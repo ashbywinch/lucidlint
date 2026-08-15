@@ -3885,12 +3885,35 @@ def _apply_baseline(unique: list[Action], baseline_keys: set[str]) -> list[str]:
     fails the gate — a one-way baseline lets a fix silently rot the
     baseline until someone re-runs update-baseline. Returns the stale keys.
     """
-    current = {action_key(a) for a in unique if a.severity != "warn"}
-    stale = sorted(baseline_keys - current)
+    # Stale comparison is location-INSENSITIVE: the key embeds file:line, so
+    # an edit that shifts a function's line would otherwise make every
+    # acknowledged entry look stale (false failures + baseline churn — the
+    # line-keyed pyrefly baseline cost us exactly this all session). The
+    # identity is (kind, file, function): the same debt at a new line is
+    # still acknowledged; only debt that is genuinely gone is stale.
+    current_ids = {(a.kind, a.file, a.function) for a in unique if a.severity != "warn"}
+    baseline_ids = {_baseline_identity(k) for k in baseline_keys}
+    stale = sorted(k for k in baseline_keys if _baseline_identity(k) not in current_ids)
     for a in unique:
-        if action_key(a) in baseline_keys:
+        if (a.kind, a.file, a.function) in baseline_ids:
             a.severity = "ack"
     return stale
+
+
+class BaselineIdentity(NamedTuple):
+    """An action's (kind, file, function) — the line is excluded so location
+    shifts do not rot acknowledged debt."""
+
+    kind: str
+    file: str
+    function: str
+
+
+def _baseline_identity(key: str) -> BaselineIdentity:
+    parts = key.split(":", 3)
+    if len(parts) == 4:
+        return BaselineIdentity(parts[0], parts[1], parts[3])
+    return BaselineIdentity(key, "", "")
 
 
 def main() -> int:

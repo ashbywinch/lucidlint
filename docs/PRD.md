@@ -149,15 +149,18 @@ rather than a number.
   fan-in, normalized to P01–P99 percentiles, with the formula, norms, and
   caps documented in the report so the ranking is auditable.
 - **R9 — Baseline locks today's debt, both directions.** `--baseline`/`--update-baseline`
-  acknowledges current actions so the gate fails only on new ones; the
-  report states exactly how many are acknowledged.
+  acknowledges current actions so the gate fails only on new ones — and on
+  STALE ones (see below); the report states exactly how many are
+  acknowledged.
 - **R10 — Diff awareness, honestly worded.** Actions in files the current
   branch touches are marked; the header says "actions in files your diff
   touches" and admits when no baseline means "cannot tell what is new". The
   lock is both-direction (the pyrefly-lock rule): a stale baseline entry —
   a finding the code no longer produces — fails the run with "run
   --update-baseline", so paying debt without shrinking the baseline is
-  drift, never silent.
+  drift, never silent. Staleness is compared on (kind, file, function) —
+  the location dimension is excluded, because an edit that shifts a
+  function's line is the same debt, not new debt.
 - **R11 — Lifecycle facts, not advice.** Low-churn scripts/tools carry
   churn and last-touch dates as facts; whether to delete, leave, or
   refactor is the agent's call — the tool stays in its lane.

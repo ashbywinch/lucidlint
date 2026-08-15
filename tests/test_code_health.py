@@ -1951,3 +1951,27 @@ def test_stale_baseline_clears_after_update(tmp_path):
     # the stale ghost entry is gone after the refresh
     data = json.loads(baseline.read_text())
     assert all("ghost" not in k for k in data["actions"])
+
+
+def test_baseline_line_shift_is_not_stale(tmp_path, capsys):
+    """The same debt at a new line (a function that moved) must NOT fail the
+    gate as stale — the stale comparison is on (kind, file, function), not
+    the location the key embeds."""
+    repo = make_repo(tmp_path)
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text('{"actions": ["complexity:houses/app.py:1:alpha"]}')
+    rc = run_main(repo, "--baseline", str(baseline), functions=[[FakeFn("alpha", 40, 20)]])
+    assert rc == 0  # acknowledged at any line of alpha — the gate is green
+    err = capsys.readouterr().err
+    assert "stale baseline entr" not in err
+
+
+def test_baseline_gone_function_is_stale(tmp_path, capsys):
+    """Debt on a function that no longer exists IS stale — the location-
+    insensitive rule must not miss genuinely paid debt."""
+    repo = make_repo(tmp_path)
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text('{"actions": ["complexity:houses/app.py:1:ghost"]}')
+    rc = run_main(repo, "--baseline", str(baseline), functions=[[FakeFn("alpha", 1, 20)]])
+    assert rc == 1
+    assert "stale baseline entr" in capsys.readouterr().err
