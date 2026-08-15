@@ -61,13 +61,19 @@ never depend on a later phase.
   push/PR; the docs kind passes on this repo's own docs; no duplicated
   tool copies anywhere.
 
-## Phase 6 — Structural splitting detection (in development)
+## Phase 6 — Structural splitting detection and filesystem-test hygiene (delivered 2026-08-14)
 
-- **Inputs:** Phase 4 tool, graph communities, file-level call graph.
+- **Inputs:** Phase 4 tool, graph communities, file-level call graph,
+  test files.
 - **Outputs:** `folder-mix` (a folder whose direct files split across
-  graph communities is a grab bag — extract a sub-folder per community)
-  and `layer-mix` (a file whose functions partition by dominant callee
-  subsystem — the call graph is the seam; extract a module per layer).
-- **Quality gate:** houses shows real folder/layer splits; self-run stays
-  green; false-positive cases (organized packages with subdirectories,
-  files with unresolved callees) excluded by the gates.
+  graph communities is a grab bag — extract a sub-folder per community;
+  validated on chat-workflow: chat_workflow/ splits into chat-workflow-log
+  and chat-workflow-error), `layer-mix` (a file whose functions partition
+  by dominant callee subsystem — houses' server.py and api_router.py fire),
+  and `fakefs` (tests touching the real filesystem without pyfakefs are
+  findings, with the standard's real-FS exceptions and file-scoped
+  explained exemptions).
+- **Quality gate:** self-run stays green with only genuinely-reasoned
+  exemptions (sqlite3 C-level I/O for the tool's own graph fixtures;
+  test_check_records migrated to pyfakefs instead of exempting); 135
+  tests green; CI runs make test + make self-check.
