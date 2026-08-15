@@ -67,7 +67,11 @@ tag and runs it as its review-attribution gate.
   only from tests is a conditional test-seam finding), and broad
   `except Exception`/`BaseException` handlers. A swallow finding
   requires a handler with no control-flow exit at all — an explicit
-  return is the documented contract.
+  return is the documented contract, and a handler that mutates a name
+  the enclosing function returns (accumulator) surfaces the error.
+  No-op statements (a ternary or arithmetic as a bare line — value
+  discarded) are dead-statement findings. Text reports open with a
+  per-kind roll-up of fail and warning counts.
   Lint-style exemptions: `# code-health: ignore <signal>
   <why>` on the line (or above) — a suppression without a why is itself a
   finding. Actions are grouped by file and

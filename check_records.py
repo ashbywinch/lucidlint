@@ -260,6 +260,8 @@ class ModuleScanner:
         may carry nested constant structures)."""
         if isinstance(node, ast.Constant):
             return True
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+            return ModuleScanner._is_constant_value(node.operand)  # -4.0 is a literal
         if isinstance(node, (ast.List, ast.Tuple)):
             return all(ModuleScanner._is_constant_value(e) for e in node.elts)
         if isinstance(node, ast.Dict):
@@ -282,6 +284,10 @@ class ModuleScanner:
                 return
             if isinstance(node, ast.Dict):
                 keys = node.keys
+                # a spread merge ({**session, "x": v}) updates an existing shape — not a
+                # record being built. Keys are ast.DictUnpack on 3.5-3.13 and None on 3.14.
+                if any(k is None or (hasattr(ast, "DictUnpack") and isinstance(k, ast.DictUnpack)) for k in keys):
+                    return
                 has_const_key = any(
                     isinstance(k, ast.Constant) and isinstance(k.value, str) for k in keys
                 )

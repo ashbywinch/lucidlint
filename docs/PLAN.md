@@ -128,3 +128,28 @@ fixed with detector-semantics changes:
 - Validation: 162 tests green; self-check ok (new code decomposed under
   its own CC gate); houses fails 541→537 (mislabels + builtin edges),
   warns 235→165.
+
+## Phase 7b — Eval round 3: precision fixes + roll-up (delivered 2026-08-14)
+
+Eval round 3: usability 6.5, accuracy 8.0 (up from 6.0/6.5); record-shape
+messages credited as well-reasoned. Its five new verified findings, all
+fixed, plus the deferred category roll-up:
+- Swallow surfaces via accumulator: a handler that stores into or mutates
+  a name the enclosing function returns (`issues.append(...)` in
+  validate_payload) rides the error out in the result — the
+  drive_isochrone.py:605 false FAIL is gone.
+- Dict spread merges (`{**session, "is_superuser": live}`) are updates,
+  not record construction — record_literal_lines skips spread keys
+  (None-key on 3.14, DictUnpack on 3.5-3.13).
+- Negative literals are constants: `_all_constant`/`_is_constant_value`
+  unwrap UnaryOp, so DEFAULT_BBOX-style all-literal tables pass the
+  lookup-table carve-out.
+- `__init__` excluded from the near-duplicate scan (~30 DAG-boilerplate
+  matches gone).
+- No-op statements: expression statements that discard their value are
+  dead-statement findings — catches the eval's server.py:220/269 miss
+  (a ternary as a bare line, surely meant as an assignment).
+- Text reports open with a per-kind roll-up (`by kind — fails:
+  record-shape=260, ...; warnings: ...`) — the usability ask.
+- Validation: 171 tests green; self-check ok (_all_constant decomposed
+  under its own CC gate); houses fails 537→535, warns 165→158.

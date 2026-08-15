@@ -202,20 +202,31 @@ rather than a number.
   catch that neither re-raises nor exits with control flow (no return,
   no break/continue) is invisible — bare, empty, and log-only handlers
   fail. An explicit return, even `None` or an empty literal, is the
-  documented contract; a continue is retry/skip semantics. The fail-fast
+  documented contract; a continue is retry/skip semantics; mutating an
+  accumulator the enclosing function returns (`issues.append(...)`) rides
+  the error out in the result and is not a swallow. The fail-fast
   rule is distinct from broad-except linting (ruff BLE001 owns that;
   this tool only adds the house rule). Module-level state includes typed
   `AnnAssign` literals and collections mutated inside functions, not
-  just non-constant `Assign` literals.
+  just non-constant `Assign` literals (negative literals like `-4.0` are
+  still constants — the UnaryOp wrapper is not state). A dict spread
+  merge (`{**session, "x": v}`) updates an existing shape and is not a
+  record being built; `__init__` bodies are excluded from the
+  near-duplicate scan (init boilerplate is convention, not copy-paste).
+  Text reports open with a per-kind roll-up (`by kind — fails:
+  record-shape=261, standard=199, ...`) so a 500-action report is
+  scannable before the wall of entries.
 - **R23 — Cycles, dead code, and shadowed builtins are findings.** Import
   cycles between local modules (from the graph's IMPORTS_FROM edges,
   strongly-connected components) are always fixed by restructuring — the
   fix direction is to hoist the shared interface into its own module and
   have both sides depend on it, never to bodge with lazy imports.
   Statements after an unconditional return/raise/continue/break are dead
-  code — deleted, not kept. Parameters and locals named after builtins
-  (list, dict, id, input, …) are renamed: a shadowed builtin makes the
-  code read wrong.
+  code — deleted, not kept. Expression statements that discard their value
+  (a ternary or arithmetic as a bare line) are dead statements — likely a
+  refactor leftover, assign it or delete it. Parameters and locals named
+  after builtins (list, dict, id, input, …) are renamed: a shadowed
+  builtin makes the code read wrong.
 - **R24 — A warn tier exists for noisy-but-useful signals.** Magic
   numbers (raw int/float operands, indices, and call arguments outside a
   tiny allowlist — lookup tables pass), copy-paste near-duplicates

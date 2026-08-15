@@ -1270,6 +1270,13 @@ def _render_file_group(file: str, items: list[Action]) -> None:
             print(f"      -> {a.note}")
 
 
+def _kind_counts(actions: list[Action]) -> str:
+    """Category-count roll-up: record-shape=261, standard=199, ... — the
+    volume each rule contributes, so a 500-action report is scannable."""
+    counts = Counter(a.kind for a in actions)
+    return ", ".join(f"{k}={v}" for k, v in counts.most_common())
+
+
 def _render_actions(repo: Path, args, fails: list[Action], acks: list[Action]) -> None:
     """Per-file grouped action lines, baseline acknowledgements, and the footer."""
     by_file: dict[str, list[Action]] = {}
@@ -1295,9 +1302,11 @@ def _render_text(repo: Path, args, unique: list[Action], fails: list[Action], wa
         warn_note = f" ({len(warns)} warnings reported, never fail)" if warns else ""
         print(f"GATE: PASS — {len(acks)} action(s) acknowledged in baseline{warn_note}")
         if warns:
+            print(f"by kind — warnings: {_kind_counts(warns)}")
             _render_actions(repo, args, warns, [])
         return
     _render_summary(repo, args, fails, warns, acks, diff, coverage_source, graph_preferred)
+    print(f"by kind — fails: {_kind_counts(fails)}; warnings: {_kind_counts(warns)}")
     _render_actions(repo, args, fails, acks)
     if warns:
         print(f"\nwarnings (reported, never fail) — {len(warns)}:")
@@ -1525,6 +1534,7 @@ def _standard_findings(tree: ast.Module, rel: str, source: str) -> list[LatentFi
     findings += _shadowing_findings(tree, rel)
     findings += _magic_number_findings(tree, rel)
     findings += _broad_except_findings(tree, rel)
+    findings += _noop_statement_findings(tree, rel)
     return findings
 
 
@@ -1583,33 +1593,76 @@ def _except_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     error, marked `# code-health: ignore except <why>` and logged.
     """
     findings: list[LatentFinding] = []
+    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
             continue
+        fn = _enclosing_function(parents, node)
+        returned = _returned_names(fn) if fn is not None else set()
         for h in node.handlers:
-            if _handler_swallows(h):
+            if _handler_swallows(h, returned):
                 kind = "bare except" if h.type is None else "except that swallows"
                 findings.append(LatentFinding(
                     signal="except", function="", line=h.lineno, metric=1,
-                    detail=f"{kind} at line {h.lineno} — the catch never raises or surfaces a return, so the "
-                           f"error is invisible. Logging alone is not fail-fast: re-raise, surface it, or if "
-                           f"this error is genuinely safe to ignore, mark `# code-health: ignore except <why>` "
-                           f"and log with that explanation",
+                    detail=f"{kind} at line {h.lineno} — the catch never raises, returns, or surfaces "
+                           f"the error, so it is invisible. Logging alone is not fail-fast: re-raise, "
+                           f"surface it, or if this error is genuinely safe to ignore, mark "
+                           f"`# code-health: ignore except <why>` and log with that explanation",
                     inner=[]))
     return findings
 
 
-def _handler_swallows(h) -> bool:
+def _handler_swallows(h, returned: set[str]) -> bool:
     """True when the handler hides the failure: bare, or a body with no
     control-flow exit (no raise, no return, no break/continue) — the error
     is invisible. An explicit return, even None or an empty literal, is the
-    documented contract; a continue is retry/skip semantics."""
+    documented contract; a continue is retry/skip semantics; mutating an
+    accumulator the enclosing function returns (issues.append, result[0] = )
+    surfaces the error the same way."""
     if h.type is None:
         return True
-    return not any(
-        isinstance(n, (ast.Raise, ast.Return, ast.Break, ast.Continue))
-        for n in ast.walk(h)
-    )
+    if any(isinstance(n, (ast.Raise, ast.Return, ast.Break, ast.Continue)) for n in ast.walk(h)):
+        return False
+    return not _mutates_returned(h, returned)
+
+
+def _mutates_returned(h, returned: set[str]) -> bool:
+    """The handler stores into, rebinds, or mutates a name the enclosing
+    function returns — the error rides out in the result, not a swallow."""
+    if not returned:
+        return False
+    for node in ast.walk(h):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id in returned):
+            return True
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in returned:
+            return True
+        if (isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del))
+                and isinstance(node.value, ast.Name) and node.value.id in returned):
+            return True
+    return False
+
+
+def _returned_names(fn) -> set[str]:
+    """Names the function returns at its own top level (nested functions excluded)."""
+    names: set[str] = set()
+    stack = [fn]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node is not fn:
+            continue
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Name):
+            names.add(node.value.id)
+        stack.extend(ast.iter_child_nodes(node))
+    return names
+
+
+def _enclosing_function(parents: dict[int, ast.AST], node: ast.AST):
+    """The nearest enclosing function of a node, or None at module level."""
+    p = parents.get(id(node))
+    while p is not None and not isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        p = parents.get(id(p))
+    return p
 
 
 def _global_state_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
@@ -1689,6 +1742,13 @@ def _all_constant(node: ast.AST) -> bool:
     """A literal subtree of only constants — a constant lookup table, not state."""
     if isinstance(node, ast.Constant):
         return True
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        return _all_constant(node.operand)  # -4.0 parses as UnaryOp, still a literal
+    return _container_all_constant(node)
+
+
+def _container_all_constant(node: ast.AST) -> bool:
+    """Containers whose parts are all constant literals."""
     if isinstance(node, (ast.List, ast.Set)):
         return bool(node.elts) and all(_all_constant(e) for e in node.elts)
     if isinstance(node, ast.Tuple):
@@ -1777,6 +1837,34 @@ def _magic_number_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     return findings
 
 
+def _noop_statement_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """Expression statements that discard their value — dead statements.
+
+    `payload.address if is_outcode(postcode) else postcode` as a bare line is
+    a refactor leftover (surely an assignment); `a + b` alone is a read with
+    no effect. Calls, awaits, yields, constants (docstrings), lambdas, and
+    walrus assignments have an effect or a purpose and pass.
+    """
+    findings: list[LatentFinding] = []
+    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Expr):
+            continue
+        v = node.value
+        if isinstance(v, (ast.Call, ast.Await, ast.Yield, ast.YieldFrom,
+                          ast.Constant, ast.Lambda, ast.NamedExpr)):
+            continue
+        fn = _enclosing_function(parents, node)
+        expr = ast.unparse(v)
+        findings.append(LatentFinding(
+            signal="noop-statement", function=fn.name if fn is not None else "",
+            line=node.lineno, metric=1,
+            detail=f"no-op statement at line {node.lineno}: `{expr[:60]}` discards its value — dead "
+                   f"statement, likely a refactor leftover: assign it or delete it",
+            inner=[]))
+    return findings
+
+
 def _broad_except_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     """except Exception/BaseException catches too broadly — name the specific one.
 
@@ -1784,12 +1872,15 @@ def _broad_except_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     a body that would otherwise pass.
     """
     findings: list[LatentFinding] = []
+    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
             continue
+        fn = _enclosing_function(parents, node)
+        returned = _returned_names(fn) if fn is not None else set()
         for h in node.handlers:
             base = _annotation_base_name(h.type) if h.type else ""
-            if base in ("Exception", "BaseException") and not _handler_swallows(h):
+            if base in ("Exception", "BaseException") and not _handler_swallows(h, returned):
                 findings.append(LatentFinding(
                     signal="broad-except", function="", line=h.lineno, metric=1,
                     detail=f"broad `except {ast.unparse(h.type)}` at line {h.lineno} — catch the "
@@ -2376,6 +2467,8 @@ def _is_duplicate_candidate(fn) -> bool:
     """A function worth comparing: at least two real statements (one-line
     accessors, stubs, and delegation wrappers are not copy-paste) and a
     12+ token skeleton."""
+    if fn.name == "__init__":
+        return False  # init boilerplate is conventional, not copy-paste
     stmts = [s for s in fn.body
              if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant)
                      and isinstance(s.value.value, str))]

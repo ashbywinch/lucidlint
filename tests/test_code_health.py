@@ -1745,3 +1745,102 @@ def test_record_shape_message_names_the_evidence(tmp_path):
     literal = [m for m in msgs if m.startswith("dict literal")]
     assert len(literal) == 1
     assert "fixed string keys (tab, rows) are fields, not data" in literal[0]
+
+
+# ---------------------------------------------------------------- eval round-3 fixes
+
+def test_except_surfacing_via_returned_accumulator_is_not_a_swallow(tmp_path):
+    """The drive_isochrone:605 case: the handler appends to the list the
+    function exists to return — the error rides out in the result."""
+    actions = _standard_for(tmp_path, (
+        "def validate(rows):\n"
+        "    issues = []\n"
+        "    for s in rows:\n"
+        "        try:\n"
+        "            parse(s)\n"
+        "        except ValueError as e:\n"
+        "            issues.append(f'{s}: unparseable ({e})')\n"
+        "    return issues\n"))
+    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
+
+
+def test_except_accumulator_not_returned_still_swallows(tmp_path):
+    """Mutating a list that the function does NOT return is still invisible."""
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    scratch = []\n"
+        "    try:\n"
+        "        g()\n"
+        "    except ValueError as e:\n"
+        "        scratch.append(str(e))\n"
+        "    return 1\n"))
+    assert len([a for a in actions if a.kind == "standard" and "swallows" in a.message]) == 1
+
+
+def test_dict_spread_merge_is_not_a_record_literal(tmp_path):
+    """auth.py:105 `{**session, 'is_superuser': live}` updates an existing
+    shape — not a record being built."""
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "def f(session, live):\n"
+        "    return {**session, 'is_superuser': live}\n")
+    with Env(routes=git_routes()):
+        actions = ch._record_actions(repo, False, {}, {})
+    assert [a for a in actions if a.message.startswith("dict literal")] == []
+
+
+def test_negative_literals_stay_constant_lookup_tables(tmp_path):
+    """DEFAULT_BBOX: -4.0 parses as UnaryOp — still a constant, no state."""
+    actions = _standard_for(tmp_path, (
+        "DEFAULT_BBOX = {'lat_min': 50.1, 'lon_min': -4.0}\n"
+        "\n"
+        "def f():\n"
+        "    return DEFAULT_BBOX\n"))
+    assert [a for a in actions if a.kind == "standard" and "module-level" in a.message] == []
+
+
+def test_duplicate_skips_init_boilerplate(tmp_path):
+    """Identical __init__ bodies across a class hierarchy are convention."""
+    repo = make_repo(tmp_path, app_src=(
+        "class Base:\n"
+        "    def __init__(self, name):\n"
+        "        self.name = name\n"
+        "        super().__init__()\n"
+        "\n"
+        "class Child(Base):\n"
+        "    def __init__(self, name):\n"
+        "        self.name = name\n"
+        "        super().__init__()\n"))
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._duplicate_actions(repo, False, {}, {})
+    assert [a for a in actions if "similar to" in a.message] == []
+
+
+def test_noop_statement_is_a_finding(tmp_path):
+    """The server.py:220 case: a ternary as a bare statement discards its value."""
+    actions = _standard_for(tmp_path, (
+        "def f(payload, postcode):\n"
+        "    payload.address if is_outcode(postcode) else postcode\n"
+        "    return postcode\n"))
+    noops = [a for a in actions if a.kind == "standard" and "no-op" in a.message]
+    assert len(noops) == 1
+    assert "is_outcode" in noops[0].message  # the discarded expression is named
+    assert noops[0].line == 2
+
+
+def test_noop_statement_passes_calls_and_docstrings(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    \"\"\"docstring\"\"\"\n"
+        "    cleanup()\n"
+        "    (x := 1)\n"
+        "    return x\n"))
+    assert [a for a in actions if a.kind == "standard" and "no-op" in a.message] == []
+
+
+def test_kind_rollup_in_fail_output(tmp_path, capsys):
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 3\n")
+    rc = run_main(repo, functions=[[FakeFn("alpha", 1, 20)]])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "by kind — fails: complexity=1; warnings: standard=1" in out
