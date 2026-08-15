@@ -33,9 +33,10 @@ tag and runs it as its review-attribution gate.
   .coverage line_bits, else the graph risk index) and untested functions get
   the contract to pin (`name(params) -> ret`). A `record-shape` kind (from
   `check_records.py`, the record-vs-bare-dict gate) flags bare dict/tuple
-  collections as records — the fix is a small domain class, and even a
-  legitimate map is a domain noun that deserves a named type (a bare dict
-  communicates nothing). Actions are grouped by file and
+  collections as records — the fix is a small domain class; a genuine map is
+  named by its meaning (CoverageLines, never SomethingDict), and data
+  crossing a boundary is ingested into a domain class at that boundary.
+  Actions are grouped by file and
   ranked by priority (percentile of metric x churn x fan-in); a baseline file
   (`--baseline`, `--update-baseline`) locks acknowledged debt so the gate can
   go green incrementally, and `--base <ref>` marks actions in your branch's

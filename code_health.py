@@ -24,7 +24,10 @@ clarifying it) is not the point; making the code easy to read and safe to
 change is. A name is the cheapest form of encapsulation: a domain noun in
 the type (CoverageLines, PropertyId) communicates to the next reader, where
 a bare dict or tuple says nothing — this applies to legitimate maps too,
-not only to records.
+not only to records. The name must carry meaning: CoverageLines is a
+domain noun, JsonDict is the smell renamed — and data crossing a boundary
+(parsing/serialization) belongs to a domain class at that boundary, not a
+named container.
 """
 
 from __future__ import annotations
@@ -68,14 +71,6 @@ class Action:
     in_diff: bool = False
     kinds: list[str] = field(default_factory=list)
     callers: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> JsonDict:
-        d = asdict(self)
-        if not self.kinds:
-            d.pop("kinds")
-        if not self.callers:
-            d.pop("callers")
-        return d
 
 
 @dataclass
@@ -162,10 +157,9 @@ class VolatilePart:
     line: int
 
 
-# Named map types: a lookup table, not a record. Used in signatures so the
-# intent (file -> covered lines; JSON-serializable mapping) is explicit.
+# Named map type: a lookup table, not a record. Named by its meaning (the
+# lines covered per file), not as SomethingDict — the name is the communication.
 CoverageLines = dict[str, set[int]]
-JsonDict = dict[str, object]
 
 
 # Injectable seam: tests assign code_health.radon_visitor to a fake. Loaded
@@ -197,7 +191,7 @@ GUIDANCE = {
     "hub-file": "Decide what this file is first: if it is an assembly/composition root whose job is wiring (app layer, router), move handler logic out to the service layer and keep the assembly thin — the cross-module orchestration is its job, not a smell. Otherwise separate the concerns it mixes into modules with narrow, stable interfaces.",
     "hotspot": "Make the volatile part small and data-driven behind a stable interface — frequent changes become cheap and cannot disturb the stable core.",
     "high-risk": "Pin behavior with tests, then reduce the caller surface — when many things depend on it, the simplest code is the safest.",
-    "record-shape": "The record wants a class — named fields with domain meaning, so a reader sees what the data IS without tracing it (encapsulation, obvious correctness). Make a small domain class/dataclass. Even a genuinely map-shaped value is a domain noun: if it appears in a signature, give it a named type (CoverageLines = dict[str, set[int]]) or wrap it — the name is the communication, a bare dict says nothing. Only constant lookup tables stay anonymous, and at module scope, never in an interface.",
+    "record-shape": "The record wants a class — named fields with domain meaning, so a reader sees what the data IS without tracing it (encapsulation, obvious correctness). Make a small domain class/dataclass. If the shape is genuinely a map, name it by what it MEANS (CoverageLines = dict[str, set[int]]: the lines covered per file), never as SomethingDict — a *Dict alias just renames the smell. If the data crosses a boundary (parsing or serialization), the fix is to ingest it into a domain class at that boundary: parse into the type and carry the type, don't carry the bare mapping. Constant lookup tables stay at module scope, never in an interface.",
 }
 
 
@@ -1073,7 +1067,7 @@ def _render_json(repo: Path, args, unique: list[Action], branch: str, commit: st
             },
         },
         "baseline": str(args.baseline) if args.baseline else "",
-        "actions": [a.to_dict() for a in unique],
+        "actions": [asdict(a) for a in unique],
     }, indent=2))
 
 

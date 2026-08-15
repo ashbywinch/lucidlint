@@ -653,12 +653,19 @@ def test_tool_passes_its_own_record_check():
 
 
 def test_record_shape_guidance_teaches_naming_not_just_classes():
-    """The fix guidance must teach the communication theme: even a legitimate
-    map in a signature deserves a named type — a bare dict says nothing.
-    (Regression: it used to say 'maps stay dicts', the wrong lesson.)"""
+    """The fix guidance must teach the communication theme: records want
+    classes; genuine maps are named by their MEANING (never SomethingDict —
+    that renames the smell); boundary-crossing data is ingested into a domain
+    class at the boundary. (Regression: it used to say 'maps stay dicts'.)"""
     g = ch.GUIDANCE["record-shape"]
-    assert "named type" in g or "domain noun" in g
     assert "class/dataclass" in g
     assert "stay dicts" not in g
-    # the philosophy docstring carries the same principle
+    assert "SomethingDict" in g and "renames the smell" in g  # anti-*Dict lesson
+    assert "boundary" in g and "ingest" in g  # boundary-ingestion lesson
+    # the philosophy docstring carries the same principles
     assert "cheapest form of encapsulation" in ch.__doc__
+    assert "JsonDict is the smell renamed" in ch.__doc__
+    # the tool models the lesson: no JsonDict alias, no to_dict claiming a
+    # type for the wire format — serialization happens at the render boundary
+    assert not hasattr(ch, "JsonDict")
+    assert not hasattr(ch.Action, "to_dict")
