@@ -117,12 +117,16 @@ class Env:
         self._saved["radon"] = ch.RADON.visitor
         ch.subprocess = FakeSubprocess(self.routes)
         ch.RADON.visitor = FakeRadonVisitor
+        # the unit tests target the Python engine; the Rust core is validated
+        # by tests/test_scanner_parity.py against the real binary
+        ch.RUST_SCAN.enabled = False
         FakeRadonVisitor.per_call = list(self.functions or [])
         return self
 
     def __exit__(self, *exc):
         ch.subprocess = self._saved["subprocess"]
         ch.RADON.visitor = self._saved["radon"]
+        ch.RUST_SCAN.enabled = True
         FakeRadonVisitor.per_call = []
 
 

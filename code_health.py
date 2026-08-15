@@ -36,9 +36,11 @@ import argparse
 import ast
 import builtins
 import datetime
+import os
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from itertools import combinations
+from subprocess import SubprocessError
 from typing import NamedTuple
 
 try:
@@ -75,6 +77,15 @@ EXCLUDED_DIRS = {
     ".pytest_cache",
     ".ruff_cache",
 }
+
+
+def _excluded_part(part: str) -> bool:
+    """An env/tool directory hides vendored code — .venv-htr, .conda-tools,
+    node_modules, .mypy_cache, etc. Exact names in EXCLUDED_DIRS plus the
+    .venv* / venv* env-dir families (a repo's real modules never live there)."""
+    if part in EXCLUDED_DIRS:
+        return True
+    return part.startswith(".venv") or part.startswith("venv") or part.startswith(".conda")
 
 ACTION_KINDS = (
     "complexity",
@@ -790,7 +801,7 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
     return [
         SourceFile(py, py.relative_to(repo).as_posix())
         for py in sorted(repo.rglob("*.py"))
-        if not any(part in EXCLUDED_DIRS for part in py.parts)
+        if not any(_excluded_part(part) for part in py.parts)
     ]
 
 
@@ -822,6 +833,121 @@ class _SourceCache:
 # function of inputs, not mutable state that changes behavior; without it every file is
 # re-parsed four times per run
 SOURCE_CACHE = _SourceCache()
+
+
+class RustFindings(NamedTuple):
+    """The Rust scan output for one file set, keyed by repo-relative path —
+    a named object, not a bare map (the record-shape rule's escape hatch)."""
+
+    by_rel: dict[str, list[LatentFinding]]
+
+    def for_rel(self, rel: str) -> list[LatentFinding]:
+        return self.by_rel.get(rel, [])
+
+
+class _RustScan:
+    """The Rust scan core as the default finding engine.
+
+    One binary invocation per repo per run (or per file in --file / LSP mode);
+    the JSON findings (already suppression-filtered) convert straight to
+    LatentFindings. Falls back to the pure-Python path when the binary is
+    missing or a run fails — the gate never silently loses findings.
+    """
+
+    def __init__(self) -> None:
+        self._cache: dict[tuple[Path, tuple[str, ...]], RustFindings | None] = {}
+        self._binary_cache: dict[Path, Path | None] = {}
+        self._warned: set[Path] = set()
+        # test seam: the unit tests fake subprocess + radon and target the
+        # Python engine (the parity suite validates the Rust core) — Env
+        # flips this off so the binary never fires under a fake subprocess
+        self.enabled = True
+
+    # code-health: ignore global-state the scanner cache is a per-run memo of subprocess
+    # output — a pure function of the repo + file set, not mutable state with behavior
+
+    def binary(self, repo: Path) -> Path | None:
+        """The code-health-scan binary: env override, then repo-relative, then
+        tool-relative. None when not built — the Python path takes over."""
+        if repo in self._binary_cache:
+            return self._binary_cache[repo]
+        candidates: list[Path] = []
+        env = os.environ.get("CODE_HEALTH_SCANNER")
+        if env:
+            candidates.append(Path(env))
+        candidates.append(repo / "scanner" / "target" / "release" / "code-health-scan")
+        candidates.append(Path(__file__).resolve().parent / "scanner" / "target" / "release" / "code-health-scan")
+        found = next((p for p in candidates if p.is_file()), None)
+        self._binary_cache[repo] = found
+        return found
+
+    def load(self, repo: Path, files: list[SourceFile]) -> RustFindings | None:
+        """Findings per rel for one file set; None = Rust unavailable (Python path)."""
+        rels = tuple(sf.rel for sf in files)
+        key = (repo, rels)
+        if key in self._cache:
+            return self._cache[key]
+        binary = self.binary(repo) if self.enabled else None
+        result: dict[str, list[LatentFinding]] | None = None
+        if binary is not None and files:
+            result = {}
+            try:
+                proc = subprocess.run(
+                    [str(binary)] + [str(sf.py) for sf in files],
+                    capture_output=True, text=True, timeout=180,
+                )
+                if proc.returncode == 0:
+                    data = json.loads(proc.stdout)
+                    rels_set = set(rels)
+                    for f in data.get("findings", []):
+                        rel = _rust_finding_rel(f.get("file", ""), repo, rels_set)
+                        if rel is None:
+                            continue
+                        result.setdefault(rel, []).append(
+                            LatentFinding(
+                                signal=f.get("kind", ""),
+                                function=f.get("function", ""),
+                                line=int(f.get("line", 0)),
+                                metric=1,
+                                detail=f.get("message", ""),
+                                inner=[],
+                                severity=f.get("severity", "fail"),
+                            )
+                        )
+                else:
+                    result = None
+            except _SCANNER_FAILURES:  # code-health: ignore except falls back to the Python path — no finding loss
+                result = None
+        wrapped = RustFindings(result) if result is not None else None
+        self._cache[key] = wrapped
+        if result is None and binary is not None and repo not in self._warned:
+            self._warned.add(repo)
+            log("Rust scanner unavailable (build with `make scanner-check`) — using the Python scan path")
+        return wrapped
+
+    def active(self, repo: Path) -> bool:
+        """True when the Rust backend is the live scan path for this repo."""
+        return self.enabled and self.binary(repo) is not None
+
+
+def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
+    """The binary reports per-file findings with the path as passed and the
+    repo-wide ones (duplicate/unused) with the repo-relative path — normalize."""
+    if file_val in rels:
+        return file_val
+    try:
+        rel = Path(file_val).resolve().relative_to(repo).as_posix()
+    except (ValueError, OSError):  # code-health: ignore except an unmappable path means the finding
+        # is for a file outside this scan set — drop it, not a failure to surface
+        rel = ""
+    return rel if rel in rels else None
+
+
+RUST_SCAN = _RustScan()
+
+# the failure modes of a scanner invocation — a subprocess that dies, times
+# out, or returns garbage degrades to the Python path, never to missing findings
+_SCANNER_FAILURES = (OSError, SubprocessError, json.JSONDecodeError, ValueError)
 
 
 def complexity_actions(
@@ -1786,8 +1912,10 @@ def _latent_class_actions(
     """
     visitor = _radon_visitor(required=False)
     actions: list[Action] = []
-    for sf in _py_files(repo, only_rel):
-        actions += _scan_file(sf.py, sf.rel, include_tests, visitor, repo, file_churn, last_modified)
+    files = _py_files(repo, only_rel)
+    for sf in files:
+        actions += _scan_file(sf.py, sf.rel, include_tests, visitor, repo, file_churn, last_modified,
+                              files=files)
     return actions
 
 
@@ -1799,15 +1927,46 @@ def _scan_file(
     repo: Path,
     file_churn: Counter[str],
     last_modified: dict[str, str],
+    files: list[SourceFile] | None = None,
 ) -> list[Action]:
-    """One file's latent-class / vague-name / standard findings."""
-    is_test = "/test" in f"/{rel}" or rel.startswith("test")
+    """One file's latent-class / vague-name / standard findings.
+
+    Default engine: the Rust scan core (RUST_SCAN) — one binary invocation
+    per repo covers every per-file family plus the repo-wide duplicate/unused
+    scans. The Python-only families stay here: the latent-class field
+    partition (graph-based) and the rules that live in tests (monkeypatch,
+    env-skipif, fakefs). Falls back to the pure-Python path when the binary
+    is missing."""
     parsed = SOURCE_CACHE.get(py)
     tree, source = parsed.tree, parsed.source
     if tree is None:
         return []
     supps = _suppressions(source)
     file_supps = _file_suppressions(source)
+    rust = RUST_SCAN.load(repo, files) if files is not None else None
+    if rust is not None:
+        return _rust_scan_file(
+            rel, include_tests, tree, source, supps, file_supps, rust, repo, file_churn, last_modified
+        )
+    return _python_scan_file(rel, include_tests, visitor_cls, tree, source, supps, file_supps, repo, file_churn,
+                             last_modified)
+
+
+def _python_scan_file(
+    rel: str,
+    include_tests: bool,
+    visitor_cls,
+    tree,
+    source: str,
+    supps: dict[int, tuple[str, str]],
+    file_supps,
+    repo: Path,
+    file_churn: Counter[str],
+    last_modified: dict[str, str],
+) -> list[Action]:
+    """The pure-Python fallback engine: the classic per-file scan plus the
+    test-only rule families and invalid-suppression findings."""
+    is_test = "/test" in f"/{rel}" or rel.startswith("test")
     if is_test and not include_tests:
         # test files are excluded from the health scan, but the rules that live
         # in tests (monkeypatch, env-skipif, fakefs) are scanned for alone
@@ -1837,6 +1996,41 @@ def _scan_file(
         # flipped the general scan on — include-tests adds checks, never drops them
         findings += _monkeypatch_findings(tree, rel) + _skipif_findings(tree, rel) + _fakefs_findings(tree, rel)
     findings += _invalid_suppressions(supps)
+    return [
+        _latent_action(repo, rel, f, file_churn, last_modified)
+        for f in findings
+        if not _suppressed(f.signal, f.line, supps) and f.signal not in file_supps.exemptions
+    ]
+
+
+def _rust_scan_file(
+    rel: str,
+    include_tests: bool,
+    tree,
+    source: str,
+    supps: dict[int, tuple[str, str]],
+    file_supps,
+    rust: RustFindings,
+    repo: Path,
+    file_churn: Counter[str],
+    last_modified: dict[str, str],
+) -> list[Action]:
+    """The Rust path of _scan_file: findings already suppression-filtered by
+    the binary; only the Python-only families are computed here."""
+    is_test = "/test" in f"/{rel}" or rel.startswith("test")
+    findings: list[LatentFinding] = []
+    if is_test and not include_tests:
+        # test files are excluded from the health scan, but the rules that
+        # live in tests are scanned for alone — plus the suppression rules
+        # (the binary's suppression/type-ignore findings cover invalid ones)
+        findings += [f for f in rust.for_rel(rel) if f.signal in ("suppression", "type-ignore")]
+    else:
+        findings += rust.for_rel(rel)
+        findings += _partition_findings(tree, rel)
+    if is_test:
+        # the test-only rule families apply whether or not --include-tests
+        # flipped the general scan on — include-tests adds checks, never drops them
+        findings += _monkeypatch_findings(tree, rel) + _skipif_findings(tree, rel) + _fakefs_findings(tree, rel)
     return [
         _latent_action(repo, rel, f, file_churn, last_modified)
         for f in findings
@@ -2744,7 +2938,7 @@ def _skipif_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
             continue
         if node.func.attr != "skipif":
             continue
-        cond = " ".join(ast.unparse(a) for a in node.args) + " " + " ".join(ast.unparse(v) for k, v in node.keywords)
+        cond = " ".join(ast.unparse(a) for a in node.args) + " " + " ".join(ast.unparse(k.value) for k in node.keywords)
         if any(needle in cond for needle in ("os.environ", "environ", "getenv", "os.path.exists", "sys.platform")):
             findings.append(
                 LatentFinding(
@@ -3060,7 +3254,7 @@ def _collect_classes(repo: Path, include_tests: bool) -> ClassScan:
     rels: list[ClassRef] = []
     for py in sorted(repo.rglob("*.py")):
         rel = py.relative_to(repo).as_posix()
-        if any(part in EXCLUDED_DIRS for part in py.parts):
+        if any(_excluded_part(part) for part in py.parts):
             continue
         if not include_tests and ("/test" in f"/{rel}" or rel.startswith("test")):
             continue
@@ -3221,7 +3415,7 @@ def _collect_functions(repo: Path) -> list[FunctionRecord]:
     fns: list[FunctionRecord] = []
     for py in sorted(repo.rglob("*.py")):
         rel = py.relative_to(repo).as_posix()
-        if any(part in EXCLUDED_DIRS for part in py.parts) or "/test" in f"/{rel}" or rel.startswith("test"):
+        if any(_excluded_part(part) for part in py.parts) or "/test" in f"/{rel}" or rel.startswith("test"):
             continue
         try:
             tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
@@ -3574,7 +3768,7 @@ def _layer_mix_actions(repo: Path, file_churn: Counter[str], last_modified: dict
     actions: list[Action] = []
     for py in sorted(repo.rglob("*.py")):
         rel = py.relative_to(repo).as_posix()
-        if any(part in EXCLUDED_DIRS for part in py.parts) or "/test" in f"/{rel}" or rel.startswith("test"):
+        if any(_excluded_part(part) for part in py.parts) or "/test" in f"/{rel}" or rel.startswith("test"):
             continue
         finding = _layer_mix_for_file(conn, repo, py, rel)
         if finding:
@@ -3854,8 +4048,10 @@ def _collect_actions(
         actions += _folder_mix_actions(repo, file_churn, last_modified)
         actions += _layer_mix_actions(repo, file_churn, last_modified)
         actions += _cycle_actions(repo, file_churn, last_modified)
-        actions += _duplicate_actions(repo, args.include_tests, file_churn, last_modified)
-        actions += _unused_actions(repo, args.include_tests, file_churn, last_modified)
+        if not RUST_SCAN.active(repo):
+            # the Rust core computes duplicate + unused in its one repo-wide run
+            actions += _duplicate_actions(repo, args.include_tests, file_churn, last_modified)
+            actions += _unused_actions(repo, args.include_tests, file_churn, last_modified)
     return actions
 
 

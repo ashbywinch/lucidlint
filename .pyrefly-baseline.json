@@ -1,9 +1,9 @@
 {
  "errors": [
   {
-   "line": 486,
+   "line": 497,
    "column": 18,
-   "stop_line": 486,
+   "stop_line": 497,
    "stop_column": 37,
    "path": "code_health.py",
    "code": -2,
@@ -13,9 +13,9 @@
    "severity": "error"
   },
   {
-   "line": 654,
+   "line": 665,
    "column": 35,
-   "stop_line": 654,
+   "stop_line": 665,
    "stop_column": 51,
    "path": "code_health.py",
    "code": -2,
@@ -25,9 +25,9 @@
    "severity": "error"
   },
   {
-   "line": 848,
+   "line": 974,
    "column": 23,
-   "stop_line": 848,
+   "stop_line": 974,
    "stop_column": 51,
    "path": "code_health.py",
    "code": -2,
@@ -37,9 +37,9 @@
    "severity": "error"
   },
   {
-   "line": 1004,
+   "line": 1130,
    "column": 5,
-   "stop_line": 1006,
+   "stop_line": 1132,
    "stop_column": 6,
    "path": "code_health.py",
    "code": -2,
@@ -49,9 +49,9 @@
    "severity": "error"
   },
   {
-   "line": 1007,
+   "line": 1133,
    "column": 5,
-   "stop_line": 1009,
+   "stop_line": 1135,
    "stop_column": 6,
    "path": "code_health.py",
    "code": -2,
@@ -61,9 +61,9 @@
    "severity": "error"
   },
   {
-   "line": 1010,
+   "line": 1136,
    "column": 5,
-   "stop_line": 1012,
+   "stop_line": 1138,
    "stop_column": 6,
    "path": "code_health.py",
    "code": -2,
@@ -73,9 +73,9 @@
    "severity": "error"
   },
   {
-   "line": 1014,
+   "line": 1140,
    "column": 12,
-   "stop_line": 1014,
+   "stop_line": 1140,
    "stop_column": 19,
    "path": "code_health.py",
    "code": -2,
@@ -85,9 +85,9 @@
    "severity": "error"
   },
   {
-   "line": 1191,
+   "line": 1317,
    "column": 22,
-   "stop_line": 1191,
+   "stop_line": 1317,
    "stop_column": 28,
    "path": "code_health.py",
    "code": -2,
@@ -97,9 +97,9 @@
    "severity": "error"
   },
   {
-   "line": 1375,
+   "line": 1501,
    "column": 23,
-   "stop_line": 1375,
+   "stop_line": 1501,
    "stop_column": 51,
    "path": "code_health.py",
    "code": -2,
@@ -109,9 +109,9 @@
    "severity": "error"
   },
   {
-   "line": 1399,
+   "line": 1525,
    "column": 13,
-   "stop_line": 1412,
+   "stop_line": 1538,
    "stop_column": 14,
    "path": "code_health.py",
    "code": -2,
@@ -121,9 +121,9 @@
    "severity": "error"
   },
   {
-   "line": 1414,
+   "line": 1540,
    "column": 12,
-   "stop_line": 1414,
+   "stop_line": 1540,
    "stop_column": 19,
    "path": "code_health.py",
    "code": -2,
@@ -133,9 +133,9 @@
    "severity": "error"
   },
   {
-   "line": 2079,
+   "line": 2273,
    "column": 14,
-   "stop_line": 2079,
+   "stop_line": 2273,
    "stop_column": 25,
    "path": "code_health.py",
    "code": -2,
@@ -145,9 +145,9 @@
    "severity": "error"
   },
   {
-   "line": 2081,
+   "line": 2275,
    "column": 55,
-   "stop_line": 2081,
+   "stop_line": 2275,
    "stop_column": 66,
    "path": "code_health.py",
    "code": -2,
@@ -157,9 +157,9 @@
    "severity": "error"
   },
   {
-   "line": 2112,
+   "line": 2306,
    "column": 18,
-   "stop_line": 2112,
+   "stop_line": 2306,
    "stop_column": 28,
    "path": "code_health.py",
    "code": -2,
@@ -169,9 +169,9 @@
    "severity": "error"
   },
   {
-   "line": 2118,
+   "line": 2312,
    "column": 26,
-   "stop_line": 2118,
+   "stop_line": 2312,
    "stop_column": 37,
    "path": "code_health.py",
    "code": -2,
@@ -181,9 +181,9 @@
    "severity": "error"
   },
   {
-   "line": 2120,
+   "line": 2314,
    "column": 75,
-   "stop_line": 2120,
+   "stop_line": 2314,
    "stop_column": 86,
    "path": "code_health.py",
    "code": -2,
@@ -193,9 +193,9 @@
    "severity": "error"
   },
   {
-   "line": 2354,
+   "line": 2548,
    "column": 23,
-   "stop_line": 2354,
+   "stop_line": 2548,
    "stop_column": 33,
    "path": "code_health.py",
    "code": -2,
@@ -205,9 +205,9 @@
    "severity": "error"
   },
   {
-   "line": 2394,
+   "line": 2588,
    "column": 48,
-   "stop_line": 2394,
+   "stop_line": 2588,
    "stop_column": 55,
    "path": "code_health.py",
    "code": -2,
@@ -217,9 +217,9 @@
    "severity": "error"
   },
   {
-   "line": 2401,
+   "line": 2595,
    "column": 30,
-   "stop_line": 2401,
+   "stop_line": 2595,
    "stop_column": 41,
    "path": "code_health.py",
    "code": -2,
@@ -229,9 +229,9 @@
    "severity": "error"
   },
   {
-   "line": 2403,
+   "line": 2597,
    "column": 92,
-   "stop_line": 2403,
+   "stop_line": 2597,
    "stop_column": 103,
    "path": "code_health.py",
    "code": -2,
@@ -241,9 +241,9 @@
    "severity": "error"
   },
   {
-   "line": 2553,
+   "line": 2747,
    "column": 30,
-   "stop_line": 2553,
+   "stop_line": 2747,
    "stop_column": 40,
    "path": "code_health.py",
    "code": -2,
@@ -253,21 +253,9 @@
    "severity": "error"
   },
   {
-   "line": 2747,
-   "column": 96,
-   "stop_line": 2747,
-   "stop_column": 100,
-   "path": "code_health.py",
-   "code": -2,
-   "name": "not-iterable",
-   "description": "Type `keyword` is not iterable",
-   "concise_description": "Type `keyword` is not iterable",
-   "severity": "error"
-  },
-  {
-   "line": 3740,
+   "line": 3934,
    "column": 39,
-   "stop_line": 3740,
+   "stop_line": 3934,
    "stop_column": 50,
    "path": "code_health.py",
    "code": -2,
@@ -289,9 +277,9 @@
    "severity": "error"
   },
   {
-   "line": 288,
+   "line": 292,
    "column": 12,
-   "stop_line": 288,
+   "stop_line": 292,
    "stop_column": 37,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -301,9 +289,9 @@
    "severity": "error"
   },
   {
-   "line": 296,
+   "line": 300,
    "column": 12,
-   "stop_line": 296,
+   "stop_line": 300,
    "stop_column": 37,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -313,9 +301,9 @@
    "severity": "error"
   },
   {
-   "line": 401,
+   "line": 405,
    "column": 58,
-   "stop_line": 401,
+   "stop_line": 405,
    "stop_column": 60,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -325,9 +313,9 @@
    "severity": "error"
   },
   {
-   "line": 414,
+   "line": 418,
    "column": 58,
-   "stop_line": 414,
+   "stop_line": 418,
    "stop_column": 60,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -337,9 +325,9 @@
    "severity": "error"
   },
   {
-   "line": 419,
+   "line": 423,
    "column": 57,
-   "stop_line": 419,
+   "stop_line": 423,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -349,9 +337,9 @@
    "severity": "error"
   },
   {
-   "line": 436,
+   "line": 440,
    "column": 64,
-   "stop_line": 436,
+   "stop_line": 440,
    "stop_column": 66,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -361,9 +349,9 @@
    "severity": "error"
   },
   {
-   "line": 465,
+   "line": 469,
    "column": 62,
-   "stop_line": 465,
+   "stop_line": 469,
    "stop_column": 64,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -373,9 +361,9 @@
    "severity": "error"
   },
   {
-   "line": 491,
+   "line": 495,
    "column": 64,
-   "stop_line": 491,
+   "stop_line": 495,
    "stop_column": 66,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -385,9 +373,9 @@
    "severity": "error"
   },
   {
-   "line": 656,
+   "line": 660,
    "column": 51,
-   "stop_line": 656,
+   "stop_line": 660,
    "stop_column": 53,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -397,9 +385,9 @@
    "severity": "error"
   },
   {
-   "line": 668,
+   "line": 672,
    "column": 51,
-   "stop_line": 668,
+   "stop_line": 672,
    "stop_column": 53,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -409,9 +397,9 @@
    "severity": "error"
   },
   {
-   "line": 671,
+   "line": 675,
    "column": 50,
-   "stop_line": 671,
+   "stop_line": 675,
    "stop_column": 52,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -421,9 +409,9 @@
    "severity": "error"
   },
   {
-   "line": 699,
+   "line": 703,
    "column": 47,
-   "stop_line": 699,
+   "stop_line": 703,
    "stop_column": 49,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -433,9 +421,9 @@
    "severity": "error"
   },
   {
-   "line": 742,
+   "line": 746,
    "column": 57,
-   "stop_line": 742,
+   "stop_line": 746,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -445,9 +433,9 @@
    "severity": "error"
   },
   {
-   "line": 769,
+   "line": 773,
    "column": 57,
-   "stop_line": 769,
+   "stop_line": 773,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -457,9 +445,9 @@
    "severity": "error"
   },
   {
-   "line": 799,
+   "line": 803,
    "column": 57,
-   "stop_line": 799,
+   "stop_line": 803,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -469,9 +457,9 @@
    "severity": "error"
   },
   {
-   "line": 823,
+   "line": 827,
    "column": 57,
-   "stop_line": 823,
+   "stop_line": 827,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -481,9 +469,9 @@
    "severity": "error"
   },
   {
-   "line": 841,
+   "line": 845,
    "column": 57,
-   "stop_line": 841,
+   "stop_line": 845,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -493,9 +481,9 @@
    "severity": "error"
   },
   {
-   "line": 859,
+   "line": 863,
    "column": 57,
-   "stop_line": 859,
+   "stop_line": 863,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -505,9 +493,9 @@
    "severity": "error"
   },
   {
-   "line": 870,
+   "line": 874,
    "column": 57,
-   "stop_line": 870,
+   "stop_line": 874,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -517,9 +505,9 @@
    "severity": "error"
   },
   {
-   "line": 878,
+   "line": 882,
    "column": 57,
-   "stop_line": 878,
+   "stop_line": 882,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -529,9 +517,9 @@
    "severity": "error"
   },
   {
-   "line": 886,
+   "line": 890,
    "column": 57,
-   "stop_line": 886,
+   "stop_line": 890,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -541,9 +529,9 @@
    "severity": "error"
   },
   {
-   "line": 900,
+   "line": 904,
    "column": 57,
-   "stop_line": 900,
+   "stop_line": 904,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -553,9 +541,9 @@
    "severity": "error"
   },
   {
-   "line": 914,
+   "line": 918,
    "column": 57,
-   "stop_line": 914,
+   "stop_line": 918,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -565,9 +553,9 @@
    "severity": "error"
   },
   {
-   "line": 926,
+   "line": 930,
    "column": 57,
-   "stop_line": 926,
+   "stop_line": 930,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -577,9 +565,9 @@
    "severity": "error"
   },
   {
-   "line": 937,
+   "line": 941,
    "column": 54,
-   "stop_line": 937,
+   "stop_line": 941,
    "stop_column": 56,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -589,9 +577,9 @@
    "severity": "error"
   },
   {
-   "line": 1085,
+   "line": 1089,
    "column": 56,
-   "stop_line": 1085,
+   "stop_line": 1089,
    "stop_column": 58,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -601,9 +589,9 @@
    "severity": "error"
   },
   {
-   "line": 1108,
+   "line": 1112,
    "column": 56,
-   "stop_line": 1108,
+   "stop_line": 1112,
    "stop_column": 58,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -613,9 +601,9 @@
    "severity": "error"
   },
   {
-   "line": 1125,
+   "line": 1129,
    "column": 56,
-   "stop_line": 1125,
+   "stop_line": 1129,
    "stop_column": 58,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -625,9 +613,9 @@
    "severity": "error"
   },
   {
-   "line": 1137,
+   "line": 1141,
    "column": 57,
-   "stop_line": 1137,
+   "stop_line": 1141,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -637,9 +625,9 @@
    "severity": "error"
   },
   {
-   "line": 1147,
+   "line": 1151,
    "column": 57,
-   "stop_line": 1147,
+   "stop_line": 1151,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -649,9 +637,9 @@
    "severity": "error"
   },
   {
-   "line": 1160,
+   "line": 1164,
    "column": 57,
-   "stop_line": 1160,
+   "stop_line": 1164,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -661,9 +649,9 @@
    "severity": "error"
   },
   {
-   "line": 1170,
+   "line": 1174,
    "column": 57,
-   "stop_line": 1170,
+   "stop_line": 1174,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -673,9 +661,9 @@
    "severity": "error"
   },
   {
-   "line": 1182,
+   "line": 1186,
    "column": 57,
-   "stop_line": 1182,
+   "stop_line": 1186,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -685,9 +673,9 @@
    "severity": "error"
   },
   {
-   "line": 1200,
+   "line": 1204,
    "column": 38,
-   "stop_line": 1200,
+   "stop_line": 1204,
    "stop_column": 40,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -697,9 +685,9 @@
    "severity": "error"
   },
   {
-   "line": 1208,
+   "line": 1212,
    "column": 38,
-   "stop_line": 1208,
+   "stop_line": 1212,
    "stop_column": 40,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -709,9 +697,9 @@
    "severity": "error"
   },
   {
-   "line": 1216,
+   "line": 1220,
    "column": 38,
-   "stop_line": 1216,
+   "stop_line": 1220,
    "stop_column": 40,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -721,9 +709,9 @@
    "severity": "error"
   },
   {
-   "line": 1224,
+   "line": 1228,
    "column": 38,
-   "stop_line": 1224,
+   "stop_line": 1228,
    "stop_column": 40,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -733,9 +721,9 @@
    "severity": "error"
   },
   {
-   "line": 1233,
+   "line": 1237,
    "column": 38,
-   "stop_line": 1233,
+   "stop_line": 1237,
    "stop_column": 40,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -745,9 +733,9 @@
    "severity": "error"
   },
   {
-   "line": 1239,
+   "line": 1243,
    "column": 38,
-   "stop_line": 1239,
+   "stop_line": 1243,
    "stop_column": 40,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -757,9 +745,9 @@
    "severity": "error"
   },
   {
-   "line": 1252,
+   "line": 1256,
    "column": 38,
-   "stop_line": 1252,
+   "stop_line": 1256,
    "stop_column": 40,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -769,9 +757,9 @@
    "severity": "error"
   },
   {
-   "line": 1261,
+   "line": 1265,
    "column": 38,
-   "stop_line": 1261,
+   "stop_line": 1265,
    "stop_column": 40,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -781,9 +769,9 @@
    "severity": "error"
   },
   {
-   "line": 1263,
+   "line": 1267,
    "column": 27,
-   "stop_line": 1263,
+   "stop_line": 1267,
    "stop_column": 44,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -793,9 +781,9 @@
    "severity": "error"
   },
   {
-   "line": 1277,
+   "line": 1281,
    "column": 48,
-   "stop_line": 1277,
+   "stop_line": 1281,
    "stop_column": 50,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -805,9 +793,9 @@
    "severity": "error"
   },
   {
-   "line": 1289,
+   "line": 1293,
    "column": 48,
-   "stop_line": 1289,
+   "stop_line": 1293,
    "stop_column": 50,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -817,9 +805,9 @@
    "severity": "error"
   },
   {
-   "line": 1307,
+   "line": 1311,
    "column": 47,
-   "stop_line": 1307,
+   "stop_line": 1311,
    "stop_column": 49,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -829,9 +817,9 @@
    "severity": "error"
   },
   {
-   "line": 1322,
+   "line": 1326,
    "column": 47,
-   "stop_line": 1322,
+   "stop_line": 1326,
    "stop_column": 49,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -841,9 +829,9 @@
    "severity": "error"
   },
   {
-   "line": 1331,
+   "line": 1335,
    "column": 57,
-   "stop_line": 1331,
+   "stop_line": 1335,
    "stop_column": 59,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -853,9 +841,9 @@
    "severity": "error"
   },
   {
-   "line": 1414,
+   "line": 1418,
    "column": 43,
-   "stop_line": 1414,
+   "stop_line": 1418,
    "stop_column": 45,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -865,9 +853,9 @@
    "severity": "error"
   },
   {
-   "line": 1436,
+   "line": 1440,
    "column": 43,
-   "stop_line": 1436,
+   "stop_line": 1440,
    "stop_column": 45,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -877,9 +865,9 @@
    "severity": "error"
   },
   {
-   "line": 1530,
+   "line": 1534,
    "column": 54,
-   "stop_line": 1530,
+   "stop_line": 1534,
    "stop_column": 56,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -889,9 +877,9 @@
    "severity": "error"
   },
   {
-   "line": 1552,
+   "line": 1556,
    "column": 54,
-   "stop_line": 1552,
+   "stop_line": 1556,
    "stop_column": 56,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -901,9 +889,9 @@
    "severity": "error"
   },
   {
-   "line": 1559,
+   "line": 1563,
    "column": 51,
-   "stop_line": 1559,
+   "stop_line": 1563,
    "stop_column": 53,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -913,9 +901,9 @@
    "severity": "error"
   },
   {
-   "line": 1568,
+   "line": 1572,
    "column": 51,
-   "stop_line": 1568,
+   "stop_line": 1572,
    "stop_column": 53,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -925,9 +913,9 @@
    "severity": "error"
   },
   {
-   "line": 1609,
+   "line": 1613,
    "column": 51,
-   "stop_line": 1609,
+   "stop_line": 1613,
    "stop_column": 53,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -937,9 +925,9 @@
    "severity": "error"
   },
   {
-   "line": 1621,
+   "line": 1625,
    "column": 51,
-   "stop_line": 1621,
+   "stop_line": 1625,
    "stop_column": 53,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -949,9 +937,9 @@
    "severity": "error"
   },
   {
-   "line": 1633,
+   "line": 1637,
    "column": 54,
-   "stop_line": 1633,
+   "stop_line": 1637,
    "stop_column": 56,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -961,9 +949,9 @@
    "severity": "error"
   },
   {
-   "line": 1716,
+   "line": 1720,
    "column": 62,
-   "stop_line": 1716,
+   "stop_line": 1720,
    "stop_column": 64,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -973,9 +961,9 @@
    "severity": "error"
   },
   {
-   "line": 1733,
+   "line": 1737,
    "column": 51,
-   "stop_line": 1733,
+   "stop_line": 1737,
    "stop_column": 53,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -985,9 +973,9 @@
    "severity": "error"
   },
   {
-   "line": 1791,
+   "line": 1795,
    "column": 51,
-   "stop_line": 1791,
+   "stop_line": 1795,
    "stop_column": 53,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -997,9 +985,9 @@
    "severity": "error"
   },
   {
-   "line": 1820,
+   "line": 1824,
    "column": 54,
-   "stop_line": 1820,
+   "stop_line": 1824,
    "stop_column": 56,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -1009,9 +997,9 @@
    "severity": "error"
   },
   {
-   "line": 107,
+   "line": 103,
    "column": 62,
-   "stop_line": 107,
+   "stop_line": 103,
    "stop_column": 64,
    "path": "tests/test_scanner_parity.py",
    "code": -2,

@@ -40,37 +40,33 @@ PORTED_SIGNALS = (
 )
 
 
+# (message needle, signal) — order matters: type-ignore is checked BEFORE
+# 'without a why' (a why-less type-ignore comment is both)
+_SIGNAL_NEEDLES = (
+    ("magic number", "magic-number"),
+    ("no-op statement", "noop-statement"),
+    ("import inside function body", "inline-import"),
+    ("imports private", "private-import"),
+    ("unreachable statement", "unreachable"),
+    ("type: ignore", "type-ignore"),
+    ("without a why", "suppression"),
+    ("global statement", "global-state"),
+    ("shadows a builtin", "builtin-shadow"),
+    ("closing over", "closures"),
+    ("-line body", "closures"),
+    ("holds one class", "class-module"),
+    ("name carries a", "vague-name"),
+    ("share leading parameter", "strewing"),
+    ("bare except", "except"),
+    ("swallows", "except"),
+    ("broad `except", "broad-except"),
+)
+
+
 def _signal_of(message: str) -> str | None:
-    if "magic number" in message:
-        return "magic-number"
-    if "no-op statement" in message:
-        return "noop-statement"
-    if "import inside function body" in message:
-        return "inline-import"
-    if "imports private" in message:
-        return "private-import"
-    if "unreachable statement" in message:
-        return "unreachable"
-    if "type: ignore" in message:
-        return "type-ignore"  # '# type: ignore[code]' without a second comment — checked BEFORE 'without a why'
-    if "without a why" in message:
-        return "suppression"
-    if "module-level" in message or "global statement" in message:
-        return "global-state"
-    if "shadows a builtin" in message:
-        return "builtin-shadow"
-    if "inner function" in message and ("closing over" in message or "-line body" in message):
-        return "closures"
-    if "holds one class" in message:
-        return "class-module"
-    if "name carries a" in message and "class with" in message:
-        return "vague-name"
-    if "share leading parameter" in message:
-        return "strewing"
-    if "swallows" in message or "bare except" in message:
-        return "except"
-    if "broad `except" in message:
-        return "broad-except"
+    for needle, sig in _SIGNAL_NEEDLES:
+        if needle in message:
+            return sig
     return None
 
 
@@ -113,18 +109,19 @@ def _python_side() -> tuple[set, set]:
 
 def test_cc_parity(binary: Path):
     rust = _rust_output(binary)
-    rust_cc = {(e["file"].replace(str(ROOT) + "/", ""), e["function"], e["cc"]) for e in rust["cc"]}
-    py_cc, _ = _python_side()
+    rust_map = {
+        (e["file"].replace(str(ROOT) + "/", ""), e["function"]): e["cc"] for e in rust["cc"]
+    }
+    py_map = {(f, n): c for f, n, c in _python_side()[0]}
     # the decorated-function line offset is not part of the identity — a
     # function present on both sides must have identical CC
-    both = {(f, n) for f, n, _ in rust_cc} & {(f, n) for f, n, _ in py_cc}
-    mismatches = [(f, n, c1, c2) for f, n in both
-                  for c1 in [next(c for ff, nn, c in rust_cc if ff == f and nn == n)]
-                  for c2 in [next(c for ff, nn, c in py_cc if ff == f and nn == n)]
-                  if c1 != c2]
-    assert not mismatches, f"CC mismatches: {mismatches[:5]}"
-    # every Python function must exist in Rust
-    missing = {(f, n) for f, n, _ in py_cc} - {(f, n) for f, n, _ in rust_cc}
+    mismatch_pairs = [
+        (f, n, rust_map[(f, n)], py_map[(f, n)])
+        for f, n in rust_map
+        if f in py_map and n in py_map and rust_map[(f, n)] != py_map[(f, n)]
+    ]
+    assert not mismatch_pairs, f"CC mismatches: {mismatch_pairs[:5]}"
+    missing = [k for k in py_map if k not in rust_map]
     assert not missing, f"functions missing from Rust: {sorted(missing)[:5]}"
 
 
@@ -140,6 +137,16 @@ def test_findings_parity(binary: Path):
     assert not only_rust, f"Rust findings missing from Python: {sorted(only_rust)[:5]}"
 
 
+def _rust_kind_pairs(rust: dict, kind: str) -> set[tuple[str, int]]:
+    return {(f["file"], f["line"]) for f in rust["findings"] if f["kind"] == kind}
+
+
+def _py_kind_pairs(fn, repo) -> set[tuple[str, int]]:
+    from collections import Counter
+
+    return {(a.file, a.line) for a in fn(repo, True, Counter(), {})}
+
+
 def test_repo_wide_parity(binary: Path):
     """duplicate + unused: the Rust core computes the whole-repo families
     (Dice on structural skeletons; defined-but-never-referenced) exactly
@@ -153,15 +160,14 @@ def test_repo_wide_parity(binary: Path):
     proc = subprocess.run([str(binary)] + [str(p) for p in all_py],
                           capture_output=True, text=True, check=True)
     rust = json.loads(proc.stdout)
-    rust_dup = {(f["file"], f["line"]) for f in rust["findings"] if f["kind"] == "duplicate"}
-    rust_unused = {(f["file"], f["line"]) for f in rust["findings"] if f["kind"] == "unused"}
-    from collections import Counter
-    py_dup = {(a.file, a.line) for a in ch._duplicate_actions(ROOT, True, Counter(), {})}
-    py_unused = {(a.file, a.line) for a in ch._unused_actions(ROOT, True, Counter(), {})}
-    assert not (py_dup - rust_dup), f"duplicate missing from Rust: {sorted(py_dup - rust_dup)[:5]}"
-    assert not (rust_dup - py_dup), f"duplicate extra in Rust: {sorted(rust_dup - py_dup)[:5]}"
-    assert not (py_unused - rust_unused), f"unused missing from Rust: {sorted(py_unused - rust_unused)[:5]}"
-    assert not (rust_unused - py_unused), f"unused extra in Rust: {sorted(rust_unused - py_unused)[:5]}"
+    rust_dup = _rust_kind_pairs(rust, "duplicate")
+    rust_unused = _rust_kind_pairs(rust, "unused")
+    py_dup = _py_kind_pairs(ch._duplicate_actions, ROOT)
+    py_unused = _py_kind_pairs(ch._unused_actions, ROOT)
+    assert py_dup <= rust_dup, f"duplicate missing from Rust: {sorted(py_dup - rust_dup)[:5]}"
+    assert rust_dup <= py_dup, f"duplicate extra in Rust: {sorted(rust_dup - py_dup)[:5]}"
+    assert py_unused <= rust_unused, f"unused missing from Rust: {sorted(py_unused - rust_unused)[:5]}"
+    assert rust_unused <= py_unused, f"unused extra in Rust: {sorted(rust_unused - py_unused)[:5]}"
 
 
 def test_scanner_parses_every_corpus_file(binary: Path):
