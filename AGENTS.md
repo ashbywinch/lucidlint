@@ -18,7 +18,7 @@ both-direction baseline lock (`scripts/pyrefly-lock.py`; refresh with
 `make typecheck-update-baseline`). Raw git hooks in `scripts/`, installed
 by `make install-hooks` — re-run `make setup` after pulling updates.
 `tests/fixtures/` is intentionally non-compliant test input: ruff and
-pyrefly both exclude it (check_records skips it for the same reason).
+pyrefly both exclude it (the fixtures are intentionally broken input).
 
 ## Where things live
 
@@ -33,7 +33,8 @@ pyrefly both exclude it (check_records skips it for the same reason).
 
 - `check_review_posted.py` — PR review-attribution gate (env: `SHA`,
   `GITHUB_REPOSITORY`, `PR_NUMBER`, `GITHUB_TOKEN`)
-- `check_records.py` — record-vs-bare-dict gate (stdlib AST), fixture-tested
+- the Rust scan core (`scanner/`) — every finding family; the Python
+  orchestrator converts + renders
 - `code_health.py` — the deterministic code-health gate: complexity, size,
   coupling, hotspots, risk, record shape, latent classes, vague names,
   coding-standard rules, docs integrity — actions with facts and fix
@@ -51,7 +52,5 @@ pyrefly both exclude it (check_records skips it for the same reason).
   enforced by the tool itself: `make self-check` runs `code_health.py
   --repo .`, whose `docs` kind fails on broken links and unreachable
   docs. No separate docs-links test is needed — the tool IS the checker.
-- The tools import only stdlib at module level (radon is an optional
-  guarded import) — that invariant is what lets consuming repos run them
-  with a bare `uv run --with radon`; a test guards it
-  (`tests/test_tool_imports.py`).
+- The tools import only stdlib at module level; the scan engine is the
+  Rust binary (built by `make scanner-check`, required by the gate).

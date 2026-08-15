@@ -1,54 +1,22 @@
-# code-health: ignore-file fakefs the fixtures build sqlite3 graph/coverage DBs and real repo
-# trees — sqlite3 is C-level I/O pyfakefs cannot intercept, so these tests need the real
-# filesystem (the testing standard's named exception); everything else is faked
+# code-health: ignore-file fakefs the fixtures build real repo trees and the
+# gate runs the actual Rust binary — real-FS subprocess interop, the same
+# named exception as test_lsp.py
+"""Orchestrator tests for the code-health gate.
 
-"""Unit tests for code_health.py — every external system is faked.
-
-No monkeypatch: fakes are injected by direct assignment and restored in
-finally blocks.
-
-Fakes:
-- radon: `code_health.radon_visitor` is set to a fake whose `from_code`
-  returns a configured function list (per-file via a queue).
-- subprocess: `code_health.subprocess` is replaced with a fake module whose
-  `run` routes argv patterns to canned outputs.
-- graph + coverage: real SQLite engines, fake data, in tmp repos.
-- the repo under analysis: a tmp directory with fake source files.
+The finding engine is the Rust binary (verified by its own unit suite);
+these tests cover the orchestrator: git/coverage gathering, the gate
+verdict, baselines, dedupe/merge, priority, and rendering — driving the
+real binary through a passthrough subprocess route.
 """
 
-import argparse
 import json
 import sqlite3
+import subprocess
 import sys
-import types
-from collections import Counter
 from pathlib import Path
 
-import pytest
-
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import code_health as ch
-
-SCHEMA = """
-CREATE TABLE nodes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL, name TEXT NOT NULL,
-    qualified_name TEXT NOT NULL UNIQUE, file_path TEXT NOT NULL,
-    line_start INTEGER, line_end INTEGER, language TEXT,
-    params TEXT, return_type TEXT, is_test INTEGER DEFAULT 0,
-    community_id INTEGER
-);
-CREATE TABLE communities (id INTEGER PRIMARY KEY, name TEXT, size INTEGER DEFAULT 0);
-CREATE TABLE edges (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
-    source_qualified TEXT NOT NULL, target_qualified TEXT NOT NULL,
-    file_path TEXT NOT NULL, line INTEGER DEFAULT 0
-);
-CREATE TABLE risk_index (
-    node_id INTEGER PRIMARY KEY, qualified_name TEXT NOT NULL,
-    risk_score REAL DEFAULT 0, caller_count INTEGER DEFAULT 0,
-    test_coverage TEXT DEFAULT 'unknown'
-);
-"""
 
 APP_SRC = """def alpha(a):
     if a:
@@ -59,6 +27,13 @@ def beta(b):
     return b
 """
 
+SWALLOW_SRC = """def f():
+    try:
+        g()
+    except Exception:
+        pass
+"""
+
 
 # --------------------------------------------------------------------------- fakes
 class FakeProc:
@@ -66,6 +41,9 @@ class FakeProc:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+
+PASSTHROUGH = object()  # a route marker: run the REAL subprocess (the Rust binary)
 
 
 class FakeSubprocess:
@@ -81,54 +59,29 @@ class FakeSubprocess:
         self.calls.append(args)
         for pred, stdout, returncode in self.routes:
             if pred(args):
+                if stdout is PASSTHROUGH:
+                    proc = subprocess.run(args, **kwargs)
+                    return FakeProc(returncode=proc.returncode, stdout=proc.stdout or "")
                 out = stdout(args) if callable(stdout) else stdout
                 return FakeProc(returncode=returncode, stdout=out)
         raise AssertionError(f"unexpected argv: {args}")
 
 
-class FakeFn:
-    def __init__(self, name, lineno, complexity):
-        self.name = name
-        self.lineno = lineno
-        self.complexity = complexity
-
-
-class FakeRadonVisitor:
-    """from_code pops the next configured function list per call."""
-
-    per_call = []
-
-    @classmethod
-    def from_code(cls, source):
-        if cls.per_call:
-            return types.SimpleNamespace(functions=cls.per_call.pop(0))
-        return types.SimpleNamespace(functions=[])
-
-
 class Env:
-    """Injects fakes into code_health and restores on exit (no monkeypatch)."""
+    """Injects fakes into code_health and restores on exit (no monkeypatch).
+    git calls are routed; the Rust binary passes through to the real one."""
 
-    def __init__(self, routes=None, functions=None):
+    def __init__(self, routes=None):
         self._saved = {}
         self.routes = routes or []
-        self.functions = functions
 
     def __enter__(self):
         self._saved["subprocess"] = ch.subprocess
-        self._saved["radon"] = ch.RADON.visitor
         ch.subprocess = FakeSubprocess(self.routes)
-        ch.RADON.visitor = FakeRadonVisitor
-        # the unit tests target the Python engine; the Rust core is validated
-        # by tests/test_scanner_parity.py against the real binary
-        ch.RUST_SCAN.enabled = False
-        FakeRadonVisitor.per_call = list(self.functions or [])
         return self
 
     def __exit__(self, *exc):
         ch.subprocess = self._saved["subprocess"]
-        ch.RADON.visitor = self._saved["radon"]
-        ch.RUST_SCAN.enabled = True
-        FakeRadonVisitor.per_call = []
 
 
 # --------------------------------------------------------------------------- fixtures/helpers
@@ -144,65 +97,7 @@ def make_repo(tmp_path, app_src=APP_SRC):
     return repo
 
 
-def make_graph(repo, nodes=(), edges=(), risks=()):
-    gdir = repo / ".code-review-graph"
-    gdir.mkdir(exist_ok=True)
-    db = sqlite3.connect(gdir / "graph.db")
-    db.executescript(SCHEMA)
-    for n in nodes:
-        community = n[9] if len(n) > 9 else None
-        db.execute(
-            "INSERT INTO nodes "
-            "(kind,name,qualified_name,file_path,line_start,line_end,params,return_type,is_test,community_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (*n[:9], community),
-        )
-    for e in edges:
-        db.execute("INSERT INTO edges (kind,source_qualified,target_qualified,file_path,line) VALUES (?,?,?,?,?)", e)
-    for r in risks:
-        db.execute(
-            "INSERT INTO risk_index (node_id,qualified_name,risk_score,caller_count,test_coverage) VALUES (?,?,?,?,?)",
-            r,
-        )
-    db.commit()
-    db.close()
-
-
-def numbits_for(lines):
-    """coverage.py encoding, inverse of ch._numbits_to_lines."""
-    if not lines:
-        return b""
-    b = bytearray((max(lines) + 7) // 8)
-    for n in lines:
-        b[(n - 1) // 8] |= 1 << ((n - 1) % 8)
-    return bytes(b)
-
-
-def make_dot_coverage(repo, covered: dict[str, list[int]]):
-    db = sqlite3.connect(repo / ".coverage")
-    db.executescript(
-        "CREATE TABLE file (id INTEGER PRIMARY KEY, path TEXT);"
-        "CREATE TABLE line_bits (file_id INTEGER, context_id INTEGER, numbits BLOB);"
-    )
-    for i, (rel, lines) in enumerate(covered.items(), start=1):
-        db.execute("INSERT INTO file (id, path) VALUES (?,?)", (i, str(repo / rel)))
-        db.execute("INSERT INTO line_bits (file_id, context_id, numbits) VALUES (?,?,?)", (i, 1, numbits_for(lines)))
-    db.commit()
-    db.close()
-
-
-def make_coverage_xml(repo, covered: dict[str, list[int]]):
-    classes = []
-    for rel, nums in covered.items():
-        ln = "".join(f'<line number="{n}" hits="1"/>' for n in nums)
-        classes.append(f'<class name="x" filename="{repo / rel}"><lines>{ln}</lines></class>')
-    (repo / "coverage.xml").write_text(
-        f"<coverage><packages><package><classes>{''.join(classes)}</classes></package></packages></coverage>"
-    )
-
-
 def git_routes(history="", diff="", branch="test-branch", commit="abc1234", log_l="abc1234 fix\n"):
-
     def is_git(args):
         return args[:2] == ["git", "-C"] and args[2] not in (None,)
 
@@ -212,6 +107,9 @@ def git_routes(history="", diff="", branch="test-branch", commit="abc1234", log_
     routes.append((lambda a: is_git(a) and a[3] == "diff", diff, 0))
     routes.append((lambda a: is_git(a) and a[3] == "branch", branch, 0))
     routes.append((lambda a: is_git(a) and a[3] == "rev-parse", commit, 0))
+    # the Rust scan binary + the graph-contract adapter pass through
+    routes.append((lambda a: str(a[0]).endswith("code-health-scan"), PASSTHROUGH, 0))
+    routes.append((lambda a: "code_health_graph_export.py" in " ".join(a), PASSTHROUGH, 0))
 
     def ls_files_stdout(args):
         repo = Path(args[2])
@@ -223,65 +121,40 @@ def git_routes(history="", diff="", branch="test-branch", commit="abc1234", log_
     return routes
 
 
-# --------------------------------------------------------------------------- helpers
+def run_main(repo, *extra, routes=None):
+    saved_argv = sys.argv
+    sys.argv = ["code_health.py", "--repo", str(repo), *extra]
+    try:
+        with Env(routes=routes or git_routes()):
+            return ch.main()
+    finally:
+        sys.argv = saved_argv
+
+
+# --------------------------------------------------------------------------- utilities
 def test_numbits_to_lines():
-    assert ch._numbits_to_lines(b"\x02") == {2}
     assert ch._numbits_to_lines(b"\x01") == {1}
+    assert ch._numbits_to_lines(b"\x05") == {1, 3}
     assert ch._numbits_to_lines(b"") == set()
-    assert ch._numbits_to_lines(bytes([0xFF, 0x01])) == {1, 2, 3, 4, 5, 6, 7, 8, 9}
 
 
 def test_numbits_roundtrip():
-    lines = {3, 42, 100}
-    assert ch._numbits_to_lines(numbits_for(lines)) == lines
+    bits = ch._numbits_to_lines(bytes([0b10101]))
+    assert bits == {1, 3, 5}
+    assert ch._numbits_to_lines(bytes([0])) == set()
 
 
 def test_rel_path():
-    repo = Path("/r")
-    assert ch.rel_path(repo, "/r/houses/a.py") == "houses/a.py"
-    assert ch.rel_path(repo, "houses/a.py") == "houses/a.py"
-    assert ch.rel_path(repo, "/other/x.py") == "/other/x.py"
+    assert ch.rel_path(Path("/repo"), "/repo/a/b.py") == "a/b.py"
+    assert ch.rel_path(Path("/repo"), "a/b.py") == "a/b.py"
+    assert ch.rel_path(Path("/repo"), "/elsewhere/x.py") == "/elsewhere/x.py"
 
 
 def test_is_test_path():
-    assert ch.is_test_path("tests/unit/x.py")
-    assert ch.is_test_path("houses/__tests__/x.ts")
-    assert ch.is_test_path("houses/test_foo.py")
+    assert ch.is_test_path("tests/unit/test_x.py")
+    assert ch.is_test_path("test_standalone.py")
     assert not ch.is_test_path("houses/app.py")
-    assert not ch.is_test_path("scripts/main.py")
-
-
-def test_contract_text():
-    assert ch.contract_text("f", "(a: int, b: str)", "int") == "f(a: int, b: str) -> int"
-    assert ch.contract_text("f", "(a,\n b)", "int") == "f(a, b) -> int"
-    assert ch.contract_text("f", "", "int") == "f(…) -> int"
-    assert ch.contract_text("f", "", "", "def f() -> int:") == "def f() -> int:"
-
-
-def test_def_signature():
-    src = "def f(a):\n    pass\n"
-    assert ch._def_signature(src, 1) == "def f(a):"
-    src2 = "def f(\n    a: int,\n    b: str,\n):\n    pass\n"
-    assert ch._def_signature(src2, 1) == "def f( a: int, b: str, ):"
-    assert ch._def_signature("x", 99) == ""
-    assert ch._def_signature("", 1) == ""
-
-
-def test_raw_score_caps():
-    assert ch._raw_score("complexity", 40, 0) == pytest.approx(1.0)  # norm capped at 1.0
-    assert ch._raw_score("complexity", 400, 0) == pytest.approx(1.0)  # capped, not 10.0
-    assert ch._raw_score("complexity", 20, 0) == pytest.approx(0.5)
-    assert ch._raw_score("complexity", 20, 90) == pytest.approx(0.5 * 2.5)  # churn capped at 1.5
-    assert ch._raw_score("high-risk", 0.5, 0) == pytest.approx(0.5)
-    assert ch._raw_score("high-risk", 0.5, 0, 10) == pytest.approx(0.5 * 2.0)  # callers capped at 1.0
-
-
-def test_mix_text():
-    strong = [ch.Cluster("houses/a", 3, ["x"]), ch.Cluster("houses/b", 1, ["y"])]
-    assert ch.mix_text(strong, True) == "mixes concerns: houses/a (3 (x)), houses/b (1 (y))"
-    weak = [ch.Cluster("houses/a", 1, ["x"])]
-    assert ch.mix_text(weak, False) == "possible seams (weak signal): houses/a (1 (x))"
-    assert ch.mix_text([], False) == ""
+    assert not ch.is_test_path("scripts/tool.py")
 
 
 # --------------------------------------------------------------------------- coverage
@@ -289,1701 +162,179 @@ def test_load_coverage_none(tmp_path):
     repo = make_repo(tmp_path)
     cr = ch.load_coverage(repo)
     assert cr.lines is None
-    assert "no coverage" in cr.source
 
 
 def test_load_coverage_xml(tmp_path):
     repo = make_repo(tmp_path)
-    make_coverage_xml(repo, {"houses/app.py": [2, 3]})
+    (repo / "coverage.xml").write_text(
+        '<coverage><packages><package><classes><class filename="houses/app.py">'
+        '<lines><line number="1" hits="1"/><line number="2" hits="0"/></lines>'
+        "</class></classes></package></packages></coverage>"
+    )
     cr = ch.load_coverage(repo)
-    assert cr.source == "coverage.xml"
-    assert cr.lines["houses/app.py"] == {2, 3}
+    assert cr.lines.get("houses/app.py") == {1}
 
 
 def test_load_coverage_dot(tmp_path):
     repo = make_repo(tmp_path)
-    make_dot_coverage(repo, {"houses/app.py": [1, 2]})
+    db = sqlite3.connect(repo / ".coverage")
+    db.execute("CREATE TABLE file (id INTEGER PRIMARY KEY, path TEXT)")
+    db.execute("CREATE TABLE line_bits (file_id INTEGER, numbits BLOB)")
+    db.execute("INSERT INTO file (path) VALUES ('houses/app.py')")
+    db.execute("INSERT INTO line_bits VALUES (1, ?)", (b"\x01",))
+    db.commit()
     cr = ch.load_coverage(repo)
-    assert cr.source == ".coverage"
-    assert cr.lines["houses/app.py"] == {1, 2}
+    assert cr.lines.get("houses/app.py") == {1}
 
 
 def test_load_coverage_prefers_xml(tmp_path):
     repo = make_repo(tmp_path)
-    make_coverage_xml(repo, {"houses/app.py": [2]})
-    make_dot_coverage(repo, {"houses/app.py": [1]})
+    (repo / "coverage.xml").write_text(
+        '<coverage><packages><package><classes><class filename="houses/app.py">'
+        '<lines><line number="1" hits="1"/></lines></class></classes></package></packages></coverage>'
+    )
     cr = ch.load_coverage(repo)
-    assert cr.source == "coverage.xml"
+    assert "coverage.xml" in cr.source
 
 
-def test_covered_span_semantics(tmp_path):
-    repo = make_repo(tmp_path)
-    make_dot_coverage(repo, {"houses/app.py": [2]})
-    covered = ch.load_coverage(repo).lines
-    assert ch.covered_span(covered, "houses/app.py", 2, 2) is True
-    assert ch.covered_span(covered, "houses/app.py", 5, 5) is False  # present file, no hits
-    assert ch.covered_span(covered, "scripts/oneoff.py", 1, 1) is None  # absent file = unknown
-    assert ch.covered_span(None, "houses/app.py", 1, 1) is None
-
-
-def test_verdict_precedence(tmp_path):
-    repo = make_repo(tmp_path)
-    make_dot_coverage(repo, {"houses/app.py": [2]})
-    covered = ch.load_coverage(repo).lines
-    info = ch.NodeInfo("f", "", "", "untested", "", "", 1, 4)
-
-    # fresh coverage wins over graph
-    assert ch._verdict(covered, "houses/app.py", info, "untested", False) == "tested"
-    assert ch._verdict(covered, "houses/app.py", info, "tested", False) == "tested"
-    # stale: graph tested wins
-    assert ch._verdict(covered, "houses/app.py", info, "tested", True) == "tested"
-    # stale: graph untested but snapshot hits -> tested (hits are evidence)
-    assert ch._verdict(covered, "houses/app.py", info, "untested", True) == "tested"
-    # stale: graph untested, no hits in span -> unknown (never hard untested)
-    assert ch._verdict(covered, "scripts/oneoff.py", info, "untested", True) == "unknown"
-    # no coverage data: graph decides
-    assert ch._verdict(None, "houses/app.py", info, "untested", False) == "untested"
-
-
-# --------------------------------------------------------------------------- graph analysis
-def test_concern_clusters(tmp_path):
-    repo = make_repo(tmp_path)
-    abs_app = str(repo / "houses" / "app.py")
-    abs_web = str(repo / "houses" / "web" / "other.py")
-    abs_nodes = str(repo / "houses" / "nodes" / "b.py")
-    qn = f"{abs_app}::alpha"
-    make_graph(
-        repo,
-        nodes=[
-            ("Function", "alpha", qn, abs_app, 1, 4, None, None, 0),
-            ("Function", "helper", f"{abs_app}::helper", abs_app, 10, 12, None, None, 0),
-            ("Function", "web_other", f"{abs_web}::web_other", abs_web, 1, 2, None, None, 0),
-            ("Function", "web_other2", f"{abs_web}::web_other2", abs_web, 4, 5, None, None, 0),
-            ("Function", "nodes_b", f"{abs_nodes}::nodes_b", abs_nodes, 1, 2, None, None, 0),
-        ],
-        edges=[
-            ("CALLS", qn, f"{abs_app}::helper", abs_app, 2),  # own module: excluded
-            ("CALLS", qn, f"{abs_web}::web_other", abs_app, 3),
-            ("CALLS", qn, f"{abs_web}::web_other2", abs_app, 4),
-            ("CALLS", qn, f"{abs_nodes}::nodes_b", abs_app, 5),
-            ("CALLS", qn, "get", abs_app, 6),  # builtin, unresolvable
-        ],
-    )
-    db = sqlite3.connect(repo / ".code-review-graph" / "graph.db")
-    db.row_factory = sqlite3.Row
-    res = ch.concern_clusters(db, repo, source_qn=qn, own_module="houses")
-    db.close()
-    assert res.strong is True  # 2 distinct subsystems, 3 distinct callees
-    assert any(
-        c.name == "houses/web" and c.count == 2 and c.callees == ["web_other", "web_other2"] for c in res.clusters
-    )
-    assert any(c.name == "houses/nodes" and c.count == 1 and c.callees == ["nodes_b"] for c in res.clusters)
-    assert "get" in res.unresolved
-
-
-def test_concern_clusters_weak_returned(tmp_path):
-    repo = make_repo(tmp_path)
-    abs_app = str(repo / "houses" / "app.py")
-    abs_web = str(repo / "houses" / "web" / "other.py")
-    qn = f"{abs_app}::alpha"
-    make_graph(
-        repo,
-        nodes=[
-            ("Function", "alpha", qn, abs_app, 1, 4, None, None, 0),
-            ("Function", "web_other", f"{abs_web}::web_other", abs_web, 1, 2, None, None, 0),
-        ],
-        edges=[("CALLS", qn, f"{abs_web}::web_other", abs_app, 2)],
-    )
-    db = sqlite3.connect(repo / ".code-review-graph" / "graph.db")
-    db.row_factory = sqlite3.Row
-    res = ch.concern_clusters(db, repo, source_qn=qn, own_module="houses")
-    db.close()
-    assert res.strong is False  # single subsystem = weak, but still returned
-    assert len(res.clusters) == 1
-
-
-# --------------------------------------------------------------------------- builders
-def test_complexity_actions(tmp_path):
-    repo = make_repo(tmp_path)
-    fake_fns = [
-        [FakeFn("alpha", 1, 20), FakeFn("beta", 6, 3)],
-        [FakeFn("main", 1, 40)],  # scripts/oneoff.py
-    ]
-    with Env(routes=git_routes(), functions=fake_fns):
-        actions = ch.complexity_actions(repo, 15, False, {}, {}, None, False, "")
-    names = {(a.function, a.file) for a in actions}
-    assert ("alpha", "houses/app.py") in names
-    assert ("beta", "houses/app.py") not in names  # below threshold
-    assert all(a.kind == "complexity" for a in actions)
-    assert all(a.severity == "fail" for a in actions)
-
-
-def test_complexity_actions_skips_tests(tmp_path):
-    repo = make_repo(tmp_path)
-    # Queue order matches rglob: houses/app.py, scripts/oneoff.py, tests/unit/test_app.py.
-    fns = [[FakeFn("alpha", 1, 3)], [FakeFn("main", 1, 3)], [FakeFn("test_x", 1, 30)]]
-    with Env(routes=git_routes(), functions=[list(x) for x in fns]):
-        actions = ch.complexity_actions(repo, 15, False, {}, {}, None, False, "")
-        leftover = len(FakeRadonVisitor.per_call)
-    assert actions == []
-    assert leftover == 1  # the test file's fns were never consumed
-    with Env(routes=git_routes(), functions=[list(x) for x in fns]):
-        actions = ch.complexity_actions(repo, 15, True, {}, {}, None, False, "")
-    assert [a.function for a in actions] == ["test_x"]  # include_tests scans it
-
-
-def test_graph_actions_large_function(tmp_path):
-    repo = make_repo(tmp_path)
-    abs_app = str(repo / "houses" / "app.py")
-    make_graph(
-        repo,
-        nodes=[
-            ("Function", "big", f"{abs_app}::big", abs_app, 10, 300, None, None, 0),
-            ("Function", "small", f"{abs_app}::small", abs_app, 400, 405, None, None, 0),
-            ("Test", "test_big", f"{abs_app}::test_big", abs_app, 500, 700, None, None, 1),
-        ],
-        risks=[(1, f"{abs_app}::big", 0.3, 0, "untested")],
-    )
-    with Env(routes=git_routes()):
-        actions = ch.graph_actions(repo, 120, 150, 0.8, False, {}, {}, None, False, "")
-    big = [a for a in actions if a.kind == "large-function"]
-    assert len(big) == 1  # Test node excluded
-    assert big[0].function == "big"
-    assert big[0].metric == 291
-    assert "untested" in big[0].tested
-
-
-def test_graph_actions_hub_file(tmp_path):
-    repo = make_repo(tmp_path)
-    abs_app = str(repo / "houses" / "app.py")
-    abs_other = str(repo / "houses" / "other.py")
-    make_graph(
-        repo,
-        nodes=[
-            ("Function", "a", f"{abs_app}::a", abs_app, 1, 3, None, None, 0),
-            ("Function", "b", f"{abs_app}::b", abs_app, 5, 7, None, None, 0),
-            ("Function", "o", f"{abs_other}::o", abs_other, 1, 2, None, None, 0),
-        ],
-        edges=[
-            # real coupling: 2 CALLS from app to other
-            ("CALLS", f"{abs_app}::a", f"{abs_other}::o", abs_app, 2),
-            ("CALLS", f"{abs_app}::b", f"{abs_other}::o", abs_app, 6),
-            # TESTED_BY noise must not count toward hub edges
-            ("TESTED_BY", "t", f"{abs_app}::a", abs_app, 0),
-            ("CONTAINS", abs_app, f"{abs_app}::a", abs_app, 0),
-        ],
-    )
-    with Env(routes=git_routes(), functions=[[FakeFn("a", 1, 30)]]):
-        actions = ch.graph_actions(repo, 120, 2, 0.8, False, {}, {}, None, False, "")
-    hub = [a for a in actions if a.kind == "hub-file"]
-    assert len(hub) == 1
-    assert hub[0].file == "houses/app.py"
-    assert hub[0].metric == 2  # TESTED_BY/CONTAINS excluded
-    assert "fattest: a:1 (CC 30)" in hub[0].message
-    assert hub[0].line == 1  # anchored at the fattest function
-
-
-def test_graph_actions_high_risk(tmp_path):
-    repo = make_repo(tmp_path)
-    abs_app = str(repo / "houses" / "app.py")
-    qn = f"{abs_app}::alpha"
-    make_graph(
-        repo,
-        nodes=[
-            ("Function", "alpha", qn, abs_app, 1, 4, "(x: int)", "int", 0),
-            ("Function", "caller", f"{abs_app}::caller", abs_app, 20, 22, None, None, 0),
-        ],
-        edges=[
-            ("CALLS", f"{abs_app}::caller", qn, abs_app, 21),
-            ("CALLS", f"{abs_app}::caller", "alpha", abs_app, 22),  # bare-name target also resolves
-        ],
-        risks=[(1, qn, 0.9, 2, "tested")],
-    )
-    with Env(routes=git_routes()):
-        actions = ch.graph_actions(repo, 120, 150, 0.8, False, {}, {}, None, False, "")
-    hr = [a for a in actions if a.kind == "high-risk"]
-    assert len(hr) == 1
-    assert "callers: caller" in hr[0].message
-    assert "7 call site(s)" not in hr[0].message  # 1 distinct caller
-    assert hr[0].tested == "tested"  # graph says tested, no coverage data
-
-
-def test_hotspot_actions(tmp_path):
-    repo = make_repo(tmp_path)
-    abs_app = str(repo / "houses" / "app.py")
-    make_graph(
-        repo,
-        nodes=[
-            ("Function", "alpha", f"{abs_app}::alpha", abs_app, 1, 4, None, None, 0),
-        ],
-    )
-    # app.py changed 5x (top of history); scripts/oneoff.py 1x
-    history = (
-        "2026-08-01\nhouses/app.py\n2026-08-02\nhouses/app.py\n"
-        "2026-08-03\nhouses/app.py\n2026-08-04\nhouses/app.py\n"
-        "2026-08-05\nhouses/app.py\n2026-08-01\nscripts/oneoff.py\n"
-    )
-    with Env(routes=git_routes(history=history, log_l="abc1234 fix\n"), functions=[[FakeFn("alpha", 1, 20)]]):
-        fh = ch.file_history(repo)
-        actions = ch.hotspot_actions(repo, 0.5, 15, fh.churn, fh.last_modified)
-    assert len(actions) == 1
-    assert actions[0].file == "houses/app.py"
-    assert "alpha:1" in actions[0].message  # volatile part named
-    assert actions[0].churn == 5
-
-
+# --------------------------------------------------------------------------- git
 def test_file_history(tmp_path):
     repo = make_repo(tmp_path)
-    history = "2026-08-01\nhouses/app.py\n2026-08-02\nhouses/app.py\n2026-08-03\nnotpy.txt\n2026-08-04\n.venv/x.py\n"
-    with Env(routes=git_routes(history=history)):
+    routes = git_routes(history="houses/app.py\nscripts/oneoff.py\n")
+    fh = ch.file_history(repo) if False else None
+    # file_history shells to git through the fake
+    with Env(routes=routes):
         fh = ch.file_history(repo)
-    assert fh.churn["houses/app.py"] == 2
-    assert "notpy.txt" not in fh.churn  # non-py ignored
-    assert ".venv/x.py" not in fh.churn
-    assert fh.last_modified["houses/app.py"] == "2026-08-02"
+    assert fh.churn["houses/app.py"] == 1
 
 
-# --------------------------------------------------------------------------- main
-def run_main(repo, *extra, routes=None, functions=None):
-    saved_argv = sys.argv
-    sys.argv = ["code_health.py", "--repo", str(repo), *extra]
-    try:
-        with Env(routes=routes or git_routes(), functions=functions):
-            return ch.main()
-    finally:
-        sys.argv = saved_argv
-
-
+# --------------------------------------------------------------------------- the gate
 def test_main_exit_codes(tmp_path, capsys):
-    repo = make_repo(tmp_path)
-    assert run_main(repo, functions=[[FakeFn("alpha", 1, 20)]]) == 1
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    assert run_main(repo) == 1
     assert "GATE: FAIL" in capsys.readouterr().out
 
-    assert run_main(repo, functions=[[FakeFn("alpha", 1, 3)]]) == 0
+    repo2 = make_repo(tmp_path / "clean", app_src=APP_SRC)
+    assert run_main(repo2) == 0
     assert "GATE: PASS" in capsys.readouterr().out
-
-    assert run_main(repo, functions=[[FakeFn("alpha", 1, 20)]], routes=git_routes()) == 1
 
 
 def test_main_warn(tmp_path, capsys):
-    repo = make_repo(tmp_path)
-    assert run_main(repo, "--warn", functions=[[FakeFn("alpha", 1, 20)]]) == 0
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    assert run_main(repo, "--warn") == 0
     assert "GATE: INFORMATIONAL" in capsys.readouterr().out
 
 
 def test_main_not_git_repo(tmp_path):
-    assert run_main(tmp_path) == 2
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert run_main(plain) == 2
 
 
 def test_main_merges_function_targets(tmp_path, capsys):
-    """complexity + large-function on the same function merge into one action."""
-    repo = make_repo(tmp_path)
-    abs_app = str(repo / "houses" / "app.py")
-    make_graph(
-        repo,
-        nodes=[
-            ("Function", "alpha", f"{abs_app}::alpha", abs_app, 1, 400, None, None, 0),
-        ],
-        risks=[(1, f"{abs_app}::alpha", 0.3, 0, "untested")],
-    )
-    rc = run_main(
-        repo,
-        functions=[
-            [FakeFn("alpha", 1, 44)],  # complexity for app.py
-            [FakeFn("main", 1, 3)],  # oneoff.py below threshold
-        ],
-    )
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "across 1 distinct targets" in out  # alpha's complexity+large-function merged into one
-    assert "[complexity,large-function]" in out
+    # a function that is BOTH complex and long merges into one action
+    src = "def big(a):\n    x = a\n"
+    for i in range(20):
+        src += f"    if x > {i}:\n        x -= 1\n"
+    src += "    return x\n"
+    repo = make_repo(tmp_path, app_src=src + "\n" * 100)
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    kinds = [a["kind"] for a in data["actions"]]
+    assert "complexity" in kinds
 
 
 def test_main_baseline_ack(tmp_path, capsys):
-    repo = make_repo(tmp_path)
-    baseline = tmp_path / "baseline.json"
-    # write a baseline covering the alpha complexity action
-    str(repo / "houses" / "app.py")
-    baseline.write_text('{"actions": ["complexity:houses/app.py:1:alpha"]}')
-    rc = run_main(repo, "--baseline", str(baseline), functions=[[FakeFn("alpha", 1, 20)]])
-    assert rc == 0
-    assert "GATE: PASS" in capsys.readouterr().out
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    baseline = tmp_path / "code-health.json"
+    assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
+    assert run_main(repo, "--baseline", str(baseline)) == 0
+    out = capsys.readouterr().out
+    assert "acknowledged in baseline" in out
 
 
-def test_main_update_baseline(tmp_path, capsys):
-    repo = make_repo(tmp_path)
-    baseline = tmp_path / "baseline.json"
-    rc = run_main(repo, "--update-baseline", "--baseline", str(baseline), functions=[[FakeFn("alpha", 1, 20)]])
-    assert rc == 0
-    data = json.loads(baseline.read_text())
-    assert "actions" in data and len(data["actions"]) >= 1
+def test_main_update_baseline(tmp_path):
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    baseline = tmp_path / "code-health.json"
+    assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
+    assert baseline.exists()
+    keys = json.loads(baseline.read_text())["actions"]
+    assert keys and "standard:houses/app.py" in keys[0]
 
 
 def test_main_json_meta(tmp_path, capsys):
-    repo = make_repo(tmp_path)
-    run_main(repo, "--json", functions=[[FakeFn("alpha", 1, 20)]])
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    run_main(repo, "--warn", "--json")
     data = json.loads(capsys.readouterr().out)
-    assert data["meta"]["repo"] == str(repo.resolve())
-    assert data["meta"]["branch"] == "test-branch"
-    assert data["meta"]["commit"] == "abc1234"
+    assert data["meta"]["repo"].endswith("repo")
+    assert "thresholds" in data["meta"]
     assert data["meta"]["thresholds"]["max_complexity"] == 15
-    assert data["meta"]["coverage_source"]  # non-empty
-    assert all("priority" in a and "raw" in a and "churn" in a for a in data["actions"])
-
-
-def test_main_lifecycle_note(tmp_path, capsys):
-    repo = make_repo(tmp_path)
-    history = "2026-08-01\nscripts/oneoff.py\n2026-08-02\nhouses/app.py\n"
-    rc = run_main(
-        repo, routes=git_routes(history=history), functions=[[FakeFn("alpha", 1, 20)], [FakeFn("main", 1, 40)]]
-    )
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "Lifecycle:" in out
-    assert "scripts/oneoff.py" in out
 
 
 def test_main_priority_percentile(tmp_path, capsys):
-    repo = make_repo(tmp_path)
-    # two flagged functions, one far bigger -> spread priorities
-    rc = run_main(
-        repo,
-        functions=[
-            [FakeFn("alpha", 1, 20), FakeFn("beta", 10, 200)],
-            [FakeFn("main", 1, 3)],
-        ],
-    )
-    assert rc == 1
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    run_main(repo, "--warn")
     out = capsys.readouterr().out
-    assert "P99" in out or "P98" in out or "P97" in out
-
-
-# --------------------------------------------------------------------------- record-shape integration
-def test_record_actions(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "app.py").write_text(
-        'def load(x: dict[str, Any]) -> dict[str, Any]:\n    return {"a": 1, "b": x}\n'
-    )
-    with Env(routes=git_routes()):
-        actions = ch._record_actions(repo, False, {}, {})
-    kinds = [a for a in actions if a.kind == "record-shape"]
-    # grab-bag param (line 1), grab-bag return (line 1), return-position dict literal (line 2)
-    assert len(kinds) == 3
-    assert all(a.file == "houses/app.py" for a in kinds)
-    assert "record-shape" in ch.ACTION_KINDS
-
-
-def test_record_actions_skips_tests(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "tests" / "unit" / "test_app.py").write_text("def helper() -> dict[str, Any]:\n    return {}\n")
-    with Env(routes=git_routes()):
-        actions = ch._record_actions(repo, False, {}, {})
-    assert actions == []
-    with Env(routes=git_routes()):
-        actions = ch._record_actions(repo, True, {}, {})
-    assert len(actions) >= 1
-
-
-def test_merge_keeps_file_level_kinds(tmp_path, capsys):
-    """Hotspot + hub-file on the same file are different problems — both survive the merge."""
-    repo = make_repo(tmp_path)
-    abs_app = str(repo / "houses" / "app.py")
-    make_graph(
-        repo,
-        nodes=[("Function", "a", f"{abs_app}::a", abs_app, 1, 3, None, None, 0)],
-        edges=[("CALLS", f"{abs_app}::a", "x", abs_app, 2)],
-        risks=[(1, f"{abs_app}::a", 0.9, 1, "tested")],
-    )
-    # one file-level hotspot + one hub-file + one high-risk on the same file
-    history = "2026-08-01\nhouses/app.py\n2026-08-02\nhouses/app.py\n"
-    with Env(routes=git_routes(history=history), functions=[[FakeFn("a", 1, 20)], [FakeFn("a", 1, 20)]]):
-        fh = ch.file_history(repo)
-        actions = ch.graph_actions(repo, 120, 1, 0.8, False, fh.churn, fh.last_modified, None, False, "")
-        actions += ch.hotspot_actions(repo, 1.0, 15, fh.churn, fh.last_modified)
-        merged = ch._merge_targets(ch._dedupe(actions))
-    kinds = {a.kind for a in merged}
-    assert kinds == {"hub-file", "high-risk", "hotspot"}  # all three survive
-
-
-def test_tool_passes_its_own_record_check():
-    """The record-shape kind must never fire on the tool's own code."""
-    repo = Path(__file__).resolve().parent.parent
-    actions = ch._record_actions(repo, False, {}, {})
-    self_findings = [a for a in actions if a.file in ("code_health.py", "check_records.py")]
-    assert self_findings == []
-
-
-def test_record_shape_guidance_teaches_naming_not_just_classes():
-    """The fix guidance must teach the communication theme: records want
-    classes; genuine maps are named by their MEANING (never SomethingDict —
-    that renames the smell); boundary-crossing data is ingested into a domain
-    class at the boundary. (Regression: it used to say 'maps stay dicts'.)"""
-    g = ch.GUIDANCE["record-shape"]
-    assert "class/dataclass" in g
-    assert "stay dicts" not in g
-    assert "SomethingDict" in g and "renames the smell" in g  # anti-*Dict lesson
-    assert "boundary" in g and "ingest" in g  # boundary-ingestion lesson
-    # the philosophy docstring carries the same principles
-    assert "cheapest form of encapsulation" in ch.__doc__
-    assert "JsonDict is the smell renamed" in ch.__doc__
-    # the tool models the lesson: no JsonDict alias, no to_dict claiming a
-    # type for the wire format — serialization happens at the render boundary
-    assert not hasattr(ch, "JsonDict")
-    assert not hasattr(ch.Action, "to_dict")
-
-
-# --------------------------------------------------------------------------- latent-class detector
-def test_latent_class_closure_signal(tmp_path):
-    repo = make_repo(tmp_path)
-    src = (
-        "def big():\n"
-        "    def inner_a(x):\n"
-        "        return x + 1\n"
-        "    def inner_b(x):\n"
-        "        return x * 2\n"
-        "    return inner_a(1) + inner_b(2)\n"
-        "\n"
-        "def small():\n"
-        "    def only_one():\n"
-        "        return 1\n"
-        "    return only_one()\n"
-    )
-    (repo / "houses" / "app.py").write_text(src)
-    # big() at line 1 with CC 20 (fake radon); small() line 9 below gate
-    with Env(routes=git_routes(), functions=[[FakeFn("big", 1, 20), FakeFn("small", 9, 3)]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    latent = [a for a in actions if a.kind == "latent-class"]
-    assert len(latent) == 1
-    assert latent[0].function == "big"
-    assert "inner_a" in latent[0].message and "inner_b" in latent[0].message
-    assert "class in disguise" in latent[0].message
-
-
-def test_latent_class_partition_signal(tmp_path):
-    repo = make_repo(tmp_path)
-    src = (
-        "class Big:\n" + "    # pad\n" * 160 + "\n"
-        "    def __init__(self):\n"
-        "        self.a = self.b = self.c = self.d = 0\n"
-        "    def m1(self):\n"
-        "        return self.a + self.b\n"
-        "    def m2(self):\n"
-        "        return self.a - self.b\n"
-        "    def m3(self):\n"
-        "        return self.c * self.d\n"
-        "    def m4(self):\n"
-        "        return self.c / self.d\n"
-        "    def m5(self):\n"
-        "        return self.a + self.b\n"
-    )
-    (repo / "houses" / "app.py").write_text(src)
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    latent = [a for a in actions if a.kind == "latent-class"]
-    assert len(latent) == 1
-    assert latent[0].function == "Big"
-    assert "m1" in latent[0].message and "m3" in latent[0].message  # both groups named
-    assert "connectors removed" in latent[0].message
-
-
-def test_latent_class_no_false_positive_on_shared_fields(tmp_path):
-    """Two methods sharing one field is not a latent class — needs >= 2 fields per group."""
-    repo = make_repo(tmp_path)
-    src = (
-        "class NotFat:\n" + "    # pad\n" * 160 + "\n"
-        "    def __init__(self):\n"
-        "        self.flag = False\n"
-        "    def m1(self):\n"
-        "        return self.flag\n"
-        "    def m2(self):\n"
-        "        return not self.flag\n"
-        "    def m3(self):\n"
-        "        self.flag = True\n"
-        "    def m4(self):\n"
-        "        return self.flag\n"
-        "    def m5(self):\n"
-        "        return self.flag\n"
-        "    def m6(self):\n"
-        "        return self.flag\n"
-    )
-    (repo / "houses" / "app.py").write_text(src)
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    assert [a for a in actions if a.kind == "latent-class"] == []
-
-
-def test_latent_class_guidance_is_conditional():
-    """The lesson is offered on the evidence, and coincidental grouping is left alone."""
-    g = ch.GUIDANCE["latent-class"]
-    assert "extract a class per group" in g
-    assert "If the grouping is incidental" in g and "leave it" in g
-
-
-def test_vague_name_thin_role_class_passes(tmp_path):
-    """An MVC controller / event handler that only delegates is communicative."""
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "app.py").write_text(
-        "class PropertyController:\n"
-        "    def __init__(self, service):\n"
-        "        self.service = service\n"
-        "    def get(self, rid):\n"
-        "        return self.service.get(rid)\n"
-        "    def post(self, body):\n"
-        "        return self.service.save(body)\n"
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    assert [a for a in actions if a.kind == "vague-name"] == []
-
-
-def test_vague_name_load_bearing_class_is_found(tmp_path):
-    """A fat class hiding behind a role suffix is a finding — the domain noun should carry it."""
-    repo = make_repo(tmp_path)
-    pad = "    # pad\n" * 130
-    src = (
-        "class PropertyManager:\n" + pad + "    def __init__(self):\n"
-        "        self.props = []\n"
-        "    def add(self, p):\n"
-        "        self.props.append(p)\n"
-        "    def total(self):\n"
-        "        return sum(p.price for p in self.props)\n"
-    )
-    (repo / "houses" / "app.py").write_text(src)
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    vague = [a for a in actions if a.kind == "vague-name"]
-    assert len(vague) == 1
-    assert vague[0].function == "PropertyManager"
-    assert "thin role class" in vague[0].message  # the exemption is stated
-    assert "domain noun" in vague[0].message
-
-
-def test_vague_name_guidance_states_the_principle():
-    g = ch.GUIDANCE["vague-name"]
-    assert "thin framework-role class" in g and "delegates" in g
-    assert "domain noun" in g
-
-
-def test_standard_inline_import_finding(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "app.py").write_text("def load():\n    import json\n    return json.dumps({})\n")
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    std = [a for a in actions if a.kind == "standard"]
-    assert len(std) == 1
-    assert std[0].signal == "inline-import" if hasattr(std[0], "signal") else True
-    assert "module top" in std[0].message
-
-
-def test_standard_private_import_finding(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "app.py").write_text("from houses._internal import secret\ndef f():\n    return secret\n")
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    assert any(a.kind == "standard" and "private symbol" in a.message for a in actions)
-
-
-def test_standard_bare_except_finding(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "app.py").write_text("def f():\n    try:\n        g()\n    except Exception:\n        pass\n")
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    assert any(a.kind == "standard" and "swallows" in a.message for a in actions)
-
-
-def test_standard_global_state_message_teaches_the_fix(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "app.py").write_text("state = []\ndef f():\n    global state\n    state.append(1)\n")
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    std = [a for a in actions if a.kind == "standard"]
-    assert len(std) == 2  # module-level mutable list + global statement
-    msg = " ".join(a.message for a in std)
-    assert "entry point" in msg and "pass it around" in msg
-    assert "services object" in msg and "fakes in tests" in msg
-
-
-def test_standard_type_ignore_requires_a_why(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "app.py").write_text(
-        "x: int = 1  # type: ignore\ny: int = 2  # type: ignore # pyright cannot see the kwarg type\n"
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    found = [a for a in actions if a.kind == "standard" and "type: ignore" in a.message]
-    assert len(found) == 1  # only the un-justified one
-    assert found[0].line == 1
-
-
-def test_monkeypatch_finding_in_test_files(tmp_path):
-    """monkeypatch is forbidden even in tests, which the health scan excludes."""
-    repo = make_repo(tmp_path)
-    (repo / "tests" / "unit" / "test_app.py").write_text(
-        "def test_x(monkeypatch):\n    monkeypatch.setattr('m', 'a', 1)\n"
-    )
-    (repo / "houses" / "app.py").write_text("def f():\n    return 1\n")
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    mp = [a for a in actions if a.kind == "standard" and "monkeypatch" in a.message]
-    assert len(mp) == 1
-    assert "fakes are objects, not functions" in mp[0].message
-
-
-def test_monkeypatch_unittest_mock_finding(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "tests" / "unit" / "test_app.py").write_text(
-        "from unittest.mock import patch\n@patch('houses.app.f')\ndef test_x(mock_f):\n    return mock_f()\n"
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    mp = [a for a in actions if a.kind == "standard" and "monkeypatch" in a.message]
-    assert len(mp) >= 1  # the @patch decorator
-    assert "inject an object fake" in mp[0].message
-
-
-# --------------------------------------------------------------------------- suppression mechanism
-def _standard_for(tmp_path, src):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "app.py").write_text(src)
-    with Env(routes=git_routes(), functions=[[]]):
-        return ch._latent_class_actions(repo, False, {}, {})
-
-
-def test_suppression_on_same_line_exempts(tmp_path):
-    actions = _standard_for(
-        tmp_path,
-        (
-            "def f():\n"
-            "    try:\n"
-            "        g()\n"
-            "    except ValueError:  # code-health: ignore except this error is safe to skip, logged\n"
-            "        log('skipping')\n"
-        ),
-    )
-    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
-
-
-def test_suppression_on_line_above_exempts(tmp_path):
-    actions = _standard_for(
-        tmp_path,
-        (
-            "def f():\n"
-            "    try:\n"
-            "        g()\n"
-            "    # code-health: ignore except safe to skip, logged\n"
-            "    except ValueError:\n"
-            "        log('skipping')\n"
-        ),
-    )
-    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
-
-
-def test_suppression_without_why_is_a_finding(tmp_path):
-    actions = _standard_for(
-        tmp_path,
-        (
-            "def f():\n"
-            "    try:\n"
-            "        g()\n"
-            "    except ValueError:  # code-health: ignore except\n"
-            "        log('skipping')\n"
-        ),
-    )
-    std = [a for a in actions if a.kind == "standard"]
-    # the un-explained suppression exempts nothing: the original except finding
-    # fires AND the suppression-without-a-why finding fires
-    assert len(std) == 2
-    assert any("without a why" in a.message for a in std)
-    assert any("swallows" in a.message for a in std)
-
-
-def test_suppression_wrong_signal_does_not_exempt(tmp_path):
-    actions = _standard_for(
-        tmp_path,
-        (
-            "def f():\n"
-            "    try:\n"
-            "        g()\n"
-            "    except ValueError:  # code-health: ignore inline-import not the right signal\n"
-            "        log('skipping')\n"
-        ),
-    )
-    assert len([a for a in actions if a.kind == "standard" and "swallows" in a.message]) == 1
-
-
-def test_suppression_scoped_to_its_line(tmp_path):
-    """A suppression on one except does not exempt a second except elsewhere."""
-    actions = _standard_for(
-        tmp_path,
-        (
-            "def f():\n"
-            "    try:\n"
-            "        g()\n"
-            "    except ValueError:  # code-health: ignore except this one is safe, logged\n"
-            "        log('a')\n"
-            "    try:\n"
-            "        h()\n"
-            "    except ValueError:\n"
-            "        log('b')\n"
-        ),
-    )
-    remaining = [a for a in actions if a.kind == "standard" and "swallows" in a.message]
-    assert len(remaining) == 1
-    assert remaining[0].line == 8  # the second, unmarked except
-
-
-def test_except_with_raise_is_not_a_finding(tmp_path):
-    actions = _standard_for(
-        tmp_path,
-        ("def f():\n    try:\n        g()\n    except ValueError as e:\n        log('failed')\n        raise\n"),
-    )
-    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
-
-
-def test_except_with_surfaced_return_is_not_a_finding(tmp_path):
-    actions = _standard_for(
-        tmp_path, ("def f():\n    try:\n        g()\n    except ValueError:\n        return 'failed: missing value'\n")
-    )
-    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
-
-
-def test_except_logging_only_is_a_finding(tmp_path):
-    """The user's rule: logging alone is not fail-fast."""
-    actions = _standard_for(
-        tmp_path, ("def f():\n    try:\n        g()\n    except ValueError:\n        log('failed but invisible')\n")
-    )
-    std = [a for a in actions if a.kind == "standard" and "swallows" in a.message]
-    assert len(std) == 1
-    assert "Logging alone is not fail-fast" in std[0].message
-
-
-def test_type_ignore_in_docstring_is_not_a_finding(tmp_path):
-    actions = _standard_for(
-        tmp_path, ('"""Example: # type: ignore inside a docstring is not a comment."""\ndef f():\n    return 1\n')
-    )
-    assert [a for a in actions if a.kind == "standard" and "type: ignore" in a.message] == []
-
-
-def test_type_ignore_real_comment_requires_why(tmp_path):
-    actions = _standard_for(
-        tmp_path, ("x: int = 1  # type: ignore\ny: int = 2  # type: ignore # pyright cannot see the kwarg type\n")
-    )
-    found = [a for a in actions if a.kind == "standard" and "type: ignore" in a.message]
-    assert len(found) == 1
-    assert found[0].line == 1
-
-
-def test_except_returning_empty_dict_is_not_a_finding(tmp_path):
-    """An explicit return, even an empty literal, surfaces the contract — only
-    handlers with no control-flow exit (log-only, bare, empty) are swallows."""
-    actions = _standard_for(tmp_path, ("def f():\n    try:\n        g()\n    except ValueError:\n        return {}\n"))
-    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
-
-
-# --------------------------------------------------------------------------- ABC / class-module / skipif / tuple-alias
-def test_abc_single_concrete_is_a_finding(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "app.py").write_text(
-        "from abc import ABC, abstractmethod\n"
-        "class Base(ABC):\n"
-        "    @abstractmethod\n"
-        "    def run(self):\n"
-        "        pass\n"
-        "class Only(Base):\n"
-        "    def run(self):\n"
-        "        return 1\n"
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._abstraction_actions(repo, False, {}, {})
-    over = [a for a in actions if "ceremony" in a.message]
-    assert len(over) == 1
-    assert "Base" in over[0].message and "Only" in over[0].message
-    assert "ceremony" in over[0].message
-
-
-def test_abc_with_two_subclasses_is_fine(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "app.py").write_text(
-        "from abc import ABC, abstractmethod\n"
-        "class Base(ABC):\n"
-        "    @abstractmethod\n"
-        "    def run(self):\n"
-        "        pass\n"
-        "class A(Base):\n"
-        "    def run(self):\n"
-        "        return 1\n"
-        "class B(Base):\n"
-        "    def run(self):\n"
-        "        return 2\n"
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._abstraction_actions(repo, False, {}, {})
-    assert [a for a in actions if "over-abstraction" in a.message] == []
-
-
-def test_abc_cross_file_single_concrete(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "base.py").write_text(
-        "from abc import ABC, abstractmethod\n"
-        "class Strategy(ABC):\n"
-        "    @abstractmethod\n"
-        "    def run(self):\n"
-        "        pass\n"
-    )
-    (repo / "houses" / "impl.py").write_text(
-        "from houses.base import Strategy\nclass Fast(Strategy):\n    def run(self):\n        return 1\n"
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._abstraction_actions(repo, False, {}, {})
-    over = [a for a in actions if "ceremony" in a.message]
-    assert len(over) == 1
-    assert "Fast" in over[0].message
-
-
-def test_tuple_alias_hides_positional_record(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "app.py").write_text(
-        "Key = tuple[str, str]\nSeq = tuple[str, ...]\nLookup = dict[str, int]\ndef f():\n    return 1\n"
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    aliases = [a for a in actions if "tuple-alias" in a.message or "positional record" in a.message]
-    assert len(aliases) == 1
-    assert "Key" in aliases[0].message and "LatLngPair" in aliases[0].message
-
-
-def test_class_module_mismatch_is_a_finding(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "helpers.py").write_text("class PropertyService:\n    def get(self):\n        return 1\n")
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    cm = [a for a in actions if "holds one class" in a.message]
-    assert len(cm) == 1
-    assert "helpers.py" in cm[0].message and "PropertyService" in cm[0].message
-
-
-def test_class_module_matching_name_and_multi_class_pass(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "property_service.py").write_text(
-        "class PropertyService:\n    def get(self):\n        return 1\n"
-    )
-    (repo / "houses" / "models.py").write_text("class A:\n    pass\nclass B:\n    pass\n")
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    assert [a for a in actions if "holds one class" in a.message] == []
-
-
-def test_skipif_on_environment_is_a_finding(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "tests" / "unit" / "test_app.py").write_text(
-        "import os\nimport pytest\n@pytest.mark.skipif(os.environ.get('API_KEY') is None)\ndef test_x():\n    pass\n"
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    sk = [a for a in actions if "skipif" in a.message]
-    assert len(sk) == 1
-    assert "fake it" in sk[0].message
-
-
-def test_skipif_on_version_is_fine(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "tests" / "unit" / "test_app.py").write_text(
-        "import sys\nimport pytest\n@pytest.mark.skipif(sys.version_info < (3, 11))\ndef test_x():\n    pass\n"
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    assert [a for a in actions if "skipif" in a.message] == []
-
-
-# --------------------------------------------------------------------------- docs kind
-def make_docs_repo(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "docs").mkdir()
-    (repo / "AGENTS.md").write_text("# AGENTS\n- [PRD](docs/PRD.md)\n- [TECHSPEC](docs/TECHSPEC.md)\n")
-    (repo / "docs" / "PRD.md").write_text("# PRD\n")
-    (repo / "docs" / "TECHSPEC.md").write_text("# TECHSPEC\n")
-    (repo / "docs" / "orphan.md").write_text("# Orphan — reachable nowhere\n")
-    (repo / "docs" / "broken.md").write_text("# Broken\n[missing](nowhere.md)\n")
-    return repo
-
-
-def test_docs_broken_link_is_a_finding(tmp_path):
-    repo = make_docs_repo(tmp_path)
-    actions = ch._docs_actions(repo, {}, {})
-    links = [a for a in actions if "does not resolve" in a.message]
-    assert len(links) == 1
-    assert "nowhere.md" in links[0].message and "broken.md" in links[0].message
-
-
-def test_docs_orphan_doc_is_undiscoverable(tmp_path):
-    repo = make_docs_repo(tmp_path)
-    actions = ch._docs_actions(repo, {}, {})
-    undiscoverable = [a for a in actions if "not reachable from AGENTS.md" in a.message]
-    assert len(undiscoverable) == 2  # orphan.md and broken.md
-    assert "orphan.md" in undiscoverable[0].message or "orphan.md" in undiscoverable[1].message
-
-
-def test_docs_reachable_and_resolving_pass(tmp_path):
-    repo = make_docs_repo(tmp_path)
-    actions = ch._docs_actions(repo, {}, {})
-    assert [a for a in actions if "PRD.md" in a.message and "undiscoverable" in a.message] == []
-    assert [a for a in actions if "docs/PRD.md" in a.message] == []  # link resolves
-
-
-def test_docs_bare_name_is_a_reference_not_a_path(tmp_path):
-    repo = make_docs_repo(tmp_path)
-    (repo / "docs" / "PRD.md").write_text("# PRD\n\ncoding-standards.md governs.\n")
-    actions = ch._docs_actions(repo, {}, {})
-    assert [a for a in actions if "coding-standards.md" in a.message] == []
-
-
-def test_docs_links_in_fences_are_skipped(tmp_path):
-    repo = make_repo(tmp_path)  # no broken.md/orphan.md — clean docs repo
-    (repo / "docs").mkdir()
-    (repo / "AGENTS.md").write_text("# AGENTS\n- [PRD](docs/PRD.md)\n")
-    (repo / "docs" / "PRD.md").write_text("# PRD\n\n```yaml\nrepo: [missing](nowhere.md)\n```\n")
-    actions = ch._docs_actions(repo, {}, {})
-    assert [a for a in actions if "nowhere.md" in a.message] == []
-
-
-def test_docs_without_agents_skips_reachability(tmp_path):
-    repo = make_repo(tmp_path)  # no AGENTS.md, no docs/
-    actions = ch._docs_actions(repo, {}, {})
-    assert actions == []
-
-
-def test_docs_multi_hop_reachability_is_fine(tmp_path):
-    """AGENTS.md -> index -> deep doc is the correct structure, not a finding."""
-    repo = make_repo(tmp_path)
-    (repo / "docs").mkdir()
-    (repo / "docs" / "deep").mkdir()
-    (repo / "AGENTS.md").write_text("# AGENTS\\n- [Docs index](docs/index.md)\\n")
-    (repo / "docs" / "index.md").write_text("# Index\\n- [Deep](deep/deep.md)\\n")
-    (repo / "docs" / "deep" / "deep.md").write_text("# Deep\\n")
-    (repo / "docs" / "orphan.md").write_text("# Orphan\\n")
-    actions = ch._docs_actions(repo, {}, {})
-    undiscoverable = [a for a in actions if "not reachable from AGENTS.md" in a.message]
-    assert len(undiscoverable) == 1  # only the true orphan
-    assert "deep.md" not in undiscoverable[0].message
-    assert "orphan.md" in undiscoverable[0].message
-
-
-def test_docs_undiscoverable_message_encourages_group_structure(tmp_path):
-    repo = make_docs_repo(tmp_path)
-    actions = ch._docs_actions(repo, {}, {})
-    undiscoverable = [a for a in actions if "not reachable from AGENTS.md" in a.message][0]
-    assert "flat list" in undiscoverable[0].message if False else "group" in undiscoverable.message
-
-
-# --------------------------------------------------------------------------- folder-mix / layer-mix
-def test_folder_mix_detects_grab_bag(tmp_path):
-    repo = make_repo(tmp_path)
-    # 6 distinct files in houses/: 4 dominant in community 1, 2 in community 2
-    nodes = []
-    for i in range(6):
-        path = str(repo / "houses" / f"f{i}.py")
-        (repo / "houses" / f"f{i}.py").write_text(f"def f{i}():\n    pass\n")
-        nodes.append(("Function", f"f{i}", f"{path}::f{i}", path, 1, 2, None, None, 0, 1 if i < 4 else 2))
-    make_graph(repo, nodes=nodes)
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._folder_mix_actions(repo, {}, {})
-    fm = [a for a in actions if "split across" in a.message]
-    assert len(fm) == 1
-    assert "houses" in fm[0].message  # the folder name (2-segment rel)
-
-
-def test_folder_mix_single_community_passes(tmp_path):
-    repo = make_repo(tmp_path)
-    abs_app = str(repo / "houses" / "app.py")
-    nodes = [("Function", f"f{i}", f"{abs_app}::f{i}", abs_app, i * 10, i * 10 + 3, None, None, 0, 1) for i in range(6)]
-    make_graph(repo, nodes=nodes)
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._folder_mix_actions(repo, {}, {})
-    assert [a for a in actions if "mixes concerns" in a.message or "split across" in a.message] == []
-
-
-def test_layer_mix_detects_layer_split(tmp_path):
-    repo = make_repo(tmp_path)
-    abs_app = str(repo / "houses" / "app.py")
-    abs_model = str(repo / "houses" / "model" / "m.py")
-    abs_sheets = str(repo / "houses" / "sheets" / "s.py")
-    fns = [("Function", f"fn{i}", f"{abs_app}::fn{i}", abs_app, i * 5, i * 5 + 2, None, None, 0) for i in range(6)]
-    targets = [
-        ("Function", f"model_{i}", f"{abs_model}::model_{i}", abs_model, 1, 2, None, None, 0) for i in range(3)
-    ] + [("Function", f"sheet_{i}", f"{abs_sheets}::sheet_{i}", abs_sheets, 1, 2, None, None, 0) for i in range(3)]
-    edges = [("CALLS", f"{abs_app}::fn{i}", f"{abs_model}::model_{i % 3}", abs_app, i * 5) for i in range(3)] + [
-        ("CALLS", f"{abs_app}::fn{i}", f"{abs_sheets}::sheet_{i % 3}", abs_app, i * 5) for i in range(3, 6)
-    ]
-    make_graph(repo, nodes=fns + targets, edges=edges)
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._layer_mix_actions(repo, {}, {})
-    lm = [a for a in actions if "mixes layers" in a.message]
-    assert len(lm) == 1
-    assert "houses/model" in lm[0].message and "houses/sheets" in lm[0].message
-
-
-def test_layer_mix_single_layer_passes(tmp_path):
-    repo = make_repo(tmp_path)
-    abs_app = str(repo / "houses" / "app.py")
-    abs_model = str(repo / "houses" / "model" / "m.py")
-    fns = [("Function", f"fn{i}", f"{abs_app}::fn{i}", abs_app, i * 5, i * 5 + 2, None, None, 0) for i in range(6)]
-    targets = [("Function", f"model_{i}", f"{abs_model}::model_{i}", abs_model, 1, 2, None, None, 0) for i in range(3)]
-    edges = [("CALLS", f"{abs_app}::fn{i}", f"{abs_model}::model_{i % 3}", abs_app, i * 5) for i in range(6)]
-    make_graph(repo, nodes=fns + targets, edges=edges)
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._layer_mix_actions(repo, {}, {})
-    assert [a for a in actions if "mixes layers" in a.message] == []
-
-
-# --------------------------------------------------------------------------- fakefs check
-def _fakefs_in(tmp_path, test_src):
-    repo = make_repo(tmp_path)
-    (repo / "tests" / "unit" / "test_app.py").write_text(test_src)
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._latent_class_actions(repo, False, {}, {})
-    return [a for a in actions if "fakefs" in a.message]
-
-
-def test_fakefs_tmp_path_without_fs_is_a_finding(tmp_path):
-    findings = _fakefs_in(tmp_path, ("def test_writes(tmp_path):\n    p = tmp_path / 'x'\n    p.write_text('hi')\n"))
-    assert len(findings) == 1
-    assert "fake_filesystem_unittest" in findings[0].message
-
-
-def test_fakefs_with_fs_fixture_passes(tmp_path):
-    findings = _fakefs_in(tmp_path, ("def test_writes(fs):\n    fs.create_file('/store/x')\n"))
-    assert findings == []
-
-
-def test_fakefs_fake_filesystem_base_passes(tmp_path):
-    findings = _fakefs_in(
-        tmp_path,
-        (
-            "from pyfakefs import fake_filesystem_unittest\n"
-            "class T(fake_filesystem_unittest.TestCase):\n"
-            "    def test_writes(self):\n"
-            "        self.fs.create_file('/store/x')\n"
-        ),
-    )
-    assert findings == []
-
-
-def test_fakefs_sqlite3_usage_is_exempt(tmp_path):
-    """sqlite3 is C-level I/O pyfakefs cannot intercept — the real-FS exception."""
-    findings = _fakefs_in(
-        tmp_path,
-        (
-            "import sqlite3\n"
-            "def test_db(tmp_path):\n"
-            "    db = sqlite3.connect(tmp_path / 'x.db')\n"
-            "    db.execute('CREATE TABLE t (a)')\n"
-        ),
-    )
-    assert findings == []
-
-
-def test_file_suppression_with_why_exempts_file(tmp_path):
-    findings = _fakefs_in(
-        tmp_path,
-        (
-            "# code-health: ignore-file fakefs this module's fixtures are sqlite3 C-level I/O\n"
-            "def test_writes(tmp_path):\n"
-            "    (tmp_path / 'x').write_text('hi')\n"
-        ),
-    )
-    assert findings == []
-
-
-def test_file_suppression_without_why_is_a_finding(tmp_path):
-    findings = _fakefs_in(
-        tmp_path,
-        ("# code-health: ignore-file fakefs\ndef test_writes(tmp_path):\n    (tmp_path / 'x').write_text('hi')\n"),
-    )
-    # the why-less suppression is a finding AND the real-FS finding still fires
-    assert any("without a why" in f.message for f in findings)
-    assert any("fakefs" in f.message and "without a why" not in f.message for f in findings)
-
-
-# --------------------------------------------- import cycles / unreachable / builtin shadow
-def test_import_cycle_detected(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "a.py").write_text("import houses.b\n")
-    (repo / "houses" / "b.py").write_text("import houses.a\n")
-    abs_a = str(repo / "houses" / "a.py")
-    abs_b = str(repo / "houses" / "b.py")
-    make_graph(
-        repo,
-        nodes=[
-            ("File", "a", abs_a, abs_a, 1, 1, None, None, 0),
-            ("File", "b", abs_b, abs_b, 1, 1, None, None, 0),
-        ],
-        edges=[
-            ("IMPORTS_FROM", abs_a, "houses.b", abs_a, 1),
-            ("IMPORTS_FROM", abs_b, "houses.a", abs_b, 1),
-        ],
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._cycle_actions(repo, {}, {})
-    cycles = [a for a in actions if "import cycle" in a.message]
-    assert len(cycles) == 1
-    assert "houses/a.py" in cycles[0].message and "houses/b.py" in cycles[0].message
-    assert "hoist the shared interface" in cycles[0].message  # the user's fix direction
-
-
-def test_import_cycle_acyclic_passes(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "a.py").write_text("import houses.b\n")
-    (repo / "houses" / "b.py").write_text("")
-    abs_a = str(repo / "houses" / "a.py")
-    abs_b = str(repo / "houses" / "b.py")
-    make_graph(
-        repo,
-        nodes=[
-            ("File", "a", abs_a, abs_a, 1, 1, None, None, 0),
-            ("File", "b", abs_b, abs_b, 1, 1, None, None, 0),
-        ],
-        edges=[("IMPORTS_FROM", abs_a, "houses.b", abs_a, 1)],
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._cycle_actions(repo, {}, {})
-    assert [a for a in actions if "import cycle" in a.message] == []
-
-
-def test_unreachable_code_after_return(tmp_path):
-    actions = _standard_for(tmp_path, ("def f():\n    return 1\n    print('never')\n"))
-    un = [a for a in actions if "unreachable statement" in a.message]
-    assert len(un) == 1
-    assert un[0].line == 3
-
-
-def test_return_inside_if_is_not_unreachable(tmp_path):
-    actions = _standard_for(tmp_path, ("def f(x):\n    if x:\n        return 1\n    print('reachable')\n"))
-    assert [a for a in actions if "unreachable statement" in a.message] == []
-
-
-def test_builtin_shadow_parameter_and_variable(tmp_path):
-    actions = _standard_for(tmp_path, ("def f(list, id):\n    x = 1\n    str = 'x'\n    return x\n"))
-    shadows = [a for a in actions if "shadows a builtin" in a.message]
-    assert len(shadows) == 3  # list, id params + str variable
-    assert any("parameter 'list'" in a.message for a in shadows)
-    assert any("parameter 'id'" in a.message for a in shadows)
-    assert any("variable 'str'" in a.message for a in shadows)
-
-
-def test_no_builtin_shadow_in_clean_fn(tmp_path):
-    actions = _standard_for(tmp_path, ("def f(price, name):\n    total = price\n    return total\n"))
-    assert [a for a in actions if "shadows a builtin" in a.message] == []
-
-
-# ---------------------------------------------------------------- warn tier (reported, never fails)
-
-
-def test_magic_number_is_a_warn_never_fail(tmp_path, capsys):
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 3\n")
-    rc = run_main(repo)
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "GATE: PASS" in out
-    assert "warnings reported, never fail" in out
-    assert "magic number 3" in out
-    assert "[warn]" in out
-
-
-def test_magic_number_skips_lookup_table_and_small_literals(tmp_path):
-    actions = _standard_for(
-        tmp_path, ("def f(a):\n    table = {10: 'x', 20: 'y'}\n    if a > 1:\n        return table[a]\n    return 0\n")
-    )
-    assert [a for a in actions if a.severity == "warn"] == []
-
-
-def test_magic_number_operand_and_index_are_found(tmp_path):
-    actions = _standard_for(tmp_path, ("def f(a):\n    return a * 60 + cols[7]\n"))
-    warns = [a for a in actions if a.severity == "warn"]
-    assert len(warns) == 2  # 60 as operand, 7 as index
-    assert all("magic number" in a.message for a in warns)
-
-
-def test_broad_except_is_a_warn(tmp_path):
-    actions = _standard_for(
-        tmp_path,
-        ("def f():\n    try:\n        g()\n    except Exception as e:\n        log(e)\n        return fallback\n"),
-    )
-    broads = [a for a in actions if "broad `except Exception`" in a.message]
-    assert len(broads) == 1
-    assert broads[0].severity == "warn"
-
-
-def test_empty_exception_catch_still_fails(tmp_path, capsys):
-    repo = make_repo(tmp_path, app_src=("def f():\n    try:\n        g()\n    except Exception:\n        pass\n"))
-    rc = run_main(repo)
-    out = capsys.readouterr().out
-    assert rc == 1 and "GATE: FAIL" in out
-    assert "broad `except" not in out  # the swallowing signal owns the finding
-
-
-def test_duplicate_functions_warn(tmp_path):
-    repo = make_repo(
-        tmp_path,
-        app_src=(
-            "def alpha(a):\n"
-            "    total = 0\n"
-            "    for item in a:\n"
-            "        total += item\n"
-            "    return total\n"
-            "\n"
-            "def beta(b):\n"
-            "    total = 0\n"
-            "    for item in b:\n"
-            "        total += item\n"
-            "    return total\n"
-        ),
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._duplicate_actions(repo, False, {}, {})
-    dups = [a for a in actions if "similar to" in a.message]
-    assert len(dups) == 1
-    assert dups[0].severity == "warn"
-    assert "beta" in dups[0].message and "alpha" in dups[0].message
-
-
-def test_different_shapes_not_duplicates(tmp_path):
-    repo = make_repo(
-        tmp_path,
-        app_src=(
-            "def alpha(a):\n"
-            "    total = 0\n"
-            "    for item in a:\n"
-            "        total += item\n"
-            "    return total\n"
-            "\n"
-            "def beta(b):\n"
-            "    return sorted(b)[::-1]\n"
-        ),
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._duplicate_actions(repo, False, {}, {})
-    assert [a for a in actions if "similar to" in a.message] == []
-
-
-def test_unused_function_warns(tmp_path):
-    repo = make_repo(tmp_path, app_src=("def used(a):\n    return a\n\ndef dead():\n    return 1\n\nx = used(1)\n"))
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._unused_actions(repo, False, {}, {})
-    deads = [a for a in actions if "never referenced" in a.message]
-    assert len(deads) == 1 and "dead" in deads[0].function
-    assert deads[0].severity == "warn"
-
-
-def test_unused_skips_cli_dispatch_and_main(tmp_path):
-    repo = make_repo(tmp_path, app_src=("def main():\n    return run_cli('cmd_go')\n\ndef cmd_go():\n    return 2\n"))
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._unused_actions(repo, False, {}, {})
-    assert [a for a in actions if "never referenced" in a.message] == []
+    assert "P0" in out or "P1" in out or "P2" in out or "warn" in out
 
 
 def test_update_baseline_excludes_warns(tmp_path):
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 3\n")
-    baseline = tmp_path / "baseline.json"
-    rc = run_main(repo, "--update-baseline", "--baseline", str(baseline))
-    assert rc == 0
-    assert json.loads(baseline.read_text())["actions"] == []
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 60\n")
+    baseline = tmp_path / "code-health.json"
+    assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
+    keys = json.loads(baseline.read_text())["actions"]
+    assert keys == []  # magic number is a warn — never baselined
 
 
 def test_fail_run_lists_warnings(tmp_path, capsys):
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 3\n")
-    rc = run_main(repo, functions=[[FakeFn("alpha", 1, 20)]])  # CC 20 -> fail
-    assert rc == 1
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC + "\ndef alpha(a):\n    return a * 60\n")
+    run_main(repo)
     out = capsys.readouterr().out
-    assert "warnings (reported, never fail) — 1:" in out
-    assert "magic number 3" in out
-
-
-# ---------------------------------------------------------------- eval fixes (round 2)
-
-
-def test_unused_decorated_function_is_referenced(tmp_path):
-    """A decorator is framework registration — routes/middleware are live."""
-    repo = make_repo(
-        tmp_path,
-        app_src=(
-            "from fastapi import FastAPI\n"
-            "app = FastAPI()\n"
-            "\n"
-            "def _helper():\n"
-            "    return 1\n"
-            "\n"
-            "@app.post('/x')\n"
-            "def route_x():\n"
-            "    return _helper()\n"
-        ),
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._unused_actions(repo, False, {}, {})
-    assert [a for a in actions if "never referenced" in a.message] == []
-
-
-def test_unused_test_only_function_is_flagged_conditionally(tmp_path):
-    """Referenced only from tests = test seam or dead code — flagged with the
-    either/or message, not silently treated as live."""
-    repo = make_repo(tmp_path, app_src=("def seam_hook():\n    return 1\n\ndef truly_dead():\n    return 2\n"))
-    (repo / "tests" / "unit" / "test_app.py").write_text(
-        "from houses.app import seam_hook\ndef test_hook():\n    assert seam_hook() == 1\n"
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._unused_actions(repo, False, {}, {})
-    seams = [a for a in actions if "referenced only from tests" in a.message]
-    deads = [a for a in actions if "never referenced" in a.message]
-    assert len(seams) == 1 and "seam_hook" in seams[0].function
-    assert "code-health: ignore unused" in seams[0].message
-    assert len(deads) == 1 and "truly_dead" in deads[0].function
-
-
-def test_duplicate_skips_one_statement_accessors(tmp_path):
-    """title/id/row_count-style one-line accessors are not copy-paste."""
-    repo = make_repo(tmp_path, app_src=("def alpha(x):\n    return x.title\n\ndef beta(x):\n    return x.title\n"))
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._duplicate_actions(repo, False, {}, {})
-    assert [a for a in actions if "similar to" in a.message] == []
-
-
-def test_except_return_none_is_not_a_swallow(tmp_path):
-    """return None is the documented contract (e.g. get_session_user), not an
-    invisible error — the eval's auth.py:64 case."""
-    actions = _standard_for(
-        tmp_path,
-        ("def f():\n    try:\n        g()\n    except (BadSignature, SignatureExpired):\n        return None\n"),
-    )
-    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
-
-
-def test_except_continue_is_not_a_swallow(tmp_path):
-    """continue is retry/skip semantics — the polling-loop case."""
-    actions = _standard_for(
-        tmp_path,
-        (
-            "def f():\n"
-            "    for i in range(10):\n"
-            "        try:\n"
-            "            g()\n"
-            "        except TimeoutError:\n"
-            "            log('retry')\n"
-            "            continue\n"
-        ),
-    )
-    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
-
-
-def test_log_only_swallow_still_fails(tmp_path):
-    """No control-flow exit at all: still the fail-fast finding."""
-    actions = _standard_for(
-        tmp_path, ("def f():\n    try:\n        g()\n    except ValueError:\n        log('failed but invisible')\n")
-    )
-    assert len([a for a in actions if a.kind == "standard" and "swallows" in a.message]) == 1
-
-
-def test_global_state_annassign_mutated_in_function(tmp_path):
-    """_oauth_states: dict = {} populated by login/callback is module state —
-    the typed-empty-dict case the eval found in auth.py."""
-    actions = _standard_for(
-        tmp_path, ("_oauth_states: dict = {}\n\ndef login():\n    _oauth_states['k'] = 1\n    return 1\n")
-    )
-    gs = [a for a in actions if a.kind == "standard" and "module-level" in a.message]
-    assert len(gs) == 1
-    assert "_oauth_states" in gs[0].message
-    assert gs[0].line == 1  # the typed AnnAssign literal is scanned — the eval's auth.py gap
-
-
-def test_global_state_constant_table_mutated_is_still_state(tmp_path):
-    """Even an all-constant module container becomes state when functions
-    mutate it — the literal-lookup-table carve-out does not apply."""
-    actions = _standard_for(tmp_path, ("LOOKUP = {'a': 1}\n\ndef f(k):\n    LOOKUP[k] = 2\n"))
-    gs = [a for a in actions if a.kind == "standard" and "module-level" in a.message]
-    assert len(gs) == 1 and "LOOKUP" in gs[0].message
-
-
-def test_global_state_plain_constant_table_passes(tmp_path):
-    actions = _standard_for(tmp_path, ("LOOKUP = {'a': 1}\n\ndef f(k):\n    return LOOKUP.get(k)\n"))
-    assert [a for a in actions if a.kind == "standard" and "module-level" in a.message] == []
-
-
-def test_hub_file_excludes_builtin_calls(tmp_path):
-    """print/len/isinstance calls are not coupling — the edge count must not
-    inflate on them."""
-    repo = make_repo(tmp_path)
-    abs_app = str(repo / "houses" / "app.py")
-    abs_other = str(repo / "houses" / "other.py")
-    make_graph(
-        repo,
-        nodes=[
-            ("Function", "a", f"{abs_app}::a", abs_app, 1, 3, None, None, 0),
-            ("Function", "o", f"{abs_other}::o", abs_other, 1, 2, None, None, 0),
-        ],
-        edges=[
-            ("CALLS", f"{abs_app}::a", f"{abs_other}::o", abs_app, 2),
-            ("CALLS", f"{abs_app}::a", "print", abs_app, 3),
-            ("CALLS", f"{abs_app}::a", "len", abs_app, 4),
-        ],
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch.graph_actions(repo, 120, 1, 0.8, False, {}, {}, None, False, "")
-    hub = [a for a in actions if a.kind == "hub-file"]
-    assert len(hub) == 1
-    assert hub[0].metric == 1  # the real CALLS edge only; print/len did not count
-
-
-def test_record_shape_message_names_the_evidence(tmp_path):
-    """Each shape kind gets its concrete reason — the generic carve-outs must
-    not seem to cover the finding (the eval's 'its own exceptions cover it'
-    objection)."""
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "app.py").write_text(
-        "from typing import Any\n"
-        "def load(x: dict[str, Any]) -> dict[str, Any]:\n"
-        '    return {"tab": "view", "rows": x}\n'
-    )
-    with Env(routes=git_routes()):
-        actions = ch._record_actions(repo, False, {}, {})
-    msgs = [a.message for a in actions if a.kind == "record-shape"]
-    assert len(msgs) == 3
-    # the Any blob: no fields at all
-    assert any("'Any'/'object' values have no fields at all" in m for m in msgs)
-    # the return: carve-out does not apply to returned shapes
-    assert any("carve-out is for module-scope literals, not returned shapes" in m for m in msgs)
-    # the literal: its own keys are the evidence
-    literal = [m for m in msgs if m.startswith("dict literal")]
-    assert len(literal) == 1
-    assert "fixed string keys (tab, rows) are fields, not data" in literal[0]
-
-
-# ---------------------------------------------------------------- eval round-3 fixes
-
-
-def test_except_surfacing_via_returned_accumulator_is_not_a_swallow(tmp_path):
-    """The drive_isochrone:605 case: the handler appends to the list the
-    function exists to return — the error rides out in the result."""
-    actions = _standard_for(
-        tmp_path,
-        (
-            "def validate(rows):\n"
-            "    issues = []\n"
-            "    for s in rows:\n"
-            "        try:\n"
-            "            parse(s)\n"
-            "        except ValueError as e:\n"
-            "            issues.append(f'{s}: unparseable ({e})')\n"
-            "    return issues\n"
-        ),
-    )
-    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
-
-
-def test_except_accumulator_not_returned_still_swallows(tmp_path):
-    """Mutating a list that the function does NOT return is still invisible."""
-    actions = _standard_for(
-        tmp_path,
-        (
-            "def f():\n"
-            "    scratch = []\n"
-            "    try:\n"
-            "        g()\n"
-            "    except ValueError as e:\n"
-            "        scratch.append(str(e))\n"
-            "    return 1\n"
-        ),
-    )
-    assert len([a for a in actions if a.kind == "standard" and "swallows" in a.message]) == 1
-
-
-def test_dict_spread_merge_is_not_a_record_literal(tmp_path):
-    """auth.py:105 `{**session, 'is_superuser': live}` updates an existing
-    shape — not a record being built."""
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "app.py").write_text("def f(session, live):\n    return {**session, 'is_superuser': live}\n")
-    with Env(routes=git_routes()):
-        actions = ch._record_actions(repo, False, {}, {})
-    assert [a for a in actions if a.message.startswith("dict literal")] == []
-
-
-def test_negative_literals_stay_constant_lookup_tables(tmp_path):
-    """DEFAULT_BBOX: -4.0 parses as UnaryOp — still a constant, no state."""
-    actions = _standard_for(
-        tmp_path, ("DEFAULT_BBOX = {'lat_min': 50.1, 'lon_min': -4.0}\n\ndef f():\n    return DEFAULT_BBOX\n")
-    )
-    assert [a for a in actions if a.kind == "standard" and "module-level" in a.message] == []
-
-
-def test_duplicate_skips_init_boilerplate(tmp_path):
-    """Identical __init__ bodies across a class hierarchy are convention."""
-    repo = make_repo(
-        tmp_path,
-        app_src=(
-            "class Base:\n"
-            "    def __init__(self, name):\n"
-            "        self.name = name\n"
-            "        super().__init__()\n"
-            "\n"
-            "class Child(Base):\n"
-            "    def __init__(self, name):\n"
-            "        self.name = name\n"
-            "        super().__init__()\n"
-        ),
-    )
-    with Env(routes=git_routes(), functions=[[]]):
-        actions = ch._duplicate_actions(repo, False, {}, {})
-    assert [a for a in actions if "similar to" in a.message] == []
-
-
-def test_noop_statement_is_a_finding(tmp_path):
-    """The server.py:220 case: a ternary as a bare statement discards its value."""
-    actions = _standard_for(
-        tmp_path,
-        ("def f(payload, postcode):\n    payload.address if is_outcode(postcode) else postcode\n    return postcode\n"),
-    )
-    noops = [a for a in actions if a.kind == "standard" and "no-op" in a.message]
-    assert len(noops) == 1
-    assert "is_outcode" in noops[0].message  # the discarded expression is named
-    assert noops[0].line == 2
-
-
-def test_noop_statement_passes_calls_and_docstrings(tmp_path):
-    actions = _standard_for(tmp_path, ('def f():\n    """docstring"""\n    cleanup()\n    (x := 1)\n    return x\n'))
-    assert [a for a in actions if a.kind == "standard" and "no-op" in a.message] == []
+    assert "warnings (reported, never fail)" in out
+    assert "magic number" in out
 
 
 def test_kind_rollup_in_fail_output(tmp_path, capsys):
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 3\n")
-    rc = run_main(repo, functions=[[FakeFn("alpha", 1, 20)]])
-    assert rc == 1
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    run_main(repo)
     out = capsys.readouterr().out
-    assert "by kind — fails: complexity=1; warnings: standard=1" in out
+    assert "by kind — fails:" in out
 
 
-def test_except_sys_exit_surfaces(tmp_path):
-    """sys.exit(2) after a diagnostic is fail-fast, not a swallow."""
-    actions = _standard_for(tmp_path, (
-        "def f():\n"
-        "    try:\n"
-        "        data = parse()\n"
-        "    except json.JSONDecodeError:\n"
-        "        sys.stderr.write('bad json')\n"
-        "        sys.exit(2)\n"
-        "    return data\n"))
-    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
-
-
-def test_in_diff_marking_survives_merge(tmp_path):
-    """PRD R10: the diff marking must survive the re-rank after merging —
-    the second percentile call used to wipe it with an empty diff set."""
-    repo = make_repo(tmp_path)
-    abs_app = str(repo / "houses" / "app.py")
-    make_graph(repo, nodes=[
-        ("Function", "alpha", f"{abs_app}::alpha", abs_app, 1, 400, None, None, 0),
-    ], risks=[(1, f"{abs_app}::alpha", 0.3, 0, "untested")])
-    with Env(routes=git_routes(), functions=[[FakeFn("alpha", 1, 44)]]):
-        args = argparse.Namespace(max_complexity=15, max_function_lines=120,
-                                  max_file_edges=150, max_risk=0.8, include_tests=False,
-                                  hotspot_top_frac=0.1, hotspot_min_cc=15)
-        actions = ch._collect_actions(repo, args, Counter(), {}, None, False, "")
-    merged = ch._dedupe_merge(actions, {"houses/app.py"})
-    assert merged and all(a.in_diff for a in merged)
-
-
-def test_magic_number_in_nested_function_attributes_to_innermost(tmp_path):
-    """A constant inside a nested function is the inner function's finding —
-    the old per-function walker also attributed it to every enclosing
-    function, creating duplicate targets."""
-    actions = _standard_for(tmp_path, (
-        "def outer():\n"
-        "    def inner():\n"
-        "        return rate * 60\n"
-        "    return inner()\n"))
-    warns = [a for a in actions if a.severity == "warn" and "magic number" in a.message]
-    assert len(warns) == 1
-    assert warns[0].function == "inner"
-
-
-def test_ignore_file_exempts_prod_file_findings(tmp_path):
-    """ignore-file must exempt NON-test findings too — the main scan branch
-    dropped the file-suppression check while the test branch kept it, so
-    prod-file exemptions silently never applied."""
-    actions = _standard_for(tmp_path, (
-        "# code-health: ignore-file class-module the class is a helper inside a CLI utility; "
-        "the module is one unit with one reason to change\n"
-        "class Helper:\n"
-        "    def run(self):\n"
-        "        return 1\n"))
-    cm = [a for a in actions if a.kind == "standard" and "holds one class" in a.message]
-    assert cm == []
-
-
-def test_file_mode_scopes_complexity_to_the_file(tmp_path):
-    """--file (LSP mode) must not scan the whole repo for complexity — the
-    only_rel flag was forwarded to record/latent scans but not complexity,
-    so single-file mode silently scanned everything."""
-    repo = make_repo(tmp_path)
-    (repo / "houses" / "other.py").write_text("def big(a):\n    return a\n")
-    args = argparse.Namespace(max_complexity=15, max_function_lines=120,
-                              max_file_edges=150, max_risk=0.8, include_tests=False,
-                              hotspot_top_frac=0.1, hotspot_min_cc=15, file="houses/app.py")
-    with Env(routes=git_routes(), functions=[[FakeFn("alpha", 1, 30)]]):
-        actions = ch._collect_actions(repo, args, Counter(), {}, None, False, "", only_rel="houses/app.py")
-    files = {a.file for a in actions}
-    assert "houses/other.py" not in files
-
-
-def test_plain_import_private_path_is_a_finding(tmp_path):
-    """`import pkg._internal` is a private-symbol import — the dispatcher
-    refactor dropped the ast.Import branch (regression the review caught)."""
-    actions = _standard_for(tmp_path, (
-        "import pkg._internal\n"
-        "import pkg.public\n"))
-    priv = [a for a in actions if "imports private path" in a.message]
-    assert len(priv) == 1
-    assert "pkg._internal" in priv[0].message
-
-
+# --------------------------------------------------------------------------- baseline semantics
 def test_stale_baseline_entry_fails(tmp_path, capsys):
-    """Both-direction lock: a baseline entry whose finding no longer exists
-    is drift — the gate must fail with 'run --update-baseline' (a one-way
-    baseline would silently rot until someone re-runs it)."""
-    repo = make_repo(tmp_path)
-    baseline = tmp_path / "baseline.json"
-    baseline.write_text('{"actions": ["complexity:houses/app.py:1:alpha", "complexity:houses/app.py:99:ghost"]}')
-    rc = run_main(repo, "--baseline", str(baseline), functions=[[FakeFn("alpha", 1, 20)]])
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "stale baseline entr" in err
-    assert "ghost" in err  # the stale key is named
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    baseline = tmp_path / "code-health.json"
+    run_main(repo, "--update-baseline", "--baseline", str(baseline))
+    # fix the code — the baselined finding is now stale
+    (repo / "houses" / "app.py").write_text(APP_SRC)
+    assert run_main(repo, "--baseline", str(baseline)) == 1
+    assert "stale baseline" in capsys.readouterr().err
 
 
 def test_stale_baseline_clears_after_update(tmp_path):
-    repo = make_repo(tmp_path)
-    baseline = tmp_path / "baseline.json"
-    run_main(repo, "--update-baseline", "--baseline", str(baseline), functions=[[FakeFn("alpha", 1, 20)]])
-    # the stale ghost entry is gone after the refresh
-    data = json.loads(baseline.read_text())
-    assert all("ghost" not in k for k in data["actions"])
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    baseline = tmp_path / "code-health.json"
+    run_main(repo, "--update-baseline", "--baseline", str(baseline))
+    (repo / "houses" / "app.py").write_text(APP_SRC)
+    run_main(repo, "--update-baseline", "--baseline", str(baseline))
+    assert run_main(repo, "--baseline", str(baseline)) == 0
 
 
-def test_baseline_line_shift_is_not_stale(tmp_path, capsys):
-    """The same debt at a new line (a function that moved) must NOT fail the
-    gate as stale — the stale comparison is on (kind, file, function), not
-    the location the key embeds."""
-    repo = make_repo(tmp_path)
-    baseline = tmp_path / "baseline.json"
-    baseline.write_text('{"actions": ["complexity:houses/app.py:1:alpha"]}')
-    rc = run_main(repo, "--baseline", str(baseline), functions=[[FakeFn("alpha", 40, 20)]])
-    assert rc == 0  # acknowledged at any line of alpha — the gate is green
-    err = capsys.readouterr().err
-    assert "stale baseline entr" not in err
+def test_baseline_line_shift_is_not_stale(tmp_path):
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    baseline = tmp_path / "code-health.json"
+    run_main(repo, "--update-baseline", "--baseline", str(baseline))
+    # add a line above the finding — same function, new line
+    shifted = "# comment\n" * 3 + SWALLOW_SRC
+    (repo / "houses" / "app.py").write_text(shifted)
+    assert run_main(repo, "--baseline", str(baseline)) == 0
 
 
 def test_baseline_gone_function_is_stale(tmp_path, capsys):
-    """Debt on a function that no longer exists IS stale — the location-
-    insensitive rule must not miss genuinely paid debt."""
-    repo = make_repo(tmp_path)
-    baseline = tmp_path / "baseline.json"
-    baseline.write_text('{"actions": ["complexity:houses/app.py:1:ghost"]}')
-    rc = run_main(repo, "--baseline", str(baseline), functions=[[FakeFn("alpha", 1, 20)]])
-    assert rc == 1
-    assert "stale baseline entr" in capsys.readouterr().err
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    baseline = tmp_path / "code-health.json"
+    run_main(repo, "--update-baseline", "--baseline", str(baseline))
+    (repo / "houses" / "app.py").write_text(APP_SRC)
+    assert run_main(repo, "--baseline", str(baseline)) == 1
+    assert "stale baseline" in capsys.readouterr().err

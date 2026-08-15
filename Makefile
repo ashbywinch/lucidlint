@@ -67,15 +67,14 @@ install-hooks:
 # `make test` already includes these).
 check: deps lint-check typecheck
 
-# The Rust scan core must be freshly built before pytest — the parity
-# gate (tests/test_scanner_parity.py) diffs it against the Python
-# implementation, and a stale binary would test nothing.
+# The Rust scan core must be freshly built before pytest — the orchestrator
+# tests drive the real binary, and a stale binary would test nothing.
 test: deps lint-check typecheck scanner-check
 	@$(PYTEST) tests/ -q --tb=short
 
 scanner-check:
 	@cd scanner && cargo build --release 2>&1 | tail -1
-	@echo "${GREEN}✓ scanner built (parity gate active)${NC}"
+	@echo "${GREEN}✓ scanner built${NC}"
 
 coverage: deps
 	@$(UV) run coverage run -m pytest tests/ -q --tb=short
@@ -104,11 +103,10 @@ format: setup
 	@$(RUFF) check --fix *.py tests/ scripts/
 	@$(RUFF) format *.py tests/ scripts/
 
-# The repo's defining gate: the tool must pass on itself, and the record
-# check must stay clean on the tools' own signatures.
+# The repo's defining gate: the tool must pass on itself — every finding
+# family (record-shape included) computes in the Rust core.
 self-check:
 	@$(PYTHON) code_health.py --repo .
-	@$(PYTHON) check_records.py code_health.py check_records.py
 	@echo "ok — the tool passes its own gate"
 
 # Run the health tool on another repo (default: the parent directory).

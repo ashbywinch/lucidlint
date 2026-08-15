@@ -801,6 +801,26 @@ fn scan_file(path: &Path) -> FileScan {
     scan
 }
 
+/// The finding model's final action kind — the contract carries it so the
+/// Python orchestrator consumes findings verbatim (no re-mapping, no drift).
+/// Internal kinds (suppression signals) map once, here.
+pub fn final_kind(kind: &str) -> &'static str {
+    match kind {
+        "closures" | "partition" | "strewing" => "latent-class",
+        "vague-name" => "vague-name",
+        "record-shape" => "record-shape",
+        "docs-link" | "docs-undiscoverable" => "docs",
+        "large-function" => "large-function",
+        "hub-file" => "hub-file",
+        "high-risk" => "high-risk",
+        "hotspot" => "hotspot",
+        "folder-mix" => "folder-mix",
+        "layer-mix" => "layer-mix",
+        "complexity" => "complexity",
+        _ => "standard", // magic-number, except, imports, over-abstraction, cycles, duplicate, unused, ...
+    }
+}
+
 /// Longest common prefix of the passed paths — the repo root for a
 /// full-repo run; the file itself in per-file mode.
 ///
@@ -967,11 +987,45 @@ fn main() {
             }
         }
     }
+    // complexity findings from the scan's own CC array (the gate threshold)
+    let mut contract_complexity: Vec<serde_json::Value> = Vec::new();
+    for e in &all_cc {
+        if e.cc >= 15 {
+            contract_complexity.push(serde_json::json!({
+                "file": e.file,
+                "line": e.line,
+                "function": e.function,
+                "kind": "complexity",
+                "severity": "fail",
+                "message": format!(
+                    "cyclomatic complexity {} (>= 15) — extract each decision branch into a named method that captures one rule",
+                    e.cc
+                ),
+            }));
+        }
+    }
+    // the contract: schema_version + final action kinds
+    let contract_findings: Vec<serde_json::Value> = all_findings
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "file": f.file,
+                "line": f.line,
+                "function": f.function,
+                "kind": final_kind(&f.kind),
+                "signal": f.kind,
+                "severity": f.severity,
+                "message": f.message,
+            })
+        })
+        .collect();
     let out = serde_json::json!({
+        "schema_version": 2,
         "files": paths.len(),
         "parse_errors": total_errors,
-        "findings": all_findings,
+        "findings": contract_findings,
         "cc": all_cc,
+        "complexity": contract_complexity,
     });
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
 }

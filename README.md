@@ -18,10 +18,11 @@ tag and runs it as its review-attribution gate.
 - `code_health.py` — deterministic code-health gate. Emits a list of actions to address
   (high cyclomatic complexity, oversized functions, dependency hubs, git
   hotspots, high graph-risk nodes) and exits 1 when any exist, so it works
-  as a failing test gate. Reads the code-review-graph SQLite at
-  `<repo>/.code-review-graph/graph.db` (build with `code-review-graph build
-  --repo <repo>`), radon for complexity (run via `uv run --with radon`),
-  and `git log` for change frequency. Metrics are proxies — the requirement
+  as a failing test gate. Every finding family computes in the Rust scan
+  core (scanner/, built with `make scanner-check`); the graph families read
+  a versioned export contract generated through the code-review-graph tool's
+  own public API (never its SQLite schema or location), and `git log`
+  supplies change frequency. Metrics are proxies — the requirement
   is code that is obviously correct and cheap to change (readability,
   maintainability, anti-fragility), so each action's message gives a fix
   guideline in those terms: separation of concerns, domain language,
@@ -31,8 +32,8 @@ tag and runs it as its review-attribution gate.
   actions name the exact volatile functions with their own churn (`git log -L`).
   Coverage verdicts come from the repo's own data (coverage.xml, else
   .coverage line_bits, else the graph risk index) and untested functions get
-  the contract to pin (`name(params) -> ret`). A `record-shape` kind (from
-  `check_records.py`, the record-vs-bare-dict gate) flags bare dict/tuple
+  the contract to pin (`name(params) -> ret`). A `record-shape` kind flags
+  bare dict/tuple
   collections as records — the fix is a small domain class; a genuine map is
   named by its meaning (CoverageLines, never SomethingDict), and data
   crossing a boundary is ingested into a domain class at that boundary. A
@@ -105,12 +106,11 @@ what CI runs.
 
 ## Tests
 
-`make test` runs the pytest suite (`tests/test_code_health.py`) plus a syntax
-check of every tool. The suite exercises `code_health.py` with fakes only
-(plus the fixture-based `check_records` unit tests) —
-radon is injected via `code_health.radon_visitor`, subprocess via a fake
-module with canned argv routes, and the graph/coverage databases are real
-SQLite with fake data — so it runs without radon or a real repo. It covers
-the verdict precedence, concern clustering, all five action builders, the
-priority/merge/baseline logic, and the gate's exit codes. `code_health.py`
+`make test` runs the pytest suite (`tests/test_code_health.py` plus the
+LSP session tests) and the Rust unit suite (`cargo test`, via
+scanner-check). The orchestrator tests drive the real binary through a
+passthrough subprocess route with faked git, so they run without a real
+repo; the finding logic itself is owned by the Rust suite. They cover the
+priority/merge/baseline logic, the gate's exit codes, and rendering.
+`code_health.py`
 also runs on itself: `make code-health REPO=.` reports its own hotspots.
