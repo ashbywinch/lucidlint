@@ -1434,3 +1434,133 @@ def test_no_builtin_shadow_in_clean_fn(tmp_path):
         "    total = price\n"
         "    return total\n"))
     assert [a for a in actions if "shadows a builtin" in a.message] == []
+
+
+# ---------------------------------------------------------------- warn tier (reported, never fails)
+
+def test_magic_number_is_a_warn_never_fail(tmp_path, capsys):
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 3\n")
+    rc = run_main(repo)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "GATE: PASS" in out
+    assert "warnings reported, never fail" in out
+    assert "magic number 3" in out
+    assert "[warn]" in out
+
+
+def test_magic_number_skips_lookup_table_and_small_literals(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "def f(a):\n"
+        "    table = {10: 'x', 20: 'y'}\n"
+        "    if a > 1:\n"
+        "        return table[a]\n"
+        "    return 0\n"))
+    assert [a for a in actions if a.severity == "warn"] == []
+
+
+def test_magic_number_operand_and_index_are_found(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "def f(a):\n"
+        "    return a * 60 + cols[7]\n"))
+    warns = [a for a in actions if a.severity == "warn"]
+    assert len(warns) == 2  # 60 as operand, 7 as index
+    assert all("magic number" in a.message for a in warns)
+
+
+def test_broad_except_is_a_warn(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except Exception as e:\n"
+        "        log(e)\n"
+        "        return fallback\n"))
+    broads = [a for a in actions if "broad `except Exception`" in a.message]
+    assert len(broads) == 1
+    assert broads[0].severity == "warn"
+
+
+def test_empty_exception_catch_still_fails(tmp_path, capsys):
+    repo = make_repo(tmp_path, app_src=(
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except Exception:\n"
+        "        pass\n"))
+    rc = run_main(repo)
+    out = capsys.readouterr().out
+    assert rc == 1 and "GATE: FAIL" in out
+    assert "broad `except" not in out  # the swallowing signal owns the finding
+
+
+def test_duplicate_functions_warn(tmp_path):
+    repo = make_repo(tmp_path, app_src=(
+        "def alpha(a):\n"
+        "    total = 0\n"
+        "    for item in a:\n"
+        "        total += item\n"
+        "    return total\n"
+        "\n"
+        "def beta(b):\n"
+        "    total = 0\n"
+        "    for item in b:\n"
+        "        total += item\n"
+        "    return total\n"))
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._duplicate_actions(repo, False, {}, {})
+    dups = [a for a in actions if "similar to" in a.message]
+    assert len(dups) == 1
+    assert dups[0].severity == "warn"
+    assert "beta" in dups[0].message and "alpha" in dups[0].message
+
+
+def test_different_shapes_not_duplicates(tmp_path):
+    repo = make_repo(tmp_path, app_src=(
+        "def alpha(a):\n"
+        "    total = 0\n"
+        "    for item in a:\n"
+        "        total += item\n"
+        "    return total\n"
+        "\n"
+        "def beta(b):\n"
+        "    return sorted(b)[::-1]\n"))
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._duplicate_actions(repo, False, {}, {})
+    assert [a for a in actions if "similar to" in a.message] == []
+
+
+def test_unused_function_warns(tmp_path):
+    repo = make_repo(tmp_path, app_src=(
+        "def used(a):\n"
+        "    return a\n"
+        "\n"
+        "def dead():\n"
+        "    return 1\n"
+        "\n"
+        "x = used(1)\n"))
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._unused_actions(repo, False, {}, {})
+    deads = [a for a in actions if "never referenced" in a.message]
+    assert len(deads) == 1 and "dead" in deads[0].function
+    assert deads[0].severity == "warn"
+
+
+def test_unused_skips_cli_dispatch_and_main(tmp_path):
+    repo = make_repo(tmp_path, app_src=(
+        "def main():\n"
+        "    return run_cli('cmd_go')\n"
+        "\n"
+        "def cmd_go():\n"
+        "    return 2\n"))
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._unused_actions(repo, False, {}, {})
+    assert [a for a in actions if "never referenced" in a.message] == []
+
+
+def test_update_baseline_excludes_warns(tmp_path):
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 3\n")
+    baseline = tmp_path / "baseline.json"
+    rc = run_main(repo, "--update-baseline", "--baseline", str(baseline))
+    assert rc == 0
+    assert json.loads(baseline.read_text())["actions"] == []

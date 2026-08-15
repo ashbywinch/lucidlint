@@ -165,7 +165,12 @@ class Callers:
 
 @dataclass
 class LatentFinding:
-    """One unextracted-class signal: closures or a field-disjoint partition."""
+    """One structural signal before it becomes an Action.
+
+    severity: 'fail' (fails the gate) or 'warn' (reported, never fails) —
+    warn carries the noisy-but-useful signals: magic numbers, duplication,
+    unused functions, broad excepts.
+    """
 
     signal: str
     function: str
@@ -173,6 +178,7 @@ class LatentFinding:
     metric: int
     detail: str
     inner: list[str]
+    severity: str = "fail"
 
 
 @dataclass
@@ -199,6 +205,25 @@ class ClassRef:
 
     file: str
     name: str
+
+
+@dataclass(frozen=True)
+class FunctionRecord:
+    """A function's identity and structural skeleton, for the duplication search."""
+
+    rel: str
+    name: str
+    line: int
+    skeleton: list[str]
+
+
+@dataclass(frozen=True)
+class ReferenceScan:
+    """One repo pass for the unused-function check: definitions, referenced names, strings."""
+
+    definitions: dict[str, dict[str, int]]
+    referenced: set[str]
+    strings: list[str]
 
 
 @dataclass(frozen=True)
@@ -1125,6 +1150,12 @@ def _merge_targets(unique: list[Action]) -> list[Action]:
             if a.note and a.note not in prev.note:
                 prev.note = (prev.note + " " + a.note).strip()
             prev.line = min(prev.line, a.line)
+            if a.severity == "fail":
+                prev.severity = "fail"  # a warn merged into a fail target must not clear the gate
+            if a.message != prev.message:
+                extra = f"{a.severity.upper()}: {a.message}"
+                if extra not in prev.note:
+                    prev.note = (prev.note + " " + extra).strip()
     return list(merged.values())
 
 
@@ -1178,7 +1209,7 @@ def _render_json(repo: Path, args, unique: list[Action], branch: str, commit: st
     }, indent=2))
 
 
-def _render_summary(repo: Path, args, fails: list[Action], acks: list[Action],
+def _render_summary(repo: Path, args, fails: list[Action], warns: list[Action], acks: list[Action],
                     diff: set[str], coverage_source: str, graph_preferred: bool) -> None:
     """Gate verdict, scope, and formula lines."""
     top = fails[0]
@@ -1189,7 +1220,7 @@ def _render_summary(repo: Path, args, fails: list[Action], acks: list[Action],
     targets = len({(a.file, a.function) for a in fails})
     verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
     print(f"{verdict} — {len(fails)} action(s) across {targets} distinct targets "
-          f"(+{len(acks)} acknowledged in baseline){mine_txt}, "
+          f"(+{len(acks)} acknowledged in baseline, {len(warns)} warnings never-fail){mine_txt}, "
           f"top P{top.priority} {top.file}:{top.line} ({top.function or top.kind})")
     print("priority ranks change-cost (churn x fan-in), not brokenness — which item is worth fixing first is a judgement call; "
           "the hotspot entries are the usual starting set")
@@ -1213,7 +1244,8 @@ def _render_file_group(file: str, items: list[Action]) -> None:
         loc = f":{a.line}" + (f" ({a.function})" if a.function else "")
         churn = f" [churn {a.churn}x]" if a.churn else ""
         kinds = ",".join(a.kinds) if a.kinds else a.kind
-        print(f"  [P{a.priority:02d}][{kinds}] {loc}{churn} — {a.message}")
+        tag = f"P{a.priority:02d}" if a.severity != "warn" else "warn"
+        print(f"  [{tag}][{kinds}] {loc}{churn} — {a.message}")
         if a.note:
             print(f"      -> {a.note}")
 
@@ -1234,15 +1266,18 @@ def _render_actions(repo: Path, args, fails: list[Action], acks: list[Action]) -
           "gate only fails on NEW actions; this report is a snapshot, not wired into CI")
 
 
-def _render_text(repo: Path, args, unique: list[Action], fails: list[Action], acks: list[Action],
-                 diff: set[str], coverage_source: str, graph_preferred: bool) -> None:
+def _render_text(repo: Path, args, unique: list[Action], fails: list[Action], warns: list[Action],
+                 acks: list[Action], diff: set[str], coverage_source: str, graph_preferred: bool) -> None:
     if not unique:
         print("GATE: PASS — clean, no actions")
         return
     if not fails:
-        print(f"GATE: PASS — {len(acks)} action(s), all acknowledged in baseline")
+        warn_note = f" ({len(warns)} warnings reported, never fail)" if warns else ""
+        print(f"GATE: PASS — {len(acks)} action(s) acknowledged in baseline{warn_note}")
+        if warns:
+            _render_actions(repo, args, warns, [])
         return
-    _render_summary(repo, args, fails, acks, diff, coverage_source, graph_preferred)
+    _render_summary(repo, args, fails, warns, acks, diff, coverage_source, graph_preferred)
     _render_actions(repo, args, fails, acks)
 
 
@@ -1465,6 +1500,8 @@ def _standard_findings(tree: ast.Module, rel: str, source: str) -> list[LatentFi
     findings += _tuple_alias_findings(tree, rel)
     findings += _unreachable_findings(tree, rel)
     findings += _shadowing_findings(tree, rel)
+    findings += _magic_number_findings(tree, rel)
+    findings += _broad_except_findings(tree, rel)
     return findings
 
 
@@ -1645,6 +1682,57 @@ def _statement_lists(fn) -> StatementBlocks:
 
     walk(fn)
     return lists
+
+
+_MAGIC_SKIP = (0, 1, 2, -1)
+
+
+def _magic_number_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """Raw integers and floats as operands/indices are named constants.
+
+    Noisy by design — warn tier. Lookup tables (all-constant containers) are
+    not descended into here: only literals whose parent is an operation.
+    """
+    findings: list[LatentFinding] = []
+    for fn in [n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        parents = {id(child): node for node in ast.walk(fn) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Constant) or isinstance(node.value, bool):
+                continue
+            v = node.value
+            if not isinstance(v, (int, float)) or v in _MAGIC_SKIP:
+                continue
+            parent = parents.get(id(node))
+            if isinstance(parent, (ast.BinOp, ast.Compare, ast.UnaryOp, ast.Subscript, ast.Call)):
+                findings.append(LatentFinding(
+                    signal="magic-number", function=fn.name, line=node.lineno, metric=1,
+                    detail=f"magic number {v} at line {node.lineno} in '{fn.name}' — name it as a "
+                           f"constant (the name is the documentation); raw integers as operands "
+                           f"and indices are a finding",
+                    inner=[], severity="warn"))
+    return findings
+
+
+def _broad_except_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """except Exception/BaseException catches too broadly — name the specific one.
+
+    Empty/bare handlers are already fail-tier; this warn covers handlers with
+    a body that would otherwise pass.
+    """
+    findings: list[LatentFinding] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+            continue
+        for h in node.handlers:
+            base = _annotation_base_name(h.type) if h.type else ""
+            if base in ("Exception", "BaseException") and not _handler_swallows(h):
+                findings.append(LatentFinding(
+                    signal="broad-except", function="", line=h.lineno, metric=1,
+                    detail=f"broad `except {ast.unparse(h.type)}` at line {h.lineno} — catch the "
+                           f"specific exception; a broad catch hides which failures are expected",
+                    inner=[], severity="warn"))
+    return findings
 
 
 def _shadowing_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
@@ -2041,7 +2129,7 @@ def _latent_action(repo: Path, rel: str, finding: LatentFinding,
         kind = "standard"  # including suppression and over-abstraction signals
     guidance_key = "over-abstraction" if finding.signal == "over-abstraction" else kind
     return Action(
-        kind=kind, severity="fail", file=rel, line=finding.line, function=finding.function,
+        kind=kind, severity=finding.severity, file=rel, line=finding.line, function=finding.function,
         message=f"{finding.detail} — {GUIDANCE[guidance_key]}",
         metric=finding.metric, churn=churn,
         last_modified=last_modified.get(rel, ""), tested="",
@@ -2178,6 +2266,148 @@ def _md_link_targets(text: str) -> list[str]:
             if target and not target.startswith(MD_SKIP_PREFIXES):
                 targets.append(target)
     return targets
+
+
+def _duplicate_actions(repo: Path, include_tests: bool,
+                        file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+    """Copy-paste: functions with near-identical structural skeletons.
+
+    The skeleton collapses names, constants, and arguments to placeholders,
+    so copy-paste with renames or tweaked values keeps the same shape.
+    Dice similarity on consecutive skeleton types; warn tier, because two
+    legitimately same-shaped functions (e.g. two endpoints) can match.
+    """
+    fns = _collect_functions(repo)
+    actions: list[Action] = []
+    for i, fr in enumerate(fns):
+        dup = _first_duplicate(fns, i, fr.skeleton)
+        if dup:
+            actions.append(_latent_action(repo, dup.rel, LatentFinding(
+                signal="duplicate", function=dup.name, line=dup.line, metric=1,
+                detail=f"function '{dup.name}' ({dup.rel}:{dup.line}) is {dup.sim:.0%} similar to "
+                       f"'{fr.name}' ({fr.rel}:{fr.line}) — copy-paste; extract the shared logic "
+                       f"into one function",
+                inner=[], severity="warn"), file_churn, last_modified))
+    return actions
+
+
+def _collect_functions(repo: Path) -> list[FunctionRecord]:
+    """Every function with a 12+ token skeleton, for the duplication search."""
+    fns: list[FunctionRecord] = []
+    for py in sorted(repo.rglob("*.py")):
+        rel = py.relative_to(repo).as_posix()
+        if any(part in EXCLUDED_DIRS for part in py.parts) or "/test" in f"/{rel}" or rel.startswith("test"):
+            continue
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
+        except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped, not a scan failure
+            continue
+        for fn in [n for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            toks = _fn_skeleton(fn)
+            if len(toks) >= 12:
+                fns.append(FunctionRecord(rel, fn.name, fn.lineno, toks))
+    return fns
+
+
+@dataclass(frozen=True)
+class DuplicateMatch:
+    """A later function at least 90% structurally similar to the one before it."""
+
+    rel: str
+    name: str
+    line: int
+    sim: float
+
+
+def _first_duplicate(fns: list[FunctionRecord], i: int, toks: list[str]) -> DuplicateMatch | None:
+    """The first later function at least 90% structurally similar to fns[i]."""
+    for j in range(i + 1, len(fns)):
+        other = fns[j]
+        if abs(len(toks) - len(other.skeleton)) > max(2, len(toks) // 5):
+            continue
+        sim = _dice_similarity(toks, other.skeleton)
+        if sim >= 0.9:
+            return DuplicateMatch(other.rel, other.name, other.line, sim)
+    return None
+
+
+def _fn_skeleton(fn) -> list[str]:
+    """Structural fingerprint: node types, with names/constants/args collapsed."""
+    toks: list[str] = []
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name):
+            toks.append("N")
+        elif isinstance(node, ast.Constant):
+            toks.append("C")
+        elif isinstance(node, ast.arg):
+            toks.append("A")
+        else:
+            toks.append(type(node).__name__)
+    return toks
+
+
+def _dice_similarity(a: list[str], b: list[str]) -> float:
+    sa = set(zip(a, a[1:]))
+    sb = set(zip(b, b[1:]))
+    if not sa and not sb:
+        return 0.0
+    return 2 * len(sa & sb) / (len(sa) + len(sb))
+
+
+def _unused_actions(repo: Path, include_tests: bool,
+                    file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+    """Module-level functions defined but never referenced — dead code.
+
+    Referenced = any Name, any import alias, or a mention in a string
+    literal (CLI commands dispatched by name). 'main' entry points pass.
+    Warn tier: attribute-style calls (mod.fn()) and public API used by
+    other repos can false-positive.
+    """
+    scan = _collect_references(repo)
+    actions: list[Action] = []
+    for rel, fns in scan.definitions.items():
+        for name, line in fns.items():
+            if _referenced_anywhere(name, scan.referenced, scan.strings):
+                continue
+            actions.append(_latent_action(repo, rel, LatentFinding(
+                signal="unused", function=name, line=line, metric=1,
+                detail=f"function '{name}' ({rel}:{line}) is defined but never referenced — dead "
+                       f"code is deleted, not kept (unless it is a CLI command or public API "
+                       f"entry point)",
+                inner=[], severity="warn"), file_churn, last_modified))
+    return actions
+
+
+def _collect_references(repo: Path) -> ReferenceScan:
+    """Module-level function definitions, every referenced name, and string literals."""
+    defined: dict[str, dict[str, int]] = defaultdict(dict)
+    referenced: set[str] = set()
+    strings: list[str] = []
+    for py in sorted(repo.rglob("*.py")):
+        rel = py.relative_to(repo).as_posix()
+        if any(part in EXCLUDED_DIRS for part in py.parts) or "/test" in f"/{rel}" or rel.startswith("test"):
+            continue
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
+        except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped, not a scan failure
+            continue
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defined[rel][node.name] = node.lineno
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                referenced.add(node.id)
+            elif isinstance(node, ast.alias):
+                referenced.add(node.name)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                strings.append(node.value)
+    return ReferenceScan(defined, referenced, strings)
+
+
+def _referenced_anywhere(name: str, referenced: set[str], strings: list[str]) -> bool:
+    """Referenced by name, imported, dispatched via a string (CLI), or an entry point."""
+    return name == "main" or name in referenced or any(name in s for s in strings)
 
 
 def _cycle_actions(repo: Path, file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
@@ -2511,6 +2741,8 @@ def _collect_actions(repo: Path, args, file_churn, last_modified, covered, graph
     actions += _folder_mix_actions(repo, file_churn, last_modified)
     actions += _layer_mix_actions(repo, file_churn, last_modified)
     actions += _cycle_actions(repo, file_churn, last_modified)
+    actions += _duplicate_actions(repo, args.include_tests, file_churn, last_modified)
+    actions += _unused_actions(repo, args.include_tests, file_churn, last_modified)
     return actions
 
 
@@ -2526,7 +2758,7 @@ def _write_baseline(args, unique: list[Action]) -> int:
     if not args.baseline:
         log("--update-baseline requires --baseline PATH")
         return 2
-    keys = [action_key(a) for a in unique]
+    keys = [action_key(a) for a in unique if a.severity != "warn"]
     args.baseline.write_text(json.dumps({"actions": keys}, indent=2))
     print(f"code-health: baseline written — {len(keys)} action(s) locked to {args.baseline}")
     return 0
@@ -2558,14 +2790,15 @@ def main() -> int:
     if args.update_baseline:
         return _write_baseline(args, unique)
     _apply_baseline(unique, _load_baseline(args.baseline))
-    fails = [a for a in unique if a.severity != "ack"]
+    fails = [a for a in unique if a.severity == "fail"]
+    warns = [a for a in unique if a.severity == "warn"]
     acks = [a for a in unique if a.severity == "ack"]
     head = _git_head(repo)
 
     if args.json:
         _render_json(repo, args, unique, head.branch, head.commit, cc.label)
     else:
-        _render_text(repo, args, unique, fails, acks, diff, cc.label, cc.graph_preferred)
+        _render_text(repo, args, unique, fails, warns, acks, diff, cc.label, cc.graph_preferred)
 
     if fails and not args.warn:
         log(f"{len(fails)} action(s) found — failing (use --warn to run informational)")

@@ -15,12 +15,22 @@ How the product in `docs/PRD.md` is built. Requirements by name: R1–R20
 
 ## Object model (the naming authority — classes are these nouns)
 
-- **`Action`** — one finding: kind, severity (fail/ack), file, line, function,
-  message, metric, churn, last_modified, tested, note, raw, priority, in_diff,
-  kinds (merged), callers. The wire format is produced at the render boundary
-  (`asdict`), never claimed as a type.
+- **`Action`** — one finding: kind, severity (fail/warn/ack), file, line,
+  function, message, metric, churn, last_modified, tested, note, raw,
+  priority, in_diff, kinds (merged), callers. The wire format is produced at
+  the render boundary (`asdict`), never claimed as a type. Severity: "fail"
+  (blocks the gate), "warn" (reported, never fails — carries the noisy
+  signals), "ack" (locked in the baseline).
 - **`LatentFinding`** — one unextracted-class/stdandard signal (signal,
-  function, line, metric, detail) before it becomes an Action.
+  function, line, metric, detail, severity) before it becomes an Action;
+  severity defaults to "fail", warn checks set "warn".
+- **`FunctionRecord`** — (rel, name, line, skeleton) for the duplication
+  search; the skeleton collapses names/constants/args to placeholders so
+  copy-paste with renames keeps its shape.
+- **`DuplicateMatch`** — a later function ≥ 90% structurally similar
+  (Dice similarity on skeleton bigrams, length-bucketed pairs).
+- **`ReferenceScan`** — one unused-function pass: module-level definitions,
+  every referenced name, and all string literals (CLI dispatch).
 - **`ClassRef`** — a class identified by its defining file and name (frozen;
   the tuple-alias lesson: two fields with distinct meanings, never
   `ClassKey = tuple[str, str]`).
@@ -66,15 +76,28 @@ git churn, radon — no model judgment; the review layer (PR-Agent / review
 loop) is separate and only handles what code cannot check (the standard's
 "deterministic checks beat model judgment" principle).
 
+Severity (R24): per-file findings carry fail or warn; `_dedupe_merge`
+merges per target and a warn merged into a fail target stays fail; the gate
+counts only fail actions, warns render with a `[warn]` tag and a
+"never-fail" verdict note, and `--update-baseline` writes only non-warn
+keys — nothing noisy needs acknowledging to go green.
+
 Factory functions: `complexity_actions`, `graph_actions`
 (`_large_function_actions`, `_hub_file_actions`, `_high_risk_actions`),
 `hotspot_actions`, `_record_actions`, `_latent_class_actions`
 (`_scan_file` + `_closure_findings`/`_partition_findings`/
 `_vague_name_findings`/`_standard_findings`), `_abstraction_actions`
 (`_collect_classes`/`_concrete_counts`), `_docs_actions`
-(`_docs_reachability_actions`). `_dedupe_merge` ranks by churn × complexity
-× fan-in (R8); `_suppressions` reads `# code-health: ignore <signal> <why>`
-exemptions via tokenize COMMENT tokens (R17, R18).
+(`_docs_reachability_actions`), `_duplicate_actions`
+(`_collect_functions`/`_first_duplicate`/`_fn_skeleton`/`_dice_similarity`),
+`_unused_actions` (`_collect_references`/`_referenced_anywhere`). The
+standard family's warn checks are `_magic_number_findings` (operand/index/
+call-arg literals outside (0, 1, 2, -1); all-literal containers pass) and
+`_broad_except_findings` (non-empty `except Exception`/`BaseException`
+handlers — empty/bare ones are already fail-tier). `_dedupe_merge` ranks by
+churn × complexity × fan-in (R8); `_suppressions` reads
+`# code-health: ignore <signal> <why>` exemptions via tokenize COMMENT
+tokens (R17, R18).
 
 ## Technology choices
 

@@ -77,3 +77,26 @@ never depend on a later phase.
   exemptions (sqlite3 C-level I/O for the tool's own graph fixtures;
   test_check_records migrated to pyfakefs instead of exempting); 135
   tests green; CI runs make test + make self-check.
+## Phase 7 — Warn tier: noisy-but-useful signals (delivered 2026-08-14)
+
+- **Decision:** a "warn" severity — reported, never fails — unlocks the
+  checks whose false-positive rate would block a hard gate.
+- **Outputs:** `magic-number` (raw int/float operands, indices, and call
+  args outside (0, 1, 2, -1); all-literal containers pass), `duplicate`
+  (functions ≥ 90% structurally similar by Dice on skeleton bigrams —
+  names/constants/args collapse, so copy-paste with renames matches;
+  length-bucketed pairs; one finding per function), `unused` (module-level
+  functions never referenced by name, import alias, or string literal —
+  CLI dispatch and `main` pass), and `broad-except` (non-empty
+  `except Exception`/`BaseException` — empty/bare stays fail-tier).
+- **Severity plumbing:** `LatentFinding.severity` defaults fail; gate
+  counts fails only; warns render `[warn]`-tagged with a "never-fail"
+  verdict note; `--update-baseline` excludes warns (nothing noisy needs
+  acknowledging); a warn merged into a fail target stays fail, and merged
+  distinct messages are preserved as notes.
+- **Self-check:** the tool's own run is GATE: PASS (17 warnings reported);
+  max CC 14 (the two new repo-wide builders decomposed under the tool's own
+  CC gate); 151 tests green.
+- **Validation:** houses gate unchanged — 541 fail actions, +235 warnings
+  never-fail; the tool's own near-duplicate scan finds the genuine
+  copy-paste clusters in houses.

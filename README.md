@@ -55,7 +55,14 @@ tag and runs it as its review-attribution gate.
   statements after unconditional returns, and builtin-shadowing params and
   locals are standard-family findings. Tests touching the real filesystem
   without pyfakefs are
-  findings (fakefs), except subprocess/symlink/sqlite3 C-level I/O.
+  findings (fakefs), except subprocess/symlink/sqlite3 C-level I/O. A
+  **warn tier** reports noisy-but-useful signals that never fail the gate
+  (tagged `[warn]`, counted as "N warnings never-fail", excluded from the
+  baseline): magic numbers (raw int/float operands, indices, and call
+  args outside (0, 1, 2, -1) — lookup tables pass), copy-paste
+  near-duplicates (functions ≥ 90% structurally similar), unused
+  module-level functions (never referenced, imported, or dispatched by
+  string), and broad `except Exception`/`BaseException` handlers.
   Lint-style exemptions: `# code-health: ignore <signal>
   <why>` on the line (or above) — a suppression without a why is itself a
   finding. Actions are grouped by file and

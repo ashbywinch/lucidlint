@@ -207,6 +207,18 @@ rather than a number.
   code — deleted, not kept. Parameters and locals named after builtins
   (list, dict, id, input, …) are renamed: a shadowed builtin makes the
   code read wrong.
+- **R24 — A warn tier exists for noisy-but-useful signals.** Magic
+  numbers (raw int/float operands, indices, and call arguments outside a
+  tiny allowlist — lookup tables pass), copy-paste near-duplicates
+  (functions ≥ 90% structurally similar), unused module-level functions,
+  and broad `except Exception`/`BaseException` handlers are reported but
+  never fail the gate. Their severity is "warn": the signal is real but
+  the false-positive rate is too high to block on (same-shaped endpoints
+  match as duplicates; `mod.fn()` attribute calls and public API used by
+  other repos look unused). Warns are excluded from `--update-baseline`
+  — nothing noisy needs acknowledging to go green. Merging a warn into a
+  fail target keeps the fail severity, and merged messages are preserved
+  as notes rather than dropped.
 
 ## Non-goals
 
