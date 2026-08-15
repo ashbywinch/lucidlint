@@ -3,6 +3,8 @@
 # pyproject.toml's [tool.pyrefly]).
 preset = "default"
 
-# tests/fixtures/ is intentionally non-compliant test input (standalone
-# snippets without imports) — type-checking them is noise.
-exclude = ["tests/fixtures"]
+# No file-exclude key exists in pyrefly's config schema — the
+# tests/fixtures/ exclusion lives in scripts/pyrefly-lock.py (the gate we
+# own), which drops their diagnostics; the fixtures are intentionally
+# non-compliant test input (standalone snippets, syntactically broken
+# ones included).

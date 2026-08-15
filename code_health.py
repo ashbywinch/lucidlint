@@ -595,12 +595,16 @@ def file_history(repo: Path) -> FileHistory:
     """
     churn: Counter[str] = Counter()
     last: dict[str, str] = {}
-    proc = subprocess.run(
-        ["git", "-C", str(repo), "log", "--name-only", "--pretty=format:%ad", "--date=short"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "log", "--name-only", "--pretty=format:%ad", "--date=short"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:  # code-health: ignore except a slow checkout degrades to empty history
+        log(f"git log timed out in {repo} — history-based signals are skipped")
+        return FileHistory(churn, last)
     if proc.returncode != 0:
         return FileHistory(churn, last)
     date = ""
@@ -1105,7 +1109,7 @@ def _large_function_actions(
                 metric=span,
                 churn=churn,
                 last_modified=last_modified.get(rel, ""),
-                tested=final_tested(covered, rel, info),
+                tested=final_tested(covered, rel, info, graph_preferred),
                 note=note,
                 raw=_raw_score("large-function", span, churn),
             )
@@ -1313,7 +1317,7 @@ def _high_risk_action(
         metric=round(row["risk_score"], 2),
         churn=churn,
         last_modified=last_modified.get(rel, ""),
-        tested=final_tested(covered, rel, info),
+        tested=final_tested(covered, rel, info, graph_preferred),
         callers=callers,
         note=note,
         raw=_raw_score("high-risk", row["risk_score"], churn, len(callers) if callers else row["caller_count"]),
@@ -1477,12 +1481,16 @@ def changed_files(repo: Path, base: str) -> set[str]:
     """Files touched by the current branch vs base ref (best-effort)."""
     refs = [base] if base else ["origin/main", "main"]
     for ref in refs:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), "diff", "--name-only", f"{ref}...HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(repo), "diff", "--name-only", f"{ref}...HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:  # code-health: ignore except a slow checkout degrades to an empty diff
+            log(f"git diff against {ref} timed out — diff awareness skipped")
+            continue
         if proc.returncode == 0 and proc.stdout.strip():
             return {ln.strip() for ln in proc.stdout.splitlines() if ln.strip()}
     return set()
@@ -1824,6 +1832,10 @@ def _scan_file(
         ]
     fn_map = _radon_map(visitor_cls, source)
     findings = _scan_findings(tree, rel, fn_map, source)
+    if is_test:
+        # the test-only rule families apply whether or not --include-tests
+        # flipped the general scan on — include-tests adds checks, never drops them
+        findings += _monkeypatch_findings(tree, rel) + _skipif_findings(tree, rel) + _fakefs_findings(tree, rel)
     findings += _invalid_suppressions(supps)
     return [
         _latent_action(repo, rel, f, file_churn, last_modified)

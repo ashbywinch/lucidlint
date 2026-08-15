@@ -89,7 +89,14 @@ def error_key(e: Diagnostic) -> DiagnosticKey:
 
 
 def current_errors(extra_args: list[str]) -> list[Diagnostic]:
-    """Run pyrefly (no baseline) and return the full error list."""
+    """Run pyrefly (no baseline) and return the full error list.
+
+    Diagnostics under tests/fixtures are filtered out: the fixtures are
+    intentionally non-compliant test input (standalone snippets, even
+    syntactically broken) and pyrefly has no config-level exclude — the
+    exclusion lives here, in the gate we own (AGENTS.md: ruff and pyrefly
+    both exclude tests/fixtures).
+    """
     proc = subprocess.run(
         (*PYREFLY_BASE_ARGS, *extra_args),
         capture_output=True,
@@ -105,7 +112,7 @@ def current_errors(extra_args: list[str]) -> list[Diagnostic]:
     except json.JSONDecodeError:
         sys.stderr.write(f"pyrefly returned non-JSON output:\n{proc.stdout}\n{proc.stderr}\n")
         sys.exit(2)
-    return data.get("errors", [])
+    return [e for e in data.get("errors", []) if "tests/fixtures" not in (e.get("path") or "")]
 
 
 def load_baseline(path: Path) -> list[Diagnostic]:
