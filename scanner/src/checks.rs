@@ -2677,3 +2677,186 @@ pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
         qi += 1;
     }
 }
+
+// =====================================================================
+// over-abstraction: an ABC with exactly one concrete subclass is ceremony
+// (the last Python finding family — cross-file class + import resolution)
+// =====================================================================
+
+const ABSTRACT_DECORATORS: [&str; 4] = [
+    "abstractmethod", "abstractproperty", "abstractclassmethod", "abstractstaticmethod",
+];
+
+/// Top-level classes with abstractness and base references.
+pub fn collect_classes(body: &[Stmt], source: &str) -> Vec<crate::ClassInfo> {
+    let mut out = Vec::new();
+    for s in body {
+        let Stmt::ClassDef(cls) = s else { continue };
+        let mut abstract_ = false;
+        for d in &cls.decorator_list {
+            let expr = if let Expr::Call(c) = &d.expression {
+                c.func.as_ref()
+            } else {
+                &d.expression
+            };
+            match expr {
+                Expr::Name(n) if ABSTRACT_DECORATORS.contains(&n.id.as_str()) => abstract_ = true,
+                Expr::Attribute(a) if ABSTRACT_DECORATORS.contains(&a.attr.as_str()) => abstract_ = true,
+                _ => {}
+            }
+        }
+        let mut bases: Vec<String> = Vec::new();
+        if let Some(arguments) = &cls.arguments {
+            for b in &arguments.args {
+                match b {
+                    Expr::Name(n) => {
+                        if matches!(n.id.to_lowercase().as_str(), "abc" | "abcmeta") {
+                            abstract_ = true;
+                        }
+                        bases.push(format!("Name:{}", n.id.as_str()));
+                    }
+                    Expr::Attribute(a) => {
+                        if matches!(a.attr.to_lowercase().as_str(), "abc" | "abcmeta") {
+                            abstract_ = true;
+                        }
+                        if let Expr::Name(v) = a.value.as_ref() {
+                            bases.push(format!("Attr:{}:{}", v.id.as_str(), a.attr.as_str()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out.push(crate::ClassInfo {
+            name: cls.name.to_string(),
+            line: line_of(source, cls.name.range().start()),
+            abstract_,
+            bases,
+        });
+    }
+    out
+}
+
+/// Import aliases from top-level imports — `_import_map`.
+pub fn collect_imports(body: &[Stmt], _source: &str) -> Vec<crate::ImportInfo> {
+    let mut out = Vec::new();
+    let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+    let mut qi = 0usize;
+    while qi < queue.len() {
+        if let Q::N(n) = queue[qi] {
+            match n {
+                AnyNodeRef::StmtImportFrom(imp) => {
+                    if let Some(module) = &imp.module {
+                        for a in &imp.names {
+                            let alias = a.asname.as_ref().map(|x| x.to_string()).unwrap_or_else(|| a.name.to_string());
+                            out.push(crate::ImportInfo {
+                                alias,
+                                module: module.to_string(),
+                                imported: a.name.to_string(),
+                            });
+                        }
+                    }
+                }
+                AnyNodeRef::StmtImport(imp) => {
+                    for a in &imp.names {
+                        let alias = a.asname.as_ref().map(|x| x.to_string()).unwrap_or_else(|| a.name.to_string());
+                        out.push(crate::ImportInfo {
+                            alias,
+                            module: a.name.to_string(),
+                            imported: a.name.to_string(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            skel_children(n, &mut queue);
+        }
+        qi += 1;
+    }
+    out
+}
+
+/// `_class_key`: a module reference to a file rel.
+fn class_key(classes: &std::collections::HashMap<(String, String), &crate::ClassInfo>, mrel: &str, mname: &str) -> Option<(String, String)> {
+    if mrel.ends_with(".py") {
+        let key = (mrel.to_string(), mname.to_string());
+        return if classes.contains_key(&key) { Some(key) } else { None };
+    }
+    let base = mrel.replace('.', "/");
+    for candidate in [format!("{base}.py"), format!("{base}/__init__.py")] {
+        let key = (candidate, mname.to_string());
+        if classes.contains_key(&key) {
+            return Some(key);
+        }
+    }
+    None
+}
+
+/// Abstract classes with exactly one concrete subclass — `_abstraction_actions`.
+pub fn abstraction_findings(scans: &[(String, Vec<crate::ClassInfo>, Vec<crate::ImportInfo>)]) -> Vec<Finding> {
+    use std::collections::HashMap;
+    let mut classes: HashMap<(String, String), &crate::ClassInfo> = HashMap::new();
+    for (rel, cls_list, _) in scans {
+        for c in cls_list {
+            classes.insert((rel.clone(), c.name.clone()), c);
+        }
+    }
+    let mut concrete: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for (rel, cls_list, imports) in scans {
+        let import_map: HashMap<&str, (&str, &str)> = imports
+            .iter()
+            .map(|i| (i.alias.as_str(), (i.module.as_str(), i.imported.as_str())))
+            .collect();
+        for c in cls_list {
+            for base in &c.bases {
+                let candidates: Vec<(String, String)> = if let Some(rest) = base.strip_prefix("Name:") {
+                    let mut cands = vec![(rel.clone(), rest.to_string())];
+                    if let Some((module, _name)) = import_map.get(rest) {
+                        cands.push(((*module).to_string(), rest.to_string()));
+                    }
+                    cands
+                } else if let Some(rest) = base.strip_prefix("Attr:") {
+                    let mut parts = rest.splitn(2, ':');
+                    let alias = parts.next().unwrap_or("");
+                    let attr = parts.next().unwrap_or("");
+                    let mut cands = Vec::new();
+                    if let Some((module, _name)) = import_map.get(alias) {
+                        cands.push(((*module).to_string(), attr.to_string()));
+                    }
+                    cands
+                } else {
+                    Vec::new()
+                };
+                for (mrel, mname) in candidates {
+                    if let Some(key) = class_key(&classes, &mrel, &mname) {
+                        if key != (rel.clone(), c.name.clone())
+                            && classes.get(&key).map(|k| k.abstract_).unwrap_or(false)
+                        {
+                            concrete.entry(key).or_default().push(c.name.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut entries: Vec<((String, String), Vec<String>)> = concrete.into_iter().collect();
+    entries.sort();
+    for ((rel, name), subs) in entries {
+        if subs.len() == 1 {
+            let line = classes.get(&(rel.clone(), name.clone())).map(|c| c.line).unwrap_or(1);
+            out.push(Finding {
+                file: rel.clone(),
+                line,
+                function: name.clone(),
+                kind: "over-abstraction".into(),
+                severity: "fail".into(),
+                message: format!(
+                    "abstract class '{name}' in {rel} has exactly one concrete subclass ('{}') — an ABC with a single implementation is ceremony: fold the subclass into the base or drop the ABC; an abstraction earns its keep at two real, differing implementations",
+                    subs[0]
+                ),
+            });
+        }
+    }
+    out
+}

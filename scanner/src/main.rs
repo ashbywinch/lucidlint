@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 mod checks;
+mod docs;
 mod graph_families;
 mod lsp;
 use checks::*;
@@ -656,6 +657,24 @@ fn stmt_line(source: &str, stmt: &Stmt) -> usize {
 }
 
 /// One file's scan output, including the repo-wide collections.
+/// One top-level class: name, def line, abstract flag, and base references
+/// ("Name:Id" for a plain base, "Attr:Alias:attr" for alias.attr).
+#[derive(Clone)]
+pub struct ClassInfo {
+    pub name: String,
+    pub line: usize,
+    pub abstract_: bool,
+    pub bases: Vec<String>,
+}
+
+/// One import alias: local name -> (module, imported name).
+#[derive(Clone)]
+pub struct ImportInfo {
+    pub alias: String,
+    pub module: String,
+    pub imported: String,
+}
+
 pub struct FileScan {
     pub file_name: String,
     pub findings: Vec<Finding>,
@@ -666,6 +685,8 @@ pub struct FileScan {
     pub strings: Vec<String>,
     pub decorated: HashSet<String>,
     pub skeletons: Vec<SkeletonFn>,
+    pub classes: Vec<ClassInfo>,
+    pub imports: Vec<ImportInfo>,
 }
 
 fn is_test_path(name: &str) -> bool {
@@ -697,6 +718,8 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
                 strings: Vec::new(),
                 decorated: HashSet::new(),
                 skeletons: Vec::new(),
+                classes: Vec::new(),
+                imports: Vec::new(),
             };
         }
     };
@@ -753,6 +776,8 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     let findings = apply_suppressions(state.findings, source, name, tokens);
     let mut all = type_ignore_findings(source, name, tokens);
     all.extend(findings);
+    let classes = collect_classes(&body, source);
+    let imports = collect_imports(&body, source);
     FileScan {
         file_name: name.to_string(),
         findings: all,
@@ -763,6 +788,8 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         strings: state.strings,
         decorated: state.decorated,
         skeletons: state.skeletons,
+        classes,
+        imports,
     }
 }
 
@@ -814,9 +841,10 @@ fn main() {
         lsp::run();
         return;
     }
-    // flag parsing: --graph <json> --churn <json> --include-tests then files
+    // flag parsing: --graph <json> --churn <json> --docs <root> --include-tests
     let mut graph_path: Option<String> = None;
     let mut churn_path: Option<String> = None;
+    let mut docs_root: Option<String> = None;
     let mut include_tests = false;
     let mut i = 0usize;
     let mut paths: Vec<String> = Vec::new();
@@ -829,6 +857,10 @@ fn main() {
             "--churn" => {
                 i += 1;
                 churn_path = args.get(i).cloned();
+            }
+            "--docs" => {
+                i += 1;
+                docs_root = args.get(i).cloned();
             }
             "--include-tests" => include_tests = true,
             _ => paths.push(args[i].clone()),
@@ -871,6 +903,12 @@ fn main() {
     let mut all_findings = Vec::new();
     let mut all_cc = Vec::new();
     let mut total_errors = 0usize;
+    // over-abstraction: ABCs with exactly one concrete subclass (needs the
+    // class/import collection before the scans are consumed)
+    let class_scans: Vec<(String, Vec<ClassInfo>, Vec<ImportInfo>)> = scans
+        .iter()
+        .map(|s| (rel_of(&s.file_name, &root), s.classes.clone(), s.imports.clone()))
+        .collect();
     for scan in scans {
         all_findings.extend(scan.findings);
         all_cc.extend(scan.cc);
@@ -909,6 +947,10 @@ fn main() {
         all_findings.extend(graph_families::layer_mix_findings(repo_root, c, &rels));
         all_findings.extend(graph_families::folder_mix_findings(repo_root, c));
     }
+    if let Some(d) = &docs_root {
+        all_findings.extend(docs::docs_findings(Path::new(d)));
+    }
+    all_findings.extend(abstraction_findings(&class_scans));
     if let Some(p) = &churn_path {
         if let Ok(s) = std::fs::read_to_string(p) {
             if let Ok(churn) = serde_json::from_str::<std::collections::HashMap<String, usize>>(&s) {
@@ -1351,6 +1393,48 @@ mod tests {
     }
 
     // ------------------------------------------------- severity
+    // ------------------------------------------- docs + abstraction
+    #[test]
+    fn docs_broken_link_is_found() {
+        let dir = std::env::temp_dir().join(format!("docs_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/guide.md"), "see [missing](nope.md)
+").unwrap();
+        let f = docs::docs_findings(&dir);
+        assert!(f.iter().any(|x| x.kind == "docs-link" && x.message.contains("nope.md")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn abstraction_single_concrete_is_found() {
+        let src_a = "from abc import ABC, abstractmethod\n\nclass Base(ABC):\n    @abstractmethod\n    def run(self):\n        pass\n";
+        let src_b = "from a import Base\n\nclass Concrete(Base):\n    def run(self):\n        return 1\n";
+        let scan_a = scan_source(src_a, "a.py");
+        let scan_b = scan_source(src_b, "b.py");
+        let scans = vec![
+            ("a.py".to_string(), scan_a.classes, scan_a.imports),
+            ("b.py".to_string(), scan_b.classes, scan_b.imports),
+        ];
+        let f = checks::abstraction_findings(&scans);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].function, "Base");
+    }
+
+    #[test]
+    fn abstraction_two_subclasses_passes() {
+        let src_a = "from abc import ABC, abstractmethod\n\nclass Base(ABC):\n    @abstractmethod\n    def run(self):\n        pass\n";
+        let src_b = "from a import Base\n\nclass One(Base):\n    def run(self):\n        return 1\n\nclass Two(Base):\n    def run(self):\n        return 2\n";
+        let scan_a = scan_source(src_a, "a.py");
+        let scan_b = scan_source(src_b, "b.py");
+        let scans = vec![
+            ("a.py".to_string(), scan_a.classes, scan_a.imports),
+            ("b.py".to_string(), scan_b.classes, scan_b.imports),
+        ];
+        let f = checks::abstraction_findings(&scans);
+        assert!(f.is_empty());
+    }
+
     // ------------------------------------------------- record-shape
     #[test]
     fn record_grab_bag_and_collection_params_fail() {

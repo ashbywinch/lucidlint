@@ -906,10 +906,10 @@ class _RustScan:
         graph: Path | None = None,
         churn_json: Path | None = None,
         include_tests: bool = False,
+        docs_root: str | None = None,
     ) -> RustFindings | None:
-        if graph is None and churn_json is None and not include_tests:
-            prepared = self._flags()
-            graph, churn_json, include_tests = prepared
+        if graph is None and churn_json is None and not include_tests and docs_root is None:
+            graph, churn_json, include_tests, docs_root = self._flags()
         """Findings per rel for one file set; None = Rust unavailable (Python path)."""
         rels = tuple(sf.rel for sf in files)
         key = (repo, rels)
@@ -936,6 +936,8 @@ class _RustScan:
                     cmd += ["--churn", str(churn_json)]
                 if include_tests:
                     cmd.append("--include-tests")
+                if docs_root is not None:
+                    cmd += ["--docs", docs_root]
                 cmd += [str(sf.py) for sf in files]
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
                 if proc.returncode == 0:
@@ -978,19 +980,21 @@ class _RustScan:
     def prepare(
         self, repo: Path, only_rel: str | None, include_tests: bool, file_churn: Counter[str]
     ) -> None:
-        """Graph contract + churn JSON for the next scan; repo-wide only."""
+        """Graph contract + churn JSON + docs root for the next scan; repo-wide only."""
         self._pending_graph = None
         self._pending_churn = None
         self._pending_tests = include_tests
+        self._pending_docs = None
         if only_rel is None:
             self._pending_graph = GRAPH_CONTRACT.contract(repo)
             if file_churn:
                 tmp = Path(tempfile.mkstemp(prefix="code-health-churn-", suffix=".json")[1])
                 tmp.write_text(json.dumps(dict(file_churn)), encoding="utf-8")
                 self._pending_churn = tmp
+            self._pending_docs = str(repo)
 
     def _flags(self):
-        return self._pending_graph, self._pending_churn, self._pending_tests
+        return self._pending_graph, self._pending_churn, self._pending_tests, self._pending_docs
 
     def active(self, repo: Path) -> bool:
         """True when the Rust backend is the live scan path for this repo."""
@@ -4214,8 +4218,10 @@ def _collect_actions(
     if only_rel is None:
         # repo-wide families — git/graph/coverage-scoped, skipped in the
         # single-file (--file / LSP) mode
-        actions += _abstraction_actions(repo, args.include_tests, file_churn, last_modified)
-        actions += _docs_actions(repo, file_churn, last_modified)
+        if not rust_live:
+            # the Rust core computes over-abstraction + the docs families
+            actions += _abstraction_actions(repo, args.include_tests, file_churn, last_modified)
+            actions += _docs_actions(repo, file_churn, last_modified)
         if not rust_live:
             # the Rust core computes folder/layer-mix and import cycles
             # from the graph contract
