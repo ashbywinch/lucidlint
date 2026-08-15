@@ -1,0 +1,72 @@
+# AI Code Review (the-pr-agent) — the house review bot.
+#
+# CHANGE: the pinned SHA in the check-review step's fetch of
+# check_review_posted.py — re-pin to a newer main SHA when the script
+# evolves (this repo is the script's home; omp-config mirrors this pattern).
+#
+# DO NOT CHANGE:
+# - NO actions/checkout here — deliberate. PR-Agent fetches everything via
+#   the GitHub API (the pinned config branch, the diff, the repo context
+#   files), and the action's config loader ALSO merges a [tool.pr-agent]
+#   section from pyproject.toml found in the working tree. With a checkout
+#   of the PR head, an attacker branch could ship its own pyproject.toml
+#   overriding [openai] api_base; with no checkout there is no working-tree
+#   config to read at all.
+# - PR_AGENT_CONFIG_BRANCH: config MUST come from a maintainer-controlled
+#   branch — a PR branch could ship its own .pr_agent.toml pointing
+#   api_base at an attacker endpoint, and the API key would be sent there
+#   as the Bearer token. (.pr_agent.toml is fetched via the API from this
+#   branch; 404 falls back to the default branch — never the working tree.)
+#   This is ALSO the only way the config applies at all: the action gates
+#   repo .pr_agent.toml keys by per-host allowed-keys, so without the pin
+#   the image defaults run (model gpt-5.6, api_base api.openai.com) and the
+#   model call dies with "Incorrect API key". Missing pin, not the key, is
+#   the first thing to check when that error shows.
+# - Pin the action to a real release SHA (see houses' workflow) — @latest
+#   does not resolve.
+# - The `if:` on the job: dependabot bumps are mechanical and covered by
+#   build-and-test; the AI review adds noise and its ticket-compliance step
+#   chokes on dependabot descriptions (no ticket ref). Skip the whole job.
+# - The "Check review succeeded" step: fails the PR when no review comment
+#   covers the head commit (check_review_posted.py — fetched at a pinned
+#   SHA, never from the PR head). Must PASS when a human posted "/skip"
+#   (skip_commands in .pr_agent.toml — pr-agent posts nothing on a skip).
+
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  pr-review:
+    runs-on: ubuntu-latest
+    # Dependabot bumps are mechanical and already covered by build-and-test;
+    # the AI review adds noise (and dependabot PRs lack a ticket, which the
+    # ticket-compliance step chokes on). Skip the whole job for them.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: the-pr-agent/pr-agent@b249e568e0c0fb6c674ace55fe95d02f62f8f3b3   # pin a real release SHA — @latest does not resolve
+        id: pr-agent
+        env:
+          OPENAI_KEY: ${{ secrets.OPENCODE_GO_BUILD_TOOLS_API_KEY }}
+          OPENAI_BASE_URL: https://opencode.ai/zen/go/v1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_AGENT_CONFIG_BRANCH: pr-agent-config
+
+      # Fail the PR when no "## PR Reviewer Guide" comment covers the head
+      # commit. The script is fetched at a pinned SHA from this repo's main
+      # (never from the PR head), matching the omp-config pattern.
+      - name: Check review succeeded
+        env:
+          SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -fsSL -o check_review_posted.py \
+            https://raw.githubusercontent.com/ashbywinch/build-tools/ab9ab5dc1578d77b6623c8030c4dd3326d097c74/check_review_posted.py
+          python3 check_review_posted.py
