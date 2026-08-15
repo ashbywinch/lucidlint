@@ -5,6 +5,33 @@ the maintainability requirements into a prioritized, actionable list of fix
 actions — cheap to run, machine-readable, testable as a failing gate, and
 honest about what it can and cannot know.
 
+## User requirements (this repo's objectives)
+
+1. **People's repos stay consistent and highly maintainable.** The tools
+   and the conventions they enforce exist so every house repo reads the
+   same way, with the same rules, and stays cheap to change. A repo that
+   drifts from the conventions is a finding, not a surprise.
+2. **The products meet user requirements: reliability, security, and good
+   PII handling.** The tools themselves must be correct (deterministic,
+   tested, no false verdicts on the evidence they have), must not leak or
+   mishandle personal data (repos, coverage, and reports are scanned for
+   PII exposure, never written beyond the repo), and must not introduce
+   insecure patterns (credentials, secrets, unsafe parsing) into the repos
+   they scan — the standard's security rules are enforced in code like any
+   other rule.
+3. **Checks take the minimum possible time while still achieving the
+   objectives.** A gate nobody runs is no gate: the full scan must be cheap
+   enough for routine per-PR use, and the per-file subset must run under a
+   second so it can live in an editor (LSP). Speed is a requirement, not a
+   nicety — measured and budgeted against the objectives above.
+4. **Managing PR checks is a streamlined process for humans and bots
+   alike.** Figuring out what to fix, whether everything has been fixed,
+   and merging must be mechanical: the report ranks what to fix first, the
+   gate answers "is it all fixed" with a deterministic verdict, and the
+   review bot (incremental per push, findings attributed to the head
+   commit) never makes a human or an agent hunt for stale or missing
+   reviews.
+
 ## Overarching goal
 
 All code produced under these conventions stays readable, maintainable, and

@@ -9,7 +9,9 @@ A comment covers the head commit when its body references the commit's SHA
 (the incremental-review form, "Starting from commit .../<SHA>") or it was
 posted after the head commit landed (the first review on a PR is posted
 without the SHA marker — observed: pr-agent v0.41.1 regular reviews never
-contain the head SHA).
+contain the head SHA). The range-start SHA in the incremental body is the
+first NEW commit, not the head — coverage still falls to the posted-after
+rule; the explicit form is belt-and-braces for reviews that embed it.
 
 Why the bot's own step cannot fail (2026-08-11, read from the v0.41.1
 source): ``PRAgent.handle_request`` catches EVERY exception with a bare
@@ -150,7 +152,11 @@ def main() -> int:
     # the check missed it, failing a review that had succeeded)
     covered = any(
         c.get("body", "").startswith(("## PR Reviewer Guide", "## Incremental PR Reviewer Guide"))
-        and (sha in c.get("body", "") or c.get("created_at", "") >= head_committed_at)
+        and (
+            sha in c.get("body", "")
+            or f"commit/{sha}" in c.get("body", "")  # the incremental "Starting from commit .../<SHA>" form
+            or c.get("created_at", "") >= head_committed_at
+        )
         for c in comments
     )
     if not covered:
