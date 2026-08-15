@@ -642,11 +642,11 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
         if callers:
             resolved = f", callers: {', '.join(callers)}"
             if len(callers) < row["caller_count"]:
-                resolved += f" ({len(callers)} distinct of {row['caller_count']} call sites — count includes repeated call sites)"
+                resolved += f" ({len(callers)} distinct of {row['caller_count']} call sites per risk index — count includes repeated call sites)"
         else:
             resolved = ""
         message = (
-            f"graph risk {row['risk_score']:.2f} (>= {max_risk}), {row['caller_count']} call sites{resolved} — "
+            f"graph risk {row['risk_score']:.2f} (>= {max_risk}), {len(callers) or row['caller_count']} call site(s){resolved} — "
             f"{GUIDANCE['high-risk']}"
         )
         info = {"name": row["name"], "params": row["params"] or "", "return_type": row["return_type"] or "",
