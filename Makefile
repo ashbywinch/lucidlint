@@ -9,8 +9,9 @@ help:
 	@echo "  ${GREEN}make code-health${NC}   Run code_health.py on REPO (default: ..)"
 
 test:
+	uv run --with pytest python3 -m pytest tests -q
 	@for f in *.py; do python3 -m py_compile $$f || exit 1; done
-	@echo "ok — all tools compile"
+	@echo "ok — tests pass"
 
 code-health:
 	uv run --with radon python3 code_health.py --repo $(REPO)

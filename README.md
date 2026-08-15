@@ -56,3 +56,14 @@ tag and runs it as its review-attribution gate.
 
 Pin the URL to a tag, never `main`, so a later change cannot silently alter
 what CI runs.
+
+## Tests
+
+`make test` runs the pytest suite (`tests/test_code_health.py`) plus a syntax
+check of every tool. The suite exercises `code_health.py` with fakes only —
+radon is injected via `code_health.radon_visitor`, subprocess via a fake
+module with canned argv routes, and the graph/coverage databases are real
+SQLite with fake data — so it runs without radon or a real repo. It covers
+the verdict precedence, concern clustering, all five action builders, the
+priority/merge/baseline logic, and the gate's exit codes. `code_health.py`
+also runs on itself: `make code-health REPO=.` reports its own hotspots.

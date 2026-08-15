@@ -40,6 +40,24 @@ EXCLUDED_DIRS = {".git", ".venv", "node_modules", "__pycache__", "dist", "build"
 
 ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk")
 
+# Injectable seam: tests assign code_health.radon_visitor to a fake. Loaded
+# lazily so the tool runs without radon until complexity analysis is needed.
+radon_visitor = None
+
+
+def _radon_visitor(required: bool = True):
+    global radon_visitor
+    if radon_visitor is None:
+        try:
+            from radon.visitors import ComplexityVisitor
+        except ImportError:
+            if required:
+                log("radon not importable — run via `uv run --with radon python3 code_health.py`")
+                sys.exit(2)
+            return None
+        radon_visitor = ComplexityVisitor
+    return radon_visitor
+
 # Fix guidance per action kind. One sentence each: what to do, not just what's
 # wrong. Tied to the real requirements (readability, maintainability,
 # anti-fragility) via separation of concerns, domain language, encapsulation.
@@ -366,12 +384,7 @@ def complexity_actions(repo: Path, max_cc: int, include_tests: bool,
                        file_churn: Counter[str], last_modified: dict[str, str],
                        covered: dict[str, set[int]] | None, graph_preferred: bool, stale_note: str) -> list[dict]:
     """Cyclomatic complexity per function via radon's fast pure-Python analyzer."""
-    try:
-        from radon.visitors import ComplexityVisitor
-    except ImportError:  # pragma: no cover
-        log("radon not importable — run via `uv run --with radon python3 code_health.py`")
-        sys.exit(2)
-
+    ComplexityVisitor = _radon_visitor()
     conn = _graph_conn(repo)
     actions: list[dict] = []
     for py in sorted(repo.rglob("*.py")):
@@ -484,7 +497,7 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
                   covered: dict[str, set[int]] | None, graph_preferred: bool, stale_note: str) -> list[dict]:
     db_path = _graph_db(repo)
     if db_path is None:
-        log(f"no graph at {db_path} — run `code-review-graph build --repo {repo}` first")
+        log(f"no graph at {repo / '.code-review-graph' / 'graph.db'} — run `code-review-graph build --repo {repo}` first")
         return []
     db = sqlite3.connect(db_path)
     db.row_factory = sqlite3.Row
@@ -523,7 +536,7 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
             message = (f"function spans {span} lines (>= {max_fn_lines}) — {GUIDANCE['large-function']}"
                        f" [concern mix unresolved — {snippet}]")
         info = {"name": row["name"], "params": row["params"] or "", "return_type": row["return_type"] or "",
-                "line_start": row["line_start"], "line_end": row["line_end"]}
+                "line_start": row["line_start"], "line_end": row["line_end"], "tested": row["test_coverage"] or ""}
         if not info["params"]:
             if rel not in src_cache:
                 try:
@@ -588,19 +601,19 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
         ).fetchone()[0]
         fat = ""
         try:
-            from radon.visitors import ComplexityVisitor
-            if rel not in src_cache:
+            Visitor = _radon_visitor(required=False)
+            if Visitor is not None and rel not in src_cache:
                 try:
                     src_cache[rel] = (repo / rel).read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     src_cache[rel] = ""
-            if src_cache[rel]:
-                fns = ComplexityVisitor.from_code(src_cache[rel]).functions
+            if Visitor is not None and src_cache.get(rel):
+                fns = Visitor.from_code(src_cache[rel]).functions
                 top = sorted(fns, key=lambda f: f.complexity, reverse=True)[:3]
                 if top:
                     fat = " fattest: " + ", ".join(f"{f.name}:{f.lineno} (CC {f.complexity})" for f in top)
                     anchor = top[0].lineno
-        except ImportError:
+        except Exception:
             pass
         message += fat
         churn = file_churn.get(rel, 0)
@@ -651,7 +664,8 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
             f"{GUIDANCE['high-risk']}"
         )
         info = {"name": row["name"], "params": row["params"] or "", "return_type": row["return_type"] or "",
-                "line_start": row["line_start"] or 1, "line_end": row["line_end"] or row["line_start"] or 1}
+                "line_start": row["line_start"] or 1, "line_end": row["line_end"] or row["line_start"] or 1,
+                "tested": row["test_coverage"] or ""}
         if not info["params"]:
             if rel not in src_cache:
                 try:
@@ -693,12 +707,7 @@ def hotspot_actions(repo: Path, top_frac: float, min_cc: float,
     CodeScene's hotspot signal is the concentration of complexity in a
     frequently-changed file.
     """
-    try:
-        from radon.complexity import ComplexityVisitor
-    except ImportError:  # pragma: no cover
-        log("radon not importable — run via `uv run --with radon python3 code_health.py`")
-        sys.exit(2)
-
+    ComplexityVisitor = _radon_visitor()
     cutoff = max(1, int(len(file_churn) * top_frac))
     hottest = {f for f, c in file_churn.most_common(cutoff) if c >= 2}
 
@@ -845,11 +854,12 @@ def main() -> int:
 
     # Normalize raw risk scores to a 1-99 percentile so the list spreads and
     # ordering is meaningful (top = biggest churn x complexity x fan-in).
-    raws = sorted(a["raw"] for a in unique)
-    lo, hi = raws[0], raws[-1]
-    for a in unique:
-        a["priority"] = 99 if hi <= lo else max(1, round(1 + 98 * (a["raw"] - lo) / (hi - lo)))
-        a["in_diff"] = a["file"] in diff
+    if unique:
+        raws = sorted(a["raw"] for a in unique)
+        lo, hi = raws[0], raws[-1]
+        for a in unique:
+            a["priority"] = 99 if hi <= lo else max(1, round(1 + 98 * (a["raw"] - lo) / (hi - lo)))
+            a["in_diff"] = a["file"] in diff
     # Per-target merge: complexity + large-function on the same function is one
     # fix, not two. Keep the highest-raw message, list the other kinds.
     merged: dict[tuple, dict] = {}
@@ -868,11 +878,12 @@ def main() -> int:
             prev["line"] = min(prev["line"], a["line"])
     unique = list(merged.values())
     # recompute priority on merged raws
-    raws = sorted(a["raw"] for a in unique)
-    lo, hi = raws[0], raws[-1]
-    for a in unique:
-        a["priority"] = 99 if hi <= lo else max(1, round(1 + 98 * (a["raw"] - lo) / (hi - lo)))
-    unique.sort(key=lambda a: (-a["priority"], a["file"], a["line"]))
+    if unique:
+        raws = sorted(a["raw"] for a in unique)
+        lo, hi = raws[0], raws[-1]
+        for a in unique:
+            a["priority"] = 99 if hi <= lo else max(1, round(1 + 98 * (a["raw"] - lo) / (hi - lo)))
+        unique.sort(key=lambda a: (-a["priority"], a["file"], a["line"]))
     # Lifecycle: facts only — low-churn scripts/tools under scripts/ or tools/.
     # Whether to delete, leave, or refactor is the agent's call; we only surface
     # the data (churn, last touch) the agent would otherwise have to dig for.
