@@ -26,10 +26,16 @@ tag and runs it as its review-attribution gate.
   maintainability, anti-fragility), so each action's message gives a fix
   guideline in those terms: separation of concerns, domain language,
   effective encapsulation. Where the graph's CALLS edges show a function or
-  file pulling from >= 2 subsystems, the action names those subsystems — the
-  seams to extract classes/modules along — and hotspot actions name the exact
-  volatile functions with their own churn (`git log -L`). Flags: `--repo`,
-  `--max-complexity`
+  file pulling from >= 2 subsystems, the action names those subsystems (with
+  example callees) — the seams to extract classes/modules along — and hotspot
+  actions name the exact volatile functions with their own churn (`git log -L`).
+  Coverage verdicts come from the repo's own data (coverage.xml, else
+  .coverage line_bits, else the graph risk index) and untested functions get
+  the contract to pin (`name(params) -> ret`). Actions are grouped by file and
+  ranked by priority (percentile of metric x churn x fan-in); a baseline file
+  (`--baseline`, `--update-baseline`) locks acknowledged debt so the gate can
+  go green incrementally, and `--base <ref>` marks actions in your branch's
+  diff. Flags: `--repo`, `--max-complexity`
   (15), `--max-function-lines` (120), `--max-file-edges` (150),
   `--max-risk` (0.8), `--hotspot-top-frac` (0.1), `--hotspot-min-cc` (15),
   `--json`, `--warn` (informational, exit 0).
