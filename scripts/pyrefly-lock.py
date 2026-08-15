@@ -91,7 +91,7 @@ def error_key(e: Diagnostic) -> DiagnosticKey:
 def current_errors(extra_args: list[str]) -> list[Diagnostic]:
     """Run pyrefly (no baseline) and return the full error list."""
     proc = subprocess.run(
-        PYREFLY_BASE_ARGS + extra_args,
+        (*PYREFLY_BASE_ARGS, *extra_args),
         capture_output=True,
         text=True,
     )
