@@ -33,7 +33,7 @@ pub struct FnScope {
     pub returned: HashSet<String>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct Finding {
     file: String,
     line: usize,

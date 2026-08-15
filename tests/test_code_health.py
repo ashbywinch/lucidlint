@@ -13,6 +13,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -59,10 +60,16 @@ class FakeSubprocess:
         self.calls.append(args)
         for pred, stdout, returncode in self.routes:
             if pred(args):
+                if isinstance(stdout, type) and issubclass(stdout, BaseException):
+                    # the fake's except-clause alias is TimeoutError — raise THAT, since the
+                    # real TimeoutExpired is a SubprocessError, not a TimeoutError
+                    raise TimeoutError("command timed out")
                 if stdout is PASSTHROUGH:
                     proc = subprocess.run(args, **kwargs)
                     return FakeProc(returncode=proc.returncode, stdout=proc.stdout or "")
                 out = stdout(args) if callable(stdout) else stdout
+                if kwargs.get("check") and returncode != 0:
+                    raise subprocess.CalledProcessError(returncode, args)  # like real run(check=True)
                 return FakeProc(returncode=returncode, stdout=out)
         raise AssertionError(f"unexpected argv: {args}")
 
@@ -76,8 +83,9 @@ class Env:
         self.routes = routes or []
 
     def __enter__(self):
+        self.fake = FakeSubprocess(self.routes)
         self._saved["subprocess"] = ch.subprocess
-        ch.subprocess = FakeSubprocess(self.routes)
+        ch.subprocess = self.fake
         return self
 
     def __exit__(self, *exc):
@@ -117,7 +125,7 @@ def git_routes(history="", diff="", branch="test-branch", commit="abc1234", log_
         return "\0".join(rels) + ("\0" if rels else "")
 
     routes.append((lambda a: is_git(a) and a[3] == "ls-files", ls_files_stdout, 0))
-    routes.append((lambda a: a[:2] == ["make", "coverage"], "", 0))
+    routes.append((lambda a: a[0] == "make" and "coverage" in a, "", 0))
     return routes
 
 
@@ -130,6 +138,333 @@ def run_main(repo, *extra, routes=None):
     finally:
         sys.argv = saved_argv
 
+
+
+# --------------------------------------------------------------------------- coverage edges
+def test_coverage_xml_unparseable(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "coverage.xml").write_text("not xml at all")
+    cr = ch.load_coverage(repo)
+    assert cr.source == "coverage.xml unparseable"
+    assert cr.lines is None
+
+
+def test_coverage_xml_malformed_line_skipped(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    (repo / "coverage.xml").write_text(
+        "<coverage><class filename=\"houses/app.py\">"
+        "<line hits=\"1\" number=\"abc\"/>"
+        "<line hits=\"1\" number=\"2\"/>"
+        "</class>"
+        "<class filename=\"notes.txt\"><line hits=\"1\" number=\"1\"/></class>"
+        "</coverage>"
+    )
+    cr = ch.load_coverage(repo)
+    # the malformed <line> is skipped with a log; the valid one survives; the .txt class is skipped
+    assert cr.lines == {"houses/app.py": {2}}
+    assert "malformed <line>" in capsys.readouterr().err
+
+
+def test_coverage_sqlite_skips_unknown_and_nonpy(tmp_path):
+    repo = make_repo(tmp_path)
+    db = sqlite3.connect(repo / ".coverage")
+    db.execute("CREATE TABLE file (id INTEGER, path TEXT)")
+    db.execute("CREATE TABLE line_bits (file_id INTEGER, numbits BLOB)")
+    db.execute("INSERT INTO file VALUES (1, 'houses/app.py'), (3, 'notes.txt')")
+    db.execute("INSERT INTO line_bits VALUES (1, X'05'), (2, X'05'), (3, X'05')")
+    db.commit()
+    db.close()
+    cr = ch.load_coverage(repo)
+    # file_id 2 has no file row (skipped); notes.txt is not .py (skipped); app.py lines 1,3 covered
+    assert cr.lines == {"houses/app.py": {1, 3}}
+
+
+def test_coverage_sqlite_unreadable(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / ".coverage").write_bytes(b"this is not a sqlite database at all, definitely")
+    cr = ch.load_coverage(repo)
+    assert cr.source == ".coverage unreadable"
+
+
+def test_coverage_context_staleness(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / ".coverage").write_bytes(b"x")
+    now = 1_800_000_000.0
+    os_utime = __import__("os").utime
+    os_utime(repo / ".coverage", (now, now))
+    test = repo / "tests" / "unit" / "test_app.py"
+    os_utime(test, (now - 1000, now - 1000))  # tests older than the snapshot
+    cc = ch._coverage_context(repo, {"houses/app.py": {1}}, ".coverage")
+    assert cc.graph_preferred is False
+    assert "mtime" in cc.label
+    os_utime(test, (now + 1000, now + 1000))  # a newer test makes the snapshot stale
+    cc = ch._coverage_context(repo, {"houses/app.py": {1}}, ".coverage")
+    assert cc.graph_preferred is True
+    assert "snapshot older" in cc.stale_note
+
+
+# --------------------------------------------------------------------------- git gathering edges
+def test_file_history_parser_edges(tmp_path):
+    repo = make_repo(tmp_path)
+    history = "2026-08-01\n\nhouses/app.py\nMakefile\n2026-08-02\nhouses/app.py\n"
+    routes = [(
+        lambda a: a[:2] == ["git", "-C"] and a[3:5] == ["log", "--name-only"],
+        history, 0,
+    )]
+    fh = _file_history_with(routes, repo)
+    assert fh.churn["houses/app.py"] == 2
+    assert "Makefile" not in fh.churn  # not .py — skipped
+    assert fh.last_modified["houses/app.py"] == "2026-08-02"
+
+
+def _file_history_with(routes, repo):
+    saved = ch.subprocess
+    ch.subprocess = FakeSubprocess(routes)
+    try:
+        return ch.file_history(repo)
+    finally:
+        ch.subprocess = saved
+
+
+def test_file_history_timeout_and_nonzero(tmp_path):
+    repo = make_repo(tmp_path)
+    fh = _file_history_with([(
+        lambda a: a[:2] == ["git", "-C"] and a[3:5] == ["log", "--name-only"],
+        subprocess.TimeoutExpired, 0,
+    )], repo)
+    assert fh.churn == {}  # timeout degrades to empty history
+    fh = _file_history_with([(
+        lambda a: a[:2] == ["git", "-C"] and a[3:5] == ["log", "--name-only"],
+        "", 1,
+    )], repo)
+    assert fh.churn == {}  # nonzero exit degrades to empty history
+
+
+def test_changed_files_timeout_and_nonempty(tmp_path):
+    repo = make_repo(tmp_path)
+    saved = ch.subprocess
+    ch.subprocess = FakeSubprocess([(
+        lambda a: a[3:5] == ["diff", "--name-only"], subprocess.TimeoutExpired, 0,
+    )])
+    try:
+        assert ch.changed_files(repo, "origin/main") == set()
+    finally:
+        ch.subprocess = saved
+    ch.subprocess = FakeSubprocess([(
+        lambda a: a[3:5] == ["diff", "--name-only"], "houses/app.py\nscripts/x.py\n", 0,
+    )])
+    try:
+        assert ch.changed_files(repo, "origin/main") == {"houses/app.py", "scripts/x.py"}
+    finally:
+        ch.subprocess = saved
+
+
+# --------------------------------------------------------------------------- scoring/merge/baseline units
+def test_raw_score_high_risk_callers():
+    base = ch._raw_score("high-risk", 0.5, 0)
+    assert ch._raw_score("high-risk", 0.5, 0, callers=6) == base * 2.0  # capped factor 1 + 6/5
+    assert ch._raw_score("high-risk", 0.5, 0, callers=1) == base * 1.2
+    # only high-risk scales with fan-in — standard ignores callers entirely
+    assert ch._raw_score("standard", 0.5, 0, callers=6) == ch._raw_score("standard", 0.5, 0)
+
+
+def test_merge_warn_into_fail_target():
+    fail = ch.Action("complexity", "fail", "houses/app.py", 3, "alpha", "m1", 1, 0, "", "", note="n1", raw=2)
+    # same target (file+function+kind-group) but a different line — distinct dedupe keys,
+    # same merge key: the merge path (not the dedupe path) must handle the warn
+    warn = ch.Action("complexity", "warn", "houses/app.py", 5, "alpha", "m2", 1, 0, "", "", note="n2", raw=1)
+    out = ch._dedupe_merge([fail, warn], set())
+    assert len(out) == 1
+    assert out[0].severity == "fail"  # a warn merged into a fail target keeps the gate
+    assert "n2" in out[0].note
+    assert "WARN: m2" in out[0].note  # the differing message lands in the note
+
+
+def test_baseline_identity_fallback():
+    assert ch._baseline_identity("complexity:a.py:3:alpha") == ch.BaselineIdentity("complexity", "a.py", "alpha")
+    assert ch._baseline_identity("short") == ch.BaselineIdentity("short", "", "")
+
+
+def test_rust_finding_rel_unmappable(tmp_path):
+    repo = make_repo(tmp_path)
+    rels = {"houses/app.py", "scripts/oneoff.py"}
+    assert ch._rust_finding_rel("houses/app.py", repo, rels) == "houses/app.py"
+    assert ch._rust_finding_rel(str(repo / "houses" / "app.py"), repo, rels) == "houses/app.py"
+    assert ch._rust_finding_rel("/elsewhere/x.py", repo, rels) is None  # outside the repo — dropped
+    assert ch._rust_finding_rel("houses/missing.py", repo, rels) is None  # not in this scan set
+
+
+# --------------------------------------------------------------------------- end-to-end edges
+def test_file_mode_single_file(tmp_path, capsys):
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)  # except Exception -> a finding
+    rc = run_main(repo, "--file", "houses/app.py")
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "houses/app.py" in out  # the requested file renders with its finding
+    assert "scripts/oneoff.py" not in out  # only the one file is scanned
+    assert "GATE" in out
+
+
+def test_update_baseline_requires_path(tmp_path):
+    repo = make_repo(tmp_path)
+    assert run_main(repo, "--update-baseline") == 2
+
+
+def test_corrupt_baseline_ignored(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    baseline = tmp_path / "bad.json"
+    baseline.write_text("{not json")
+    rc = run_main(repo, "--baseline", str(baseline))
+    assert rc == 0  # unbaselined — the clean repo still passes
+    assert "unreadable" in capsys.readouterr().err
+
+
+def test_git_lsfiles_failure_falls_back_to_rglob(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    (repo / ".venv").mkdir()
+    (repo / ".venv" / "x.py").write_text("def f():\n    return 60\n")  # would fail if scanned
+    routes = [
+        (lambda a: a[:2] == ["git", "-C"] and a[3:5] == ["log", "--name-only"], "", 1),
+        (lambda a: a[:2] == ["git", "-C"] and "-L" in a[3:], "", 1),
+        (lambda a: a[:2] == ["git", "-C"] and a[3] == "diff", "", 1),
+        (lambda a: a[:2] == ["git", "-C"] and a[3] == "branch", "test-branch", 0),
+        (lambda a: a[:2] == ["git", "-C"] and a[3] == "rev-parse", "abc1234", 0),
+        (lambda a: a[:2] == ["git", "-C"] and a[3] == "ls-files", "", 1),  # git fails
+        (lambda a: str(a[0]).endswith("code-health-scan"), PASSTHROUGH, 0),
+        (lambda a: "code_health_graph_export.py" in " ".join(a), PASSTHROUGH, 0),
+        (lambda a: a[:2] == ["make", "coverage"], "", 0),
+    ]
+    rc = run_main(repo, routes=routes)
+    assert rc == 0  # .venv excluded by _excluded_part; the clean repo passes
+    assert "falling back to rglob" in capsys.readouterr().err
+    assert ".venv" not in capsys.readouterr().out
+
+
+def test_refresh_coverage_runs_make(tmp_path):
+    repo = make_repo(tmp_path)
+    with Env(routes=git_routes()) as env:
+        saved_argv = sys.argv
+        sys.argv = ["code_health.py", "--repo", str(repo), "--refresh-coverage"]
+        try:
+            rc = ch.main()
+        finally:
+            sys.argv = saved_argv
+    assert rc == 0
+    assert any(a[0] == "make" and "coverage" in a for a in env.fake.calls)
+
+
+def test_scanner_failure_raises(tmp_path):
+    repo = make_repo(tmp_path)
+    routes = git_routes()
+    routes.insert(0, (lambda a: str(a[0]).endswith("code-health-scan"), "not json at all", 0))
+    try:
+        run_main(repo, routes=routes)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "Rust scan core failed" in str(e)
+
+
+def test_scanner_garbage_findings_dropped(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    scan_json = json.dumps({
+        "schema_version": 2,
+        "findings": [{
+            "kind": "standard", "signal": "standard", "severity": "fail",
+            "file": "/elsewhere/x.py", "line": 1, "function": "", "message": "drop me",
+        }],
+        "cc": [{"function": "f", "line": 1, "cc": 20, "file": "/elsewhere/x.py"}],
+        "complexity": [],
+    })
+    routes = git_routes()
+    routes.insert(0, (lambda a: str(a[0]).endswith("code-health-scan"), scan_json, 0))
+    rc = run_main(repo, routes=routes)
+    assert rc == 0  # findings for files outside the scan set are dropped, not failures
+    assert "drop me" not in capsys.readouterr().out
+
+
+def test_scanner_cache_hits(tmp_path):
+    repo = make_repo(tmp_path)
+    rs = ch._RustScan()
+    fs = FakeSubprocess([(lambda a: str(a[0]).endswith("code-health-scan"), PASSTHROUGH, 0)])
+    files = [ch.SourceFile(repo / "houses/app.py", "houses/app.py")]
+    rs._pending_graph = None  # exactly what prepare() sets when no graph/churn is available
+    rs._pending_churn = None
+    rs._pending_tests = False
+    rs._pending_docs = None
+    saved = ch.subprocess
+    ch.subprocess = fs
+    try:
+        assert rs.load(repo, files) is not None
+        assert rs.load(repo, files) is not None
+    finally:
+        ch.subprocess = saved
+    assert sum(1 for a in fs.calls if str(a[0]).endswith("code-health-scan")) == 1
+
+
+def test_scanner_binary_missing_raises(tmp_path):
+    repo = make_repo(tmp_path)
+    rs = ch._RustScan()
+    rs._binary_cache[repo] = None  # simulate an unbuilt binary
+    files = [ch.SourceFile(repo / "houses/app.py", "houses/app.py")]
+    rs._pending_graph = None
+    rs._pending_churn = None
+    rs._pending_tests = False
+    rs._pending_docs = None
+    try:
+        rs.load(repo, files)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "make scanner-check" in str(e)
+
+
+def test_graph_contract_failure_degrades(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    routes = git_routes()
+    routes.insert(0, (lambda a: "code_health_graph_export.py" in " ".join(a), "", 1))
+    rc = run_main(repo, routes=routes)
+    assert rc == 0  # no graph contract — the non-graph families still gate
+    assert "GATE: PASS" in capsys.readouterr().out
+
+
+def test_actions_from_rust_test_only_filter():
+    rf = ch.RustFindings(
+        {"tests/unit/test_app.py": [
+            ch.RustFinding(kind="magic-number", signal="magic-number", severity="fail",
+                           file="tests/unit/test_app.py", line=1, function="", message="not test-only"),
+            ch.RustFinding(kind="standard", signal="monkeypatch", severity="fail",
+                           file="tests/unit/test_app.py", line=2, function="", message="test-only rule"),
+        ]},
+        {},
+    )
+    acts = ch._actions_from_rust(rf, include_tests=False, file_churn=Counter(), last_modified={})
+    assert [a.message for a in acts] == ["test-only rule"]  # only TEST_ONLY_SIGNALS survive
+
+
+def test_render_actions_acks(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    import argparse
+    ack = ch.Action("standard", "ack", "houses/app.py", 1, "", "m", 1, 0, "", "")
+    ch._render_actions(repo, argparse.Namespace(baseline=None), [], [ack])
+    assert "acknowledged in baseline (1): houses/app.py:1" in capsys.readouterr().out
+
+
+def test_main_stale_coverage_warning(tmp_path, capsys):
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)  # except Exception -> a fail action
+    db = sqlite3.connect(repo / ".coverage")
+    db.execute("CREATE TABLE file (id INTEGER, path TEXT)")
+    db.execute("CREATE TABLE line_bits (file_id INTEGER, numbits BLOB)")
+    db.execute("INSERT INTO file VALUES (1, 'houses/app.py')")
+    db.execute("INSERT INTO line_bits VALUES (1, X'05')")
+    db.commit()
+    db.close()
+    now = 1_800_000_000.0
+    os = __import__("os")
+    os.utime(repo / ".coverage", (now, now))
+    os.utime(repo / "tests" / "unit" / "test_app.py", (now + 1000, now + 1000))  # newer than the snapshot
+    rc = run_main(repo)
+    out = capsys.readouterr().out
+    assert rc == 1  # the except finding still fails the gate
+    assert "snapshot predates the repo's tests" in out
 
 # --------------------------------------------------------------------------- utilities
 def test_numbits_to_lines():

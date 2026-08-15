@@ -37,10 +37,10 @@
    "severity": "error"
   },
   {
-   "line": 80,
+   "line": 88,
    "column": 25,
-   "stop_line": 80,
-   "stop_column": 52,
+   "stop_line": 88,
+   "stop_column": 34,
    "path": "tests/test_code_health.py",
    "code": -2,
    "name": "bad-assignment",
@@ -49,9 +49,57 @@
    "severity": "error"
   },
   {
-   "line": 175,
+   "line": 222,
+   "column": 21,
+   "stop_line": 222,
+   "stop_column": 43,
+   "path": "tests/test_code_health.py",
+   "code": -2,
+   "name": "bad-assignment",
+   "description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
+   "concise_description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
+   "severity": "error"
+  },
+  {
+   "line": 246,
+   "column": 21,
+   "stop_line": 248,
+   "stop_column": 8,
+   "path": "tests/test_code_health.py",
+   "code": -2,
+   "name": "bad-assignment",
+   "description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
+   "concise_description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
+   "severity": "error"
+  },
+  {
+   "line": 253,
+   "column": 21,
+   "stop_line": 255,
+   "stop_column": 8,
+   "path": "tests/test_code_health.py",
+   "code": -2,
+   "name": "bad-assignment",
+   "description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
+   "concise_description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
+   "severity": "error"
+  },
+  {
+   "line": 395,
+   "column": 21,
+   "stop_line": 395,
+   "stop_column": 23,
+   "path": "tests/test_code_health.py",
+   "code": -2,
+   "name": "bad-assignment",
+   "description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
+   "concise_description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
+   "severity": "error"
+  },
+  {
+   "line": 510,
    "column": 12,
-   "stop_line": 175,
+   "stop_line": 510,
    "stop_column": 24,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -61,9 +109,9 @@
    "severity": "error"
   },
   {
-   "line": 187,
+   "line": 522,
    "column": 12,
-   "stop_line": 187,
+   "stop_line": 522,
    "stop_column": 24,
    "path": "tests/test_code_health.py",
    "code": -2,

@@ -64,7 +64,7 @@ pub fn diagnostics_for(scan: &FileScan, source: &str) -> Vec<serde_json::Value> 
     out
 }
 
-fn publish(uri: &str, diagnostics: &[serde_json::Value]) {
+fn publish(uri: &str, diagnostics: &[serde_json::Value], out: &mut impl Write) {
     let msg = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "textDocument/publishDiagnostics",
@@ -72,10 +72,9 @@ fn publish(uri: &str, diagnostics: &[serde_json::Value]) {
     });
     let body = msg.to_string();
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(header.as_bytes());
-    let _ = stdout.write_all(body.as_bytes());
-    let _ = stdout.flush();
+    let _ = out.write_all(header.as_bytes());
+    let _ = out.write_all(body.as_bytes());
+    let _ = out.flush();
 }
 
 /// file:///path/to/x.py -> the path; anything else is used as-is.
@@ -117,86 +116,93 @@ fn read_message<R: BufRead>(input: &mut R) -> Option<serde_json::Value> {
     serde_json::from_slice(&body).ok()
 }
 
-fn send_response(id: &serde_json::Value, result: serde_json::Value) {
+fn send_response(id: &serde_json::Value, result: serde_json::Value, out: &mut impl Write) {
     let msg = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
     let body = msg.to_string();
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(header.as_bytes());
-    let _ = stdout.write_all(body.as_bytes());
-    let _ = stdout.flush();
+    let _ = out.write_all(header.as_bytes());
+    let _ = out.write_all(body.as_bytes());
+    let _ = out.flush();
+}
+
+pub fn dispatch(documents: &mut HashMap<String, String>, msg: &serde_json::Value, out: &mut impl Write) -> bool {
+    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let params = msg.get("params").cloned().unwrap_or(serde_json::Value::Null);
+    match method {
+        "initialize" => {
+            let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            send_response(
+                &id,
+                serde_json::json!({
+                    "capabilities": {
+                        "textDocumentSync": {"openClose": true, "change": 1},
+                        "serverInfo": {"name": "code-health", "version": "0.1.0"}
+                    }
+                }),
+                out,
+            );
+        }
+        "shutdown" => {
+            let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            send_response(&id, serde_json::Value::Null, out);
+        }
+        "exit" => return false,
+        "textDocument/didOpen" => {
+            let doc = &params["textDocument"];
+            let uri = doc["uri"].as_str().unwrap_or("").to_string();
+            let text = doc["text"].as_str().unwrap_or("").to_string();
+            let scan = scan_buffer(&uri, &text);
+            let diags = diagnostics_for(&scan, &text);
+            publish(&uri, &diags, out);
+            documents.insert(uri.clone(), text);
+        }
+        "textDocument/didChange" => {
+            let doc = &params["textDocument"];
+            let uri = doc["uri"].as_str().unwrap_or("").to_string();
+            // change: 1 = full sync — the last content change is the text
+            let text = params["contentChanges"]
+                .as_array()
+                .and_then(|c| c.last())
+                .and_then(|c| c["text"].as_str())
+                .unwrap_or("")
+                .to_string();
+            let scan = scan_buffer(&uri, &text);
+            let diags = diagnostics_for(&scan, &text);
+            publish(&uri, &diags, out);
+            documents.insert(uri, text);
+        }
+        "textDocument/didSave" => {
+            let doc = &params["textDocument"];
+            let uri = doc["uri"].as_str().unwrap_or("").to_string();
+            if let Some(text) = documents.get(&uri) {
+                let scan = scan_buffer(&uri, text);
+                let diags = diagnostics_for(&scan, text);
+                publish(&uri, &diags, out);
+            }
+        }
+        "textDocument/didClose" => {
+            let doc = &params["textDocument"];
+            let uri = doc["uri"].as_str().unwrap_or("").to_string();
+            publish(&uri, &[], out); // clear the gutter on close
+            documents.remove(&uri);
+        }
+        _ => {} // unknown methods and notifications are ignored
+    }
+    true
 }
 
 pub fn run() {
     let mut documents: HashMap<String, String> = HashMap::new();
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
-    loop {
-        let Some(msg) = read_message(&mut input) else {
-            return; // EOF — client gone
-        };
-        let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let params = msg.get("params").cloned().unwrap_or(serde_json::Value::Null);
-        match method {
-            "initialize" => {
-                let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
-                send_response(
-                    &id,
-                    serde_json::json!({
-                        "capabilities": {
-                            "textDocumentSync": {"openClose": true, "change": 1},
-                            "serverInfo": {"name": "code-health", "version": "0.1.0"}
-                        }
-                    }),
-                );
-            }
-            "shutdown" => {
-                let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
-                send_response(&id, serde_json::Value::Null);
-            }
-            "exit" => return,
-            "textDocument/didOpen" => {
-                let doc = &params["textDocument"];
-                let uri = doc["uri"].as_str().unwrap_or("").to_string();
-                let text = doc["text"].as_str().unwrap_or("").to_string();
-                let scan = scan_buffer(&uri, &text);
-                let diags = diagnostics_for(&scan, &text);
-                publish(&uri, &diags);
-                documents.insert(uri.clone(), text);
-            }
-            "textDocument/didChange" => {
-                let doc = &params["textDocument"];
-                let uri = doc["uri"].as_str().unwrap_or("").to_string();
-                // change: 1 = full sync — the last content change is the text
-                let text = params["contentChanges"]
-                    .as_array()
-                    .and_then(|c| c.last())
-                    .and_then(|c| c["text"].as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let scan = scan_buffer(&uri, &text);
-                let diags = diagnostics_for(&scan, &text);
-                publish(&uri, &diags);
-                documents.insert(uri, text);
-            }
-            "textDocument/didSave" => {
-                let doc = &params["textDocument"];
-                let uri = doc["uri"].as_str().unwrap_or("").to_string();
-                if let Some(text) = documents.get(&uri) {
-                    let scan = scan_buffer(&uri, text);
-                    let diags = diagnostics_for(&scan, text);
-                    publish(&uri, &diags);
-                }
-            }
-            "textDocument/didClose" => {
-                let doc = &params["textDocument"];
-                let uri = doc["uri"].as_str().unwrap_or("").to_string();
-                publish(&uri, &[]); // clear the gutter on close
-                documents.remove(&uri);
-            }
-            _ => {} // unknown methods and notifications are ignored
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    while let Some(msg) = read_message(&mut input) {
+        if !dispatch(&mut documents, &msg, &mut out) {
+            return; // exit request
         }
     }
+    // EOF — client gone
 }
 
 #[cfg(test)]
@@ -261,6 +267,116 @@ mod tests {
     fn uri_path_mapping() {
         assert_eq!(uri_to_path("file:///a/b.py"), "a/b.py");
         assert_eq!(uri_to_path("plain.py"), "plain.py");
+    }
+
+    #[test]
+    fn dispatch_initialize_responds_with_capabilities() {
+        let mut docs = HashMap::new();
+        let mut out = Vec::new();
+        let msg = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("textDocumentSync"));
+        assert!(text.contains("\"id\":1"));
+    }
+
+    #[test]
+    fn dispatch_didopen_publishes_findings_and_caches_text() {
+        let mut docs = HashMap::new();
+        let mut out = Vec::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": "file:///tmp/buf.py", "text": "def f():\n    return a * 60\n"}}
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("publishDiagnostics"));
+        assert!(text.contains("magic number"));
+        assert!(docs.contains_key("file:///tmp/buf.py"));
+    }
+
+    #[test]
+    fn dispatch_didsave_republishes_cached_document() {
+        let mut docs = HashMap::new();
+        docs.insert(
+            "file:///tmp/buf.py".to_string(),
+            "def f():\n    return a * 60\n".to_string(),
+        );
+        let mut out = Vec::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didSave",
+            "params": {"textDocument": {"uri": "file:///tmp/buf.py"}}
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        assert!(String::from_utf8(out).unwrap().contains("magic number"));
+    }
+
+    #[test]
+    fn dispatch_didsave_unknown_doc_publishes_nothing() {
+        let mut docs = HashMap::new();
+        let mut out = Vec::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didSave",
+            "params": {"textDocument": {"uri": "file:///tmp/other.py"}}
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn dispatch_didchange_full_sync_republishes() {
+        let mut docs = HashMap::new();
+        let mut out = Vec::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/buf.py"},
+                "contentChanges": [{"text": "def f():\n    return a * 60\n"}]
+            }
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        assert!(String::from_utf8(out).unwrap().contains("magic number"));
+        assert!(docs.contains_key("file:///tmp/buf.py"));
+    }
+
+    #[test]
+    fn dispatch_didclose_clears_gutter_and_doc() {
+        let mut docs = HashMap::new();
+        docs.insert("file:///tmp/buf.py".to_string(), "x".to_string());
+        let mut out = Vec::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": {"textDocument": {"uri": "file:///tmp/buf.py"}}
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("\"diagnostics\":[]"));
+        assert!(!docs.contains_key("file:///tmp/buf.py"));
+    }
+
+    #[test]
+    fn dispatch_exit_and_shutdown() {
+        let mut docs = HashMap::new();
+        let mut out = Vec::new();
+        let msg = serde_json::json!({"jsonrpc": "2.0", "method": "exit"});
+        assert!(!dispatch(&mut docs, &msg, &mut out));
+        let msg = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "shutdown"});
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        assert!(String::from_utf8(out).unwrap().contains("\"result\":null"));
+    }
+
+    #[test]
+    fn dispatch_unknown_method_is_ignored() {
+        let mut docs = HashMap::new();
+        let mut out = Vec::new();
+        let msg = serde_json::json!({"jsonrpc": "2.0", "method": "$/someThing"});
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        assert!(out.is_empty());
     }
 
     #[test]

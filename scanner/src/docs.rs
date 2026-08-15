@@ -230,3 +230,80 @@ fn docs_reachability(repo: &Path) -> Vec<Finding> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn link_targets_extract_and_skip_fences() {
+        let text = "see [here](docs/PRD.md) and [x](skill://foo)\n```\n[fence](nope.md)\n```\n[a](after.md)\n";
+        let targets = md_link_targets(text);
+        assert_eq!(targets, vec!["docs/PRD.md", "after.md"]); // skill:// skipped, fence skipped
+    }
+
+    #[test]
+    fn backtick_paths_extract_outside_fences() {
+        let text = "use `docs/PRD.md` and \n```\n`docs/PLAN.md`\n```\n";
+        let paths = md_backtick_paths(text);
+        assert_eq!(paths, vec!["docs/PRD.md"]); // the fenced one is skipped
+    }
+
+    #[test]
+    fn anchors_are_stripped() {
+        let targets = md_link_targets("[go](docs/PRD.md#goals)");
+        assert_eq!(targets, vec!["docs/PRD.md"]);
+    }
+
+    #[test]
+    fn broken_link_is_found_in_docs_findings() {
+        let dir = std::env::temp_dir().join(format!("docs_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/guide.md"), "see [missing](nope.md)\n").unwrap();
+        let f = docs_findings(&dir);
+        assert!(f.iter().any(|x| x.kind == "docs-link" && x.message.contains("nope.md")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backtick_path_resolves_against_repo_root_not_parent() {
+        let dir = std::env::temp_dir().join(format!("docs_root_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/PRD.md"), "").unwrap();
+        // docs/guide.md backticks docs/PRD.md — resolves at the REPO root
+        std::fs::write(dir.join("docs/guide.md"), "see `docs/PRD.md`\n").unwrap();
+        let f = docs_findings(&dir);
+        assert!(!f.iter().any(|x| x.kind == "docs-link"), "{f:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphan_doc_is_undiscoverable() {
+        let dir = std::env::temp_dir().join(format!("docs_orphan_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        // AGENTS.md exists but links nothing; the doc is unreachable
+        std::fs::write(dir.join("AGENTS.md"), "# agent\n").unwrap();
+        std::fs::write(dir.join("docs/lost.md"), "orphan\n").unwrap();
+        let f = docs_findings(&dir);
+        assert!(f
+            .iter()
+            .any(|x| x.kind == "docs-undiscoverable" && x.message.contains("lost.md")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reachable_doc_via_index_passes() {
+        let dir = std::env::temp_dir().join(format!("docs_reach_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "see [index](docs/index.md)\n").unwrap();
+        std::fs::write(dir.join("docs/index.md"), "see [guide](guide.md)\n").unwrap();
+        std::fs::write(dir.join("docs/guide.md"), "reachable\n").unwrap();
+        let f = docs_findings(&dir);
+        assert!(!f.iter().any(|x| x.kind == "docs-undiscoverable"), "{f:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -773,3 +773,345 @@ pub fn hotspot_findings(
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn node(kind: &str, name: &str, qn: &str, file: &str, ls: i64, le: i64, community: Option<i64>) -> GNode {
+        GNode {
+            kind: kind.into(),
+            name: name.into(),
+            qualified_name: qn.into(),
+            file_path: file.into(),
+            line_start: Some(ls),
+            line_end: Some(le),
+            community_id: community,
+        }
+    }
+
+    fn edge(kind: &str, src: &str, tgt: &str, file: &str) -> GEdge {
+        GEdge {
+            kind: kind.into(),
+            source: src.into(),
+            target: tgt.into(),
+            file_path: file.into(),
+        }
+    }
+
+    fn contract(nodes: Vec<GNode>, edges: Vec<GEdge>) -> GraphContract {
+        GraphContract {
+            contract_version: 1,
+            nodes,
+            edges,
+            communities: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn large_function_over_threshold_is_found() {
+        let c = contract(
+            vec![
+                node("Function", "big", "/repo/a.py::big", "/repo/a.py", 10, 200, None),
+                node("Function", "small", "/repo/a.py::small", "/repo/a.py", 1, 5, None),
+            ],
+            vec![],
+        );
+        let f = large_function_findings(Path::new("/repo"), &c, 120, false);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].function, "big");
+        assert_eq!(f[0].line, 10);
+        assert_eq!(f[0].kind, "large-function");
+    }
+
+    #[test]
+    fn large_function_skips_tests_without_flag() {
+        let c = contract(
+            vec![node(
+                "Function",
+                "big",
+                "/repo/tests/t.py::big",
+                "/repo/tests/t.py",
+                10,
+                200,
+                None,
+            )],
+            vec![],
+        );
+        assert!(large_function_findings(Path::new("/repo"), &c, 120, false).is_empty());
+        assert_eq!(large_function_findings(Path::new("/repo"), &c, 120, true).len(), 1);
+    }
+
+    #[test]
+    fn hub_file_counts_edges_and_skips_builtins() {
+        let c = contract(
+            vec![node("Function", "f", "/repo/a.py::f", "/repo/a.py", 1, 5, None)],
+            vec![
+                edge("CALLS", "/repo/a.py::f", "len", "/repo/a.py"), // builtin — skipped
+                edge("CALLS", "/repo/a.py::f", "/repo/b.py::g", "/repo/a.py"),
+                edge("IMPORTS_FROM", "/repo/a.py", "/repo/b.py", "/repo/a.py"),
+                edge("REFERENCES", "/repo/a.py", "x", "/repo/a.py"),
+            ],
+        );
+        let f = hub_file_findings(Path::new("/repo"), &c, 3, false, &HashMap::new());
+        assert_eq!(f.len(), 1);
+        assert!(f[0].message.starts_with("3 call/import edges"));
+    }
+
+    #[test]
+    fn high_risk_untested_hot_function_is_found() {
+        // a function called 12 times, untested, name with a security keyword
+        let mut edges = Vec::new();
+        for i in 0..12 {
+            edges.push(edge(
+                "CALLS",
+                &format!("/repo/x.py::caller{i}"),
+                "/repo/a.py::login",
+                "/repo/x.py",
+            ));
+        }
+        let c = contract(
+            vec![node("Function", "login", "/repo/a.py::login", "/repo/a.py", 1, 5, None)],
+            edges,
+        );
+        let f = high_risk_findings(Path::new("/repo"), &c, 0.8, false);
+        assert_eq!(f.len(), 1);
+        // 0.3 (12 callers) + 0.3 (untested) + 0.4 (security keyword) capped at 1.0
+        assert!(f[0].message.contains("graph risk 1.00"));
+    }
+
+    #[test]
+    fn high_risk_tested_function_passes() {
+        let mut edges = vec![edge("CALLS", "/repo/x.py::c", "/repo/a.py::f", "/repo/x.py")];
+        for i in 0..5 {
+            edges.push(edge(
+                "CALLS",
+                &format!("/repo/x.py::c{i}"),
+                "/repo/a.py::f",
+                "/repo/x.py",
+            ));
+        }
+        edges.push(edge(
+            "TESTED_BY",
+            "/repo/tests/test_a.py::test_f",
+            "/repo/a.py::f",
+            "/repo/tests/test_a.py",
+        ));
+        let c = contract(
+            vec![node("Function", "f", "/repo/a.py::f", "/repo/a.py", 1, 5, None)],
+            edges,
+        );
+        // 6 callers -> 0.15, tested -> no 0.3, no keyword -> 0.15 < 0.8
+        assert!(high_risk_findings(Path::new("/repo"), &c, 0.8, false).is_empty());
+    }
+
+    #[test]
+    fn hotspot_churn_and_cc_gate() {
+        let mut churn = HashMap::new();
+        churn.insert("a.py".to_string(), 11usize); // top churn -> the candidate
+        churn.insert("b.py".to_string(), 10usize);
+        let mut cc = HashMap::new();
+        cc.insert("a.py".to_string(), 20u32);
+        cc.insert("b.py".to_string(), 5u32);
+        let f = hotspot_findings(&churn, &cc, 0.5, 15, &HashMap::new());
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].file, "a.py");
+    }
+
+    #[test]
+    fn import_cycle_is_found_with_real_files() {
+        // module_to_file needs the files to exist — use a temp dir
+        let dir = std::env::temp_dir().join(format!("crg_cycle_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("pkg")).unwrap();
+        std::fs::write(dir.join("pkg/a.py"), "").unwrap();
+        std::fs::write(dir.join("pkg/b.py"), "").unwrap();
+        let a_path = format!("{}/pkg/a.py", dir.display());
+        let b_path = format!("{}/pkg/b.py", dir.display());
+        let c = contract(
+            vec![],
+            vec![
+                edge("IMPORTS_FROM", &a_path, "pkg.b", ""),
+                edge("IMPORTS_FROM", &b_path, "pkg.a", ""),
+            ],
+        );
+        let f = cycle_findings(&dir, &c);
+        assert_eq!(f.len(), 1);
+        assert!(f[0].message.contains("import cycle"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folder_mix_split_across_communities_is_found() {
+        let mut c = contract(
+            vec![
+                node(
+                    "Function",
+                    "a1",
+                    "/repo/pkg/a1.py::a1",
+                    "/repo/pkg/a1.py",
+                    1,
+                    2,
+                    Some(1),
+                ),
+                node(
+                    "Function",
+                    "a2",
+                    "/repo/pkg/a2.py::a2",
+                    "/repo/pkg/a2.py",
+                    1,
+                    2,
+                    Some(1),
+                ),
+                node(
+                    "Function",
+                    "b1",
+                    "/repo/pkg/b1.py::b1",
+                    "/repo/pkg/b1.py",
+                    1,
+                    2,
+                    Some(2),
+                ),
+                node(
+                    "Function",
+                    "b2",
+                    "/repo/pkg/b2.py::b2",
+                    "/repo/pkg/b2.py",
+                    1,
+                    2,
+                    Some(2),
+                ),
+                node(
+                    "Function",
+                    "b3",
+                    "/repo/pkg/b3.py::b3",
+                    "/repo/pkg/b3.py",
+                    1,
+                    2,
+                    Some(2),
+                ),
+            ],
+            vec![],
+        );
+        c.communities.insert("1".into(), "models".into());
+        c.communities.insert("2".into(), "views".into());
+        let f = folder_mix_findings(Path::new("/repo"), &c);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].file, "pkg");
+    }
+
+    #[test]
+    fn layer_mix_dominant_callee_split_is_found() {
+        // a file with 6 functions: 3 call into one subsystem, 3 into another
+        let mut edges = Vec::new();
+        for i in 0..3 {
+            edges.push(edge(
+                "CALLS",
+                &format!("/repo/houses/mix.py::f{i}"),
+                &format!("/repo/houses/nodes/target{i}.py::t{i}"),
+                "/repo/houses/mix.py",
+            ));
+        }
+        for i in 0..3 {
+            edges.push(edge(
+                "CALLS",
+                &format!("/repo/houses/mix.py::g{i}"),
+                &format!("/repo/houses/sheets/target{i}.py::t{i}"),
+                "/repo/houses/mix.py",
+            ));
+        }
+        let mut c = contract(
+            vec![
+                node(
+                    "Function",
+                    "f0",
+                    "/repo/houses/mix.py::f0",
+                    "/repo/houses/mix.py",
+                    1,
+                    2,
+                    None,
+                ),
+                node(
+                    "Function",
+                    "f1",
+                    "/repo/houses/mix.py::f1",
+                    "/repo/houses/mix.py",
+                    1,
+                    2,
+                    None,
+                ),
+                node(
+                    "Function",
+                    "f2",
+                    "/repo/houses/mix.py::f2",
+                    "/repo/houses/mix.py",
+                    1,
+                    2,
+                    None,
+                ),
+                node(
+                    "Function",
+                    "g0",
+                    "/repo/houses/mix.py::g0",
+                    "/repo/houses/mix.py",
+                    1,
+                    2,
+                    None,
+                ),
+                node(
+                    "Function",
+                    "g1",
+                    "/repo/houses/mix.py::g1",
+                    "/repo/houses/mix.py",
+                    1,
+                    2,
+                    None,
+                ),
+                node(
+                    "Function",
+                    "g2",
+                    "/repo/houses/mix.py::g2",
+                    "/repo/houses/mix.py",
+                    1,
+                    2,
+                    None,
+                ),
+                node(
+                    "Function",
+                    "t0",
+                    "/repo/houses/nodes/target0.py::t0",
+                    "/repo/houses/nodes/target0.py",
+                    1,
+                    2,
+                    None,
+                ),
+                node(
+                    "Function",
+                    "t1",
+                    "/repo/houses/sheets/target1.py::t1",
+                    "/repo/houses/sheets/target1.py",
+                    1,
+                    2,
+                    None,
+                ),
+            ],
+            edges,
+        );
+        let _ = &mut c;
+        let f = layer_mix_findings(Path::new("/repo"), &c, &["houses/mix.py".to_string()]);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].file, "houses/mix.py");
+    }
+
+    #[test]
+    fn module_key_and_repo_rel() {
+        assert_eq!(
+            module_key(Path::new("/repo"), "/repo/houses/nodes/x.py"),
+            "houses/nodes"
+        );
+        assert_eq!(repo_rel(Path::new("/repo"), "/repo/a/b.py"), "a/b.py");
+        assert!(is_test_rel("tests/x.py"));
+        assert!(!is_test_rel("houses/x.py"));
+    }
+}
