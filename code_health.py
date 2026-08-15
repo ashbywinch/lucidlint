@@ -437,9 +437,13 @@ def _verdict(covered: dict[str, set[int]] | None, rel: str, info: dict, graph_te
     """
     cov = covered_span(covered, rel, info.get("line_start") or 1, info.get("line_end") or info.get("line_start") or 1)
     if graph_preferred:
+        # Stale snapshot: only 'tested' is provable. Anything else is UNKNOWN —
+        # the snapshot may predate the tests and the graph is blind to HTTP-path
+        # and in-body-import tests, so a hard 'untested' would be a false
+        # "write the failing tests first" imperative.
         if graph_tested == "tested" or cov is True:
             return "tested"
-        return "untested" if cov is False else "unknown"
+        return "unknown"
     if cov is not None:
         return "tested" if cov else "untested"
     return graph_tested or "unknown"
@@ -591,6 +595,7 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
                 top = sorted(fns, key=lambda f: f.complexity, reverse=True)[:3]
                 if top:
                     fat = " fattest: " + ", ".join(f"{f.name}:{f.lineno} (CC {f.complexity})" for f in top)
+                    anchor = top[0].lineno
         except ImportError:
             pass
         message += fat
@@ -600,7 +605,7 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
                 "kind": "hub-file",
                 "severity": "fail",
                 "file": rel,
-                "line": first or 1,
+                "line": anchor if fat else (first or 1),
                 "function": "",
                 "message": message,
                 "metric": row["edge_count"],
@@ -897,14 +902,19 @@ def main() -> int:
         elif fails:
             top = fails[0]
             mine = sum(1 for a in fails if a.get("in_diff"))
-            mine_txt = f"; {mine} of {len(fails)} in your diff" if diff else "; diff base unresolved"
-            print(f"code-health: {len(fails)} action(s) to fix (+{len(acks)} acknowledged in baseline){mine_txt}, "
+            mine_txt = (f"; {mine} of {len(fails)} actions in files your diff touches"
+                        if diff else "; diff base unresolved")
+            mine_txt += " (no baseline — cannot tell what is new)"
+            targets = len({(a["file"], a.get("function", "")) for a in fails})
+            print(f"code-health: {len(fails)} action(s) across {targets} distinct function/file targets "
+                  f"(+{len(acks)} acknowledged in baseline){mine_txt}, "
                   f"top P{top['priority']} {top['file']}:{top['line']} ({top['function'] or top['kind']})")
             if graph_preferred:
-                print("WARNING: coverage snapshot predates the repo's tests — 'not covered' claims are graph-based; "
-                      "regenerate coverage (make coverage) for ground truth")
+                print("WARNING: coverage snapshot predates the repo's tests — hard 'untested' claims are suppressed; "
+                      "run --refresh-coverage (make coverage) for definite test-status verdicts")
             print("priority = percentile of raw risk (metric norm x (1 + churn/30) x (1 + callers/5)); "
-                  "norms: CC/40, lines/200, edges/400, risk/1 — the displayed thresholds are the fail bars, not the norms; "
+                  "norms: CC/40, lines/200, edges/400, risk/1 (norm capped at 1.0, churn factor at 1.5, callers factor at 1.0) "
+                  "— the displayed thresholds are the fail bars, not the norms; "
                   "thresholds: CC>=" + str(args.max_complexity) + ", fn>=" + str(args.max_function_lines) +
                   " lines, file>=" + str(args.max_file_edges) + " edges, risk>=" + str(args.max_risk) +
                   ", hotspot top " + f"{args.hotspot_top_frac:.0%}" + " by churn with CC>=" + str(args.hotspot_min_cc) +
