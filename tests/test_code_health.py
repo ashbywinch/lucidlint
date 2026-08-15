@@ -21,6 +21,7 @@ import json
 import sqlite3
 import sys
 import types
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -1870,6 +1871,6 @@ def test_in_diff_marking_survives_merge(tmp_path):
         args = argparse.Namespace(max_complexity=15, max_function_lines=120,
                                   max_file_edges=150, max_risk=0.8, include_tests=False,
                                   hotspot_top_frac=0.1, hotspot_min_cc=15)
-        actions = ch._collect_actions(repo, args, {}, {}, None, False, "")
+        actions = ch._collect_actions(repo, args, Counter(), {}, None, False, "")
     merged = ch._dedupe_merge(actions, {"houses/app.py"})
     assert merged and all(a.in_diff for a in merged)
