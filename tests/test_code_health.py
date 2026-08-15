@@ -596,3 +596,49 @@ def test_main_priority_percentile(tmp_path, capsys):
     assert rc == 1
     out = capsys.readouterr().out
     assert "P99" in out or "P98" in out or "P97" in out
+
+
+# --------------------------------------------------------------------------- record-shape integration
+def test_record_actions(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "def load(x: dict[str, Any]) -> dict[str, Any]:\n"
+        "    return {\"a\": 1, \"b\": x}\n"
+    )
+    with Env(routes=git_routes()):
+        actions = ch._record_actions(repo, False, {}, {})
+    kinds = [a for a in actions if a["kind"] == "record-shape"]
+    # grab-bag param (line 1), grab-bag return (line 1), return-position dict literal (line 2)
+    assert len(kinds) == 3
+    assert all(a["file"] == "houses/app.py" for a in kinds)
+    assert "record-shape" in ch.ACTION_KINDS
+
+
+def test_record_actions_skips_tests(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "tests" / "unit" / "test_app.py").write_text(
+        "def helper() -> dict[str, Any]:\n    return {}\n")
+    with Env(routes=git_routes()):
+        actions = ch._record_actions(repo, False, {}, {})
+    assert actions == []
+    with Env(routes=git_routes()):
+        actions = ch._record_actions(repo, True, {}, {})
+    assert len(actions) >= 1
+
+
+def test_merge_keeps_file_level_kinds(tmp_path, capsys):
+    """Hotspot + hub-file on the same file are different problems — both survive the merge."""
+    repo = make_repo(tmp_path)
+    abs_app = str(repo / "houses" / "app.py")
+    make_graph(repo, nodes=[("Function", "a", f"{abs_app}::a", abs_app, 1, 3, None, None, 0)],
+               edges=[("CALLS", f"{abs_app}::a", "x", abs_app, 2)],
+               risks=[(1, f"{abs_app}::a", 0.9, 1, "tested")])
+    # one file-level hotspot + one hub-file + one high-risk on the same file
+    history = "2026-08-01\nhouses/app.py\n2026-08-02\nhouses/app.py\n"
+    with Env(routes=git_routes(history=history), functions=[[FakeFn("a", 1, 20)], [FakeFn("a", 1, 20)]]):
+        churn, last = ch.file_history(repo)
+        actions = ch.graph_actions(repo, 120, 1, 0.8, False, churn, last, None, False, "")
+        actions += ch.hotspot_actions(repo, 1.0, 15, churn, last)
+        merged = ch._merge_targets(ch._dedupe(actions))
+    kinds = {a["kind"] for a in merged}
+    assert kinds == {"hub-file", "high-risk", "hotspot"}  # all three survive

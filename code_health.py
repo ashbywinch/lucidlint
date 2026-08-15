@@ -34,13 +34,14 @@ import re
 import sqlite3
 import subprocess
 import sys
+import check_records
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
 EXCLUDED_DIRS = {".git", ".venv", "node_modules", "__pycache__", "dist", "build", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 
-ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk")
+ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk", "record-shape")
 
 # Injectable seam: tests assign code_health.radon_visitor to a fake. Loaded
 # lazily so the tool runs without radon until complexity analysis is needed.
@@ -71,6 +72,7 @@ GUIDANCE = {
     "hub-file": "Decide what this file is first: if it is an assembly/composition root whose job is wiring (app layer, router), move handler logic out to the service layer and keep the assembly thin — the cross-module orchestration is its job, not a smell. Otherwise separate the concerns it mixes into modules with narrow, stable interfaces.",
     "hotspot": "Make the volatile part small and data-driven behind a stable interface — frequent changes become cheap and cannot disturb the stable core.",
     "high-risk": "Pin behavior with tests, then reduce the caller surface — when many things depend on it, the simplest code is the safest.",
+    "record-shape": "The record wants a class — named fields with domain meaning, so a reader sees what the data IS without tracing it (encapsulation, obvious correctness). Make a small domain class/dataclass; maps (dict[str, T] of a domain class) and constant lookup tables stay dicts.",
 }
 
 
@@ -372,6 +374,7 @@ def _raw_score(kind: str, metric: float, churn: int, callers: int | None = None)
     instead of saturating at 99.
     """
     norm = {
+        "record-shape": 0.7,
         "complexity": min(metric / 40, 1.0),
         "large-function": min(metric / 200, 1.0),
         "hub-file": min(metric / 400, 1.0),
@@ -875,13 +878,21 @@ def _percentile_rank(unique: list[dict], diff: set[str]) -> None:
         a["in_diff"] = a["file"] in diff
 
 
+def _merge_key(a: dict) -> tuple:
+    """(file, function, kind-group): complexity and large-function are one fix family;
+    every other kind (hotspot, hub-file, high-risk, record-shape) is its own target —
+    a hub-file and a hotspot on the same file are different problems."""
+    group = a["kind"] if a["kind"] not in ("complexity", "large-function") else "fn"
+    return (a["file"], a.get("function", ""), group)
+
+
 def _merge_targets(unique: list[dict]) -> list[dict]:
     """Per-target merge: complexity + large-function on the same function is one fix."""
     merged: dict[tuple, dict] = {}
     for a in sorted(unique, key=lambda a: (-a["raw"], a["file"], a["line"])):
-        key = (a["file"], a.get("function", ""))
-        if not a.get("function") or key not in merged:
-            merged.setdefault(key, a)
+        key = _merge_key(a)
+        if key not in merged:
+            merged[key] = a
         else:
             prev = merged[key]
             prev["kinds"] = sorted({prev.get("kind"), a["kind"]})
@@ -1010,11 +1021,39 @@ def _render_text(repo: Path, args, unique: list[dict], fails: list[dict], acks: 
     _render_actions(repo, args, fails, acks)
 
 
+def _record_actions(repo: Path, include_tests: bool,
+                    file_churn: Counter[str], last_modified: dict[str, str]) -> list[dict]:
+    """Record-shaped collections (bare dicts/tuples as records) via check_records."""
+    actions: list[dict] = []
+    for finding in check_records.scan([repo]).findings:
+        rel = rel_path(repo, finding.split(":", 1)[0])
+        if not include_tests and is_test_path(rel):
+            continue
+        line = 1
+        m = re.search(r"\(line (\d+)\)", finding)
+        if m:
+            line = int(m.group(1))
+        fn = ""
+        m = re.search(r"of (\w+) \(line", finding)
+        if m:
+            fn = m.group(1)
+        body = finding.split(": ", 1)[1] if ": " in finding else finding
+        churn = file_churn.get(rel, 0)
+        actions.append({
+            "kind": "record-shape", "severity": "fail", "file": rel, "line": line, "function": fn,
+            "message": f"{body} — {GUIDANCE['record-shape']}", "metric": 1, "churn": churn,
+            "last_modified": last_modified.get(rel, ""), "tested": "", "note": "",
+            "raw": _raw_score("record-shape", 1, churn),
+        })
+    return actions
+
+
 def _collect_actions(repo: Path, args, file_churn, last_modified, covered, graph_preferred: bool, stale_note: str) -> list[dict]:
     actions: list[dict] = []
     actions += complexity_actions(repo, args.max_complexity, args.include_tests, file_churn, last_modified, covered, graph_preferred, stale_note)
     actions += graph_actions(repo, args.max_function_lines, args.max_file_edges, args.max_risk, args.include_tests, file_churn, last_modified, covered, graph_preferred, stale_note)
     actions += hotspot_actions(repo, args.hotspot_top_frac, args.hotspot_min_cc, file_churn, last_modified)
+    actions += _record_actions(repo, args.include_tests, file_churn, last_modified)
     return actions
 
 
