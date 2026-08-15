@@ -86,7 +86,7 @@ def _rust_output(binary: Path) -> dict:
 
 def _python_side() -> tuple[set, set]:
     """(cc entries, findings) from the Python implementation."""
-    cc: set[tuple[str, str, int]] = set()
+    cc: set[tuple[str, str, int, int]] = set()  # (rel, name, lineno, cc)
     findings: set[tuple[str, str, int]] = set()
     visitor = ch._radon_visitor()
     for py in CORPUS:
@@ -97,7 +97,7 @@ def _python_side() -> tuple[set, set]:
             continue
         try:
             for f in ComplexityVisitor.from_code(src).functions:
-                cc.add((rel, f.name, f.complexity))
+                cc.add((rel, f.name, f.lineno, f.complexity))
         except SyntaxError:
             pass
         # include_tests=True so the fixtures take the general scan branch —
@@ -119,15 +119,15 @@ def _python_side() -> tuple[set, set]:
 def test_cc_parity(binary: Path):
     rust = _rust_output(binary)
     rust_map = {
-        (e["file"].replace(str(ROOT) + "/", ""), e["function"]): e["cc"] for e in rust["cc"]
+        (e["file"].replace(str(ROOT) + "/", ""), e["function"], e["line"]): e["cc"] for e in rust["cc"]
     }
-    py_map = {(f, n): c for f, n, c in _python_side()[0]}
-    # the decorated-function line offset is not part of the identity — a
-    # function present on both sides must have identical CC
+    py_map = {(f, n, ln): c for f, n, ln, c in _python_side()[0]}
+    # identity is (file, function, def line, cc) — the Rust core reports the
+    # def line like radon's fn.lineno, so decorated functions agree exactly
     mismatch_pairs = [
-        (f, n, rust_map[(f, n)], py_map[(f, n)])
-        for f, n in rust_map
-        if f in py_map and n in py_map and rust_map[(f, n)] != py_map[(f, n)]
+        (f, n, ln, rust_map[(f, n, ln)], py_map[(f, n, ln)])
+        for f, n, ln in rust_map
+        if (f, n, ln) in py_map and rust_map[(f, n, ln)] != py_map[(f, n, ln)]
     ]
     assert not mismatch_pairs, f"CC mismatches: {mismatch_pairs[:5]}"
     missing = [k for k in py_map if k not in rust_map]

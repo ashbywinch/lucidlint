@@ -83,6 +83,9 @@ struct ScanState<'a> {
     skeletons: Vec<SkeletonFn>,
     /// File is under a test path — reference-scan split + skeleton skip.
     is_test: bool,
+    /// radon's visit_Assert never recurses: an assert counts 1 and its
+    /// test/msg subtrees contribute no decisions. Bumped while walking one.
+    suppress_decisions: u32,
 }
 
 fn line_of(source: &str, offset: ruff_text_size::TextSize) -> usize {
@@ -200,10 +203,13 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 let gate_cc = if module_level { cc } else { 0 };
                 closure_findings(self, stmt, gate_cc, span);
                 if module_level {
+                    // the def line (name range), not the decorator — radon's
+                    // fn.lineno; the parity test's decorated-line offset
+                    // normalization existed because of this difference
                     self.cc.push(FnCc {
                         file: self.file.to_string(),
                         function: f.name.to_string(),
-                        line: line_of(self.source, f.range.start()),
+                        line: def_line,
                         cc,
                     });
                 }
@@ -284,7 +290,15 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 _ => {}
             }
         }
+        // radon's visit_Assert does not recurse — the assert's subtrees
+        // contribute no decisions (verified on 6.0.1)
+        if matches!(stmt, Stmt::Assert(_)) {
+            self.suppress_decisions += 1;
+        }
         walk_stmt(self, stmt);
+        if matches!(stmt, Stmt::Assert(_)) {
+            self.suppress_decisions -= 1;
+        }
         self.parent_stack.pop();
     }
 
@@ -320,29 +334,34 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
         if let Some(scope) = self.fn_stack.last_mut() {
             let slot = &mut scope.decisions;
             match expr {
-                Expr::BoolOp(b) => *slot += b.values.len().saturating_sub(1) as u32,
-                Expr::If(_) => *slot += 1,
-                // radon's lambda: +0, but the body IS walked (verified on 6.0.1)
-                // radon counts EACH generator clause (for x in ...) plus each
-                // if — a two-for comprehension is +2, not +1 (verified)
-                Expr::ListComp(c) => {
-                    *slot += c.generators.len() as u32
-                        + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
-                }
-                Expr::SetComp(c) => {
-                    *slot += c.generators.len() as u32
-                        + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
-                }
-                Expr::DictComp(c) => {
-                    *slot += c.generators.len() as u32
-                        + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
-                }
-                Expr::Generator(c) => {
-                    *slot += c.generators.len() as u32
-                        + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
-                }
                 Expr::NumberLiteral(n) => self.magic_check(n),
-                _ => {}
+                _ if self.suppress_decisions > 0 => {}
+                _ => {
+                    match expr {
+                        Expr::BoolOp(b) => *slot += b.values.len().saturating_sub(1) as u32,
+                        Expr::If(_) => *slot += 1,
+                        // radon's lambda: +0, but the body IS walked (verified on 6.0.1)
+                        // radon counts EACH generator clause (for x in ...) plus each
+                        // if — a two-for comprehension is +2, not +1 (verified)
+                        Expr::ListComp(c) => {
+                            *slot += c.generators.len() as u32
+                                + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
+                        }
+                        Expr::SetComp(c) => {
+                            *slot += c.generators.len() as u32
+                                + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
+                        }
+                        Expr::DictComp(c) => {
+                            *slot += c.generators.len() as u32
+                                + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
+                        }
+                        Expr::Generator(c) => {
+                            *slot += c.generators.len() as u32
+                                + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
         self.parent_stack.push(ParentEntry::Expr(expr.clone()));
@@ -852,7 +871,7 @@ mod tests {
     fn cc_loops_try_assert_match_boolop() {
         let src = "def f(xs, a, b):\n    for x in xs:\n        if x:\n            break\n    else:\n        return 0\n    try:\n        g()\n    except ValueError:\n        h()\n    else:\n        k()\n    assert a and b\n    match a:\n        case 1:\n            return 1\n        case _:\n            return 0\n";
         let (_, cc, _) = scan_cc(src);
-        assert_eq!(cc[0].cc, 9); // for+else(2) if(1) try+handler+else(3) assert(1) boolop(1) match-case(1) + base 1
+        assert_eq!(cc[0].cc, 8); // for+else(2) if(1) try+handler+else(3) assert(1) match-case(1) + base 1 — the boolop under assert does NOT count (radon's visit_Assert never recurses)
     }
 
     #[test]
@@ -861,6 +880,15 @@ mod tests {
         let (_, cc, _) = scan_cc(src);
         assert_eq!(cc.len(), 1);
         assert_eq!(cc[0].cc, 2); // only the outer if counts
+    }
+
+    #[test]
+    fn cc_assert_does_not_recurse() {
+        // radon's visit_Assert short-circuits: boolop/ternary/comp inside
+        // an assert contribute nothing — only the assert itself counts
+        let src = "def f(a, b, y):\n    assert a and b\n    assert [x for x in y if x]\n    return a\n";
+        let (_, cc, _) = scan_cc(src);
+        assert_eq!(cc[0].cc, 3); // base + 2 asserts; the boolop/comp/ifs do not count
     }
 
     #[test]

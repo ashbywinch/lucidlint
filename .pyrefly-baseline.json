@@ -1,9 +1,9 @@
 {
  "errors": [
   {
-   "line": 497,
+   "line": 498,
    "column": 18,
-   "stop_line": 497,
+   "stop_line": 498,
    "stop_column": 37,
    "path": "code_health.py",
    "code": -2,
@@ -13,9 +13,9 @@
    "severity": "error"
   },
   {
-   "line": 665,
+   "line": 666,
    "column": 35,
-   "stop_line": 665,
+   "stop_line": 666,
    "stop_column": 51,
    "path": "code_health.py",
    "code": -2,
@@ -25,9 +25,9 @@
    "severity": "error"
   },
   {
-   "line": 990,
+   "line": 1011,
    "column": 23,
-   "stop_line": 990,
+   "stop_line": 1011,
    "stop_column": 51,
    "path": "code_health.py",
    "code": -2,
@@ -37,9 +37,21 @@
    "severity": "error"
   },
   {
-   "line": 1146,
+   "line": 1054,
+   "column": 33,
+   "stop_line": 1054,
+   "stop_column": 47,
+   "path": "code_health.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `cc_by_rel`",
+   "concise_description": "Object of class `NoneType` has no attribute `cc_by_rel`",
+   "severity": "error"
+  },
+  {
+   "line": 1205,
    "column": 5,
-   "stop_line": 1148,
+   "stop_line": 1207,
    "stop_column": 6,
    "path": "code_health.py",
    "code": -2,
@@ -49,9 +61,9 @@
    "severity": "error"
   },
   {
-   "line": 1149,
+   "line": 1208,
    "column": 5,
-   "stop_line": 1151,
+   "stop_line": 1210,
    "stop_column": 6,
    "path": "code_health.py",
    "code": -2,
@@ -61,9 +73,9 @@
    "severity": "error"
   },
   {
-   "line": 1152,
+   "line": 1211,
    "column": 5,
-   "stop_line": 1154,
+   "stop_line": 1213,
    "stop_column": 6,
    "path": "code_health.py",
    "code": -2,
@@ -73,9 +85,9 @@
    "severity": "error"
   },
   {
-   "line": 1156,
+   "line": 1215,
    "column": 12,
-   "stop_line": 1156,
+   "stop_line": 1215,
    "stop_column": 19,
    "path": "code_health.py",
    "code": -2,
@@ -85,9 +97,9 @@
    "severity": "error"
   },
   {
-   "line": 1333,
+   "line": 1392,
    "column": 22,
-   "stop_line": 1333,
+   "stop_line": 1392,
    "stop_column": 28,
    "path": "code_health.py",
    "code": -2,
@@ -97,9 +109,9 @@
    "severity": "error"
   },
   {
-   "line": 1517,
+   "line": 1576,
    "column": 23,
-   "stop_line": 1517,
+   "stop_line": 1576,
    "stop_column": 51,
    "path": "code_health.py",
    "code": -2,
@@ -109,9 +121,9 @@
    "severity": "error"
   },
   {
-   "line": 1541,
+   "line": 1600,
    "column": 13,
-   "stop_line": 1554,
+   "stop_line": 1613,
    "stop_column": 14,
    "path": "code_health.py",
    "code": -2,
@@ -121,9 +133,9 @@
    "severity": "error"
   },
   {
-   "line": 1556,
+   "line": 1615,
    "column": 12,
-   "stop_line": 1556,
+   "stop_line": 1615,
    "stop_column": 19,
    "path": "code_health.py",
    "code": -2,
@@ -133,9 +145,9 @@
    "severity": "error"
   },
   {
-   "line": 2289,
+   "line": 2348,
    "column": 14,
-   "stop_line": 2289,
+   "stop_line": 2348,
    "stop_column": 25,
    "path": "code_health.py",
    "code": -2,
@@ -145,9 +157,9 @@
    "severity": "error"
   },
   {
-   "line": 2291,
+   "line": 2350,
    "column": 55,
-   "stop_line": 2291,
+   "stop_line": 2350,
    "stop_column": 66,
    "path": "code_health.py",
    "code": -2,
@@ -157,9 +169,9 @@
    "severity": "error"
   },
   {
-   "line": 2322,
+   "line": 2381,
    "column": 18,
-   "stop_line": 2322,
+   "stop_line": 2381,
    "stop_column": 28,
    "path": "code_health.py",
    "code": -2,
@@ -169,9 +181,9 @@
    "severity": "error"
   },
   {
-   "line": 2328,
+   "line": 2387,
    "column": 26,
-   "stop_line": 2328,
+   "stop_line": 2387,
    "stop_column": 37,
    "path": "code_health.py",
    "code": -2,
@@ -181,9 +193,9 @@
    "severity": "error"
   },
   {
-   "line": 2330,
+   "line": 2389,
    "column": 75,
-   "stop_line": 2330,
+   "stop_line": 2389,
    "stop_column": 86,
    "path": "code_health.py",
    "code": -2,
@@ -193,9 +205,9 @@
    "severity": "error"
   },
   {
-   "line": 2564,
+   "line": 2623,
    "column": 23,
-   "stop_line": 2564,
+   "stop_line": 2623,
    "stop_column": 33,
    "path": "code_health.py",
    "code": -2,
@@ -205,9 +217,9 @@
    "severity": "error"
   },
   {
-   "line": 2604,
+   "line": 2663,
    "column": 48,
-   "stop_line": 2604,
+   "stop_line": 2663,
    "stop_column": 55,
    "path": "code_health.py",
    "code": -2,
@@ -217,9 +229,9 @@
    "severity": "error"
   },
   {
-   "line": 2611,
+   "line": 2670,
    "column": 30,
-   "stop_line": 2611,
+   "stop_line": 2670,
    "stop_column": 41,
    "path": "code_health.py",
    "code": -2,
@@ -229,9 +241,9 @@
    "severity": "error"
   },
   {
-   "line": 2613,
+   "line": 2672,
    "column": 92,
-   "stop_line": 2613,
+   "stop_line": 2672,
    "stop_column": 103,
    "path": "code_health.py",
    "code": -2,
@@ -241,9 +253,9 @@
    "severity": "error"
   },
   {
-   "line": 2763,
+   "line": 2822,
    "column": 30,
-   "stop_line": 2763,
+   "stop_line": 2822,
    "stop_column": 40,
    "path": "code_health.py",
    "code": -2,
@@ -253,9 +265,9 @@
    "severity": "error"
   },
   {
-   "line": 3951,
+   "line": 4010,
    "column": 39,
-   "stop_line": 3951,
+   "stop_line": 4010,
    "stop_column": 50,
    "path": "code_health.py",
    "code": -2,

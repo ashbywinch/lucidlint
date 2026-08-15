@@ -55,6 +55,7 @@ import subprocess
 import sys
 import time
 import tokenize
+import types
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -852,6 +853,7 @@ class RustFindings(NamedTuple):
     a named object, not a bare map (the record-shape rule's escape hatch)."""
 
     by_rel: dict[str, list[LatentFinding]]
+    cc_by_rel: dict[str, list[tuple[str, int, int]]]
 
     def for_rel(self, rel: str) -> list[LatentFinding]:
         return self.by_rel.get(rel, [])
@@ -908,6 +910,7 @@ class _RustScan:
                 "(the Python engine exists only as the parity-test reference)"
             )
         result: dict[str, list[LatentFinding]] | None = None
+        cc_result: dict[str, list[tuple[str, int, int]]] = {}
         if files:
             result = {}
             try:
@@ -933,11 +936,22 @@ class _RustScan:
                                 severity=f.get("severity", "fail"),
                             )
                         )
+                    for e in data.get("cc", []):
+                        rel = _rust_finding_rel(e.get("file", ""), repo, rels_set)
+                        if rel is None:
+                            continue
+                        cc_result.setdefault(rel, []).append(
+                            (e.get("function", ""), int(e.get("line", 0)), int(e.get("cc", 0)))
+                        )
                 else:
                     result = None
             except _SCANNER_FAILURES:  # code-health: ignore except degraded runs report nothing — visible
                 result = None
-        wrapped = RustFindings(result) if result is not None else None
+        wrapped = (
+            RustFindings(result, cc_result)
+            if result is not None
+            else None
+        )
         self._cache[key] = wrapped
         return wrapped
 
@@ -977,11 +991,18 @@ def complexity_actions(
     stale_note: str,
     only_rel: str | None = None,
 ) -> list[Action]:
-    """Cyclomatic complexity per function via radon's fast pure-Python analyzer."""
+    """Cyclomatic complexity per function — CC from the Rust scan core when
+    active (radon-equivalent, parity-tested; removes the radon dependency),
+    else radon's fast pure-Python analyzer."""
+    files = _py_files(repo, only_rel)
+    if RUST_SCAN.active(repo):
+        return _rust_complexity_actions(
+            repo, max_cc, include_tests, files, covered, graph_preferred, stale_note, file_churn, last_modified
+        )
     complexity_visitor = _radon_visitor()
     conn = _graph_conn(repo)
-    actions: list[Action] = []
-    for sf in _py_files(repo, only_rel):
+    actions = []
+    for sf in files:
         py, rel = sf.py, sf.rel
         if not include_tests and ("/test" in f"/{rel}" or rel.startswith("test")):
             continue
@@ -1000,6 +1021,44 @@ def complexity_actions(
             actions.append(
                 _complexity_action(
                     repo, rel, fn, max_cc, conn, source, covered, graph_preferred, stale_note, file_churn, last_modified
+                )
+            )
+    return actions
+
+
+def _rust_complexity_actions(
+    repo: Path,
+    max_cc: int,
+    include_tests: bool,
+    files: list[SourceFile],
+    covered,
+    graph_preferred: bool,
+    stale_note: str,
+    file_churn: Counter[str],
+    last_modified: dict[str, str],
+) -> list[Action]:
+    """Complexity actions from the Rust scan core's CC array (radon-
+    equivalent, parity-tested) — same graph/coverage verdicts as the radon
+    path, with a shim fn object for _complexity_action."""
+    rust = RUST_SCAN.load(repo, files)
+    conn = _graph_conn(repo)
+    actions: list[Action] = []
+    for sf in files:
+        py, rel = sf.py, sf.rel
+        if not include_tests and is_test_path(rel):
+            continue
+        try:
+            source = py.read_text(encoding="utf-8", errors="replace")
+        except (OSError, UnicodeDecodeError):  # code-health: ignore except an unreadable file is skipped
+            continue
+        for name, lineno, cc in rust.cc_by_rel.get(rel, []):
+            if cc < max_cc:
+                continue
+            fn = types.SimpleNamespace(name=name, lineno=lineno, complexity=cc)
+            actions.append(
+                _complexity_action(
+                    repo, rel, fn, max_cc, conn, source, covered, graph_preferred, stale_note,
+                    file_churn, last_modified,
                 )
             )
     return actions
