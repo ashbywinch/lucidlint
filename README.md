@@ -43,8 +43,12 @@ tag and runs it as its review-attribution gate.
   rules from coding-standards.md deterministically: top-level imports,
   no private-symbol imports, no `global`/module-level mutable state,
   catches that fail fast (logging alone is not fail-fast), `# type: ignore`
-  with a why, vague-suffix class names that hide load, and strewing over a
-  same-module record. Lint-style exemptions: `# code-health: ignore <signal>
+  with a why, vague-suffix class names that hide load, strewing over a
+  same-module record, no ABC with a single concrete implementation, each
+  class in its own module, no fixed-tuple type aliases (they erase which
+  element is which), and no env-keyed `skipif` in tests. A `docs` kind
+  checks that markdown links resolve and every doc is discoverable from
+  AGENTS.md. Lint-style exemptions: `# code-health: ignore <signal>
   <why>` on the line (or above) — a suppression without a why is itself a
   finding. Actions are grouped by file and
   ranked by priority (percentile of metric x churn x fan-in); a baseline file
