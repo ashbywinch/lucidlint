@@ -153,10 +153,7 @@ def test_repo_wide_parity(binary: Path):
     like _duplicate_actions / _unused_actions."""
     # the binary must see the FULL repo file set (reference scan splits
     # prod vs test files)
-    all_py = sorted(
-        p for p in ROOT.rglob("*.py")
-        if not any(part in ch.EXCLUDED_DIRS for part in p.parts)
-    )
+    all_py = [sf.py for sf in ch._py_files(ROOT)]
     proc = subprocess.run([str(binary)] + [str(p) for p in all_py],
                           capture_output=True, text=True, check=True)
     rust = json.loads(proc.stdout)

@@ -1,9 +1,11 @@
 # code-health-scan — the Rust scan core
 
 The deterministic per-file + repo-wide finding engine behind the code-health
-gate. `code_health.py` shells out to it by default (one invocation per repo);
-every per-file family and the two repo-wide families (duplicate, unused)
-compute here at exact Python parity.
+gate. `code_health.py` requires it (one invocation per repo; the gate fails
+fast with "build it with `make scanner-check`" when it is missing — the
+Python engine exists only as the parity-test reference). Every per-file
+family and the two repo-wide families (duplicate, unused) compute here at
+exact Python parity.
 
 ## CLI contract
 

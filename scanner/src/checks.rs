@@ -1689,26 +1689,45 @@ pub fn is_duplicate_candidate(f: &StmtFunctionDef, skeleton_len: usize) -> bool 
     stmts.len() >= 2 && skeleton_len >= 12
 }
 
-/// `_first_duplicate`: the first LATER candidate at least 90% similar.
-pub fn first_duplicate<'a>(fns: &'a [SkeletonFn], i: usize, toks: &[String]) -> Option<(&'a SkeletonFn, f64)> {
-    for other in &fns[i + 1..] {
-        let len_diff = toks.len().abs_diff(other.skeleton.len());
-        if len_diff > (toks.len() / 5).max(2) {
-            continue;
-        }
-        let sim = dice_similarity(toks, &other.skeleton);
-        if sim >= 0.9 {
-            return Some((other, sim));
-        }
-    }
-    None
-}
-
 /// Cross-file copy-paste findings (`_duplicate_actions`).
+///
+/// Not O(n²): the tolerance guard (`|len_a - len_b| <= max(2, len/5)`) means
+/// only skeletons of similar length can ever match, so candidates are
+/// bucketed by skeleton length and each one probes only the lengths within
+/// its window — near-linear for real repos, and the all-same-length
+/// degenerate case is genuinely pairwise (every candidate is a valid peer).
+/// `_first_duplicate` semantics are preserved exactly: the earliest LATER
+/// candidate (list order) at >= 90% Dice.
 pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
+    use std::collections::HashMap;
     let mut out = Vec::new();
+    let mut buckets: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, fr) in fns.iter().enumerate() {
-        if let Some((dup, sim)) = first_duplicate(fns, i, &fr.skeleton) {
+        buckets.entry(fr.skeleton.len()).or_default().push(i);
+    }
+    let mut len_keys: Vec<usize> = buckets.keys().copied().collect();
+    len_keys.sort_unstable();
+    for (i, fr) in fns.iter().enumerate() {
+        let l = fr.skeleton.len();
+        let tol = (l / 5).max(2);
+        let lo = l.saturating_sub(tol);
+        let hi = l + tol;
+        let mut best: Option<(usize, f64)> = None;
+        for &len in len_keys.iter().filter(|&&k| k >= lo && k <= hi) {
+            let bucket = &buckets[&len];
+            let start = bucket.partition_point(|&j| j <= i);
+            for &j in &bucket[start..] {
+                let sim = dice_similarity(&fr.skeleton, &fns[j].skeleton);
+                if sim >= 0.9 {
+                    if best.map_or(true, |(b, _)| j < b) {
+                        best = Some((j, sim));
+                    }
+                    break; // later members of this bucket are later indices
+                }
+            }
+        }
+        if let Some((j, sim)) = best {
+            let dup = &fns[j];
             out.push(Finding {
                 file: dup.rel.clone(),
                 line: dup.line,

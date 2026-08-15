@@ -112,7 +112,7 @@ self-check:
 	@echo "ok — the tool passes its own gate"
 
 # Run the health tool on another repo (default: the parent directory).
-code-health: deps
+code-health: deps scanner-check
 	@$(PYTHON) code_health.py --repo $(REPO)
 
 clean:

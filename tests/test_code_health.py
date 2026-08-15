@@ -81,7 +81,8 @@ class FakeSubprocess:
         self.calls.append(args)
         for pred, stdout, returncode in self.routes:
             if pred(args):
-                return FakeProc(returncode=returncode, stdout=stdout)
+                out = stdout(args) if callable(stdout) else stdout
+                return FakeProc(returncode=returncode, stdout=out)
         raise AssertionError(f"unexpected argv: {args}")
 
 
@@ -211,6 +212,13 @@ def git_routes(history="", diff="", branch="test-branch", commit="abc1234", log_
     routes.append((lambda a: is_git(a) and a[3] == "diff", diff, 0))
     routes.append((lambda a: is_git(a) and a[3] == "branch", branch, 0))
     routes.append((lambda a: is_git(a) and a[3] == "rev-parse", commit, 0))
+
+    def ls_files_stdout(args):
+        repo = Path(args[2])
+        rels = sorted(str(p.relative_to(repo)) for p in repo.rglob("*.py"))
+        return "\0".join(rels) + ("\0" if rels else "")
+
+    routes.append((lambda a: is_git(a) and a[3] == "ls-files", ls_files_stdout, 0))
     routes.append((lambda a: a[:2] == ["make", "coverage"], "", 0))
     return routes
 

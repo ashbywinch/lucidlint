@@ -788,21 +788,33 @@ class ParsedSource(NamedTuple):
 
 
 def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
-    """One rglob pass over the repo's .py files (excluded dirs applied).
+    """The repo's own .py files — git's answer, not an invented list.
 
-    Every scan pass consumes this single list — the tool used to rglob
-    four or five times per run (2.7s of glob + 3.4s of relative_to in the
-    profile). With only_rel set, returns just that file (the --file / LSP
-    mode).
+    `git ls-files --cached --others --exclude-standard` = tracked files plus
+    untracked-not-ignored: exactly what the repo's .gitignore defines as its
+    code (venvs, caches, generated output never qualify, whatever they are
+    named). One call per run, NUL-split, no quoting issues. With only_rel
+    set, returns just that file (the --file / LSP mode).
     """
     if only_rel is not None:
         py = repo / only_rel
         return [SourceFile(py, only_rel)] if py.is_file() and py.suffix == ".py" else []
-    return [
-        SourceFile(py, py.relative_to(repo).as_posix())
-        for py in sorted(repo.rglob("*.py"))
-        if not any(_excluded_part(part) for part in py.parts)
-    ]
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "*.py"],
+            capture_output=True, text=True, check=True, timeout=60,
+        )
+        rels = [r for r in proc.stdout.split("\0") if r]
+        return [SourceFile(repo / rel, rel) for rel in sorted(rels)]
+    except (OSError, SubprocessError, ValueError):
+        # git unavailable (not a repo, submodule-less edge): fall back to the
+        # rglob minus the known env/tool dirs — the pre-git behavior
+        log("git ls-files failed — falling back to rglob for the file list")
+        return [
+            SourceFile(py, py.relative_to(repo).as_posix())
+            for py in sorted(repo.rglob("*.py"))
+            if not any(_excluded_part(part) for part in py.parts)
+        ]
 
 
 class _SourceCache:
@@ -857,7 +869,6 @@ class _RustScan:
     def __init__(self) -> None:
         self._cache: dict[tuple[Path, tuple[str, ...]], RustFindings | None] = {}
         self._binary_cache: dict[Path, Path | None] = {}
-        self._warned: set[Path] = set()
         # test seam: the unit tests fake subprocess + radon and target the
         # Python engine (the parity suite validates the Rust core) — Env
         # flips this off so the binary never fires under a fake subprocess
@@ -887,9 +898,17 @@ class _RustScan:
         key = (repo, rels)
         if key in self._cache:
             return self._cache[key]
-        binary = self.binary(repo) if self.enabled else None
+        if not self.enabled:
+            # explicit Python-engine opt-in — the parity reference, tests only
+            return None
+        binary = self.binary(repo)
+        if binary is None:
+            raise RuntimeError(
+                "the Rust scan core is required — build it with `make scanner-check` "
+                "(the Python engine exists only as the parity-test reference)"
+            )
         result: dict[str, list[LatentFinding]] | None = None
-        if binary is not None and files:
+        if files:
             result = {}
             try:
                 proc = subprocess.run(
@@ -916,13 +935,10 @@ class _RustScan:
                         )
                 else:
                     result = None
-            except _SCANNER_FAILURES:  # code-health: ignore except falls back to the Python path — no finding loss
+            except _SCANNER_FAILURES:  # code-health: ignore except degraded runs report nothing — visible
                 result = None
         wrapped = RustFindings(result) if result is not None else None
         self._cache[key] = wrapped
-        if result is None and binary is not None and repo not in self._warned:
-            self._warned.add(repo)
-            log("Rust scanner unavailable (build with `make scanner-check`) — using the Python scan path")
         return wrapped
 
     def active(self, repo: Path) -> bool:
@@ -3252,10 +3268,8 @@ def _collect_classes(repo: Path, include_tests: bool) -> ClassScan:
     classes: dict[ClassRef, ast.ClassDef] = {}
     imports: dict[str, ImportAliases] = {}
     rels: list[ClassRef] = []
-    for py in sorted(repo.rglob("*.py")):
-        rel = py.relative_to(repo).as_posix()
-        if any(_excluded_part(part) for part in py.parts):
-            continue
+    for sf in _py_files(repo):
+        py, rel = sf.py, sf.rel
         if not include_tests and ("/test" in f"/{rel}" or rel.startswith("test")):
             continue
         try:
@@ -3413,9 +3427,9 @@ def _duplicate_actions(
 def _collect_functions(repo: Path) -> list[FunctionRecord]:
     """Every function with a 12+ token skeleton, for the duplication search."""
     fns: list[FunctionRecord] = []
-    for py in sorted(repo.rglob("*.py")):
-        rel = py.relative_to(repo).as_posix()
-        if any(_excluded_part(part) for part in py.parts) or "/test" in f"/{rel}" or rel.startswith("test"):
+    for sf in _py_files(repo):
+        py, rel = sf.py, sf.rel
+        if "/test" in f"/{rel}" or rel.startswith("test"):
             continue
         try:
             tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
@@ -3766,9 +3780,9 @@ def _layer_mix_actions(repo: Path, file_churn: Counter[str], last_modified: dict
     if conn is None:
         return []
     actions: list[Action] = []
-    for py in sorted(repo.rglob("*.py")):
-        rel = py.relative_to(repo).as_posix()
-        if any(_excluded_part(part) for part in py.parts) or "/test" in f"/{rel}" or rel.startswith("test"):
+    for sf in _py_files(repo):
+        py, rel = sf.py, sf.rel
+        if "/test" in f"/{rel}" or rel.startswith("test"):
             continue
         finding = _layer_mix_for_file(conn, repo, py, rel)
         if finding:
