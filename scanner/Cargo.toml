@@ -1,0 +1,17 @@
+[package]
+name = "code-health-scan"
+version = "0.1.0"
+edition = "2021"
+description = "Rust scan core for the deterministic code-health gate — ruff parser, parity-gated against the Python implementation"
+
+[dependencies]
+# PINNED: ruff's internal crates are versioned 0.0.x and move fast; the parity
+# gate depends on the parser semantics staying fixed. Bump deliberately.
+ruff_python_parser = "=0.0.9"
+ruff_python_ast = "=0.0.9"
+ruff_text_size = "=0.0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = true
