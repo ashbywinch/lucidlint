@@ -1,0 +1,47 @@
+# CI — delegates to make, never raw tool commands.
+#
+# DO NOT CHANGE:
+# - `permissions: contents: read` (+ `pull-requests: write` only while the
+#   coverage-comment step is present — drop both together if you drop it).
+# - The concurrency group: every active repo uses cancel-in-progress.
+# - Steps are exactly make targets. Never inline pip/uv logic into the
+#   workflow — CI and local dev must run the same recipes.
+# - Lint runs via `make lint-github` so findings surface as PR annotations.
+
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+  pull-requests: write   # the coverage comment step needs it; drop if you drop that step
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: make setup
+      - run: make lint-github
+      - run: make test
+      - run: make self-check
+      - run: make coverage
+      - name: Coverage summary
+        uses: irongut/CodeCoverageSummary@v1.3.0
+        with:
+          filename: coverage.xml
+          badge: true
+          fail_below_min: true
+          thresholds: '80 90'  # measured 95% — floor below the measured number, goal above
+          format: markdown
+          output: both
+      - name: Post coverage comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        if: github.event_name == 'pull_request'
+        with:
+          recreate: true
+          path: code-coverage-results.md

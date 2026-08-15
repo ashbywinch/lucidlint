@@ -1,0 +1,56 @@
+#!/usr/bin/env sh
+# Pre-push hook: run the same gate as CI — `make check` (lint + typecheck).
+#
+# Install: `make install-hooks` (copies this file to .git/hooks/pre-push).
+# Re-run `make install-hooks` after pulling updates — this file is the
+# single source of truth; the copy in .git/hooks is not versioned.
+#
+# Why `make check` and not the tools directly: CI runs `make check` (via
+# `make test`, which includes lint-check + typecheck) — delegating here
+# means the hook and CI can never drift apart. The deadlock that once
+# forced the hook to call the tools directly is gone: check targets depend
+# on `deps` (uv sync), never on install-hooks.
+#
+# CHANGE: extend the source globs if the repo adds another source type
+# or a config whose change alters the diagnostic set (pyrefly.toml).
+#
+# DO NOT CHANGE:
+# - Never run the full test suite here — too slow; tests stay in CI.
+# - The gate must not silently skip a broken file: the skip scopes to the
+#   PUSHED RANGE, never the working tree (see below).
+# - `set -e` (fail loudly on the first error — a skipped check is worse
+#   than a failed one).
+
+set -e
+
+# Only run when the push actually touches Python or the typecheck config —
+# a pure docs push shouldn't pay the check cost.
+#
+# The scope is the pushed commits, read from the hook's stdin
+# (<local ref> <local sha> <remote ref> <remote sha> per pushed ref), NOT
+# the working tree: at push time the index and worktree are clean, so a
+# worktree-based skip would exit 0 before the gate ever ran. A new branch
+# (all-zero remote sha) diffs against the empty tree, so every pushed file
+# is in scope; a deleted ref (all-zero local sha) is skipped.
+EMPTY_TREE=$(git hash-object -t tree /dev/null)
+ZERO_SHA=0000000000000000000000000000000000000000
+touched=false
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+    case $local_sha in
+        ""|$ZERO_SHA) continue ;;   # deleted ref — nothing to check
+    esac
+    base=$remote_sha
+    [ "$base" = "$ZERO_SHA" ] && base=$EMPTY_TREE
+    if [ -n "$(git diff --name-only "$base".."$local_sha" -- '*.py' 'pyrefly.toml')" ]; then
+        touched=true
+        break
+    fi
+done
+[ "$touched" = true ] || exit 0
+
+if [ ! -x .venv/bin/ruff ]; then
+    echo "pre-push: .venv missing — run 'make setup' first"
+    exit 1
+fi
+
+make check

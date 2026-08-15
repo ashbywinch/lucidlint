@@ -1,0 +1,81 @@
+# AI Code Review (the-pr-agent) — the house review bot.
+#
+# CHANGE: the pinned SHA in the check-review step's fetch of
+# check_review_posted.py — re-pin to a newer main SHA when the script
+# evolves (this repo is the script's home; omp-config mirrors this pattern).
+#
+# DO NOT CHANGE:
+# - NO actions/checkout here — deliberate. PR-Agent fetches everything via
+#   the GitHub API (the pinned config branch, the diff, the repo context
+#   files), and the action's config loader ALSO merges a [tool.pr-agent]
+#   section from pyproject.toml found in the working tree. With a checkout
+#   of the PR head, an attacker branch could ship its own pyproject.toml
+#   overriding [openai] api_base; with no checkout there is no working-tree
+#   config to read at all.
+# - PR_AGENT_CONFIG_BRANCH: config MUST come from a maintainer-controlled
+#   branch — a PR branch could ship its own .pr_agent.toml pointing
+#   api_base at an attacker endpoint, and the API key would be sent there
+#   as the Bearer token. (.pr_agent.toml is fetched via the API from this
+#   branch; 404 falls back to the default branch — never the working tree.)
+#   This is ALSO the only way the config applies at all: the action gates
+#   repo .pr_agent.toml keys by per-host allowed-keys, so without the pin
+#   the image defaults run (model gpt-5.6, api_base api.openai.com) and the
+#   model call dies with "Incorrect API key". Missing pin, not the key, is
+#   the first thing to check when that error shows.
+# - Pin the action to a real release SHA (see houses' workflow) — @latest
+#   does not resolve.
+# - The `if:` on the job: dependabot bumps are mechanical and covered by
+#   build-and-test; the AI review adds noise and its ticket-compliance step
+#   chokes on dependabot descriptions (no ticket ref). Skip the whole job.
+# - The "Check review succeeded" step: fails the PR when no review comment
+#   covers the head commit (check_review_posted.py — fetched at a pinned
+#   SHA, never from the PR head). Must PASS when a human posted "/skip"
+#   (skip_commands in .pr_agent.toml — pr-agent posts nothing on a skip).
+
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+# One review at a time per PR; a newer push cancels the stale run rather than
+# queueing behind it (rapid fix pushes never stack — with the incremental
+# /review -i config, the cancelled run's review is superseded by the new
+# push's incremental review anyway).
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-review:
+    runs-on: ubuntu-latest
+    # Dependabot bumps are mechanical and already covered by build-and-test;
+    # the AI review adds noise (and dependabot PRs lack a ticket, which the
+    # ticket-compliance step chokes on). Skip the whole job for them.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      actions: read  # the fail-loud check reads the bot's own log for the failure reason
+    steps:
+      - uses: the-pr-agent/pr-agent@f6af7d77554ff8d26adffded077e6461329e92fa   # v0.42.0 tag SHA — pin a real release SHA, @latest does not resolve
+        id: pr-agent
+        env:
+          OPENAI_KEY: ${{ secrets.OPENCODE_GO_BUILD_TOOLS_API_KEY }}
+          OPENAI_BASE_URL: https://opencode.ai/zen/go/v1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_AGENT_CONFIG_BRANCH: pr-agent-config
+
+      # Fail the PR when no "## PR Reviewer Guide" / "## Incremental PR
+      # Reviewer Guide" comment covers the head commit (the -i path posts the
+      # incremental header). The script is fetched at a pinned SHA (never
+      # from the PR head at run time — see the re-pin note below).
+      - name: Check review succeeded
+        env:
+          SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # check_review_posted.py reads GITHUB_TOKEN (the omp-config contract)
+        run: |
+          curl -fsSL -o check_review_posted.py \
+            https://raw.githubusercontent.com/ashbywinch/build-tools/7ff9a3c17a12e59e1e71912171746cbc2caa7bf9/check_review_posted.py
+          python3 check_review_posted.py

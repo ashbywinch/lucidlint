@@ -1,0 +1,10 @@
+# Pyrefly config — standalone file uses TOP-LEVEL keys, no [pyrefly] wrapper
+# (a [pyrefly] section here is silently ignored; that header belongs in
+# pyproject.toml's [tool.pyrefly]).
+preset = "default"
+
+# No file-exclude key exists in pyrefly's config schema — the
+# tests/fixtures/ exclusion lives in scripts/pyrefly-lock.py (the gate we
+# own), which drops their diagnostics; the fixtures are intentionally
+# non-compliant test input (standalone snippets, syntactically broken
+# ones included).
