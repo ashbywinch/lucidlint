@@ -328,7 +328,7 @@ GUIDANCE = {
     "docs": "A documentation standard with a checkable form is enforced in code: every relative markdown link must resolve, and every doc must be reachable from AGENTS.md through links — several hops are the norm, not a finding. AGENTS.md carries only content relevant to every agent and links group indexes; it never flat-lists the whole doc tree, and each doc keeps one distinct purpose and audience.",
     "vague-name": "A role-suffix name (Controller, Handler, Store, Repository, Manager, Orchestrator, Utils, Info) is communicative only for a thin framework-role class that delegates — an MVC controller or event handler named for its role. This class carries real weight (see the span and method count): the domain noun it operates on should be taking the name and the logic. Name the class for that noun, or move the logic into the domain classes it should be delegating to; a genuinely thin role class is fine as-is.",
     "latent-class": "Closures that capture state are a class in disguise — if the inner functions form behavior groups, extract a class per group and hoist the closures to its methods (the captured state becomes fields). If methods touch disjoint field sets, that partition is the latent seam: extract a class per group and let the connectors compose them. If the grouping is incidental (no shared state, no shared fields), leave it — the evidence is state and field access, not a guess.",
-    "record-shape": "The record wants a class — named fields with domain meaning, so a reader sees what the data IS without tracing it (encapsulation, obvious correctness). Make a small domain class/dataclass. If the shape is genuinely a map, name it by what it MEANS (CoverageLines = dict[str, set[int]]: the lines covered per file), never as SomethingDict — a *Dict alias just renames the smell. If the data crosses a boundary (parsing or serialization), the fix is to ingest it into a domain class at that boundary: parse into the type and carry the type, don't carry the bare mapping. Constant lookup tables stay at module scope, never in an interface.",
+    "record-shape": "The record wants a class — named fields with domain meaning, so a reader sees what the data IS without tracing it (encapsulation, obvious correctness). Make a small class/dataclass. If the data crosses a boundary (parsing or serialization), the fix is to ingest it into a domain class at that boundary: parse into the type and carry the type, don't carry the bare mapping. Constant lookup tables stay at module scope, never in an interface. If the keys are genuinely data (a true map: label -> value), suppress with `# code-health: ignore record-shape <why>` and name the alias by meaning — CoverageLines, never SomethingDict (a *Dict alias just renames the smell).",
 }
 
 
@@ -2813,11 +2813,55 @@ def _record_actions(repo: Path, include_tests: bool,
         churn = file_churn.get(rel, 0)
         actions.append(Action(
             kind="record-shape", severity="fail", file=rel, line=line, function=fn,
-            message=f"{body} — {GUIDANCE['record-shape']}", metric=1, churn=churn,
+            message=_record_shape_message(repo, body, rel, line), metric=1, churn=churn,
             last_modified=last_modified.get(rel, ""), tested="",
             raw=_raw_score("record-shape", 1, churn),
         ))
     return actions
+
+
+def _record_shape_message(repo: Path, body: str, rel: str, line: int) -> str:
+    """The record-shape guidance with the evidence for THIS finding named.
+
+    The generic paragraph read as dogma because its carve-outs seemed to
+    cover the very findings it fired on (an eval reviewer flagged
+    make_default_thresholds as 'a lookup table the rule exempts'). Each
+    shape kind gets its concrete reason: an Any blob has no fields; a
+    return re-creates the shape per call; a fixed-key literal is a record
+    being built; a parameter is a boundary without a type.
+    """
+    evidence = ""
+    m = re.search(r"'([^']*)'", body)
+    annotation = m.group(1) if m else body
+    if "Any" in annotation or "object" in annotation:
+        evidence += (" 'Any'/'object' values have no fields at all — every read is a string-keyed "
+                     "guess at a blob; the annotation says nothing about what the record holds.")
+    if " in parameter " in body:
+        evidence += (" A parameter is a boundary without a type — a dataclass or pydantic model is "
+                     "the framework's normal shape for request bodies and injected config.")
+    if " as return type " in body:
+        evidence += (" A return re-creates the shape at every call site; the constant-lookup-table "
+                     "carve-out is for module-scope literals, not returned shapes.")
+    if body.startswith("dict literal"):
+        keys = _literal_keys(repo, rel, line)
+        evidence += (f" The fixed string keys ({', '.join(keys)}) are fields, not data — this is a "
+                     "record being built.")
+    return f"{body} —{evidence} {GUIDANCE['record-shape']}"
+
+
+def _literal_keys(repo: Path, rel: str, line: int) -> list[str]:
+    """The constant string keys of the dict literal at line — the evidence
+    that a 'dict literal with constant keys' really is a record."""
+    try:
+        tree = ast.parse((repo / rel).read_text(encoding="utf-8", errors="replace"))
+    except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except the file already parsed in check_records; this re-parse is best-effort evidence only
+        return []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict) and node.lineno == line:
+            keys = [k.value for k in node.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+            return keys[:4] + (["..."] if len(keys) > 4 else [])
+    return []
 
 
 def _collect_actions(repo: Path, args, file_churn, last_modified, covered, graph_preferred: bool, stale_note: str) -> list[Action]:

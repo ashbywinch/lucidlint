@@ -1721,3 +1721,27 @@ def test_hub_file_excludes_builtin_calls(tmp_path):
     hub = [a for a in actions if a.kind == "hub-file"]
     assert len(hub) == 1
     assert hub[0].metric == 1  # the real CALLS edge only; print/len did not count
+
+
+def test_record_shape_message_names_the_evidence(tmp_path):
+    """Each shape kind gets its concrete reason — the generic carve-outs must
+    not seem to cover the finding (the eval's 'its own exceptions cover it'
+    objection)."""
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "from typing import Any\n"
+        "def load(x: dict[str, Any]) -> dict[str, Any]:\n"
+        "    return {\"tab\": \"view\", \"rows\": x}\n"
+    )
+    with Env(routes=git_routes()):
+        actions = ch._record_actions(repo, False, {}, {})
+    msgs = [a.message for a in actions if a.kind == "record-shape"]
+    assert len(msgs) == 3
+    # the Any blob: no fields at all
+    assert any("'Any'/'object' values have no fields at all" in m for m in msgs)
+    # the return: carve-out does not apply to returned shapes
+    assert any("carve-out is for module-scope literals, not returned shapes" in m for m in msgs)
+    # the literal: its own keys are the evidence
+    literal = [m for m in msgs if m.startswith("dict literal")]
+    assert len(literal) == 1
+    assert "fixed string keys (tab, rows) are fields, not data" in literal[0]
