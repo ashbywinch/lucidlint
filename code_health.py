@@ -467,8 +467,9 @@ def coverage_note(covered: dict[str, set[int]] | None, repo: Path, rel: str, inf
     if verdict == "untested":
         return f" Not covered by the repo's coverage data — write the failing tests first. Contract to pin: {contract}.{extend}"
     # unknown: stale snapshot and graph blind to it — verify, never assert
-    return (f" Coverage snapshot is older than the repo's tests and the graph sees no direct "
-            f"unit tests — verify with make coverage / htmlcov; if truly uncovered, pin "
+    return (f" Coverage snapshot is older than the repo's tests and the graph's TESTED_BY edges "
+            f"don't reach this function (in-body imports and HTTP-path tests are invisible to it) — "
+            f"verify with make coverage / htmlcov; if truly uncovered, pin "
             f"{contract} with tests first.{extend}")
 
 
@@ -974,7 +975,7 @@ def main() -> int:
                 print(f"\nacknowledged in baseline ({len(acks)}): " + ", ".join(f"{a['file']}:{a['line']}" for a in acks[:5]) + (" …" if len(acks) > 5 else ""))
             print("\nre-run: uv run --with radon python3 code_health.py --repo " + str(repo) +
                   (" --baseline " + str(args.baseline) if args.baseline else "") +
-                  "   | thresholds and per-action data in --json output")
+                  "   | tool lives in build-tools (github.com/ashbywinch/build-tools); thresholds and per-action data in --json output")
             print("baseline: '--update-baseline --baseline code-health.json' acknowledges today's debt so the "
                   "gate only fails on NEW actions; this report is a snapshot, not wired into CI")
         else:
