@@ -735,6 +735,10 @@ fn scan_file(path: &Path) -> FileScan {
 
 /// Longest common prefix of the passed paths — the repo root for a
 /// full-repo run; the file itself in per-file mode.
+///
+/// The char-level prefix can stop mid-component (tests/ vs tools/ share a
+/// trailing 't'), so it backs off to the last path separator — rels are
+/// always clean directory boundaries.
 fn repo_root(paths: &[String]) -> String {
     if paths.is_empty() {
         return String::new();
@@ -745,10 +749,11 @@ fn repo_root(paths: &[String]) -> String {
             prefix.truncate(prefix.len().saturating_sub(1));
         }
     }
-    // strip trailing path separators so rels are clean
+    match prefix.rfind('/') {
+        Some(idx) => prefix.truncate(idx),
+        None => prefix.clear(),
+    }
     prefix
-        .trim_end_matches('/')
-        .to_string()
 }
 
 fn rel_of(path: &str, root: &str) -> String {

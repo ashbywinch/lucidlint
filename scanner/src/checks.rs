@@ -1689,6 +1689,21 @@ pub fn is_duplicate_candidate(f: &StmtFunctionDef, skeleton_len: usize) -> bool 
     stmts.len() >= 2 && skeleton_len >= 12
 }
 
+/// Order-independent content hash of a skeleton's bigram set — identical
+/// sets collide, so the hash IS the dice=1.0 test. XOR keeps it order-free;
+/// DefaultHasher::new() has fixed keys, so the value is deterministic.
+fn bigram_set_hash(t: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = 0u64;
+    for w in t.windows(2) {
+        let mut s = std::collections::hash_map::DefaultHasher::new();
+        w[0].hash(&mut s);
+        w[1].hash(&mut s);
+        h ^= s.finish();
+    }
+    h
+}
+
 /// Cross-file copy-paste findings (`_duplicate_actions`).
 ///
 /// Not O(n²): the tolerance guard (`|len_a - len_b| <= max(2, len/5)`) means
@@ -1698,9 +1713,19 @@ pub fn is_duplicate_candidate(f: &StmtFunctionDef, skeleton_len: usize) -> bool 
 /// degenerate case is genuinely pairwise (every candidate is a valid peer).
 /// `_first_duplicate` semantics are preserved exactly: the earliest LATER
 /// candidate (list order) at >= 90% Dice.
+///
+/// Exact matches need no similarity math: dice is 1.0 iff the bigram SETS
+/// are equal (identical sets have equal cardinality), so a content-addressed
+/// set hash — XOR of per-bigram hashes, order-independent — is an O(1)
+/// collision test. Same-hash pairs skip the Dice computation entirely; the
+/// length guard still applies (identical bigram sets can arise from periodic
+/// sequences of different lengths, which the rule rejects).
 pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
     use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
     let mut out = Vec::new();
+    // precomputed set hashes — one O(len) pass per candidate, O(1) per pair
+    let hashes: Vec<u64> = fns.iter().map(|fr| bigram_set_hash(&fr.skeleton)).collect();
     let mut buckets: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, fr) in fns.iter().enumerate() {
         buckets.entry(fr.skeleton.len()).or_default().push(i);
@@ -1717,7 +1742,12 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
             let bucket = &buckets[&len];
             let start = bucket.partition_point(|&j| j <= i);
             for &j in &bucket[start..] {
-                let sim = dice_similarity(&fr.skeleton, &fns[j].skeleton);
+                // identical bigram sets -> dice is exactly 1.0, no computation
+                let sim = if hashes[j] == hashes[i] {
+                    1.0
+                } else {
+                    dice_similarity(&fr.skeleton, &fns[j].skeleton)
+                };
                 if sim >= 0.9 {
                     if best.map_or(true, |(b, _)| j < b) {
                         best = Some((j, sim));
