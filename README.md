@@ -77,7 +77,10 @@ tag and runs it as its review-attribution gate.
   finding. Actions are grouped by file and
   ranked by priority (percentile of metric x churn x fan-in); a baseline file
   (`--baseline`, `--update-baseline`) locks acknowledged debt so the gate can
-  go green incrementally, and `--base <ref>` marks actions in your branch's
+  go green incrementally — and it is a BOTH-DIRECTION lock, like the pyrefly
+  gate: a stale entry (a finding the code no longer produces) fails the run
+  with "run --update-baseline", so debt paid without shrinking the baseline
+  is drift, never silent. `--base <ref>` marks actions in your branch's
   diff. Flags: `--repo`, `--max-complexity`
   (15), `--max-function-lines` (120), `--max-file-edges` (150),
   `--max-risk` (0.8), `--hotspot-top-frac` (0.1), `--hotspot-min-cc` (15),

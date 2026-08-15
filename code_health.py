@@ -3877,11 +3877,20 @@ def _write_baseline(args, unique: list[Action]) -> int:
     return 0
 
 
-def _apply_baseline(unique: list[Action], baseline_keys: set[str]) -> None:
-    """Mark acknowledged actions so they report but never fail the gate."""
+def _apply_baseline(unique: list[Action], baseline_keys: set[str]) -> list[str]:
+    """Mark acknowledged actions so they report but never fail the gate.
+
+    Both-direction lock (the pyrefly-lock rule, same lesson): a baseline
+    entry whose finding the code no longer produces is STALE drift and
+    fails the gate — a one-way baseline lets a fix silently rot the
+    baseline until someone re-runs update-baseline. Returns the stale keys.
+    """
+    current = {action_key(a) for a in unique if a.severity != "warn"}
+    stale = sorted(baseline_keys - current)
     for a in unique:
         if action_key(a) in baseline_keys:
             a.severity = "ack"
+    return stale
 
 
 def main() -> int:
@@ -3911,7 +3920,7 @@ def main() -> int:
 
     if args.update_baseline:
         return _write_baseline(args, unique)
-    _apply_baseline(unique, _load_baseline(args.baseline))
+    stale = _apply_baseline(unique, _load_baseline(args.baseline))
     fails = [a for a in unique if a.severity == "fail"]
     warns = [a for a in unique if a.severity == "warn"]
     acks = [a for a in unique if a.severity == "ack"]
@@ -3922,10 +3931,21 @@ def main() -> int:
     else:
         _render_text(repo, args, unique, fails, warns, acks, diff, cc.label, cc.graph_preferred)
 
-    if fails and not args.warn:
+    return _gate_exit(stale, fails, args)
+
+
+def _gate_exit(stale: list[str], fails: list[Action], args) -> int:
+    """The gate verdict: stale baseline entries and fail actions both block;
+    --warn renders everything informational and exits clean."""
+    if args.warn:
+        return 0
+    if stale:
+        log(f"{len(stale)} stale baseline entr{'y' if len(stale) == 1 else 'ies'} — the code no longer "
+            f"produces these findings: {', '.join(stale[:5])}{'...' if len(stale) > 5 else ''}; "
+            f"run --update-baseline to shrink the baseline")
+    if fails:
         log(f"{len(fails)} action(s) found — failing (use --warn to run informational)")
-        return 1
-    return 0
+    return 1 if (stale or fails) else 0
 
 
 if __name__ == "__main__":

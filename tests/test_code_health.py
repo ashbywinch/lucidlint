@@ -1928,3 +1928,26 @@ def test_plain_import_private_path_is_a_finding(tmp_path):
     priv = [a for a in actions if "imports private path" in a.message]
     assert len(priv) == 1
     assert "pkg._internal" in priv[0].message
+
+
+def test_stale_baseline_entry_fails(tmp_path, capsys):
+    """Both-direction lock: a baseline entry whose finding no longer exists
+    is drift — the gate must fail with 'run --update-baseline' (a one-way
+    baseline would silently rot until someone re-runs it)."""
+    repo = make_repo(tmp_path)
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text('{"actions": ["complexity:houses/app.py:1:alpha", "complexity:houses/app.py:99:ghost"]}')
+    rc = run_main(repo, "--baseline", str(baseline), functions=[[FakeFn("alpha", 1, 20)]])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "stale baseline entr" in err
+    assert "ghost" in err  # the stale key is named
+
+
+def test_stale_baseline_clears_after_update(tmp_path):
+    repo = make_repo(tmp_path)
+    baseline = tmp_path / "baseline.json"
+    run_main(repo, "--update-baseline", "--baseline", str(baseline), functions=[[FakeFn("alpha", 1, 20)]])
+    # the stale ghost entry is gone after the refresh
+    data = json.loads(baseline.read_text())
+    assert all("ghost" not in k for k in data["actions"])
