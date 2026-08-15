@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 mod checks;
+mod graph_families;
 mod lsp;
 use checks::*;
 use checks::Q;
@@ -813,9 +814,30 @@ fn main() {
         lsp::run();
         return;
     }
-    let root = repo_root(&args);
+    // flag parsing: --graph <json> --churn <json> --include-tests then files
+    let mut graph_path: Option<String> = None;
+    let mut churn_path: Option<String> = None;
+    let mut include_tests = false;
+    let mut i = 0usize;
+    let mut paths: Vec<String> = Vec::new();
+    while i < args.len() {
+        match args[i].as_str() {
+            "--graph" => {
+                i += 1;
+                graph_path = args.get(i).cloned();
+            }
+            "--churn" => {
+                i += 1;
+                churn_path = args.get(i).cloned();
+            }
+            "--include-tests" => include_tests = true,
+            _ => paths.push(args[i].clone()),
+        }
+        i += 1;
+    }
+    let root = repo_root(&paths);
     let mut scans = Vec::new();
-    for path in &args {
+    for path in &paths {
         scans.push(scan_file(Path::new(path)));
     }
     // repo-wide families: duplicate (Dice) + unused (reference scan)
@@ -856,8 +878,55 @@ fn main() {
     }
     all_findings.extend(duplicate_findings(&skeletons));
     all_findings.extend(unused_findings(&definitions, &prod_refs, &test_refs, &strings));
+    // repo-wide families from the graph contract + git churn (orchestrator
+    // gathers both; the findings compute here)
+    let contract = graph_path
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<graph_families::GraphContract>(&s).ok());
+    if let Some(c) = &contract {
+        let repo_root = Path::new(&root);
+        let mut max_cc_by_file: std::collections::HashMap<String, (usize, usize, String)> =
+            std::collections::HashMap::new();
+        let mut cc_by_file: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        for e in &all_cc {
+            let rel = rel_of(&e.file, &root);
+            *cc_by_file.entry(rel.clone()).or_default() = (*cc_by_file.get(&rel).unwrap_or(&0)).max(e.cc);
+            let entry = max_cc_by_file.entry(rel).or_insert((e.line, e.cc as usize, e.function.clone()));
+            if (e.cc as usize) > entry.1 {
+                *entry = (e.line, e.cc as usize, e.function.clone());
+            }
+        }
+        all_findings.extend(graph_families::large_function_findings(
+            repo_root, c, 120, include_tests,
+        ));
+        all_findings.extend(graph_families::hub_file_findings(
+            repo_root, c, 150, include_tests, &max_cc_by_file,
+        ));
+        all_findings.extend(graph_families::high_risk_findings(repo_root, c, 0.8, include_tests));
+        all_findings.extend(graph_families::cycle_findings(repo_root, c));
+        let rels: Vec<String> = paths.iter().map(|p| rel_of(p, &root)).collect();
+        all_findings.extend(graph_families::layer_mix_findings(repo_root, c, &rels));
+        all_findings.extend(graph_families::folder_mix_findings(repo_root, c));
+    }
+    if let Some(p) = &churn_path {
+        if let Ok(s) = std::fs::read_to_string(p) {
+            if let Ok(churn) = serde_json::from_str::<std::collections::HashMap<String, usize>>(&s) {
+                // max CC per file from the scan itself — recompute without the graph
+                let mut cc_any: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+                for e in &all_cc {
+                    let rel = rel_of(&e.file, &root);
+                    let slot = cc_any.entry(rel).or_insert(0);
+                    *slot = (*slot).max(e.cc);
+                }
+                all_findings.extend(graph_families::hotspot_findings(
+                    &churn, &cc_any, 0.1, 15, &std::collections::HashMap::new(),
+                ));
+            }
+        }
+    }
     let out = serde_json::json!({
-        "files": args.len(),
+        "files": paths.len(),
         "parse_errors": total_errors,
         "findings": all_findings,
         "cc": all_cc,

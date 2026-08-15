@@ -50,9 +50,11 @@ except ImportError:  # code-health: ignore except radon is an optional dependenc
 import io
 import json
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import tokenize
 import types
@@ -895,6 +897,19 @@ class _RustScan:
         return found
 
     def load(self, repo: Path, files: list[SourceFile]) -> RustFindings | None:
+        return self.load_with(repo, files)
+
+    def load_with(
+        self,
+        repo: Path,
+        files: list[SourceFile],
+        graph: Path | None = None,
+        churn_json: Path | None = None,
+        include_tests: bool = False,
+    ) -> RustFindings | None:
+        if graph is None and churn_json is None and not include_tests:
+            prepared = self._flags()
+            graph, churn_json, include_tests = prepared
         """Findings per rel for one file set; None = Rust unavailable (Python path)."""
         rels = tuple(sf.rel for sf in files)
         key = (repo, rels)
@@ -914,10 +929,15 @@ class _RustScan:
         if files:
             result = {}
             try:
-                proc = subprocess.run(
-                    [str(binary)] + [str(sf.py) for sf in files],
-                    capture_output=True, text=True, timeout=180,
-                )
+                cmd = [str(binary)]
+                if graph is not None:
+                    cmd += ["--graph", str(graph)]
+                if churn_json is not None:
+                    cmd += ["--churn", str(churn_json)]
+                if include_tests:
+                    cmd.append("--include-tests")
+                cmd += [str(sf.py) for sf in files]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
                 if proc.returncode == 0:
                     data = json.loads(proc.stdout)
                     rels_set = set(rels)
@@ -955,6 +975,23 @@ class _RustScan:
         self._cache[key] = wrapped
         return wrapped
 
+    def prepare(
+        self, repo: Path, only_rel: str | None, include_tests: bool, file_churn: Counter[str]
+    ) -> None:
+        """Graph contract + churn JSON for the next scan; repo-wide only."""
+        self._pending_graph = None
+        self._pending_churn = None
+        self._pending_tests = include_tests
+        if only_rel is None:
+            self._pending_graph = GRAPH_CONTRACT.contract(repo)
+            if file_churn:
+                tmp = Path(tempfile.mkstemp(prefix="code-health-churn-", suffix=".json")[1])
+                tmp.write_text(json.dumps(dict(file_churn)), encoding="utf-8")
+                self._pending_churn = tmp
+
+    def _flags(self):
+        return self._pending_graph, self._pending_churn, self._pending_tests
+
     def active(self, repo: Path) -> bool:
         """True when the Rust backend is the live scan path for this repo."""
         return self.enabled and self.binary(repo) is not None
@@ -978,6 +1015,53 @@ RUST_SCAN = _RustScan()
 # the failure modes of a scanner invocation — a subprocess that dies, times
 # out, or returns garbage degrades to the Python path, never to missing findings
 _SCANNER_FAILURES = (OSError, SubprocessError, json.JSONDecodeError, ValueError)
+
+
+class _GraphContract:
+    """The code-review-graph export contract, generated through the tool's own
+    public API by code_health_graph_export.py — the gate never touches the
+    SQLite schema or the DB location. None = tool missing or no graph."""
+
+    def __init__(self) -> None:
+        self._cache: dict[Path, Path | None] = {}
+        self._adapter = Path(__file__).resolve().parent / "code_health_graph_export.py"
+
+    def _interpreter(self) -> str:
+        """The graph tool's own Python (its CLI shebang), else this env."""
+        exe = shutil.which("code-review-graph")
+        if exe:
+            try:
+                first = Path(exe).read_text(encoding="utf-8", errors="replace").splitlines()[0]
+                if first.startswith("#!"):
+                    interp = first[2:].split()[0]
+                    if Path(interp).exists():
+                        return interp
+            except OSError:  # code-health: ignore except a missing interpreter degrades to this env
+                pass
+        return sys.executable
+
+    def contract(self, repo: Path) -> Path | None:
+        """The contract JSON path for the repo, or None (no graph available)."""
+        if repo in self._cache:
+            return self._cache[repo]
+        result: Path | None = None
+        try:
+            proc = subprocess.run(
+                [self._interpreter(), str(self._adapter), "--repo", str(repo)],
+                capture_output=True, text=True, timeout=180,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                tmp = Path(tempfile.mkstemp(prefix="code-health-graph-", suffix=".json")[1])
+                tmp.write_text(proc.stdout, encoding="utf-8")
+                result = tmp
+        except _SCANNER_FAILURES:  # code-health: ignore except no graph contract means the gate
+            # degrades to the non-graph families with a log, never a crash
+            result = None
+        self._cache[repo] = result
+        return result
+
+
+GRAPH_CONTRACT = _GraphContract()
 
 
 def complexity_actions(
@@ -4099,11 +4183,16 @@ def _collect_actions(
     only_rel: str | None = None,
 ) -> list[Action]:
     actions: list[Action] = []
+    rust_live = RUST_SCAN.active(repo)
+    if rust_live:
+        # graph contract + churn JSON for the one Rust invocation
+        RUST_SCAN.prepare(repo, only_rel, args.include_tests, file_churn)
     actions += complexity_actions(
         repo, args.max_complexity, args.include_tests, file_churn, last_modified, covered, graph_preferred, stale_note,
         only_rel,
     )
-    if only_rel is None:
+    if only_rel is None and not rust_live:
+        # the Rust core computes the graph families from the export contract
         actions += graph_actions(
             repo,
             args.max_function_lines,
@@ -4116,7 +4205,7 @@ def _collect_actions(
             graph_preferred,
             stale_note,
         )
-    if only_rel is None:
+    if only_rel is None and not rust_live:
         actions += hotspot_actions(repo, args.hotspot_top_frac, args.hotspot_min_cc, file_churn, last_modified)
     if not RUST_SCAN.active(repo):
         # the Rust core computes record-shape in its one scan pass
@@ -4127,9 +4216,12 @@ def _collect_actions(
         # single-file (--file / LSP) mode
         actions += _abstraction_actions(repo, args.include_tests, file_churn, last_modified)
         actions += _docs_actions(repo, file_churn, last_modified)
-        actions += _folder_mix_actions(repo, file_churn, last_modified)
-        actions += _layer_mix_actions(repo, file_churn, last_modified)
-        actions += _cycle_actions(repo, file_churn, last_modified)
+        if not rust_live:
+            # the Rust core computes folder/layer-mix and import cycles
+            # from the graph contract
+            actions += _folder_mix_actions(repo, file_churn, last_modified)
+            actions += _layer_mix_actions(repo, file_churn, last_modified)
+            actions += _cycle_actions(repo, file_churn, last_modified)
         if not RUST_SCAN.active(repo):
             # the Rust core computes duplicate + unused in its one repo-wide run
             actions += _duplicate_actions(repo, args.include_tests, file_churn, last_modified)
