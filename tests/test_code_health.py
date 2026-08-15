@@ -669,3 +669,86 @@ def test_record_shape_guidance_teaches_naming_not_just_classes():
     # type for the wire format — serialization happens at the render boundary
     assert not hasattr(ch, "JsonDict")
     assert not hasattr(ch.Action, "to_dict")
+
+
+# --------------------------------------------------------------------------- latent-class detector
+def test_latent_class_closure_signal(tmp_path):
+    repo = make_repo(tmp_path)
+    src = ("def big():\n"
+           "    def inner_a(x):\n"
+           "        return x + 1\n"
+           "    def inner_b(x):\n"
+           "        return x * 2\n"
+           "    return inner_a(1) + inner_b(2)\n"
+           "\n"
+           "def small():\n"
+           "    def only_one():\n"
+           "        return 1\n"
+           "    return only_one()\n")
+    (repo / "houses" / "app.py").write_text(src)
+    # big() at line 1 with CC 20 (fake radon); small() line 9 below gate
+    with Env(routes=git_routes(), functions=[[FakeFn("big", 1, 20), FakeFn("small", 9, 3)]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    latent = [a for a in actions if a.kind == "latent-class"]
+    assert len(latent) == 1
+    assert latent[0].function == "big"
+    assert "inner_a" in latent[0].message and "inner_b" in latent[0].message
+    assert "class in disguise" in latent[0].message
+
+
+def test_latent_class_partition_signal(tmp_path):
+    repo = make_repo(tmp_path)
+    pad = "# pad\n" * 160
+    src = ("class Big:\n" + "    # pad\n" * 160 + "\n"
+           "    def __init__(self):\n"
+           "        self.a = self.b = self.c = self.d = 0\n"
+           "    def m1(self):\n"
+           "        return self.a + self.b\n"
+           "    def m2(self):\n"
+           "        return self.a - self.b\n"
+           "    def m3(self):\n"
+           "        return self.c * self.d\n"
+           "    def m4(self):\n"
+           "        return self.c / self.d\n"
+           "    def m5(self):\n"
+           "        return self.a + self.b\n")
+    (repo / "houses" / "app.py").write_text(src)
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    latent = [a for a in actions if a.kind == "latent-class"]
+    assert len(latent) == 1
+    assert latent[0].function == "Big"
+    assert "m1" in latent[0].message and "m3" in latent[0].message  # both groups named
+    assert "connectors removed" in latent[0].message
+
+
+def test_latent_class_no_false_positive_on_shared_fields(tmp_path):
+    """Two methods sharing one field is not a latent class — needs >= 2 fields per group."""
+    repo = make_repo(tmp_path)
+    pad = "# pad\n" * 160
+    src = ("class NotFat:\n" + "    # pad\n" * 160 + "\n"
+           "    def __init__(self):\n"
+           "        self.flag = False\n"
+           "    def m1(self):\n"
+           "        return self.flag\n"
+           "    def m2(self):\n"
+           "        return not self.flag\n"
+           "    def m3(self):\n"
+           "        self.flag = True\n"
+           "    def m4(self):\n"
+           "        return self.flag\n"
+           "    def m5(self):\n"
+           "        return self.flag\n"
+           "    def m6(self):\n"
+           "        return self.flag\n")
+    (repo / "houses" / "app.py").write_text(src)
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    assert [a for a in actions if a.kind == "latent-class"] == []
+
+
+def test_latent_class_guidance_is_conditional():
+    """The lesson is offered on the evidence, and coincidental grouping is left alone."""
+    g = ch.GUIDANCE["latent-class"]
+    assert "extract a class per group" in g
+    assert "If the grouping is incidental" in g and "leave it" in g

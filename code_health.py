@@ -33,6 +33,7 @@ named container.
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime
 from dataclasses import asdict, dataclass, field
 import json
@@ -48,7 +49,7 @@ from pathlib import Path
 
 EXCLUDED_DIRS = {".git", ".venv", "node_modules", "__pycache__", "dist", "build", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 
-ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk", "record-shape")
+ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk", "record-shape", "latent-class")
 
 @dataclass
 class Action:
@@ -148,6 +149,18 @@ class Callers:
 
 
 @dataclass
+class LatentFinding:
+    """One unextracted-class signal: closures or a field-disjoint partition."""
+
+    signal: str
+    function: str
+    line: int
+    metric: int
+    detail: str
+    inner: list[str]
+
+
+@dataclass
 class VolatilePart:
     """One complex function inside a hotspot file, with its own churn."""
 
@@ -157,9 +170,12 @@ class VolatilePart:
     line: int
 
 
-# Named map type: a lookup table, not a record. Named by its meaning (the
-# lines covered per file), not as SomethingDict — the name is the communication.
+# Named map types: lookup tables, not records. Named by their meaning (the
+# lines covered per file; groups of method names sharing fields), never as
+# SomethingDict — the name is the communication.
 CoverageLines = dict[str, set[int]]
+MethodFields = dict[str, set[str]]
+MethodGroups = list[list[str]]
 
 
 # Injectable seam: tests assign code_health.radon_visitor to a fake. Loaded
@@ -191,6 +207,7 @@ GUIDANCE = {
     "hub-file": "Decide what this file is first: if it is an assembly/composition root whose job is wiring (app layer, router), move handler logic out to the service layer and keep the assembly thin — the cross-module orchestration is its job, not a smell. Otherwise separate the concerns it mixes into modules with narrow, stable interfaces.",
     "hotspot": "Make the volatile part small and data-driven behind a stable interface — frequent changes become cheap and cannot disturb the stable core.",
     "high-risk": "Pin behavior with tests, then reduce the caller surface — when many things depend on it, the simplest code is the safest.",
+    "latent-class": "Closures that capture state are a class in disguise — if the inner functions form behavior groups, extract a class per group and hoist the closures to its methods (the captured state becomes fields). If methods touch disjoint field sets, that partition is the latent seam: extract a class per group and let the connectors compose them. If the grouping is incidental (no shared state, no shared fields), leave it — the evidence is state and field access, not a guess.",
     "record-shape": "The record wants a class — named fields with domain meaning, so a reader sees what the data IS without tracing it (encapsulation, obvious correctness). Make a small domain class/dataclass. If the shape is genuinely a map, name it by what it MEANS (CoverageLines = dict[str, set[int]]: the lines covered per file), never as SomethingDict — a *Dict alias just renames the smell. If the data crosses a boundary (parsing or serialization), the fix is to ingest it into a domain class at that boundary: parse into the type and carry the type, don't carry the bare mapping. Constant lookup tables stay at module scope, never in an interface.",
 }
 
@@ -492,6 +509,7 @@ def _raw_score(kind: str, metric: float, churn: int, callers: int | None = None)
     instead of saturating at 99.
     """
     norm = {
+        "latent-class": 0.7,
         "record-shape": 0.7,
         "complexity": min(metric / 40, 1.0),
         "large-function": min(metric / 200, 1.0),
@@ -1139,6 +1157,168 @@ def _render_text(repo: Path, args, unique: list[Action], fails: list[Action], ac
     _render_actions(repo, args, fails, acks)
 
 
+def _latent_class_actions(repo: Path, include_tests: bool,
+                         file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+    """Fat classes/functions carrying unextracted classes inside them.
+
+    Two factual signals, both gated so the finding is a plausible fix item:
+    - nested closures: a method/function with >= 2 inner function definitions
+      (closures capturing state = a class in disguise) AND complexity >= 15
+      or a >= 60-line span;
+    - field partition: a class with >= 6 methods and >= 150 lines whose
+      methods split, after removing up to 2 connector methods, into >= 2
+      connected groups (by shared self.<attr> access) of >= 2 methods each
+      touching >= 2 distinct fields — the partition is the latent seam.
+    Guidance is conditional: the evidence is stated, the interpretation is
+    offered, coincidental grouping is left alone.
+    """
+    try:
+        Visitor = _radon_visitor(required=False)
+    except SystemExit:
+        Visitor = None
+    actions: list[Action] = []
+    for py in sorted(repo.rglob("*.py")):
+        rel = py.relative_to(repo).as_posix()
+        if any(part in EXCLUDED_DIRS for part in py.parts):
+            continue
+        if not include_tests and ("/test" in f"/{rel}" or rel.startswith("test")):
+            continue
+        try:
+            source = py.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(source)
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        fn_map = {}
+        if Visitor is not None:
+            for f in Visitor.from_code(source).functions:
+                fn_map[(f.name, f.lineno)] = f.complexity
+        for finding in _closure_findings(tree, rel, fn_map):
+            actions.append(_latent_action(repo, rel, finding, file_churn, last_modified))
+        for finding in _partition_findings(tree, rel):
+            actions.append(_latent_action(repo, rel, finding, file_churn, last_modified))
+    return actions
+
+
+def _closure_findings(tree: ast.Module, rel: str, fn_map: dict[tuple[str, int], int]) -> list[LatentFinding]:
+    """Functions/methods with >= 2 inner function defs and size/complexity to match."""
+    findings: list[LatentFinding] = []
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        span = (fn.end_lineno or fn.lineno) - fn.lineno
+        cc = fn_map.get((fn.name, fn.lineno), 0)
+        if cc < 15 and span < 60:
+            continue
+        inner = [n.name for n in ast.walk(fn)
+                 if n is not fn and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        lambdas = sum(1 for n in ast.walk(fn) if isinstance(n, ast.Lambda))
+        if len(inner) + lambdas < 2:
+            continue
+        findings.append(LatentFinding(
+            signal="closures", function=fn.name, line=fn.lineno,
+            metric=len(inner) + lambdas,
+            detail=_closure_detail(inner, lambdas, cc, span),
+            inner=inner[:6],
+        ))
+    return findings
+
+
+def _closure_detail(inner: list[str], lambdas: int, cc: int, span: int) -> str:
+    """Wording: how many inner functions (named), and why the size gate fired."""
+    count = len(inner) + lambdas
+    names = ", ".join(inner) if inner else ""
+    names = f" — {names}" if names else ""
+    reason = "closing over its state — a class in disguise" if cc >= 15 else f"in a {span}-line body"
+    lambda_note = f" including {lambdas} lambda(s)" if lambdas else ""
+    return f"defines {count} inner function(s){names}{lambda_note} ({reason})"
+
+
+def _partition_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """Classes whose methods split into field-disjoint groups (latent classes)."""
+    findings: list[LatentFinding] = []
+    for cls in [n for n in tree.body if isinstance(n, ast.ClassDef)]:
+        finding = _partition_for_class(cls)
+        if finding is not None:
+            findings.append(finding)
+    return findings
+
+
+def _partition_for_class(cls: ast.ClassDef) -> LatentFinding | None:
+    """One class: the smallest connector removal exposing >= 2 field-disjoint method groups."""
+    methods = [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    if len(methods) < 6 or (cls.end_lineno or cls.lineno) - cls.lineno < 150:
+        return None
+    mf = {}
+    for m in methods:
+        mf[m.name] = {node.attr for node in ast.walk(m)
+                      if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self"}
+    partition = _find_partition(list(mf), mf)
+    if partition is None:
+        return None
+    connectors, groups = partition
+    return LatentFinding(
+        signal="partition", function=cls.name, line=cls.lineno,
+        metric=sum(len(g) for g in groups),
+        detail=_partition_detail(connectors, groups),
+        inner=[],
+    )
+
+
+def _partition_detail(connectors: list[str], groups: MethodGroups) -> str:
+    """Wording: the field-disjoint groups and which connectors were removed."""
+    groups_text = "/".join("{" + ",".join(g) + "}" for g in groups)
+    conn_text = "{" + ",".join(connectors) + "}" if connectors else "none"
+    return (f"methods split into {len(groups)} field-disjoint groups ({groups_text}), "
+            f"connectors removed: {conn_text} — each group touches only its own fields, "
+            f"so each is a latent class")
+
+
+def _find_partition(names: list[str], mf: MethodFields):
+    """Smallest connector removal that splits the shared-field graph into
+    >= 2 groups of >= 2 methods each touching >= 2 distinct fields."""
+    from itertools import combinations
+    for removal in range(3):
+        for removed in combinations(names, removal):
+            kept = [n for n in names if n not in removed]
+            groups = _connected_groups(kept, mf)
+            big = [g for g in groups if len(g) >= 2 and len({f for m in g for f in mf[m]}) >= 2]
+            if len(big) >= 2:
+                return list(removed), big
+    return None
+
+
+def _connected_groups(kept: list[str], mf: MethodFields) -> MethodGroups:
+    """Methods connected by sharing at least one field."""
+    groups: list[list[str]] = []
+    seen: set[str] = set()
+    for start in kept:
+        if start in seen:
+            continue
+        group = []
+        stack = [start]
+        while stack:
+            m = stack.pop()
+            if m in seen:
+                continue
+            seen.add(m)
+            group.append(m)
+            for other in kept:
+                if other not in seen and mf[m] & mf[other]:
+                    stack.append(other)
+        groups.append(group)
+    return groups
+
+
+def _latent_action(repo: Path, rel: str, finding: LatentFinding,
+                   file_churn: Counter[str], last_modified: dict[str, str]) -> Action:
+    churn = file_churn.get(rel, 0)
+    return Action(
+        kind="latent-class", severity="fail", file=rel, line=finding.line, function=finding.function,
+        message=f"{finding.detail} — {GUIDANCE['latent-class']}",
+        metric=finding.metric, churn=churn,
+        last_modified=last_modified.get(rel, ""), tested="",
+        raw=_raw_score("latent-class", finding.metric, churn),
+    )
+
+
 def _record_actions(repo: Path, include_tests: bool,
                     file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
     """Record-shaped collections (bare dicts/tuples as records) via check_records."""
@@ -1172,6 +1352,7 @@ def _collect_actions(repo: Path, args, file_churn, last_modified, covered, graph
     actions += graph_actions(repo, args.max_function_lines, args.max_file_edges, args.max_risk, args.include_tests, file_churn, last_modified, covered, graph_preferred, stale_note)
     actions += hotspot_actions(repo, args.hotspot_top_frac, args.hotspot_min_cc, file_churn, last_modified)
     actions += _record_actions(repo, args.include_tests, file_churn, last_modified)
+    actions += _latent_class_actions(repo, args.include_tests, file_churn, last_modified)
     return actions
 
 
