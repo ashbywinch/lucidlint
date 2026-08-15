@@ -15,7 +15,7 @@ tag and runs it as its review-attribution gate.
   created after the head commit landed (first-review case — regular pr-agent
   reviews never contain the SHA).
 
-- `code_health.py` — CodeScene-lite. Emits a list of actions to address
+- `code_health.py` — deterministic code-health gate. Emits a list of actions to address
   (high cyclomatic complexity, oversized functions, dependency hubs, git
   hotspots, high graph-risk nodes) and exits 1 when any exist, so it works
   as a failing test gate. Reads the code-review-graph SQLite at

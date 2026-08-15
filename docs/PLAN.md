@@ -3,7 +3,7 @@
 Phases in delivery order; each ships the app working at its gate. Phases
 never depend on a later phase.
 
-## Phase 1 — CodeScene-lite core
+## Phase 1 — deterministic gate core
 
 - **Inputs:** repo path; radon; code-review-graph SQLite; git log.
 - **Outputs:** a prioritized action list: complexity, large functions,

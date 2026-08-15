@@ -1,6 +1,6 @@
 # PRD — code_health: the deterministic code-health gate
 
-A deterministic, gate-shaped code-health scanner (CodeScene-lite) that turns
+A deterministic, gate-shaped code-health scanner that turns
 the maintainability requirements into a prioritized, actionable list of fix
 actions — cheap to run, machine-readable, testable as a failing gate, and
 honest about what it can and cannot know.

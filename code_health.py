@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""code_health.py — CodeScene-lite: complexity + dependency + hotspot analysis.
+"""code_health.py — deterministic code-health gate: complexity + dependency + hotspot analysis.
 
-Replicates the *actionable* core of CodeScene on top of what we already run:
+Built on what we already run:
   - code-review-graph (per-repo SQLite at <repo>/.code-review-graph/graph.db)
   - radon (cyclomatic complexity) — run via `uv run --with radon`
   - git history (hotspot = high change frequency AND high complexity)
@@ -1352,12 +1352,12 @@ def _volatile_parts(conn, repo: Path, rel: str, fns, min_cc: float) -> list[Vola
 def hotspot_actions(
     repo: Path, top_frac: float, min_cc: float, file_churn: Counter[str], last_modified: dict[str, str]
 ) -> list[Action]:
-    """CodeScene hotspot: files that change often AND are complex.
+    """Hotspot: files that change often AND are complex.
 
     Change frequency from the shared `git log --name-only` pass; complexity =
     max cyclomatic complexity of the file's functions (radon). Max, not mean:
     mean dilutes when a file mixes many small functions with one monster —
-    CodeScene's hotspot signal is the concentration of complexity in a
+    The hotspot signal is the concentration of complexity in a
     frequently-changed file.
     """
     complexity_visitor = _radon_visitor()
@@ -1417,7 +1417,7 @@ def hotspot_actions(
 # --------------------------------------------------------------------------- main
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="CodeScene-lite: complexity/dependency/hotspot actions from code-review-graph + radon + git"
+        description="deterministic code-health gate: complexity/dependency/hotspot from code-review-graph + radon + git"
     )
     p.add_argument("--repo", type=Path, default=Path.cwd(), help="repository root (default: cwd)")
     p.add_argument("--file", type=str, default=None,
