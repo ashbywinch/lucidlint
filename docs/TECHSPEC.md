@@ -90,11 +90,21 @@ Factory functions: `complexity_actions`, `graph_actions`
 (`_collect_classes`/`_concrete_counts`), `_docs_actions`
 (`_docs_reachability_actions`), `_duplicate_actions`
 (`_collect_functions`/`_first_duplicate`/`_fn_skeleton`/`_dice_similarity`),
-`_unused_actions` (`_collect_references`/`_referenced_anywhere`). The
-standard family's warn checks are `_magic_number_findings` (operand/index/
+`_unused_actions` (`_collect_references`/`_collect_file_references`,
+`_referenced_anywhere` removed — prod/test reference split). The standard
+family's warn checks are `_magic_number_findings` (operand/index/
 call-arg literals outside (0, 1, 2, -1); all-literal containers pass) and
 `_broad_except_findings` (non-empty `except Exception`/`BaseException`
-handlers — empty/bare ones are already fail-tier). `_dedupe_merge` ranks by
+handlers — empty/bare ones are already fail-tier). `_handler_swallows` is
+exact: bare, or a body with no raise/return/break/continue — an explicit
+return (even None or an empty literal) surfaces the contract, a continue
+is retry semantics. `ReferenceScan` splits `prod_references` vs
+`test_references`: decorated module functions are registered by their
+decorator, and a function referenced only from tests is a conditional
+test-seam finding. `_global_state_findings` covers typed AnnAssign
+literals and `_mutation_findings` catches module collections mutated
+inside functions. `_hub_edge_counts` excludes CALLS to true builtins.
+`_dedupe_merge` ranks by
 churn × complexity × fan-in (R8); `_suppressions` reads
 `# code-health: ignore <signal> <why>` exemptions via tokenize COMMENT
 tokens (R17, R18).
