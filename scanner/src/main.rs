@@ -12,7 +12,7 @@
 //! functions and class bodies contribute no decisions to their parent).
 
 use ruff_python_ast::visitor::source_order::{walk_expr, walk_stmt, SourceOrderVisitor};
-use ruff_python_ast::{Expr, ModModule, Stmt};
+use ruff_python_ast::{AnyNodeRef, Expr, ModModule, Stmt};
 use ruff_python_parser::{parse_module, Parsed};
 use ruff_text_size::Ranged;
 use serde::Serialize;
@@ -21,6 +21,7 @@ use std::path::Path;
 
 mod checks;
 use checks::*;
+use checks::Q;
 
 /// One open function scope: its decision count and the names it returns
 /// (for the except-swallow analysis).
@@ -70,6 +71,18 @@ struct ScanState<'a> {
     /// Module containers whose literal was flagged (non-constant) — their
     /// in-function mutations are not double-reported (Python's `flagged`).
     module_flagged: HashSet<String>,
+    /// Module-level function definitions (name, line) — non-test files.
+    defs: Vec<(String, usize)>,
+    /// Every referenced name (Name nodes + import aliases) in this file.
+    refs: HashSet<String>,
+    /// String literal values (prod files only).
+    strings: Vec<String>,
+    /// Module-level function names with decorators (framework-registered).
+    decorated: HashSet<String>,
+    /// Duplicate candidates with their structural skeletons.
+    skeletons: Vec<SkeletonFn>,
+    /// File is under a test path — reference-scan split + skeleton skip.
+    is_test: bool,
 }
 
 fn line_of(source: &str, offset: ruff_text_size::TextSize) -> usize {
@@ -138,11 +151,48 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 });
                 self.unreachable_check(&f.body);
                 shadow_findings(self, stmt);
+                // signature exprs feed the reference scan (ast.walk covers
+                // decorators, parameter annotations/defaults, and returns)
+                for d in &f.decorator_list {
+                    self.visit_expr(&d.expression);
+                }
+                for pwd in f
+                    .parameters
+                    .posonlyargs
+                    .iter()
+                    .chain(&f.parameters.args)
+                    .chain(&f.parameters.kwonlyargs)
+                {
+                    if let Some(a) = &pwd.parameter.annotation {
+                        self.visit_expr(a.as_ref());
+                    }
+                    if let Some(d) = &pwd.default {
+                        self.visit_expr(d.as_ref());
+                    }
+                }
+                for p in [&f.parameters.vararg, &f.parameters.kwarg].into_iter().flatten() {
+                    if let Some(a) = &p.annotation {
+                        self.visit_expr(a.as_ref());
+                    }
+                }
+                if let Some(r) = &f.returns {
+                    self.visit_expr(r.as_ref());
+                }
                 for s in &f.body {
                     self.visit_stmt(s);
                 }
                 let scope = self.fn_stack.pop().unwrap();
                 let cc = scope.decisions + 1;
+                // repo-wide collections: module-level defs + duplicate
+                // candidates (the def line is the NAME's line — ruff's
+                // FunctionDef range starts at the decorator)
+                let def_line = line_of(self.source, f.name.range().start());
+                if module_level && !self.is_test {
+                    self.defs.push((f.name.to_string(), def_line));
+                    if !f.decorator_list.is_empty() {
+                        self.decorated.insert(f.name.to_string());
+                    }
+                }
                 let span = (line_of(self.source, f.range().end())
                     - line_of(self.source, f.range().start())) as u32;
                 // the Python gate reads cc from radon's fn_map, which only
@@ -169,7 +219,18 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 return;
             }
             Stmt::Expr(e) => self.noop_check(&e.value),
-            Stmt::Import(_) | Stmt::ImportFrom(_) => self.import_checks(stmt),
+            Stmt::Import(imp) => {
+                self.import_checks(stmt);
+                for a in &imp.names {
+                    self.refs.insert(a.name.to_string());
+                }
+            }
+            Stmt::ImportFrom(imp) => {
+                self.import_checks(stmt);
+                for a in &imp.names {
+                    self.refs.insert(a.name.to_string());
+                }
+            }
             Stmt::Try(_) => except_findings(self, stmt),
             Stmt::Global(_) => global_state_findings(self, stmt, false),
             Stmt::Assign(_) => {
@@ -228,6 +289,17 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
     }
 
     fn visit_expr(&mut self, expr: &'a Expr) {
+        match expr {
+            Expr::Name(n) => {
+                self.refs.insert(n.id.to_string());
+            }
+            Expr::StringLiteral(s) => {
+                if !self.is_test {
+                    self.strings.push(s.value.to_str().to_string());
+                }
+            }
+            _ => {}
+        }
         // Calls are walked manually so keyword values get a Keyword parent —
         // the generic walk would hand them the Call as parent, and the magic
         // position rule must match Python's (status_code=403 is NOT a finding).
@@ -562,10 +634,39 @@ fn stmt_line(source: &str, stmt: &Stmt) -> usize {
     line_of(source, off)
 }
 
-fn scan_source(source: &str, name: &str) -> (Vec<Finding>, Vec<FnCc>, usize) {
+/// One file's scan output, including the repo-wide collections.
+pub struct FileScan {
+    pub file_name: String,
+    pub findings: Vec<Finding>,
+    pub cc: Vec<FnCc>,
+    pub errors: usize,
+    pub defs: Vec<(String, usize)>,
+    pub refs: HashSet<String>,
+    pub strings: Vec<String>,
+    pub decorated: HashSet<String>,
+    pub skeletons: Vec<SkeletonFn>,
+}
+
+fn is_test_path(name: &str) -> bool {
+    name.contains("/test") || name.starts_with("test")
+}
+
+fn scan_source(source: &str, name: &str) -> FileScan {
     let parsed: Parsed<ModModule> = match parse_module(source) {
         Ok(p) => p,
-        Err(_) => return (Vec::new(), Vec::new(), 1),
+        Err(_) => {
+            return FileScan {
+                file_name: name.to_string(),
+                findings: Vec::new(),
+                cc: Vec::new(),
+                errors: 1,
+                defs: Vec::new(),
+                refs: HashSet::new(),
+                strings: Vec::new(),
+                decorated: HashSet::new(),
+                skeletons: Vec::new(),
+            };
+        }
     };
     let errors = parsed.errors().len();
     let body = parsed.syntax().body.clone(); // ThinVec<Stmt> — derefs to &[Stmt]
@@ -574,6 +675,7 @@ fn scan_source(source: &str, name: &str) -> (Vec<Finding>, Vec<FnCc>, usize) {
         source,
         module_mutables: module_container_names(&body),
         module_flagged: module_flagged_names(&body),
+        is_test: is_test_path(name),
         ..Default::default()
     };
     for stmt in &body {
@@ -582,29 +684,128 @@ fn scan_source(source: &str, name: &str) -> (Vec<Finding>, Vec<FnCc>, usize) {
     class_module_findings(&mut state, &body, name);
     vague_name_findings(&mut state, &body);
     strewing_findings(&mut state, &body);
+    // duplicate candidates in ast.walk BFS order — module-level functions
+    // (any depth) come before class methods regardless of source line
+    if !state.is_test {
+        let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+        let mut qi = 0usize;
+        while qi < queue.len() {
+            if let Q::N(n) = queue[qi] {
+                if let AnyNodeRef::StmtFunctionDef(f) = n {
+                    let skel = fn_skeleton(f);
+                    if is_duplicate_candidate(f, skel.len()) {
+                        let def_line = line_of(source, f.name.range().start());
+                        state.skeletons.push(SkeletonFn {
+                            rel: name.to_string(),
+                            name: f.name.to_string(),
+                            line: def_line,
+                            skeleton: skel,
+                        });
+                    }
+                }
+                skel_children(n, &mut queue);
+            }
+            qi += 1;
+        }
+    }
     let tokens = parsed.tokens();
     let findings = apply_suppressions(state.findings, source, name, tokens);
     let mut all = type_ignore_findings(source, name, tokens);
     all.extend(findings);
-    (all, state.cc, errors)
+    FileScan {
+        file_name: name.to_string(),
+        findings: all,
+        cc: state.cc,
+        errors,
+        defs: state.defs,
+        refs: state.refs,
+        strings: state.strings,
+        decorated: state.decorated,
+        skeletons: state.skeletons,
+    }
 }
 
-fn scan_file(path: &Path) -> (Vec<Finding>, Vec<FnCc>, usize) {
+fn scan_file(path: &Path) -> FileScan {
     let source = std::fs::read_to_string(path).unwrap_or_default();
-    scan_source(&source, path.to_str().unwrap_or("<file>"))
+    let name = path.to_str().unwrap_or("<file>").to_string();
+    let mut scan = scan_source(&source, &name);
+    scan.file_name = name;
+    scan
+}
+
+/// Longest common prefix of the passed paths — the repo root for a
+/// full-repo run; the file itself in per-file mode.
+fn repo_root(paths: &[String]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    let mut prefix = paths[0].clone();
+    for p in &paths[1..] {
+        while !p.starts_with(&prefix) {
+            prefix.truncate(prefix.len().saturating_sub(1));
+        }
+    }
+    // strip trailing path separators so rels are clean
+    prefix
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn rel_of(path: &str, root: &str) -> String {
+    if let Some(rel) = path.strip_prefix(root).and_then(|r| r.strip_prefix('/')) {
+        return rel.to_string();
+    }
+    std::path::Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string())
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let root = repo_root(&args);
+    let mut scans = Vec::new();
+    for path in &args {
+        scans.push(scan_file(Path::new(path)));
+    }
+    // repo-wide families: duplicate (Dice) + unused (reference scan)
+    let mut skeletons = Vec::new();
+    let mut definitions: Vec<(String, String, usize)> = Vec::new();
+    let mut prod_refs = HashSet::new();
+    let mut test_refs = HashSet::new();
+    let mut strings = Vec::new();
+    for scan in &scans {
+        let rel = rel_of(&scan.file_name, &root);
+        let is_test = is_test_path(&rel);
+        for s in &scan.skeletons {
+            skeletons.push(SkeletonFn {
+                rel: rel.clone(),
+                name: s.name.clone(),
+                line: s.line,
+                skeleton: s.skeleton.clone(),
+            });
+        }
+        for (name, line) in &scan.defs {
+            definitions.push((rel.clone(), name.clone(), *line));
+        }
+        if is_test {
+            test_refs.extend(scan.refs.iter().cloned());
+        } else {
+            prod_refs.extend(scan.refs.iter().cloned());
+            strings.extend(scan.strings.iter().cloned());
+        }
+        prod_refs.extend(scan.decorated.iter().cloned());
+    }
     let mut all_findings = Vec::new();
     let mut all_cc = Vec::new();
     let mut total_errors = 0usize;
-    for path in &args {
-        let (findings, cc, errors) = scan_file(Path::new(path));
-        all_findings.extend(findings);
-        all_cc.extend(cc);
-        total_errors += errors;
+    for scan in scans {
+        all_findings.extend(scan.findings);
+        all_cc.extend(scan.cc);
+        total_errors += scan.errors;
     }
+    all_findings.extend(duplicate_findings(&skeletons));
+    all_findings.extend(unused_findings(&definitions, &prod_refs, &test_refs, &strings));
     let out = serde_json::json!({
         "files": args.len(),
         "parse_errors": total_errors,
@@ -619,8 +820,12 @@ mod tests {
     use super::*;
 
     fn scan_src(src: &str) -> Vec<Finding> {
-        let (findings, _, _) = scan_source(src, "test_mod.py");
-        findings
+        scan_corpus(&[("prod_mod.py", src)])
+    }
+
+    fn scan_cc(src: &str) -> (Vec<Finding>, Vec<FnCc>, usize) {
+        let scan = scan_source(src, "prod_mod.py");
+        (scan.findings, scan.cc, scan.errors)
     }
 
     fn kinds(findings: &[Finding]) -> Vec<&str> {
@@ -666,15 +871,11 @@ mod tests {
         assert_eq!(cc[0].cc, 4); // 2 generators + 1 if + base
     }
 
-    fn scan_cc(src: &str) -> (Vec<Finding>, Vec<FnCc>, usize) {
-        scan_source(src, "test_mod.py")
-    }
-
     // ------------------------------------------------------------- magic
     #[test]
     fn magic_skips_lookup_table_and_small_literals() {
         let f = scan_src("def f(a):\n    table = {10: 'x', 20: 'y'}\n    if a > 1:\n        return table[a]\n    return 0\n");
-        assert!(f.is_empty()); // 10/20 in a dict literal, 1 and 0 skipped
+        assert!(!f.iter().any(|x| x.kind == "magic-number")); // 10/20 in a dict literal, 1 and 0 skipped
     }
 
     #[test]
@@ -1024,5 +1225,132 @@ mod tests {
         assert_eq!(magic.len(), 1);
         assert_eq!(magic[0].severity, "warn");
         assert_eq!(magic[0].line, 2);
+    }
+
+    // ------------------------------------------------- duplicate (Dice)
+    /// Corpus-level scan: names map to sources; returns merged findings.
+    fn scan_corpus(files: &[(&str, &str)]) -> Vec<Finding> {
+        let mut skeletons = Vec::new();
+        let mut definitions = Vec::new();
+        let mut prod_refs = HashSet::new();
+        let mut test_refs = HashSet::new();
+        let mut strings = Vec::new();
+        let mut all = Vec::new();
+        let root = "repo";
+        for (name, src) in files {
+            let mut scan = scan_source(src, name);
+            scan.file_name = name.to_string();
+            all.extend(scan.findings);
+            let rel = name.to_string();
+            let is_test = is_test_path(&rel);
+            for s in &scan.skeletons {
+                skeletons.push(SkeletonFn {
+                    rel: rel.clone(),
+                    name: s.name.clone(),
+                    line: s.line,
+                    skeleton: s.skeleton.clone(),
+                });
+            }
+            for (fn_name, line) in &scan.defs {
+                definitions.push((rel.clone(), fn_name.clone(), *line));
+            }
+            if is_test {
+                test_refs.extend(scan.refs.iter().cloned());
+            } else {
+                prod_refs.extend(scan.refs.iter().cloned());
+                strings.extend(scan.strings.iter().cloned());
+            }
+            prod_refs.extend(scan.decorated.iter().cloned());
+        }
+        all.extend(duplicate_findings(&skeletons));
+        all.extend(unused_findings(&definitions, &prod_refs, &test_refs, &strings));
+        let _ = root;
+        all
+    }
+
+    #[test]
+    fn duplicate_near_identical_functions_are_found() {
+        // same shape with renamed identifiers — Dice >= 0.9
+        let f = scan_src(
+            "def price_a(items):\n    total = 0\n    for it in items:\n        total += it.cost\n    return total\n\ndef price_b(parts):\n    total = 0\n    for p in parts:\n        total += p.cost\n    return total\n",
+        );
+        let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate").collect();
+        assert_eq!(d.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_different_shapes_are_not_found() {
+        let f = scan_src(
+            "def alpha(a):\n    return a * 3\n\ndef beta(b):\n    if b:\n        return [x for x in b if x]\n    return []\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "duplicate"));
+    }
+
+    #[test]
+    fn duplicate_skips_init_and_accessors() {
+        let f = scan_src(
+            "class Box:\n    def __init__(self, x):\n        self.x = x\n\n    def get(self):\n        return self.x\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "duplicate"));
+    }
+
+    #[test]
+    fn duplicate_bfs_order_flags_the_later_class_method() {
+        // module-level fn comes BEFORE class methods in ast.walk BFS — the
+        // finding lands on the class method even though it has the lower line
+        let f = scan_src(
+            "def span(grid, row, c0, c1):\n    lat_min = max(grid.a, grid.a + row * grid.d)\n    lat_max = min(grid.b, grid.a + (row + 1) * grid.d)\n    lon_min = max(grid.c, grid.c + c0 * grid.e)\n    lon_max = min(grid.d, grid.c + (c1 + 1) * grid.e)\n    return Rect(lat_min, lat_max, lon_min, lon_max)\n\nclass Grid:\n    def cell_rect(self, r, c):\n        lat_min = max(self.bbox.a, self.bbox.a + r * self.lat_deg)\n        lat_max = min(self.bbox.b, self.bbox.a + (r + 1) * self.lat_deg)\n        lon_min = max(self.bbox.c, self.bbox.c + c * self.lon_deg)\n        lon_max = min(self.bbox.d, self.bbox.c + (c + 1) * self.lon_deg)\n        return Rect(lat_min, lat_max, lon_min, lon_max)\n",
+        );
+        let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate").collect();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].function, "cell_rect");
+        assert_eq!(d[0].line, 9);
+    }
+
+    #[test]
+    fn dice_partial_similarity_below_threshold() {
+        let a: Vec<String> = "A B C D E".split(' ').map(str::to_string).collect();
+        let b: Vec<String> = "A B X Y Z".split(' ').map(str::to_string).collect();
+        assert!(checks::dice_similarity(&a, &b) < 0.9);
+        let same: Vec<String> = "A B C D E".split(' ').map(str::to_string).collect();
+        assert_eq!(checks::dice_similarity(&a, &same), 1.0);
+    }
+
+    // ------------------------------------------------- unused
+    #[test]
+    fn unused_never_referenced_is_found() {
+        let f = scan_src("def helper():\n    return 1\n");
+        let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "unused").collect();
+        assert_eq!(u.len(), 1);
+        assert!(u[0].message.contains("never referenced"));
+    }
+
+    #[test]
+    fn unused_referenced_and_main_skip() {
+        let f = scan_src("def main():\n    return helper()\n\ndef helper():\n    return 1\n");
+        assert!(!f.iter().any(|x| x.kind == "unused"));
+    }
+
+    #[test]
+    fn unused_string_dispatch_mention_skips() {
+        let f = scan_src("COMMANDS = [\"import_places\"]\n\ndef import_places():\n    return 1\n");
+        assert!(!f.iter().any(|x| x.kind == "unused"));
+    }
+
+    #[test]
+    fn unused_decorated_is_referenced() {
+        let f = scan_src("@app.route(\"/x\")\ndef import_places():\n    return 1\n");
+        assert!(!f.iter().any(|x| x.kind == "unused"));
+    }
+
+    #[test]
+    fn unused_test_only_is_conditional() {
+        let (f, c) = (scan_corpus(&[
+            ("prod.py", "def seam():\n    return 1\n"),
+            ("tests/test_prod.py", "def test_seam():\n    assert seam()\n"),
+        ]), ());
+        let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "unused").collect();
+        assert_eq!(u.len(), 1);
+        assert!(u[0].message.contains("referenced only from tests"));
     }
 }

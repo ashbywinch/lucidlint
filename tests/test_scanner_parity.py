@@ -140,6 +140,30 @@ def test_findings_parity(binary: Path):
     assert not only_rust, f"Rust findings missing from Python: {sorted(only_rust)[:5]}"
 
 
+def test_repo_wide_parity(binary: Path):
+    """duplicate + unused: the Rust core computes the whole-repo families
+    (Dice on structural skeletons; defined-but-never-referenced) exactly
+    like _duplicate_actions / _unused_actions."""
+    # the binary must see the FULL repo file set (reference scan splits
+    # prod vs test files)
+    all_py = sorted(
+        p for p in ROOT.rglob("*.py")
+        if not any(part in ch.EXCLUDED_DIRS for part in p.parts)
+    )
+    proc = subprocess.run([str(binary)] + [str(p) for p in all_py],
+                          capture_output=True, text=True, check=True)
+    rust = json.loads(proc.stdout)
+    rust_dup = {(f["file"], f["line"]) for f in rust["findings"] if f["kind"] == "duplicate"}
+    rust_unused = {(f["file"], f["line"]) for f in rust["findings"] if f["kind"] == "unused"}
+    from collections import Counter
+    py_dup = {(a.file, a.line) for a in ch._duplicate_actions(ROOT, True, Counter(), {})}
+    py_unused = {(a.file, a.line) for a in ch._unused_actions(ROOT, True, Counter(), {})}
+    assert not (py_dup - rust_dup), f"duplicate missing from Rust: {sorted(py_dup - rust_dup)[:5]}"
+    assert not (rust_dup - py_dup), f"duplicate extra in Rust: {sorted(rust_dup - py_dup)[:5]}"
+    assert not (py_unused - rust_unused), f"unused missing from Rust: {sorted(py_unused - rust_unused)[:5]}"
+    assert not (rust_unused - py_unused), f"unused extra in Rust: {sorted(rust_unused - py_unused)[:5]}"
+
+
 def test_scanner_parses_every_corpus_file(binary: Path):
     """broken.py is intentionally unparseable (fixture) — exactly 1 error,
     and error tolerance is the point: everything else must parse clean."""

@@ -2,9 +2,11 @@
 //! exactly: suppressions, type-ignore, global-state, builtin-shadow, closures,
 //! class-module, vague-name, strewing, except-swallows, broad-except.
 
-use ruff_python_ast::Expr;
-use ruff_python_ast::Stmt;
 use ruff_python_ast::token::{Token, TokenKind, Tokens};
+use ruff_python_ast::{
+    AnyNodeRef, BoolOp, CmpOp, Expr, ExprContext, ModModule, Operator, Pattern, Stmt,
+    StmtFunctionDef, UnaryOp, visitor::Visitor,
+};
 use ruff_text_size::Ranged;
 use std::collections::HashSet;
 
@@ -998,6 +1000,842 @@ pub fn module_flagged_names(body: &[Stmt]) -> HashSet<String> {
                 }
             }
         }
+    }
+    out
+}
+
+// =====================================================================
+// repo-wide families: duplicate (Dice on structural skeletons) + unused
+// (defined-but-never-referenced). These are computed in the Rust runner
+// across ALL files of one invocation — mirroring _duplicate_actions and
+// _unused_actions in code_health.py.
+// =====================================================================
+
+/// One function candidate for the duplication search.
+pub struct SkeletonFn {
+    pub rel: String,
+    pub name: String,
+    pub line: usize,
+    pub skeleton: Vec<String>,
+}
+
+/// Dice similarity on bigram sets — `_dice_similarity` in code_health.py.
+pub fn dice_similarity(a: &[String], b: &[String]) -> f64 {
+    let bigrams = |t: &[String]| -> HashSet<(String, String)> {
+        t.windows(2).map(|w| (w[0].clone(), w[1].clone())).collect()
+    };
+    let sa = bigrams(a);
+    let sb = bigrams(b);
+    if sa.is_empty() && sb.is_empty() {
+        return 0.0;
+    }
+    let inter = sa.intersection(&sb).count();
+    2.0 * inter as f64 / (sa.len() + sb.len()) as f64
+}
+
+/// The structural fingerprint: node types in CPython `ast.walk` BFS order,
+/// with names/constants/args collapsed (`_fn_skeleton`). The BFS child
+/// enumeration replicates `ast.iter_child_nodes` field order — the
+/// Parameters node emits its defaults hoisted (kw_defaults then defaults),
+/// dict literals emit all keys before all values, and if/elif chains
+/// re-expand into nested "If" nodes, exactly like CPython's orelse nesting.
+/// A BFS queue item — either an AST node or a bare operator/context token
+/// (CPython visits `ast.operator` / `ast.expr_context` nodes in `ast.walk`).
+pub enum Q<'a> {
+    N(AnyNodeRef<'a>),
+    T(&'static str),
+}
+
+pub fn fn_skeleton(f: &StmtFunctionDef) -> Vec<String> {
+    use ruff_python_ast::{AnyNodeRef, ElifElseClause};
+    let mut toks: Vec<String> = Vec::new();
+    let mut queue: Vec<Q> = Vec::new();
+    toks.push(if f.is_async { "AsyncFunctionDef" } else { "FunctionDef" }.to_string());
+    // CPython FunctionDef children: arguments, body, decorator_list, returns
+    queue.push(Q::N(AnyNodeRef::Parameters(&f.parameters)));
+    for s in &f.body {
+        queue.push(Q::N(AnyNodeRef::from(s)));
+    }
+    for d in &f.decorator_list {
+        queue.push(Q::N(AnyNodeRef::from(&d.expression)));
+    }
+    if let Some(r) = &f.returns {
+        queue.push(Q::N(AnyNodeRef::from(r.as_ref())));
+    }
+    let mut i = 0usize;
+    while i < queue.len() {
+        let node = match &queue[i] {
+            Q::N(n) => *n,
+            Q::T(t) => {
+                toks.push((*t).to_string());
+                i += 1;
+                continue;
+            }
+        };
+        i += 1;
+        match node {
+            AnyNodeRef::ExprName(_) => toks.push("N".to_string()),
+            AnyNodeRef::ExprStringLiteral(_)
+            | AnyNodeRef::ExprBytesLiteral(_)
+            | AnyNodeRef::ExprNumberLiteral(_)
+            | AnyNodeRef::ExprBooleanLiteral(_)
+            | AnyNodeRef::ExprNoneLiteral(_)
+            | AnyNodeRef::ExprEllipsisLiteral(_)
+            | AnyNodeRef::InterpolatedStringLiteralElement(_) => toks.push("C".to_string()),
+            AnyNodeRef::Parameter(_) | AnyNodeRef::ParameterWithDefault(_) => {
+                toks.push("A".to_string())
+            }
+            AnyNodeRef::Parameters(_) => toks.push("arguments".to_string()),
+            AnyNodeRef::ElifElseClause(_) => toks.push("If".to_string()),
+            AnyNodeRef::InterpolatedElement(_) => toks.push("FormattedValue".to_string()),
+            _ => toks.push(format!("{:?}", node.kind())),
+        }
+        skel_children(node, &mut queue);
+    }
+    toks
+}
+
+fn op_token(op: &Operator) -> &'static str {
+    use ruff_python_ast::Operator as O;
+    match op {
+        O::Add => "Add",
+        O::Sub => "Sub",
+        O::Mult => "Mult",
+        O::MatMult => "MatMult",
+        O::Div => "Div",
+        O::Mod => "Mod",
+        O::Pow => "Pow",
+        O::LShift => "LShift",
+        O::RShift => "RShift",
+        O::BitOr => "BitOr",
+        O::BitXor => "BitXor",
+        O::BitAnd => "BitAnd",
+        O::FloorDiv => "FloorDiv",
+    }
+}
+
+fn unary_op_token(op: &UnaryOp) -> &'static str {
+    use ruff_python_ast::UnaryOp as U;
+    match op {
+        U::Invert => "Invert",
+        U::Not => "Not",
+        U::UAdd => "UAdd",
+        U::USub => "USub",
+    }
+}
+
+fn bool_op_token(op: &BoolOp) -> &'static str {
+    use ruff_python_ast::BoolOp as B;
+    match op {
+        B::And => "And",
+        B::Or => "Or",
+    }
+}
+
+fn cmp_op_token(op: &CmpOp) -> &'static str {
+    use ruff_python_ast::CmpOp as C;
+    match op {
+        C::Eq => "Eq",
+        C::NotEq => "NotEq",
+        C::Lt => "Lt",
+        C::LtE => "LtE",
+        C::Gt => "Gt",
+        C::GtE => "GtE",
+        C::Is => "Is",
+        C::IsNot => "IsNot",
+        C::In => "In",
+        C::NotIn => "NotIn",
+    }
+}
+
+fn ctx_token(ctx: &ExprContext) -> &'static str {
+    use ruff_python_ast::ExprContext as X;
+    match ctx {
+        X::Load => "Load",
+        X::Store => "Store",
+        X::Del => "Del",
+        X::Invalid => "Invalid",
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+/// Push a pattern node onto the skeleton queue.
+fn push_pattern<'a>(queue: &mut Vec<Q<'a>>, p: &'a Pattern) {
+    let n = match p {
+        Pattern::MatchValue(x) => AnyNodeRef::PatternMatchValue(x),
+        Pattern::MatchSingleton(x) => AnyNodeRef::PatternMatchSingleton(x),
+        Pattern::MatchSequence(x) => AnyNodeRef::PatternMatchSequence(x),
+        Pattern::MatchMapping(x) => AnyNodeRef::PatternMatchMapping(x),
+        Pattern::MatchClass(x) => AnyNodeRef::PatternMatchClass(x),
+        Pattern::MatchStar(x) => AnyNodeRef::PatternMatchStar(x),
+        Pattern::MatchAs(x) => AnyNodeRef::PatternMatchAs(x),
+        Pattern::MatchOr(x) => AnyNodeRef::PatternMatchOr(x),
+    };
+    queue.push(Q::N(n));
+}
+
+pub fn skel_children<'a>(node: AnyNodeRef<'a>, queue: &mut Vec<Q<'a>>) {
+    use ruff_python_ast::{ElifElseClause, Expr, Pattern, Stmt};
+    fn push<'a>(q: &mut Vec<Q<'a>>, n: AnyNodeRef<'a>) {
+        q.push(Q::N(n));
+    }
+    fn tok<'a>(q: &mut Vec<Q<'a>>, t: &'static str) {
+        q.push(Q::T(t));
+    }
+    match node {
+        AnyNodeRef::StmtClassDef(c) => {
+            // CPython: bases, keywords, body, decorator_list
+            if let Some(arguments) = &c.arguments {
+                for b in &arguments.args {
+                    push(queue, AnyNodeRef::from(b));
+                }
+                for k in &arguments.keywords {
+                    push(queue, AnyNodeRef::Keyword(k));
+                }
+            }
+            for s in &c.body {
+                push(queue, AnyNodeRef::from(s));
+            }
+            for d in &c.decorator_list {
+                push(queue, AnyNodeRef::from(&d.expression));
+            }
+        }
+        AnyNodeRef::StmtReturn(r) => {
+            if let Some(v) = &r.value {
+                push(queue, AnyNodeRef::from(v.as_ref()));
+            }
+        }
+        AnyNodeRef::StmtDelete(d) => {
+            for t in &d.targets {
+                push(queue, AnyNodeRef::from(t));
+            }
+        }
+        AnyNodeRef::StmtTypeAlias(t) => {
+            push(queue, AnyNodeRef::from(t.name.as_ref()));
+            if let Some(tp) = &t.type_params {
+                for p in &tp.type_params {
+                    match p {
+                        ruff_python_ast::TypeParam::TypeVar(t) => push(queue, AnyNodeRef::TypeParamTypeVar(t)),
+                        ruff_python_ast::TypeParam::TypeVarTuple(t) => push(queue, AnyNodeRef::TypeParamTypeVarTuple(t)),
+                        ruff_python_ast::TypeParam::ParamSpec(t) => push(queue, AnyNodeRef::TypeParamParamSpec(t)),
+                    }
+                }
+            }
+            push(queue, AnyNodeRef::from(t.value.as_ref()));
+        }
+        AnyNodeRef::StmtAssign(a) => {
+            for t in &a.targets {
+                push(queue, AnyNodeRef::from(t));
+            }
+            push(queue, AnyNodeRef::from(a.value.as_ref()));
+        }
+        AnyNodeRef::StmtAugAssign(a) => {
+            push(queue, AnyNodeRef::from(a.target.as_ref()));
+            tok(queue, op_token(&a.op));
+            push(queue, AnyNodeRef::from(a.value.as_ref()));
+        }
+        AnyNodeRef::StmtAnnAssign(a) => {
+            push(queue, AnyNodeRef::from(a.target.as_ref()));
+            push(queue, AnyNodeRef::from(a.annotation.as_ref()));
+            if let Some(v) = &a.value {
+                push(queue, AnyNodeRef::from(v.as_ref()));
+            }
+        }
+        AnyNodeRef::StmtFor(f) => {
+            push(queue, AnyNodeRef::from(f.target.as_ref()));
+            push(queue, AnyNodeRef::from(f.iter.as_ref()));
+            for s in &f.body {
+                push(queue, AnyNodeRef::from(s));
+            }
+            for s in &f.orelse {
+                push(queue, AnyNodeRef::from(s));
+            }
+        }
+        AnyNodeRef::StmtWhile(w) => {
+            push(queue, AnyNodeRef::from(w.test.as_ref()));
+            for s in &w.body {
+                push(queue, AnyNodeRef::from(s));
+            }
+            for s in &w.orelse {
+                push(queue, AnyNodeRef::from(s));
+            }
+        }
+        AnyNodeRef::StmtIf(i) => {
+            push(queue, AnyNodeRef::from(i.test.as_ref()));
+            for s in &i.body {
+                push(queue, AnyNodeRef::from(s));
+            }
+            // CPython re-nests elifs as inner If nodes in orelse
+            for clause in &i.elif_else_clauses {
+                push(queue, AnyNodeRef::ElifElseClause(clause));
+            }
+        }
+        AnyNodeRef::ElifElseClause(clause) => {
+            if let Some(t) = &clause.test {
+                push(queue, AnyNodeRef::from(t));
+            }
+            for s in &clause.body {
+                push(queue, AnyNodeRef::from(s));
+            }
+        }
+        AnyNodeRef::StmtWith(w) => {
+            for item in &w.items {
+                push(queue, AnyNodeRef::WithItem(item));
+            }
+            for s in &w.body {
+                push(queue, AnyNodeRef::from(s));
+            }
+        }
+        AnyNodeRef::WithItem(item) => {
+            push(queue, AnyNodeRef::from(&item.context_expr));
+            if let Some(v) = &item.optional_vars {
+                push(queue, AnyNodeRef::from(v.as_ref()));
+            }
+        }
+        AnyNodeRef::StmtMatch(m) => {
+            push(queue, AnyNodeRef::from(m.subject.as_ref()));
+            for case in &m.cases {
+                push(queue, AnyNodeRef::MatchCase(case));
+            }
+        }
+        AnyNodeRef::MatchCase(case) => {
+            match &case.pattern {
+                Pattern::MatchValue(p) => push(queue, AnyNodeRef::PatternMatchValue(p)),
+                Pattern::MatchSingleton(p) => push(queue, AnyNodeRef::PatternMatchSingleton(p)),
+                Pattern::MatchSequence(p) => push(queue, AnyNodeRef::PatternMatchSequence(p)),
+                Pattern::MatchMapping(p) => push(queue, AnyNodeRef::PatternMatchMapping(p)),
+                Pattern::MatchClass(p) => push(queue, AnyNodeRef::PatternMatchClass(p)),
+                Pattern::MatchStar(p) => push(queue, AnyNodeRef::PatternMatchStar(p)),
+                Pattern::MatchAs(p) => push(queue, AnyNodeRef::PatternMatchAs(p)),
+                Pattern::MatchOr(p) => push(queue, AnyNodeRef::PatternMatchOr(p)),
+            }
+            if let Some(g) = &case.guard {
+                push(queue, AnyNodeRef::from(g.as_ref()));
+            }
+            for s in &case.body {
+                push(queue, AnyNodeRef::from(s));
+            }
+        }
+        AnyNodeRef::StmtRaise(r) => {
+            if let Some(e) = &r.exc {
+                push(queue, AnyNodeRef::from(e.as_ref()));
+            }
+            if let Some(c) = &r.cause {
+                push(queue, AnyNodeRef::from(c.as_ref()));
+            }
+        }
+        AnyNodeRef::StmtTry(t) => {
+            for s in &t.body {
+                push(queue, AnyNodeRef::from(s));
+            }
+            for h in &t.handlers {
+                if let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h {
+                    push(queue, AnyNodeRef::ExceptHandlerExceptHandler(eh));
+                }
+            }
+            for s in &t.orelse {
+                push(queue, AnyNodeRef::from(s));
+            }
+            for s in &t.finalbody {
+                push(queue, AnyNodeRef::from(s));
+            }
+        }
+        AnyNodeRef::ExceptHandlerExceptHandler(eh) => {
+            if let Some(t) = &eh.type_ {
+                push(queue, AnyNodeRef::from(t.as_ref()));
+            }
+            for s in &eh.body {
+                push(queue, AnyNodeRef::from(s));
+            }
+        }
+        AnyNodeRef::StmtAssert(a) => {
+            push(queue, AnyNodeRef::from(a.test.as_ref()));
+            if let Some(m) = &a.msg {
+                push(queue, AnyNodeRef::from(m.as_ref()));
+            }
+        }
+        AnyNodeRef::StmtImport(imp) => {
+            for a in &imp.names {
+                push(queue, AnyNodeRef::Alias(a));
+            }
+        }
+        AnyNodeRef::StmtImportFrom(imp) => {
+            for a in &imp.names {
+                push(queue, AnyNodeRef::Alias(a));
+            }
+        }
+        AnyNodeRef::StmtExpr(e) => push(queue, AnyNodeRef::from(e.value.as_ref())),
+        // a nested function's subtree IS part of ast.walk — descend like the
+        // module-level root: arguments, body, decorator_list, returns
+        AnyNodeRef::StmtFunctionDef(f) => {
+            push(queue, AnyNodeRef::Parameters(&f.parameters));
+            for s in &f.body {
+                push(queue, AnyNodeRef::from(s));
+            }
+            for d in &f.decorator_list {
+                push(queue, AnyNodeRef::from(&d.expression));
+            }
+            if let Some(r) = &f.returns {
+                push(queue, AnyNodeRef::from(r.as_ref()));
+            }
+        }
+        // leaf / identifier-only statements
+        AnyNodeRef::StmtGlobal(_)
+        | AnyNodeRef::StmtNonlocal(_)
+        | AnyNodeRef::StmtPass(_)
+        | AnyNodeRef::StmtBreak(_)
+        | AnyNodeRef::StmtContinue(_)
+        | AnyNodeRef::StmtIpyEscapeCommand(_)
+        | AnyNodeRef::Alias(_) => {}
+        AnyNodeRef::Parameters(p) => {
+            // CPython arguments children: posonlyargs, args, vararg,
+            // kwonlyargs, kw_defaults, kwarg, defaults (hoisted)
+            for pwd in &p.posonlyargs {
+                push(queue, AnyNodeRef::ParameterWithDefault(pwd));
+            }
+            for pwd in &p.args {
+                push(queue, AnyNodeRef::ParameterWithDefault(pwd));
+            }
+            if let Some(v) = &p.vararg {
+                push(queue, AnyNodeRef::Parameter(v));
+            }
+            for pwd in &p.kwonlyargs {
+                push(queue, AnyNodeRef::ParameterWithDefault(pwd));
+            }
+            for pwd in p.kwonlyargs.iter().filter_map(|p| p.default.as_deref()) {
+                push(queue, AnyNodeRef::from(pwd));
+            }
+            if let Some(k) = &p.kwarg {
+                push(queue, AnyNodeRef::Parameter(k));
+            }
+            for pwd in p
+                .posonlyargs
+                .iter()
+                .chain(&p.args)
+                .filter_map(|p| p.default.as_deref())
+            {
+                push(queue, AnyNodeRef::from(pwd));
+            }
+        }
+        AnyNodeRef::Parameter(param) => {
+            if let Some(a) = &param.annotation {
+                push(queue, AnyNodeRef::from(a.as_ref()));
+            }
+        }
+        AnyNodeRef::ParameterWithDefault(pwd) => {
+            // the default is hoisted by Parameters (CPython defaults list)
+            if let Some(a) = &pwd.parameter.annotation {
+                push(queue, AnyNodeRef::from(a.as_ref()));
+            }
+        }
+        AnyNodeRef::Keyword(k) => push(queue, AnyNodeRef::from(&k.value)),
+        AnyNodeRef::Comprehension(c) => {
+            push(queue, AnyNodeRef::from(&c.target));
+            push(queue, AnyNodeRef::from(&c.iter));
+            for f in &c.ifs {
+                push(queue, AnyNodeRef::from(f));
+            }
+        }
+        AnyNodeRef::ExprBoolOp(b) => {
+            tok(queue, bool_op_token(&b.op));
+            for v in &b.values {
+                push(queue, AnyNodeRef::from(v));
+            }
+        }
+        AnyNodeRef::ExprNamed(n) => {
+            push(queue, AnyNodeRef::from(n.target.as_ref()));
+            push(queue, AnyNodeRef::from(n.value.as_ref()));
+        }
+        AnyNodeRef::ExprBinOp(b) => {
+            push(queue, AnyNodeRef::from(b.left.as_ref()));
+            tok(queue, op_token(&b.op));
+            push(queue, AnyNodeRef::from(b.right.as_ref()));
+        }
+        AnyNodeRef::ExprUnaryOp(u) => {
+            tok(queue, unary_op_token(&u.op));
+            push(queue, AnyNodeRef::from(u.operand.as_ref()));
+        }
+        AnyNodeRef::ExprLambda(l) => {
+            if let Some(p) = &l.parameters {
+                push(queue, AnyNodeRef::Parameters(p));
+            }
+            push(queue, AnyNodeRef::from(l.body.as_ref()));
+        }
+        AnyNodeRef::ExprIf(e) => {
+            push(queue, AnyNodeRef::from(e.test.as_ref()));
+            push(queue, AnyNodeRef::from(e.body.as_ref()));
+            push(queue, AnyNodeRef::from(e.orelse.as_ref()));
+        }
+        AnyNodeRef::ExprDict(d) => {
+            // CPython: all keys first, then all values
+            for item in &d.items {
+                if let Some(k) = &item.key {
+                    push(queue, AnyNodeRef::from(k));
+                }
+            }
+            for item in &d.items {
+                push(queue, AnyNodeRef::from(&item.value));
+            }
+        }
+        AnyNodeRef::ExprSet(s) => {
+            for e in &s.elts {
+                push(queue, AnyNodeRef::from(e));
+            }
+        }
+        AnyNodeRef::ExprListComp(c) => {
+            push(queue, AnyNodeRef::from(c.elt.as_ref()));
+            for g in &c.generators {
+                push(queue, AnyNodeRef::Comprehension(g));
+            }
+        }
+        AnyNodeRef::ExprSetComp(c) => {
+            push(queue, AnyNodeRef::from(c.elt.as_ref()));
+            for g in &c.generators {
+                push(queue, AnyNodeRef::Comprehension(g));
+            }
+        }
+        AnyNodeRef::ExprGenerator(g) => {
+            push(queue, AnyNodeRef::from(g.elt.as_ref()));
+            for gen in &g.generators {
+                push(queue, AnyNodeRef::Comprehension(gen));
+            }
+        }
+        AnyNodeRef::ExprDictComp(c) => {
+            if let Some(k) = &c.key {
+                push(queue, AnyNodeRef::from(k.as_ref()));
+            }
+            push(queue, AnyNodeRef::from(c.value.as_ref()));
+            for g in &c.generators {
+                push(queue, AnyNodeRef::Comprehension(g));
+            }
+        }
+        AnyNodeRef::ExprAwait(a) => push(queue, AnyNodeRef::from(a.value.as_ref())),
+        AnyNodeRef::ExprYield(y) => {
+            if let Some(v) = &y.value {
+                push(queue, AnyNodeRef::from(v.as_ref()));
+            }
+        }
+        AnyNodeRef::ExprYieldFrom(y) => push(queue, AnyNodeRef::from(y.value.as_ref())),
+        AnyNodeRef::ExprCompare(c) => {
+            push(queue, AnyNodeRef::from(c.left.as_ref()));
+            for o in &c.ops {
+                tok(queue, cmp_op_token(o));
+            }
+            for o in &c.comparators {
+                push(queue, AnyNodeRef::from(o));
+            }
+        }
+        AnyNodeRef::ExprCall(c) => {
+            push(queue, AnyNodeRef::from(c.func.as_ref()));
+            for a in &c.arguments.args {
+                push(queue, AnyNodeRef::from(a));
+            }
+            for k in &c.arguments.keywords {
+                push(queue, AnyNodeRef::Keyword(k));
+            }
+        }
+        AnyNodeRef::ExprFString(f) => {
+            for element in f.value.elements() {
+                push(queue, AnyNodeRef::from(element));
+            }
+        }
+        AnyNodeRef::ExprTString(t) => {
+            // t-strings (3.14) — structurally a JoinedStr; walk parts' elements
+            for element in t.value.elements() {
+                push(queue, AnyNodeRef::from(element));
+            }
+        }
+        AnyNodeRef::InterpolatedElement(e) => {
+            push(queue, AnyNodeRef::from(e.expression.as_ref()));
+            if let Some(spec) = &e.format_spec {
+                for element in &spec.elements {
+                    push(queue, AnyNodeRef::from(element));
+                }
+            }
+        }
+        AnyNodeRef::InterpolatedStringFormatSpec(_) | AnyNodeRef::InterpolatedStringLiteralElement(_) => {}
+        AnyNodeRef::ExprAttribute(a) => {
+            push(queue, AnyNodeRef::from(a.value.as_ref()));
+            tok(queue, ctx_token(&a.ctx));
+        }
+        AnyNodeRef::ExprSubscript(s) => {
+            push(queue, AnyNodeRef::from(s.value.as_ref()));
+            push(queue, AnyNodeRef::from(s.slice.as_ref()));
+            tok(queue, ctx_token(&s.ctx));
+        }
+        AnyNodeRef::ExprStarred(s) => {
+            push(queue, AnyNodeRef::from(s.value.as_ref()));
+            tok(queue, ctx_token(&s.ctx));
+        }
+        AnyNodeRef::ExprList(l) => {
+            for e in &l.elts {
+                push(queue, AnyNodeRef::from(e));
+            }
+            tok(queue, ctx_token(&l.ctx));
+        }
+        AnyNodeRef::ExprTuple(t) => {
+            for e in &t.elts {
+                push(queue, AnyNodeRef::from(e));
+            }
+            tok(queue, ctx_token(&t.ctx));
+        }
+        AnyNodeRef::ExprSlice(s) => {
+            if let Some(l) = &s.lower {
+                push(queue, AnyNodeRef::from(l.as_ref()));
+            }
+            if let Some(u) = &s.upper {
+                push(queue, AnyNodeRef::from(u.as_ref()));
+            }
+            if let Some(st) = &s.step {
+                push(queue, AnyNodeRef::from(st.as_ref()));
+            }
+        }
+        AnyNodeRef::PatternMatchValue(p) => push(queue, AnyNodeRef::from(p.value.as_ref())),
+        AnyNodeRef::PatternMatchSequence(p) => {
+            for pat in &p.patterns {
+                push_pattern(queue, pat);
+            }
+        }
+        AnyNodeRef::PatternMatchMapping(p) => {
+            for k in &p.keys {
+                push(queue, AnyNodeRef::from(k));
+            }
+            for pat in &p.patterns {
+                push_pattern(queue, pat);
+            }
+        }
+        AnyNodeRef::PatternMatchClass(p) => {
+            push(queue, AnyNodeRef::from(p.cls.as_ref()));
+            for pat in &p.arguments.patterns {
+                push_pattern(queue, pat);
+            }
+            for kw in &p.arguments.keywords {
+                push_pattern(queue, &kw.pattern);
+            }
+        }
+        AnyNodeRef::PatternMatchAs(p) => {
+            if let Some(pat) = &p.pattern {
+                push_pattern(queue, pat);
+            }
+        }
+        AnyNodeRef::PatternMatchOr(p) => {
+            for pat in &p.patterns {
+                push_pattern(queue, pat);
+            }
+        }
+        AnyNodeRef::PatternMatchSingleton(_) | AnyNodeRef::PatternMatchStar(_) => {}
+        AnyNodeRef::TypeParamTypeVar(t) => {
+            if let Some(b) = &t.bound {
+                push(queue, AnyNodeRef::from(b.as_ref()));
+            }
+            if let Some(d) = &t.default {
+                push(queue, AnyNodeRef::from(d.as_ref()));
+            }
+        }
+        AnyNodeRef::TypeParamTypeVarTuple(t) => {
+            if let Some(d) = &t.default {
+                push(queue, AnyNodeRef::from(d.as_ref()));
+            }
+        }
+        AnyNodeRef::TypeParamParamSpec(t) => {
+            if let Some(d) = &t.default {
+                push(queue, AnyNodeRef::from(d.as_ref()));
+            }
+        }
+        AnyNodeRef::PatternArguments(_) | AnyNodeRef::PatternKeyword(_) => {}
+        AnyNodeRef::Arguments(a) => {
+            for e in &a.args {
+                push(queue, AnyNodeRef::from(e));
+            }
+            for k in &a.keywords {
+                push(queue, AnyNodeRef::Keyword(k));
+            }
+        }
+        // literals, names, module — leaves
+        AnyNodeRef::ExprName(n) => tok(queue, ctx_token(&n.ctx)),
+        AnyNodeRef::ExprStringLiteral(_)
+        | AnyNodeRef::ExprBytesLiteral(_)
+        | AnyNodeRef::ExprNumberLiteral(_)
+        | AnyNodeRef::ExprBooleanLiteral(_)
+        | AnyNodeRef::ExprNoneLiteral(_)
+        | AnyNodeRef::ExprEllipsisLiteral(_)
+        | AnyNodeRef::ExprIpyEscapeCommand(_)
+        | AnyNodeRef::StmtTypeAlias(_)
+        | AnyNodeRef::ModModule(_)
+        | AnyNodeRef::ModExpression(_)
+        // never pushed by skel_children, but the match must be total
+        | AnyNodeRef::Decorator(_)
+        | AnyNodeRef::TypeParams(_)
+        | AnyNodeRef::FString(_)
+        | AnyNodeRef::TString(_)
+        | AnyNodeRef::StringLiteral(_)
+        | AnyNodeRef::BytesLiteral(_)
+        | AnyNodeRef::Identifier(_) => {}
+    }
+}
+
+/// `_is_duplicate_candidate`: at least two real statements (one-line
+/// accessors are not copy-paste) and a 12+ token skeleton; `__init__`
+/// boilerplate is conventional.
+pub fn is_duplicate_candidate(f: &StmtFunctionDef, skeleton_len: usize) -> bool {
+    if f.name.as_str() == "__init__" {
+        return false;
+    }
+    let stmts: Vec<&Stmt> = f
+        .body
+        .iter()
+        .filter(|s| !matches!(s, Stmt::Expr(e) if matches!(e.value.as_ref(), Expr::StringLiteral(_))))
+        .collect();
+    stmts.len() >= 2 && skeleton_len >= 12
+}
+
+/// `_first_duplicate`: the first LATER candidate at least 90% similar.
+pub fn first_duplicate<'a>(fns: &'a [SkeletonFn], i: usize, toks: &[String]) -> Option<(&'a SkeletonFn, f64)> {
+    for other in &fns[i + 1..] {
+        let len_diff = toks.len().abs_diff(other.skeleton.len());
+        if len_diff > (toks.len() / 5).max(2) {
+            continue;
+        }
+        let sim = dice_similarity(toks, &other.skeleton);
+        if sim >= 0.9 {
+            return Some((other, sim));
+        }
+    }
+    None
+}
+
+/// Cross-file copy-paste findings (`_duplicate_actions`).
+pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (i, fr) in fns.iter().enumerate() {
+        if let Some((dup, sim)) = first_duplicate(fns, i, &fr.skeleton) {
+            out.push(Finding {
+                file: dup.rel.clone(),
+                line: dup.line,
+                function: dup.name.clone(),
+                kind: "duplicate".into(),
+                severity: "warn".into(),
+                message: format!(
+                    "function '{}' ({}:{}) is {:.0}% similar to '{}' ({}:{}) — copy-paste; extract the shared logic into one function",
+                    dup.name, dup.rel, dup.line, sim * 100.0, fr.name, fr.rel, fr.line
+                ),
+            });
+        }
+    }
+    out
+}
+
+/// The reference scan for one file — module-level definitions and every
+/// referenced name, split by prod vs test (`_collect_file_references`).
+#[derive(Default)]
+pub struct FileRefs {
+    /// module-level function definitions (non-test files only)
+    pub defs: Vec<(String, usize)>,
+    /// names referenced anywhere (Name nodes + import aliases)
+    pub refs: HashSet<String>,
+    /// string literal values (prod files only) — CLI dispatch mentions
+    pub strings: Vec<String>,
+    /// module-level functions with decorators — framework-registered
+    pub decorated: HashSet<String>,
+}
+
+/// Collect one file's definitions + references (the plain field-order
+/// visitor covers parameters, annotations, and defaults too).
+pub fn collect_file_refs(body: &[Stmt], is_test: bool, source: &str) -> FileRefs {
+    struct Collector {
+        is_test: bool,
+        defs: Vec<(String, usize)>,
+        refs: HashSet<String>,
+        strings: Vec<String>,
+        decorated: HashSet<String>,
+    }
+    impl<'a> Visitor<'a> for Collector {
+        fn visit_stmt(&mut self, stmt: &'a Stmt) {
+            ruff_python_ast::visitor::walk_stmt(self, stmt);
+        }
+        fn visit_expr(&mut self, expr: &'a Expr) {
+            match expr {
+                Expr::Name(n) => {
+                    self.refs.insert(n.id.to_string());
+                }
+                Expr::StringLiteral(s) => {
+                    if !self.is_test {
+                        self.strings.push(s.value.to_str().to_string());
+                    }
+                }
+                _ => {}
+            }
+            ruff_python_ast::visitor::walk_expr(self, expr);
+        }
+        fn visit_alias(&mut self, alias: &'a ruff_python_ast::Alias) {
+            self.refs.insert(alias.name.to_string());
+        }
+    }
+    let mut c = Collector {
+        is_test,
+        defs: Vec::new(),
+        refs: HashSet::new(),
+        strings: Vec::new(),
+        decorated: HashSet::new(),
+    };
+    // module-level definitions come from tree.body — the walk covers refs
+    for s in body {
+        if let Stmt::FunctionDef(f) = s {
+            if !is_test {
+                let line = stmt_line(source, s);
+                c.defs.push((f.name.to_string(), line));
+                if !f.decorator_list.is_empty() {
+                    c.decorated.insert(f.name.to_string());
+                }
+            }
+        }
+    }
+    for s in body {
+        c.visit_stmt(s);
+    }
+    FileRefs {
+        defs: c.defs,
+        refs: c.refs,
+        strings: c.strings,
+        decorated: c.decorated,
+    }
+}
+
+/// Dead-code findings (`_unused_actions`).
+pub fn unused_findings(
+    definitions: &[(String, String, usize)], // (rel, name, line)
+    prod_refs: &HashSet<String>,
+    test_refs: &HashSet<String>,
+    strings: &[String],
+) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (rel, name, line) in definitions {
+        if name == "main" || prod_refs.contains(name) || strings.iter().any(|s| s.contains(name.as_str())) {
+            continue;
+        }
+        let (message, kind) = if test_refs.contains(name) {
+            (
+                format!(
+                    "function '{name}' ({rel}:{line}) is referenced only from tests — if it is a deliberate test seam (isolation hook, fixture helper), document it with `# code-health: ignore unused <why>`; otherwise production code that nothing ships calls is dead — delete it"
+                ),
+                "unused",
+            )
+        } else {
+            (
+                format!(
+                    "function '{name}' ({rel}:{line}) is defined but never referenced — dead code is deleted, not kept (unless it is a CLI command or public API entry point)"
+                ),
+                "unused",
+            )
+        };
+        out.push(Finding {
+            file: rel.clone(),
+            line: *line,
+            function: name.clone(),
+            kind: kind.into(),
+            severity: "warn".into(),
+            message,
+        });
     }
     out
 }
