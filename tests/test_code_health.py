@@ -1564,3 +1564,12 @@ def test_update_baseline_excludes_warns(tmp_path):
     rc = run_main(repo, "--update-baseline", "--baseline", str(baseline))
     assert rc == 0
     assert json.loads(baseline.read_text())["actions"] == []
+
+
+def test_fail_run_lists_warnings(tmp_path, capsys):
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 3\n")
+    rc = run_main(repo, functions=[[FakeFn("alpha", 1, 20)]])  # CC 20 -> fail
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "warnings (reported, never fail) — 1:" in out
+    assert "magic number 3" in out

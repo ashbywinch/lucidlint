@@ -1279,6 +1279,9 @@ def _render_text(repo: Path, args, unique: list[Action], fails: list[Action], wa
         return
     _render_summary(repo, args, fails, warns, acks, diff, coverage_source, graph_preferred)
     _render_actions(repo, args, fails, acks)
+    if warns:
+        print(f"\nwarnings (reported, never fail) — {len(warns)}:")
+        _render_actions(repo, args, warns, [])
 
 
 def _latent_class_actions(repo: Path, include_tests: bool,
