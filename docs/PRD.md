@@ -179,9 +179,25 @@ rather than a number.
   (tests fake dependencies; only E2E may skip).
 - **R20 — Documentation standards are enforced too.** Every relative
   markdown link in the repo's docs resolves; backtick paths that look like
-  real paths resolve; every doc in `docs/` is discoverable from AGENTS.md
-  directly or one link deep. Bare names like `coding-standards.md` are
-  references, not paths, and are left alone.
+  real paths resolve; every doc in `docs/` is reachable from AGENTS.md
+  through any number of links — several hops are the norm. AGENTS.md
+  carries only content relevant to all agents and links group indexes; it
+  never flat-lists the doc tree. Bare names like `coding-standards.md`
+  are references, not paths, and are left alone.
+- **R21 — Structural mixing is detected at folder and layer level.** A
+  folder whose direct files split across graph communities mixes concerns —
+  extract a sub-folder per community. A file whose functions partition by
+  dominant callee subsystem mixes architecture layers — the call graph is
+  the seam; extract a module per layer. Both are graph-based, gated on the
+  evidence (community membership, resolved callees), and skipped without a
+  graph.
+- **R22 — Tests fake the filesystem.** Real-FS access in a test
+  (tmp_path/open/Path) without pyfakefs is a finding; the `fs` fixture and
+  fake_filesystem_unittest pass. Real FS is sanctioned only when the code
+  under test needs real semantics — subprocess interop, symlinks, C-level
+  I/O like sqlite3 — and `# code-health: ignore-file <signal> <why>`
+  exempts a whole file with an explanation (a why-less ignore-file is
+  itself a finding).
 
 ## Non-goals
 

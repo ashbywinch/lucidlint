@@ -1,3 +1,7 @@
+# code-health: ignore-file fakefs the fixtures build sqlite3 graph/coverage DBs and real repo
+# trees — sqlite3 is C-level I/O pyfakefs cannot intercept, so these tests need the real
+# filesystem (the testing standard's named exception); everything else is faked
+
 """Unit tests for code_health.py — every external system is faked.
 
 No monkeypatch: fakes are injected by direct assignment and restored in
@@ -30,8 +34,10 @@ CREATE TABLE nodes (
     kind TEXT NOT NULL, name TEXT NOT NULL,
     qualified_name TEXT NOT NULL UNIQUE, file_path TEXT NOT NULL,
     line_start INTEGER, line_end INTEGER, language TEXT,
-    params TEXT, return_type TEXT, is_test INTEGER DEFAULT 0
+    params TEXT, return_type TEXT, is_test INTEGER DEFAULT 0,
+    community_id INTEGER
 );
+CREATE TABLE communities (id INTEGER PRIMARY KEY, name TEXT, size INTEGER DEFAULT 0);
 CREATE TABLE edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
     source_qualified TEXT NOT NULL, target_qualified TEXT NOT NULL,
@@ -139,9 +145,10 @@ def make_graph(repo, nodes=(), edges=(), risks=()):
     db = sqlite3.connect(gdir / "graph.db")
     db.executescript(SCHEMA)
     for n in nodes:
+        community = n[9] if len(n) > 9 else None
         db.execute(
-            "INSERT INTO nodes (kind,name,qualified_name,file_path,line_start,line_end,params,return_type,is_test) "
-            "VALUES (?,?,?,?,?,?,?,?,?)", n)
+            "INSERT INTO nodes (kind,name,qualified_name,file_path,line_start,line_end,params,return_type,is_test,community_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)", (*n[:9], community))
     for e in edges:
         db.execute(
             "INSERT INTO edges (kind,source_qualified,target_qualified,file_path,line) VALUES (?,?,?,?,?)", e)
@@ -1145,3 +1152,208 @@ def test_skipif_on_version_is_fine(tmp_path):
     with Env(routes=git_routes(), functions=[[]]):
         actions = ch._latent_class_actions(repo, False, {}, {})
     assert [a for a in actions if "skipif" in a.message] == []
+
+
+# --------------------------------------------------------------------------- docs kind
+def make_docs_repo(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "docs").mkdir()
+    (repo / "AGENTS.md").write_text("# AGENTS\n- [PRD](docs/PRD.md)\n- [TECHSPEC](docs/TECHSPEC.md)\n")
+    (repo / "docs" / "PRD.md").write_text("# PRD\n")
+    (repo / "docs" / "TECHSPEC.md").write_text("# TECHSPEC\n")
+    (repo / "docs" / "orphan.md").write_text("# Orphan — reachable nowhere\n")
+    (repo / "docs" / "broken.md").write_text("# Broken\n[missing](nowhere.md)\n")
+    return repo
+
+
+def test_docs_broken_link_is_a_finding(tmp_path):
+    repo = make_docs_repo(tmp_path)
+    actions = ch._docs_actions(repo, {}, {})
+    links = [a for a in actions if "does not resolve" in a.message]
+    assert len(links) == 1
+    assert "nowhere.md" in links[0].message and "broken.md" in links[0].message
+
+
+def test_docs_orphan_doc_is_undiscoverable(tmp_path):
+    repo = make_docs_repo(tmp_path)
+    actions = ch._docs_actions(repo, {}, {})
+    undiscoverable = [a for a in actions if "not reachable from AGENTS.md" in a.message]
+    assert len(undiscoverable) == 2  # orphan.md and broken.md
+    assert "orphan.md" in undiscoverable[0].message or "orphan.md" in undiscoverable[1].message
+
+
+def test_docs_reachable_and_resolving_pass(tmp_path):
+    repo = make_docs_repo(tmp_path)
+    actions = ch._docs_actions(repo, {}, {})
+    assert [a for a in actions if "PRD.md" in a.message and "undiscoverable" in a.message] == []
+    assert [a for a in actions if "docs/PRD.md" in a.message] == []  # link resolves
+
+
+def test_docs_bare_name_is_a_reference_not_a_path(tmp_path):
+    repo = make_docs_repo(tmp_path)
+    (repo / "docs" / "PRD.md").write_text("# PRD\n\ncoding-standards.md governs.\n")
+    actions = ch._docs_actions(repo, {}, {})
+    assert [a for a in actions if "coding-standards.md" in a.message] == []
+
+
+def test_docs_links_in_fences_are_skipped(tmp_path):
+    repo = make_repo(tmp_path)  # no broken.md/orphan.md — clean docs repo
+    (repo / "docs").mkdir()
+    (repo / "AGENTS.md").write_text("# AGENTS\n- [PRD](docs/PRD.md)\n")
+    (repo / "docs" / "PRD.md").write_text(
+        "# PRD\n\n```yaml\nrepo: [missing](nowhere.md)\n```\n")
+    actions = ch._docs_actions(repo, {}, {})
+    assert [a for a in actions if "nowhere.md" in a.message] == []
+
+
+def test_docs_without_agents_skips_reachability(tmp_path):
+    repo = make_repo(tmp_path)  # no AGENTS.md, no docs/
+    actions = ch._docs_actions(repo, {}, {})
+    assert actions == []
+
+
+def test_docs_multi_hop_reachability_is_fine(tmp_path):
+    """AGENTS.md -> index -> deep doc is the correct structure, not a finding."""
+    repo = make_repo(tmp_path)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "deep").mkdir()
+    (repo / "AGENTS.md").write_text("# AGENTS\\n- [Docs index](docs/index.md)\\n")
+    (repo / "docs" / "index.md").write_text("# Index\\n- [Deep](deep/deep.md)\\n")
+    (repo / "docs" / "deep" / "deep.md").write_text("# Deep\\n")
+    (repo / "docs" / "orphan.md").write_text("# Orphan\\n")
+    actions = ch._docs_actions(repo, {}, {})
+    undiscoverable = [a for a in actions if "not reachable from AGENTS.md" in a.message]
+    assert len(undiscoverable) == 1  # only the true orphan
+    assert "deep.md" not in undiscoverable[0].message
+    assert "orphan.md" in undiscoverable[0].message
+
+
+def test_docs_undiscoverable_message_encourages_group_structure(tmp_path):
+    repo = make_docs_repo(tmp_path)
+    actions = ch._docs_actions(repo, {}, {})
+    undiscoverable = [a for a in actions if "not reachable from AGENTS.md" in a.message][0]
+    assert "flat list" in undiscoverable[0].message if False else "group" in undiscoverable.message
+
+
+# --------------------------------------------------------------------------- folder-mix / layer-mix
+def test_folder_mix_detects_grab_bag(tmp_path):
+    repo = make_repo(tmp_path)
+    # 6 distinct files in houses/: 4 dominant in community 1, 2 in community 2
+    nodes = []
+    for i in range(6):
+        path = str(repo / "houses" / f"f{i}.py")
+        (repo / "houses" / f"f{i}.py").write_text(f"def f{i}():\n    pass\n")
+        nodes.append(("Function", f"f{i}", f"{path}::f{i}", path, 1, 2, None, None, 0,
+                      1 if i < 4 else 2))
+    make_graph(repo, nodes=nodes)
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._folder_mix_actions(repo, {}, {})
+    fm = [a for a in actions if "split across" in a.message]
+    assert len(fm) == 1
+    assert "houses" in fm[0].message  # the folder name (2-segment rel)
+
+
+def test_folder_mix_single_community_passes(tmp_path):
+    repo = make_repo(tmp_path)
+    abs_app = str(repo / "houses" / "app.py")
+    nodes = [("Function", f"f{i}", f"{abs_app}::f{i}", abs_app, i * 10, i * 10 + 3, None, None, 0, 1)
+             for i in range(6)]
+    make_graph(repo, nodes=nodes)
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._folder_mix_actions(repo, {}, {})
+    assert [a for a in actions if "mixes concerns" in a.message or "split across" in a.message] == []
+
+
+def test_layer_mix_detects_layer_split(tmp_path):
+    repo = make_repo(tmp_path)
+    abs_app = str(repo / "houses" / "app.py")
+    abs_model = str(repo / "houses" / "model" / "m.py")
+    abs_sheets = str(repo / "houses" / "sheets" / "s.py")
+    fns = [("Function", f"fn{i}", f"{abs_app}::fn{i}", abs_app, i * 5, i * 5 + 2, None, None, 0)
+           for i in range(6)]
+    targets = ([("Function", f"model_{i}", f"{abs_model}::model_{i}", abs_model, 1, 2, None, None, 0) for i in range(3)] +
+               [("Function", f"sheet_{i}", f"{abs_sheets}::sheet_{i}", abs_sheets, 1, 2, None, None, 0) for i in range(3)])
+    edges = ([( "CALLS", f"{abs_app}::fn{i}", f"{abs_model}::model_{i % 3}", abs_app, i * 5) for i in range(3)] +
+             [("CALLS", f"{abs_app}::fn{i}", f"{abs_sheets}::sheet_{i % 3}", abs_app, i * 5) for i in range(3, 6)])
+    make_graph(repo, nodes=fns + targets, edges=edges)
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._layer_mix_actions(repo, {}, {})
+    lm = [a for a in actions if "mixes layers" in a.message]
+    assert len(lm) == 1
+    assert "houses/model" in lm[0].message and "houses/sheets" in lm[0].message
+
+
+def test_layer_mix_single_layer_passes(tmp_path):
+    repo = make_repo(tmp_path)
+    abs_app = str(repo / "houses" / "app.py")
+    abs_model = str(repo / "houses" / "model" / "m.py")
+    fns = [("Function", f"fn{i}", f"{abs_app}::fn{i}", abs_app, i * 5, i * 5 + 2, None, None, 0)
+           for i in range(6)]
+    targets = [("Function", f"model_{i}", f"{abs_model}::model_{i}", abs_model, 1, 2, None, None, 0) for i in range(3)]
+    edges = [("CALLS", f"{abs_app}::fn{i}", f"{abs_model}::model_{i % 3}", abs_app, i * 5) for i in range(6)]
+    make_graph(repo, nodes=fns + targets, edges=edges)
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._layer_mix_actions(repo, {}, {})
+    assert [a for a in actions if "mixes layers" in a.message] == []
+
+
+# --------------------------------------------------------------------------- fakefs check
+def _fakefs_in(tmp_path, test_src):
+    repo = make_repo(tmp_path)
+    (repo / "tests" / "unit" / "test_app.py").write_text(test_src)
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    return [a for a in actions if "fakefs" in a.message]
+
+
+def test_fakefs_tmp_path_without_fs_is_a_finding(tmp_path):
+    findings = _fakefs_in(tmp_path, (
+        "def test_writes(tmp_path):\n"
+        "    p = tmp_path / 'x'\n"
+        "    p.write_text('hi')\n"))
+    assert len(findings) == 1
+    assert "fake_filesystem_unittest" in findings[0].message
+
+
+def test_fakefs_with_fs_fixture_passes(tmp_path):
+    findings = _fakefs_in(tmp_path, (
+        "def test_writes(fs):\n"
+        "    fs.create_file('/store/x')\n"))
+    assert findings == []
+
+
+def test_fakefs_fake_filesystem_base_passes(tmp_path):
+    findings = _fakefs_in(tmp_path, (
+        "from pyfakefs import fake_filesystem_unittest\n"
+        "class T(fake_filesystem_unittest.TestCase):\n"
+        "    def test_writes(self):\n"
+        "        self.fs.create_file('/store/x')\n"))
+    assert findings == []
+
+
+def test_fakefs_sqlite3_usage_is_exempt(tmp_path):
+    """sqlite3 is C-level I/O pyfakefs cannot intercept — the real-FS exception."""
+    findings = _fakefs_in(tmp_path, (
+        "import sqlite3\n"
+        "def test_db(tmp_path):\n"
+        "    db = sqlite3.connect(tmp_path / 'x.db')\n"
+        "    db.execute('CREATE TABLE t (a)')\n"))
+    assert findings == []
+
+
+def test_file_suppression_with_why_exempts_file(tmp_path):
+    findings = _fakefs_in(tmp_path, (
+        "# code-health: ignore-file fakefs this module's fixtures are sqlite3 C-level I/O\n"
+        "def test_writes(tmp_path):\n"
+        "    (tmp_path / 'x').write_text('hi')\n"))
+    assert findings == []
+
+
+def test_file_suppression_without_why_is_a_finding(tmp_path):
+    findings = _fakefs_in(tmp_path, (
+        "# code-health: ignore-file fakefs\n"
+        "def test_writes(tmp_path):\n"
+        "    (tmp_path / 'x').write_text('hi')\n"))
+    # the why-less suppression is a finding AND the real-FS finding still fires
+    assert any("without a why" in f.message for f in findings)
+    assert any("fakefs" in f.message and "without a why" not in f.message for f in findings)

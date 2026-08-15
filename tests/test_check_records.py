@@ -1,18 +1,16 @@
-"""Tests for check_records.py (moved from omp-config tools) (stdlib unittest — no deps in this repo).
+"""Tests for check_records.py (moved from omp-config tools).
 
-Fixtures are REAL files under tools/tests/fixtures/ — the coding standard
-forbids source code embedded in test strings (invisible to the type
-checker, drifts from the real toolchain, cannot be linted or run).
-
-Run: python3 -m unittest discover -s tools/tests
-Wired into `make test` alongside the other self-checks.
+Fixtures are REAL files under tests/fixtures/ — the coding standard forbids
+source code embedded in test strings. Tests fake the filesystem (pyfakefs):
+the real fixtures stay readable by mounting them (add_real_paths), and the
+directory-walk test builds its tree on the fake FS. Run via `make test`.
 """
 
-import shutil
 import sys
-import tempfile
 import unittest
 from pathlib import Path
+
+from pyfakefs import fake_filesystem_unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from check_records import ScanResult, scan  # noqa: E402
@@ -21,11 +19,15 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def scan_fixture(name: str) -> ScanResult:
-    """Run the gate on one fixture file."""
+    """Run the gate on one fixture file (read through the fake FS)."""
     return scan([FIXTURES / name])
 
 
-class RecordCollectionGateTest(unittest.TestCase):
+class RecordCollectionGateTest(fake_filesystem_unittest.TestCase):
+    def setUp(self):
+        self.setUpPyfakefs()
+        self.fs.add_real_paths([str(FIXTURES)])
+
     def test_dict_str_signature_is_a_map_exempt(self):
         self.assertEqual(scan_fixture("dict_str_signature.py").findings, [])
 
@@ -165,7 +167,11 @@ class RecordCollectionGateTest(unittest.TestCase):
         self.assertIn("parameter 'd'", findings[0])
 
 
-class StrewingWarningTest(unittest.TestCase):
+class StrewingWarningTest(fake_filesystem_unittest.TestCase):
+    def setUp(self):
+        self.setUpPyfakefs()
+        self.fs.add_real_paths([str(FIXTURES)])
+
     def test_three_shared_params_warns_not_fails(self):
         result = scan_fixture("three_shared.py")
         self.assertEqual(result.findings, [])  # strewing is a warning, not the gate
@@ -194,12 +200,11 @@ class StrewingWarningTest(unittest.TestCase):
         self.assertEqual(result.warnings, [])
 
     def test_directory_walk_and_single_file(self):
-        with tempfile.TemporaryDirectory() as td:
-            shutil.copy2(FIXTURES / "three_shared.py", Path(td) / "a.py")
-            shutil.copy2(FIXTURES / "different_leads.py", Path(td) / "b.py")
-            self.assertEqual(len(scan([Path(td)]).warnings), 1)
-            self.assertEqual(len(scan([Path(td) / "a.py"]).warnings), 1)
-            self.assertEqual(scan([Path(td) / "b.py"]).warnings, [])
+        self.fs.create_file("/work/a.py", contents=FIXTURES.joinpath("three_shared.py").read_text())
+        self.fs.create_file("/work/b.py", contents=FIXTURES.joinpath("different_leads.py").read_text())
+        self.assertEqual(len(scan([Path("/work")]).warnings), 1)
+        self.assertEqual(len(scan([Path("/work/a.py")]).warnings), 1)
+        self.assertEqual(scan([Path("/work/b.py")]).warnings, [])
 
     def test_broken_source_is_skipped_not_crashed(self):
         result = scan_fixture("broken.py")
@@ -207,7 +212,11 @@ class StrewingWarningTest(unittest.TestCase):
         self.assertEqual(result.warnings, [])
 
 
-class FixtureDirSkipTest(unittest.TestCase):
+class FixtureDirSkipTest(fake_filesystem_unittest.TestCase):
+    def setUp(self):
+        self.setUpPyfakefs()
+        self.fs.add_real_paths([str(FIXTURES)])
+
     def test_fixture_directories_are_skipped(self):
         """Fixture files are intentionally non-compliant test input; the
         gate must not flag its own test corpus."""

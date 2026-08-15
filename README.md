@@ -47,8 +47,13 @@ tag and runs it as its review-attribution gate.
   same-module record, no ABC with a single concrete implementation, each
   class in its own module, no fixed-tuple type aliases (they erase which
   element is which), and no env-keyed `skipif` in tests. A `docs` kind
-  checks that markdown links resolve and every doc is discoverable from
-  AGENTS.md. Lint-style exemptions: `# code-health: ignore <signal>
+  checks that markdown links resolve and every doc is reachable from
+  AGENTS.md (multi-hop is the norm — AGENTS.md links groups, never flat
+  lists). `folder-mix` and `layer-mix` detect a folder or file whose parts
+  split across graph communities / callee subsystems — the seams for
+  splitting. Tests touching the real filesystem without pyfakefs are
+  findings (fakefs), except subprocess/symlink/sqlite3 C-level I/O.
+  Lint-style exemptions: `# code-health: ignore <signal>
   <why>` on the line (or above) — a suppression without a why is itself a
   finding. Actions are grouped by file and
   ranked by priority (percentile of metric x churn x fan-in); a baseline file

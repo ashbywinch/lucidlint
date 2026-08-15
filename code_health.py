@@ -64,7 +64,7 @@ VAGUE_SUFFIXES = ("Manager", "Orchestrator", "Handler", "Store", "Repository", "
 
 EXCLUDED_DIRS = {".git", ".venv", "node_modules", "__pycache__", "dist", "build", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 
-ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk", "record-shape", "latent-class", "vague-name", "standard", "docs")
+ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk", "record-shape", "latent-class", "vague-name", "standard", "docs", "folder-mix", "layer-mix")
 
 @dataclass
 class Action:
@@ -201,6 +201,30 @@ class ClassRef:
 
 
 @dataclass(frozen=True)
+class InvalidFileSuppression:
+    """A `# code-health: ignore-file` comment that omitted the required why."""
+
+    line: int
+    signal: str
+
+
+@dataclass(frozen=True)
+class FileSuppressions:
+    """File-scoped exemptions: explained ones, and the invalid (why-less) ones."""
+
+    exemptions: dict[str, str]
+    invalid: list[InvalidFileSuppression]
+
+
+@dataclass(frozen=True)
+class DirFile:
+    """A file inside a scanned folder and the graph community its code belongs to."""
+
+    file: str
+    community: int
+
+
+@dataclass(frozen=True)
 class ImportedSymbol:
     """A symbol brought in by an import: the dotted module and its original name."""
 
@@ -260,7 +284,9 @@ GUIDANCE = {
     "high-risk": "Pin behavior with tests, then reduce the caller surface — when many things depend on it, the simplest code is the safest.",
     "standard": "A coding-standard rule with a checkable form is enforced in code, not left to review — fix it at its site; the fix is stated in the finding.",
     "over-abstraction": "An abstract base class with a single concrete implementation is ceremony, not design — the standard names it directly. Fold the one subclass into the base (or drop the ABC); an abstraction earns its keep at two real, differing implementations.",
-    "docs": "A documentation standard with a checkable form is enforced in code: every relative markdown link must resolve, and every doc must be discoverable from AGENTS.md (directly or one link deep) — an undiscoverable doc does not exist for the reader who starts where all readers start.",
+    "folder-mix": "A folder whose direct files split across graph communities mixes concerns — each community is a dependency-tied group that wants its own sub-folder (folder-discipline: large clusters get their own folder). Extract a sub-folder per community; if the split is coincidental (the files genuinely share one reason to change), leave it — the evidence is the community graph, not intent.",
+    "layer-mix": "A file whose functions partition by the subsystem they call into mixes architecture layers — the call graph is the seam: functions calling the model, the sheets, and the web layer belong in different modules. Extract a module per layer; a single dominant caller for all functions is not a finding.",
+    "docs": "A documentation standard with a checkable form is enforced in code: every relative markdown link must resolve, and every doc must be reachable from AGENTS.md through links — several hops are the norm, not a finding. AGENTS.md carries only content relevant to every agent and links group indexes; it never flat-lists the whole doc tree, and each doc keeps one distinct purpose and audience.",
     "vague-name": "A role-suffix name (Controller, Handler, Store, Repository, Manager, Orchestrator, Utils, Info) is communicative only for a thin framework-role class that delegates — an MVC controller or event handler named for its role. This class carries real weight (see the span and method count): the domain noun it operates on should be taking the name and the logic. Name the class for that noun, or move the logic into the domain classes it should be delegating to; a genuinely thin role class is fine as-is.",
     "latent-class": "Closures that capture state are a class in disguise — if the inner functions form behavior groups, extract a class per group and hoist the closures to its methods (the captured state becomes fields). If methods touch disjoint field sets, that partition is the latent seam: extract a class per group and let the connectors compose them. If the grouping is incidental (no shared state, no shared fields), leave it — the evidence is state and field access, not a guess.",
     "record-shape": "The record wants a class — named fields with domain meaning, so a reader sees what the data IS without tracing it (encapsulation, obvious correctness). Make a small domain class/dataclass. If the shape is genuinely a map, name it by what it MEANS (CoverageLines = dict[str, set[int]]: the lines covered per file), never as SomethingDict — a *Dict alias just renames the smell. If the data crosses a boundary (parsing or serialization), the fix is to ingest it into a domain class at that boundary: parse into the type and carry the type, don't carry the bare mapping. Constant lookup tables stay at module scope, never in an interface.",
@@ -566,6 +592,8 @@ def _raw_score(kind: str, metric: float, churn: int, callers: int | None = None)
         "latent-class": 0.7,
         "standard": 0.6,
         "docs": 0.5,
+        "folder-mix": 0.5,
+        "layer-mix": 0.5,
         "vague-name": 0.7,
         "record-shape": 0.7,
         "complexity": min(metric / 40, 1.0),
@@ -1249,13 +1277,20 @@ def _scan_file(py: Path, rel: str, include_tests: bool, Visitor, repo: Path,
     except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped, not a scan failure
         return []
     supps = _suppressions(source)
+    file_supps = _file_suppressions(source)
     if is_test and not include_tests:
         # test files are excluded from the health scan, but the rules that live
-        # in tests (monkeypatch, env-skipif) are scanned for alone
-        findings = _monkeypatch_findings(tree, rel) + _skipif_findings(tree, rel)
+        # in tests (monkeypatch, env-skipif, fakefs) are scanned for alone
+        findings = (_monkeypatch_findings(tree, rel) + _skipif_findings(tree, rel)
+                    + _fakefs_findings(tree, rel))
         findings += _invalid_suppressions(supps)
+        findings += [LatentFinding(
+            signal="suppression", function="", line=s.line, metric=1,
+            detail=f"file suppression '# code-health: ignore-file {s.signal}' at line {s.line} without a why — "
+                   f"exemptions only apply with an explanation", inner=[])
+            for s in file_supps.invalid]
         return [_latent_action(repo, rel, f, file_churn, last_modified)
-                for f in findings if not _suppressed(f.signal, f.line, supps)]
+                for f in findings if not _suppressed(f.signal, f.line, supps) and f.signal not in file_supps.exemptions]
     fn_map = {}
     if Visitor is not None:
         for f in Visitor.from_code(source).functions:
@@ -1615,6 +1650,7 @@ _MONKEYPATCH_METHODS = ("setattr", "setitem", "delattr", "setenv", "delenv")
 
 
 SUPPRESSION_RE = re.compile(r"# code-health: ignore\s+(\S+)\s*(.*)")
+FILE_SUPPRESSION_RE = re.compile(r"# code-health: ignore-file\s+(\S+)\s*(.*)")
 
 
 def _suppressions(source: str) -> dict[int, tuple[str, str]]:
@@ -1638,6 +1674,29 @@ def _suppressions(source: str) -> dict[int, tuple[str, str]]:
         if m:
             out[tok.start[0]] = (m.group(1), m.group(2).strip())
     return out
+
+
+def _file_suppressions(source: str) -> FileSuppressions:
+    """File-scoped exemptions: `# code-health: ignore-file <signal> <why>`.
+
+    An ignore-file without a why is itself a finding, like the line-level
+    suppression. Only real comments count."""
+    out: dict[str, str] = {}
+    invalid: list[InvalidFileSuppression] = []
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (IndentationError, tokenize.TokenError):
+        return FileSuppressions(out, invalid)
+    for tok in tokens:
+        if tok.type != tokenize.COMMENT:
+            continue
+        m = FILE_SUPPRESSION_RE.search(tok.string)
+        if m:
+            if m.group(2).strip():
+                out[m.group(1)] = m.group(2).strip()
+            else:
+                invalid.append(InvalidFileSuppression(tok.start[0], m.group(1)))
+    return FileSuppressions(out, invalid)
 
 
 def _suppressed(signal: str, line: int, supps: dict[int, tuple[str, str]]) -> bool:
@@ -1748,6 +1807,102 @@ def _mock_decorators(tree: ast.Module, mock_imports: set[str]) -> list[LatentFin
     return findings
 
 
+_FS_PATH_METHODS = ("read_text", "write_text", "read_bytes", "write_bytes", "mkdir", "unlink",
+                     "rename", "replace", "touch", "rmdir", "iterdir", "glob", "rglob",
+                     "exists", "resolve", "symlink_to", "copy")
+_FS_OS_OPS = ("remove", "rename", "mkdir", "makedirs", "rmdir", "unlink", "symlink", "link", "replace")
+_FS_SHUTIL_OPS = ("copy", "copy2", "move", "rmtree", "copytree")
+_FS_TEMPFILE = ("TemporaryDirectory", "NamedTemporaryFile", "TemporaryFile", "mkdtemp", "mkstemp", "mktemp")
+
+
+def _fakefs_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """Tests fake the filesystem (pyfakefs) — real FS access without it is a finding.
+
+    Per the testing standard: file I/O uses the `fs` fixture or
+    fake_filesystem_unittest. Real FS is sanctioned only when the code under
+    test needs real semantics — subprocess interop, symlinks, C-level I/O
+    like sqlite3 — and that usage is present in the test.
+    """
+    findings: list[LatentFinding] = []
+    uses_fakefs_base = _uses_fakefs_base(tree)
+    for fn in [n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        finding = _fakefs_finding_for_fn(fn, tree, uses_fakefs_base)
+        if finding:
+            findings.append(finding)
+    return findings
+
+
+def _uses_fakefs_base(tree: ast.Module) -> bool:
+    """pyfakefs in use: the module imports it, or a test class bases on it."""
+    for n in tree.body:
+        if isinstance(n, ast.ImportFrom) and n.module and "pyfakefs" in n.module:
+            return True
+        if isinstance(n, ast.Import) and any("pyfakefs" in a.name for a in n.names):
+            return True
+    for cls in [n for n in tree.body if isinstance(n, ast.ClassDef)]:
+        for b in cls.bases:
+            name = ast.unparse(b).lower()
+            if "fakefs" in name or "fake_filesystem" in name:
+                return True
+    return False
+
+
+def _fakefs_finding_for_fn(fn, tree: ast.Module, uses_fakefs_base: bool) -> LatentFinding | None:
+    """One test function: real-FS usage without pyfakefs and without a
+    sanctioned real-FS need is a finding."""
+    if not _test_function(fn, tree) or _uses_fakefs(fn) or uses_fakefs_base:
+        return None
+    if not _real_fs_usage(fn) or _needs_real_fs(fn):
+        return None
+    return LatentFinding(
+        signal="fakefs", function=fn.name, line=fn.lineno, metric=1,
+        detail=f"test '{fn.name}' at line {fn.lineno} touches the real filesystem "
+               f"(tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` "
+               f"fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code "
+               f"under test needs real FS semantics (subprocess interop, symlinks, C-level I/O "
+               f"like sqlite3) and comment why — or mark `# code-health: ignore-file fakefs <why>`",
+        inner=[])
+
+
+def _test_function(fn, tree: ast.Module) -> bool:
+    """A test: name starts with test_, or a method of a test class."""
+    if fn.name.startswith("test_"):
+        return True
+    return any(isinstance(n, ast.ClassDef) and n.name.lower().startswith("test")
+               and any(m is fn for m in n.body) for n in tree.body)
+
+
+def _uses_fakefs(fn) -> bool:
+    return any(a.arg == "fs" for a in fn.args.args)
+
+
+def _real_fs_usage(fn) -> bool:
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and node.id == "tmp_path":
+            return True
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in ("open", "tempfile"):
+                return True
+            if isinstance(func, ast.Attribute):
+                if func.attr in _FS_PATH_METHODS or func.attr in _FS_OS_OPS:
+                    return True
+                if func.attr in _FS_SHUTIL_OPS or func.attr in _FS_TEMPFILE:
+                    return True
+    return False
+
+
+def _needs_real_fs(fn) -> bool:
+    """The standard's sanctioned real-FS cases: subprocess, symlinks, sqlite3 (C-level I/O)."""
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and node.id in ("sqlite3", "subprocess"):
+            return True
+        if isinstance(node, ast.Attribute) and node.attr in ("symlink", "symlink_to", "link"):
+            return True
+    return False
+
+
 def _strewing_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     """3+ free functions sharing a leading parameter that is a class defined in
     THIS module — a missed class. Stdlib-param strewing (Path, str) is not the
@@ -1796,6 +1951,10 @@ def _latent_action(repo: Path, rel: str, finding: LatentFinding,
         kind = "vague-name"
     elif finding.signal in ("docs-link", "docs-undiscoverable"):
         kind = "docs"
+    elif finding.signal == "folder-mix":
+        kind = "folder-mix"
+    elif finding.signal == "layer-mix":
+        kind = "layer-mix"
     else:
         kind = "standard"  # including suppression and over-abstraction signals
     guidance_key = "over-abstraction" if finding.signal == "over-abstraction" else kind
@@ -1939,6 +2098,115 @@ def _md_link_targets(text: str) -> list[str]:
     return targets
 
 
+def _folder_mix_actions(repo: Path, file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+    """A folder whose direct files split across graph communities is a grab bag.
+
+    Each community is a dependency-tied group wanting its own sub-folder.
+    Test dirs are excluded (they legitimately mix); the repo root is not a
+    folder. No graph -> no signal, like hub-file.
+    """
+    conn = _graph_conn(repo)
+    if conn is None:
+        return []
+    rows = conn.execute(
+        "SELECT file_path, community_id, COUNT(*) c FROM nodes "
+        "WHERE community_id IS NOT NULL AND file_path LIKE '%.py' "
+        "GROUP BY file_path, community_id").fetchall()
+    best: dict[str, tuple[int, int]] = {}
+    for fp, cid, c in rows:
+        if fp not in best or c > best[fp][1]:
+            best[fp] = (cid, c)
+    names = dict(conn.execute("SELECT id, name FROM communities"))
+    conn.close()
+    dirs: dict[str, list[DirFile]] = defaultdict(list)
+    for fp, (cid, _c) in best.items():
+        parts = fp.replace("\\", "/").split("/")
+        dirs["/".join(parts[:-1])].append(DirFile(parts[-1], cid))
+    actions: list[Action] = []
+    for d, files in dirs.items():
+        rel = rel_path(repo, d)
+        finding = _folder_mix_for_dir(rel, files, names)
+        if finding:
+            actions.append(_latent_action(repo, rel, finding, file_churn, last_modified))
+    return actions
+
+
+def _folder_mix_for_dir(rel: str, files: list[DirFile], names: dict[int, str]) -> LatentFinding | None:
+    """One directory's community split, or None when it is not a grab bag."""
+    if len(files) < 5 or rel.startswith("tests") or rel in ("", "."):
+        return None
+    spread: dict[int, list[str]] = defaultdict(list)
+    for f in files:
+        spread[f.community].append(f.file)
+    big = {cid: fns for cid, fns in spread.items() if len(fns) >= 2}
+    if len(big) < 2:
+        return None
+    groups = ", ".join(f"{names.get(cid, cid)} ({', '.join(fns[:4])})" for cid, fns in list(big.items())[:3])
+    return LatentFinding(
+        signal="folder-mix", function="", line=0, metric=len(files),
+        detail=f"folder '{rel}' has {len(files)} files split across {len(big)} graph communities: "
+               f"{groups} — the folder mixes concerns; extract a sub-folder per community",
+        inner=[])
+
+
+def _layer_mix_actions(repo: Path, file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+    """A file whose functions partition by dominant callee subsystem mixes layers.
+
+    Each function's dominant resolved external callee module is its layer;
+    groups of >= 2 functions calling distinct subsystems are latent modules.
+    Functions with no resolved external callees are excluded (plumbing or
+    self-contained). No graph -> no signal.
+    """
+    conn = _graph_conn(repo)
+    if conn is None:
+        return []
+    actions: list[Action] = []
+    for py in sorted(repo.rglob("*.py")):
+        rel = py.relative_to(repo).as_posix()
+        if any(part in EXCLUDED_DIRS for part in py.parts) or "/test" in f"/{rel}" or rel.startswith("test"):
+            continue
+        finding = _layer_mix_for_file(conn, repo, py, rel)
+        if finding:
+            actions.append(_latent_action(repo, rel, finding, file_churn, last_modified))
+    conn.close()
+    return actions
+
+
+def _layer_mix_for_file(conn, repo: Path, py: Path, rel: str) -> LatentFinding | None:
+    """One file's layer partition, or None when it has no clear split."""
+    fns = conn.execute(
+        "SELECT qualified_name FROM nodes WHERE file_path = ? AND kind IN ('Function', 'Method')",
+        (str(py.resolve()),)).fetchall()
+    if len(fns) < 6:
+        return None
+    layers: dict[str, list[str]] = defaultdict(list)
+    for (qn,) in fns:
+        layer = _dominant_callee(conn, repo, qn, rel)
+        if layer:
+            layers[layer].append(qn.split("::")[-1].split(".")[-1])
+    big = {m: names for m, names in layers.items() if len(names) >= 2}
+    if len(big) < 2:
+        return None
+    groups = ", ".join(f"{m} ({', '.join(names[:4])})" for m, names in list(big.items())[:3])
+    return LatentFinding(
+        signal="layer-mix", function="", line=0, metric=sum(len(n) for n in big.values()),
+        detail=f"file '{rel}' mixes layers: {groups} — the call graph is the seam; "
+               f"extract a module per layer",
+        inner=[])
+
+
+def _dominant_callee(conn, repo: Path, qn: str, own_rel: str) -> str:
+    """The most-called external subsystem of a function, or '' when none."""
+    counts: Counter[str] = Counter()
+    for (target,) in conn.execute(
+            "SELECT DISTINCT target_qualified FROM edges WHERE source_qualified = ? AND kind = 'CALLS'",
+            (qn,)):
+        mod = _resolve_callee_module(conn, repo, target)
+        if mod and mod != _module_key(repo, own_rel):
+            counts[mod] += 1
+    return counts.most_common(1)[0][0] if counts else ""
+
+
 def _docs_actions(repo: Path, file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
     """Documentation standards with a checkable form: links resolve, docs discoverable."""
     actions: list[Action] = []
@@ -1987,17 +2255,23 @@ def _docs_reachability_actions(repo: Path, file_churn: Counter[str], last_modifi
             if cand in doc_set:
                 links[src].add(cand)
     reachable = {agents.relative_to(repo).as_posix()}
-    for _ in range(2):  # AGENTS.md, plus one link deep
-        reachable |= {n for src in list(reachable) for n in links.get(src, set())}
+    # Any number of hops is fine — AGENTS.md links groups, not flat lists.
+    while True:
+        frontier = {n for src in reachable for n in links.get(src, set())}
+        if frontier <= reachable:
+            break
+        reachable |= frontier
     actions: list[Action] = []
     for d in docs:
         rel = d.relative_to(repo).as_posix()
         if rel not in reachable:
             actions.append(_latent_action(repo, "AGENTS.md", LatentFinding(
                 signal="docs-undiscoverable", function="", line=0, metric=1,
-                detail=f"doc '{rel}' is not discoverable from AGENTS.md (directly or one link deep) — "
-                       f"an undiscoverable doc is a finding: it does not exist for the reader who "
-                       f"starts where all readers start", inner=[]), file_churn, last_modified))
+                detail=f"doc '{rel}' is not reachable from AGENTS.md at any hop — a doc the reader "
+                       f"cannot reach from where everyone starts does not exist. Link it from its "
+                       f"group's index: AGENTS.md links group indexes and stays lean — never a flat "
+                       f"list of every doc, and each doc keeps one distinct purpose and audience",
+                inner=[]), file_churn, last_modified))
     return actions
 
 
@@ -2037,6 +2311,8 @@ def _collect_actions(repo: Path, args, file_churn, last_modified, covered, graph
     actions += _latent_class_actions(repo, args.include_tests, file_churn, last_modified)
     actions += _abstraction_actions(repo, args.include_tests, file_churn, last_modified)
     actions += _docs_actions(repo, file_churn, last_modified)
+    actions += _folder_mix_actions(repo, file_churn, last_modified)
+    actions += _layer_mix_actions(repo, file_churn, last_modified)
     return actions
 
 
