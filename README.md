@@ -15,6 +15,25 @@ tag and runs it as its review-attribution gate.
   created after the head commit landed (first-review case — regular pr-agent
   reviews never contain the SHA).
 
+- `code_health.py` — CodeScene-lite. Emits a list of actions to address
+  (high cyclomatic complexity, oversized functions, dependency hubs, git
+  hotspots, high graph-risk nodes) and exits 1 when any exist, so it works
+  as a failing test gate. Reads the code-review-graph SQLite at
+  `<repo>/.code-review-graph/graph.db` (build with `code-review-graph build
+  --repo <repo>`), radon for complexity (run via `uv run --with radon`),
+  and `git log` for change frequency. Metrics are proxies — the requirement
+  is code that is obviously correct and cheap to change (readability,
+  maintainability, anti-fragility), so each action's message gives a fix
+  guideline in those terms: separation of concerns, domain language,
+  effective encapsulation. Where the graph's CALLS edges show a function or
+  file pulling from >= 2 subsystems, the action names those subsystems — the
+  seams to extract classes/modules along — and hotspot actions name the exact
+  volatile functions with their own churn (`git log -L`). Flags: `--repo`,
+  `--max-complexity`
+  (15), `--max-function-lines` (120), `--max-file-edges` (150),
+  `--max-risk` (0.8), `--hotspot-top-frac` (0.1), `--hotspot-min-cc` (15),
+  `--json`, `--warn` (informational, exit 0).
+
 ## Use in a workflow
 
 ```yaml
