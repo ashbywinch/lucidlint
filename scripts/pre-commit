@@ -31,7 +31,7 @@ else
 fi
 
 # Lint gate — only when the commit touches Python.
-if [ -z "$(git diff --cached --name-only -- '*.py')" ]; then
+if [ -z "$(git diff --cached --name-only -- '*.py' '*.rs' 'Cargo.toml' 'Cargo.lock' 'rust-toolchain.toml' 'rustfmt.toml')" ]; then
     exit 0
 fi
 

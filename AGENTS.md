@@ -27,6 +27,11 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | Why this repo exists, requirements | `docs/PRD.md` |
 | How the tool is built | `docs/TECHSPEC.md` |
 | Phased delivery and gates | `docs/PLAN.md` |
+| Coding standards (canonical + language conventions) | `docs/coding-standards.md` |
+| Testing standards | `docs/testing-standards.md` |
+| UX standards | `docs/ux-standards.md` |
+| What good documentation is | `docs/writing-documentation.md` |
+| Required doc set and folder structure | `docs/documentation-structure.md` |
 | What each tool does | `README.md` (below) |
 
 ## Tools

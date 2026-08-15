@@ -1,7 +1,6 @@
 # PR-Agent config — the house review contract.
 #
-# CHANGE: repo_context_files tracks the repo's doc set (standards docs are
-# the scaffold's materialization step — pending for build-tools).
+# CHANGE: repo_context_files tracks the repo's doc set.
 #
 # DO NOT CHANGE:
 # - api_base points at the house provider. Never let a PR branch override
@@ -36,6 +35,11 @@ repo_context_files = [
     "docs/PRD.md",
     "docs/TECHSPEC.md",
     "docs/PLAN.md",
+    "docs/coding-standards.md",
+    "docs/testing-standards.md",
+    "docs/ux-standards.md",
+    "docs/writing-documentation.md",
+    "docs/documentation-structure.md",
 ]
 
 [pr_reviewer]

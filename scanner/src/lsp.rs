@@ -8,10 +8,9 @@
 //!
 //! Editors point at: `code-health-scan --lsp`
 
-use crate::{FileScan, Finding, scan_source_lsp};
-use ruff_text_size::Ranged;
+use crate::{scan_source_lsp, FileScan, Finding};
 use std::collections::HashMap;
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, Write};
 
 /// LSP DiagnosticSeverity: 1 Error, 2 Warning.
 fn severity_of(f: &Finding) -> i64 {
@@ -236,11 +235,24 @@ mod tests {
         let kinds: Vec<&str> = diags
             .iter()
             .filter_map(|d| d["message"].as_str())
-            .map(|m| if m.contains("magic number") { "magic" } else if m.contains("complexity") { "cc" } else { "other" })
+            .map(|m| {
+                if m.contains("magic number") {
+                    "magic"
+                } else if m.contains("complexity") {
+                    "cc"
+                } else {
+                    "other"
+                }
+            })
             .collect();
-        assert!(kinds.iter().any(|k| *k == "magic"), "{kinds:?}");
-        assert!(!diags.iter().any(|d| d["message"].as_str().is_some_and(|m| m.contains("never referenced"))));
-        let magic = diags.iter().find(|d| d["message"].as_str().is_some_and(|m| m.contains("magic number"))).unwrap();
+        assert!(kinds.contains(&"magic"), "{kinds:?}");
+        assert!(!diags
+            .iter()
+            .any(|d| d["message"].as_str().is_some_and(|m| m.contains("never referenced"))));
+        let magic = diags
+            .iter()
+            .find(|d| d["message"].as_str().is_some_and(|m| m.contains("magic number")))
+            .unwrap();
         assert_eq!(magic["range"]["start"]["line"], 1); // 0-based line 2
         assert_eq!(magic["range"]["end"]["character"], 17); // "    return a * 60"
     }

@@ -23,8 +23,8 @@ mod checks;
 mod docs;
 mod graph_families;
 mod lsp;
-use checks::*;
 use checks::Q;
+use checks::*;
 
 /// One open function scope: its decision count and the names it returns
 /// (for the except-swallow analysis).
@@ -34,7 +34,7 @@ pub struct FnScope {
 }
 
 #[derive(Serialize, Clone)]
-struct Finding {
+pub struct Finding {
     file: String,
     line: usize,
     function: String,
@@ -45,7 +45,7 @@ struct Finding {
 
 /// One function's cyclomatic complexity — radon-equivalent counting.
 #[derive(Serialize)]
-struct FnCc {
+pub struct FnCc {
     file: String,
     function: String,
     line: usize,
@@ -101,44 +101,6 @@ enum ParentEntry {
     Keyword,
 }
 
-fn expr_range(e: &Expr) -> ruff_text_size::TextRange {
-    match e {
-        Expr::BoolOp(x) => x.range(),
-        Expr::Named(x) => x.range(),
-        Expr::BinOp(x) => x.range(),
-        Expr::UnaryOp(x) => x.range(),
-        Expr::Lambda(x) => x.range(),
-        Expr::If(x) => x.range(),
-        Expr::Dict(x) => x.range(),
-        Expr::Set(x) => x.range(),
-        Expr::ListComp(x) => x.range(),
-        Expr::SetComp(x) => x.range(),
-        Expr::DictComp(x) => x.range(),
-        Expr::Generator(x) => x.range(),
-        Expr::Await(x) => x.range(),
-        Expr::Yield(x) => x.range(),
-        Expr::YieldFrom(x) => x.range(),
-        Expr::Compare(x) => x.range(),
-        Expr::Call(x) => x.range(),
-        Expr::FString(x) => x.range(),
-        Expr::TString(x) => x.range(),
-        Expr::StringLiteral(x) => x.range(),
-        Expr::BytesLiteral(x) => x.range(),
-        Expr::NumberLiteral(x) => x.range(),
-        Expr::BooleanLiteral(x) => x.range(),
-        Expr::NoneLiteral(x) => x.range(),
-        Expr::EllipsisLiteral(x) => x.range(),
-        Expr::Attribute(x) => x.range(),
-        Expr::Subscript(x) => x.range(),
-        Expr::Starred(x) => x.range(),
-        Expr::Name(x) => x.range(),
-        Expr::List(x) => x.range(),
-        Expr::Tuple(x) => x.range(),
-        Expr::Slice(x) => x.range(),
-        Expr::IpyEscapeCommand(x) => x.range(),
-    }
-}
-
 impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
     fn visit_stmt(&mut self, stmt: &'a Stmt) {
         // module scope = no open function scope and no class nesting (the
@@ -149,8 +111,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             Stmt::FunctionDef(f) => {
                 let module_level = self.fn_stack.is_empty() && self.in_class == 0;
                 let was_fn = self.current_fn.take();
-                self.current_fn =
-                    Some((f.name.to_string(), line_of(self.source, f.range.start())));
+                self.current_fn = Some((f.name.to_string(), line_of(self.source, f.range.start())));
                 self.fn_stack.push(FnScope {
                     decisions: 0,
                     returned: returned_names(&f.body),
@@ -199,8 +160,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                         self.decorated.insert(f.name.to_string());
                     }
                 }
-                let span = (line_of(self.source, f.range().end())
-                    - line_of(self.source, f.range().start())) as u32;
+                let span = (line_of(self.source, f.range().end()) - line_of(self.source, f.range().start())) as u32;
                 // the Python gate reads cc from radon's fn_map, which only
                 // holds module-level functions — methods/nested get cc = 0
                 let gate_cc = if module_level { cc } else { 0 };
@@ -260,19 +220,11 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             match stmt {
                 Stmt::If(i) => {
                     // radon: if + each elif counts, the trailing else does NOT
-                    let elifs = i
-                        .elif_else_clauses
-                        .iter()
-                        .filter(|c| c.test.is_some())
-                        .count() as u32;
+                    let elifs = i.elif_else_clauses.iter().filter(|c| c.test.is_some()).count() as u32;
                     self.fn_stack.last_mut().unwrap().decisions += 1 + elifs;
                 }
-                Stmt::For(f) => {
-                    self.fn_stack.last_mut().unwrap().decisions += 1 + (!f.orelse.is_empty()) as u32
-                }
-                Stmt::While(w) => {
-                    self.fn_stack.last_mut().unwrap().decisions += 1 + (!w.orelse.is_empty()) as u32
-                }
+                Stmt::For(f) => self.fn_stack.last_mut().unwrap().decisions += 1 + (!f.orelse.is_empty()) as u32,
+                Stmt::While(w) => self.fn_stack.last_mut().unwrap().decisions += 1 + (!w.orelse.is_empty()) as u32,
                 Stmt::Try(t) => {
                     self.fn_stack.last_mut().unwrap().decisions +=
                         t.handlers.len() as u32 + (!t.orelse.is_empty()) as u32
@@ -310,10 +262,8 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             Expr::Name(n) => {
                 self.refs.insert(n.id.to_string());
             }
-            Expr::StringLiteral(s) => {
-                if !self.is_test {
-                    self.strings.push(s.value.to_str().to_string());
-                }
+            Expr::StringLiteral(s) if !self.is_test => {
+                self.strings.push(s.value.to_str().to_string());
             }
             _ => {}
         }
@@ -347,20 +297,20 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                         // radon counts EACH generator clause (for x in ...) plus each
                         // if — a two-for comprehension is +2, not +1 (verified)
                         Expr::ListComp(c) => {
-                            *slot += c.generators.len() as u32
-                                + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
+                            *slot +=
+                                c.generators.len() as u32 + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
                         }
                         Expr::SetComp(c) => {
-                            *slot += c.generators.len() as u32
-                                + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
+                            *slot +=
+                                c.generators.len() as u32 + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
                         }
                         Expr::DictComp(c) => {
-                            *slot += c.generators.len() as u32
-                                + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
+                            *slot +=
+                                c.generators.len() as u32 + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
                         }
                         Expr::Generator(c) => {
-                            *slot += c.generators.len() as u32
-                                + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
+                            *slot +=
+                                c.generators.len() as u32 + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
                         }
                         _ => {}
                     }
@@ -467,11 +417,7 @@ impl<'a> ScanState<'a> {
                         let target = if name.starts_with('_') {
                             name.to_string()
                         } else {
-                            format!(
-                                "{}.{}",
-                                im.module.as_ref().map(|m| m.as_str()).unwrap_or(""),
-                                name
-                            )
+                            format!("{}.{}", im.module.as_ref().map(|m| m.as_str()).unwrap_or(""), name)
                         };
                         self.findings.push(Finding {
                             file: self.file.to_string(),
@@ -479,9 +425,7 @@ impl<'a> ScanState<'a> {
                             function: fn_name.clone(),
                             kind: "private-import".into(),
                             severity: "fail".into(),
-                            message: format!(
-                                "imports private symbol '{target}' — never import underscore symbols"
-                            ),
+                            message: format!("imports private symbol '{target}' — never import underscore symbols"),
                         });
                     }
                 }
@@ -496,9 +440,7 @@ impl<'a> ScanState<'a> {
                             function: fn_name.clone(),
                             kind: "private-import".into(),
                             severity: "fail".into(),
-                            message: format!(
-                                "imports private path '{name}' — never import underscore symbols"
-                            ),
+                            message: format!("imports private path '{name}' — never import underscore symbols"),
                         });
                     }
                 }
@@ -530,9 +472,7 @@ impl<'a> ScanState<'a> {
                             function: fn_name.clone(),
                             kind: "unreachable".into(),
                             severity: "fail".into(),
-                            message: format!(
-                                "unreachable statement at line {line} — dead code is deleted"
-                            ),
+                            message: format!("unreachable statement at line {line} — dead code is deleted"),
                         });
                     }
                     break;
@@ -546,7 +486,7 @@ impl<'a> ScanState<'a> {
 /// the Python `_statement_lists` equivalent.
 fn collect_stmt_lists<'a>(stmt: &'a Stmt, out: &mut Vec<&'a [Stmt]>) {
     match stmt {
-        Stmt::FunctionDef(_) => return,
+        Stmt::FunctionDef(_) => {}
         Stmt::ClassDef(c) => {
             out.push(&c.body);
             for s in &c.body {
@@ -597,11 +537,10 @@ fn collect_stmt_lists<'a>(stmt: &'a Stmt, out: &mut Vec<&'a [Stmt]>) {
                 collect_stmt_lists(s, out);
             }
             for h in &t.handlers {
-                if let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h {
-                    out.push(&eh.body);
-                    for s in &eh.body {
-                        collect_stmt_lists(s, out);
-                    }
+                let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                out.push(&eh.body);
+                for s in &eh.body {
+                    collect_stmt_lists(s, out);
                 }
             }
             out.push(&t.orelse);
@@ -942,6 +881,22 @@ fn main() {
         .as_deref()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str::<graph_families::GraphContract>(&s).ok());
+    // the contract version is part of the interface — a mismatched version
+    // means the exporter and the scan core disagree; degrade to the
+    // non-graph families rather than trusting unknown shapes
+    if contract.as_ref().is_some_and(|c| c.contract_version != 1) {
+        eprintln!(
+            "graph contract version {} — expected 1; graph families skipped",
+            contract.as_ref().unwrap().contract_version
+        );
+        // drop the contract so the graph families are skipped
+        let _ = graph_path.take();
+    }
+    let contract = if contract.as_ref().is_some_and(|c| c.contract_version == 1) {
+        contract
+    } else {
+        None
+    };
     if let Some(c) = &contract {
         let repo_root = Path::new(&root);
         let mut max_cc_by_file: std::collections::HashMap<String, (usize, usize, String)> =
@@ -950,16 +905,25 @@ fn main() {
         for e in &all_cc {
             let rel = rel_of(&e.file, &root);
             *cc_by_file.entry(rel.clone()).or_default() = (*cc_by_file.get(&rel).unwrap_or(&0)).max(e.cc);
-            let entry = max_cc_by_file.entry(rel).or_insert((e.line, e.cc as usize, e.function.clone()));
+            let entry = max_cc_by_file
+                .entry(rel)
+                .or_insert((e.line, e.cc as usize, e.function.clone()));
             if (e.cc as usize) > entry.1 {
                 *entry = (e.line, e.cc as usize, e.function.clone());
             }
         }
         all_findings.extend(graph_families::large_function_findings(
-            repo_root, c, 120, include_tests,
+            repo_root,
+            c,
+            120,
+            include_tests,
         ));
         all_findings.extend(graph_families::hub_file_findings(
-            repo_root, c, 150, include_tests, &max_cc_by_file,
+            repo_root,
+            c,
+            150,
+            include_tests,
+            &max_cc_by_file,
         ));
         all_findings.extend(graph_families::high_risk_findings(repo_root, c, 0.8, include_tests));
         all_findings.extend(graph_families::cycle_findings(repo_root, c));
@@ -982,7 +946,11 @@ fn main() {
                     *slot = (*slot).max(e.cc);
                 }
                 all_findings.extend(graph_families::hotspot_findings(
-                    &churn, &cc_any, 0.1, 15, &std::collections::HashMap::new(),
+                    &churn,
+                    &cc_any,
+                    0.1,
+                    15,
+                    &std::collections::HashMap::new(),
                 ));
             }
         }
@@ -1057,7 +1025,8 @@ mod tests {
     // ------------------------------------------------------------- CC
     #[test]
     fn cc_if_elif_else_counts_elifs_not_else() {
-        let src = "def f(a):\n    if a:\n        return 1\n    elif b:\n        return 2\n    else:\n        return 3\n";
+        let src =
+            "def f(a):\n    if a:\n        return 1\n    elif b:\n        return 2\n    else:\n        return 3\n";
         let (_, cc, _) = scan_cc(src);
         assert_eq!(cc[0].cc, 3); // if + elif; trailing else does NOT count
     }
@@ -1103,7 +1072,9 @@ mod tests {
     // ------------------------------------------------------------- magic
     #[test]
     fn magic_skips_lookup_table_and_small_literals() {
-        let f = scan_src("def f(a):\n    table = {10: 'x', 20: 'y'}\n    if a > 1:\n        return table[a]\n    return 0\n");
+        let f = scan_src(
+            "def f(a):\n    table = {10: 'x', 20: 'y'}\n    if a > 1:\n        return table[a]\n    return 0\n",
+        );
         assert!(!f.iter().any(|x| x.kind == "magic-number")); // 10/20 in a dict literal, 1 and 0 skipped
     }
 
@@ -1179,7 +1150,9 @@ mod tests {
 
     #[test]
     fn suppression_without_why_is_a_finding() {
-        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # code-health: ignore except\n        log('x')\n");
+        let f = scan_src(
+            "def f():\n    try:\n        g()\n    except ValueError:  # code-health: ignore except\n        log('x')\n",
+        );
         assert!(f.iter().any(|x| x.kind == "suppression"));
         assert!(f.iter().any(|x| x.kind == "except")); // not actually exempted
     }
@@ -1285,7 +1258,8 @@ mod tests {
         let f = scan_src(&format!(
             "class C:\n    def _build_cost_groups(self, data):\n        journeys = data.get(\"journeys\", [])\n        if not journeys:\n            return []\n        best = min(journeys, key=lambda j: j.get(\"duration\", 9999))\n        groups = sorted(journeys, key=lambda j: j.get(\"mode\", \"\"))\n{pad}        return best, groups\n"
         ));
-        let closures: Vec<(usize, &str)> = f.iter()
+        let closures: Vec<(usize, &str)> = f
+            .iter()
             .filter(|x| x.kind == "closures")
             .map(|x| (x.line, x.message.as_str()))
             .collect();
@@ -1304,7 +1278,9 @@ mod tests {
 
     #[test]
     fn broad_except_is_a_warn() {
-        let f = scan_src("def f():\n    try:\n        g()\n    except Exception as e:\n        log(e)\n        return fallback\n");
+        let f = scan_src(
+            "def f():\n    try:\n        g()\n    except Exception as e:\n        log(e)\n        return fallback\n",
+        );
         let b: Vec<&Finding> = f.iter().filter(|x| x.kind == "broad-except").collect();
         assert_eq!(b.len(), 1);
         assert_eq!(b[0].severity, "warn");
@@ -1320,7 +1296,11 @@ mod tests {
             ifs.concat()
         );
         let f = scan_src(&src);
-        assert!(f.iter().any(|x| x.kind == "closures"), "expected closures, got {:?}", kinds(&f));
+        assert!(
+            f.iter().any(|x| x.kind == "closures"),
+            "expected closures, got {:?}",
+            kinds(&f)
+        );
     }
 
     // ------------------------------------------------------------- class-module
@@ -1363,14 +1343,16 @@ mod tests {
 
     #[test]
     fn type_ignore_in_docstring_is_not_a_finding() {
-        let f = scan_src("def f():\n    \"\"\"Never silence: type: ignore lives in real comments.\"\"\"\n    return 1\n");
+        let f =
+            scan_src("def f():\n    \"\"\"Never silence: type: ignore lives in real comments.\"\"\"\n    return 1\n");
         assert!(!f.iter().any(|x| x.kind == "type-ignore"));
     }
 
     // ------------------------------------------------- except edges
     #[test]
     fn except_with_raise_is_not_a_swallow() {
-        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:\n        log('bad')\n        raise\n");
+        let f =
+            scan_src("def f():\n    try:\n        g()\n    except ValueError:\n        log('bad')\n        raise\n");
         assert!(!f.iter().any(|x| x.kind == "except"));
     }
 
@@ -1453,8 +1435,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("docs_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("docs")).unwrap();
-        std::fs::write(dir.join("docs/guide.md"), "see [missing](nope.md)
-").unwrap();
+        std::fs::write(
+            dir.join("docs/guide.md"),
+            "see [missing](nope.md)
+",
+        )
+        .unwrap();
         let f = docs::docs_findings(&dir);
         assert!(f.iter().any(|x| x.kind == "docs-link" && x.message.contains("nope.md")));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1492,7 +1478,9 @@ mod tests {
     // ------------------------------------------------- record-shape
     #[test]
     fn record_grab_bag_and_collection_params_fail() {
-        let f = scan_src("def f(m: dict[str, Any]):\n    return m\n\ndef g(rows: list[dict[str, str]]):\n    return rows\n");
+        let f = scan_src(
+            "def f(m: dict[str, Any]):\n    return m\n\ndef g(rows: list[dict[str, str]]):\n    return rows\n",
+        );
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 2);
     }
@@ -1514,7 +1502,9 @@ mod tests {
     #[test]
     fn record_variadic_tuple_and_fixed_tuple() {
         // tuple[str, ...] is a sequence; tuple[str, int] is a record pair
-        let f = scan_src("def a(x: tuple[str, ...]) -> None:\n    pass\n\ndef b(pair: tuple[str, int]) -> None:\n    pass\n");
+        let f = scan_src(
+            "def a(x: tuple[str, ...]) -> None:\n    pass\n\ndef b(pair: tuple[str, int]) -> None:\n    pass\n",
+        );
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1);
         assert!(r[0].message.contains("pair"));
@@ -1607,7 +1597,8 @@ mod tests {
 
     #[test]
     fn record_suppression_with_why_exempts() {
-        let f = scan_src("def f(x):\n    return {\"a\": 1, \"b\": x}  # code-health: ignore record-shape genuine map\n");
+        let f =
+            scan_src("def f(x):\n    return {\"a\": 1, \"b\": x}  # code-health: ignore record-shape genuine map\n");
         assert!(!f.iter().any(|x| x.kind == "record-shape"));
     }
 
@@ -1738,10 +1729,10 @@ mod tests {
 
     #[test]
     fn unused_test_only_is_conditional() {
-        let (f, c) = (scan_corpus(&[
+        let f = scan_corpus(&[
             ("prod.py", "def seam():\n    return 1\n"),
             ("tests/test_prod.py", "def test_seam():\n    assert seam()\n"),
-        ]), ());
+        ]);
         let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "unused").collect();
         assert_eq!(u.len(), 1);
         assert!(u[0].message.contains("referenced only from tests"));

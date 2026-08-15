@@ -41,7 +41,7 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
     esac
     base=$remote_sha
     [ "$base" = "$ZERO_SHA" ] && base=$EMPTY_TREE
-    if [ -n "$(git diff --name-only "$base".."$local_sha" -- '*.py' 'pyrefly.toml')" ]; then
+    if [ -n "$(git diff --name-only "$base".."$local_sha" -- '*.py' 'pyrefly.toml' '*.rs' 'Cargo.toml' 'Cargo.lock' 'rust-toolchain.toml' 'rustfmt.toml')" ]; then
         touched=true
         break
     fi

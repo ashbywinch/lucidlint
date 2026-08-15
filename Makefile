@@ -69,8 +69,14 @@ check: deps lint-check typecheck
 
 # The Rust scan core must be freshly built before pytest — the orchestrator
 # tests drive the real binary, and a stale binary would test nothing.
-test: deps lint-check typecheck scanner-check
+test: deps lint-check typecheck scanner-check scanner-test
 	@$(PYTEST) tests/ -q --tb=short
+
+# The Rust suite is part of the gate — a change to the core must pass its
+# own tests, not just build.
+scanner-test:
+	@cd scanner && cargo test --release 2>&1 | tail -1
+	@echo "${GREEN}✓ scanner tests passed${NC}"
 
 scanner-check:
 	@cd scanner && cargo build --release 2>&1 | tail -1
@@ -81,19 +87,27 @@ coverage: deps
 	@$(UV) run coverage report -m
 	@$(UV) run coverage xml
 	@$(UV) run coverage html
-	@echo "${GREEN}Coverage report: htmlcov/index.html${NC}"
+	@cd scanner && cargo llvm-cov --lcov --output-path ../lcov.info 2>&1 | tail -1
+	@echo "${GREEN}Coverage reports: htmlcov/index.html + lcov.info${NC}"
 
 lint: deps lint-check
 
 lint-check: deps  # Shared with the pre-commit hook — single source of truth for the lint scope
 	@$(RUFF) check *.py tests/ scripts/
+	@cd scanner && cargo fmt -- --check
+	@cd scanner && cargo clippy --all-targets -- -D warnings
 
 lint-github: deps   # CI only: findings surface as PR annotations
 	@$(RUFF) check *.py tests/ scripts/ --output-format=github
+	@cd scanner && cargo fmt -- --check
+	@cd scanner && cargo clippy --all-targets --message-format json -- -D warnings
 
-# pyrefly + BOTH-direction baseline lock (new errors AND stale entries fail)
+# pyrefly + BOTH-direction baseline lock (new errors AND stale entries fail);
+# the Rust borrow checker (cargo check) is deterministic under the
+# rust-toolchain.toml pin, so it needs no baseline.
 typecheck: deps
 	@$(PYTHON) scripts/pyrefly-lock.py check --pyrefly-config pyrefly.toml
+	@cd scanner && cargo check --all-targets 2>&1 | tail -1
 
 # After a deliberate diagnostic change, commit the refresh
 typecheck-update-baseline: deps

@@ -2,28 +2,90 @@
 //! exactly: suppressions, type-ignore, global-state, builtin-shadow, closures,
 //! class-module, vague-name, strewing, except-swallows, broad-except.
 
-use ruff_python_ast::token::{Token, TokenKind, Tokens};
+use ruff_python_ast::token::{TokenKind, Tokens};
 use ruff_python_ast::{
-    AnyNodeRef, BoolOp, CmpOp, Decorator, Expr, ExprContext, ModModule, Operator, Pattern, Stmt,
-    StmtClassDef, StmtFunctionDef, UnaryOp, visitor::Visitor,
+    AnyNodeRef, BoolOp, CmpOp, Decorator, Expr, ExprContext, Operator, Pattern, Stmt, StmtClassDef, StmtFunctionDef,
+    UnaryOp,
 };
 use ruff_text_size::Ranged;
 use std::collections::HashSet;
 
-use crate::{Finding, FnScope, ScanState, line_of, stmt_line};
+use crate::{line_of, stmt_line, Finding, ScanState};
 
 pub const VAGUE_SUFFIXES: [&str; 8] = [
-    "Manager", "Orchestrator", "Handler", "Store", "Repository", "Controller", "Utils", "Info",
+    "Manager",
+    "Orchestrator",
+    "Handler",
+    "Store",
+    "Repository",
+    "Controller",
+    "Utils",
+    "Info",
 ];
 
 pub const SHADOWED_BUILTINS: &[&str] = &[
-    "abs", "all", "any", "bin", "bool", "bytes", "callable", "chr", "classmethod", "complex",
-    "dict", "dir", "divmod", "enumerate", "eval", "exec", "filter", "float", "format",
-    "frozenset", "getattr", "globals", "hasattr", "hash", "hex", "id", "input", "int",
-    "isinstance", "issubclass", "iter", "len", "list", "locals", "map", "max", "memoryview",
-    "min", "next", "object", "oct", "open", "ord", "pow", "print", "property", "range", "repr",
-    "reversed", "round", "set", "setattr", "slice", "sorted", "staticmethod", "str", "sum",
-    "super", "tuple", "type", "vars", "zip",
+    "abs",
+    "all",
+    "any",
+    "bin",
+    "bool",
+    "bytes",
+    "callable",
+    "chr",
+    "classmethod",
+    "complex",
+    "dict",
+    "dir",
+    "divmod",
+    "enumerate",
+    "eval",
+    "exec",
+    "filter",
+    "float",
+    "format",
+    "frozenset",
+    "getattr",
+    "globals",
+    "hasattr",
+    "hash",
+    "hex",
+    "id",
+    "input",
+    "int",
+    "isinstance",
+    "issubclass",
+    "iter",
+    "len",
+    "list",
+    "locals",
+    "map",
+    "max",
+    "memoryview",
+    "min",
+    "next",
+    "object",
+    "oct",
+    "open",
+    "ord",
+    "pow",
+    "print",
+    "property",
+    "range",
+    "repr",
+    "reversed",
+    "round",
+    "set",
+    "setattr",
+    "slice",
+    "sorted",
+    "staticmethod",
+    "str",
+    "sum",
+    "super",
+    "tuple",
+    "type",
+    "vars",
+    "zip",
 ];
 
 /// One line-level suppression and the (signal, why) parsed from it.
@@ -91,12 +153,7 @@ fn suppressed(signal: &str, line: usize, supps: &Suppressions) -> bool {
 
 /// Filter findings through the suppressions + emit the why-less suppression
 /// findings, mirroring `_scan_file`'s post-filter.
-pub fn apply_suppressions(
-    findings: Vec<Finding>,
-    source: &str,
-    file: &str,
-    tokens: &Tokens,
-) -> Vec<Finding> {
+pub fn apply_suppressions(findings: Vec<Finding>, source: &str, file: &str, tokens: &Tokens) -> Vec<Finding> {
     let supps = parse_suppressions(source, tokens);
     let mut out = Vec::new();
     // the Python tool dedups suppressions by line (one per line)
@@ -177,11 +234,7 @@ pub fn type_ignore_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Fi
 /// Module-level mutable literals, Global statements, and mutations of module
 /// containers inside functions — mirrors the dispatcher's global-state handlers.
 pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: bool) {
-    let fn_name = state
-        .current_fn
-        .as_ref()
-        .map(|f| f.0.clone())
-        .unwrap_or_default();
+    let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
     if let Stmt::Global(g) = stmt {
         let line = stmt_line(state.source, stmt);
         state.findings.push(Finding {
@@ -248,9 +301,9 @@ fn all_constant(e: &Expr) -> bool {
         Expr::Tuple(t) => t.elts.iter().all(all_constant),
         Expr::Dict(d) => {
             !d.items.is_empty()
-                && d.items.iter().all(|it| {
-                    it.key.as_ref().map(all_constant).unwrap_or(false) && all_constant(&it.value)
-                })
+                && d.items
+                    .iter()
+                    .all(|it| it.key.as_ref().map(all_constant).unwrap_or(false) && all_constant(&it.value))
         }
         _ => false,
     }
@@ -312,10 +365,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
                     function: f.name.to_string(),
                     kind: "builtin-shadow".into(),
                     severity: "fail".into(),
-                    message: format!(
-                        "parameter '{}' shadows a builtin — rename it",
-                        v.name.as_str()
-                    ),
+                    message: format!("parameter '{}' shadows a builtin — rename it", v.name.as_str()),
                 });
             }
         }
@@ -327,10 +377,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
                     function: f.name.to_string(),
                     kind: "builtin-shadow".into(),
                     severity: "fail".into(),
-                    message: format!(
-                        "parameter '{}' shadows a builtin — rename it",
-                        k.name.as_str()
-                    ),
+                    message: format!("parameter '{}' shadows a builtin — rename it", k.name.as_str()),
                 });
             }
         }
@@ -342,21 +389,14 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         for target in &a.targets {
             if let Expr::Name(n) = target {
                 if SHADOWED_BUILTINS.contains(&n.id.as_str()) {
-                    let fn_name = state
-                        .current_fn
-                        .as_ref()
-                        .map(|f| f.0.clone())
-                        .unwrap_or_default();
+                    let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
                     state.findings.push(Finding {
                         file: state.file.to_string(),
                         line: stmt_line(state.source, stmt),
                         function: fn_name,
                         kind: "builtin-shadow".into(),
                         severity: "fail".into(),
-                        message: format!(
-                            "variable '{}' shadows a builtin — rename it",
-                            n.id.as_str()
-                        ),
+                        message: format!("variable '{}' shadows a builtin — rename it", n.id.as_str()),
                     });
                 }
             }
@@ -367,16 +407,8 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
 /// The except family: swallows (fail) and broad excepts (warn).
 pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
     let Stmt::Try(t) = stmt else { return };
-    let returned: HashSet<String> = state
-        .fn_stack
-        .last()
-        .map(|s| s.returned.clone())
-        .unwrap_or_default();
-    let fn_name = state
-        .current_fn
-        .as_ref()
-        .map(|f| f.0.clone())
-        .unwrap_or_default();
+    let returned: HashSet<String> = state.fn_stack.last().map(|s| s.returned.clone()).unwrap_or_default();
+    let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
     for handler in &t.handlers {
         let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = handler;
         let type_opt = eh.type_.as_ref();
@@ -389,7 +421,11 @@ pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
         };
         if swallows {
             let line = line_of(state.source, eh.range().start());
-            let kind = if type_opt.is_none() { "bare except" } else { "except that swallows" };
+            let kind = if type_opt.is_none() {
+                "bare except"
+            } else {
+                "except that swallows"
+            };
             state.findings.push(Finding {
                 file: state.file.to_string(),
                 line,
@@ -436,12 +472,7 @@ fn handler_exits(handler_body: &[&Stmt], returned: &HashSet<String>) -> bool {
     false
 }
 
-fn walk_handler(
-    stmt: &Stmt,
-    exits: &mut bool,
-    process_exit: &mut bool,
-    returned: &HashSet<String>,
-) {
+fn walk_handler(stmt: &Stmt, exits: &mut bool, process_exit: &mut bool, returned: &HashSet<String>) {
     // process exit / returned-name mutation detection via a manual walk
     let mut stack: Vec<&Stmt> = vec![stmt];
     while let Some(s) = stack.pop() {
@@ -485,8 +516,7 @@ fn is_process_exit(e: &Expr) -> bool {
         Expr::Call(c) => match c.func.as_ref() {
             Expr::Name(n) => matches!(n.id.as_str(), "exit" | "quit"),
             Expr::Attribute(a) => {
-                matches!(a.attr.as_str(), "exit")
-                    && matches!(a.value.as_ref(), Expr::Name(n) if n.id.as_str() == "sys")
+                matches!(a.attr.as_str(), "exit") && matches!(a.value.as_ref(), Expr::Name(n) if n.id.as_str() == "sys")
             }
             _ => false,
         },
@@ -641,10 +671,9 @@ fn push_stmt_children<'a>(s: &'a Stmt, stack: &mut Vec<&'a Stmt>) {
                 stack.push(b);
             }
             for h in &t.handlers {
-                if let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h {
-                    for b in &eh.body {
-                        stack.push(b);
-                    }
+                let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                for b in &eh.body {
+                    stack.push(b);
                 }
             }
             for b in &t.orelse {
@@ -744,10 +773,7 @@ pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &
     if rel.ends_with("__init__.py") {
         return;
     }
-    let classes: Vec<&Stmt> = module_body
-        .iter()
-        .filter(|s| matches!(s, Stmt::ClassDef(_)))
-        .collect();
+    let classes: Vec<&Stmt> = module_body.iter().filter(|s| matches!(s, Stmt::ClassDef(_))).collect();
     if classes.len() != 1 {
         return;
     }
@@ -787,13 +813,9 @@ pub fn vague_name_findings(state: &mut ScanState, module_body: &[Stmt]) {
             if !cls.name.as_str().ends_with(suffix) {
                 continue;
             }
-            let methods = cls
-                .body
-                .iter()
-                .filter(|m| matches!(m, Stmt::FunctionDef(_)))
-                .count();
-            let span = line_of(state.source, cls.range().end())
-                .saturating_sub(line_of(state.source, cls.range().start()));
+            let methods = cls.body.iter().filter(|m| matches!(m, Stmt::FunctionDef(_))).count();
+            let span =
+                line_of(state.source, cls.range().end()).saturating_sub(line_of(state.source, cls.range().start()));
             if span < 120 && methods < 6 {
                 break; // thin role class — the name is the communication
             }
@@ -823,8 +845,7 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
             _ => None,
         })
         .collect();
-    let mut groups: std::collections::HashMap<String, Vec<(String, usize)>> =
-        std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<String, Vec<(String, usize)>> = std::collections::HashMap::new();
     for s in module_body {
         let Stmt::FunctionDef(f) = s else { continue };
         if f.parameters.args.is_empty() {
@@ -848,10 +869,7 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
             continue;
         }
         members.sort_by_key(|m| m.1);
-        let names: Vec<String> = members
-            .iter()
-            .map(|(n, l)| format!("{n} (line {l})"))
-            .collect();
+        let names: Vec<String> = members.iter().map(|(n, l)| format!("{n} (line {l})")).collect();
         let line = members[0].1;
         state.findings.push(Finding {
             file: state.file.to_string(),
@@ -905,12 +923,8 @@ pub fn mutation_findings(state: &mut ScanState, stmt: &Stmt) {
     };
     for target in targets {
         let container: Option<String> = match target {
-            Expr::Name(n) if state.module_mutables.contains(n.id.as_str()) => {
-                Some(n.id.to_string())
-            }
-            Expr::Subscript(s) if state.module_mutables.contains(sub_name(s).as_str()) => {
-                Some(sub_name(s))
-            }
+            Expr::Name(n) if state.module_mutables.contains(n.id.as_str()) => Some(n.id.to_string()),
+            Expr::Subscript(s) if state.module_mutables.contains(sub_name(s).as_str()) => Some(sub_name(s)),
             _ => None,
         };
         if let Some(container) = container {
@@ -1021,9 +1035,8 @@ pub struct SkeletonFn {
 
 /// Dice similarity on bigram sets — `_dice_similarity` in code_health.py.
 pub fn dice_similarity(a: &[String], b: &[String]) -> f64 {
-    let bigrams = |t: &[String]| -> HashSet<(String, String)> {
-        t.windows(2).map(|w| (w[0].clone(), w[1].clone())).collect()
-    };
+    let bigrams =
+        |t: &[String]| -> HashSet<(String, String)> { t.windows(2).map(|w| (w[0].clone(), w[1].clone())).collect() };
     let sa = bigrams(a);
     let sb = bigrams(b);
     if sa.is_empty() && sb.is_empty() {
@@ -1047,7 +1060,7 @@ pub enum Q<'a> {
 }
 
 pub fn fn_skeleton(f: &StmtFunctionDef) -> Vec<String> {
-    use ruff_python_ast::{AnyNodeRef, ElifElseClause};
+    use ruff_python_ast::AnyNodeRef;
     let mut toks: Vec<String> = Vec::new();
     let mut queue: Vec<Q> = Vec::new();
     toks.push(if f.is_async { "AsyncFunctionDef" } else { "FunctionDef" }.to_string());
@@ -1082,9 +1095,7 @@ pub fn fn_skeleton(f: &StmtFunctionDef) -> Vec<String> {
             | AnyNodeRef::ExprNoneLiteral(_)
             | AnyNodeRef::ExprEllipsisLiteral(_)
             | AnyNodeRef::InterpolatedStringLiteralElement(_) => toks.push("C".to_string()),
-            AnyNodeRef::Parameter(_) | AnyNodeRef::ParameterWithDefault(_) => {
-                toks.push("A".to_string())
-            }
+            AnyNodeRef::Parameter(_) | AnyNodeRef::ParameterWithDefault(_) => toks.push("A".to_string()),
             AnyNodeRef::Parameters(_) => toks.push("arguments".to_string()),
             AnyNodeRef::ElifElseClause(_) => toks.push("If".to_string()),
             AnyNodeRef::InterpolatedElement(_) => toks.push("FormattedValue".to_string()),
@@ -1175,7 +1186,7 @@ fn push_pattern<'a>(queue: &mut Vec<Q<'a>>, p: &'a Pattern) {
 }
 
 pub fn skel_children<'a>(node: AnyNodeRef<'a>, queue: &mut Vec<Q<'a>>) {
-    use ruff_python_ast::{ElifElseClause, Expr, Pattern, Stmt};
+    use ruff_python_ast::Pattern;
     fn push<'a>(q: &mut Vec<Q<'a>>, n: AnyNodeRef<'a>) {
         q.push(Q::N(n));
     }
@@ -1329,9 +1340,8 @@ pub fn skel_children<'a>(node: AnyNodeRef<'a>, queue: &mut Vec<Q<'a>>) {
                 push(queue, AnyNodeRef::from(s));
             }
             for h in &t.handlers {
-                if let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h {
-                    push(queue, AnyNodeRef::ExceptHandlerExceptHandler(eh));
-                }
+                let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                push(queue, AnyNodeRef::ExceptHandlerExceptHandler(eh));
             }
             for s in &t.orelse {
                 push(queue, AnyNodeRef::from(s));
@@ -1660,7 +1670,6 @@ pub fn skel_children<'a>(node: AnyNodeRef<'a>, queue: &mut Vec<Q<'a>>) {
         | AnyNodeRef::ExprNoneLiteral(_)
         | AnyNodeRef::ExprEllipsisLiteral(_)
         | AnyNodeRef::ExprIpyEscapeCommand(_)
-        | AnyNodeRef::StmtTypeAlias(_)
         | AnyNodeRef::ModModule(_)
         | AnyNodeRef::ModExpression(_)
         // never pushed by skel_children, but the match must be total
@@ -1722,7 +1731,6 @@ fn bigram_set_hash(t: &[String]) -> u64 {
 /// sequences of different lengths, which the rule rejects).
 pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
     use std::collections::HashMap;
-    use std::hash::{Hash, Hasher};
     let mut out = Vec::new();
     // precomputed set hashes — one O(len) pass per candidate, O(1) per pair
     let hashes: Vec<u64> = fns.iter().map(|fr| bigram_set_hash(&fr.skeleton)).collect();
@@ -1749,7 +1757,7 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
                     dice_similarity(&fr.skeleton, &fns[j].skeleton)
                 };
                 if sim >= 0.9 {
-                    if best.map_or(true, |(b, _)| j < b) {
+                    if best.is_none_or(|(b, _)| j < b) {
                         best = Some((j, sim));
                     }
                     break; // later members of this bucket are later indices
@@ -1772,82 +1780,6 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
         }
     }
     out
-}
-
-/// The reference scan for one file — module-level definitions and every
-/// referenced name, split by prod vs test (`_collect_file_references`).
-#[derive(Default)]
-pub struct FileRefs {
-    /// module-level function definitions (non-test files only)
-    pub defs: Vec<(String, usize)>,
-    /// names referenced anywhere (Name nodes + import aliases)
-    pub refs: HashSet<String>,
-    /// string literal values (prod files only) — CLI dispatch mentions
-    pub strings: Vec<String>,
-    /// module-level functions with decorators — framework-registered
-    pub decorated: HashSet<String>,
-}
-
-/// Collect one file's definitions + references (the plain field-order
-/// visitor covers parameters, annotations, and defaults too).
-pub fn collect_file_refs(body: &[Stmt], is_test: bool, source: &str) -> FileRefs {
-    struct Collector {
-        is_test: bool,
-        defs: Vec<(String, usize)>,
-        refs: HashSet<String>,
-        strings: Vec<String>,
-        decorated: HashSet<String>,
-    }
-    impl<'a> Visitor<'a> for Collector {
-        fn visit_stmt(&mut self, stmt: &'a Stmt) {
-            ruff_python_ast::visitor::walk_stmt(self, stmt);
-        }
-        fn visit_expr(&mut self, expr: &'a Expr) {
-            match expr {
-                Expr::Name(n) => {
-                    self.refs.insert(n.id.to_string());
-                }
-                Expr::StringLiteral(s) => {
-                    if !self.is_test {
-                        self.strings.push(s.value.to_str().to_string());
-                    }
-                }
-                _ => {}
-            }
-            ruff_python_ast::visitor::walk_expr(self, expr);
-        }
-        fn visit_alias(&mut self, alias: &'a ruff_python_ast::Alias) {
-            self.refs.insert(alias.name.to_string());
-        }
-    }
-    let mut c = Collector {
-        is_test,
-        defs: Vec::new(),
-        refs: HashSet::new(),
-        strings: Vec::new(),
-        decorated: HashSet::new(),
-    };
-    // module-level definitions come from tree.body — the walk covers refs
-    for s in body {
-        if let Stmt::FunctionDef(f) = s {
-            if !is_test {
-                let line = stmt_line(source, s);
-                c.defs.push((f.name.to_string(), line));
-                if !f.decorator_list.is_empty() {
-                    c.decorated.insert(f.name.to_string());
-                }
-            }
-        }
-    }
-    for s in body {
-        c.visit_stmt(s);
-    }
-    FileRefs {
-        defs: c.defs,
-        refs: c.refs,
-        strings: c.strings,
-        decorated: c.decorated,
-    }
 }
 
 /// Dead-code findings (`_unused_actions`).
@@ -1976,7 +1908,9 @@ fn is_raw_json(e: &Expr) -> bool {
                 }
                 let mut val_parts = Vec::new();
                 ann_unwrap(&t.elts[1], &mut val_parts);
-                return val_parts.iter().any(|p| matches!(ann_name_of(p).as_deref(), Some("Any" | "object" | "None")));
+                return val_parts
+                    .iter()
+                    .any(|p| matches!(ann_name_of(p).as_deref(), Some("Any" | "object" | "None")));
             }
             return true; // dict[X] single-arg
         }
@@ -2019,7 +1953,9 @@ fn annotation_is_record(e: &Expr) -> bool {
                 if val_parts.len() > 1 {
                     // a union value: a record or shapeless member makes it a record
                     return val_parts.iter().any(|p| annotation_is_record(p))
-                        || val_parts.iter().any(|p| matches!(ann_name_of(p).as_deref(), Some("Any" | "object")));
+                        || val_parts
+                            .iter()
+                            .any(|p| matches!(ann_name_of(p).as_deref(), Some("Any" | "object")));
                 }
                 let val = val_parts[0];
                 let val_name = ann_name_of(val);
@@ -2058,15 +1994,16 @@ fn annotation_is_record(e: &Expr) -> bool {
 /// `_part_is_domain`: one return-annotation part resolving to a domain class.
 fn part_is_domain(e: &Expr) -> bool {
     match e {
-        Expr::Name(n) => {
-            !PRIMITIVES.contains(&n.id.as_str()) && !matches!(n.id.as_str(), "dict" | "tuple" | "list")
-        }
+        Expr::Name(n) => !PRIMITIVES.contains(&n.id.as_str()) && !matches!(n.id.as_str(), "dict" | "tuple" | "list"),
         Expr::Subscript(s) => {
             if matches!(ann_base_name(&s.value).as_deref(), Some("list" | "tuple")) {
                 let elt: &Expr = s.slice.as_ref();
                 if let Expr::Tuple(t) = elt {
-                    let parts: Vec<&Expr> =
-                        t.elts.iter().filter(|e| !matches!(e, Expr::EllipsisLiteral(_))).collect();
+                    let parts: Vec<&Expr> = t
+                        .elts
+                        .iter()
+                        .filter(|e| !matches!(e, Expr::EllipsisLiteral(_)))
+                        .collect();
                     return parts.len() == 1 && part_is_domain(parts[0]);
                 }
                 return part_is_domain(elt);
@@ -2103,9 +2040,10 @@ fn is_constant_value(e: &Expr) -> bool {
         Expr::UnaryOp(u) if matches!(u.op, UnaryOp::UAdd | UnaryOp::USub) => is_constant_value(&u.operand),
         Expr::List(l) => l.elts.iter().all(is_constant_value),
         Expr::Tuple(t) => t.elts.iter().all(is_constant_value),
-        Expr::Dict(d) => d.items.iter().all(|it| {
-            it.key.as_ref().map(is_constant_value).unwrap_or(false) && is_constant_value(&it.value)
-        }),
+        Expr::Dict(d) => d
+            .items
+            .iter()
+            .all(|it| it.key.as_ref().map(is_constant_value).unwrap_or(false) && is_constant_value(&it.value)),
         _ => false,
     }
 }
@@ -2270,11 +2208,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
 /// `_partition_for_class`: a class whose methods split into >= 2
 /// field-disjoint groups after removing at most 2 connectors.
 fn partition_for_class(source: &str, cls: &StmtClassDef) -> Option<(Vec<String>, Vec<Vec<String>>)> {
-    let methods: Vec<&Stmt> = cls
-        .body
-        .iter()
-        .filter(|s| matches!(s, Stmt::FunctionDef(_)))
-        .collect();
+    let methods: Vec<&Stmt> = cls.body.iter().filter(|s| matches!(s, Stmt::FunctionDef(_))).collect();
     if methods.len() < 6 {
         return None;
     }
@@ -2316,12 +2250,15 @@ fn partition_for_class(source: &str, cls: &StmtClassDef) -> Option<(Vec<String>,
             let big: Vec<Vec<String>> = groups
                 .into_iter()
                 .filter(|g| {
-                    let fields: HashSet<&String> = g.iter().flat_map(|m| {
-                        mf.iter()
-                            .find(|(n, _)| n == m)
-                            .map(|(_, f)| f.iter())
-                            .unwrap_or_default()
-                    }).collect();
+                    let fields: HashSet<&String> = g
+                        .iter()
+                        .flat_map(|m| {
+                            mf.iter()
+                                .find(|(n, _)| n == m)
+                                .map(|(_, f)| f.iter())
+                                .unwrap_or_default()
+                        })
+                        .collect();
                     g.len() >= 2 && fields.len() >= 2
                 })
                 .collect();
@@ -2369,12 +2306,22 @@ fn connected_groups(kept: &[String], mf: &[(String, HashSet<String>)]) -> Vec<Ve
                 continue;
             }
             group.push(m.to_string());
-            let fields = mf.iter().find(|(n, _)| n == m).map(|(_, f)| f).cloned().unwrap_or_default();
+            let fields = mf
+                .iter()
+                .find(|(n, _)| n == m)
+                .map(|(_, f)| f)
+                .cloned()
+                .unwrap_or_default();
             for other in kept {
                 if seen.contains(other.as_str()) {
                     continue;
                 }
-                let other_fields = mf.iter().find(|(n, _)| n == other).map(|(_, f)| f).cloned().unwrap_or_default();
+                let other_fields = mf
+                    .iter()
+                    .find(|(n, _)| n == other)
+                    .map(|(_, f)| f)
+                    .cloned()
+                    .unwrap_or_default();
                 if !fields.is_disjoint(&other_fields) {
                     stack.push(other);
                 }
@@ -2421,11 +2368,13 @@ const MONKEYPATCH_METHODS: [&str; 5] = ["setattr", "setitem", "delattr", "setenv
 
 fn monkeypatch_decorator(state: &mut ScanState, source: &str, d: &Decorator, mock_imports: &HashSet<String>) {
     let expr = &d.expression;
-    let func = if let Expr::Call(c) = expr { c.func.as_ref() } else { expr };
+    let func = if let Expr::Call(c) = expr {
+        c.func.as_ref()
+    } else {
+        expr
+    };
     let desc: Option<String> = match func {
-        Expr::Name(name) if mock_imports.contains(name.id.as_str()) => {
-            Some(format!("@{}", name.id.as_str()))
-        }
+        Expr::Name(name) if mock_imports.contains(name.id.as_str()) => Some(format!("@{}", name.id.as_str())),
         Expr::Attribute(a) if a.attr.as_str() == "patch" => Some("@patch".to_string()),
         _ => None,
     };
@@ -2457,11 +2406,13 @@ pub fn monkeypatch_findings(state: &mut ScanState, body: &[Stmt], source: &str) 
                 let line = line_of(source, call.range().start());
                 let desc: Option<String> = match call.func.as_ref() {
                     Expr::Attribute(a) => match a.value.as_ref() {
-                        Expr::Name(name) if name.id == "monkeypatch" && MONKEYPATCH_METHODS.contains(&a.attr.as_str()) => {
+                        Expr::Name(name)
+                            if name.id == "monkeypatch" && MONKEYPATCH_METHODS.contains(&a.attr.as_str()) =>
+                        {
                             Some(format!("monkeypatch.{}", a.attr.as_str()))
                         }
                         _ if a.attr.as_str() == "patch" && matches!(a.value.as_ref(), Expr::Attribute(_)) => {
-                            Some(format!("{}.patch", source[a.value.range()].to_string()))
+                            Some(format!("{}.patch", &source[a.value.range()]))
                         }
                         _ => None,
                     },
@@ -2521,7 +2472,12 @@ pub fn skipif_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                             .args
                             .iter()
                             .map(|e| source[e.range()].to_string())
-                            .chain(call.arguments.keywords.iter().map(|k| source[k.value.range()].to_string()))
+                            .chain(
+                                call.arguments
+                                    .keywords
+                                    .iter()
+                                    .map(|k| source[k.value.range()].to_string()),
+                            )
                             .collect();
                         let cond = cond_parts.join(" ");
                         if SKIPIF_NEEDLES.iter().any(|needle| cond.contains(needle)) {
@@ -2547,12 +2503,36 @@ pub fn skipif_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
 }
 
 const FS_PATH_METHODS: [&str; 17] = [
-    "read_text", "write_text", "read_bytes", "write_bytes", "mkdir", "unlink", "rename", "replace",
-    "touch", "rmdir", "iterdir", "glob", "rglob", "exists", "resolve", "symlink_to", "copy",
+    "read_text",
+    "write_text",
+    "read_bytes",
+    "write_bytes",
+    "mkdir",
+    "unlink",
+    "rename",
+    "replace",
+    "touch",
+    "rmdir",
+    "iterdir",
+    "glob",
+    "rglob",
+    "exists",
+    "resolve",
+    "symlink_to",
+    "copy",
 ];
-const FS_OS_OPS: [&str; 9] = ["remove", "rename", "mkdir", "makedirs", "rmdir", "unlink", "symlink", "link", "replace"];
+const FS_OS_OPS: [&str; 9] = [
+    "remove", "rename", "mkdir", "makedirs", "rmdir", "unlink", "symlink", "link", "replace",
+];
 const FS_SHUTIL_OPS: [&str; 5] = ["copy", "copy2", "move", "rmtree", "copytree"];
-const FS_TEMPFILE: [&str; 6] = ["TemporaryDirectory", "NamedTemporaryFile", "TemporaryFile", "mkdtemp", "mkstemp", "mktemp"];
+const FS_TEMPFILE: [&str; 6] = [
+    "TemporaryDirectory",
+    "NamedTemporaryFile",
+    "TemporaryFile",
+    "mkdtemp",
+    "mkstemp",
+    "mktemp",
+];
 
 /// `_fakefs_findings` — real FS access in tests without pyfakefs.
 pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
@@ -2628,8 +2608,14 @@ pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                     if let Q::N(fn_) = fq[fi] {
                         match fn_ {
                             AnyNodeRef::ExprName(n) if n.id == "tmp_path" => real_fs = true,
-                            AnyNodeRef::ExprName(n) if matches!(n.id.as_str(), "sqlite3" | "subprocess") => needs_real = true,
-                            AnyNodeRef::ExprAttribute(a) if matches!(a.attr.as_str(), "symlink" | "symlink_to" | "link") => needs_real = true,
+                            AnyNodeRef::ExprName(n) if matches!(n.id.as_str(), "sqlite3" | "subprocess") => {
+                                needs_real = true
+                            }
+                            AnyNodeRef::ExprAttribute(a)
+                                if matches!(a.attr.as_str(), "symlink" | "symlink_to" | "link") =>
+                            {
+                                needs_real = true
+                            }
                             AnyNodeRef::ExprCall(c) => {
                                 match c.func.as_ref() {
                                     // bare open(...)/tempfile(...) count; a Path(...).open(...)
@@ -2684,7 +2670,10 @@ pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
 // =====================================================================
 
 const ABSTRACT_DECORATORS: [&str; 4] = [
-    "abstractmethod", "abstractproperty", "abstractclassmethod", "abstractstaticmethod",
+    "abstractmethod",
+    "abstractproperty",
+    "abstractclassmethod",
+    "abstractstaticmethod",
 ];
 
 /// Top-level classes with abstractness and base references.
@@ -2748,7 +2737,11 @@ pub fn collect_imports(body: &[Stmt], _source: &str) -> Vec<crate::ImportInfo> {
                 AnyNodeRef::StmtImportFrom(imp) => {
                     if let Some(module) = &imp.module {
                         for a in &imp.names {
-                            let alias = a.asname.as_ref().map(|x| x.to_string()).unwrap_or_else(|| a.name.to_string());
+                            let alias = a
+                                .asname
+                                .as_ref()
+                                .map(|x| x.to_string())
+                                .unwrap_or_else(|| a.name.to_string());
                             out.push(crate::ImportInfo {
                                 alias,
                                 module: module.to_string(),
@@ -2759,7 +2752,11 @@ pub fn collect_imports(body: &[Stmt], _source: &str) -> Vec<crate::ImportInfo> {
                 }
                 AnyNodeRef::StmtImport(imp) => {
                     for a in &imp.names {
-                        let alias = a.asname.as_ref().map(|x| x.to_string()).unwrap_or_else(|| a.name.to_string());
+                        let alias = a
+                            .asname
+                            .as_ref()
+                            .map(|x| x.to_string())
+                            .unwrap_or_else(|| a.name.to_string());
                         out.push(crate::ImportInfo {
                             alias,
                             module: a.name.to_string(),
@@ -2777,7 +2774,11 @@ pub fn collect_imports(body: &[Stmt], _source: &str) -> Vec<crate::ImportInfo> {
 }
 
 /// `_class_key`: a module reference to a file rel.
-fn class_key(classes: &std::collections::HashMap<(String, String), &crate::ClassInfo>, mrel: &str, mname: &str) -> Option<(String, String)> {
+fn class_key(
+    classes: &std::collections::HashMap<(String, String), &crate::ClassInfo>,
+    mrel: &str,
+    mname: &str,
+) -> Option<(String, String)> {
     if mrel.ends_with(".py") {
         let key = (mrel.to_string(), mname.to_string());
         return if classes.contains_key(&key) { Some(key) } else { None };

@@ -41,29 +41,162 @@ pub struct GraphContract {
 }
 
 pub const BUILTIN_NAMES: &[&str] = &[
-    "ArithmeticError", "AssertionError", "AttributeError", "BaseException", "BaseExceptionGroup",
-    "BlockingIOError", "BrokenPipeError", "BufferError", "BytesWarning", "ChildProcessError",
-    "ConnectionAbortedError", "ConnectionError", "ConnectionRefusedError", "ConnectionResetError",
-    "DeprecationWarning", "EOFError", "Ellipsis", "EncodingWarning", "EnvironmentError", "Exception",
-    "False", "FileExistsError", "FileNotFoundError", "FloatingPointError", "FutureWarning",
-    "GeneratorExit", "IOError", "ImportError", "ImportWarning", "IndentationError", "IndexError",
-    "InterruptedError", "IsADirectoryError", "KeyError", "KeyboardInterrupt", "LookupError",
-    "MemoryError", "ModuleNotFoundError", "NameError", "None", "NotADirectoryError",
-    "NotImplemented", "NotImplementedError", "OSError", "OverflowError", "PendingDeprecationWarning",
-    "PermissionError", "ProcessLookupError", "RecursionError", "ReferenceError", "ResourceWarning",
-    "RuntimeError", "RuntimeWarning", "StopAsyncIteration", "StopIteration", "SyntaxError",
-    "SyntaxWarning", "SystemError", "SystemExit", "TabError", "TimeoutError", "True", "TypeError",
-    "UnboundLocalError", "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeError",
-    "UnicodeTranslateError", "UnicodeWarning", "UserWarning", "ValueError", "Warning",
-    "ZeroDivisionError", "__build_class__", "__debug__", "__doc__", "__import__", "__loader__",
-    "__name__", "__package__", "__spec__", "abs", "aiter", "all", "anext", "any", "ascii", "bin",
-    "bool", "breakpoint", "bytearray", "bytes", "callable", "chr", "classmethod", "compile",
-    "complex", "copyright", "credits", "delattr", "dict", "dir", "divmod", "enumerate", "eval",
-    "exec", "exit", "filter", "float", "format", "frozenset", "getattr", "globals", "hasattr",
-    "hash", "help", "hex", "id", "input", "int", "isinstance", "issubclass", "iter", "len", "license",
-    "list", "locals", "map", "max", "memoryview", "min", "next", "object", "oct", "open", "ord",
-    "pow", "print", "property", "quit", "range", "repr", "reversed", "round", "set", "setattr",
-    "slice", "sorted", "staticmethod", "str", "sum", "super", "tuple", "type", "vars", "zip",
+    "ArithmeticError",
+    "AssertionError",
+    "AttributeError",
+    "BaseException",
+    "BaseExceptionGroup",
+    "BlockingIOError",
+    "BrokenPipeError",
+    "BufferError",
+    "BytesWarning",
+    "ChildProcessError",
+    "ConnectionAbortedError",
+    "ConnectionError",
+    "ConnectionRefusedError",
+    "ConnectionResetError",
+    "DeprecationWarning",
+    "EOFError",
+    "Ellipsis",
+    "EncodingWarning",
+    "EnvironmentError",
+    "Exception",
+    "False",
+    "FileExistsError",
+    "FileNotFoundError",
+    "FloatingPointError",
+    "FutureWarning",
+    "GeneratorExit",
+    "IOError",
+    "ImportError",
+    "ImportWarning",
+    "IndentationError",
+    "IndexError",
+    "InterruptedError",
+    "IsADirectoryError",
+    "KeyError",
+    "KeyboardInterrupt",
+    "LookupError",
+    "MemoryError",
+    "ModuleNotFoundError",
+    "NameError",
+    "None",
+    "NotADirectoryError",
+    "NotImplemented",
+    "NotImplementedError",
+    "OSError",
+    "OverflowError",
+    "PendingDeprecationWarning",
+    "PermissionError",
+    "ProcessLookupError",
+    "RecursionError",
+    "ReferenceError",
+    "ResourceWarning",
+    "RuntimeError",
+    "RuntimeWarning",
+    "StopAsyncIteration",
+    "StopIteration",
+    "SyntaxError",
+    "SyntaxWarning",
+    "SystemError",
+    "SystemExit",
+    "TabError",
+    "TimeoutError",
+    "True",
+    "TypeError",
+    "UnboundLocalError",
+    "UnicodeDecodeError",
+    "UnicodeEncodeError",
+    "UnicodeError",
+    "UnicodeTranslateError",
+    "UnicodeWarning",
+    "UserWarning",
+    "ValueError",
+    "Warning",
+    "ZeroDivisionError",
+    "__build_class__",
+    "__debug__",
+    "__doc__",
+    "__import__",
+    "__loader__",
+    "__name__",
+    "__package__",
+    "__spec__",
+    "abs",
+    "aiter",
+    "all",
+    "anext",
+    "any",
+    "ascii",
+    "bin",
+    "bool",
+    "breakpoint",
+    "bytearray",
+    "bytes",
+    "callable",
+    "chr",
+    "classmethod",
+    "compile",
+    "complex",
+    "copyright",
+    "credits",
+    "delattr",
+    "dict",
+    "dir",
+    "divmod",
+    "enumerate",
+    "eval",
+    "exec",
+    "exit",
+    "filter",
+    "float",
+    "format",
+    "frozenset",
+    "getattr",
+    "globals",
+    "hasattr",
+    "hash",
+    "help",
+    "hex",
+    "id",
+    "input",
+    "int",
+    "isinstance",
+    "issubclass",
+    "iter",
+    "len",
+    "license",
+    "list",
+    "locals",
+    "map",
+    "max",
+    "memoryview",
+    "min",
+    "next",
+    "object",
+    "oct",
+    "open",
+    "ord",
+    "pow",
+    "print",
+    "property",
+    "quit",
+    "range",
+    "repr",
+    "reversed",
+    "round",
+    "set",
+    "setattr",
+    "slice",
+    "sorted",
+    "staticmethod",
+    "str",
+    "sum",
+    "super",
+    "tuple",
+    "type",
+    "vars",
+    "zip",
 ];
 
 /// First two directory segments inside the repo root — `_module_key`.
@@ -88,12 +221,10 @@ fn base_name(qn: &str) -> &str {
 /// A dotted module name to a repo file rel — `_module_to_file`.
 fn module_to_file(repo: &Path, dotted: &str) -> Option<String> {
     let base = dotted.replace('.', "/");
-    for candidate in [format!("{base}.py"), format!("{base}/__init__.py")] {
-        if repo.join(&candidate).exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    [format!("{base}.py"), format!("{base}/__init__.py")]
+        .iter()
+        .find(|c| repo.join(c).exists())
+        .cloned()
 }
 
 /// Iterative Tarjan SCC — `_strongly_connected_components`.
@@ -115,7 +246,7 @@ fn strongly_connected_components(graph: &BTreeMap<String, Vec<String>>, nodes: &
         stack.push(v.clone());
         on_stack.insert(v.clone());
         work.push((v.clone(), 0, graph.get(v).cloned().unwrap_or_default()));
-        while let Some((w, mut i, edges)) = work.pop() {
+        while let Some((w, i, edges)) = work.pop() {
             if i < edges.len() {
                 work.push((w.clone(), i + 1, edges.clone()));
                 let next = &edges[i];
@@ -240,7 +371,12 @@ fn repo_rel(repo: &Path, path: &str) -> String {
 }
 
 /// Large functions: node span >= threshold — `_large_function_actions`.
-pub fn large_function_findings(repo: &Path, contract: &GraphContract, max_lines: usize, include_tests: bool) -> Vec<Finding> {
+pub fn large_function_findings(
+    repo: &Path,
+    contract: &GraphContract,
+    max_lines: usize,
+    include_tests: bool,
+) -> Vec<Finding> {
     let mut out = Vec::new();
     for n in &contract.nodes {
         if !matches!(n.kind.as_str(), "Function" | "Method") {
@@ -252,7 +388,9 @@ pub fn large_function_findings(repo: &Path, contract: &GraphContract, max_lines:
         if !n.file_path.ends_with(".py") {
             continue;
         }
-        let (Some(ls), Some(le)) = (n.line_start, n.line_end) else { continue };
+        let (Some(ls), Some(le)) = (n.line_start, n.line_end) else {
+            continue;
+        };
         let span = le - ls + 1;
         if le - ls < max_lines as i64 {
             continue;
@@ -306,7 +444,7 @@ pub fn hub_file_findings(
     let counts = hub_edge_counts(contract);
     let mut out = Vec::new();
     let mut entries: Vec<(&String, &usize)> = counts.iter().collect();
-    entries.sort_by_key(|(f, c)| (*c, f.clone()));
+    entries.sort_by_key(|(f, c)| (*c, (*f).clone()));
     entries.reverse();
     for (file_path, edge_count) in entries {
         if *edge_count < max_edges {
@@ -324,15 +462,14 @@ pub fn hub_file_findings(
             .min()
             .unwrap_or(1);
         let (anchor, mut message) = match max_cc_by_file.get(&rel) {
-            Some((line, cc, name)) => {
-                (
-                    *line,
-                    format!(
-                        "{edge_count} call/import edges (>= {max_edges}) fattest: {name}:{line} (CC {cc})"
-                    ),
-                )
-            }
-            None => (first as usize, format!("{edge_count} call/import edges (>= {max_edges})")),
+            Some((line, cc, name)) => (
+                *line,
+                format!("{edge_count} call/import edges (>= {max_edges}) fattest: {name}:{line} (CC {cc})"),
+            ),
+            None => (
+                first as usize,
+                format!("{edge_count} call/import edges (>= {max_edges})"),
+            ),
         };
         if message.is_empty() {
             message = format!("{edge_count} call/import edges (>= {max_edges})");
@@ -351,7 +488,7 @@ pub fn hub_file_findings(
 
 /// The graph tool's own risk formula — recomputed from CALLS/TESTED_BY.
 fn risk_for(
-    contract: &GraphContract,
+    _contract: &GraphContract,
     node: &GNode,
     caller_counts: &HashMap<String, usize>,
     tested_counts: &HashMap<String, usize>,
@@ -369,8 +506,17 @@ fn risk_for(
     }
     let name_lower = node.name.to_lowercase();
     let sec_kw = [
-        "auth", "login", "password", "token", "session", "crypt", "secret", "credential",
-        "permission", "sql", "execute",
+        "auth",
+        "login",
+        "password",
+        "token",
+        "session",
+        "crypt",
+        "secret",
+        "credential",
+        "permission",
+        "sql",
+        "execute",
     ];
     if sec_kw.iter().any(|kw| name_lower.contains(kw)) {
         risk += 0.4;
@@ -420,9 +566,7 @@ pub fn high_risk_findings(repo: &Path, contract: &GraphContract, max_risk: f64, 
             function: n.name.clone(),
             kind: "high-risk".into(),
             severity: "fail".into(),
-            message: format!(
-                "graph risk {risk:.2} (>= {max_risk}), {caller_count} call site(s)"
-            ),
+            message: format!("graph risk {risk:.2} (>= {max_risk}), {caller_count} call site(s)"),
         });
     }
     out
@@ -472,11 +616,7 @@ fn resolve_callee_module(
 
 /// File mixes layers — `_layer_mix_actions` / `_layer_mix_for_file`.
 pub fn layer_mix_findings(repo: &Path, contract: &GraphContract, files: &[String]) -> Vec<Finding> {
-    let node_by_qn: HashMap<String, &GNode> = contract
-        .nodes
-        .iter()
-        .map(|n| (n.qualified_name.clone(), n))
-        .collect();
+    let node_by_qn: HashMap<String, &GNode> = contract.nodes.iter().map(|n| (n.qualified_name.clone(), n)).collect();
     let mut out = Vec::new();
     for rel in files {
         if is_test_rel(rel) {
@@ -494,13 +634,13 @@ pub fn layer_mix_findings(repo: &Path, contract: &GraphContract, files: &[String
         let mut layers: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for n in fns {
             if let Some(layer) = dominant_callee(contract, repo, &n.qualified_name, rel, &node_by_qn) {
-                layers.entry(layer).or_default().push(base_name(&n.qualified_name).to_string());
+                layers
+                    .entry(layer)
+                    .or_default()
+                    .push(base_name(&n.qualified_name).to_string());
             }
         }
-        let big: Vec<(String, Vec<String>)> = layers
-            .into_iter()
-            .filter(|(_, names)| names.len() >= 2)
-            .collect();
+        let big: Vec<(String, Vec<String>)> = layers.into_iter().filter(|(_, names)| names.len() >= 2).collect();
         if big.len() < 2 {
             continue;
         }
@@ -550,7 +690,9 @@ pub fn folder_mix_findings(repo: &Path, contract: &GraphContract) -> Vec<Finding
             continue;
         }
         let dir = parts[..parts.len() - 1].join("/");
-        dirs.entry(dir).or_default().push((parts.last().unwrap().to_string(), cid));
+        dirs.entry(dir)
+            .or_default()
+            .push((parts.last().unwrap().to_string(), cid));
     }
     let mut out = Vec::new();
     for (d, files) in dirs {
@@ -570,8 +712,15 @@ pub fn folder_mix_findings(repo: &Path, contract: &GraphContract) -> Vec<Finding
             .iter()
             .take(3)
             .map(|(cid, fns)| {
-                let name = contract.communities.get(&cid.to_string()).cloned().unwrap_or_else(|| cid.to_string());
-                format!("{name} ({})", fns.iter().take(4).cloned().collect::<Vec<_>>().join(", "))
+                let name = contract
+                    .communities
+                    .get(&cid.to_string())
+                    .cloned()
+                    .unwrap_or_else(|| cid.to_string());
+                format!(
+                    "{name} ({})",
+                    fns.iter().take(4).cloned().collect::<Vec<_>>().join(", ")
+                )
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -601,7 +750,7 @@ pub fn hotspot_findings(
 ) -> Vec<Finding> {
     let cutoff = ((churn.len() as f64) * top_frac).max(1.0) as usize;
     let mut entries: Vec<(&String, &usize)> = churn.iter().collect();
-    entries.sort_by_key(|(f, c)| (*c, f.clone()));
+    entries.sort_by_key(|(f, c)| (*c, (*f).clone()));
     entries.reverse();
     let mut out = Vec::new();
     for (rel, count) in entries.into_iter().take(cutoff) {
@@ -618,9 +767,7 @@ pub fn hotspot_findings(
             function: String::new(),
             kind: "hotspot".into(),
             severity: "fail".into(),
-            message: format!(
-                "changed {count}x (top {cutoff} by churn) — volatile part: max CC {max_cc} in {rel}"
-            ),
+            message: format!("changed {count}x (top {cutoff} by churn) — volatile part: max CC {max_cc} in {rel}"),
         });
         let _ = last_modified;
     }

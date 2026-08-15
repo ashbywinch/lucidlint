@@ -7,8 +7,16 @@ use std::path::{Path, PathBuf};
 use crate::Finding;
 
 const SKIP_PREFIXES: [&str; 10] = [
-    "http://", "https://", "#", "mailto:", "tel:", "skill://", "rule://", "agent://",
-    "memory://", "artifact://",
+    "http://",
+    "https://",
+    "#",
+    "mailto:",
+    "tel:",
+    "skill://",
+    "rule://",
+    "agent://",
+    "memory://",
+    "artifact://",
 ];
 
 /// Fence-aware line walker shared by both extractions.
@@ -81,12 +89,10 @@ fn all_targets(text: &str) -> Vec<String> {
 pub fn docs_findings(repo: &Path) -> Vec<Finding> {
     let mut mds: Vec<PathBuf> = Vec::new();
     if repo.join("docs").exists() {
-        if let Ok(entries) = std::fs::read_dir(repo.join("docs")) {
-            let mut all: Vec<PathBuf> = Vec::new();
-            collect_md(repo.join("docs").as_path(), &mut all);
-            all.sort();
-            mds.extend(all);
-        }
+        let mut all: Vec<PathBuf> = Vec::new();
+        collect_md(repo.join("docs").as_path(), &mut all);
+        all.sort();
+        mds.extend(all);
     }
     for root in ["README.md", "AGENTS.md"] {
         let p = repo.join(root);
@@ -96,7 +102,9 @@ pub fn docs_findings(repo: &Path) -> Vec<Finding> {
     }
     let mut out = Vec::new();
     for md in &mds {
-        let Ok(text) = std::fs::read_to_string(md) else { continue };
+        let Ok(text) = std::fs::read_to_string(md) else {
+            continue;
+        };
         let rel = md.strip_prefix(repo).unwrap_or(md).to_string_lossy().replace('\\', "/");
         let parent = md.parent().unwrap_or(repo);
         for target in md_link_targets(&text) {
@@ -107,7 +115,9 @@ pub fn docs_findings(repo: &Path) -> Vec<Finding> {
                     function: String::new(),
                     kind: "docs-link".into(),
                     severity: "fail".into(),
-                    message: format!("link to '{target}' from {rel} does not resolve — a doc that links nowhere is a finding"),
+                    message: format!(
+                        "link to '{target}' from {rel} does not resolve — a doc that links nowhere is a finding"
+                    ),
                 });
             }
         }
@@ -128,7 +138,9 @@ pub fn docs_findings(repo: &Path) -> Vec<Finding> {
                     function: String::new(),
                     kind: "docs-link".into(),
                     severity: "fail".into(),
-                    message: format!("backtick path '{path}' from {rel} does not resolve — a doc that links nowhere is a finding"),
+                    message: format!(
+                        "backtick path '{path}' from {rel} does not resolve — a doc that links nowhere is a finding"
+                    ),
                 });
             }
         }
@@ -170,12 +182,10 @@ fn docs_reachability(repo: &Path) -> Vec<Finding> {
         .to_string_lossy()
         .replace('\\', "/");
     for md in std::iter::once(&agents).chain(docs.iter()) {
-        let Ok(text) = std::fs::read_to_string(md) else { continue };
-        let src = md
-            .strip_prefix(repo)
-            .unwrap_or(md)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let Ok(text) = std::fs::read_to_string(md) else {
+            continue;
+        };
+        let src = md.strip_prefix(repo).unwrap_or(md).to_string_lossy().replace('\\', "/");
         let parent = md.parent().unwrap_or(repo);
         let mut targets = HashSet::new();
         for target in all_targets(&text) {
