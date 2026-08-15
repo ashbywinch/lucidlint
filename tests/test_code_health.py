@@ -1874,3 +1874,17 @@ def test_in_diff_marking_survives_merge(tmp_path):
         actions = ch._collect_actions(repo, args, Counter(), {}, None, False, "")
     merged = ch._dedupe_merge(actions, {"houses/app.py"})
     assert merged and all(a.in_diff for a in merged)
+
+
+def test_magic_number_in_nested_function_attributes_to_innermost(tmp_path):
+    """A constant inside a nested function is the inner function's finding —
+    the old per-function walker also attributed it to every enclosing
+    function, creating duplicate targets."""
+    actions = _standard_for(tmp_path, (
+        "def outer():\n"
+        "    def inner():\n"
+        "        return rate * 60\n"
+        "    return inner()\n"))
+    warns = [a for a in actions if a.severity == "warn" and "magic number" in a.message]
+    assert len(warns) == 1
+    assert warns[0].function == "inner"

@@ -39,6 +39,7 @@ import datetime
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from itertools import combinations
+from typing import NamedTuple
 
 try:
     from radon.visitors import ComplexityVisitor  # optional dependency
@@ -756,6 +757,69 @@ def log(msg: str) -> None:
 
 
 # --------------------------------------------------------------------------- complexity (radon)
+@dataclass(frozen=True)
+class SourceFile:
+    """One scanned .py file: its path and repo-relative name."""
+
+    py: Path
+    rel: str
+
+
+class ParsedSource(NamedTuple):
+    """One file's cached parse: the AST (None on parse failure) and the source text."""
+
+    tree: ast.Module | None
+    source: str
+
+
+def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
+    """One rglob pass over the repo's .py files (excluded dirs applied).
+
+    Every scan pass consumes this single list — the tool used to rglob
+    four or five times per run (2.7s of glob + 3.4s of relative_to in the
+    profile). With only_rel set, returns just that file (the --file / LSP
+    mode).
+    """
+    if only_rel is not None:
+        py = repo / only_rel
+        return [SourceFile(py, only_rel)] if py.is_file() and py.suffix == ".py" else []
+    return [
+        SourceFile(py, py.relative_to(repo).as_posix())
+        for py in sorted(repo.rglob("*.py"))
+        if not any(part in EXCLUDED_DIRS for part in py.parts)
+    ]
+
+
+class _SourceCache:
+    """Memoized parse: the scan passes used to re-parse every file four times.
+
+    Keyed by absolute path + mtime+size — a pure function of file content,
+    not state: the same input always yields the same tree and source."""
+
+    def __init__(self) -> None:
+        self._files: dict[str, tuple[float, int, ast.Module | None, str]] = {}
+
+    def get(self, py: Path) -> ParsedSource:
+        st = py.stat()
+        key = str(py.resolve())
+        hit = self._files.get(key)
+        if hit and hit[0] == st.st_mtime and hit[1] == st.st_size:
+            return ParsedSource(hit[2], hit[3])
+        source = py.read_text(encoding="utf-8", errors="replace")
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped
+            tree = None
+        self._files[key] = (st.st_mtime, st.st_size, tree, source)
+        return ParsedSource(tree, source)
+
+
+# code-health: ignore global-state the parse cache is a memo of file content — a pure
+# function of inputs, not mutable state that changes behavior; without it every file is
+# re-parsed four times per run
+SOURCE_CACHE = _SourceCache()
+
+
 def complexity_actions(
     repo: Path,
     max_cc: int,
@@ -765,15 +829,14 @@ def complexity_actions(
     covered: CoverageLines | None,
     graph_preferred: bool,
     stale_note: str,
+    only_rel: str | None = None,
 ) -> list[Action]:
     """Cyclomatic complexity per function via radon's fast pure-Python analyzer."""
     complexity_visitor = _radon_visitor()
     conn = _graph_conn(repo)
     actions: list[Action] = []
-    for py in sorted(repo.rglob("*.py")):
-        rel = py.relative_to(repo).as_posix()
-        if any(part in EXCLUDED_DIRS for part in py.parts):
-            continue
+    for sf in _py_files(repo, only_rel):
+        py, rel = sf.py, sf.rel
         if not include_tests and ("/test" in f"/{rel}" or rel.startswith("test")):
             continue
         try:
@@ -1353,6 +1416,9 @@ def parse_args() -> argparse.Namespace:
         description="CodeScene-lite: complexity/dependency/hotspot actions from code-review-graph + radon + git"
     )
     p.add_argument("--repo", type=Path, default=Path.cwd(), help="repository root (default: cwd)")
+    p.add_argument("--file", type=str, default=None,
+                   help="scan ONE repo-relative .py file (the LSP mode): per-file findings only, "
+                        "no git history / graph / coverage / repo-wide scans")
     p.add_argument(
         "--max-complexity", type=int, default=15, help="fail functions with cyclomatic complexity >= N (default 15)"
     )
@@ -1694,7 +1760,8 @@ def _render_text(
 
 
 def _latent_class_actions(
-    repo: Path, include_tests: bool, file_churn: Counter[str], last_modified: dict[str, str]
+    repo: Path, include_tests: bool, file_churn: Counter[str], last_modified: dict[str, str],
+    only_rel: str | None = None,
 ) -> list[Action]:
     """Fat classes/functions carrying unextracted classes inside them.
 
@@ -1711,11 +1778,8 @@ def _latent_class_actions(
     """
     visitor = _radon_visitor(required=False)
     actions: list[Action] = []
-    for py in sorted(repo.rglob("*.py")):
-        rel = py.relative_to(repo).as_posix()
-        if any(part in EXCLUDED_DIRS for part in py.parts):
-            continue
-        actions += _scan_file(py, rel, include_tests, visitor, repo, file_churn, last_modified)
+    for sf in _py_files(repo, only_rel):
+        actions += _scan_file(sf.py, sf.rel, include_tests, visitor, repo, file_churn, last_modified)
     return actions
 
 
@@ -1730,13 +1794,9 @@ def _scan_file(
 ) -> list[Action]:
     """One file's latent-class / vague-name / standard findings."""
     is_test = "/test" in f"/{rel}" or rel.startswith("test")
-    try:
-        source = py.read_text(encoding="utf-8", errors="replace")
-        tree = ast.parse(source)
-    except (
-        SyntaxError,
-        UnicodeDecodeError,
-    ):  # code-health: ignore except an unparseable file is skipped, not a scan failure
+    parsed = SOURCE_CACHE.get(py)
+    tree, source = parsed.tree, parsed.source
+    if tree is None:
         return []
     supps = _suppressions(source)
     file_supps = _file_suppressions(source)
@@ -1762,23 +1822,35 @@ def _scan_file(
             for f in findings
             if not _suppressed(f.signal, f.line, supps) and f.signal not in file_supps.exemptions
         ]
-    fn_map = {}
-    if visitor_cls is not None:
-        for f in visitor_cls.from_code(source).functions:
-            fn_map[(f.name, f.lineno)] = f.complexity
-    findings = (
-        _closure_findings(tree, rel, fn_map)
-        + _partition_findings(tree, rel)
-        + _vague_name_findings(tree, rel)
-        + _standard_findings(tree, rel, source)
-        + _class_module_findings(tree, rel)
-    )
+    fn_map = _radon_map(visitor_cls, source)
+    findings = _scan_findings(tree, rel, fn_map, source)
     findings += _invalid_suppressions(supps)
     return [
         _latent_action(repo, rel, f, file_churn, last_modified)
         for f in findings
         if not _suppressed(f.signal, f.line, supps)
     ]
+
+
+def _radon_map(visitor_cls, source: str) -> dict[tuple[str, int], int]:
+    """function-name+line -> cyclomatic complexity, when radon is available."""
+    fn_map: dict[tuple[str, int], int] = {}
+    if visitor_cls is not None:
+        for f in visitor_cls.from_code(source).functions:
+            fn_map[(f.name, f.lineno)] = f.complexity
+    return fn_map
+
+
+def _scan_findings(tree, rel: str, fn_map, source: str) -> list[LatentFinding]:
+    """The per-file finding families for one parsed file (one shared parents map)."""
+    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    return (
+        _closure_findings(tree, rel, fn_map)
+        + _partition_findings(tree, rel)
+        + _vague_name_findings(tree, rel)
+        + _standard_findings(tree, parents, rel, source)
+        + _class_module_findings(tree, rel)
+    )
 
 
 def _invalid_suppressions(supps: dict[int, tuple[str, str]]) -> list[LatentFinding]:
@@ -1948,23 +2020,199 @@ def _vague_name_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     return findings
 
 
-def _standard_findings(tree: ast.Module, rel: str, source: str) -> list[LatentFinding]:
-    """Coding-standard rules with a checkable form (Tier-1, near-zero false positives)."""
+def _standard_findings(tree: ast.Module, parents: dict[int, ast.AST], rel: str, source: str) -> list[LatentFinding]:
+    """Coding-standard rules with a checkable form (Tier-1, near-zero false positives).
+
+    ONE walk, dispatched per node type — the families used to each walk the
+    whole tree (~12 walks per file; 5M walks across a repo in the profile).
+    parents is the single map built in _scan_findings and shared by every
+    handler that needs ancestry.
+    """
     findings: list[LatentFinding] = []
-    findings += _inline_import_findings(tree, rel)
-    findings += _private_import_findings(tree, rel)
-    findings += _except_findings(tree, rel)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            if _has_function_ancestor(node, parents):
+                findings.append(_inline_import_finding(node))
+            if isinstance(node, ast.ImportFrom):
+                findings += _private_import_finding(node)
+        elif isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+            findings += _except_try_findings(node, parents)
+            findings += _broad_except_try_findings(node, parents)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            findings += _shadow_args_findings(node)
+        elif isinstance(node, ast.Assign) and _has_function_ancestor(node, parents):
+            findings += _shadow_assign_findings(node, parents)
+        elif isinstance(node, ast.Constant):
+            finding = _magic_constant_finding(node, parents)
+            if finding is not None:
+                findings.append(finding)
+        elif isinstance(node, ast.Expr):
+            finding = _noop_expr_finding(node, parents)
+            if finding is not None:
+                findings.append(finding)
+    # the families that are not tree-walk dispatches: tokenize-based,
+    # module-body-only, or per-function body walks
     findings += _global_state_findings(tree, rel)
     findings += _type_ignore_findings(source, rel)
     findings += _strewing_findings(tree, rel)
-    findings += _monkeypatch_findings(tree, rel)
     findings += _tuple_alias_findings(tree, rel)
+    findings += _monkeypatch_findings(tree, rel)
     findings += _unreachable_findings(tree, rel)
-    findings += _shadowing_findings(tree, rel)
-    findings += _magic_number_findings(tree, rel)
-    findings += _broad_except_findings(tree, rel)
-    findings += _noop_statement_findings(tree, rel)
     return findings
+
+
+def _inline_import_finding(node: ast.AST) -> LatentFinding:
+    return LatentFinding(
+        signal="inline-import",
+        function="",
+        line=node.lineno,
+        metric=1,
+        detail=f"import inside function body at line {node.lineno}: '{ast.unparse(node)}' — "
+        f"inline imports hide dependencies from static analysis; move every import to module top",
+        inner=[],
+    )
+
+
+def _private_import_finding(node: ast.ImportFrom) -> list[LatentFinding]:
+    if node.module == "__future__":
+        return []
+    findings: list[LatentFinding] = []
+    private_module = node.module and any(seg.startswith("_") for seg in node.module.split("."))
+    for alias in node.names:
+        if alias.name.startswith("_") or private_module:
+            target = alias.name if alias.name.startswith("_") else f"{node.module}.{alias.name}"
+            findings.append(
+                LatentFinding(
+                    signal="private-import",
+                    function="",
+                    line=node.lineno,
+                    metric=1,
+                    detail=f"imports private symbol '{target}' at line {node.lineno} — "
+                    f"never import underscore symbols: make the logic public and documented, "
+                    f"or extract it to a shared module",
+                    inner=[],
+                )
+            )
+    return findings
+
+
+def _except_try_findings(node, parents) -> list[LatentFinding]:
+    """A catch must fail fast: bare except, an empty body, or a body that never
+    raises or surfaces a return swallows the error. Logging alone is not
+    fail-fast — the only sanctioned swallow is an explicitly safe-to-ignore
+    error, marked `# code-health: ignore except <why>` and logged.
+    """
+    fn = _enclosing_function(parents, node)
+    returned = _returned_names(fn) if fn is not None else set()
+    findings: list[LatentFinding] = []
+    for h in node.handlers:
+        if _handler_swallows(h, returned):
+            kind = "bare except" if h.type is None else "except that swallows"
+            findings.append(
+                LatentFinding(
+                    signal="except",
+                    function="",
+                    line=h.lineno,
+                    metric=1,
+                    detail=f"{kind} at line {h.lineno} — the catch never raises, returns, or surfaces "
+                    f"the error, so it is invisible. Logging alone is not fail-fast: re-raise, "
+                    f"surface it, or if this error is genuinely safe to ignore, mark "
+                    f"`# code-health: ignore except <why>` and log with that explanation",
+                    inner=[],
+                )
+            )
+    return findings
+
+
+def _broad_except_try_findings(node, parents) -> list[LatentFinding]:
+    """except Exception/BaseException catches too broadly — name the specific one.
+
+    Empty/bare handlers are already fail-tier; this warn covers handlers with
+    a body that would otherwise pass.
+    """
+    fn = _enclosing_function(parents, node)
+    returned = _returned_names(fn) if fn is not None else set()
+    findings: list[LatentFinding] = []
+    for h in node.handlers:
+        base = _annotation_base_name(h.type) if h.type else ""
+        if base in ("Exception", "BaseException") and not _handler_swallows(h, returned):
+            findings.append(
+                LatentFinding(
+                    signal="broad-except",
+                    function="",
+                    line=h.lineno,
+                    metric=1,
+                    detail=f"broad `except {ast.unparse(h.type)}` at line {h.lineno} — catch the "
+                    f"specific exception; a broad catch hides which failures are expected",
+                    inner=[],
+                    severity="warn",
+                )
+            )
+    return findings
+
+
+def _shadow_args_findings(fn) -> list[LatentFinding]:
+    args = fn.args.args + fn.args.posonlyargs + fn.args.kwonlyargs
+    if fn.args.vararg:
+        args = args + [fn.args.vararg]
+    if fn.args.kwarg:
+        args = args + [fn.args.kwarg]
+    findings: list[LatentFinding] = []
+    for a in args:
+        if a.arg in SHADOWED_BUILTINS:
+            findings.append(_shadow_finding(a.arg, fn.lineno, fn.name, "parameter"))
+    return findings
+
+
+def _shadow_assign_findings(node: ast.Assign, parents) -> list[LatentFinding]:
+    fn = _enclosing_function(parents, node)
+    fn_name = fn.name if fn is not None else ""
+    findings: list[LatentFinding] = []
+    for target in node.targets:
+        if isinstance(target, ast.Name) and target.id in SHADOWED_BUILTINS:
+            findings.append(_shadow_finding(target.id, node.lineno, fn_name, "variable"))
+    return findings
+
+
+def _magic_constant_finding(node: ast.Constant, parents) -> LatentFinding | None:
+    if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+        return None
+    if node.value in _MAGIC_SKIP or not _has_function_ancestor(node, parents):
+        return None
+    parent = parents.get(id(node))
+    if not isinstance(parent, (ast.BinOp, ast.Compare, ast.UnaryOp, ast.Subscript, ast.Call)):
+        return None
+    fn = _enclosing_function(parents, node)
+    fn_name = fn.name if fn is not None else ""
+    return LatentFinding(
+        signal="magic-number",
+        function=fn_name,
+        line=node.lineno,
+        metric=1,
+        detail=f"magic number {node.value} at line {node.lineno} in '{fn_name}' — name it as a "
+        f"constant (the name is the documentation); raw integers as operands "
+        f"and indices are a finding",
+        inner=[],
+        severity="warn",
+    )
+
+
+def _noop_expr_finding(node: ast.Expr, parents) -> LatentFinding | None:
+    v = node.value
+    if isinstance(v, (ast.Call, ast.Await, ast.Yield, ast.YieldFrom,
+                      ast.Constant, ast.Lambda, ast.NamedExpr)):
+        return None
+    fn = _enclosing_function(parents, node)
+    expr = ast.unparse(v)
+    return LatentFinding(
+        signal="noop-statement",
+        function=fn.name if fn is not None else "",
+        line=node.lineno,
+        metric=1,
+        detail=f"no-op statement at line {node.lineno}: `{expr[:60]}` discards its value — dead "
+        f"statement, likely a refactor leftover: assign it or delete it",
+        inner=[],
+    )
 
 
 def _has_function_ancestor(node: ast.AST, parents: dict[int, ast.AST]) -> bool:
@@ -1974,97 +2222,6 @@ def _has_function_ancestor(node: ast.AST, parents: dict[int, ast.AST]) -> bool:
             return True
         cur = parents.get(id(cur))
     return False
-
-
-def _inline_import_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
-    """Never import inside a function body — inline imports hide dependencies."""
-    findings: list[LatentFinding] = []
-    parents = {id(child): parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)) and _has_function_ancestor(node, parents):
-            findings.append(
-                LatentFinding(
-                    signal="inline-import",
-                    function="",
-                    line=node.lineno,
-                    metric=1,
-                    detail=f"import inside function body at line {node.lineno}: '{ast.unparse(node)}' — "
-                    f"inline imports hide dependencies from static analysis; move every import to module top",
-                    inner=[],
-                )
-            )
-    return findings
-
-
-def _private_import_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
-    """Never import private (underscore) symbols from another module."""
-    findings: list[LatentFinding] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module != "__future__":
-            for alias in node.names:
-                private_module = node.module and any(seg.startswith("_") for seg in node.module.split("."))
-                if alias.name.startswith("_") or private_module:
-                    target = alias.name if alias.name.startswith("_") else f"{node.module}.{alias.name}"
-                    findings.append(
-                        LatentFinding(
-                            signal="private-import",
-                            function="",
-                            line=node.lineno,
-                            metric=1,
-                            detail=f"imports private symbol '{target}' at line {node.lineno} — "
-                            f"never import underscore symbols: make the logic public and documented, "
-                            f"or extract it to a shared module",
-                            inner=[],
-                        )
-                    )
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if any(seg.startswith("_") for seg in alias.name.split(".")):
-                    findings.append(
-                        LatentFinding(
-                            signal="private-import",
-                            function="",
-                            line=node.lineno,
-                            metric=1,
-                            detail=f"imports private path '{alias.name}' at line {node.lineno} — "
-                            f"never import underscore symbols: make the logic public and documented, "
-                            f"or extract it to a shared module",
-                            inner=[],
-                        )
-                    )
-    return findings
-
-
-def _except_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
-    """A catch must fail fast: bare except, an empty body, or a body that never
-    raises or surfaces a return swallows the error. Logging alone is not
-    fail-fast — the only sanctioned swallow is an explicitly safe-to-ignore
-    error, marked `# code-health: ignore except <why>` and logged.
-    """
-    findings: list[LatentFinding] = []
-    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
-            continue
-        fn = _enclosing_function(parents, node)
-        returned = _returned_names(fn) if fn is not None else set()
-        for h in node.handlers:
-            if _handler_swallows(h, returned):
-                kind = "bare except" if h.type is None else "except that swallows"
-                findings.append(
-                    LatentFinding(
-                        signal="except",
-                        function="",
-                        line=h.lineno,
-                        metric=1,
-                        detail=f"{kind} at line {h.lineno} — the catch never raises, returns, or surfaces "
-                        f"the error, so it is invisible. Logging alone is not fail-fast: re-raise, "
-                        f"surface it, or if this error is genuinely safe to ignore, mark "
-                        f"`# code-health: ignore except <why>` and log with that explanation",
-                        inner=[],
-                    )
-                )
-    return findings
 
 
 def _handler_swallows(h, returned: set[str]) -> bool:
@@ -2374,122 +2531,6 @@ _MAGIC_SKIP = (0, 1, 2, -1)
 
 
 BUILTIN_NAMES = {n for n in dir(builtins) if not n.startswith("_")}
-
-
-def _magic_number_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
-    """Raw integers and floats as operands/indices are named constants.
-
-    Noisy by design — warn tier. Lookup tables (all-constant containers) are
-    not descended into here: only literals whose parent is an operation.
-    """
-    findings: list[LatentFinding] = []
-    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-        parents = {id(child): node for node in ast.walk(fn) for child in ast.iter_child_nodes(node)}
-        for node in ast.walk(fn):
-            if not isinstance(node, ast.Constant) or isinstance(node.value, bool):
-                continue
-            v = node.value
-            if not isinstance(v, (int, float)) or v in _MAGIC_SKIP:
-                continue
-            parent = parents.get(id(node))
-            if isinstance(parent, (ast.BinOp, ast.Compare, ast.UnaryOp, ast.Subscript, ast.Call)):
-                findings.append(
-                    LatentFinding(
-                        signal="magic-number",
-                        function=fn.name,
-                        line=node.lineno,
-                        metric=1,
-                        detail=f"magic number {v} at line {node.lineno} in '{fn.name}' — name it as a "
-                        f"constant (the name is the documentation); raw integers as operands "
-                        f"and indices are a finding",
-                        inner=[],
-                        severity="warn",
-                    )
-                )
-    return findings
-
-
-def _noop_statement_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
-    """Expression statements that discard their value — dead statements.
-
-    `payload.address if is_outcode(postcode) else postcode` as a bare line is
-    a refactor leftover (surely an assignment); `a + b` alone is a read with
-    no effect. Calls, awaits, yields, constants (docstrings), lambdas, and
-    walrus assignments have an effect or a purpose and pass.
-    """
-    findings: list[LatentFinding] = []
-    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Expr):
-            continue
-        v = node.value
-        if isinstance(v, (ast.Call, ast.Await, ast.Yield, ast.YieldFrom, ast.Constant, ast.Lambda, ast.NamedExpr)):
-            continue
-        fn = _enclosing_function(parents, node)
-        expr = ast.unparse(v)
-        findings.append(
-            LatentFinding(
-                signal="noop-statement",
-                function=fn.name if fn is not None else "",
-                line=node.lineno,
-                metric=1,
-                detail=f"no-op statement at line {node.lineno}: `{expr[:60]}` discards its value — dead "
-                f"statement, likely a refactor leftover: assign it or delete it",
-                inner=[],
-            )
-        )
-    return findings
-
-
-def _broad_except_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
-    """except Exception/BaseException catches too broadly — name the specific one.
-
-    Empty/bare handlers are already fail-tier; this warn covers handlers with
-    a body that would otherwise pass.
-    """
-    findings: list[LatentFinding] = []
-    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
-            continue
-        fn = _enclosing_function(parents, node)
-        returned = _returned_names(fn) if fn is not None else set()
-        for h in node.handlers:
-            base = _annotation_base_name(h.type) if h.type else ""
-            if base in ("Exception", "BaseException") and not _handler_swallows(h, returned):
-                findings.append(
-                    LatentFinding(
-                        signal="broad-except",
-                        function="",
-                        line=h.lineno,
-                        metric=1,
-                        detail=f"broad `except {ast.unparse(h.type)}` at line {h.lineno} — catch the "
-                        f"specific exception; a broad catch hides which failures are expected",
-                        inner=[],
-                        severity="warn",
-                    )
-                )
-    return findings
-
-
-def _shadowing_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
-    """Parameters and locals that shadow builtins make the code read wrong."""
-    findings: list[LatentFinding] = []
-    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-        args = fn.args.args + fn.args.posonlyargs + fn.args.kwonlyargs
-        if fn.args.vararg:
-            args = args + [fn.args.vararg]
-        if fn.args.kwarg:
-            args = args + [fn.args.kwarg]
-        for a in args:
-            if a.arg in SHADOWED_BUILTINS:
-                findings.append(_shadow_finding(a.arg, fn.lineno, fn.name, "parameter"))
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name) and target.id in SHADOWED_BUILTINS:
-                        findings.append(_shadow_finding(target.id, node.lineno, fn.name, "variable"))
-    return findings
 
 
 def _shadow_finding(name: str, line: int, fn: str, kind: str) -> LatentFinding:
@@ -3278,19 +3319,12 @@ def _collect_references(repo: Path) -> ReferenceScan:
     prod_refs: set[str] = set()
     test_refs: set[str] = set()
     strings: list[str] = []
-    for py in sorted(repo.rglob("*.py")):
-        rel = py.relative_to(repo).as_posix()
-        if any(part in EXCLUDED_DIRS for part in py.parts):
+    for sf in _py_files(repo):
+        is_test = "/test" in f"/{sf.rel}" or sf.rel.startswith("test")
+        tree, _ = SOURCE_CACHE.get(sf.py)
+        if tree is None:
             continue
-        is_test = "/test" in f"/{rel}" or rel.startswith("test")
-        try:
-            tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
-        except (
-            SyntaxError,
-            UnicodeDecodeError,
-        ):  # code-health: ignore except an unparseable file is skipped, not a scan failure
-            continue
-        _collect_file_references(tree, rel, is_test, defined, prod_refs, test_refs, strings)
+        _collect_file_references(tree, sf.rel, is_test, defined, prod_refs, test_refs, strings)
     return ReferenceScan(defined, prod_refs, test_refs, strings)
 
 
@@ -3667,11 +3701,13 @@ def _docs_reachability_actions(repo: Path, file_churn: Counter[str], last_modifi
 
 
 def _record_actions(
-    repo: Path, include_tests: bool, file_churn: Counter[str], last_modified: dict[str, str]
+    repo: Path, include_tests: bool, file_churn: Counter[str], last_modified: dict[str, str],
+    only_rel: str | None = None,
 ) -> list[Action]:
     """Record-shaped collections (bare dicts/tuples as records) via check_records."""
     actions: list[Action] = []
-    for finding in check_records.scan([repo]).findings:
+    scan_root: Path | list[Path] = (repo / only_rel) if only_rel else repo
+    for finding in check_records.scan([scan_root]).findings:
         rel = rel_path(repo, finding.split(":", 1)[0])
         if not include_tests and is_test_path(rel):
             continue
@@ -3755,34 +3791,40 @@ def _literal_keys(repo: Path, rel: str, line: int) -> list[str]:
 
 
 def _collect_actions(
-    repo: Path, args, file_churn, last_modified, covered, graph_preferred: bool, stale_note: str
+    repo: Path, args, file_churn, last_modified, covered, graph_preferred: bool, stale_note: str,
+    only_rel: str | None = None,
 ) -> list[Action]:
     actions: list[Action] = []
     actions += complexity_actions(
         repo, args.max_complexity, args.include_tests, file_churn, last_modified, covered, graph_preferred, stale_note
     )
-    actions += graph_actions(
-        repo,
-        args.max_function_lines,
-        args.max_file_edges,
-        args.max_risk,
-        args.include_tests,
-        file_churn,
-        last_modified,
-        covered,
-        graph_preferred,
-        stale_note,
-    )
-    actions += hotspot_actions(repo, args.hotspot_top_frac, args.hotspot_min_cc, file_churn, last_modified)
-    actions += _record_actions(repo, args.include_tests, file_churn, last_modified)
-    actions += _latent_class_actions(repo, args.include_tests, file_churn, last_modified)
-    actions += _abstraction_actions(repo, args.include_tests, file_churn, last_modified)
-    actions += _docs_actions(repo, file_churn, last_modified)
-    actions += _folder_mix_actions(repo, file_churn, last_modified)
-    actions += _layer_mix_actions(repo, file_churn, last_modified)
-    actions += _cycle_actions(repo, file_churn, last_modified)
-    actions += _duplicate_actions(repo, args.include_tests, file_churn, last_modified)
-    actions += _unused_actions(repo, args.include_tests, file_churn, last_modified)
+    if only_rel is None:
+        actions += graph_actions(
+            repo,
+            args.max_function_lines,
+            args.max_file_edges,
+            args.max_risk,
+            args.include_tests,
+            file_churn,
+            last_modified,
+            covered,
+            graph_preferred,
+            stale_note,
+        )
+    if only_rel is None:
+        actions += hotspot_actions(repo, args.hotspot_top_frac, args.hotspot_min_cc, file_churn, last_modified)
+    actions += _record_actions(repo, args.include_tests, file_churn, last_modified, only_rel)
+    actions += _latent_class_actions(repo, args.include_tests, file_churn, last_modified, only_rel)
+    if only_rel is None:
+        # repo-wide families — git/graph/coverage-scoped, skipped in the
+        # single-file (--file / LSP) mode
+        actions += _abstraction_actions(repo, args.include_tests, file_churn, last_modified)
+        actions += _docs_actions(repo, file_churn, last_modified)
+        actions += _folder_mix_actions(repo, file_churn, last_modified)
+        actions += _layer_mix_actions(repo, file_churn, last_modified)
+        actions += _cycle_actions(repo, file_churn, last_modified)
+        actions += _duplicate_actions(repo, args.include_tests, file_churn, last_modified)
+        actions += _unused_actions(repo, args.include_tests, file_churn, last_modified)
     return actions
 
 
@@ -3818,13 +3860,22 @@ def main() -> int:
         log(f"{repo} is not a git repository")
         return 2
 
-    fh = file_history(repo)
-    if args.refresh_coverage:
-        _refresh_coverage(repo)
-    cr = load_coverage(repo)
-    cc = _coverage_context(repo, cr.lines, cr.source)
-    diff = changed_files(repo, args.base)
-    actions = _collect_actions(repo, args, fh.churn, fh.last_modified, cr.lines, cc.graph_preferred, cc.stale_note)
+    if args.file:
+        # Single-file / LSP mode: no git history, coverage, or diff — the
+        # per-file findings are what an editor shows on save.
+        fh = FileHistory(Counter(), {})
+        cr = CoverageResult(None, "")
+        cc = _coverage_context(repo, None, "")
+        diff: set[str] = set()
+    else:
+        fh = file_history(repo)
+        if args.refresh_coverage:
+            _refresh_coverage(repo)
+        cr = load_coverage(repo)
+        cc = _coverage_context(repo, cr.lines, cr.source)
+        diff = changed_files(repo, args.base)
+    actions = _collect_actions(repo, args, fh.churn, fh.last_modified, cr.lines, cc.graph_preferred, cc.stale_note,
+                               only_rel=args.file)
     unique = _dedupe_merge(actions, diff)
 
     if args.update_baseline:
