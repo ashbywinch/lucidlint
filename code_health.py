@@ -91,14 +91,14 @@ def _module_key(repo: Path, file_path: str) -> str:
 
 
 def concern_clusters(conn: sqlite3.Connection, repo: Path, source_qn: str | None = None,
-                     source_prefix: str | None = None, own_module: str | None = None) -> list[tuple[str, int]]:
+                     source_prefix: str | None = None, own_module: str | None = None) -> tuple[list[tuple[str, int, list[str]]], bool]:
     """Group a function's (or file's) cross-module callees by subsystem.
 
-    source_qn: exact function qualified name; source_prefix: file path prefix
-    (all CALLS from that file). Returns [(module, count), ...] when the source
-    calls into >= 2 distinct subsystems (excluding its own module and
-    unresolved/builtin targets) — those are the latent seams an extract-class
-    refactor should follow. Empty otherwise.
+    Returns (clusters, strong). clusters always lists what resolved (even a
+    single subsystem — the caller decides how to word it); strong is True
+    when >= 2 distinct subsystems with >= 3 total calls — the evidence bar
+    for claiming a real seam mix. Never silently empty: callers show an
+    explicit "unresolved" marker instead of boilerplate.
     """
     if source_qn is not None:
         rows = conn.execute(
@@ -118,11 +118,18 @@ def concern_clusters(conn: sqlite3.Connection, repo: Path, source_qn: str | None
             counts[mod] += 1
             if len(names.get(mod, [])) < 3:
                 names.setdefault(mod, []).append(r["target_qualified"].split("::")[-1].split(".")[-1])
-    top = [(m, counts[m], names.get(m, [])) for m, _ in counts.most_common(4)]
-    # Two subsystems with one call each is weak evidence of a real seam; the
-    # resolved callees understate the picture anyway (builtins/externs skip),
-    # so require a minimum total before claiming a mix.
-    return top if len(top) >= 2 and sum(c for _, c, _ in top) >= 3 else []
+    clusters = [(m, counts[m], names.get(m, [])) for m, _ in counts.most_common(4)]
+    strong = len(clusters) >= 2 and sum(c for _, c, _ in clusters) >= 3
+    return clusters, strong
+
+
+def mix_text(clusters: list[tuple[str, int, list[str]]], strong: bool) -> str:
+    """Wording for a concern mix: claim strength honestly."""
+    if not clusters:
+        return ""
+    if strong:
+        return "mixes concerns: " + fmt_clusters(clusters)
+    return "possible seams (weak signal): " + fmt_clusters(clusters)
 
 
 def _resolve_callee_module(conn: sqlite3.Connection, repo: Path, target: str) -> str | None:
@@ -144,13 +151,32 @@ def fmt_clusters(clusters: list[tuple[str, int, list[str]]]) -> str:
     return ", ".join(parts)
 
 
-def contract_text(name: str, params: str, return_type: str) -> str:
+def contract_text(name: str, params: str, return_type: str, def_sig: str = "") -> str:
     """Human hint for the behavior to pin with tests: the function's signature."""
+    if not params and def_sig:
+        return def_sig
     params = re.sub(r"\s+", " ", params or "").strip()
     if params.startswith("(") and params.endswith(")"):
         params = params[1:-1].strip()
     ret = return_type or "…"
     return f"{name}({params or '…'}) -> {ret}"
+
+
+def _def_signature(source: str, lineno: int) -> str:
+    """The function's def line(s) flattened — real signature when the graph has none."""
+    lines = source.splitlines()
+    if lineno < 1 or lineno > len(lines):
+        return ""
+    buf = lines[lineno - 1]
+    depth = buf.count("(") - buf.count(")")
+    i = lineno
+    while depth > 0 and i < len(lines):
+        i += 1
+        if i - 1 >= len(lines):
+            break
+        buf += " " + lines[i - 1]
+        depth += lines[i - 1].count("(") - lines[i - 1].count(")")
+    return re.sub(r"\s+", " ", buf).strip()
 
 
 def function_churn(repo: Path, rel_file: str, start: int, end: int) -> int:
@@ -257,16 +283,18 @@ def _numbits_to_lines(numbits: bytes) -> set[int]:
 
 
 def covered_span(covered: dict[str, set[int]] | None, rel: str, start: int, end: int) -> bool | None:
-    """True/False when coverage data exists; None when unavailable.
+    """True/False/None: covered, uncovered, or *unknown*.
 
-    A function counts as covered when at least one line in its span has hits —
-    matching the repo's own "does the contract run" bar, not full-branch math.
+    A file absent from the coverage snapshot is UNKNOWN (None), not
+    uncovered — stale snapshots predate files and would otherwise
+    mislabel freshly-tested code as untested. Only a file present in the
+    snapshot with no hits in the span counts as uncovered.
     """
     if covered is None:
         return None
     lines = covered.get(rel)
-    if not lines:
-        return False
+    if lines is None:
+        return None
     return any(l in lines for l in range(start, end + 1))
 
 
@@ -322,7 +350,7 @@ def log(msg: str) -> None:
 # --------------------------------------------------------------------------- complexity (radon)
 def complexity_actions(repo: Path, max_cc: int, include_tests: bool,
                        file_churn: Counter[str], last_modified: dict[str, str],
-                       covered: dict[str, set[int]] | None) -> list[dict]:
+                       covered: dict[str, set[int]] | None, graph_preferred: bool, stale_note: str) -> list[dict]:
     """Cyclomatic complexity per function via radon's fast pure-Python analyzer."""
     try:
         from radon.visitors import ComplexityVisitor
@@ -347,16 +375,24 @@ def complexity_actions(repo: Path, max_cc: int, include_tests: bool,
             if fn.complexity < max_cc:
                 continue
             info = _node_info(conn, repo, rel, fn.name)
-            mix = concern_clusters(conn, repo, source_qn=info["qualified_name"], own_module=_module_key(repo, info["file_path"])) if info else []
-            message = (
-                f"cyclomatic complexity {fn.complexity} (>= {max_cc}) — mixes concerns: "
-                f"{fmt_clusters(mix)} — extract a class per concern; the seams are those "
-                f"subsystem boundaries, not line breaks."
-                if mix
-                else f"cyclomatic complexity {fn.complexity} (>= {max_cc}) — {GUIDANCE['complexity']}"
-            )
             if info:
-                message += coverage_note(covered, rel, info, info["tested"])
+                clusters, strong = concern_clusters(conn, repo, source_qn=info["qualified_name"], own_module=_module_key(repo, info["file_path"]))
+                if not info.get("params"):
+                    info["def_sig"] = _def_signature(source, fn.lineno)
+            else:
+                clusters, strong = [], False
+            if clusters:
+                seam = mix_text(clusters, strong)
+                message = (
+                    f"cyclomatic complexity {fn.complexity} (>= {max_cc}) — {seam} — "
+                    f"extract a class per concern; the seams are those subsystem "
+                    f"boundaries, not line breaks."
+                )
+            else:
+                message = (f"cyclomatic complexity {fn.complexity} (>= {max_cc}) — {GUIDANCE['complexity']}"
+                           " [concern mix unresolved — callees not resolvable in graph]")
+            if info:
+                message += coverage_note(covered, rel, info, info["tested"], graph_preferred, stale_note)
             churn = file_churn.get(rel, 0)
             actions.append(
                 {
@@ -369,29 +405,46 @@ def complexity_actions(repo: Path, max_cc: int, include_tests: bool,
                     "metric": fn.complexity,
                     "churn": churn,
                     "last_modified": last_modified.get(rel, ""),
-                    "tested": final_tested(covered, rel, info) if info else "",
+                    "tested": final_tested(covered, rel, info, graph_preferred) if info else "",
                     "raw": _raw_score("complexity", fn.complexity, churn),
                 }
             )
     return actions
 
 
-def final_tested(covered: dict[str, set[int]] | None, rel: str, info: dict) -> str:
-    """Coverage verdict: real coverage.xml wins, graph risk index as fallback."""
+def final_tested(covered: dict[str, set[int]] | None, rel: str, info: dict, graph_preferred: bool = False) -> str:
+    """Coverage verdict: real coverage data wins, unless it's stale.
+
+    When the snapshot predates the repo's tests (graph_preferred), the graph's
+    fresher TESTED_BY signal wins — the snapshot would otherwise mislabel
+    freshly-tested code as untested.
+    """
+    if graph_preferred and info.get("tested") == "tested":
+        return "tested"
     cov = covered_span(covered, rel, info.get("line_start") or 1, info.get("line_end") or info.get("line_start") or 1)
     if cov is not None:
         return "tested" if cov else "untested"
     return info.get("tested", "")
 
 
-def coverage_note(covered: dict[str, set[int]] | None, rel: str, info: dict, graph_tested: str) -> str:
+def coverage_note(covered: dict[str, set[int]] | None, rel: str, info: dict, graph_tested: str,
+                  graph_preferred: bool = False, stale_note: str = "") -> str:
     """Append a coverage-based instruction when the function is untested."""
+    contract = contract_text(info.get("name") or "", info.get("params", ""), info.get("return_type", ""), info.get("def_sig", ""))
+    if graph_preferred:
+        # Stale snapshot: the strongest honest claim is "verify" — current tests
+        # may exercise the function through paths the graph cannot see (HTTP,
+        # in-body imports), so never assert "write the failing tests first".
+        if graph_tested == "tested":
+            return ""
+        return (f" Coverage snapshot is older than the repo's tests and the graph sees no direct "
+                f"unit tests — verify with make coverage / htmlcov; if truly uncovered, pin "
+                f"{contract} with tests first.")
     cov = covered_span(covered, rel, info.get("line_start") or 1, info.get("line_end") or info.get("line_start") or 1)
-    contract = contract_text(info.get("name") or "", info.get("params", ""), info.get("return_type", ""))
     if cov is False:
         return f" Not covered by the repo's coverage data — write the failing tests first. Contract to pin: {contract}."
     if cov is None and graph_tested == "untested":
-        return f" No coverage data and graph sees no unit tests — verify; if uncovered, pin {contract} with tests first."
+        return f" No coverage data and graph sees no unit tests — verify (htmlcov/ if present); if uncovered, pin {contract} with tests first."
     return ""
 
 
@@ -403,7 +456,7 @@ def _graph_db(repo: Path) -> Path | None:
 
 def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: float, include_tests: bool,
                   file_churn: Counter[str], last_modified: dict[str, str],
-                  covered: dict[str, set[int]] | None) -> list[dict]:
+                  covered: dict[str, set[int]] | None, graph_preferred: bool, stale_note: str) -> list[dict]:
     db_path = _graph_db(repo)
     if db_path is None:
         log(f"no graph at {db_path} — run `code-review-graph build --repo {repo}` first")
@@ -411,6 +464,7 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
     db = sqlite3.connect(db_path)
     db.row_factory = sqlite3.Row
     actions: list[dict] = []
+    src_cache: dict[str, str] = {}
 
     # Large functions: node line span over threshold. Skip Test nodes and non-Python.
     test_filter = "" if include_tests else "AND kind != 'Test'"
@@ -431,17 +485,27 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
         rel = rel_path(repo, row["file_path"])
         if not include_tests and is_test_path(rel):
             continue
-        mix = concern_clusters(db, repo, source_qn=row["qualified_name"], own_module=_module_key(repo, row["file_path"]))
-        message = (
-            f"function spans {span} lines (>= {max_fn_lines}) — mixes concerns: "
-            f"{fmt_clusters(mix)} — extract a class per concern, then split each class's "
-            f"methods into named domain steps."
-            if mix
-            else f"function spans {span} lines (>= {max_fn_lines}) — {GUIDANCE['large-function']}"
-        )
+        clusters, strong = concern_clusters(db, repo, source_qn=row["qualified_name"], own_module=_module_key(repo, row["file_path"]))
+        if clusters:
+            seam = mix_text(clusters, strong)
+            message = (
+                f"function spans {span} lines (>= {max_fn_lines}) — {seam} — "
+                f"extract a class per concern, then split each class's methods into "
+                f"named domain steps."
+            )
+        else:
+            message = (f"function spans {span} lines (>= {max_fn_lines}) — {GUIDANCE['large-function']}"
+                       " [concern mix unresolved — callees not resolvable in graph]")
         info = {"name": row["name"], "params": row["params"] or "", "return_type": row["return_type"] or "",
                 "line_start": row["line_start"], "line_end": row["line_end"]}
-        message += coverage_note(covered, rel, info, row["test_coverage"] or "")
+        if not info["params"]:
+            if rel not in src_cache:
+                try:
+                    src_cache[rel] = (repo / rel).read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    src_cache[rel] = ""
+            info["def_sig"] = _def_signature(src_cache[rel], row["line_start"])
+        message += coverage_note(covered, rel, info, row["test_coverage"] or "", graph_preferred, stale_note)
         churn = file_churn.get(rel, 0)
         actions.append(
             {
@@ -478,14 +542,17 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
         if not include_tests and is_test_path(rel):
             continue
         abs_file = str(repo.resolve()) + "/" + rel
-        mix = concern_clusters(db, repo, source_prefix=abs_file + "::", own_module=_module_key(repo, row["file_path"]))
-        message = (
-            f"{row['edge_count']} call/import edges (>= {max_file_edges}) — mixes: "
-            f"{fmt_clusters(mix)} — split into one module per concern with narrow, stable "
-            f"interfaces so changes stay contained."
-            if mix
-            else f"{row['edge_count']} call/import edges (>= {max_file_edges}) — {GUIDANCE['hub-file']}"
-        )
+        clusters, strong = concern_clusters(db, repo, source_prefix=abs_file + "::", own_module=_module_key(repo, row["file_path"]))
+        if clusters:
+            seam = mix_text(clusters, strong)
+            message = (
+                f"{row['edge_count']} call/import edges (>= {max_file_edges}) — {seam} — "
+                f"split into one module per concern with narrow, stable interfaces so "
+                f"changes stay contained."
+            )
+        else:
+            message = (f"{row['edge_count']} call/import edges (>= {max_file_edges}) — {GUIDANCE['hub-file']}"
+                       " [concern mix unresolved — callees not resolvable in graph]")
         # Point at the file's first function instead of line 1.
         first = db.execute(
             "SELECT MIN(line_start) FROM nodes WHERE file_path = ? AND kind IN ('Function', 'Method')",
@@ -527,14 +594,26 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
             "SELECT DISTINCT source_qualified FROM edges WHERE target_qualified = ? AND kind = 'CALLS'",
             (row["qualified_name"],),
         )][:6]
-        callers_text = f", callers: {', '.join(callers)}" if callers else ""
+        if callers:
+            resolved = f", callers resolved: {', '.join(callers)}"
+            if len(callers) < row["caller_count"]:
+                resolved += f" ({len(callers)} of {row['caller_count']} resolvable)"
+        else:
+            resolved = ""
         message = (
-            f"graph risk {row['risk_score']:.2f} (>= {max_risk}), {row['caller_count']} callers{callers_text} — "
+            f"graph risk {row['risk_score']:.2f} (>= {max_risk}), {row['caller_count']} callers{resolved} — "
             f"{GUIDANCE['high-risk']}"
         )
         info = {"name": row["name"], "params": row["params"] or "", "return_type": row["return_type"] or "",
                 "line_start": row["line_start"] or 1, "line_end": row["line_end"] or row["line_start"] or 1}
-        message += coverage_note(covered, rel, info, row["test_coverage"] or "")
+        if not info["params"]:
+            if rel not in src_cache:
+                try:
+                    src_cache[rel] = (repo / rel).read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    src_cache[rel] = ""
+            info["def_sig"] = _def_signature(src_cache[rel], info["line_start"])
+        message += coverage_note(covered, rel, info, row["test_coverage"] or "", graph_preferred, stale_note)
         churn = file_churn.get(rel, 0)
         actions.append(
             {
@@ -682,14 +761,24 @@ def main() -> int:
 
     file_churn, last_modified = file_history(repo)
     covered, coverage_source = load_coverage(repo)
+    import time
     if coverage_source == ".coverage" and (repo / ".coverage").exists():
-        import time
         coverage_source += " (mtime " + time.strftime("%Y-%m-%d %H:%M", time.localtime((repo / ".coverage").stat().st_mtime)) + ")"
+    # Stale coverage: if the snapshot predates the repo's test files, prefer the
+    # graph's fresher TESTED_BY verdict and say so on every affected action.
+    graph_preferred = False
+    stale_note = ""
+    if covered is not None and (repo / ".coverage").exists():
+        cov_mtime = (repo / ".coverage").stat().st_mtime
+        newest_test = max((p.stat().st_mtime for p in (repo / "tests").rglob("*.py")), default=0.0)
+        if newest_test > cov_mtime:
+            graph_preferred = True
+            stale_note = " (coverage snapshot older than the repo's tests — graph verdict used; verify against htmlcov/ if present)"
     diff = changed_files(repo, args.base)
 
     actions: list[dict] = []
-    actions += complexity_actions(repo, args.max_complexity, args.include_tests, file_churn, last_modified, covered)
-    actions += graph_actions(repo, args.max_function_lines, args.max_file_edges, args.max_risk, args.include_tests, file_churn, last_modified, covered)
+    actions += complexity_actions(repo, args.max_complexity, args.include_tests, file_churn, last_modified, covered, graph_preferred, stale_note)
+    actions += graph_actions(repo, args.max_function_lines, args.max_file_edges, args.max_risk, args.include_tests, file_churn, last_modified, covered, graph_preferred, stale_note)
     actions += hotspot_actions(repo, args.hotspot_top_frac, args.hotspot_min_cc, file_churn, last_modified)
 
     # Dedupe: same kind+file+function+line (graph and radon can both flag a function).
@@ -765,8 +854,13 @@ def main() -> int:
             print("code-health: clean — no actions")
         elif fails:
             top = fails[0]
-            print(f"code-health: {len(fails)} action(s) to fix (+{len(acks)} acknowledged in baseline), "
+            mine = sum(1 for a in fails if a.get("in_diff"))
+            mine_txt = f"; {mine} of {len(fails)} in your diff" if diff else "; diff base unresolved"
+            print(f"code-health: {len(fails)} action(s) to fix (+{len(acks)} acknowledged in baseline){mine_txt}, "
                   f"top P{top['priority']} {top['file']}:{top['line']} ({top['function'] or top['kind']})")
+            if graph_preferred:
+                print("WARNING: coverage snapshot predates the repo's tests — 'not covered' claims are graph-based; "
+                      "regenerate coverage (make coverage) for ground truth")
             print("priority = percentile of raw risk (metric norm x (1 + churn/30) x (1 + callers/5)); "
                   "thresholds: CC>=" + str(args.max_complexity) + ", fn>=" + str(args.max_function_lines) +
                   " lines, file>=" + str(args.max_file_edges) + " edges, risk>=" + str(args.max_risk) +
@@ -787,6 +881,8 @@ def main() -> int:
             print("\nre-run: uv run --with radon python3 code_health.py --repo " + str(repo) +
                   (" --baseline " + str(args.baseline) if args.baseline else "") +
                   "   | thresholds and per-action data in --json output")
+            print("baseline: '--update-baseline --baseline code-health.json' acknowledges today's debt so the "
+                  "gate only fails on NEW actions; this report is a snapshot, not wired into CI")
         else:
             print(f"code-health: {len(acks)} action(s), all acknowledged in baseline — clean gate")
 
