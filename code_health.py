@@ -101,15 +101,15 @@ def concern_clusters(conn: sqlite3.Connection, repo: Path, source_qn: str | None
     explicit "unresolved" marker instead of boilerplate.
     """
     if source_qn is not None:
-        rows = conn.execute(
+        rows = list(conn.execute(
             "SELECT DISTINCT target_qualified FROM edges WHERE source_qualified = ? AND kind = 'CALLS'",
             (source_qn,),
-        )
+        ))
     else:
-        rows = conn.execute(
+        rows = list(conn.execute(
             "SELECT DISTINCT target_qualified FROM edges WHERE source_qualified LIKE ? AND kind = 'CALLS'",
             (source_prefix + "%",),
-        )
+        ))
     counts: Counter[str] = Counter()
     names: dict[str, list[str]] = {}
     for r in rows:
@@ -120,7 +120,8 @@ def concern_clusters(conn: sqlite3.Connection, repo: Path, source_qn: str | None
                 names.setdefault(mod, []).append(r["target_qualified"].split("::")[-1].split(".")[-1])
     clusters = [(m, counts[m], names.get(m, [])) for m, _ in counts.most_common(4)]
     strong = len(clusters) >= 2 and sum(c for _, c, _ in clusters) >= 3
-    return clusters, strong
+    unresolved = [r["target_qualified"].split("::")[-1].split(".")[-1] for r in rows][:6]
+    return clusters, strong, unresolved
 
 
 def mix_text(clusters: list[tuple[str, int, list[str]]], strong: bool) -> str:
@@ -160,6 +161,19 @@ def contract_text(name: str, params: str, return_type: str, def_sig: str = "") -
         params = params[1:-1].strip()
     ret = return_type or "…"
     return f"{name}({params or '…'}) -> {ret}"
+
+
+def _test_file_for(repo: Path, rel: str) -> str:
+    """The repo's mirrored test file for a module (tests/unit/...), if it exists."""
+    parts = rel.split("/")
+    base = parts[-1][:-3] if parts[-1].endswith(".py") else parts[-1]
+    dirs = parts[:-1]
+    candidates = ["/".join(["tests", "unit"] + dirs + ["test_" + base + ".py"]),
+                  "/".join(["tests", "unit", "test_" + base + ".py"])]
+    for c in candidates:
+        if (repo / c).exists():
+            return c
+    return ""
 
 
 def _def_signature(source: str, lineno: int) -> str:
@@ -376,11 +390,11 @@ def complexity_actions(repo: Path, max_cc: int, include_tests: bool,
                 continue
             info = _node_info(conn, repo, rel, fn.name)
             if info:
-                clusters, strong = concern_clusters(conn, repo, source_qn=info["qualified_name"], own_module=_module_key(repo, info["file_path"]))
+                clusters, strong, _unres = concern_clusters(conn, repo, source_qn=info["qualified_name"], own_module=_module_key(repo, info["file_path"]))
                 if not info.get("params"):
                     info["def_sig"] = _def_signature(source, fn.lineno)
             else:
-                clusters, strong = [], False
+                clusters, strong, _unres = [], False, []
             if clusters:
                 seam = mix_text(clusters, strong)
                 message = (
@@ -389,10 +403,11 @@ def complexity_actions(repo: Path, max_cc: int, include_tests: bool,
                     f"boundaries, not line breaks."
                 )
             else:
+                snippet = "calls: " + ", ".join(_unres) if _unres else "no cross-module callees resolved"
                 message = (f"cyclomatic complexity {fn.complexity} (>= {max_cc}) — {GUIDANCE['complexity']}"
-                           " [concern mix unresolved — callees not resolvable in graph]")
+                           f" [concern mix unresolved — {snippet}]")
             if info:
-                message += coverage_note(covered, rel, info, info["tested"], graph_preferred, stale_note)
+                message += coverage_note(covered, repo, rel, info, info["tested"], graph_preferred, stale_note)
             churn = file_churn.get(rel, 0)
             actions.append(
                 {
@@ -427,10 +442,12 @@ def final_tested(covered: dict[str, set[int]] | None, rel: str, info: dict, grap
     return info.get("tested", "")
 
 
-def coverage_note(covered: dict[str, set[int]] | None, rel: str, info: dict, graph_tested: str,
+def coverage_note(covered: dict[str, set[int]] | None, repo: Path, rel: str, info: dict, graph_tested: str,
                   graph_preferred: bool = False, stale_note: str = "") -> str:
     """Append a coverage-based instruction when the function is untested."""
     contract = contract_text(info.get("name") or "", info.get("params", ""), info.get("return_type", ""), info.get("def_sig", ""))
+    tfile = _test_file_for(repo, rel) if info else ""
+    extend = f" Extend {tfile}." if tfile else ""
     if graph_preferred:
         # Stale snapshot: the strongest honest claim is "verify" — current tests
         # may exercise the function through paths the graph cannot see (HTTP,
@@ -439,12 +456,12 @@ def coverage_note(covered: dict[str, set[int]] | None, rel: str, info: dict, gra
             return ""
         return (f" Coverage snapshot is older than the repo's tests and the graph sees no direct "
                 f"unit tests — verify with make coverage / htmlcov; if truly uncovered, pin "
-                f"{contract} with tests first.")
+                f"{contract} with tests first.{extend}")
     cov = covered_span(covered, rel, info.get("line_start") or 1, info.get("line_end") or info.get("line_start") or 1)
     if cov is False:
-        return f" Not covered by the repo's coverage data — write the failing tests first. Contract to pin: {contract}."
+        return f" Not covered by the repo's coverage data — write the failing tests first. Contract to pin: {contract}.{extend}"
     if cov is None and graph_tested == "untested":
-        return f" No coverage data and graph sees no unit tests — verify (htmlcov/ if present); if uncovered, pin {contract} with tests first."
+        return f" No coverage data and graph sees no unit tests — verify (htmlcov/ if present); if uncovered, pin {contract} with tests first.{extend}"
     return ""
 
 
@@ -485,7 +502,7 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
         rel = rel_path(repo, row["file_path"])
         if not include_tests and is_test_path(rel):
             continue
-        clusters, strong = concern_clusters(db, repo, source_qn=row["qualified_name"], own_module=_module_key(repo, row["file_path"]))
+        clusters, strong, unres = concern_clusters(db, repo, source_qn=row["qualified_name"], own_module=_module_key(repo, row["file_path"]))
         if clusters:
             seam = mix_text(clusters, strong)
             message = (
@@ -494,8 +511,9 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
                 f"named domain steps."
             )
         else:
+            snippet = "calls: " + ", ".join(unres) if unres else "no cross-module callees resolved"
             message = (f"function spans {span} lines (>= {max_fn_lines}) — {GUIDANCE['large-function']}"
-                       " [concern mix unresolved — callees not resolvable in graph]")
+                       f" [concern mix unresolved — {snippet}]")
         info = {"name": row["name"], "params": row["params"] or "", "return_type": row["return_type"] or "",
                 "line_start": row["line_start"], "line_end": row["line_end"]}
         if not info["params"]:
@@ -505,7 +523,7 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
                 except OSError:
                     src_cache[rel] = ""
             info["def_sig"] = _def_signature(src_cache[rel], row["line_start"])
-        message += coverage_note(covered, rel, info, row["test_coverage"] or "", graph_preferred, stale_note)
+        message += coverage_note(covered, repo, rel, info, row["test_coverage"] or "", graph_preferred, stale_note)
         churn = file_churn.get(rel, 0)
         actions.append(
             {
@@ -542,7 +560,7 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
         if not include_tests and is_test_path(rel):
             continue
         abs_file = str(repo.resolve()) + "/" + rel
-        clusters, strong = concern_clusters(db, repo, source_prefix=abs_file + "::", own_module=_module_key(repo, row["file_path"]))
+        clusters, strong, unres = concern_clusters(db, repo, source_prefix=abs_file + "::", own_module=_module_key(repo, row["file_path"]))
         if clusters:
             seam = mix_text(clusters, strong)
             message = (
@@ -551,13 +569,30 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
                 f"changes stay contained."
             )
         else:
+            snippet = "calls: " + ", ".join(unres) if unres else "no cross-module callees resolved"
             message = (f"{row['edge_count']} call/import edges (>= {max_file_edges}) — {GUIDANCE['hub-file']}"
-                       " [concern mix unresolved — callees not resolvable in graph]")
-        # Point at the file's first function instead of line 1.
+                       f" [concern mix unresolved — {snippet}]")
+        # Point at the file's fattest handlers: top-3 by cyclomatic complexity.
         first = db.execute(
             "SELECT MIN(line_start) FROM nodes WHERE file_path = ? AND kind IN ('Function', 'Method')",
             (row["file_path"],),
         ).fetchone()[0]
+        fat = ""
+        try:
+            from radon.visitors import ComplexityVisitor
+            if rel not in src_cache:
+                try:
+                    src_cache[rel] = (repo / rel).read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    src_cache[rel] = ""
+            if src_cache[rel]:
+                fns = ComplexityVisitor.from_code(src_cache[rel]).functions
+                top = sorted(fns, key=lambda f: f.complexity, reverse=True)[:3]
+                if top:
+                    fat = " fattest: " + ", ".join(f"{f.name}:{f.lineno} (CC {f.complexity})" for f in top)
+        except ImportError:
+            pass
+        message += fat
         churn = file_churn.get(rel, 0)
         actions.append(
             {
@@ -595,13 +630,13 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
             (row["qualified_name"],),
         )][:6]
         if callers:
-            resolved = f", callers resolved: {', '.join(callers)}"
+            resolved = f", callers: {', '.join(callers)}"
             if len(callers) < row["caller_count"]:
-                resolved += f" ({len(callers)} of {row['caller_count']} resolvable)"
+                resolved += f" ({len(callers)} distinct of {row['caller_count']} call sites — count includes repeated call sites)"
         else:
             resolved = ""
         message = (
-            f"graph risk {row['risk_score']:.2f} (>= {max_risk}), {row['caller_count']} callers{resolved} — "
+            f"graph risk {row['risk_score']:.2f} (>= {max_risk}), {row['caller_count']} call sites{resolved} — "
             f"{GUIDANCE['high-risk']}"
         )
         info = {"name": row["name"], "params": row["params"] or "", "return_type": row["return_type"] or "",
@@ -613,7 +648,7 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
                 except OSError:
                     src_cache[rel] = ""
             info["def_sig"] = _def_signature(src_cache[rel], info["line_start"])
-        message += coverage_note(covered, rel, info, row["test_coverage"] or "", graph_preferred, stale_note)
+        message += coverage_note(covered, repo, rel, info, row["test_coverage"] or "", graph_preferred, stale_note)
         churn = file_churn.get(rel, 0)
         actions.append(
             {
@@ -628,7 +663,7 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
                 "last_modified": last_modified.get(rel, ""),
                 "tested": final_tested(covered, rel, info),
                 "callers": callers,
-                "raw": _raw_score("high-risk", row["risk_score"], churn, row["caller_count"]),
+                "raw": _raw_score("high-risk", row["risk_score"], churn, len(callers) if callers else row["caller_count"]),
             }
         )
     db.close()
@@ -731,6 +766,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--update-baseline", action="store_true", help="write all current action keys to --baseline and exit 0 (lock the list, like pyrefly baselines)")
     p.add_argument("--base", type=str, default="", help="git ref to diff against; actions in files your branch changed are marked 'in your diff' (default: origin/main, then main)")
     p.add_argument("--json", action="store_true", help="emit actions as JSON object (meta + actions) on stdout")
+    p.add_argument("--refresh-coverage", action="store_true", help="run the repo's coverage suite (make coverage) before scanning so coverage verdicts are fresh (slow)")
     p.add_argument("--warn", action="store_true", help="exit 0 even when actions exist (informational run)")
     return p.parse_args()
 
@@ -760,6 +796,10 @@ def main() -> int:
         return 2
 
     file_churn, last_modified = file_history(repo)
+    if args.refresh_coverage:
+        log("refreshing coverage (make coverage) — this can take minutes…")
+        proc = subprocess.run(["make", "coverage"], cwd=repo, capture_output=True, text=True, timeout=1800)
+        log("coverage refresh exit " + str(proc.returncode))
     covered, coverage_source = load_coverage(repo)
     import time
     if coverage_source == ".coverage" and (repo / ".coverage").exists():
@@ -875,7 +915,8 @@ def main() -> int:
                 print(f"\n{file}{touched}")
                 for a in items:
                     loc = f":{a['line']}" + (f" ({a['function']})" if a["function"] else "")
-                    print(f"  [P{a['priority']:02d}][{a['kind']}] {loc} — {a['message']}")
+                    churn = f" [churn {a['churn']}x]" if a.get("churn") else ""
+                    print(f"  [P{a['priority']:02d}][{a['kind']}] {loc}{churn} — {a['message']}")
             if acks:
                 print(f"\nacknowledged in baseline ({len(acks)}): " + ", ".join(f"{a['file']}:{a['line']}" for a in acks[:5]) + (" …" if len(acks) > 5 else ""))
             print("\nre-run: uv run --with radon python3 code_health.py --repo " + str(repo) +
