@@ -1007,6 +1007,18 @@
    "description": "Argument `dict[@_, @_]` is not assignable to parameter `file_churn` with type `Counter[str]` in function `code_health._duplicate_actions`",
    "concise_description": "Argument `dict[@_, @_]` is not assignable to parameter `file_churn` with type `Counter[str]` in function `code_health._duplicate_actions`",
    "severity": "error"
+  },
+  {
+   "line": 81,
+   "column": 63,
+   "stop_line": 81,
+   "stop_column": 65,
+   "path": "tests/test_scanner_parity.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `dict[@_, @_]` is not assignable to parameter `file_churn` with type `Counter[str]` in function `code_health._scan_file`",
+   "concise_description": "Argument `dict[@_, @_]` is not assignable to parameter `file_churn` with type `Counter[str]` in function `code_health._scan_file`",
+   "severity": "error"
   }
  ]
 }

@@ -14,7 +14,7 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-.PHONY: help setup deps uv-sync install-hooks check lint lint-check lint-github typecheck typecheck-update-baseline format test coverage self-check code-health clean
+.PHONY: help setup deps uv-sync install-hooks check lint lint-check lint-github typecheck typecheck-update-baseline format test scanner-check coverage self-check code-health clean
 
 # Tool paths. uv is the package manager (installs itself if missing).
 PYTHON := .venv/bin/python
@@ -67,8 +67,15 @@ install-hooks:
 # `make test` already includes these).
 check: deps lint-check typecheck
 
-test: deps lint-check typecheck
+# The Rust scan core must be freshly built before pytest — the parity
+# gate (tests/test_scanner_parity.py) diffs it against the Python
+# implementation, and a stale binary would test nothing.
+test: deps lint-check typecheck scanner-check
 	@$(PYTEST) tests/ -q --tb=short
+
+scanner-check:
+	@cd scanner && cargo build --release 2>&1 | tail -1
+	@echo "${GREEN}✓ scanner built (parity gate active)${NC}"
 
 coverage: deps
 	@$(UV) run coverage run -m pytest tests/ -q --tb=short

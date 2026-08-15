@@ -206,17 +206,23 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 Expr::BoolOp(b) => *slot += b.values.len().saturating_sub(1) as u32,
                 Expr::If(_) => *slot += 1,
                 // radon's lambda: +0, but the body IS walked (verified on 6.0.1)
+                // radon counts EACH generator clause (for x in ...) plus each
+                // if — a two-for comprehension is +2, not +1 (verified)
                 Expr::ListComp(c) => {
-                    *slot += 1 + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
+                    *slot += c.generators.len() as u32
+                        + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
                 }
                 Expr::SetComp(c) => {
-                    *slot += 1 + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
+                    *slot += c.generators.len() as u32
+                        + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
                 }
                 Expr::DictComp(c) => {
-                    *slot += 1 + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
+                    *slot += c.generators.len() as u32
+                        + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
                 }
                 Expr::Generator(c) => {
-                    *slot += 1 + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
+                    *slot += c.generators.len() as u32
+                        + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
                 }
                 Expr::NumberLiteral(n) => self.magic_check(n),
                 _ => {}

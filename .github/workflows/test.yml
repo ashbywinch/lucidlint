@@ -25,6 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable   # the scanner parity gate builds the Rust core
       - run: make setup
       - run: make lint-github
       - run: make test
