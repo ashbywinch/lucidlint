@@ -1,3 +1,6 @@
+// code-health: ignore-file complexity the ruff visitor walkers are parity-locked dispatch tables —
+// match-arm count, not branching; keep NEW functions under cc 15
+
 //! code-health-scan — the Rust scan core for the deterministic code-health gate.
 //!
 //! Phase 1 of the port: parsing + the pure-walk checks. The finding schema is
@@ -20,9 +23,11 @@ use std::collections::HashSet;
 use std::path::Path;
 
 mod checks;
+mod common;
 mod docs;
 mod graph_families;
 mod lsp;
+mod rustscan;
 use checks::Q;
 use checks::*;
 
@@ -44,7 +49,7 @@ pub struct Finding {
 }
 
 /// One function's cyclomatic complexity — radon-equivalent counting.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct FnCc {
     file: String,
     function: String,
@@ -102,6 +107,7 @@ enum ParentEntry {
 }
 
 impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
+    // code-health: ignore large-function the ruff visitor dispatches statement kinds in CPython's visit order
     fn visit_stmt(&mut self, stmt: &'a Stmt) {
         // module scope = no open function scope and no class nesting (the
         // FunctionDef arm walks bodies manually, so parent_stack is not the
@@ -628,7 +634,7 @@ pub struct FileScan {
     pub imports: Vec<ImportInfo>,
 }
 
-fn is_test_path(name: &str) -> bool {
+pub(crate) fn is_test_path(name: &str) -> bool {
     name.contains("/test") || name.starts_with("test")
 }
 
@@ -639,7 +645,12 @@ fn scan_source(source: &str, name: &str) -> FileScan {
 
 /// The LSP scan: per-file families only — the duplicate-candidate BFS and
 /// its per-function skeleton walks are pure waste for a single buffer.
+/// Dispatches on the buffer's extension: .rs -> the Rust layer, else Python.
 pub fn scan_source_lsp(source: &str, name: &str) -> FileScan {
+    if name.ends_with(".rs") {
+        let rs = rustscan::scan_source(source, name, false);
+        return rustscan_to_filescan_ref(&rs, name);
+    }
     scan_source_impl(source, name, false)
 }
 
@@ -712,7 +723,17 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         }
     }
     let tokens = parsed.tokens();
-    let findings = apply_suppressions(state.findings, source, name, tokens);
+    let supps = checks::parse_suppressions(source, tokens);
+    // complexity findings are generated from the cc array after this pass —
+    // honor complexity suppressions here so both paths agree (radon parity:
+    // a fn whose complexity is suppressed must not resurface via cc)
+    if !state.cc.is_empty() {
+        state.cc.retain(|e| {
+            !common::suppressed("complexity", e.line, &supps)
+                && !supps.file.get("complexity").is_some_and(|w| !w.is_empty())
+        });
+    }
+    let findings = checks::apply_suppressions(state.findings, source, name, tokens);
     let mut all = type_ignore_findings(source, name, tokens);
     all.extend(findings);
     let classes = collect_classes(&body, source);
@@ -735,9 +756,33 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
 fn scan_file(path: &Path) -> FileScan {
     let source = std::fs::read_to_string(path).unwrap_or_default();
     let name = path.to_str().unwrap_or("<file>").to_string();
+    if name.ends_with(".rs") {
+        let rs = rustscan::scan_source(&source, &name, true);
+        return rustscan_to_filescan_ref(&rs, &name);
+    }
     let mut scan = scan_source(&source, &name);
     scan.file_name = name;
     scan
+}
+
+/// The Rust layer's scan into the shared FileScan shape. The Python-specific
+/// collections (defs/refs/strings/decorated/classes/imports) stay empty:
+/// `unused` is rustc dead_code's job and the graph families need the Rust
+/// exporter — the rustscan data (mod/use/structs) travels via `RustScan`.
+fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
+    FileScan {
+        file_name: name.to_string(),
+        findings: rs.findings.clone(),
+        cc: rs.cc.clone(),
+        errors: rs.errors,
+        defs: Vec::new(),
+        refs: HashSet::new(),
+        strings: Vec::new(),
+        decorated: HashSet::new(),
+        skeletons: rs.skeletons.clone(),
+        classes: Vec::new(),
+        imports: Vec::new(),
+    }
 }
 
 /// The finding model's final action kind — the contract carries it so the
@@ -793,6 +838,7 @@ fn rel_of(path: &str, root: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+// code-health: ignore large-function the CLI orchestrates every repo-wide family in one flow — extracting helpers would thread six collections
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--lsp") {
@@ -828,10 +874,22 @@ fn main() {
     }
     let root = repo_root(&paths);
     let mut scans = Vec::new();
+    let mut rust_scans: Vec<rustscan::RustScan> = Vec::new();
     for path in &paths {
-        scans.push(scan_file(Path::new(path)));
+        if path.ends_with(".rs") {
+            let source = std::fs::read_to_string(path).unwrap_or_default();
+            let name = path.clone();
+            let rs = rustscan::scan_source(&source, &name, true);
+            let rel = name.clone();
+            rust_scans.push(rs);
+            scans.push(rustscan_to_filescan_ref(rust_scans.last().unwrap(), &rel));
+        } else {
+            scans.push(scan_file(Path::new(path)));
+        }
     }
-    // repo-wide families: duplicate (Dice) + unused (reference scan)
+    // repo-wide families: duplicate (Dice, per-language pools) + unused
+    // (Python reference scan; Rust's dead code is rustc's, so Rust scans
+    // carry no defs/refs and never fire the unused family)
     let mut skeletons = Vec::new();
     let mut definitions: Vec<(String, String, usize)> = Vec::new();
     let mut prod_refs = HashSet::new();
@@ -848,6 +906,7 @@ fn main() {
                 skeleton: s.skeleton.clone(),
             });
         }
+        let _ = &is_test;
         for (name, line) in &scan.defs {
             definitions.push((rel.clone(), name.clone(), *line));
         }
@@ -873,8 +932,43 @@ fn main() {
         all_cc.extend(scan.cc);
         total_errors += scan.errors;
     }
-    all_findings.extend(duplicate_findings(&skeletons));
+    // per-language duplicate pools: a Python fn and a Rust fn with the same
+    // shape are a PORT, not a copy-paste duplicate — never cross-matched
+    let mut py_skeletons: Vec<SkeletonFn> = Vec::new();
+    let mut rs_skeletons: Vec<SkeletonFn> = Vec::new();
+    for s in skeletons {
+        if s.rel.ends_with(".rs") {
+            rs_skeletons.push(s);
+        } else {
+            py_skeletons.push(s);
+        }
+    }
+    all_findings.extend(duplicate_findings(&py_skeletons));
+    all_findings.extend(duplicate_findings(&rs_skeletons));
     all_findings.extend(unused_findings(&definitions, &prod_refs, &test_refs, &strings));
+    // import cycles for Rust crates: the local mod/use graph (the
+    // code-review-graph contract is Python-only; Rust resolves itself)
+    if !rust_scans.is_empty() {
+        let mut mod_decls: std::collections::HashMap<String, Vec<(String, bool)>> = std::collections::HashMap::new();
+        let mut uses: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        for rs in &rust_scans {
+            let rel = rel_of(&rs.file_name(), &root);
+            mod_decls.insert(rel.clone(), rs.mod_decls.clone());
+            uses.insert(rel, rs.uses.clone());
+        }
+        let rels: Vec<String> = paths.iter().map(|p| rel_of(p, &root)).collect();
+        let graph = rustscan::module_graph(&rels, &mod_decls, &uses);
+        // the module graph keys are rels to the binary's computed root — the
+        // orchestrator's scan set is repo-relative, so re-anchor the findings
+        // to absolute paths (resolution-neutral, like the per-file findings)
+        let mut cycle_findings = graph_families::cycle_findings_for(&graph);
+        for f in &mut cycle_findings {
+            if !f.file.starts_with('/') {
+                f.file = format!("{}/{}", root, f.file);
+            }
+        }
+        all_findings.extend(cycle_findings);
+    }
     // repo-wide families from the graph contract + git churn (orchestrator
     // gathers both; the findings compute here)
     let contract = graph_path

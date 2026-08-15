@@ -330,13 +330,20 @@ pub fn cycle_findings(repo: &Path, contract: &GraphContract) -> Vec<Finding> {
             }
         }
     }
-    let node_list: Vec<String> = files.iter().cloned().collect();
+    cycle_findings_for(&graph)
+}
+
+/// The shared cycle family over a resolved file->file adjacency — the Python
+/// graph contract builds it from IMPORTS_FROM edges, the Rust layer from its
+/// own mod/use tree. SCC + the finding shape are language-neutral.
+pub fn cycle_findings_for(graph: &BTreeMap<String, Vec<String>>) -> Vec<Finding> {
+    let node_list: Vec<String> = graph.keys().cloned().collect();
     let mut out = Vec::new();
-    for comp in strongly_connected_components(&graph, &node_list) {
+    for comp in strongly_connected_components(graph, &node_list) {
         if comp.len() < 2 {
             continue;
         }
-        let chain = find_cycle(&graph, &comp);
+        let chain = find_cycle(graph, &comp);
         let cycle_text = match &chain {
             Some(c) => format!("{} -> {}", c.join(" -> "), c[0]),
             None => {
@@ -486,42 +493,41 @@ pub fn hub_file_findings(
     out
 }
 
-/// The graph tool's own risk formula — recomputed from CALLS/TESTED_BY.
-fn risk_for(
-    _contract: &GraphContract,
-    node: &GNode,
-    caller_counts: &HashMap<String, usize>,
-    tested_counts: &HashMap<String, usize>,
-) -> f64 {
-    let caller_count = caller_counts.get(&node.qualified_name).copied().unwrap_or(0);
-    let tested = tested_counts.get(&node.qualified_name).copied().unwrap_or(0) > 0;
-    let mut risk: f64 = 0.0;
-    if caller_count > 10 {
-        risk += 0.3;
-    } else if caller_count > 3 {
-        risk += 0.15;
+impl GNode {
+    /// The graph tool's own risk formula — recomputed from CALLS/TESTED_BY.
+    /// A method: the record-shape rule's advice — the risk rules ARE the
+    /// struct's behavior, not a free function's.
+    fn risk(&self, caller_counts: &HashMap<String, usize>, tested_counts: &HashMap<String, usize>) -> f64 {
+        let caller_count = caller_counts.get(&self.qualified_name).copied().unwrap_or(0);
+        let tested = tested_counts.get(&self.qualified_name).copied().unwrap_or(0) > 0;
+        let mut risk: f64 = 0.0;
+        if caller_count > 10 {
+            risk += 0.3;
+        } else if caller_count > 3 {
+            risk += 0.15;
+        }
+        if !tested {
+            risk += 0.3;
+        }
+        let name_lower = self.name.to_lowercase();
+        let sec_kw = [
+            "auth",
+            "login",
+            "password",
+            "token",
+            "session",
+            "crypt",
+            "secret",
+            "credential",
+            "permission",
+            "sql",
+            "execute",
+        ];
+        if sec_kw.iter().any(|kw| name_lower.contains(kw)) {
+            risk += 0.4;
+        }
+        risk.min(1.0)
     }
-    if !tested {
-        risk += 0.3;
-    }
-    let name_lower = node.name.to_lowercase();
-    let sec_kw = [
-        "auth",
-        "login",
-        "password",
-        "token",
-        "session",
-        "crypt",
-        "secret",
-        "credential",
-        "permission",
-        "sql",
-        "execute",
-    ];
-    if sec_kw.iter().any(|kw| name_lower.contains(kw)) {
-        risk += 0.4;
-    }
-    risk.min(1.0)
 }
 
 /// High-risk nodes — `_high_risk_actions` (risk recomputed, order/limit kept).
@@ -543,7 +549,7 @@ pub fn high_risk_findings(repo: &Path, contract: &GraphContract, max_risk: f64, 
         if !n.file_path.ends_with(".py") {
             continue;
         }
-        let risk = risk_for(contract, n, &caller_counts, &tested_counts);
+        let risk = n.risk(&caller_counts, &tested_counts);
         if risk < max_risk {
             continue;
         }
@@ -572,6 +578,8 @@ pub fn high_risk_findings(repo: &Path, contract: &GraphContract, max_risk: f64, 
     out
 }
 
+// code-health: ignore record-shape node_by_qn is an index map for graph-wide lookups —
+// the map is the boundary, not the record; the function never consumes one GNode's shape
 /// The most-called external subsystem of a function — `_dominant_callee`.
 fn dominant_callee(
     contract: &GraphContract,
@@ -596,6 +604,8 @@ fn dominant_callee(
     counts.into_iter().max_by_key(|(_, c)| *c).map(|(m, _)| m)
 }
 
+// code-health: ignore record-shape same index-map boundary as dominant_callee — the
+// qualified-name map is the parameter, GNode only ever appears as its value type
 fn resolve_callee_module(
     contract: &GraphContract,
     repo: &Path,

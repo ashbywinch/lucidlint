@@ -121,7 +121,9 @@ def git_routes(history="", diff="", branch="test-branch", commit="abc1234", log_
 
     def ls_files_stdout(args):
         repo = Path(args[2])
-        rels = sorted(str(p.relative_to(repo)) for p in repo.rglob("*.py"))
+        rels = sorted(
+            str(p.relative_to(repo)) for p in list(repo.rglob("*.py")) + list(repo.rglob("*.rs"))
+        )
         return "\0".join(rels) + ("\0" if rels else "")
 
     routes.append((lambda a: is_git(a) and a[3] == "ls-files", ls_files_stdout, 0))
@@ -465,6 +467,18 @@ def test_main_stale_coverage_warning(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 1  # the except finding still fails the gate
     assert "snapshot predates the repo's tests" in out
+
+# --------------------------------------------------------------------------- rust layer
+def test_rust_files_are_scanned(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    (repo / "src").mkdir()
+    (repo / "src" / "mod.rs").write_text("pub fn f() {\n    let x = 3 * 60;\n    x;\n}\n")
+    rc = run_main(repo)
+    out = capsys.readouterr().out
+    assert rc == 1  # the rust finding fails the gate
+    assert "src/mod.rs" in out
+    assert "magic number" in out
+
 
 # --------------------------------------------------------------------------- utilities
 def test_numbits_to_lines():

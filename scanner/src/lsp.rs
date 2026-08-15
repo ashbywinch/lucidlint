@@ -64,17 +64,25 @@ pub fn diagnostics_for(scan: &FileScan, source: &str) -> Vec<serde_json::Value> 
     out
 }
 
-fn publish(uri: &str, diagnostics: &[serde_json::Value], out: &mut impl Write) {
-    let msg = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "textDocument/publishDiagnostics",
-        "params": {"uri": uri, "diagnostics": diagnostics},
-    });
+/// One Content-Length-framed JSON-RPC message on the wire — the one framing
+/// helper every outgoing message goes through.
+fn write_message(out: &mut impl Write, msg: serde_json::Value) {
     let body = msg.to_string();
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
     let _ = out.write_all(header.as_bytes());
     let _ = out.write_all(body.as_bytes());
     let _ = out.flush();
+}
+
+fn publish(uri: &str, diagnostics: &[serde_json::Value], out: &mut impl Write) {
+    write_message(
+        out,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {"uri": uri, "diagnostics": diagnostics},
+        }),
+    );
 }
 
 /// file:///path/to/x.py -> the path; anything else is used as-is.
@@ -117,12 +125,7 @@ fn read_message<R: BufRead>(input: &mut R) -> Option<serde_json::Value> {
 }
 
 fn send_response(id: &serde_json::Value, result: serde_json::Value, out: &mut impl Write) {
-    let msg = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
-    let body = msg.to_string();
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    let _ = out.write_all(header.as_bytes());
-    let _ = out.write_all(body.as_bytes());
-    let _ = out.flush();
+    write_message(out, serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}));
 }
 
 pub fn dispatch(documents: &mut HashMap<String, String>, msg: &serde_json::Value, out: &mut impl Write) -> bool {

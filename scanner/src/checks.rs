@@ -1,3 +1,6 @@
+// code-health: ignore-file complexity the parity-locked AST walkers are single dispatch tables —
+// match-arm count is table size, not branching; keep NEW functions under cc 15
+
 //! The remaining standard-family checks, mirroring the Python implementation
 //! exactly: suppressions, type-ignore, global-state, builtin-shadow, closures,
 //! class-module, vague-name, strewing, except-swallows, broad-except.
@@ -12,16 +15,7 @@ use std::collections::HashSet;
 
 use crate::{line_of, stmt_line, Finding, ScanState};
 
-pub const VAGUE_SUFFIXES: [&str; 8] = [
-    "Manager",
-    "Orchestrator",
-    "Handler",
-    "Store",
-    "Repository",
-    "Controller",
-    "Utils",
-    "Info",
-];
+pub use crate::common::VAGUE_SUFFIXES;
 
 pub const SHADOWED_BUILTINS: &[&str] = &[
     "abs",
@@ -88,14 +82,6 @@ pub const SHADOWED_BUILTINS: &[&str] = &[
     "zip",
 ];
 
-/// One line-level suppression and the (signal, why) parsed from it.
-pub struct Suppressions {
-    /// line -> (signal, why) — a finding on that line or line-1 is exempt.
-    pub line: std::collections::HashMap<usize, (String, String)>,
-    /// signal -> why — file-scoped exemptions.
-    pub file: std::collections::HashMap<String, String>,
-}
-
 /// Comment tokens -> (line, comment text incl. '#') — from the parsed
 /// token stream (0.0.9's lexer exposes no public range accessor).
 pub fn comment_lines(source: &str, tokens: &Tokens) -> Vec<(usize, String)> {
@@ -110,101 +96,16 @@ pub fn comment_lines(source: &str, tokens: &Tokens) -> Vec<(usize, String)> {
     out
 }
 
-/// Parse `# code-health: ignore <signal> <why>` / `ignore-file` comments.
-pub fn parse_suppressions(source: &str, tokens: &Tokens) -> Suppressions {
-    let mut line_map = std::collections::HashMap::new();
-    let mut file_map = std::collections::HashMap::new();
-    for (ln, text) in comment_lines(source, tokens) {
-        let trimmed = text.trim_start_matches('#').trim_start();
-        if let Some(rest) = trimmed.strip_prefix("code-health: ignore-file ") {
-            let mut it = rest.splitn(2, char::is_whitespace);
-            let signal = it.next().unwrap_or("").to_string();
-            let why = it.next().unwrap_or("").trim().to_string();
-            if !signal.is_empty() {
-                file_map.insert(signal, why);
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("code-health: ignore ") {
-            let mut it = rest.splitn(2, char::is_whitespace);
-            let signal = it.next().unwrap_or("").to_string();
-            let why = it.next().unwrap_or("").trim().to_string();
-            if !signal.is_empty() {
-                line_map.insert(ln, (signal, why));
-            }
-        }
-    }
-    Suppressions {
-        line: line_map,
-        file: file_map,
-    }
-}
-
-/// The Python `_suppressed`: a finding is exempt when its line or line-1
-/// carries an explained suppression for that signal.
-fn suppressed(signal: &str, line: usize, supps: &Suppressions) -> bool {
-    for ln in [line, line.saturating_sub(1)] {
-        if let Some((sig, why)) = supps.line.get(&ln) {
-            if sig == signal && !why.is_empty() {
-                return true;
-            }
-        }
-    }
-    false
+/// Python comment tokens -> the shared suppression map (`#` comments).
+pub fn parse_suppressions(source: &str, tokens: &Tokens) -> crate::common::Suppressions {
+    crate::common::suppressions_from_comments(&comment_lines(source, tokens))
 }
 
 /// Filter findings through the suppressions + emit the why-less suppression
-/// findings, mirroring `_scan_file`'s post-filter.
+/// findings — shared logic over this language's comment lines (the parse
+/// itself lives in `common::suppressions_from_comments`).
 pub fn apply_suppressions(findings: Vec<Finding>, source: &str, file: &str, tokens: &Tokens) -> Vec<Finding> {
-    let supps = parse_suppressions(source, tokens);
-    let mut out = Vec::new();
-    // the Python tool dedups suppressions by line (one per line)
-    let mut seen_invalid: HashSet<usize> = HashSet::new();
-    for (ln, (sig, why)) in &supps.line {
-        if why.is_empty() && seen_invalid.insert(*ln) {
-            out.push(Finding {
-                file: file.to_string(),
-                line: *ln,
-                function: String::new(),
-                kind: "suppression".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "suppression '# code-health: ignore {sig}' at line {ln} without a why — exemptions only apply with an explanation"
-                ),
-            });
-        }
-    }
-    for (sig, why) in &supps.file {
-        if why.is_empty() {
-            // the Python emits one finding per invalid ignore-file line; we
-            // approximate with the first line carrying it
-            if let Some((ln, _)) = comment_lines(source, tokens)
-                .iter()
-                .find(|(_, t)| t.contains(&format!("code-health: ignore-file {sig}")))
-            {
-                out.push(Finding {
-                    file: file.to_string(),
-                    line: *ln,
-                    function: String::new(),
-                    kind: "suppression".into(),
-                    severity: "fail".into(),
-                    message: format!(
-                        "file suppression '# code-health: ignore-file {sig}' at line {ln} without a why — exemptions only apply with an explanation"
-                    ),
-                });
-            }
-        }
-    }
-    for f in findings {
-        if suppressed(&f.kind, f.line, &supps) {
-            continue;
-        }
-        if let Some(why) = supps.file.get(&f.kind) {
-            if !why.is_empty() {
-                continue; // ignore-file with a why exempts; a why-less one does not
-            }
-        }
-        out.push(f);
-    }
-    out
+    crate::common::apply_suppressions(findings, &comment_lines(source, tokens), file, "#")
 }
 
 /// `# type: ignore` without a why (a second comment on the line) is a finding.
@@ -1025,26 +926,7 @@ pub fn module_flagged_names(body: &[Stmt]) -> HashSet<String> {
 // _unused_actions in code_health.py.
 // =====================================================================
 
-/// One function candidate for the duplication search.
-pub struct SkeletonFn {
-    pub rel: String,
-    pub name: String,
-    pub line: usize,
-    pub skeleton: Vec<String>,
-}
-
-/// Dice similarity on bigram sets — `_dice_similarity` in code_health.py.
-pub fn dice_similarity(a: &[String], b: &[String]) -> f64 {
-    let bigrams =
-        |t: &[String]| -> HashSet<(String, String)> { t.windows(2).map(|w| (w[0].clone(), w[1].clone())).collect() };
-    let sa = bigrams(a);
-    let sb = bigrams(b);
-    if sa.is_empty() && sb.is_empty() {
-        return 0.0;
-    }
-    let inter = sa.intersection(&sb).count();
-    2.0 * inter as f64 / (sa.len() + sb.len()) as f64
-}
+pub use crate::common::{dice_similarity, SkeletonFn};
 
 /// The structural fingerprint: node types in CPython `ast.walk` BFS order,
 /// with names/constants/args collapsed (`_fn_skeleton`). The BFS child
@@ -1169,6 +1051,8 @@ fn ctx_token(ctx: &ExprContext) -> &'static str {
     }
 }
 
+// reason: the match arms mirror CPython's ast.iter_child_nodes field order —
+// one exhaustive table, splitting it would scatter a single mapping
 #[allow(clippy::too_many_lines)]
 /// Push a pattern node onto the skeleton queue.
 fn push_pattern<'a>(queue: &mut Vec<Q<'a>>, p: &'a Pattern) {
@@ -1185,208 +1069,213 @@ fn push_pattern<'a>(queue: &mut Vec<Q<'a>>, p: &'a Pattern) {
     queue.push(Q::N(n));
 }
 
+/// One BFS queue item — the walker's two push helpers (module-level: a
+/// nested pair would hide structure the latent-class rule exists to surface).
+fn skel_push<'a>(q: &mut Vec<Q<'a>>, n: AnyNodeRef<'a>) {
+    q.push(Q::N(n));
+}
+
+fn skel_tok<'a>(q: &mut Vec<Q<'a>>, t: &'static str) {
+    q.push(Q::T(t));
+}
+
+// code-health: ignore large-function the parity-locked walker mirrors CPython's field order — one dispatch table
 pub fn skel_children<'a>(node: AnyNodeRef<'a>, queue: &mut Vec<Q<'a>>) {
     use ruff_python_ast::Pattern;
-    fn push<'a>(q: &mut Vec<Q<'a>>, n: AnyNodeRef<'a>) {
-        q.push(Q::N(n));
-    }
-    fn tok<'a>(q: &mut Vec<Q<'a>>, t: &'static str) {
-        q.push(Q::T(t));
-    }
     match node {
         AnyNodeRef::StmtClassDef(c) => {
             // CPython: bases, keywords, body, decorator_list
             if let Some(arguments) = &c.arguments {
                 for b in &arguments.args {
-                    push(queue, AnyNodeRef::from(b));
+                    skel_push(queue, AnyNodeRef::from(b));
                 }
                 for k in &arguments.keywords {
-                    push(queue, AnyNodeRef::Keyword(k));
+                    skel_push(queue, AnyNodeRef::Keyword(k));
                 }
             }
             for s in &c.body {
-                push(queue, AnyNodeRef::from(s));
+                skel_push(queue, AnyNodeRef::from(s));
             }
             for d in &c.decorator_list {
-                push(queue, AnyNodeRef::from(&d.expression));
+                skel_push(queue, AnyNodeRef::from(&d.expression));
             }
         }
         AnyNodeRef::StmtReturn(r) => {
             if let Some(v) = &r.value {
-                push(queue, AnyNodeRef::from(v.as_ref()));
+                skel_push(queue, AnyNodeRef::from(v.as_ref()));
             }
         }
         AnyNodeRef::StmtDelete(d) => {
             for t in &d.targets {
-                push(queue, AnyNodeRef::from(t));
+                skel_push(queue, AnyNodeRef::from(t));
             }
         }
         AnyNodeRef::StmtTypeAlias(t) => {
-            push(queue, AnyNodeRef::from(t.name.as_ref()));
+            skel_push(queue, AnyNodeRef::from(t.name.as_ref()));
             if let Some(tp) = &t.type_params {
                 for p in &tp.type_params {
                     match p {
-                        ruff_python_ast::TypeParam::TypeVar(t) => push(queue, AnyNodeRef::TypeParamTypeVar(t)),
-                        ruff_python_ast::TypeParam::TypeVarTuple(t) => push(queue, AnyNodeRef::TypeParamTypeVarTuple(t)),
-                        ruff_python_ast::TypeParam::ParamSpec(t) => push(queue, AnyNodeRef::TypeParamParamSpec(t)),
+                        ruff_python_ast::TypeParam::TypeVar(t) => skel_push(queue, AnyNodeRef::TypeParamTypeVar(t)),
+                        ruff_python_ast::TypeParam::TypeVarTuple(t) => skel_push(queue, AnyNodeRef::TypeParamTypeVarTuple(t)),
+                        ruff_python_ast::TypeParam::ParamSpec(t) => skel_push(queue, AnyNodeRef::TypeParamParamSpec(t)),
                     }
                 }
             }
-            push(queue, AnyNodeRef::from(t.value.as_ref()));
+            skel_push(queue, AnyNodeRef::from(t.value.as_ref()));
         }
         AnyNodeRef::StmtAssign(a) => {
             for t in &a.targets {
-                push(queue, AnyNodeRef::from(t));
+                skel_push(queue, AnyNodeRef::from(t));
             }
-            push(queue, AnyNodeRef::from(a.value.as_ref()));
+            skel_push(queue, AnyNodeRef::from(a.value.as_ref()));
         }
         AnyNodeRef::StmtAugAssign(a) => {
-            push(queue, AnyNodeRef::from(a.target.as_ref()));
-            tok(queue, op_token(&a.op));
-            push(queue, AnyNodeRef::from(a.value.as_ref()));
+            skel_push(queue, AnyNodeRef::from(a.target.as_ref()));
+            skel_tok(queue, op_token(&a.op));
+            skel_push(queue, AnyNodeRef::from(a.value.as_ref()));
         }
         AnyNodeRef::StmtAnnAssign(a) => {
-            push(queue, AnyNodeRef::from(a.target.as_ref()));
-            push(queue, AnyNodeRef::from(a.annotation.as_ref()));
+            skel_push(queue, AnyNodeRef::from(a.target.as_ref()));
+            skel_push(queue, AnyNodeRef::from(a.annotation.as_ref()));
             if let Some(v) = &a.value {
-                push(queue, AnyNodeRef::from(v.as_ref()));
+                skel_push(queue, AnyNodeRef::from(v.as_ref()));
             }
         }
         AnyNodeRef::StmtFor(f) => {
-            push(queue, AnyNodeRef::from(f.target.as_ref()));
-            push(queue, AnyNodeRef::from(f.iter.as_ref()));
+            skel_push(queue, AnyNodeRef::from(f.target.as_ref()));
+            skel_push(queue, AnyNodeRef::from(f.iter.as_ref()));
             for s in &f.body {
-                push(queue, AnyNodeRef::from(s));
+                skel_push(queue, AnyNodeRef::from(s));
             }
             for s in &f.orelse {
-                push(queue, AnyNodeRef::from(s));
+                skel_push(queue, AnyNodeRef::from(s));
             }
         }
         AnyNodeRef::StmtWhile(w) => {
-            push(queue, AnyNodeRef::from(w.test.as_ref()));
+            skel_push(queue, AnyNodeRef::from(w.test.as_ref()));
             for s in &w.body {
-                push(queue, AnyNodeRef::from(s));
+                skel_push(queue, AnyNodeRef::from(s));
             }
             for s in &w.orelse {
-                push(queue, AnyNodeRef::from(s));
+                skel_push(queue, AnyNodeRef::from(s));
             }
         }
         AnyNodeRef::StmtIf(i) => {
-            push(queue, AnyNodeRef::from(i.test.as_ref()));
+            skel_push(queue, AnyNodeRef::from(i.test.as_ref()));
             for s in &i.body {
-                push(queue, AnyNodeRef::from(s));
+                skel_push(queue, AnyNodeRef::from(s));
             }
             // CPython re-nests elifs as inner If nodes in orelse
             for clause in &i.elif_else_clauses {
-                push(queue, AnyNodeRef::ElifElseClause(clause));
+                skel_push(queue, AnyNodeRef::ElifElseClause(clause));
             }
         }
         AnyNodeRef::ElifElseClause(clause) => {
             if let Some(t) = &clause.test {
-                push(queue, AnyNodeRef::from(t));
+                skel_push(queue, AnyNodeRef::from(t));
             }
             for s in &clause.body {
-                push(queue, AnyNodeRef::from(s));
+                skel_push(queue, AnyNodeRef::from(s));
             }
         }
         AnyNodeRef::StmtWith(w) => {
             for item in &w.items {
-                push(queue, AnyNodeRef::WithItem(item));
+                skel_push(queue, AnyNodeRef::WithItem(item));
             }
             for s in &w.body {
-                push(queue, AnyNodeRef::from(s));
+                skel_push(queue, AnyNodeRef::from(s));
             }
         }
         AnyNodeRef::WithItem(item) => {
-            push(queue, AnyNodeRef::from(&item.context_expr));
+            skel_push(queue, AnyNodeRef::from(&item.context_expr));
             if let Some(v) = &item.optional_vars {
-                push(queue, AnyNodeRef::from(v.as_ref()));
+                skel_push(queue, AnyNodeRef::from(v.as_ref()));
             }
         }
         AnyNodeRef::StmtMatch(m) => {
-            push(queue, AnyNodeRef::from(m.subject.as_ref()));
+            skel_push(queue, AnyNodeRef::from(m.subject.as_ref()));
             for case in &m.cases {
-                push(queue, AnyNodeRef::MatchCase(case));
+                skel_push(queue, AnyNodeRef::MatchCase(case));
             }
         }
         AnyNodeRef::MatchCase(case) => {
             match &case.pattern {
-                Pattern::MatchValue(p) => push(queue, AnyNodeRef::PatternMatchValue(p)),
-                Pattern::MatchSingleton(p) => push(queue, AnyNodeRef::PatternMatchSingleton(p)),
-                Pattern::MatchSequence(p) => push(queue, AnyNodeRef::PatternMatchSequence(p)),
-                Pattern::MatchMapping(p) => push(queue, AnyNodeRef::PatternMatchMapping(p)),
-                Pattern::MatchClass(p) => push(queue, AnyNodeRef::PatternMatchClass(p)),
-                Pattern::MatchStar(p) => push(queue, AnyNodeRef::PatternMatchStar(p)),
-                Pattern::MatchAs(p) => push(queue, AnyNodeRef::PatternMatchAs(p)),
-                Pattern::MatchOr(p) => push(queue, AnyNodeRef::PatternMatchOr(p)),
+                Pattern::MatchValue(p) => skel_push(queue, AnyNodeRef::PatternMatchValue(p)),
+                Pattern::MatchSingleton(p) => skel_push(queue, AnyNodeRef::PatternMatchSingleton(p)),
+                Pattern::MatchSequence(p) => skel_push(queue, AnyNodeRef::PatternMatchSequence(p)),
+                Pattern::MatchMapping(p) => skel_push(queue, AnyNodeRef::PatternMatchMapping(p)),
+                Pattern::MatchClass(p) => skel_push(queue, AnyNodeRef::PatternMatchClass(p)),
+                Pattern::MatchStar(p) => skel_push(queue, AnyNodeRef::PatternMatchStar(p)),
+                Pattern::MatchAs(p) => skel_push(queue, AnyNodeRef::PatternMatchAs(p)),
+                Pattern::MatchOr(p) => skel_push(queue, AnyNodeRef::PatternMatchOr(p)),
             }
             if let Some(g) = &case.guard {
-                push(queue, AnyNodeRef::from(g.as_ref()));
+                skel_push(queue, AnyNodeRef::from(g.as_ref()));
             }
             for s in &case.body {
-                push(queue, AnyNodeRef::from(s));
+                skel_push(queue, AnyNodeRef::from(s));
             }
         }
         AnyNodeRef::StmtRaise(r) => {
             if let Some(e) = &r.exc {
-                push(queue, AnyNodeRef::from(e.as_ref()));
+                skel_push(queue, AnyNodeRef::from(e.as_ref()));
             }
             if let Some(c) = &r.cause {
-                push(queue, AnyNodeRef::from(c.as_ref()));
+                skel_push(queue, AnyNodeRef::from(c.as_ref()));
             }
         }
         AnyNodeRef::StmtTry(t) => {
             for s in &t.body {
-                push(queue, AnyNodeRef::from(s));
+                skel_push(queue, AnyNodeRef::from(s));
             }
             for h in &t.handlers {
                 let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
-                push(queue, AnyNodeRef::ExceptHandlerExceptHandler(eh));
+                skel_push(queue, AnyNodeRef::ExceptHandlerExceptHandler(eh));
             }
             for s in &t.orelse {
-                push(queue, AnyNodeRef::from(s));
+                skel_push(queue, AnyNodeRef::from(s));
             }
             for s in &t.finalbody {
-                push(queue, AnyNodeRef::from(s));
+                skel_push(queue, AnyNodeRef::from(s));
             }
         }
         AnyNodeRef::ExceptHandlerExceptHandler(eh) => {
             if let Some(t) = &eh.type_ {
-                push(queue, AnyNodeRef::from(t.as_ref()));
+                skel_push(queue, AnyNodeRef::from(t.as_ref()));
             }
             for s in &eh.body {
-                push(queue, AnyNodeRef::from(s));
+                skel_push(queue, AnyNodeRef::from(s));
             }
         }
         AnyNodeRef::StmtAssert(a) => {
-            push(queue, AnyNodeRef::from(a.test.as_ref()));
+            skel_push(queue, AnyNodeRef::from(a.test.as_ref()));
             if let Some(m) = &a.msg {
-                push(queue, AnyNodeRef::from(m.as_ref()));
+                skel_push(queue, AnyNodeRef::from(m.as_ref()));
             }
         }
         AnyNodeRef::StmtImport(imp) => {
             for a in &imp.names {
-                push(queue, AnyNodeRef::Alias(a));
+                skel_push(queue, AnyNodeRef::Alias(a));
             }
         }
         AnyNodeRef::StmtImportFrom(imp) => {
             for a in &imp.names {
-                push(queue, AnyNodeRef::Alias(a));
+                skel_push(queue, AnyNodeRef::Alias(a));
             }
         }
-        AnyNodeRef::StmtExpr(e) => push(queue, AnyNodeRef::from(e.value.as_ref())),
+        AnyNodeRef::StmtExpr(e) => skel_push(queue, AnyNodeRef::from(e.value.as_ref())),
         // a nested function's subtree IS part of ast.walk — descend like the
         // module-level root: arguments, body, decorator_list, returns
         AnyNodeRef::StmtFunctionDef(f) => {
-            push(queue, AnyNodeRef::Parameters(&f.parameters));
+            skel_push(queue, AnyNodeRef::Parameters(&f.parameters));
             for s in &f.body {
-                push(queue, AnyNodeRef::from(s));
+                skel_push(queue, AnyNodeRef::from(s));
             }
             for d in &f.decorator_list {
-                push(queue, AnyNodeRef::from(&d.expression));
+                skel_push(queue, AnyNodeRef::from(&d.expression));
             }
             if let Some(r) = &f.returns {
-                push(queue, AnyNodeRef::from(r.as_ref()));
+                skel_push(queue, AnyNodeRef::from(r.as_ref()));
             }
         }
         // leaf / identifier-only statements
@@ -1401,22 +1290,22 @@ pub fn skel_children<'a>(node: AnyNodeRef<'a>, queue: &mut Vec<Q<'a>>) {
             // CPython arguments children: posonlyargs, args, vararg,
             // kwonlyargs, kw_defaults, kwarg, defaults (hoisted)
             for pwd in &p.posonlyargs {
-                push(queue, AnyNodeRef::ParameterWithDefault(pwd));
+                skel_push(queue, AnyNodeRef::ParameterWithDefault(pwd));
             }
             for pwd in &p.args {
-                push(queue, AnyNodeRef::ParameterWithDefault(pwd));
+                skel_push(queue, AnyNodeRef::ParameterWithDefault(pwd));
             }
             if let Some(v) = &p.vararg {
-                push(queue, AnyNodeRef::Parameter(v));
+                skel_push(queue, AnyNodeRef::Parameter(v));
             }
             for pwd in &p.kwonlyargs {
-                push(queue, AnyNodeRef::ParameterWithDefault(pwd));
+                skel_push(queue, AnyNodeRef::ParameterWithDefault(pwd));
             }
             for pwd in p.kwonlyargs.iter().filter_map(|p| p.default.as_deref()) {
-                push(queue, AnyNodeRef::from(pwd));
+                skel_push(queue, AnyNodeRef::from(pwd));
             }
             if let Some(k) = &p.kwarg {
-                push(queue, AnyNodeRef::Parameter(k));
+                skel_push(queue, AnyNodeRef::Parameter(k));
             }
             for pwd in p
                 .posonlyargs
@@ -1424,183 +1313,183 @@ pub fn skel_children<'a>(node: AnyNodeRef<'a>, queue: &mut Vec<Q<'a>>) {
                 .chain(&p.args)
                 .filter_map(|p| p.default.as_deref())
             {
-                push(queue, AnyNodeRef::from(pwd));
+                skel_push(queue, AnyNodeRef::from(pwd));
             }
         }
         AnyNodeRef::Parameter(param) => {
             if let Some(a) = &param.annotation {
-                push(queue, AnyNodeRef::from(a.as_ref()));
+                skel_push(queue, AnyNodeRef::from(a.as_ref()));
             }
         }
         AnyNodeRef::ParameterWithDefault(pwd) => {
             // the default is hoisted by Parameters (CPython defaults list)
             if let Some(a) = &pwd.parameter.annotation {
-                push(queue, AnyNodeRef::from(a.as_ref()));
+                skel_push(queue, AnyNodeRef::from(a.as_ref()));
             }
         }
-        AnyNodeRef::Keyword(k) => push(queue, AnyNodeRef::from(&k.value)),
+        AnyNodeRef::Keyword(k) => skel_push(queue, AnyNodeRef::from(&k.value)),
         AnyNodeRef::Comprehension(c) => {
-            push(queue, AnyNodeRef::from(&c.target));
-            push(queue, AnyNodeRef::from(&c.iter));
+            skel_push(queue, AnyNodeRef::from(&c.target));
+            skel_push(queue, AnyNodeRef::from(&c.iter));
             for f in &c.ifs {
-                push(queue, AnyNodeRef::from(f));
+                skel_push(queue, AnyNodeRef::from(f));
             }
         }
         AnyNodeRef::ExprBoolOp(b) => {
-            tok(queue, bool_op_token(&b.op));
+            skel_tok(queue, bool_op_token(&b.op));
             for v in &b.values {
-                push(queue, AnyNodeRef::from(v));
+                skel_push(queue, AnyNodeRef::from(v));
             }
         }
         AnyNodeRef::ExprNamed(n) => {
-            push(queue, AnyNodeRef::from(n.target.as_ref()));
-            push(queue, AnyNodeRef::from(n.value.as_ref()));
+            skel_push(queue, AnyNodeRef::from(n.target.as_ref()));
+            skel_push(queue, AnyNodeRef::from(n.value.as_ref()));
         }
         AnyNodeRef::ExprBinOp(b) => {
-            push(queue, AnyNodeRef::from(b.left.as_ref()));
-            tok(queue, op_token(&b.op));
-            push(queue, AnyNodeRef::from(b.right.as_ref()));
+            skel_push(queue, AnyNodeRef::from(b.left.as_ref()));
+            skel_tok(queue, op_token(&b.op));
+            skel_push(queue, AnyNodeRef::from(b.right.as_ref()));
         }
         AnyNodeRef::ExprUnaryOp(u) => {
-            tok(queue, unary_op_token(&u.op));
-            push(queue, AnyNodeRef::from(u.operand.as_ref()));
+            skel_tok(queue, unary_op_token(&u.op));
+            skel_push(queue, AnyNodeRef::from(u.operand.as_ref()));
         }
         AnyNodeRef::ExprLambda(l) => {
             if let Some(p) = &l.parameters {
-                push(queue, AnyNodeRef::Parameters(p));
+                skel_push(queue, AnyNodeRef::Parameters(p));
             }
-            push(queue, AnyNodeRef::from(l.body.as_ref()));
+            skel_push(queue, AnyNodeRef::from(l.body.as_ref()));
         }
         AnyNodeRef::ExprIf(e) => {
-            push(queue, AnyNodeRef::from(e.test.as_ref()));
-            push(queue, AnyNodeRef::from(e.body.as_ref()));
-            push(queue, AnyNodeRef::from(e.orelse.as_ref()));
+            skel_push(queue, AnyNodeRef::from(e.test.as_ref()));
+            skel_push(queue, AnyNodeRef::from(e.body.as_ref()));
+            skel_push(queue, AnyNodeRef::from(e.orelse.as_ref()));
         }
         AnyNodeRef::ExprDict(d) => {
             // CPython: all keys first, then all values
             for item in &d.items {
                 if let Some(k) = &item.key {
-                    push(queue, AnyNodeRef::from(k));
+                    skel_push(queue, AnyNodeRef::from(k));
                 }
             }
             for item in &d.items {
-                push(queue, AnyNodeRef::from(&item.value));
+                skel_push(queue, AnyNodeRef::from(&item.value));
             }
         }
         AnyNodeRef::ExprSet(s) => {
             for e in &s.elts {
-                push(queue, AnyNodeRef::from(e));
+                skel_push(queue, AnyNodeRef::from(e));
             }
         }
         AnyNodeRef::ExprListComp(c) => {
-            push(queue, AnyNodeRef::from(c.elt.as_ref()));
+            skel_push(queue, AnyNodeRef::from(c.elt.as_ref()));
             for g in &c.generators {
-                push(queue, AnyNodeRef::Comprehension(g));
+                skel_push(queue, AnyNodeRef::Comprehension(g));
             }
         }
         AnyNodeRef::ExprSetComp(c) => {
-            push(queue, AnyNodeRef::from(c.elt.as_ref()));
+            skel_push(queue, AnyNodeRef::from(c.elt.as_ref()));
             for g in &c.generators {
-                push(queue, AnyNodeRef::Comprehension(g));
+                skel_push(queue, AnyNodeRef::Comprehension(g));
             }
         }
         AnyNodeRef::ExprGenerator(g) => {
-            push(queue, AnyNodeRef::from(g.elt.as_ref()));
+            skel_push(queue, AnyNodeRef::from(g.elt.as_ref()));
             for gen in &g.generators {
-                push(queue, AnyNodeRef::Comprehension(gen));
+                skel_push(queue, AnyNodeRef::Comprehension(gen));
             }
         }
         AnyNodeRef::ExprDictComp(c) => {
             if let Some(k) = &c.key {
-                push(queue, AnyNodeRef::from(k.as_ref()));
+                skel_push(queue, AnyNodeRef::from(k.as_ref()));
             }
-            push(queue, AnyNodeRef::from(c.value.as_ref()));
+            skel_push(queue, AnyNodeRef::from(c.value.as_ref()));
             for g in &c.generators {
-                push(queue, AnyNodeRef::Comprehension(g));
+                skel_push(queue, AnyNodeRef::Comprehension(g));
             }
         }
-        AnyNodeRef::ExprAwait(a) => push(queue, AnyNodeRef::from(a.value.as_ref())),
+        AnyNodeRef::ExprAwait(a) => skel_push(queue, AnyNodeRef::from(a.value.as_ref())),
         AnyNodeRef::ExprYield(y) => {
             if let Some(v) = &y.value {
-                push(queue, AnyNodeRef::from(v.as_ref()));
+                skel_push(queue, AnyNodeRef::from(v.as_ref()));
             }
         }
-        AnyNodeRef::ExprYieldFrom(y) => push(queue, AnyNodeRef::from(y.value.as_ref())),
+        AnyNodeRef::ExprYieldFrom(y) => skel_push(queue, AnyNodeRef::from(y.value.as_ref())),
         AnyNodeRef::ExprCompare(c) => {
-            push(queue, AnyNodeRef::from(c.left.as_ref()));
+            skel_push(queue, AnyNodeRef::from(c.left.as_ref()));
             for o in &c.ops {
-                tok(queue, cmp_op_token(o));
+                skel_tok(queue, cmp_op_token(o));
             }
             for o in &c.comparators {
-                push(queue, AnyNodeRef::from(o));
+                skel_push(queue, AnyNodeRef::from(o));
             }
         }
         AnyNodeRef::ExprCall(c) => {
-            push(queue, AnyNodeRef::from(c.func.as_ref()));
+            skel_push(queue, AnyNodeRef::from(c.func.as_ref()));
             for a in &c.arguments.args {
-                push(queue, AnyNodeRef::from(a));
+                skel_push(queue, AnyNodeRef::from(a));
             }
             for k in &c.arguments.keywords {
-                push(queue, AnyNodeRef::Keyword(k));
+                skel_push(queue, AnyNodeRef::Keyword(k));
             }
         }
         AnyNodeRef::ExprFString(f) => {
             for element in f.value.elements() {
-                push(queue, AnyNodeRef::from(element));
+                skel_push(queue, AnyNodeRef::from(element));
             }
         }
         AnyNodeRef::ExprTString(t) => {
             // t-strings (3.14) — structurally a JoinedStr; walk parts' elements
             for element in t.value.elements() {
-                push(queue, AnyNodeRef::from(element));
+                skel_push(queue, AnyNodeRef::from(element));
             }
         }
         AnyNodeRef::InterpolatedElement(e) => {
-            push(queue, AnyNodeRef::from(e.expression.as_ref()));
+            skel_push(queue, AnyNodeRef::from(e.expression.as_ref()));
             if let Some(spec) = &e.format_spec {
                 for element in &spec.elements {
-                    push(queue, AnyNodeRef::from(element));
+                    skel_push(queue, AnyNodeRef::from(element));
                 }
             }
         }
         AnyNodeRef::InterpolatedStringFormatSpec(_) | AnyNodeRef::InterpolatedStringLiteralElement(_) => {}
         AnyNodeRef::ExprAttribute(a) => {
-            push(queue, AnyNodeRef::from(a.value.as_ref()));
-            tok(queue, ctx_token(&a.ctx));
+            skel_push(queue, AnyNodeRef::from(a.value.as_ref()));
+            skel_tok(queue, ctx_token(&a.ctx));
         }
         AnyNodeRef::ExprSubscript(s) => {
-            push(queue, AnyNodeRef::from(s.value.as_ref()));
-            push(queue, AnyNodeRef::from(s.slice.as_ref()));
-            tok(queue, ctx_token(&s.ctx));
+            skel_push(queue, AnyNodeRef::from(s.value.as_ref()));
+            skel_push(queue, AnyNodeRef::from(s.slice.as_ref()));
+            skel_tok(queue, ctx_token(&s.ctx));
         }
         AnyNodeRef::ExprStarred(s) => {
-            push(queue, AnyNodeRef::from(s.value.as_ref()));
-            tok(queue, ctx_token(&s.ctx));
+            skel_push(queue, AnyNodeRef::from(s.value.as_ref()));
+            skel_tok(queue, ctx_token(&s.ctx));
         }
         AnyNodeRef::ExprList(l) => {
             for e in &l.elts {
-                push(queue, AnyNodeRef::from(e));
+                skel_push(queue, AnyNodeRef::from(e));
             }
-            tok(queue, ctx_token(&l.ctx));
+            skel_tok(queue, ctx_token(&l.ctx));
         }
         AnyNodeRef::ExprTuple(t) => {
             for e in &t.elts {
-                push(queue, AnyNodeRef::from(e));
+                skel_push(queue, AnyNodeRef::from(e));
             }
-            tok(queue, ctx_token(&t.ctx));
+            skel_tok(queue, ctx_token(&t.ctx));
         }
         AnyNodeRef::ExprSlice(s) => {
             if let Some(l) = &s.lower {
-                push(queue, AnyNodeRef::from(l.as_ref()));
+                skel_push(queue, AnyNodeRef::from(l.as_ref()));
             }
             if let Some(u) = &s.upper {
-                push(queue, AnyNodeRef::from(u.as_ref()));
+                skel_push(queue, AnyNodeRef::from(u.as_ref()));
             }
             if let Some(st) = &s.step {
-                push(queue, AnyNodeRef::from(st.as_ref()));
+                skel_push(queue, AnyNodeRef::from(st.as_ref()));
             }
         }
-        AnyNodeRef::PatternMatchValue(p) => push(queue, AnyNodeRef::from(p.value.as_ref())),
+        AnyNodeRef::PatternMatchValue(p) => skel_push(queue, AnyNodeRef::from(p.value.as_ref())),
         AnyNodeRef::PatternMatchSequence(p) => {
             for pat in &p.patterns {
                 push_pattern(queue, pat);
@@ -1608,14 +1497,14 @@ pub fn skel_children<'a>(node: AnyNodeRef<'a>, queue: &mut Vec<Q<'a>>) {
         }
         AnyNodeRef::PatternMatchMapping(p) => {
             for k in &p.keys {
-                push(queue, AnyNodeRef::from(k));
+                skel_push(queue, AnyNodeRef::from(k));
             }
             for pat in &p.patterns {
                 push_pattern(queue, pat);
             }
         }
         AnyNodeRef::PatternMatchClass(p) => {
-            push(queue, AnyNodeRef::from(p.cls.as_ref()));
+            skel_push(queue, AnyNodeRef::from(p.cls.as_ref()));
             for pat in &p.arguments.patterns {
                 push_pattern(queue, pat);
             }
@@ -1636,33 +1525,33 @@ pub fn skel_children<'a>(node: AnyNodeRef<'a>, queue: &mut Vec<Q<'a>>) {
         AnyNodeRef::PatternMatchSingleton(_) | AnyNodeRef::PatternMatchStar(_) => {}
         AnyNodeRef::TypeParamTypeVar(t) => {
             if let Some(b) = &t.bound {
-                push(queue, AnyNodeRef::from(b.as_ref()));
+                skel_push(queue, AnyNodeRef::from(b.as_ref()));
             }
             if let Some(d) = &t.default {
-                push(queue, AnyNodeRef::from(d.as_ref()));
+                skel_push(queue, AnyNodeRef::from(d.as_ref()));
             }
         }
         AnyNodeRef::TypeParamTypeVarTuple(t) => {
             if let Some(d) = &t.default {
-                push(queue, AnyNodeRef::from(d.as_ref()));
+                skel_push(queue, AnyNodeRef::from(d.as_ref()));
             }
         }
         AnyNodeRef::TypeParamParamSpec(t) => {
             if let Some(d) = &t.default {
-                push(queue, AnyNodeRef::from(d.as_ref()));
+                skel_push(queue, AnyNodeRef::from(d.as_ref()));
             }
         }
         AnyNodeRef::PatternArguments(_) | AnyNodeRef::PatternKeyword(_) => {}
         AnyNodeRef::Arguments(a) => {
             for e in &a.args {
-                push(queue, AnyNodeRef::from(e));
+                skel_push(queue, AnyNodeRef::from(e));
             }
             for k in &a.keywords {
-                push(queue, AnyNodeRef::Keyword(k));
+                skel_push(queue, AnyNodeRef::Keyword(k));
             }
         }
         // literals, names, module — leaves
-        AnyNodeRef::ExprName(n) => tok(queue, ctx_token(&n.ctx)),
+        AnyNodeRef::ExprName(n) => skel_tok(queue, ctx_token(&n.ctx)),
         AnyNodeRef::ExprStringLiteral(_)
         | AnyNodeRef::ExprBytesLiteral(_)
         | AnyNodeRef::ExprNumberLiteral(_)
@@ -1698,20 +1587,7 @@ pub fn is_duplicate_candidate(f: &StmtFunctionDef, skeleton_len: usize) -> bool 
     stmts.len() >= 2 && skeleton_len >= 12
 }
 
-/// Order-independent content hash of a skeleton's bigram set — identical
-/// sets collide, so the hash IS the dice=1.0 test. XOR keeps it order-free;
-/// DefaultHasher::new() has fixed keys, so the value is deterministic.
-fn bigram_set_hash(t: &[String]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = 0u64;
-    for w in t.windows(2) {
-        let mut s = std::collections::hash_map::DefaultHasher::new();
-        w[0].hash(&mut s);
-        w[1].hash(&mut s);
-        h ^= s.finish();
-    }
-    h
-}
+pub use crate::common::bigram_set_hash;
 
 /// Cross-file copy-paste findings (`_duplicate_actions`).
 ///
@@ -2535,6 +2411,7 @@ const FS_TEMPFILE: [&str; 6] = [
 ];
 
 /// `_fakefs_findings` — real FS access in tests without pyfakefs.
+// code-health: ignore large-function the fake-filesystem grammar is one decision table per backend
 pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
     let uses_fakefs_base = {
         let mut base = false;

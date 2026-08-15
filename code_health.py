@@ -294,7 +294,7 @@ class SourceFile:
 
 
 def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
-    """The repo's own .py files — git's answer, not an invented list.
+    """The repo's own .py and .rs files — git's answer, not an invented list.
 
     `git ls-files --cached --others --exclude-standard` = tracked files plus
     untracked-not-ignored: exactly what the repo's .gitignore defines as its
@@ -304,10 +304,11 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
     """
     if only_rel is not None:
         py = repo / only_rel
-        return [SourceFile(py, only_rel)] if py.is_file() and py.suffix == ".py" else []
+        return [SourceFile(py, only_rel)] if py.is_file() and py.suffix in (".py", ".rs") else []
     try:
         proc = subprocess.run(
-            ["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "*.py"],
+            ["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--",
+             "*.py", "*.rs"],
             capture_output=True, text=True, check=True, timeout=60,
         )
         rels = [r for r in proc.stdout.split("\0") if r]
@@ -318,7 +319,7 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
         log("git ls-files failed — falling back to rglob for the file list")
         return [
             SourceFile(py, py.relative_to(repo).as_posix())
-            for py in sorted(repo.rglob("*.py"))
+            for py in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.rs"))
             if not any(_excluded_part(part) for part in py.parts)
         ]
 
@@ -977,7 +978,7 @@ def _gate_exit(stale: list[str], fails: list[Action], args) -> int:
 
 # --------------------------------------------------------------------------- scan driver
 
-TEST_ONLY_SIGNALS = {"suppression", "type-ignore", "monkeypatch", "skipif", "fakefs"}
+TEST_ONLY_SIGNALS = {"suppression", "type-ignore", "monkeypatch", "skipif", "fakefs", "allow-reason"}
 
 
 def _actions_from_rust(
