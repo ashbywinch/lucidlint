@@ -1888,3 +1888,376 @@ pub fn unused_findings(
     }
     out
 }
+
+// =====================================================================
+// record-shape: "never a bare dict as a record" (check_records.py)
+//   - signatures: record-shaped collections in params/returns (grab-bags,
+//     collections of dicts/tuples, nested lists, fixed tuples); maps pass;
+//     deserializer boundaries (raw JSON in, domain class out) are exempt
+//   - literals: dict literals with >= 2 keys, >= 1 constant string key,
+//     >= 1 dynamic value, in a record position (assign/return/yield)
+// =====================================================================
+
+const PRIMITIVES: [&str; 8] = ["str", "int", "float", "bool", "bytes", "Any", "object", "None"];
+
+/// `_name_of`: the bare name of an annotation (typing.Any -> Any).
+fn ann_name_of(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Name(n) => Some(n.id.to_string()),
+        Expr::Attribute(a) => Some(a.attr.to_string()),
+        Expr::NoneLiteral(_) => Some("None".to_string()),
+        Expr::BooleanLiteral(b) => Some(b.value.to_string()),
+        Expr::StringLiteral(s) => Some(s.value.to_str().to_string()),
+        _ => None,
+    }
+}
+
+/// `_base_name`: lowercase dict/list/tuple/optional spellings (typing.Dict -> dict).
+fn ann_base_name(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Name(n) => Some(n.id.to_lowercase()),
+        Expr::Attribute(a) => Some(a.attr.to_lowercase()),
+        _ => None,
+    }
+}
+
+/// `_unwrap`: peel Optional[..]/Union[..]/A | B wrappers into their members.
+fn ann_unwrap<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match e {
+        Expr::BinOp(b) if matches!(b.op, Operator::BitOr) => {
+            ann_unwrap(&b.left, out);
+            ann_unwrap(&b.right, out);
+        }
+        Expr::Subscript(s) if matches!(ann_base_name(&s.value).as_deref(), Some("optional" | "union")) => {
+            let slice: &Expr = s.slice.as_ref();
+            if let Expr::Tuple(t) = slice {
+                for elt in &t.elts {
+                    ann_unwrap(elt, out);
+                }
+            } else {
+                ann_unwrap(slice, out);
+            }
+        }
+        _ => out.push(e),
+    }
+}
+
+/// `_is_variadic_tuple`: tuple[T, ...] is a homogeneous sequence, not a pair.
+fn is_variadic_tuple(e: &Expr) -> bool {
+    if let Expr::Subscript(s) = e {
+        if ann_base_name(&s.value).as_deref() == Some("tuple") {
+            if let Expr::Tuple(t) = s.slice.as_ref() {
+                return t.elts.iter().any(|elt| matches!(elt, Expr::EllipsisLiteral(_)));
+            }
+        }
+    }
+    false
+}
+
+/// `_is_raw_json`: bare/grab-bag dict (dict, dict[str, Any], ...) or a
+/// collection of one — the deserializer-boundary exemption.
+fn is_raw_json(e: &Expr) -> bool {
+    let mut wrapped = Vec::new();
+    ann_unwrap(e, &mut wrapped);
+    if wrapped.len() != 1 {
+        return wrapped.iter().any(|p| is_raw_json(p));
+    }
+    let node = wrapped[0];
+    if let Expr::Name(n) = node {
+        return n.id.eq_ignore_ascii_case("dict");
+    }
+    if let Expr::Subscript(s) = node {
+        let base = ann_base_name(&s.value);
+        if base.as_deref() == Some("dict") {
+            let slice: &Expr = s.slice.as_ref();
+            if let Expr::Tuple(t) = slice {
+                if t.elts.len() != 2 {
+                    return true; // malformed — treat as bare-ish
+                }
+                let mut val_parts = Vec::new();
+                ann_unwrap(&t.elts[1], &mut val_parts);
+                return val_parts.iter().any(|p| matches!(ann_name_of(p).as_deref(), Some("Any" | "object" | "None")));
+            }
+            return true; // dict[X] single-arg
+        }
+        if matches!(base.as_deref(), Some("list" | "tuple")) {
+            let elt: &Expr = s.slice.as_ref();
+            if matches!(elt, Expr::Tuple(_)) {
+                return false; // a fixed tuple of stuff is not raw rows
+            }
+            return is_raw_json(elt);
+        }
+    }
+    false
+}
+
+/// `_annotation_is_record`: record-shaped bare collection in a signature.
+fn annotation_is_record(e: &Expr) -> bool {
+    let mut wrapped = Vec::new();
+    ann_unwrap(e, &mut wrapped);
+    if wrapped.len() != 1 {
+        return wrapped.iter().any(|p| annotation_is_record(p));
+    }
+    let node = wrapped[0];
+    if let Expr::Name(n) = node {
+        return n.id.eq_ignore_ascii_case("dict"); // bare dict = grab-bag
+    }
+    if let Expr::Subscript(s) = node {
+        let base = ann_base_name(&s.value);
+        if base.as_deref() == Some("dict") {
+            let slice: &Expr = s.slice.as_ref();
+            if let Expr::Tuple(t) = slice {
+                if t.elts.len() != 2 {
+                    return false; // malformed — tolerate
+                }
+                let key = &t.elts[0];
+                if !matches!(ann_name_of(key).as_deref(), Some("str" | "Any")) {
+                    return false;
+                }
+                let mut val_parts = Vec::new();
+                ann_unwrap(&t.elts[1], &mut val_parts);
+                if val_parts.len() > 1 {
+                    // a union value: a record or shapeless member makes it a record
+                    return val_parts.iter().any(|p| annotation_is_record(p))
+                        || val_parts.iter().any(|p| matches!(ann_name_of(p).as_deref(), Some("Any" | "object")));
+                }
+                let val = val_parts[0];
+                let val_name = ann_name_of(val);
+                if matches!(val_name.as_deref(), Some("Any" | "object" | "None")) {
+                    return true; // grab-bag: no shape
+                }
+                if matches!(val, Expr::Subscript(_)) {
+                    return !is_variadic_tuple(val); // collection values are records
+                }
+                return matches!(ann_base_name(val).as_deref(), Some("dict" | "tuple" | "list"));
+            }
+            return true; // dict[X] single-arg or dict[()]
+        }
+        if base.as_deref() == Some("tuple") {
+            return !is_variadic_tuple(node); // fixed-size pairs are records
+        }
+        if base.as_deref() == Some("list") {
+            let mut parts = Vec::new();
+            ann_unwrap(s.slice.as_ref(), &mut parts);
+            if parts.len() != 1 {
+                return parts.iter().any(|p| annotation_is_record(p));
+            }
+            let value = parts[0];
+            if matches!(value, Expr::Subscript(_)) {
+                return !is_variadic_tuple(value);
+            }
+            return matches!(
+                value,
+                Expr::Name(n) if matches!(n.id.to_lowercase().as_str(), "dict" | "tuple" | "list")
+            );
+        }
+    }
+    false
+}
+
+/// `_part_is_domain`: one return-annotation part resolving to a domain class.
+fn part_is_domain(e: &Expr) -> bool {
+    match e {
+        Expr::Name(n) => {
+            !PRIMITIVES.contains(&n.id.as_str()) && !matches!(n.id.as_str(), "dict" | "tuple" | "list")
+        }
+        Expr::Subscript(s) => {
+            if matches!(ann_base_name(&s.value).as_deref(), Some("list" | "tuple")) {
+                let elt: &Expr = s.slice.as_ref();
+                if let Expr::Tuple(t) = elt {
+                    let parts: Vec<&Expr> =
+                        t.elts.iter().filter(|e| !matches!(e, Expr::EllipsisLiteral(_))).collect();
+                    return parts.len() == 1 && part_is_domain(parts[0]);
+                }
+                return part_is_domain(elt);
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// `_returns_domain_class`: the function converts raw JSON into domain
+/// objects — the sanctioned deserializer boundary.
+fn returns_domain_class(f: &StmtFunctionDef) -> bool {
+    match &f.returns {
+        Some(r) => {
+            let mut parts = Vec::new();
+            ann_unwrap(r.as_ref(), &mut parts);
+            parts.iter().any(|p| part_is_domain(p))
+        }
+        None => false,
+    }
+}
+
+/// `_is_constant_value`: a literal that cannot vary at runtime (lookup
+/// tables may carry nested constant structures).
+fn is_constant_value(e: &Expr) -> bool {
+    match e {
+        Expr::StringLiteral(_)
+        | Expr::BytesLiteral(_)
+        | Expr::NumberLiteral(_)
+        | Expr::BooleanLiteral(_)
+        | Expr::NoneLiteral(_)
+        | Expr::EllipsisLiteral(_) => true,
+        Expr::UnaryOp(u) if matches!(u.op, UnaryOp::UAdd | UnaryOp::USub) => is_constant_value(&u.operand),
+        Expr::List(l) => l.elts.iter().all(is_constant_value),
+        Expr::Tuple(t) => t.elts.iter().all(is_constant_value),
+        Expr::Dict(d) => d.items.iter().all(|it| {
+            it.key.as_ref().map(is_constant_value).unwrap_or(false) && is_constant_value(&it.value)
+        }),
+        _ => false,
+    }
+}
+
+/// The dict-literal scan: record positions only; inline call arguments are
+/// maps and are not descended into; spread merges are not records.
+fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<usize>) {
+    match e {
+        Expr::Dict(d) => {
+            // a spread merge ({**session, ...}) updates an existing shape —
+            // not a record being built (ruff keys are None for the unpack)
+            if d.items.iter().any(|it| it.key.is_none()) {
+                return;
+            }
+            let has_const_key = d
+                .items
+                .iter()
+                .any(|it| matches!(&it.key, Some(k) if matches!(k, Expr::StringLiteral(_))));
+            let has_dynamic_value = d.items.iter().any(|it| !is_constant_value(&it.value));
+            if d.items.len() >= 2 && has_const_key && has_dynamic_value {
+                found.push(line_of(source, d.range().start()));
+            }
+            for it in &d.items {
+                record_literal_scan(&it.value, source, found);
+            }
+        }
+        Expr::List(l) => {
+            for elt in &l.elts {
+                record_literal_scan(elt, source, found);
+            }
+        }
+        Expr::Tuple(t) => {
+            for elt in &t.elts {
+                record_literal_scan(elt, source, found);
+            }
+        }
+        Expr::If(ie) => {
+            record_literal_scan(&ie.body, source, found);
+            record_literal_scan(&ie.orelse, source, found);
+        }
+        Expr::ListComp(c) => record_literal_scan(&c.elt, source, found),
+        Expr::SetComp(c) => record_literal_scan(&c.elt, source, found),
+        Expr::Generator(c) => record_literal_scan(&c.elt, source, found),
+        Expr::DictComp(c) => {
+            if let Some(k) = &c.key {
+                record_literal_scan(k, source, found);
+            }
+            record_literal_scan(&c.value, source, found);
+        }
+        Expr::Lambda(l) => record_literal_scan(&l.body, source, found),
+        _ => {} // NOT Call — inline arguments (headers={...}) are maps
+    }
+}
+
+/// The record-shape family: signature findings + record dict literals,
+/// walking the module in ast.walk BFS order (nested functions included).
+pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+    let mut qi = 0usize;
+    while qi < queue.len() {
+        if let Q::N(n) = queue[qi] {
+            if let AnyNodeRef::StmtFunctionDef(f) = n {
+                let def_line = line_of(source, f.name.range().start());
+                let boundary = returns_domain_class(f);
+                let mut params: Vec<(&str, Option<&Expr>)> = Vec::new();
+                for pwd in f
+                    .parameters
+                    .posonlyargs
+                    .iter()
+                    .chain(&f.parameters.args)
+                    .chain(&f.parameters.kwonlyargs)
+                {
+                    params.push((pwd.parameter.name.as_str(), pwd.parameter.annotation.as_deref()));
+                }
+                if let Some(v) = &f.parameters.vararg {
+                    params.push((v.name.as_str(), v.annotation.as_deref()));
+                }
+                if let Some(k) = &f.parameters.kwarg {
+                    params.push((k.name.as_str(), k.annotation.as_deref()));
+                }
+                for (arg, ann) in params {
+                    if let Some(a) = ann {
+                        if !annotation_is_record(a) {
+                            continue;
+                        }
+                        if boundary && is_raw_json(a) {
+                            continue; // deserializer boundary: raw JSON in, domain class out
+                        }
+                        let text = source[a.range()].to_string();
+                        state.findings.push(Finding {
+                            file: state.file.to_string(),
+                            line: def_line,
+                            function: f.name.to_string(),
+                            kind: "record-shape".into(),
+                            severity: "fail".into(),
+                            message: format!(
+                                "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line})",
+                                f.name.as_str()
+                            ),
+                        });
+                    }
+                }
+                if let Some(r) = &f.returns {
+                    if annotation_is_record(r.as_ref()) {
+                        let text = source[r.range()].to_string();
+                        state.findings.push(Finding {
+                            file: state.file.to_string(),
+                            line: def_line,
+                            function: f.name.to_string(),
+                            kind: "record-shape".into(),
+                            severity: "fail".into(),
+                            message: format!(
+                                "bare record collection '{text}' as return type of {} (line {def_line})",
+                                f.name.as_str()
+                            ),
+                        });
+                    }
+                }
+            }
+            skel_children(n, &mut queue);
+        }
+        qi += 1;
+    }
+    // record dict literals in record positions (assign/annassign/return/yield)
+    let mut found: Vec<usize> = Vec::new();
+    let mut sq: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+    let mut si = 0usize;
+    while si < sq.len() {
+        if let Q::N(n) = sq[si] {
+            let value: Option<&Expr> = match n {
+                AnyNodeRef::StmtAssign(a) => Some(a.value.as_ref()),
+                AnyNodeRef::StmtAnnAssign(a) => a.value.as_deref(),
+                AnyNodeRef::StmtReturn(r) => r.value.as_deref(),
+                AnyNodeRef::ExprYield(y) => y.value.as_deref(),
+                AnyNodeRef::ExprYieldFrom(y) => Some(y.value.as_ref()),
+                _ => None,
+            };
+            if let Some(v) = value {
+                record_literal_scan(v, source, &mut found);
+            }
+            skel_children(n, &mut sq);
+        }
+        si += 1;
+    }
+    for ln in found {
+        state.findings.push(Finding {
+            file: state.file.to_string(),
+            line: ln,
+            function: String::new(),
+            kind: "record-shape".into(),
+            severity: "fail".into(),
+            message: format!("dict literal with constant keys is a record — make a class (line {ln})"),
+        });
+    }
+}

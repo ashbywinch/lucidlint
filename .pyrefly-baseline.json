@@ -253,9 +253,9 @@
    "severity": "error"
   },
   {
-   "line": 3948,
+   "line": 3951,
    "column": 39,
-   "stop_line": 3948,
+   "stop_line": 3951,
    "stop_column": 50,
    "path": "code_health.py",
    "code": -2,
@@ -997,9 +997,9 @@
    "severity": "error"
   },
   {
-   "line": 103,
+   "line": 105,
    "column": 62,
-   "stop_line": 103,
+   "stop_line": 105,
    "stop_column": 64,
    "path": "tests/test_scanner_parity.py",
    "code": -2,

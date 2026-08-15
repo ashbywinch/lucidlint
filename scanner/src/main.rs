@@ -684,6 +684,7 @@ fn scan_source(source: &str, name: &str) -> FileScan {
     class_module_findings(&mut state, &body, name);
     vague_name_findings(&mut state, &body);
     strewing_findings(&mut state, &body);
+    record_shape_findings(&mut state, &body, source);
     // duplicate candidates in ast.walk BFS order — module-level functions
     // (any depth) come before class methods regardless of source line
     if !state.is_test {
@@ -1223,6 +1224,71 @@ mod tests {
     }
 
     // ------------------------------------------------- severity
+    // ------------------------------------------------- record-shape
+    #[test]
+    fn record_grab_bag_and_collection_params_fail() {
+        let f = scan_src("def f(m: dict[str, Any]):\n    return m\n\ndef g(rows: list[dict[str, str]]):\n    return rows\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn record_map_and_domain_params_pass() {
+        let f = scan_src("def f(counts: dict[str, int], items: list[Item]):\n    return counts, items\n");
+        assert!(!f.iter().any(|x| x.kind == "record-shape"));
+    }
+
+    #[test]
+    fn record_return_collection_of_dicts_fails() {
+        let f = scan_src("def f() -> dict[str, dict[str, int]]:\n    return {}\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1);
+        assert!(r[0].message.contains("as return type"));
+    }
+
+    #[test]
+    fn record_variadic_tuple_and_fixed_tuple() {
+        // tuple[str, ...] is a sequence; tuple[str, int] is a record pair
+        let f = scan_src("def a(x: tuple[str, ...]) -> None:\n    pass\n\ndef b(pair: tuple[str, int]) -> None:\n    pass\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1);
+        assert!(r[0].message.contains("pair"));
+    }
+
+    #[test]
+    fn record_deserializer_boundary_is_exempt() {
+        // raw JSON in, domain class out — the sanctioned bare-dict spot
+        let f = scan_src("def parse(raw: dict[str, Any]) -> Label:\n    return Label(raw)\n");
+        assert!(!f.iter().any(|x| x.kind == "record-shape"));
+    }
+
+    #[test]
+    fn record_dict_literal_in_return_is_found() {
+        let f = scan_src("def f(x):\n    return {\"kind\": \"tool_call\", \"value\": x}\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1);
+        assert!(r[0].message.contains("dict literal"));
+        assert_eq!(r[0].line, 2);
+    }
+
+    #[test]
+    fn record_inline_call_args_and_lookup_tables_pass() {
+        let f = scan_src("def f(x):\n    client.post(url, headers={\"Content-Type\": \"json\", \"X\": x})\n    table = {\"a\": 1, \"b\": 2}\n    return table\n");
+        assert!(!f.iter().any(|x| x.kind == "record-shape"));
+    }
+
+    #[test]
+    fn record_spread_merge_is_not_a_record() {
+        let f = scan_src("def f(session, x):\n    return {**session, \"x\": x}\n");
+        assert!(!f.iter().any(|x| x.kind == "record-shape"));
+    }
+
+    #[test]
+    fn record_suppression_with_why_exempts() {
+        let f = scan_src("def f(x):\n    return {\"a\": 1, \"b\": x}  # code-health: ignore record-shape genuine map\n");
+        assert!(!f.iter().any(|x| x.kind == "record-shape"));
+    }
+
     #[test]
     fn magic_number_is_a_warn_never_fail() {
         let f = scan_src("def alpha(a):\n    return a * 3\n");

@@ -16,12 +16,14 @@ The houses corpus stays an optional deep check (make scanner-parity-houses)
 """
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
 from radon.visitors import ComplexityVisitor
 
+import check_records
 import code_health as ch
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -104,6 +106,13 @@ def _python_side() -> tuple[set, set]:
             sig = _signal_of(a.message)
             if sig:
                 findings.add((sig, rel, a.line))
+        # record-shape: the fixtures are the record rules' workout, but the
+        # repo-wide record scan excludes fixtures dirs by design — scan each
+        # corpus file directly (a file path bypasses the dir exclusion)
+        for finding in check_records.scan([py]).findings:
+            m = re.search(r"\(line (\d+)\)", finding)
+            if m:
+                findings.add(("record-shape", rel, int(m.group(1))))
     return cc, findings
 
 

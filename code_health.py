@@ -3198,6 +3198,8 @@ def _latent_action(
         kind = "latent-class"
     elif finding.signal == "vague-name":
         kind = "vague-name"
+    elif finding.signal == "record-shape":
+        kind = "record-shape"
     elif finding.signal in ("docs-link", "docs-undiscoverable"):
         kind = "docs"
     elif finding.signal == "folder-mix":
@@ -3945,14 +3947,22 @@ def _record_actions(
     """Record-shaped collections (bare dicts/tuples as records) via check_records."""
     actions: list[Action] = []
     scan_root: Path | list[Path] = (repo / only_rel) if only_rel else repo
+    file_supps_cache: dict[str, tuple[dict[int, tuple[str, str]], set[str]]] = {}
     for finding in check_records.scan([scan_root]).findings:
-        rel = rel_path(repo, finding.split(":", 1)[0])
+        path, body = finding.split(":", 1)
+        rel = rel_path(repo, path)
         if not include_tests and is_test_path(rel):
             continue
         line = 1
-        m = re.search(r"\(line (\d+)\)", finding)
+        m = re.search(r"\(line (\d+)\)", body)
         if m:
             line = int(m.group(1))
+        if rel not in file_supps_cache:
+            src = (repo / rel).read_text(encoding="utf-8", errors="replace")
+            file_supps_cache[rel] = (_suppressions(src), set(_file_suppressions(src).exemptions))
+        supps, file_exempts = file_supps_cache[rel]
+        if _suppressed("record-shape", line, supps) or "record-shape" in file_exempts:
+            continue  # the documented escape hatch: a genuine map is suppressed with a why
         fn = ""
         m = re.search(r"of (\w+) \(line", finding)
         if m:
@@ -4052,7 +4062,9 @@ def _collect_actions(
         )
     if only_rel is None:
         actions += hotspot_actions(repo, args.hotspot_top_frac, args.hotspot_min_cc, file_churn, last_modified)
-    actions += _record_actions(repo, args.include_tests, file_churn, last_modified, only_rel)
+    if not RUST_SCAN.active(repo):
+        # the Rust core computes record-shape in its one scan pass
+        actions += _record_actions(repo, args.include_tests, file_churn, last_modified, only_rel)
     actions += _latent_class_actions(repo, args.include_tests, file_churn, last_modified, only_rel)
     if only_rel is None:
         # repo-wide families — git/graph/coverage-scoped, skipped in the
