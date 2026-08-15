@@ -46,7 +46,7 @@ ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-ris
 # Deliberately resists gaming the metric: splitting a function to lower a
 # count without clarifying it is not a fix.
 GUIDANCE = {
-    "complexity": "Extract each decision branch into a named method that says what it decides in domain terms — one decision per method, happy path reads top-to-bottom. If the body is repeated similar blocks rather than distinct decisions, prefer a data table + loop over more methods.",
+    "complexity": "Extract each decision branch into a named method that says what it decides in domain terms — one decision per method, happy path reads top-to-bottom. If the body is repeated similar blocks rather than distinct decisions, prefer a data table + loop over more methods. Where it mixes subsystems, extract a class per concern — for endpoints that usually means service-layer functions behind the Services DI, not new classes.",
     "large-function": "Split by responsibility into named steps that read like a procedure in the domain; one job per step, each independently testable.",
     "hub-file": "Separate the concerns it mixes (HTTP, orchestration, persistence, …) into modules with narrow, stable interfaces so changes stay contained. If the file is a composition root whose job is wiring, move handler logic out to the service layer and keep the assembly thin — don't split the assembly itself.",
     "hotspot": "Make the volatile part small and data-driven behind a stable interface — frequent changes become cheap and cannot disturb the stable core.",
@@ -427,19 +427,26 @@ def complexity_actions(repo: Path, max_cc: int, include_tests: bool,
     return actions
 
 
-def final_tested(covered: dict[str, set[int]] | None, rel: str, info: dict, graph_preferred: bool = False) -> str:
-    """Coverage verdict: real coverage data wins, unless it's stale.
+def _verdict(covered: dict[str, set[int]] | None, rel: str, info: dict, graph_tested: str, graph_preferred: bool) -> str:
+    """Single coverage verdict: 'tested', 'untested', or 'unknown'.
 
-    When the snapshot predates the repo's tests (graph_preferred), the graph's
-    fresher TESTED_BY signal wins — the snapshot would otherwise mislabel
-    freshly-tested code as untested.
+    One source of truth for both the JSON field and the prose note, so they
+    can never contradict. Stale snapshot (graph_preferred): trust the graph's
+    TESTED_BY, but a hit in even the stale snapshot is still evidence of
+    coverage. Fresh data: the snapshot decides.
     """
-    if graph_preferred and info.get("tested") == "tested":
-        return "tested"
     cov = covered_span(covered, rel, info.get("line_start") or 1, info.get("line_end") or info.get("line_start") or 1)
+    if graph_preferred:
+        if graph_tested == "tested" or cov is True:
+            return "tested"
+        return "untested" if cov is False else "unknown"
     if cov is not None:
         return "tested" if cov else "untested"
-    return info.get("tested", "")
+    return graph_tested or "unknown"
+
+
+def final_tested(covered: dict[str, set[int]] | None, rel: str, info: dict, graph_preferred: bool = False) -> str:
+    return _verdict(covered, rel, info, info.get("tested", ""), graph_preferred)
 
 
 def coverage_note(covered: dict[str, set[int]] | None, repo: Path, rel: str, info: dict, graph_tested: str,
@@ -448,21 +455,15 @@ def coverage_note(covered: dict[str, set[int]] | None, repo: Path, rel: str, inf
     contract = contract_text(info.get("name") or "", info.get("params", ""), info.get("return_type", ""), info.get("def_sig", ""))
     tfile = _test_file_for(repo, rel) if info else ""
     extend = f" Extend {tfile}." if tfile else ""
-    if graph_preferred:
-        # Stale snapshot: the strongest honest claim is "verify" — current tests
-        # may exercise the function through paths the graph cannot see (HTTP,
-        # in-body imports), so never assert "write the failing tests first".
-        if graph_tested == "tested":
-            return ""
-        return (f" Coverage snapshot is older than the repo's tests and the graph sees no direct "
-                f"unit tests — verify with make coverage / htmlcov; if truly uncovered, pin "
-                f"{contract} with tests first.{extend}")
-    cov = covered_span(covered, rel, info.get("line_start") or 1, info.get("line_end") or info.get("line_start") or 1)
-    if cov is False:
+    verdict = _verdict(covered, rel, info, graph_tested, graph_preferred)
+    if verdict == "tested":
+        return ""
+    if verdict == "untested":
         return f" Not covered by the repo's coverage data — write the failing tests first. Contract to pin: {contract}.{extend}"
-    if cov is None and graph_tested == "untested":
-        return f" No coverage data and graph sees no unit tests — verify (htmlcov/ if present); if uncovered, pin {contract} with tests first.{extend}"
-    return ""
+    # unknown: stale snapshot and graph blind to it — verify, never assert
+    return (f" Coverage snapshot is older than the repo's tests and the graph sees no direct "
+            f"unit tests — verify with make coverage / htmlcov; if truly uncovered, pin "
+            f"{contract} with tests first.{extend}")
 
 
 # --------------------------------------------------------------------------- graph (code-review-graph)
@@ -626,9 +627,10 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
         if not include_tests and is_test_path(rel):
             continue
         callers = [r[0].split("::")[-1] for r in db.execute(
-            "SELECT DISTINCT source_qualified FROM edges WHERE target_qualified = ? AND kind = 'CALLS'",
-            (row["qualified_name"],),
-        )][:6]
+            "SELECT DISTINCT source_qualified FROM edges WHERE kind = 'CALLS' "
+            "AND (target_qualified = ? OR target_qualified = ? OR target_qualified LIKE ?)",
+            (row["qualified_name"], row["name"], "%::" + row["name"]),
+        )][:8]
         if callers:
             resolved = f", callers: {', '.join(callers)}"
             if len(callers) < row["caller_count"]:
@@ -902,6 +904,7 @@ def main() -> int:
                 print("WARNING: coverage snapshot predates the repo's tests — 'not covered' claims are graph-based; "
                       "regenerate coverage (make coverage) for ground truth")
             print("priority = percentile of raw risk (metric norm x (1 + churn/30) x (1 + callers/5)); "
+                  "norms: CC/40, lines/200, edges/400, risk/1 — the displayed thresholds are the fail bars, not the norms; "
                   "thresholds: CC>=" + str(args.max_complexity) + ", fn>=" + str(args.max_function_lines) +
                   " lines, file>=" + str(args.max_file_edges) + " edges, risk>=" + str(args.max_risk) +
                   ", hotspot top " + f"{args.hotspot_top_frac:.0%}" + " by churn with CC>=" + str(args.hotspot_min_cc) +
