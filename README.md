@@ -31,7 +31,10 @@ tag and runs it as its review-attribution gate.
   actions name the exact volatile functions with their own churn (`git log -L`).
   Coverage verdicts come from the repo's own data (coverage.xml, else
   .coverage line_bits, else the graph risk index) and untested functions get
-  the contract to pin (`name(params) -> ret`). Actions are grouped by file and
+  the contract to pin (`name(params) -> ret`). A `record-shape` kind (from
+  `check_records.py`, the record-vs-bare-dict gate) flags bare dict/tuple
+  collections as records — the fix is a small domain class, not a generic
+  container. Actions are grouped by file and
   ranked by priority (percentile of metric x churn x fan-in); a baseline file
   (`--baseline`, `--update-baseline`) locks acknowledged debt so the gate can
   go green incrementally, and `--base <ref>` marks actions in your branch's
@@ -60,7 +63,8 @@ what CI runs.
 ## Tests
 
 `make test` runs the pytest suite (`tests/test_code_health.py`) plus a syntax
-check of every tool. The suite exercises `code_health.py` with fakes only —
+check of every tool. The suite exercises `code_health.py` with fakes only
+(plus the fixture-based `check_records` unit tests) —
 radon is injected via `code_health.radon_visitor`, subprocess via a fake
 module with canned argv routes, and the graph/coverage databases are real
 SQLite with fake data — so it runs without radon or a real repo. It covers
