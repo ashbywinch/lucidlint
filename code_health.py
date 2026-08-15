@@ -48,7 +48,7 @@ ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-ris
 GUIDANCE = {
     "complexity": "Extract each decision branch into a named method that says what it decides in domain terms — one decision per method, happy path reads top-to-bottom. If the body is repeated similar blocks rather than distinct decisions, prefer a data table + loop over more methods. Where it mixes subsystems, extract a class per concern — for endpoints that usually means service-layer functions behind the Services DI, not new classes.",
     "large-function": "Split by responsibility into named steps that read like a procedure in the domain; one job per step, each independently testable.",
-    "hub-file": "Separate the concerns it mixes (HTTP, orchestration, persistence, …) into modules with narrow, stable interfaces so changes stay contained. If the file is a composition root whose job is wiring, move handler logic out to the service layer and keep the assembly thin — don't split the assembly itself.",
+    "hub-file": "Decide what this file is first: if it is an assembly/composition root whose job is wiring (app layer, router), move handler logic out to the service layer and keep the assembly thin — the cross-module orchestration is its job, not a smell. Otherwise separate the concerns it mixes into modules with narrow, stable interfaces.",
     "hotspot": "Make the volatile part small and data-driven behind a stable interface — frequent changes become cheap and cannot disturb the stable core.",
     "high-risk": "Pin behavior with tests, then reduce the caller surface — when many things depend on it, the simplest code is the safest.",
 }
@@ -406,8 +406,9 @@ def complexity_actions(repo: Path, max_cc: int, include_tests: bool,
                 snippet = "calls: " + ", ".join(_unres) if _unres else "no cross-module callees resolved"
                 message = (f"cyclomatic complexity {fn.complexity} (>= {max_cc}) — {GUIDANCE['complexity']}"
                            f" [concern mix unresolved — {snippet}]")
+            note = ""
             if info:
-                message += coverage_note(covered, repo, rel, info, info["tested"], graph_preferred, stale_note)
+                note = coverage_note(covered, repo, rel, info, info["tested"], graph_preferred, stale_note)
             churn = file_churn.get(rel, 0)
             actions.append(
                 {
@@ -421,6 +422,7 @@ def complexity_actions(repo: Path, max_cc: int, include_tests: bool,
                     "churn": churn,
                     "last_modified": last_modified.get(rel, ""),
                     "tested": final_tested(covered, rel, info, graph_preferred) if info else "",
+                    "note": note,
                     "raw": _raw_score("complexity", fn.complexity, churn),
                 }
             )
@@ -528,7 +530,7 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
                 except OSError:
                     src_cache[rel] = ""
             info["def_sig"] = _def_signature(src_cache[rel], row["line_start"])
-        message += coverage_note(covered, repo, rel, info, row["test_coverage"] or "", graph_preferred, stale_note)
+        note = coverage_note(covered, repo, rel, info, row["test_coverage"] or "", graph_preferred, stale_note)
         churn = file_churn.get(rel, 0)
         actions.append(
             {
@@ -542,6 +544,7 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
                 "churn": churn,
                 "last_modified": last_modified.get(rel, ""),
                 "tested": final_tested(covered, rel, info),
+                "note": note,
                 "raw": _raw_score("large-function", span, churn),
             }
         )
@@ -655,7 +658,7 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
                 except OSError:
                     src_cache[rel] = ""
             info["def_sig"] = _def_signature(src_cache[rel], info["line_start"])
-        message += coverage_note(covered, repo, rel, info, row["test_coverage"] or "", graph_preferred, stale_note)
+        note = coverage_note(covered, repo, rel, info, row["test_coverage"] or "", graph_preferred, stale_note)
         churn = file_churn.get(rel, 0)
         actions.append(
             {
@@ -670,6 +673,7 @@ def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: 
                 "last_modified": last_modified.get(rel, ""),
                 "tested": final_tested(covered, rel, info),
                 "callers": callers,
+                "note": note,
                 "raw": _raw_score("high-risk", row["risk_score"], churn, len(callers) if callers else row["caller_count"]),
             }
         )
@@ -752,6 +756,7 @@ def hotspot_actions(repo: Path, top_frac: float, min_cc: float,
                 "churn": churn,
                 "last_modified": last_modified.get(rel, ""),
                 "tested": "",
+                "note": "",
                 "raw": _raw_score("hotspot", max_cc, churn),
             }
         )
@@ -844,7 +849,36 @@ def main() -> int:
     for a in unique:
         a["priority"] = 99 if hi <= lo else max(1, round(1 + 98 * (a["raw"] - lo) / (hi - lo)))
         a["in_diff"] = a["file"] in diff
+    # Per-target merge: complexity + large-function on the same function is one
+    # fix, not two. Keep the highest-raw message, list the other kinds.
+    merged: dict[tuple, dict] = {}
+    for a in sorted(unique, key=lambda a: (-a["raw"], a["file"], a["line"])):
+        key = (a["file"], a.get("function", ""))
+        if not a.get("function") or key not in merged:
+            if key in merged and not a.get("function"):
+                pass
+            merged.setdefault(key, a)
+        else:
+            prev = merged[key]
+            prev["kinds"] = sorted({prev.get("kind"), a["kind"]})
+            prev["raw"] = max(prev["raw"], a["raw"])
+            if a["note"] and a["note"] not in prev.get("note", ""):
+                prev["note"] = (prev.get("note", "") + " " + a["note"]).strip()
+            prev["line"] = min(prev["line"], a["line"])
+    unique = list(merged.values())
+    # recompute priority on merged raws
+    raws = sorted(a["raw"] for a in unique)
+    lo, hi = raws[0], raws[-1]
+    for a in unique:
+        a["priority"] = 99 if hi <= lo else max(1, round(1 + 98 * (a["raw"] - lo) / (hi - lo)))
     unique.sort(key=lambda a: (-a["priority"], a["file"], a["line"]))
+    # Lifecycle: facts only — low-churn scripts/tools under scripts/ or tools/.
+    # Whether to delete, leave, or refactor is the agent's call; we only surface
+    # the data (churn, last touch) the agent would otherwise have to dig for.
+    for a in unique:
+        if a["file"].startswith(("scripts/", "tools/")) and a.get("churn", 0) <= 2 and a.get("last_modified"):
+            a["note"] = (a.get("note", "") + f" Lifecycle: {a['churn']}x churn, last touched {a['last_modified']} — "
+                         f"low-change file under scripts/tools.").strip()
 
     # Baseline: acknowledged actions are reported but never fail the gate,
     # so a repo can lock today's debt and go green incrementally.
@@ -898,7 +932,7 @@ def main() -> int:
         }, indent=2))
     else:
         if not unique:
-            print("code-health: clean — no actions")
+            print("GATE: PASS — clean, no actions")
         elif fails:
             top = fails[0]
             mine = sum(1 for a in fails if a.get("in_diff"))
@@ -906,9 +940,12 @@ def main() -> int:
                         if diff else "; diff base unresolved")
             mine_txt += " (no baseline — cannot tell what is new)"
             targets = len({(a["file"], a.get("function", "")) for a in fails})
-            print(f"code-health: {len(fails)} action(s) across {targets} distinct function/file targets "
+            verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
+            print(f"{verdict} — {len(fails)} action(s) across {targets} distinct targets "
                   f"(+{len(acks)} acknowledged in baseline){mine_txt}, "
                   f"top P{top['priority']} {top['file']}:{top['line']} ({top['function'] or top['kind']})")
+            print("priority ranks change-cost (churn x fan-in), not brokenness — which item is worth fixing first is a judgement call; "
+                  "the hotspot entries are the usual starting set")
             if graph_preferred:
                 print("WARNING: coverage snapshot predates the repo's tests — hard 'untested' claims are suppressed; "
                       "run --refresh-coverage (make coverage) for definite test-status verdicts")
@@ -929,7 +966,10 @@ def main() -> int:
                 for a in items:
                     loc = f":{a['line']}" + (f" ({a['function']})" if a["function"] else "")
                     churn = f" [churn {a['churn']}x]" if a.get("churn") else ""
-                    print(f"  [P{a['priority']:02d}][{a['kind']}] {loc}{churn} — {a['message']}")
+                    kinds = ",".join(a["kinds"]) if a.get("kinds") else a["kind"]
+                    print(f"  [P{a['priority']:02d}][{kinds}] {loc}{churn} — {a['message']}")
+                    if a.get("note"):
+                        print(f"      -> {a['note']}")
             if acks:
                 print(f"\nacknowledged in baseline ({len(acks)}): " + ", ".join(f"{a['file']}:{a['line']}" for a in acks[:5]) + (" …" if len(acks) > 5 else ""))
             print("\nre-run: uv run --with radon python3 code_health.py --repo " + str(repo) +
@@ -938,7 +978,7 @@ def main() -> int:
             print("baseline: '--update-baseline --baseline code-health.json' acknowledges today's debt so the "
                   "gate only fails on NEW actions; this report is a snapshot, not wired into CI")
         else:
-            print(f"code-health: {len(acks)} action(s), all acknowledged in baseline — clean gate")
+            print(f"GATE: PASS — {len(acks)} action(s), all acknowledged in baseline")
 
     if fails and not args.warn:
         log(f"{len(fails)} action(s) found — failing (use --warn to run informational)")
