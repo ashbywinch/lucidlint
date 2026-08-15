@@ -650,3 +650,15 @@ def test_tool_passes_its_own_record_check():
     actions = ch._record_actions(repo, False, {}, {})
     self_findings = [a for a in actions if a.file in ("code_health.py", "check_records.py")]
     assert self_findings == []
+
+
+def test_record_shape_guidance_teaches_naming_not_just_classes():
+    """The fix guidance must teach the communication theme: even a legitimate
+    map in a signature deserves a named type — a bare dict says nothing.
+    (Regression: it used to say 'maps stay dicts', the wrong lesson.)"""
+    g = ch.GUIDANCE["record-shape"]
+    assert "named type" in g or "domain noun" in g
+    assert "class/dataclass" in g
+    assert "stay dicts" not in g
+    # the philosophy docstring carries the same principle
+    assert "cheapest form of encapsulation" in ch.__doc__

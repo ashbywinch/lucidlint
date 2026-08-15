@@ -21,7 +21,10 @@ separation of concerns, domain language, and effective encapsulation — so
 each action's message says what to do in those terms, not just what the
 number is. Gaming the metric (splitting a function to lower a count without
 clarifying it) is not the point; making the code easy to read and safe to
-change is.
+change is. A name is the cheapest form of encapsulation: a domain noun in
+the type (CoverageLines, PropertyId) communicates to the next reader, where
+a bare dict or tuple says nothing — this applies to legitimate maps too,
+not only to records.
 """
 
 from __future__ import annotations
@@ -194,7 +197,7 @@ GUIDANCE = {
     "hub-file": "Decide what this file is first: if it is an assembly/composition root whose job is wiring (app layer, router), move handler logic out to the service layer and keep the assembly thin — the cross-module orchestration is its job, not a smell. Otherwise separate the concerns it mixes into modules with narrow, stable interfaces.",
     "hotspot": "Make the volatile part small and data-driven behind a stable interface — frequent changes become cheap and cannot disturb the stable core.",
     "high-risk": "Pin behavior with tests, then reduce the caller surface — when many things depend on it, the simplest code is the safest.",
-    "record-shape": "The record wants a class — named fields with domain meaning, so a reader sees what the data IS without tracing it (encapsulation, obvious correctness). Make a small domain class/dataclass; maps (dict[str, T] of a domain class) and constant lookup tables stay dicts.",
+    "record-shape": "The record wants a class — named fields with domain meaning, so a reader sees what the data IS without tracing it (encapsulation, obvious correctness). Make a small domain class/dataclass. Even a genuinely map-shaped value is a domain noun: if it appears in a signature, give it a named type (CoverageLines = dict[str, set[int]]) or wrap it — the name is the communication, a bare dict says nothing. Only constant lookup tables stay anonymous, and at module scope, never in an interface.",
 }
 
 
