@@ -716,6 +716,13 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     vague_name_findings(&mut state, &body);
     strewing_findings(&mut state, &body);
     record_shape_findings(&mut state, &body, source);
+    partition_findings(&mut state, &body, source);
+    if state.is_test {
+        // the rules that live in tests — scanned for alone or with --include-tests
+        monkeypatch_findings(&mut state, &body, source);
+        skipif_findings(&mut state, &body, source);
+        fakefs_findings(&mut state, &body, source);
+    }
     // duplicate candidates in ast.walk BFS order — module-level functions
     // (any depth) come before class methods regardless of source line;
     // skipped for a single buffer (repo-wide families need the whole repo)
@@ -864,6 +871,11 @@ mod tests {
 
     fn scan_src(src: &str) -> Vec<Finding> {
         scan_corpus(&[("prod_mod.py", src)])
+    }
+
+    /// The test-only families (monkeypatch/skipif/fakefs) run for test paths.
+    fn scan_src_test(src: &str) -> Vec<Finding> {
+        scan_corpus(&[("tests/test_mod.py", src)])
     }
 
     fn scan_cc(src: &str) -> (Vec<Finding>, Vec<FnCc>, usize) {
@@ -1327,6 +1339,63 @@ mod tests {
     fn record_spread_merge_is_not_a_record() {
         let f = scan_src("def f(session, x):\n    return {**session, \"x\": x}\n");
         assert!(!f.iter().any(|x| x.kind == "record-shape"));
+    }
+
+    // ------------------------------------------- partition + test families
+    #[test]
+    fn partition_field_disjoint_groups_is_found() {
+        // 6 methods, >= 150 lines: group A touches a/b, group B touches c/d
+        let mut src = String::from("class Manager:\n    def __init__(self):\n        self.a = 0\n");
+        for i in 0..3 {
+            src.push_str(&format!(
+                "    def group_a_{i}(self):\n        x = self.a + self.b\n        for k in range(x):\n            x += k\n        return x\n"
+            ));
+        }
+        for i in 0..3 {
+            src.push_str(&format!(
+                "    def group_b_{i}(self):\n        x = self.c + self.d\n        for k in range(x):\n            x += k\n        return x\n"
+            ));
+        }
+        // span >= 150 code lines: a long docstring is a node (end_lineno
+        // stops at the last node, comments don't count)
+        src.push_str("    def _pad(self):\n        \"\"\"");
+        for _ in 0..140 {
+            src.push_str("padding line\n        ");
+        }
+        src.push_str("\"\"\"\n        return 1\n");
+        let f = scan_src(&src);
+        assert!(f.iter().any(|x| x.kind == "partition"));
+    }
+
+    #[test]
+    fn partition_small_class_passes() {
+        let f = scan_src("class Small:\n    def a(self):\n        return 1\n    def b(self):\n        return 2\n");
+        assert!(!f.iter().any(|x| x.kind == "partition"));
+    }
+
+    #[test]
+    fn monkeypatch_setattr_and_patch_decorator_found() {
+        let f = scan_src_test("from unittest import mock\n\ndef test_x(monkeypatch):\n    monkeypatch.setattr(Obj, 'x', 1)\n\n@mock.patch('y')\ndef test_y():\n    pass\n");
+        let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "monkeypatch").collect();
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn skipif_on_environment_is_found() {
+        let f = scan_src_test("import pytest\nimport os\n\n@pytest.mark.skipif('os.environ' in os.environ, reason='env')\ndef test_x():\n    pass\n");
+        assert!(f.iter().any(|x| x.kind == "skipif"));
+    }
+
+    #[test]
+    fn fakefs_real_fs_without_pyfakefs_is_found() {
+        let f = scan_src_test("def test_x(tmp_path):\n    p = tmp_path / 'a'\n    p.write_text('hi')\n");
+        assert!(f.iter().any(|x| x.kind == "fakefs"));
+    }
+
+    #[test]
+    fn fakefs_sanctioned_subprocess_need_passes() {
+        let f = scan_src_test("import subprocess\n\ndef test_x(tmp_path):\n    subprocess.run(['ls'])\n");
+        assert!(!f.iter().any(|x| x.kind == "fakefs"));
     }
 
     #[test]

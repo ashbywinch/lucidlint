@@ -4,8 +4,8 @@
 
 use ruff_python_ast::token::{Token, TokenKind, Tokens};
 use ruff_python_ast::{
-    AnyNodeRef, BoolOp, CmpOp, Expr, ExprContext, ModModule, Operator, Pattern, Stmt,
-    StmtFunctionDef, UnaryOp, visitor::Visitor,
+    AnyNodeRef, BoolOp, CmpOp, Decorator, Expr, ExprContext, ModModule, Operator, Pattern, Stmt,
+    StmtClassDef, StmtFunctionDef, UnaryOp, visitor::Visitor,
 };
 use ruff_text_size::Ranged;
 use std::collections::HashSet;
@@ -2259,5 +2259,421 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
             severity: "fail".into(),
             message: format!("dict literal with constant keys is a record — make a class (line {ln})"),
         });
+    }
+}
+
+// =====================================================================
+// latent-class partition + the test-only rule families (monkeypatch,
+// skipif, fakefs) — the last per-file Python families
+// =====================================================================
+
+/// `_partition_for_class`: a class whose methods split into >= 2
+/// field-disjoint groups after removing at most 2 connectors.
+fn partition_for_class(source: &str, cls: &StmtClassDef) -> Option<(Vec<String>, Vec<Vec<String>>)> {
+    let methods: Vec<&Stmt> = cls
+        .body
+        .iter()
+        .filter(|s| matches!(s, Stmt::FunctionDef(_)))
+        .collect();
+    if methods.len() < 6 {
+        return None;
+    }
+    let span = line_of(source, cls.range().end()) - line_of(source, cls.name.range().start());
+    if span < 150 {
+        return None;
+    }
+    // method name -> set of self.<attr> fields accessed anywhere in the body
+    let mut mf: Vec<(String, HashSet<String>)> = Vec::new();
+    for m in &methods {
+        let Stmt::FunctionDef(f) = m else { continue };
+        let mut fields = HashSet::new();
+        let mut queue: Vec<Q> = f.body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+        for d in &f.decorator_list {
+            queue.push(Q::N(AnyNodeRef::from(&d.expression)));
+        }
+        let mut qi = 0usize;
+        while qi < queue.len() {
+            if let Q::N(n) = queue[qi] {
+                if let AnyNodeRef::ExprAttribute(a) = n {
+                    if let Expr::Name(name) = a.value.as_ref() {
+                        if name.id == "self" {
+                            fields.insert(a.attr.to_string());
+                        }
+                    }
+                }
+                skel_children(n, &mut queue);
+            }
+            qi += 1;
+        }
+        mf.push((f.name.to_string(), fields));
+    }
+    let names: Vec<String> = mf.iter().map(|(n, _)| n.clone()).collect();
+    // smallest connector removal exposing >= 2 disjoint groups
+    for removal in 0..3usize {
+        for removed in combinations(&names, removal) {
+            let kept: Vec<String> = names.iter().filter(|n| !removed.contains(n)).cloned().collect();
+            let groups = connected_groups(&kept, &mf);
+            let big: Vec<Vec<String>> = groups
+                .into_iter()
+                .filter(|g| {
+                    let fields: HashSet<&String> = g.iter().flat_map(|m| {
+                        mf.iter()
+                            .find(|(n, _)| n == m)
+                            .map(|(_, f)| f.iter())
+                            .unwrap_or_default()
+                    }).collect();
+                    g.len() >= 2 && fields.len() >= 2
+                })
+                .collect();
+            if big.len() >= 2 {
+                return Some((removed, big));
+            }
+        }
+    }
+    None
+}
+
+/// combinations of `names` taken `k` at a time (k <= 2, so O(n^2) max).
+fn combinations(names: &[String], k: usize) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    if k == 0 {
+        out.push(Vec::new());
+        return out;
+    }
+    if k == 1 {
+        for n in names {
+            out.push(vec![n.clone()]);
+        }
+        return out;
+    }
+    for i in 0..names.len() {
+        for j in (i + 1)..names.len() {
+            out.push(vec![names[i].clone(), names[j].clone()]);
+        }
+    }
+    out
+}
+
+/// Methods connected by sharing at least one field — `_connected_groups`.
+fn connected_groups(kept: &[String], mf: &[(String, HashSet<String>)]) -> Vec<Vec<String>> {
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for start in kept {
+        if seen.contains(start.as_str()) {
+            continue;
+        }
+        let mut group: Vec<String> = Vec::new();
+        let mut stack: Vec<&str> = vec![start];
+        while let Some(m) = stack.pop() {
+            if !seen.insert(m) {
+                continue;
+            }
+            group.push(m.to_string());
+            let fields = mf.iter().find(|(n, _)| n == m).map(|(_, f)| f).cloned().unwrap_or_default();
+            for other in kept {
+                if seen.contains(other.as_str()) {
+                    continue;
+                }
+                let other_fields = mf.iter().find(|(n, _)| n == other).map(|(_, f)| f).cloned().unwrap_or_default();
+                if !fields.is_disjoint(&other_fields) {
+                    stack.push(other);
+                }
+            }
+        }
+        groups.push(group);
+    }
+    groups
+}
+
+/// `_partition_findings`: the latent-class field-partition family.
+pub fn partition_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    for s in body {
+        let Stmt::ClassDef(cls) = s else { continue };
+        if let Some((connectors, groups)) = partition_for_class(source, cls) {
+            let groups_text = groups
+                .iter()
+                .map(|g| format!("{{{}}}", g.join(",")))
+                .collect::<Vec<_>>()
+                .join("/");
+            let conn_text = if connectors.is_empty() {
+                "none".to_string()
+            } else {
+                format!("{{{}}}", connectors.join(","))
+            };
+            let metric: usize = groups.iter().map(|g| g.len()).sum();
+            let _ = metric;
+            state.findings.push(Finding {
+                file: state.file.to_string(),
+                line: line_of(source, cls.name.range().start()),
+                function: cls.name.to_string(),
+                kind: "partition".into(),
+                severity: "fail".into(),
+                message: format!(
+                    "methods split into {} field-disjoint groups ({groups_text}), connectors removed: {conn_text} — each group touches only its own fields, so each is a latent class",
+                    groups.len()
+                ),
+            });
+        }
+    }
+}
+
+const MONKEYPATCH_METHODS: [&str; 5] = ["setattr", "setitem", "delattr", "setenv", "delenv"];
+
+fn monkeypatch_decorator(state: &mut ScanState, source: &str, d: &Decorator, mock_imports: &HashSet<String>) {
+    let expr = &d.expression;
+    let func = if let Expr::Call(c) = expr { c.func.as_ref() } else { expr };
+    let desc: Option<String> = match func {
+        Expr::Name(name) if mock_imports.contains(name.id.as_str()) => {
+            Some(format!("@{}", name.id.as_str()))
+        }
+        Expr::Attribute(a) if a.attr.as_str() == "patch" => Some("@patch".to_string()),
+        _ => None,
+    };
+    if let Some(desc) = desc {
+        mp_finding(state, &desc, line_of(source, d.range().start()));
+    }
+}
+
+/// `_monkeypatch_findings` — forbidden patch usage in tests.
+pub fn monkeypatch_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    let mut mock_imports: HashSet<String> = HashSet::new();
+    for s in body {
+        if let Stmt::ImportFrom(imp) = s {
+            if let Some(module) = &imp.module {
+                if module.to_string().contains("mock") {
+                    for a in &imp.names {
+                        mock_imports.insert(a.name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    // calls + decorators in one full walk
+    let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+    let mut qi = 0usize;
+    while qi < queue.len() {
+        if let Q::N(n) = queue[qi] {
+            if let AnyNodeRef::ExprCall(call) = n {
+                let line = line_of(source, call.range().start());
+                let desc: Option<String> = match call.func.as_ref() {
+                    Expr::Attribute(a) => match a.value.as_ref() {
+                        Expr::Name(name) if name.id == "monkeypatch" && MONKEYPATCH_METHODS.contains(&a.attr.as_str()) => {
+                            Some(format!("monkeypatch.{}", a.attr.as_str()))
+                        }
+                        _ if a.attr.as_str() == "patch" && matches!(a.value.as_ref(), Expr::Attribute(_)) => {
+                            Some(format!("{}.patch", source[a.value.range()].to_string()))
+                        }
+                        _ => None,
+                    },
+                    Expr::Name(name) if name.id == "patch" && mock_imports.contains("patch") => {
+                        Some("patch".to_string())
+                    }
+                    _ => None,
+                };
+                if let Some(desc) = desc {
+                    mp_finding(state, &desc, line);
+                }
+            }
+            // decorators: skel_children descends into the expression, never
+            // the Decorator node — examine them at the function/class pop
+            if let AnyNodeRef::StmtFunctionDef(f) = n {
+                for d in &f.decorator_list {
+                    monkeypatch_decorator(state, source, d, &mock_imports);
+                }
+            }
+            if let AnyNodeRef::StmtClassDef(cls) = n {
+                for d in &cls.decorator_list {
+                    monkeypatch_decorator(state, source, d, &mock_imports);
+                }
+            }
+            skel_children(n, &mut queue);
+        }
+        qi += 1;
+    }
+}
+
+fn mp_finding(state: &mut ScanState, desc: &str, line: usize) {
+    state.findings.push(Finding {
+        file: state.file.to_string(),
+        line,
+        function: String::new(),
+        kind: "monkeypatch".into(),
+        severity: "fail".into(),
+        message: format!(
+            "{desc} at line {line} — never monkeypatch global state; inject an object fake (a class implementing the real protocol) via parameter injection or the services container — fakes are objects, not functions"
+        ),
+    });
+}
+
+const SKIPIF_NEEDLES: [&str; 5] = ["os.environ", "environ", "getenv", "os.path.exists", "sys.platform"];
+
+/// `_skipif_findings` — never skip a test for a missing environment.
+pub fn skipif_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+    let mut qi = 0usize;
+    while qi < queue.len() {
+        if let Q::N(n) = queue[qi] {
+            if let AnyNodeRef::ExprCall(call) = n {
+                if let Expr::Attribute(a) = call.func.as_ref() {
+                    if a.attr.as_str() == "skipif" {
+                        let cond_parts: Vec<String> = call
+                            .arguments
+                            .args
+                            .iter()
+                            .map(|e| source[e.range()].to_string())
+                            .chain(call.arguments.keywords.iter().map(|k| source[k.value.range()].to_string()))
+                            .collect();
+                        let cond = cond_parts.join(" ");
+                        if SKIPIF_NEEDLES.iter().any(|needle| cond.contains(needle)) {
+                            state.findings.push(Finding {
+                                file: state.file.to_string(),
+                                line: line_of(source, call.range().start()),
+                                function: String::new(),
+                                kind: "skipif".into(),
+                                severity: "fail".into(),
+                                message: format!(
+                                    "@pytest.mark.skipif on environment presence at line {} — never skip a test for a missing dependency: fake it (a fixture builds a stand-in) so it runs identically everywhere; only the E2E suite may skip",
+                                    line_of(source, call.range().start())
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+            skel_children(n, &mut queue);
+        }
+        qi += 1;
+    }
+}
+
+const FS_PATH_METHODS: [&str; 17] = [
+    "read_text", "write_text", "read_bytes", "write_bytes", "mkdir", "unlink", "rename", "replace",
+    "touch", "rmdir", "iterdir", "glob", "rglob", "exists", "resolve", "symlink_to", "copy",
+];
+const FS_OS_OPS: [&str; 9] = ["remove", "rename", "mkdir", "makedirs", "rmdir", "unlink", "symlink", "link", "replace"];
+const FS_SHUTIL_OPS: [&str; 5] = ["copy", "copy2", "move", "rmtree", "copytree"];
+const FS_TEMPFILE: [&str; 6] = ["TemporaryDirectory", "NamedTemporaryFile", "TemporaryFile", "mkdtemp", "mkstemp", "mktemp"];
+
+/// `_fakefs_findings` — real FS access in tests without pyfakefs.
+pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    let uses_fakefs_base = {
+        let mut base = false;
+        for s in body {
+            match s {
+                Stmt::ImportFrom(imp) => {
+                    if imp.module.as_ref().is_some_and(|m| m.to_string().contains("pyfakefs")) {
+                        base = true;
+                    }
+                }
+                Stmt::Import(imp) => {
+                    if imp.names.iter().any(|a| a.name.to_string().contains("pyfakefs")) {
+                        base = true;
+                    }
+                }
+                Stmt::ClassDef(cls) => {
+                    if let Some(arguments) = &cls.arguments {
+                        for b in &arguments.args {
+                            if source[b.range()].to_lowercase().contains("fakefs")
+                                || source[b.range()].to_lowercase().contains("fake_filesystem")
+                            {
+                                base = true;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        base
+    };
+    // all functions, with their enclosing test-class status
+    let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+    let mut qi = 0usize;
+    while qi < queue.len() {
+        if let Q::N(n) = queue[qi] {
+            if let AnyNodeRef::StmtFunctionDef(f) = n {
+                let line = line_of(source, f.name.range().start());
+                let is_test = f.name.as_str().starts_with("test_")
+                    || body.iter().any(|s| {
+                        matches!(s, Stmt::ClassDef(c) if c.name.to_lowercase().starts_with("test")
+                            && c.body.iter().any(|m| m.range().start() == n.range().start()))
+                    });
+                if !is_test {
+                    skel_children(n, &mut queue);
+                    qi += 1;
+                    continue;
+                }
+                let uses_fakefs = f
+                    .parameters
+                    .posonlyargs
+                    .iter()
+                    .chain(&f.parameters.args)
+                    .any(|p| p.parameter.name.as_str() == "fs");
+                if uses_fakefs || uses_fakefs_base {
+                    skel_children(n, &mut queue);
+                    qi += 1;
+                    continue;
+                }
+                // real-FS usage vs sanctioned real-FS need
+                let mut real_fs = false;
+                let mut needs_real = false;
+                // ast.walk includes decorators + parameter annotations —
+                // a skipif guard on a real file (.exists()) is FS usage
+                let mut fq: Vec<Q> = f.body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+                for d in &f.decorator_list {
+                    fq.push(Q::N(AnyNodeRef::from(&d.expression)));
+                }
+                let mut fi = 0usize;
+                while fi < fq.len() {
+                    if let Q::N(fn_) = fq[fi] {
+                        match fn_ {
+                            AnyNodeRef::ExprName(n) if n.id == "tmp_path" => real_fs = true,
+                            AnyNodeRef::ExprName(n) if matches!(n.id.as_str(), "sqlite3" | "subprocess") => needs_real = true,
+                            AnyNodeRef::ExprAttribute(a) if matches!(a.attr.as_str(), "symlink" | "symlink_to" | "link") => needs_real = true,
+                            AnyNodeRef::ExprCall(c) => {
+                                match c.func.as_ref() {
+                                    // bare open(...)/tempfile(...) count; a Path(...).open(...)
+                                    // attribute call does NOT (Python's _real_fs_usage: only
+                                    // Name funcs match open/tempfile; attribute calls must be
+                                    // in the path/os/shutil/tempfile method lists)
+                                    Expr::Name(n) if matches!(n.id.as_str(), "open" | "tempfile") => {
+                                        real_fs = true;
+                                    }
+                                    Expr::Attribute(a) => {
+                                        let attr = a.attr.as_str();
+                                        if FS_PATH_METHODS.contains(&attr)
+                                            || FS_OS_OPS.contains(&attr)
+                                            || FS_SHUTIL_OPS.contains(&attr)
+                                            || FS_TEMPFILE.contains(&attr)
+                                        {
+                                            real_fs = true;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                        skel_children(fn_, &mut fq);
+                    }
+                    fi += 1;
+                }
+                if real_fs && !needs_real {
+                    state.findings.push(Finding {
+                        file: state.file.to_string(),
+                        line,
+                        function: f.name.to_string(),
+                        kind: "fakefs".into(),
+                        severity: "fail".into(),
+                        message: format!(
+                            "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3) and comment why — or mark `# code-health: ignore-file fakefs <why>`",
+                            f.name.as_str()
+                        ),
+                    });
+                }
+            }
+            skel_children(n, &mut queue);
+        }
+        qi += 1;
     }
 }

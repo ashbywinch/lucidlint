@@ -2007,22 +2007,25 @@ def _scan_file(
     """One file's latent-class / vague-name / standard findings.
 
     Default engine: the Rust scan core (RUST_SCAN) — one binary invocation
-    per repo covers every per-file family plus the repo-wide duplicate/unused
-    scans. The Python-only families stay here: the latent-class field
-    partition (graph-based) and the rules that live in tests (monkeypatch,
-    env-skipif, fakefs). Falls back to the pure-Python path when the binary
-    is missing."""
+    per repo covers every per-file family (partition and the test-only rules
+    included) plus the repo-wide duplicate/unused scans. The pure-Python
+    path exists only as the parity reference; the Python parse is skipped
+    entirely when the Rust engine is live."""
+    if files is not None and RUST_SCAN.enabled:
+        rust = RUST_SCAN.load(repo, files)
+        if rust is not None:
+            source = py.read_text(encoding="utf-8", errors="replace")
+            supps = _suppressions(source)
+            file_supps = _file_suppressions(source)
+            return _rust_scan_file(
+                rel, include_tests, supps, file_supps, rust, repo, file_churn, last_modified
+            )
     parsed = SOURCE_CACHE.get(py)
     tree, source = parsed.tree, parsed.source
     if tree is None:
         return []
     supps = _suppressions(source)
     file_supps = _file_suppressions(source)
-    rust = RUST_SCAN.load(repo, files) if files is not None else None
-    if rust is not None:
-        return _rust_scan_file(
-            rel, include_tests, tree, source, supps, file_supps, rust, repo, file_churn, last_modified
-        )
     return _python_scan_file(rel, include_tests, visitor_cls, tree, source, supps, file_supps, repo, file_churn,
                              last_modified)
 
@@ -2081,8 +2084,6 @@ def _python_scan_file(
 def _rust_scan_file(
     rel: str,
     include_tests: bool,
-    tree,
-    source: str,
     supps: dict[int, tuple[str, str]],
     file_supps,
     rust: RustFindings,
@@ -2090,22 +2091,18 @@ def _rust_scan_file(
     file_churn: Counter[str],
     last_modified: dict[str, str],
 ) -> list[Action]:
-    """The Rust path of _scan_file: findings already suppression-filtered by
-    the binary; only the Python-only families are computed here."""
+    """The Rust path of _scan_file: every per-file family — including the
+    latent-class partition and the test-only rules — comes from the binary
+    (suppression-filtered there). Nothing is computed in Python here."""
     is_test = "/test" in f"/{rel}" or rel.startswith("test")
-    findings: list[LatentFinding] = []
     if is_test and not include_tests:
         # test files are excluded from the health scan, but the rules that
-        # live in tests are scanned for alone — plus the suppression rules
-        # (the binary's suppression/type-ignore findings cover invalid ones)
-        findings += [f for f in rust.for_rel(rel) if f.signal in ("suppression", "type-ignore")]
+        # live in tests (monkeypatch, env-skipif, fakefs) are scanned for
+        # alone — plus the suppression rules (invalid ones included)
+        keep = {"suppression", "type-ignore", "monkeypatch", "skipif", "fakefs"}
+        findings = [f for f in rust.for_rel(rel) if f.signal in keep]
     else:
-        findings += rust.for_rel(rel)
-        findings += _partition_findings(tree, rel)
-    if is_test:
-        # the test-only rule families apply whether or not --include-tests
-        # flipped the general scan on — include-tests adds checks, never drops them
-        findings += _monkeypatch_findings(tree, rel) + _skipif_findings(tree, rel) + _fakefs_findings(tree, rel)
+        findings = rust.for_rel(rel)
     return [
         _latent_action(repo, rel, f, file_churn, last_modified)
         for f in findings
