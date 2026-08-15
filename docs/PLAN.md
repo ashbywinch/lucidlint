@@ -100,3 +100,31 @@ never depend on a later phase.
 - **Validation:** houses gate unchanged — 541 fail actions, +235 warnings
   never-fail; the tool's own near-duplicate scan finds the genuine
   copy-paste clusters in houses.
+
+## Phase 7a — Eval round 2: precision fixes (delivered 2026-08-14)
+
+A blind developer-eval of the houses report scored usability 6/10,
+accuracy 6.5/10 and named four systematic false-positive classes. All
+fixed with detector-semantics changes:
+- Decorated module-level functions are referenced (routes, middleware —
+  kills ~20 "dead code" warnings on live FastAPI endpoints).
+- References split prod vs test: a function used only by tests is
+  flagged conditionally (test seam, document it — or dead code) instead
+  of silently treated as live or dead; 7 such findings on houses.
+- Near-duplicate skips single-statement bodies (accessors, stubs,
+  delegation wrappers) — genuine clusters like `_infeasible_commute`
+  still fire.
+- Swallow requires no control-flow exit: explicit returns (even None /
+  empty literals) and continue are surfaced contracts; only bare, empty,
+  log-only handlers fail. The eval's 4 of 6 mislabels are gone.
+- Global-state covers typed AnnAssign literals and module collections
+  mutated inside functions (`_oauth_states` now caught at auth.py:35).
+- Hub-file counts exclude CALLS to true builtins (print/len/isinstance
+  are not coupling).
+- Record-shape held: the eval's "these dicts are fine" cases verified —
+  the session payload (`dict[str, Any]` read by string key), the
+  per-call threshold dict, and API bodies are all genuine records under
+  the rule's own stated exceptions.
+- Validation: 162 tests green; self-check ok (new code decomposed under
+  its own CC gate); houses fails 541→537 (mislabels + builtin edges),
+  warns 235→165.

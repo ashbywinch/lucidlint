@@ -60,9 +60,14 @@ tag and runs it as its review-attribution gate.
   (tagged `[warn]`, counted as "N warnings never-fail", excluded from the
   baseline): magic numbers (raw int/float operands, indices, and call
   args outside (0, 1, 2, -1) — lookup tables pass), copy-paste
-  near-duplicates (functions ≥ 90% structurally similar), unused
+  near-duplicates (functions ≥ 90% structurally similar, two+ body
+  statements — one-line accessors are not copy-paste), unused
   module-level functions (never referenced, imported, or dispatched by
-  string), and broad `except Exception`/`BaseException` handlers.
+  string; decorated functions are registered; a function referenced
+  only from tests is a conditional test-seam finding), and broad
+  `except Exception`/`BaseException` handlers. A swallow finding
+  requires a handler with no control-flow exit at all — an explicit
+  return is the documented contract.
   Lint-style exemptions: `# code-health: ignore <signal>
   <why>` on the line (or above) — a suppression without a why is itself a
   finding. Actions are grouped by file and
