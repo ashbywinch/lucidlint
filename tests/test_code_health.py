@@ -1015,15 +1015,16 @@ def test_type_ignore_real_comment_requires_why(tmp_path):
     assert found[0].line == 1
 
 
-def test_except_returning_empty_dict_is_a_finding(tmp_path):
-    """return {} on exception is silent degradation (fail-fast names it), not surfacing."""
+def test_except_returning_empty_dict_is_not_a_finding(tmp_path):
+    """An explicit return, even an empty literal, surfaces the contract — only
+    handlers with no control-flow exit (log-only, bare, empty) are swallows."""
     actions = _standard_for(tmp_path, (
         "def f():\n"
         "    try:\n"
         "        g()\n"
         "    except ValueError:\n"
         "        return {}\n"))
-    assert len([a for a in actions if a.kind == "standard" and "swallows" in a.message]) == 1
+    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
 
 
 # --------------------------------------------------------------------------- ABC / class-module / skipif / tuple-alias
@@ -1573,3 +1574,150 @@ def test_fail_run_lists_warnings(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "warnings (reported, never fail) — 1:" in out
     assert "magic number 3" in out
+
+
+# ---------------------------------------------------------------- eval fixes (round 2)
+
+def test_unused_decorated_function_is_referenced(tmp_path):
+    """A decorator is framework registration — routes/middleware are live."""
+    repo = make_repo(tmp_path, app_src=(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "\n"
+        "def _helper():\n"
+        "    return 1\n"
+        "\n"
+        "@app.post('/x')\n"
+        "def route_x():\n"
+        "    return _helper()\n"))
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._unused_actions(repo, False, {}, {})
+    assert [a for a in actions if "never referenced" in a.message] == []
+
+
+def test_unused_test_only_function_is_flagged_conditionally(tmp_path):
+    """Referenced only from tests = test seam or dead code — flagged with the
+    either/or message, not silently treated as live."""
+    repo = make_repo(tmp_path, app_src=(
+        "def seam_hook():\n"
+        "    return 1\n"
+        "\n"
+        "def truly_dead():\n"
+        "    return 2\n"))
+    (repo / "tests" / "unit" / "test_app.py").write_text(
+        "from houses.app import seam_hook\n"
+        "def test_hook():\n"
+        "    assert seam_hook() == 1\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._unused_actions(repo, False, {}, {})
+    seams = [a for a in actions if "referenced only from tests" in a.message]
+    deads = [a for a in actions if "never referenced" in a.message]
+    assert len(seams) == 1 and "seam_hook" in seams[0].function
+    assert "code-health: ignore unused" in seams[0].message
+    assert len(deads) == 1 and "truly_dead" in deads[0].function
+
+
+def test_duplicate_skips_one_statement_accessors(tmp_path):
+    """title/id/row_count-style one-line accessors are not copy-paste."""
+    repo = make_repo(tmp_path, app_src=(
+        "def alpha(x):\n"
+        "    return x.title\n"
+        "\n"
+        "def beta(x):\n"
+        "    return x.title\n"))
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._duplicate_actions(repo, False, {}, {})
+    assert [a for a in actions if "similar to" in a.message] == []
+
+
+def test_except_return_none_is_not_a_swallow(tmp_path):
+    """return None is the documented contract (e.g. get_session_user), not an
+    invisible error — the eval's auth.py:64 case."""
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except (BadSignature, SignatureExpired):\n"
+        "        return None\n"))
+    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
+
+
+def test_except_continue_is_not_a_swallow(tmp_path):
+    """continue is retry/skip semantics — the polling-loop case."""
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    for i in range(10):\n"
+        "        try:\n"
+        "            g()\n"
+        "        except TimeoutError:\n"
+        "            log('retry')\n"
+        "            continue\n"))
+    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
+
+
+def test_log_only_swallow_still_fails(tmp_path):
+    """No control-flow exit at all: still the fail-fast finding."""
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except ValueError:\n"
+        "        log('failed but invisible')\n"))
+    assert len([a for a in actions if a.kind == "standard" and "swallows" in a.message]) == 1
+
+
+def test_global_state_annassign_mutated_in_function(tmp_path):
+    """_oauth_states: dict = {} populated by login/callback is module state —
+    the typed-empty-dict case the eval found in auth.py."""
+    actions = _standard_for(tmp_path, (
+        "_oauth_states: dict = {}\n"
+        "\n"
+        "def login():\n"
+        "    _oauth_states['k'] = 1\n"
+        "    return 1\n"))
+    gs = [a for a in actions if a.kind == "standard" and "module-level" in a.message]
+    assert len(gs) == 1
+    assert "_oauth_states" in gs[0].message
+    assert gs[0].line == 1  # the typed AnnAssign literal is scanned — the eval's auth.py gap
+
+
+def test_global_state_constant_table_mutated_is_still_state(tmp_path):
+    """Even an all-constant module container becomes state when functions
+    mutate it — the literal-lookup-table carve-out does not apply."""
+    actions = _standard_for(tmp_path, (
+        "LOOKUP = {'a': 1}\n"
+        "\n"
+        "def f(k):\n"
+        "    LOOKUP[k] = 2\n"))
+    gs = [a for a in actions if a.kind == "standard" and "module-level" in a.message]
+    assert len(gs) == 1 and "LOOKUP" in gs[0].message
+
+
+def test_global_state_plain_constant_table_passes(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "LOOKUP = {'a': 1}\n"
+        "\n"
+        "def f(k):\n"
+        "    return LOOKUP.get(k)\n"))
+    assert [a for a in actions if a.kind == "standard" and "module-level" in a.message] == []
+
+
+def test_hub_file_excludes_builtin_calls(tmp_path):
+    """print/len/isinstance calls are not coupling — the edge count must not
+    inflate on them."""
+    repo = make_repo(tmp_path)
+    abs_app = str(repo / "houses" / "app.py")
+    abs_other = str(repo / "houses" / "other.py")
+    make_graph(repo, nodes=[
+        ("Function", "a", f"{abs_app}::a", abs_app, 1, 3, None, None, 0),
+        ("Function", "o", f"{abs_other}::o", abs_other, 1, 2, None, None, 0),
+    ], edges=[
+        ("CALLS", f"{abs_app}::a", f"{abs_other}::o", abs_app, 2),
+        ("CALLS", f"{abs_app}::a", "print", abs_app, 3),
+        ("CALLS", f"{abs_app}::a", "len", abs_app, 4),
+    ])
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch.graph_actions(repo, 120, 1, 0.8, False, {}, {}, None, False, "")
+    hub = [a for a in actions if a.kind == "hub-file"]
+    assert len(hub) == 1
+    assert hub[0].metric == 1  # the real CALLS edge only; print/len did not count

@@ -198,6 +198,15 @@ rather than a number.
   I/O like sqlite3 — and `# code-health: ignore-file <signal> <why>`
   exempts a whole file with an explanation (a why-less ignore-file is
   itself a finding).
+- **R25 — A swallow must fail fast; a surfaced handler is not one.** A
+  catch that neither re-raises nor exits with control flow (no return,
+  no break/continue) is invisible — bare, empty, and log-only handlers
+  fail. An explicit return, even `None` or an empty literal, is the
+  documented contract; a continue is retry/skip semantics. The fail-fast
+  rule is distinct from broad-except linting (ruff BLE001 owns that;
+  this tool only adds the house rule). Module-level state includes typed
+  `AnnAssign` literals and collections mutated inside functions, not
+  just non-constant `Assign` literals.
 - **R23 — Cycles, dead code, and shadowed builtins are findings.** Import
   cycles between local modules (from the graph's IMPORTS_FROM edges,
   strongly-connected components) are always fixed by restructuring — the
@@ -210,15 +219,22 @@ rather than a number.
 - **R24 — A warn tier exists for noisy-but-useful signals.** Magic
   numbers (raw int/float operands, indices, and call arguments outside a
   tiny allowlist — lookup tables pass), copy-paste near-duplicates
-  (functions ≥ 90% structurally similar), unused module-level functions,
-  and broad `except Exception`/`BaseException` handlers are reported but
-  never fail the gate. Their severity is "warn": the signal is real but
-  the false-positive rate is too high to block on (same-shaped endpoints
+  (functions ≥ 90% structurally similar with at least two real body
+  statements — one-line accessors, stubs, and delegation wrappers are
+  not copy-paste), unused module-level functions, and broad
+  `except Exception`/`BaseException` handlers are reported but never
+  fail the gate. Their severity is "warn": the signal is real but the
+  false-positive rate is too high to block on (same-shaped endpoints
   match as duplicates; `mod.fn()` attribute calls and public API used by
-  other repos look unused). Warns are excluded from `--update-baseline`
-  — nothing noisy needs acknowledging to go green. Merging a warn into a
-  fail target keeps the fail severity, and merged messages are preserved
-  as notes rather than dropped.
+  other repos look unused). A decorated module-level function is
+  referenced — a decorator is framework registration (routes,
+  middleware). A function referenced only from tests is flagged
+  conditionally (deliberate test seam, document it — or dead code,
+  delete it); test references never count as live production callers.
+  Warns are excluded from `--update-baseline` — nothing noisy needs
+  acknowledging to go green. Merging a warn into a fail target keeps the
+  fail severity, and merged messages are preserved as notes rather than
+  dropped.
 
 ## Non-goals
 

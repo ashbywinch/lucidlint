@@ -219,10 +219,20 @@ class FunctionRecord:
 
 @dataclass(frozen=True)
 class ReferenceScan:
-    """One repo pass for the unused-function check: definitions, referenced names, strings."""
+    """One repo pass for the unused-function check.
+
+    definitions: module-level functions per production file.
+    prod_references: names, import aliases, and decorated function names
+        from production files — a decorator is framework registration
+        (routes, middleware), so a decorated function is referenced.
+    test_references: names and aliases from test files — a function found
+        ONLY here is a test seam or test-only dead code, not a live caller.
+    strings: production string literals (CLI dispatch by name).
+    """
 
     definitions: dict[str, dict[str, int]]
-    referenced: set[str]
+    prod_references: set[str]
+    test_references: set[str]
     strings: list[str]
 
 
@@ -840,38 +850,48 @@ def _large_function_actions(db, repo: Path, max_fn_lines: int, include_tests: bo
     return actions
 
 
+def _hub_edge_counts(db) -> Counter[str]:
+    """Per-file coupling edges, excluding CALLS to true builtins (print/len/
+    isinstance are not coupling) and non-CALLS-to-builtin noise."""
+    counts: Counter[str] = Counter()
+    hub_kinds = ("CALLS", "IMPORTS_FROM", "INHERITS", "REFERENCES")
+    for row in db.execute(
+        f"SELECT file_path, target_qualified, kind FROM edges WHERE kind IN {hub_kinds} AND file_path LIKE '%.py'",
+    ):
+        if _is_builtin_call(row):
+            continue
+        counts[row["file_path"]] += 1
+    return counts
+
+
+def _is_builtin_call(row) -> bool:
+    return (row["kind"] == "CALLS"
+            and row["target_qualified"].split("::")[-1].split(".")[-1] in BUILTIN_NAMES)
+
+
 def _hub_file_actions(db, repo: Path, max_file_edges: int, include_tests: bool,
                       file_churn: Counter[str], last_modified: dict[str, str],
                       covered, graph_preferred: bool, stale_note: str) -> list[Action]:
     """Files with heavy coupling (CALLS/IMPORTS_FROM/INHERITS/REFERENCES, no test-harness edges)."""
     actions: list[Action] = []
     src_cache: dict[str, str] = {}
-    hub_kinds = ("CALLS", "IMPORTS_FROM", "INHERITS", "REFERENCES")
-    for row in db.execute(
-        f"""
-        SELECT file_path, COUNT(*) AS edge_count
-        FROM edges
-        WHERE kind IN {hub_kinds}
-          AND file_path LIKE '%.py'
-        GROUP BY file_path
-        HAVING edge_count >= ?
-        ORDER BY edge_count DESC
-        """,
-        (max_file_edges,),
-    ):
-        rel = rel_path(repo, row["file_path"])
+    counts = _hub_edge_counts(db)
+    for file_path, edge_count in counts.most_common():
+        if edge_count < max_file_edges:
+            break
+        rel = rel_path(repo, file_path)
         if not include_tests and is_test_path(rel):
             continue
         abs_file = str(repo.resolve()) + "/" + rel
-        mix = concern_clusters(db, repo, source_prefix=abs_file + "::", own_module=_module_key(repo, row["file_path"]))
+        mix = concern_clusters(db, repo, source_prefix=abs_file + "::", own_module=_module_key(repo, file_path))
         message = _mix_message(
-            f"{row['edge_count']} call/import edges (>= {max_file_edges})", mix,
+            f"{edge_count} call/import edges (>= {max_file_edges})", mix,
             GUIDANCE["hub-file"],
             "split into one module per concern with narrow, stable interfaces so changes stay contained.")
         # Point at the file's fattest handlers: top-3 by cyclomatic complexity.
         first = db.execute(
             "SELECT MIN(line_start) FROM nodes WHERE file_path = ? AND kind IN ('Function', 'Method')",
-            (row["file_path"],),
+            (file_path,),
         ).fetchone()[0]
         fat = ""
         try:
@@ -889,9 +909,9 @@ def _hub_file_actions(db, repo: Path, max_file_edges: int, include_tests: bool,
         churn = file_churn.get(rel, 0)
         actions.append(Action(
             kind="hub-file", severity="fail", file=rel, line=anchor if fat else (first or 1),
-            function="", message=message, metric=row["edge_count"], churn=churn,
+            function="", message=message, metric=edge_count, churn=churn,
             last_modified=last_modified.get(rel, ""), tested="",
-            raw=_raw_score("hub-file", row["edge_count"], churn),
+            raw=_raw_score("hub-file", edge_count, churn),
         ))
     return actions
 
@@ -1580,25 +1600,16 @@ def _except_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
 
 
 def _handler_swallows(h) -> bool:
-    """True when the handler hides the failure: bare, or no raise and no
-    return that surfaces a value (None/empty returns are silent degradation)."""
+    """True when the handler hides the failure: bare, or a body with no
+    control-flow exit (no raise, no return, no break/continue) — the error
+    is invisible. An explicit return, even None or an empty literal, is the
+    documented contract; a continue is retry/skip semantics."""
     if h.type is None:
         return True
-    if any(isinstance(n, ast.Raise) for n in ast.walk(h)):
-        return False
-    return all(_silent_return(s) for s in h.body if isinstance(s, ast.Return))
-
-
-def _silent_return(stmt: ast.Return) -> bool:
-    """A return of None or an empty literal — silent degradation, not surfacing."""
-    v = stmt.value
-    if v is None or isinstance(v, ast.Constant) and v.value is None:
-        return True
-    if isinstance(v, ast.Dict):
-        return not v.keys
-    if isinstance(v, (ast.List, ast.Set, ast.Tuple)):
-        return not v.elts
-    return False
+    return not any(
+        isinstance(n, (ast.Raise, ast.Return, ast.Break, ast.Continue))
+        for n in ast.walk(h)
+    )
 
 
 def _global_state_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
@@ -1614,18 +1625,64 @@ def _global_state_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
                        f"or keep ONE global services object that is set at the entry point or in test setup "
                        f"and populated with whatever objects it needs — fakes in tests",
                 inner=[]))
+    flagged: set[str] = set()
     for node in tree.body:
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+        target = _module_assignment_target(node)
+        if target is None:
             continue
         if isinstance(node.value, (ast.List, ast.Dict, ast.Set)) and not _all_constant(node.value):
+            flagged.add(target)
             findings.append(LatentFinding(
                 signal="global-state", function="", line=node.lineno, metric=1,
-                detail=f"module-level mutable {type(node.value).__name__} '{node.targets[0].id}' at line {node.lineno} — "
+                detail=f"module-level mutable {type(node.value).__name__} '{target}' at line {node.lineno} — "
                        f"no module-level mutable state. The fix: instantiate the object at the entry point and "
                        f"pass it around (parameter injection), or keep ONE global services object set at the "
                        f"entry point / test setup and populated with what it needs — fakes in tests",
                 inner=[]))
+    _mutation_findings(tree, flagged, findings)
     return findings
+
+
+def _module_assignment_target(node: ast.AST) -> str | None:
+    """A single plain-name module-level assignment target (Assign or AnnAssign)."""
+    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+        return node.targets[0].id
+    if isinstance(node, ast.AnnAssign) and node.value is not None and isinstance(node.target, ast.Name):
+        return node.target.id
+    return None
+
+
+def _mutation_findings(tree: ast.Module, flagged: set[str], findings: list[LatentFinding]) -> None:
+    """Module-level collections reassigned or mutated inside functions are
+    still module state, even when the literal itself looks constant
+    (`_oauth_states: dict = {}` populated by login/callback)."""
+    mutable = {_module_assignment_target(n) for n in tree.body
+               if isinstance(getattr(n, "value", None), (ast.List, ast.Dict, ast.Set))} - {None}
+    seen: set[str] = set()
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        for node in ast.walk(fn):
+            container = _mutation_target(node, mutable)
+            if container and container not in seen and container not in flagged:
+                seen.add(container)
+                findings.append(LatentFinding(
+                    signal="global-state", function="", line=node.lineno, metric=1,
+                    detail=f"module-level collection '{container}' is mutated at line {node.lineno} — "
+                           f"no module-level mutable state. The fix: instantiate the object at the "
+                           f"entry point and pass it around (parameter injection), or keep ONE global "
+                           f"services object set at the entry point / test setup and populated with "
+                           f"what it needs — fakes in tests",
+                    inner=[]))
+
+
+def _mutation_target(node: ast.AST, mutable: set[str]) -> str | None:
+    """The module-level container this node mutates: a rebinding or an
+    in-place subscript store/del, or None when the node mutates nothing."""
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in mutable:
+        return node.id
+    if (isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del))
+            and isinstance(node.value, ast.Name) and node.value.id in mutable):
+        return node.value.id
+    return None
 
 
 def _all_constant(node: ast.AST) -> bool:
@@ -1688,6 +1745,9 @@ def _statement_lists(fn) -> StatementBlocks:
 
 
 _MAGIC_SKIP = (0, 1, 2, -1)
+
+import builtins
+BUILTIN_NAMES = {n for n in dir(builtins) if not n.startswith("_")}
 
 
 def _magic_number_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
@@ -2307,10 +2367,19 @@ def _collect_functions(repo: Path) -> list[FunctionRecord]:
             continue
         for fn in [n for n in ast.walk(tree)
                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-            toks = _fn_skeleton(fn)
-            if len(toks) >= 12:
-                fns.append(FunctionRecord(rel, fn.name, fn.lineno, toks))
+            if _is_duplicate_candidate(fn):
+                fns.append(FunctionRecord(rel, fn.name, fn.lineno, _fn_skeleton(fn)))
     return fns
+
+
+def _is_duplicate_candidate(fn) -> bool:
+    """A function worth comparing: at least two real statements (one-line
+    accessors, stubs, and delegation wrappers are not copy-paste) and a
+    12+ token skeleton."""
+    stmts = [s for s in fn.body
+             if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant)
+                     and isinstance(s.value.value, str))]
+    return len(stmts) >= 2 and len(_fn_skeleton(fn)) >= 12
 
 
 @dataclass(frozen=True)
@@ -2371,46 +2440,65 @@ def _unused_actions(repo: Path, include_tests: bool,
     actions: list[Action] = []
     for rel, fns in scan.definitions.items():
         for name, line in fns.items():
-            if _referenced_anywhere(name, scan.referenced, scan.strings):
+            if name == "main" or name in scan.prod_references or any(name in s for s in scan.strings):
                 continue
+            if name in scan.test_references:
+                detail = (f"function '{name}' ({rel}:{line}) is referenced only from tests — if it is "
+                          f"a deliberate test seam (isolation hook, fixture helper), document it with "
+                          f"`# code-health: ignore unused <why>`; otherwise production code that "
+                          f"nothing ships calls is dead — delete it")
+            else:
+                detail = (f"function '{name}' ({rel}:{line}) is defined but never referenced — dead "
+                          f"code is deleted, not kept (unless it is a CLI command or public API "
+                          f"entry point)")
             actions.append(_latent_action(repo, rel, LatentFinding(
                 signal="unused", function=name, line=line, metric=1,
-                detail=f"function '{name}' ({rel}:{line}) is defined but never referenced — dead "
-                       f"code is deleted, not kept (unless it is a CLI command or public API "
-                       f"entry point)",
-                inner=[], severity="warn"), file_churn, last_modified))
+                detail=detail, inner=[], severity="warn"), file_churn, last_modified))
     return actions
 
 
 def _collect_references(repo: Path) -> ReferenceScan:
-    """Module-level function definitions, every referenced name, and string literals."""
+    """Module-level definitions and referenced names, split by prod vs test.
+
+    Test references count separately from production ones: a production
+    function used only by tests is either a deliberate test seam (document
+    it) or dead code — it is not a live production caller.
+    """
     defined: dict[str, dict[str, int]] = defaultdict(dict)
-    referenced: set[str] = set()
+    prod_refs: set[str] = set()
+    test_refs: set[str] = set()
     strings: list[str] = []
     for py in sorted(repo.rglob("*.py")):
         rel = py.relative_to(repo).as_posix()
-        if any(part in EXCLUDED_DIRS for part in py.parts) or "/test" in f"/{rel}" or rel.startswith("test"):
+        if any(part in EXCLUDED_DIRS for part in py.parts):
             continue
+        is_test = "/test" in f"/{rel}" or rel.startswith("test")
         try:
             tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
         except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped, not a scan failure
             continue
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                defined[rel][node.name] = node.lineno
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Name):
-                referenced.add(node.id)
-            elif isinstance(node, ast.alias):
-                referenced.add(node.name)
-            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-                strings.append(node.value)
-    return ReferenceScan(defined, referenced, strings)
+        _collect_file_references(tree, rel, is_test, defined, prod_refs, test_refs, strings)
+    return ReferenceScan(defined, prod_refs, test_refs, strings)
 
 
-def _referenced_anywhere(name: str, referenced: set[str], strings: list[str]) -> bool:
-    """Referenced by name, imported, dispatched via a string (CLI), or an entry point."""
-    return name == "main" or name in referenced or any(name in s for s in strings)
+def _collect_file_references(tree, rel: str, is_test: bool, defined, prod_refs, test_refs, strings) -> None:
+    """One file's contribution to the reference scan: module-level definitions
+    (decorated = framework-registered = referenced) and every referenced name,
+    aliased import, and string literal, split by prod vs test."""
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if is_test:
+                continue
+            defined[rel][node.name] = node.lineno
+            if node.decorator_list:
+                prod_refs.add(node.name)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            (test_refs if is_test else prod_refs).add(node.id)
+        elif isinstance(node, ast.alias):
+            (test_refs if is_test else prod_refs).add(node.name)
+        elif not is_test and isinstance(node, ast.Constant) and isinstance(node.value, str):
+            strings.append(node.value)
 
 
 def _cycle_actions(repo: Path, file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
