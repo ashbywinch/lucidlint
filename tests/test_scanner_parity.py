@@ -33,7 +33,11 @@ CORPUS = sorted((ROOT / "tests" / "fixtures").rglob("*.py")) + [
     ROOT / "check_review_posted.py",
 ]
 
-PORTED_SIGNALS = ("magic-number", "noop-statement", "inline-import", "private-import", "unreachable")
+PORTED_SIGNALS = (
+    "magic-number", "noop-statement", "inline-import", "private-import", "unreachable",
+    "suppression", "type-ignore", "global-state", "builtin-shadow", "closures",
+    "class-module", "vague-name", "strewing", "except", "broad-except",
+)
 
 
 def _signal_of(message: str) -> str | None:
@@ -47,6 +51,26 @@ def _signal_of(message: str) -> str | None:
         return "private-import"
     if "unreachable statement" in message:
         return "unreachable"
+    if "type: ignore" in message:
+        return "type-ignore"  # '# type: ignore[code]' without a second comment — checked BEFORE 'without a why'
+    if "without a why" in message:
+        return "suppression"
+    if "module-level" in message or "global statement" in message:
+        return "global-state"
+    if "shadows a builtin" in message:
+        return "builtin-shadow"
+    if "inner function" in message and ("closing over" in message or "-line body" in message):
+        return "closures"
+    if "holds one class" in message:
+        return "class-module"
+    if "name carries a" in message and "class with" in message:
+        return "vague-name"
+    if "share leading parameter" in message:
+        return "strewing"
+    if "swallows" in message or "bare except" in message:
+        return "except"
+    if "broad `except" in message:
+        return "broad-except"
     return None
 
 
@@ -78,7 +102,9 @@ def _python_side() -> tuple[set, set]:
                 cc.add((rel, f.name, f.complexity))
         except SyntaxError:
             pass
-        for a in ch._scan_file(py, rel, False, visitor, ROOT, {}, {}):
+        # include_tests=True so the fixtures take the general scan branch —
+        # the parity corpus deliberately includes tests/fixtures input.
+        for a in ch._scan_file(py, rel, True, visitor, ROOT, {}, {}):
             sig = _signal_of(a.message)
             if sig:
                 findings.add((sig, rel, a.line))

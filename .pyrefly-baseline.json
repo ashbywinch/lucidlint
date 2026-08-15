@@ -1009,10 +1009,10 @@
    "severity": "error"
   },
   {
-   "line": 81,
-   "column": 63,
-   "stop_line": 81,
-   "stop_column": 65,
+   "line": 107,
+   "column": 62,
+   "stop_line": 107,
+   "stop_column": 64,
    "path": "tests/test_scanner_parity.py",
    "code": -2,
    "name": "bad-argument-type",
