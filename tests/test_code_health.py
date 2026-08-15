@@ -1902,3 +1902,29 @@ def test_ignore_file_exempts_prod_file_findings(tmp_path):
         "        return 1\n"))
     cm = [a for a in actions if a.kind == "standard" and "holds one class" in a.message]
     assert cm == []
+
+
+def test_file_mode_scopes_complexity_to_the_file(tmp_path):
+    """--file (LSP mode) must not scan the whole repo for complexity — the
+    only_rel flag was forwarded to record/latent scans but not complexity,
+    so single-file mode silently scanned everything."""
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "other.py").write_text("def big(a):\n    return a\n")
+    args = argparse.Namespace(max_complexity=15, max_function_lines=120,
+                              max_file_edges=150, max_risk=0.8, include_tests=False,
+                              hotspot_top_frac=0.1, hotspot_min_cc=15, file="houses/app.py")
+    with Env(routes=git_routes(), functions=[[FakeFn("alpha", 1, 30)]]):
+        actions = ch._collect_actions(repo, args, Counter(), {}, None, False, "", only_rel="houses/app.py")
+    files = {a.file for a in actions}
+    assert "houses/other.py" not in files
+
+
+def test_plain_import_private_path_is_a_finding(tmp_path):
+    """`import pkg._internal` is a private-symbol import — the dispatcher
+    refactor dropped the ast.Import branch (regression the review caught)."""
+    actions = _standard_for(tmp_path, (
+        "import pkg._internal\n"
+        "import pkg.public\n"))
+    priv = [a for a in actions if "imports private path" in a.message]
+    assert len(priv) == 1
+    assert "pkg._internal" in priv[0].message

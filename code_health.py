@@ -2045,8 +2045,7 @@ def _standard_findings(tree: ast.Module, parents: dict[int, ast.AST], rel: str, 
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             if _has_function_ancestor(node, parents):
                 findings.append(_inline_import_finding(node))
-            if isinstance(node, ast.ImportFrom):
-                findings += _private_import_finding(node)
+            findings += _private_import_finding(node)
         elif isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
             findings += _except_try_findings(node, parents)
             findings += _broad_except_try_findings(node, parents)
@@ -2085,21 +2084,40 @@ def _inline_import_finding(node: ast.AST) -> LatentFinding:
     )
 
 
-def _private_import_finding(node: ast.ImportFrom) -> list[LatentFinding]:
-    if node.module == "__future__":
-        return []
+def _private_import_finding(node: ast.AST) -> list[LatentFinding]:
+    """Private-symbol imports: `from pkg import _x` / `from pkg._sub import x`
+    (ImportFrom) and `import pkg._internal` (plain Import with an underscore
+    segment) — both are importing internals by name."""
     findings: list[LatentFinding] = []
-    private_module = node.module and any(seg.startswith("_") for seg in node.module.split("."))
+    if isinstance(node, ast.ImportFrom):
+        if node.module == "__future__":
+            return []
+        private_module = node.module and any(seg.startswith("_") for seg in node.module.split("."))
+        for alias in node.names:
+            if alias.name.startswith("_") or private_module:
+                target = alias.name if alias.name.startswith("_") else f"{node.module}.{alias.name}"
+                findings.append(
+                    LatentFinding(
+                        signal="private-import",
+                        function="",
+                        line=node.lineno,
+                        metric=1,
+                        detail=f"imports private symbol '{target}' at line {node.lineno} — "
+                        f"never import underscore symbols: make the logic public and documented, "
+                        f"or extract it to a shared module",
+                        inner=[],
+                    )
+                )
+        return findings
     for alias in node.names:
-        if alias.name.startswith("_") or private_module:
-            target = alias.name if alias.name.startswith("_") else f"{node.module}.{alias.name}"
+        if any(seg.startswith("_") for seg in alias.name.split(".")):
             findings.append(
                 LatentFinding(
                     signal="private-import",
                     function="",
                     line=node.lineno,
                     metric=1,
-                    detail=f"imports private symbol '{target}' at line {node.lineno} — "
+                    detail=f"imports private path '{alias.name}' at line {node.lineno} — "
                     f"never import underscore symbols: make the logic public and documented, "
                     f"or extract it to a shared module",
                     inner=[],
@@ -3808,7 +3826,8 @@ def _collect_actions(
 ) -> list[Action]:
     actions: list[Action] = []
     actions += complexity_actions(
-        repo, args.max_complexity, args.include_tests, file_churn, last_modified, covered, graph_preferred, stale_note
+        repo, args.max_complexity, args.include_tests, file_churn, last_modified, covered, graph_preferred, stale_note,
+        only_rel,
     )
     if only_rel is None:
         actions += graph_actions(
