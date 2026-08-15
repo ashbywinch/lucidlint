@@ -29,7 +29,7 @@ api_base = "https://opencode.ai/zen/go/v1"
 model = "openai/deepseek-v4-flash"
 custom_model_max_tokens = 128000
 max_model_tokens = 128000
-ai_timeout = 600
+ai_timeout = 1800  # reviews on large diffs take minutes; the upstream default is too low
 fallback_models = []
 repo_context_from_default_branch = false
 repo_context_files = [
@@ -39,6 +39,10 @@ repo_context_files = [
 ]
 
 [pr_reviewer]
+# Incremental reviews must post FRESH comments: the commit range anchors on
+# the previous review comment's created_at (github_provider.get_commit_range),
+# which an in-place-updated persistent comment would break (2026-08-11).
+persistent_comment = false
 require_tests_review = true
 require_security_review = true
 num_max_findings = 50
@@ -49,7 +53,12 @@ persistent_comment = true
 
 [github_action_config]
 handle_push_trigger = true
-push_commands = ["/review", "/improve"]
+# -i on /review is the ONLY incremental enabler in v0.41.1 (the
+# enable_incremental config key does not exist in this version) — without
+# it every push re-reviews the WHOLE PR diff (family-history-album 2026-08):
+# the incremental flag makes each push review only the commits since the
+# previous review, so a 12-push PR costs 12 small reviews, not 12 full ones.
+push_commands = ["/review -i", "/improve"]
 # A human posting "/skip" on the PR skips the AI review for that PR
 # (the check-review step passes on it). Deliberate opt-out only — the
 # default is that every PR gets reviewed. Do NOT use /skip on your own

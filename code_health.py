@@ -1828,7 +1828,7 @@ def _scan_file(
     return [
         _latent_action(repo, rel, f, file_churn, last_modified)
         for f in findings
-        if not _suppressed(f.signal, f.line, supps)
+        if not _suppressed(f.signal, f.line, supps) and f.signal not in file_supps.exemptions
     ]
 
 

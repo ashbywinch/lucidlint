@@ -1888,3 +1888,17 @@ def test_magic_number_in_nested_function_attributes_to_innermost(tmp_path):
     warns = [a for a in actions if a.severity == "warn" and "magic number" in a.message]
     assert len(warns) == 1
     assert warns[0].function == "inner"
+
+
+def test_ignore_file_exempts_prod_file_findings(tmp_path):
+    """ignore-file must exempt NON-test findings too — the main scan branch
+    dropped the file-suppression check while the test branch kept it, so
+    prod-file exemptions silently never applied."""
+    actions = _standard_for(tmp_path, (
+        "# code-health: ignore-file class-module the class is a helper inside a CLI utility; "
+        "the module is one unit with one reason to change\n"
+        "class Helper:\n"
+        "    def run(self):\n"
+        "        return 1\n"))
+    cm = [a for a in actions if a.kind == "standard" and "holds one class" in a.message]
+    assert cm == []

@@ -37,6 +37,13 @@ name: AI Code Review
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+# One review at a time per PR; a newer push cancels the stale run rather than
+# queueing behind it (rapid fix pushes never stack — with the incremental
+# /review -i config, the cancelled run's review is superseded by the new
+# push's incremental review anyway).
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   pr-review:
@@ -49,6 +56,7 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
+      actions: read  # the fail-loud check reads the bot's own log for the failure reason
     steps:
       - uses: the-pr-agent/pr-agent@b249e568e0c0fb6c674ace55fe95d02f62f8f3b3   # pin a real release SHA — @latest does not resolve
         id: pr-agent
@@ -58,9 +66,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_AGENT_CONFIG_BRANCH: pr-agent-config
 
-      # Fail the PR when no "## PR Reviewer Guide" comment covers the head
-      # commit. The script is fetched at a pinned SHA from this repo's main
-      # (never from the PR head), matching the omp-config pattern.
+      # Fail the PR when no "## PR Reviewer Guide" / "## Incremental PR
+      # Reviewer Guide" comment covers the head commit (the -i path posts the
+      # incremental header). The script is fetched at a pinned SHA (never
+      # from the PR head at run time — see the re-pin note below).
       - name: Check review succeeded
         env:
           SHA: ${{ github.event.pull_request.head.sha }}
