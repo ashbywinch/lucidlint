@@ -1854,13 +1854,28 @@ def _radon_map(visitor_cls, source: str) -> dict[tuple[str, int], int]:
 
 
 def _scan_findings(tree, rel: str, fn_map, source: str) -> list[LatentFinding]:
-    """The per-file finding families for one parsed file (one shared parents map)."""
+    """The per-file finding families for one parsed file (one shared parents map).
+
+    closure/unreachable/global-state-mutations join the dispatcher's single
+    walk — they used to do their own whole-tree passes to find functions.
+    The module-scope sets (mutable containers, already-flagged literals)
+    are precomputed from tree.body, which is cheap."""
     parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    mutable = {
+        _module_assignment_target(n)
+        for n in tree.body
+        if isinstance(getattr(n, "value", None), (ast.List, ast.Dict, ast.Set))
+    } - {None}
+    flagged = {
+        _module_assignment_target(n)
+        for n in tree.body
+        if isinstance(getattr(n, "value", None), (ast.List, ast.Dict, ast.Set))
+        and not _all_constant(n.value)
+    } - {None}
     return (
-        _closure_findings(tree, rel, fn_map)
-        + _partition_findings(tree, rel)
+        _partition_findings(tree, rel)
         + _vague_name_findings(tree, rel)
-        + _standard_findings(tree, parents, rel, source)
+        + _standard_findings(tree, parents, rel, source, fn_map, mutable, flagged)
         + _class_module_findings(tree, rel)
     )
 
@@ -1882,28 +1897,31 @@ def _invalid_suppressions(supps: dict[int, tuple[str, str]]) -> list[LatentFindi
     ]
 
 
-def _closure_findings(tree: ast.Module, rel: str, fn_map: dict[tuple[str, int], int]) -> list[LatentFinding]:
-    """Functions/methods with >= 2 inner function defs and size/complexity to match."""
+def _closure_findings(fn, fn_map: dict[tuple[str, int], int]) -> list[LatentFinding]:
+    """Functions/methods with >= 2 inner function defs and size/complexity to match.
+
+    Dispatched per FunctionDef — the whole-tree pass that used to find them
+    is gone; this handler's subtree walk is bounded by the function's size.
+    """
     findings: list[LatentFinding] = []
-    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-        span = (fn.end_lineno or fn.lineno) - fn.lineno
-        cc = fn_map.get((fn.name, fn.lineno), 0)
-        if cc < 15 and span < 60:
-            continue
-        inner = [n.name for n in ast.walk(fn) if n is not fn and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        lambdas = sum(1 for n in ast.walk(fn) if isinstance(n, ast.Lambda))
-        if len(inner) + lambdas < 2:
-            continue
-        findings.append(
-            LatentFinding(
-                signal="closures",
-                function=fn.name,
-                line=fn.lineno,
-                metric=len(inner) + lambdas,
-                detail=_closure_detail(inner, lambdas, cc, span),
-                inner=inner[:6],
-            )
+    span = (fn.end_lineno or fn.lineno) - fn.lineno
+    cc = fn_map.get((fn.name, fn.lineno), 0)
+    if cc < 15 and span < 60:
+        return findings
+    inner = [n.name for n in ast.walk(fn) if n is not fn and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    lambdas = sum(1 for n in ast.walk(fn) if isinstance(n, ast.Lambda))
+    if len(inner) + lambdas < 2:
+        return findings
+    findings.append(
+        LatentFinding(
+            signal="closures",
+            function=fn.name,
+            line=fn.lineno,
+            metric=len(inner) + lambdas,
+            detail=_closure_detail(inner, lambdas, cc, span),
+            inner=inner[:6],
         )
+    )
     return findings
 
 
@@ -2032,7 +2050,9 @@ def _vague_name_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     return findings
 
 
-def _standard_findings(tree: ast.Module, parents: dict[int, ast.AST], rel: str, source: str) -> list[LatentFinding]:
+def _standard_findings(tree: ast.Module, parents: dict[int, ast.AST], rel: str, source: str,
+                        fn_map=None, mutable: set[str] | None = None,
+                        flagged: set[str] | None = None) -> list[LatentFinding]:
     """Coding-standard rules with a checkable form (Tier-1, near-zero false positives).
 
     ONE walk, dispatched per node type — the families used to each walk the
@@ -2042,34 +2062,88 @@ def _standard_findings(tree: ast.Module, parents: dict[int, ast.AST], rel: str, 
     """
     findings: list[LatentFinding] = []
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            if _has_function_ancestor(node, parents):
-                findings.append(_inline_import_finding(node))
-            findings += _private_import_finding(node)
-        elif isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
-            findings += _except_try_findings(node, parents)
-            findings += _broad_except_try_findings(node, parents)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            findings += _shadow_args_findings(node)
-        elif isinstance(node, ast.Assign) and _has_function_ancestor(node, parents):
-            findings += _shadow_assign_findings(node, parents)
-        elif isinstance(node, ast.Constant):
-            finding = _magic_constant_finding(node, parents)
-            if finding is not None:
-                findings.append(finding)
-        elif isinstance(node, ast.Expr):
-            finding = _noop_expr_finding(node, parents)
-            if finding is not None:
-                findings.append(finding)
+        findings += _dispatch_node(node, tree, parents, rel, fn_map, mutable, flagged)
     # the families that are not tree-walk dispatches: tokenize-based,
-    # module-body-only, or per-function body walks
-    findings += _global_state_findings(tree, rel)
+    # module-body-only scans (strewing/tuple-alias), or the mock-call walk
     findings += _type_ignore_findings(source, rel)
     findings += _strewing_findings(tree, rel)
     findings += _tuple_alias_findings(tree, rel)
     findings += _monkeypatch_findings(tree, rel)
-    findings += _unreachable_findings(tree, rel)
     return findings
+
+
+def _dispatch_node(node, tree, parents, rel, fn_map, mutable, flagged) -> list[LatentFinding]:
+    """One node's findings in the single pass — a data table, not a branch
+    chain (the standard's own preference; the CC bar applies per handler)."""
+    handler = _DISPATCH_TABLE.get(type(node))
+    if handler is None:
+        return []
+    return handler(node, tree, parents, rel, fn_map, mutable, flagged)
+
+
+def _dispatch_import(node, tree, parents, rel, fn_map, mutable, flagged) -> list[LatentFinding]:
+    findings: list[LatentFinding] = []
+    if _has_function_ancestor(node, parents):
+        findings.append(_inline_import_finding(node))
+    findings += _private_import_finding(node)
+    return findings
+
+
+def _dispatch_try(node, tree, parents, rel, fn_map, mutable, flagged) -> list[LatentFinding]:
+    return _except_try_findings(node, parents) + _broad_except_try_findings(node, parents)
+
+
+def _dispatch_function(node, tree, parents, rel, fn_map, mutable, flagged) -> list[LatentFinding]:
+    findings = _shadow_args_findings(node)
+    if fn_map is not None:
+        findings += _closure_findings(node, fn_map)
+        findings += _unreachable_findings(node)
+        findings += _mutation_findings(node, mutable or set(), flagged or set())
+    return findings
+
+
+def _dispatch_global(node, tree, parents, rel, fn_map, mutable, flagged) -> list[LatentFinding]:
+    return [_global_statement_finding(node)]
+
+
+def _dispatch_assign(node, tree, parents, rel, fn_map, mutable, flagged) -> list[LatentFinding]:
+    if parents.get(id(node)) is tree:
+        return _module_literal_findings(node)
+    if _has_function_ancestor(node, parents):
+        return _shadow_assign_findings(node, parents)
+    return []
+
+
+def _dispatch_annassign(node, tree, parents, rel, fn_map, mutable, flagged) -> list[LatentFinding]:
+    if parents.get(id(node)) is tree:
+        return _module_literal_findings(node)
+    return []
+
+
+def _dispatch_constant(node, tree, parents, rel, fn_map, mutable, flagged) -> list[LatentFinding]:
+    finding = _magic_constant_finding(node, parents)
+    return [finding] if finding is not None else []
+
+
+def _dispatch_expr(node, tree, parents, rel, fn_map, mutable, flagged) -> list[LatentFinding]:
+    finding = _noop_expr_finding(node, parents)
+    return [finding] if finding is not None else []
+
+
+# code-health: ignore global-state the dispatch table is a pure immutable type-to-handler map
+_DISPATCH_TABLE = {
+    ast.Import: _dispatch_import,
+    ast.ImportFrom: _dispatch_import,
+    ast.Try: _dispatch_try,
+    getattr(ast, "TryStar", ast.Try): _dispatch_try,
+    ast.FunctionDef: _dispatch_function,
+    ast.AsyncFunctionDef: _dispatch_function,
+    ast.Global: _dispatch_global,
+    ast.Assign: _dispatch_assign,
+    ast.AnnAssign: _dispatch_annassign,
+    ast.Constant: _dispatch_constant,
+    ast.Expr: _dispatch_expr,
+}
 
 
 def _inline_import_finding(node: ast.AST) -> LatentFinding:
@@ -2327,46 +2401,66 @@ def _enclosing_function(parents: dict[int, ast.AST], node: ast.AST):
     return p
 
 
-def _global_state_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
-    """No module-level mutable state and no global statements. Constant lookup
-    tables (all-literal values, module scope) pass — the record gate's rule."""
+def _global_statement_finding(node: ast.Global) -> LatentFinding:
+    """A `global` statement is module state — dispatched, no whole-tree pass."""
+    return LatentFinding(
+        signal="global-state",
+        function="",
+        line=node.lineno,
+        metric=1,
+        detail=f"global statement at line {node.lineno} — no module-level mutable state. The fix: "
+        f"instantiate the object at the entry point and pass it around (parameter injection), "
+        f"or keep ONE global services object that is set at the entry point or in test setup "
+        f"and populated with whatever objects it needs — fakes in tests",
+        inner=[],
+    )
+
+
+def _module_literal_findings(node: ast.AST) -> list[LatentFinding]:
+    """A module-level mutable literal (list/dict/set, non-constant) — dispatched
+    on module-scope Assign/AnnAssign, so no separate tree pass is needed."""
+    target = _module_assignment_target(node)
+    if target is None or not isinstance(node.value, (ast.List, ast.Dict, ast.Set)):
+        return []
+    if _all_constant(node.value):
+        return []
+    return [
+        LatentFinding(
+            signal="global-state",
+            function="",
+            line=node.lineno,
+            metric=1,
+            detail=f"module-level mutable {type(node.value).__name__} '{target}' at line {node.lineno} — "
+            f"no module-level mutable state. The fix: instantiate the object at the entry point and "
+            f"pass it around (parameter injection), or keep ONE global services object set at the "
+            f"entry point / test setup and populated with what it needs — fakes in tests",
+            inner=[],
+        )
+    ]
+
+
+def _mutation_findings(fn, mutable: set[str], flagged: set[str]) -> list[LatentFinding]:
+    """Module-level collections reassigned or mutated inside THIS function are
+    still module state — dispatched per FunctionDef, subtree walk bounded by
+    the function's size (`_oauth_states: dict = {}` populated by login)."""
     findings: list[LatentFinding] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Global):
+    for node in ast.walk(fn):
+        container = _mutation_target(node, mutable)
+        if container and container not in flagged:
             findings.append(
                 LatentFinding(
                     signal="global-state",
                     function="",
                     line=node.lineno,
                     metric=1,
-                    detail=f"global statement at line {node.lineno} — no module-level mutable state. The fix: "
-                    f"instantiate the object at the entry point and pass it around (parameter injection), "
-                    f"or keep ONE global services object that is set at the entry point or in test setup "
-                    f"and populated with whatever objects it needs — fakes in tests",
+                    detail=f"module-level collection '{container}' is mutated at line {node.lineno} — "
+                    f"no module-level mutable state. The fix: instantiate the object at the "
+                    f"entry point and pass it around (parameter injection), or keep ONE global "
+                    f"services object set at the entry point / test setup and populated with "
+                    f"what it needs — fakes in tests",
                     inner=[],
                 )
             )
-    flagged: set[str] = set()
-    for node in tree.body:
-        target = _module_assignment_target(node)
-        if target is None:
-            continue
-        if isinstance(node.value, (ast.List, ast.Dict, ast.Set)) and not _all_constant(node.value):
-            flagged.add(target)
-            findings.append(
-                LatentFinding(
-                    signal="global-state",
-                    function="",
-                    line=node.lineno,
-                    metric=1,
-                    detail=f"module-level mutable {type(node.value).__name__} '{target}' at line {node.lineno} — "
-                    f"no module-level mutable state. The fix: instantiate the object at the entry point and "
-                    f"pass it around (parameter injection), or keep ONE global services object set at the "
-                    f"entry point / test setup and populated with what it needs — fakes in tests",
-                    inner=[],
-                )
-            )
-    _mutation_findings(tree, flagged, findings)
     return findings
 
 
@@ -2377,37 +2471,6 @@ def _module_assignment_target(node: ast.AST) -> str | None:
     if isinstance(node, ast.AnnAssign) and node.value is not None and isinstance(node.target, ast.Name):
         return node.target.id
     return None
-
-
-def _mutation_findings(tree: ast.Module, flagged: set[str], findings: list[LatentFinding]) -> None:
-    """Module-level collections reassigned or mutated inside functions are
-    still module state, even when the literal itself looks constant
-    (`_oauth_states: dict = {}` populated by login/callback)."""
-    mutable = {
-        _module_assignment_target(n)
-        for n in tree.body
-        if isinstance(getattr(n, "value", None), (ast.List, ast.Dict, ast.Set))
-    } - {None}
-    seen: set[str] = set()
-    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-        for node in ast.walk(fn):
-            container = _mutation_target(node, mutable)
-            if container and container not in seen and container not in flagged:
-                seen.add(container)
-                findings.append(
-                    LatentFinding(
-                        signal="global-state",
-                        function="",
-                        line=node.lineno,
-                        metric=1,
-                        detail=f"module-level collection '{container}' is mutated at line {node.lineno} — "
-                        f"no module-level mutable state. The fix: instantiate the object at the "
-                        f"entry point and pass it around (parameter injection), or keep ONE global "
-                        f"services object set at the entry point / test setup and populated with "
-                        f"what it needs — fakes in tests",
-                        inner=[],
-                    )
-                )
 
 
 def _mutation_target(node: ast.AST, mutable: set[str]) -> str | None:
@@ -2517,27 +2580,30 @@ SHADOWED_BUILTINS = frozenset(
 )
 
 
-def _unreachable_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
-    """Statements after an unconditional return/raise/continue/break are dead code."""
+def _unreachable_findings(fn) -> list[LatentFinding]:
+    """Statements after an unconditional return/raise/continue/break are dead code.
+
+    Dispatched per FunctionDef — the whole-tree pass that used to find them
+    is gone.
+    """
     findings: list[LatentFinding] = []
-    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-        for body in _statement_lists(fn):
-            for i, stmt in enumerate(body[:-1]):
-                if isinstance(stmt, (ast.Return, ast.Raise, ast.Continue, ast.Break)):
-                    dead = body[i + 1]
-                    findings.append(
-                        LatentFinding(
-                            signal="unreachable",
-                            function=fn.name,
-                            line=dead.lineno,
-                            metric=1,
-                            detail=f"unreachable statement at line {dead.lineno} in '{fn.name}' — "
-                            f"it follows an unconditional {type(stmt).__name__.lower()} and can "
-                            f"never run; dead code is deleted, not kept",
-                            inner=[],
-                        )
+    for body in _statement_lists(fn):
+        for i, stmt in enumerate(body[:-1]):
+            if isinstance(stmt, (ast.Return, ast.Raise, ast.Continue, ast.Break)):
+                dead = body[i + 1]
+                findings.append(
+                    LatentFinding(
+                        signal="unreachable",
+                        function=fn.name,
+                        line=dead.lineno,
+                        metric=1,
+                        detail=f"unreachable statement at line {dead.lineno} in '{fn.name}' — "
+                        f"it follows an unconditional {type(stmt).__name__.lower()} and can "
+                        f"never run; dead code is deleted, not kept",
+                        inner=[],
                     )
-                    break
+                )
+                break
     return findings
 
 
@@ -3736,8 +3802,9 @@ def _record_actions(
 ) -> list[Action]:
     """Record-shaped collections (bare dicts/tuples as records) via check_records."""
     actions: list[Action] = []
-    scan_root: Path | list[Path] = (repo / only_rel) if only_rel else repo
-    for finding in check_records.scan([scan_root]).findings:
+    # the shared _py_files list — check_records would rglob the tree again
+    scan_files = [sf.py for sf in _py_files(repo, only_rel)]
+    for finding in check_records.scan(scan_files).findings:
         rel = rel_path(repo, finding.split(":", 1)[0])
         if not include_tests and is_test_path(rel):
             continue
