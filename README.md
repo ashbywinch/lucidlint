@@ -51,7 +51,10 @@ tag and runs it as its review-attribution gate.
   AGENTS.md (multi-hop is the norm — AGENTS.md links groups, never flat
   lists). `folder-mix` and `layer-mix` detect a folder or file whose parts
   split across graph communities / callee subsystems — the seams for
-  splitting. Tests touching the real filesystem without pyfakefs are
+  splitting. Import cycles (the fix: hoist the shared interface), unreachable
+  statements after unconditional returns, and builtin-shadowing params and
+  locals are standard-family findings. Tests touching the real filesystem
+  without pyfakefs are
   findings (fakefs), except subprocess/symlink/sqlite3 C-level I/O.
   Lint-style exemptions: `# code-health: ignore <signal>
   <why>` on the line (or above) — a suppression without a why is itself a
