@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+from dataclasses import asdict, dataclass, field
 import json
 import os
 import re
@@ -42,6 +43,127 @@ from pathlib import Path
 EXCLUDED_DIRS = {".git", ".venv", "node_modules", "__pycache__", "dist", "build", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 
 ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk", "record-shape")
+
+@dataclass
+class Action:
+    """One finding. Kind families: complexity/large-function merge per target;
+    hotspot/hub-file/high-risk/record-shape are separate problems."""
+
+    kind: str
+    severity: str
+    file: str
+    line: int
+    function: str
+    message: str
+    metric: float
+    churn: int
+    last_modified: str
+    tested: str
+    note: str = ""
+    raw: float = 0.0
+    priority: int = 0
+    in_diff: bool = False
+    kinds: list[str] = field(default_factory=list)
+    callers: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> JsonDict:
+        d = asdict(self)
+        if not self.kinds:
+            d.pop("kinds")
+        if not self.callers:
+            d.pop("callers")
+        return d
+
+
+@dataclass
+class NodeInfo:
+    """Graph node facts for one function (tested, signature, span)."""
+
+    name: str
+    qualified_name: str
+    file_path: str
+    tested: str
+    params: str
+    return_type: str
+    line_start: int | None
+    line_end: int | None
+    def_sig: str = ""
+
+
+@dataclass
+class Cluster:
+    """One resolved callee subsystem: its name, call count, and example callees."""
+
+    name: str
+    count: int
+    callees: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Clusters:
+    """Concern-seam result: resolved clusters, evidence strength, unresolved callees."""
+
+    clusters: list[Cluster]
+    strong: bool
+    unresolved: list[str]
+
+
+@dataclass
+class FileHistory:
+    """Per-file change counts and last-touched dates from git history."""
+
+    churn: Counter[str]
+    last_modified: dict[str, str]
+
+
+@dataclass
+class CoverageResult:
+    """Covered line sets and the source they came from."""
+
+    lines: dict[str, set[int]] | None
+    source: str
+
+
+@dataclass
+class CoverageContext:
+    """Coverage provenance + staleness verdict for the run."""
+
+    label: str
+    graph_preferred: bool
+    stale_note: str
+
+
+@dataclass
+class GitHead:
+    """Branch and short commit for report provenance."""
+
+    branch: str
+    commit: str
+
+
+@dataclass
+class Callers:
+    """Resolved callers of a node plus the display wording for them."""
+
+    callers: list[str]
+    text: str
+
+
+@dataclass
+class VolatilePart:
+    """One complex function inside a hotspot file, with its own churn."""
+
+    churn: int
+    complexity: int
+    name: str
+    line: int
+
+
+# Named map types: a lookup table, not a record. Used in signatures so the
+# intent (file -> covered lines; JSON-serializable mapping) is explicit.
+CoverageLines = dict[str, set[int]]
+JsonDict = dict[str, object]
+
 
 # Injectable seam: tests assign code_health.radon_visitor to a fake. Loaded
 # lazily so the tool runs without radon until complexity analysis is needed.
@@ -113,14 +235,13 @@ def _module_key(repo: Path, file_path: str) -> str:
 
 
 def concern_clusters(conn: sqlite3.Connection, repo: Path, source_qn: str | None = None,
-                     source_prefix: str | None = None, own_module: str | None = None) -> tuple[list[tuple[str, int, list[str]]], bool]:
+                     source_prefix: str | None = None, own_module: str | None = None) -> Clusters:
     """Group a function's (or file's) cross-module callees by subsystem.
 
-    Returns (clusters, strong). clusters always lists what resolved (even a
-    single subsystem — the caller decides how to word it); strong is True
-    when >= 2 distinct subsystems with >= 3 total calls — the evidence bar
-    for claiming a real seam mix. Never silently empty: callers show an
-    explicit "unresolved" marker instead of boilerplate.
+    clusters always lists what resolved (even a single subsystem — the caller
+    decides how to word it); strong is True when >= 2 distinct subsystems
+    with >= 3 total calls — the evidence bar for claiming a real seam mix.
+    Never silently empty: callers show an explicit "unresolved" marker.
     """
     if source_qn is not None:
         rows = list(conn.execute(
@@ -140,13 +261,13 @@ def concern_clusters(conn: sqlite3.Connection, repo: Path, source_qn: str | None
             counts[mod] += 1
             if len(names.get(mod, [])) < 3:
                 names.setdefault(mod, []).append(r["target_qualified"].split("::")[-1].split(".")[-1])
-    clusters = [(m, counts[m], names.get(m, [])) for m, _ in counts.most_common(4)]
-    strong = len(clusters) >= 2 and sum(c for _, c, _ in clusters) >= 3
+    clusters = [Cluster(name=m, count=counts[m], callees=names.get(m, [])) for m, _ in counts.most_common(4)]
+    strong = len(clusters) >= 2 and sum(c.count for c in clusters) >= 3
     unresolved = [r["target_qualified"].split("::")[-1].split(".")[-1] for r in rows][:6]
-    return clusters, strong, unresolved
+    return Clusters(clusters=clusters, strong=strong, unresolved=unresolved)
 
 
-def mix_text(clusters: list[tuple[str, int, list[str]]], strong: bool) -> str:
+def mix_text(clusters: list[Cluster], strong: bool) -> str:
     """Wording for a concern mix: claim strength honestly."""
     if not clusters:
         return ""
@@ -166,11 +287,11 @@ def _resolve_callee_module(conn: sqlite3.Connection, repo: Path, target: str) ->
     return _module_key(repo, row["file_path"])
 
 
-def fmt_clusters(clusters: list[tuple[str, int, list[str]]]) -> str:
+def fmt_clusters(clusters: list[Cluster]) -> str:
     parts = []
-    for m, c, names in clusters:
-        n = f" ({', '.join(names)})" if names else ""
-        parts.append(f"{m} ({c}{n})")
+    for cl in clusters:
+        n = f" ({', '.join(cl.callees)})" if cl.callees else ""
+        parts.append(f"{cl.name} ({cl.count}{n})")
     return ", ".join(parts)
 
 
@@ -229,11 +350,11 @@ def function_churn(repo: Path, rel_file: str, start: int, end: int) -> int:
     return len(re.findall(r"^[0-9a-f]{7,40}", proc.stdout, flags=re.M))
 
 
-def file_history(repo: Path) -> tuple[Counter[str], dict[str, str]]:
+def file_history(repo: Path) -> FileHistory:
     """One pass over git history: per-file change counts and last-modified date.
 
-    Returns (churn, last_modified). Cheap even on long histories; drives the
-    'is this still live?' judgement and the priority ranking.
+    Cheap even on long histories; drives the 'is this still live?' judgement
+    and the priority ranking.
     """
     churn: Counter[str] = Counter()
     last: dict[str, str] = {}
@@ -242,7 +363,7 @@ def file_history(repo: Path) -> tuple[Counter[str], dict[str, str]]:
         capture_output=True, text=True, timeout=120,
     )
     if proc.returncode != 0:
-        return churn, last
+        return FileHistory(churn, last)
     date = ""
     for line in proc.stdout.splitlines():
         line = line.strip()
@@ -254,31 +375,31 @@ def file_history(repo: Path) -> tuple[Counter[str], dict[str, str]]:
         if line.endswith(".py") and not line.startswith((".venv/", "node_modules/")):
             churn[line] += 1
             last[line] = date
-    return churn, last
+    return FileHistory(churn, last)
 
 
-def load_coverage(repo: Path) -> tuple[dict[str, set[int]] | None, str]:
+def load_coverage(repo: Path) -> CoverageResult:
     """Per-file covered line sets, preferring the repo's own coverage data.
 
     Sources, in order: coverage.xml (Cobertura, what CI gates on), then
     .coverage (coverage.py SQLite, line_bits format). The graph's TESTED_BY
     edges miss tests that import inside the test body — real coverage data
-    does not. Returns (None, reason) when neither exists.
+    does not. lines is None when neither source exists.
     """
     if (repo / "coverage.xml").exists():
         return _coverage_from_xml(repo)
     if (repo / ".coverage").exists():
         return _coverage_from_sqlite(repo)
-    return None, "no coverage data (no coverage.xml, no .coverage)"
+    return CoverageResult(None, "no coverage data (no coverage.xml, no .coverage)")
 
 
-def _coverage_from_xml(repo: Path) -> tuple[dict[str, set[int]] | None, str]:
+def _coverage_from_xml(repo: Path) -> CoverageResult:
     """Cobertura coverage.xml: class line elements with hits > 0."""
     import xml.etree.ElementTree as ET
     try:
         root = ET.parse(repo / "coverage.xml").getroot()
     except ET.ParseError:
-        return None, "coverage.xml unparseable"
+        return CoverageResult(None, "coverage.xml unparseable")
     covered: dict[str, set[int]] = {}
     for cls in root.iter("class"):
         filename = (cls.get("filename") or "").replace("\\", "/")
@@ -291,10 +412,10 @@ def _coverage_from_xml(repo: Path) -> tuple[dict[str, set[int]] | None, str]:
                     lines.add(int(ln.get("number")))
                 except (TypeError, ValueError):
                     pass
-    return (covered or None), "coverage.xml"
+    return CoverageResult(covered or None, "coverage.xml")
 
 
-def _coverage_from_sqlite(repo: Path) -> tuple[dict[str, set[int]] | None, str]:
+def _coverage_from_sqlite(repo: Path) -> CoverageResult:
     """coverage.py .coverage SQLite: line_bits rows per file."""
     try:
         db = sqlite3.connect(repo / ".coverage")
@@ -309,9 +430,9 @@ def _coverage_from_sqlite(repo: Path) -> tuple[dict[str, set[int]] | None, str]:
                 continue
             covered.setdefault(rel, set()).update(_numbits_to_lines(numbits))
         db.close()
-        return (covered or None), ".coverage"
+        return CoverageResult(covered or None, ".coverage")
     except sqlite3.Error:
-        return None, ".coverage unreadable"
+        return CoverageResult(None, ".coverage unreadable")
 
 
 def _numbits_to_lines(numbits: bytes) -> set[int]:
@@ -325,7 +446,7 @@ def _numbits_to_lines(numbits: bytes) -> set[int]:
     return lines
 
 
-def covered_span(covered: dict[str, set[int]] | None, rel: str, start: int, end: int) -> bool | None:
+def covered_span(covered: CoverageLines | None, rel: str, start: int, end: int) -> bool | None:
     """True/False/None: covered, uncovered, or *unknown*.
 
     A file absent from the coverage snapshot is UNKNOWN (None), not
@@ -341,8 +462,8 @@ def covered_span(covered: dict[str, set[int]] | None, rel: str, start: int, end:
     return any(l in lines for l in range(start, end + 1))
 
 
-def _node_info(conn: sqlite3.Connection | None, repo: Path, rel_file: str, name: str) -> dict | None:
-    """Graph node (qualified_name, file_path, tested, params, return_type, span), or None."""
+def _node_info(conn: sqlite3.Connection | None, repo: Path, rel_file: str, name: str) -> NodeInfo | None:
+    """Graph node facts for a function, or None when the graph has no such node."""
     if conn is None:
         return None
     abs_file = str(repo.resolve()) + "/" + rel_file
@@ -355,16 +476,16 @@ def _node_info(conn: sqlite3.Connection | None, repo: Path, rel_file: str, name:
     ).fetchone()
     if row is None:
         return None
-    return {
-        "name": name,
-        "qualified_name": row["qualified_name"],
-        "file_path": row["file_path"],
-        "tested": row["test_coverage"] or "",
-        "params": row["params"] or "",
-        "return_type": row["return_type"] or "",
-        "line_start": row["line_start"],
-        "line_end": row["line_end"],
-    }
+    return NodeInfo(
+        name=name,
+        qualified_name=row["qualified_name"],
+        file_path=row["file_path"],
+        tested=row["test_coverage"] or "",
+        params=row["params"] or "",
+        return_type=row["return_type"] or "",
+        line_start=row["line_start"],
+        line_end=row["line_end"],
+    )
 
 
 def _raw_score(kind: str, metric: float, churn: int, callers: int | None = None) -> float:
@@ -394,11 +515,11 @@ def log(msg: str) -> None:
 # --------------------------------------------------------------------------- complexity (radon)
 def complexity_actions(repo: Path, max_cc: int, include_tests: bool,
                        file_churn: Counter[str], last_modified: dict[str, str],
-                       covered: dict[str, set[int]] | None, graph_preferred: bool, stale_note: str) -> list[dict]:
+                       covered: CoverageLines | None, graph_preferred: bool, stale_note: str) -> list[Action]:
     """Cyclomatic complexity per function via radon's fast pure-Python analyzer."""
     ComplexityVisitor = _radon_visitor()
     conn = _graph_conn(repo)
-    actions: list[dict] = []
+    actions: list[Action] = []
     for py in sorted(repo.rglob("*.py")):
         rel = py.relative_to(repo).as_posix()
         if any(part in EXCLUDED_DIRS for part in py.parts):
@@ -419,42 +540,39 @@ def complexity_actions(repo: Path, max_cc: int, include_tests: bool,
     return actions
 
 
+def _function_mix(conn, repo: Path, rel: str, name: str, info: NodeInfo | None) -> Clusters:
+    """Concern-seam result for a function's graph node, or empty when no node."""
+    if info is None:
+        return Clusters([], False, [])
+    return concern_clusters(conn, repo, source_qn=info.qualified_name, own_module=_module_key(repo, info.file_path))
+
+
 def _complexity_action(repo: Path, rel: str, fn, max_cc: int, conn, source: str,
                        covered, graph_preferred: bool, stale_note: str,
-                       file_churn: Counter[str], last_modified: dict[str, str]) -> dict:
+                       file_churn: Counter[str], last_modified: dict[str, str]) -> Action:
     """One complexity action: finding + seam wording + coverage note."""
     info = _node_info(conn, repo, rel, fn.name)
-    if info:
-        clusters, strong, unres = concern_clusters(conn, repo, source_qn=info["qualified_name"], own_module=_module_key(repo, info["file_path"]))
-        if not info.get("params"):
-            info["def_sig"] = _def_signature(source, fn.lineno)
-    else:
-        clusters, strong, unres = [], False, []
+    mix = _function_mix(conn, repo, rel, fn.name, info)
+    if info and not info.params:
+        info.def_sig = _def_signature(source, fn.lineno)
     finding = f"cyclomatic complexity {fn.complexity} (>= {max_cc})"
-    if clusters:
-        message = f"{finding} — {mix_text(clusters, strong)} — extract a class per concern; the seams are those subsystem boundaries, not line breaks."
+    if mix.clusters:
+        message = f"{finding} — {mix_text(mix.clusters, mix.strong)} — extract a class per concern; the seams are those subsystem boundaries, not line breaks."
     else:
-        snippet = "calls: " + ", ".join(unres) if unres else "no cross-module callees resolved"
+        snippet = "calls: " + ", ".join(mix.unresolved) if mix.unresolved else "no cross-module callees resolved"
         message = f"{finding} — {GUIDANCE['complexity']} [concern mix unresolved — {snippet}]"
-    note = coverage_note(covered, repo, rel, info, info["tested"], graph_preferred, stale_note) if info else ""
+    note = coverage_note(covered, repo, rel, info, info.tested, graph_preferred, stale_note) if info else ""
     churn = file_churn.get(rel, 0)
-    return {
-        "kind": "complexity",
-        "severity": "fail",
-        "file": rel,
-        "line": fn.lineno,
-        "function": fn.name,
-        "message": message,
-        "metric": fn.complexity,
-        "churn": churn,
-        "last_modified": last_modified.get(rel, ""),
-        "tested": final_tested(covered, rel, info, graph_preferred) if info else "",
-        "note": note,
-        "raw": _raw_score("complexity", fn.complexity, churn),
-    }
+    return Action(
+        kind="complexity", severity="fail", file=rel, line=fn.lineno, function=fn.name,
+        message=message, metric=fn.complexity, churn=churn,
+        last_modified=last_modified.get(rel, ""),
+        tested=final_tested(covered, rel, info, graph_preferred) if info else "",
+        note=note, raw=_raw_score("complexity", fn.complexity, churn),
+    )
 
 
-def _verdict(covered: dict[str, set[int]] | None, rel: str, info: dict, graph_tested: str, graph_preferred: bool) -> str:
+def _verdict(covered: CoverageLines | None, rel: str, info: NodeInfo, graph_tested: str, graph_preferred: bool) -> str:
     """Single coverage verdict: 'tested', 'untested', or 'unknown'.
 
     One source of truth for both the JSON field and the prose note, so they
@@ -462,7 +580,8 @@ def _verdict(covered: dict[str, set[int]] | None, rel: str, info: dict, graph_te
     TESTED_BY, but a hit in even the stale snapshot is still evidence of
     coverage. Fresh data: the snapshot decides.
     """
-    cov = covered_span(covered, rel, info.get("line_start") or 1, info.get("line_end") or info.get("line_start") or 1)
+    start = info.line_start or 1
+    cov = covered_span(covered, rel, start, info.line_end or start)
     if graph_preferred:
         # Stale snapshot: only 'tested' is provable. Anything else is UNKNOWN —
         # the snapshot may predate the tests and the graph is blind to HTTP-path
@@ -476,15 +595,15 @@ def _verdict(covered: dict[str, set[int]] | None, rel: str, info: dict, graph_te
     return graph_tested or "unknown"
 
 
-def final_tested(covered: dict[str, set[int]] | None, rel: str, info: dict, graph_preferred: bool = False) -> str:
-    return _verdict(covered, rel, info, info.get("tested", ""), graph_preferred)
+def final_tested(covered: CoverageLines | None, rel: str, info: NodeInfo, graph_preferred: bool = False) -> str:
+    return _verdict(covered, rel, info, info.tested, graph_preferred)
 
 
-def coverage_note(covered: dict[str, set[int]] | None, repo: Path, rel: str, info: dict, graph_tested: str,
+def coverage_note(covered: CoverageLines | None, repo: Path, rel: str, info: NodeInfo, graph_tested: str,
                   graph_preferred: bool = False, stale_note: str = "") -> str:
     """Append a coverage-based instruction when the function is untested."""
-    contract = contract_text(info.get("name") or "", info.get("params", ""), info.get("return_type", ""), info.get("def_sig", ""))
-    tfile = _test_file_for(repo, rel) if info else ""
+    contract = contract_text(info.name, info.params, info.return_type, info.def_sig)
+    tfile = _test_file_for(repo, rel)
     extend = f" Extend {tfile}." if tfile else ""
     verdict = _verdict(covered, rel, info, graph_tested, graph_preferred)
     if verdict == "tested":
@@ -506,7 +625,7 @@ def _graph_db(repo: Path) -> Path | None:
 
 def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: float, include_tests: bool,
                   file_churn: Counter[str], last_modified: dict[str, str],
-                  covered: dict[str, set[int]] | None, graph_preferred: bool, stale_note: str) -> list[dict]:
+                  covered: CoverageLines | None, graph_preferred: bool, stale_note: str) -> list[Action]:
     """Repo-structure actions from the code-review-graph SQLite: large functions, hub files, high risk."""
     db_path = _graph_db(repo)
     if db_path is None:
@@ -532,26 +651,26 @@ def _read_source(src_cache: dict[str, str], repo: Path, rel: str) -> str:
     return src_cache[rel]
 
 
-def _mix_message(finding: str, clusters, strong, unres, guidance: str, seams: str) -> str:
+def _mix_message(finding: str, mix: Clusters, guidance: str, seams: str) -> str:
     """Finding + concern-seam wording, or the guidance with an honest unresolved marker."""
-    if clusters:
-        return f"{finding} — {mix_text(clusters, strong)} — {seams}"
-    snippet = "calls: " + ", ".join(unres) if unres else "no cross-module callees resolved"
+    if mix.clusters:
+        return f"{finding} — {mix_text(mix.clusters, mix.strong)} — {seams}"
+    snippet = "calls: " + ", ".join(mix.unresolved) if mix.unresolved else "no cross-module callees resolved"
     return f"{finding} — {guidance} [concern mix unresolved — {snippet}]"
 
 
-def _info_signature(info: dict, src_cache: dict[str, str], repo: Path, rel: str, line: int) -> dict:
+def _info_signature(info: NodeInfo, src_cache: dict[str, str], repo: Path, rel: str, line: int) -> NodeInfo:
     """Attach the real def signature when the graph has no params for the function."""
-    if not info.get("params"):
-        info["def_sig"] = _def_signature(_read_source(src_cache, repo, rel), line)
+    if not info.params:
+        info.def_sig = _def_signature(_read_source(src_cache, repo, rel), line)
     return info
 
 
 def _large_function_actions(db, repo: Path, max_fn_lines: int, include_tests: bool,
                              file_churn: Counter[str], last_modified: dict[str, str],
-                             covered, graph_preferred: bool, stale_note: str) -> list[dict]:
+                             covered, graph_preferred: bool, stale_note: str) -> list[Action]:
     """Functions whose node line span exceeds the threshold (non-test, Python)."""
-    actions: list[dict] = []
+    actions: list[Action] = []
     src_cache: dict[str, str] = {}
     test_filter = "" if include_tests else "AND kind != 'Test'"
     for row in db.execute(
@@ -571,31 +690,32 @@ def _large_function_actions(db, repo: Path, max_fn_lines: int, include_tests: bo
         rel = rel_path(repo, row["file_path"])
         if not include_tests and is_test_path(rel):
             continue
-        clusters, strong, unres = concern_clusters(db, repo, source_qn=row["qualified_name"], own_module=_module_key(repo, row["file_path"]))
+        mix = concern_clusters(db, repo, source_qn=row["qualified_name"], own_module=_module_key(repo, row["file_path"]))
         message = _mix_message(
-            f"function spans {span} lines (>= {max_fn_lines})", clusters, strong, unres,
+            f"function spans {span} lines (>= {max_fn_lines})", mix,
             GUIDANCE["large-function"],
             "extract a class per concern, then split each class's methods into named domain steps.")
         info = _info_signature(
-            {"name": row["name"], "params": row["params"] or "", "return_type": row["return_type"] or "",
-             "line_start": row["line_start"], "line_end": row["line_end"], "tested": row["test_coverage"] or ""},
+            NodeInfo(name=row["name"], qualified_name=row["qualified_name"], file_path=row["file_path"],
+                     tested=row["test_coverage"] or "", params=row["params"] or "", return_type=row["return_type"] or "",
+                     line_start=row["line_start"], line_end=row["line_end"]),
             src_cache, repo, rel, row["line_start"])
         note = coverage_note(covered, repo, rel, info, row["test_coverage"] or "", graph_preferred, stale_note)
         churn = file_churn.get(rel, 0)
-        actions.append({
-            "kind": "large-function", "severity": "fail", "file": rel, "line": row["line_start"],
-            "function": row["name"], "message": message, "metric": span, "churn": churn,
-            "last_modified": last_modified.get(rel, ""), "tested": final_tested(covered, rel, info),
-            "note": note, "raw": _raw_score("large-function", span, churn),
-        })
+        actions.append(Action(
+            kind="large-function", severity="fail", file=rel, line=row["line_start"],
+            function=row["name"], message=message, metric=span, churn=churn,
+            last_modified=last_modified.get(rel, ""), tested=final_tested(covered, rel, info),
+            note=note, raw=_raw_score("large-function", span, churn),
+        ))
     return actions
 
 
 def _hub_file_actions(db, repo: Path, max_file_edges: int, include_tests: bool,
                       file_churn: Counter[str], last_modified: dict[str, str],
-                      covered, graph_preferred: bool, stale_note: str) -> list[dict]:
+                      covered, graph_preferred: bool, stale_note: str) -> list[Action]:
     """Files with heavy coupling (CALLS/IMPORTS_FROM/INHERITS/REFERENCES, no test-harness edges)."""
-    actions: list[dict] = []
+    actions: list[Action] = []
     src_cache: dict[str, str] = {}
     hub_kinds = ("CALLS", "IMPORTS_FROM", "INHERITS", "REFERENCES")
     for row in db.execute(
@@ -614,9 +734,9 @@ def _hub_file_actions(db, repo: Path, max_file_edges: int, include_tests: bool,
         if not include_tests and is_test_path(rel):
             continue
         abs_file = str(repo.resolve()) + "/" + rel
-        clusters, strong, unres = concern_clusters(db, repo, source_prefix=abs_file + "::", own_module=_module_key(repo, row["file_path"]))
+        mix = concern_clusters(db, repo, source_prefix=abs_file + "::", own_module=_module_key(repo, row["file_path"]))
         message = _mix_message(
-            f"{row['edge_count']} call/import edges (>= {max_file_edges})", clusters, strong, unres,
+            f"{row['edge_count']} call/import edges (>= {max_file_edges})", mix,
             GUIDANCE["hub-file"],
             "split into one module per concern with narrow, stable interfaces so changes stay contained.")
         # Point at the file's fattest handlers: top-3 by cyclomatic complexity.
@@ -638,16 +758,16 @@ def _hub_file_actions(db, repo: Path, max_file_edges: int, include_tests: bool,
             pass
         message += fat
         churn = file_churn.get(rel, 0)
-        actions.append({
-            "kind": "hub-file", "severity": "fail", "file": rel, "line": anchor if fat else (first or 1),
-            "function": "", "message": message, "metric": row["edge_count"], "churn": churn,
-            "last_modified": last_modified.get(rel, ""), "tested": "", "note": "",
-            "raw": _raw_score("hub-file", row["edge_count"], churn),
-        })
+        actions.append(Action(
+            kind="hub-file", severity="fail", file=rel, line=anchor if fat else (first or 1),
+            function="", message=message, metric=row["edge_count"], churn=churn,
+            last_modified=last_modified.get(rel, ""), tested="",
+            raw=_raw_score("hub-file", row["edge_count"], churn),
+        ))
     return actions
 
 
-def _callers_text(db, row) -> tuple[list[str], str]:
+def _callers_text(db, row) -> Callers:
     """Distinct callers of a node from CALLS edges (qualified and bare-name targets)."""
     callers = [r[0].split("::")[-1] for r in db.execute(
         "SELECT DISTINCT source_qualified FROM edges WHERE kind = 'CALLS' "
@@ -655,18 +775,18 @@ def _callers_text(db, row) -> tuple[list[str], str]:
         (row["qualified_name"], row["name"], "%::" + row["name"]),
     )][:8]
     if not callers:
-        return callers, ""
+        return Callers([], "")
     text = f", callers: {', '.join(callers)}"
     if len(callers) < row["caller_count"]:
         text += f" ({len(callers)} distinct of {row['caller_count']} call sites per risk index — count includes repeated call sites)"
-    return callers, text
+    return Callers(callers, text)
 
 
 def _high_risk_actions(db, repo: Path, max_risk: float, include_tests: bool,
                        file_churn: Counter[str], last_modified: dict[str, str],
-                       covered, graph_preferred: bool, stale_note: str) -> list[dict]:
+                       covered, graph_preferred: bool, stale_note: str) -> list[Action]:
     """Graph risk-index nodes above the threshold, with resolved callers."""
-    actions: list[dict] = []
+    actions: list[Action] = []
     src_cache: dict[str, str] = {}
     for row in db.execute(
         """
@@ -688,36 +808,37 @@ def _high_risk_actions(db, repo: Path, max_risk: float, include_tests: bool,
 
 def _high_risk_action(db, repo: Path, row, max_risk: float, include_tests: bool, src_cache: dict[str, str],
                       file_churn: Counter[str], last_modified: dict[str, str],
-                      covered, graph_preferred: bool, stale_note: str) -> dict | None:
+                      covered, graph_preferred: bool, stale_note: str) -> Action | None:
     """One high-risk action, or None for test files."""
     rel = rel_path(repo, row["file_path"])
     if not include_tests and is_test_path(rel):
         return None
-    callers, callers_text = _callers_text(db, row)
+    resolved = _callers_text(db, row)
+    callers = resolved.callers
     message = (
-        f"graph risk {row['risk_score']:.2f} (>= {max_risk}), {len(callers) or row['caller_count']} call site(s){callers_text} — "
+        f"graph risk {row['risk_score']:.2f} (>= {max_risk}), {len(callers) or row['caller_count']} call site(s){resolved.text} — "
         f"{GUIDANCE['high-risk']}"
     )
     info = _info_signature(
-        {"name": row["name"], "params": row["params"] or "", "return_type": row["return_type"] or "",
-         "line_start": row["line_start"] or 1, "line_end": row["line_end"] or row["line_start"] or 1,
-         "tested": row["test_coverage"] or ""},
+        NodeInfo(name=row["name"], qualified_name=row["qualified_name"], file_path=row["file_path"],
+                 tested=row["test_coverage"] or "", params=row["params"] or "", return_type=row["return_type"] or "",
+                 line_start=row["line_start"] or 1, line_end=row["line_end"] or row["line_start"] or 1),
         src_cache, repo, rel, row["line_start"] or 1)
     note = coverage_note(covered, repo, rel, info, row["test_coverage"] or "", graph_preferred, stale_note)
     churn = file_churn.get(rel, 0)
-    return {
-        "kind": "high-risk", "severity": "fail", "file": rel, "line": row["line_start"] or 1,
-        "function": row["name"], "message": message, "metric": round(row["risk_score"], 2), "churn": churn,
-        "last_modified": last_modified.get(rel, ""), "tested": final_tested(covered, rel, info),
-        "callers": callers, "note": note,
-        "raw": _raw_score("high-risk", row["risk_score"], churn, len(callers) if callers else row["caller_count"]),
-    }
+    return Action(
+        kind="high-risk", severity="fail", file=rel, line=row["line_start"] or 1,
+        function=row["name"], message=message, metric=round(row["risk_score"], 2), churn=churn,
+        last_modified=last_modified.get(rel, ""), tested=final_tested(covered, rel, info),
+        callers=callers, note=note,
+        raw=_raw_score("high-risk", row["risk_score"], churn, len(callers) if callers else row["caller_count"]),
+    )
 
 
 # --------------------------------------------------------------------------- hotspots (git history x complexity)
-def _volatile_parts(conn, repo: Path, rel: str, fns, min_cc: float) -> list[tuple[int, int, str, int]]:
+def _volatile_parts(conn, repo: Path, rel: str, fns, min_cc: float) -> list[VolatilePart]:
     """Complex functions in a hotspot file with their own churn (git log -L)."""
-    volatile: list[tuple[int, int, str, int]] = []  # (churn, cc, name, line)
+    volatile: list[VolatilePart] = []
     if conn is None:
         return volatile
     abs_file = str(repo.resolve()) + "/" + rel
@@ -733,12 +854,12 @@ def _volatile_parts(conn, repo: Path, rel: str, fns, min_cc: float) -> list[tupl
         if node is None or node["line_start"] is None or node["line_end"] is None:
             continue
         churn = function_churn(repo, rel, node["line_start"], node["line_end"])
-        volatile.append((churn, fn.complexity, fn.name, node["line_start"]))
+        volatile.append(VolatilePart(churn=churn, complexity=fn.complexity, name=fn.name, line=node["line_start"]))
     return volatile
 
 
 def hotspot_actions(repo: Path, top_frac: float, min_cc: float,
-                    file_churn: Counter[str], last_modified: dict[str, str]) -> list[dict]:
+                    file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
     """CodeScene hotspot: files that change often AND are complex.
 
     Change frequency from the shared `git log --name-only` pass; complexity =
@@ -770,29 +891,29 @@ def hotspot_actions(repo: Path, top_frac: float, min_cc: float,
             continue
         # Name the volatile part: complex functions in this file, with their own
         # churn (git log -L over the graph's line range). Cap at 3 per file.
-        volatile = sorted(_volatile_parts(conn, repo, rel, fns, min_cc), reverse=True)
+        volatile = sorted(_volatile_parts(conn, repo, rel, fns, min_cc),
+                           key=lambda v: (v.churn, v.complexity), reverse=True)
         parts = []
-        for churn, cc, name, line in volatile[:3]:
-            parts.append(f"{name}:{line} (CC {cc}" + (f", {churn}x churn)" if churn else ")"))
+        for v in volatile[:3]:
+            parts.append(f"{v.name}:{v.line} (CC {v.complexity}" + (f", {v.churn}x churn)" if v.churn else ")"))
         if not parts:
             parts = [f"max CC {max_cc} in {rel}"]
         churn = file_churn.get(rel, 0)
         actions.append(
-            {
-                "kind": "hotspot",
-                "severity": "fail",
-                "file": rel,
-                "line": 1,
-                "function": "",
-                "message": f"changed {churn}x (top {top_frac:.0%} by churn) — volatile part: "
+            Action(
+                kind="hotspot",
+                severity="fail",
+                file=rel,
+                line=1,
+                function="",
+                message=f"changed {churn}x (top {top_frac:.0%} by churn) — volatile part: "
                 f"{', '.join(parts)} — {GUIDANCE['hotspot']}",
-                "metric": max_cc,
-                "churn": churn,
-                "last_modified": last_modified.get(rel, ""),
-                "tested": "",
-                "note": "",
-                "raw": _raw_score("hotspot", max_cc, churn),
-            }
+                metric=max_cc,
+                churn=churn,
+                last_modified=last_modified.get(rel, ""),
+                tested="",
+                raw=_raw_score("hotspot", max_cc, churn),
+            )
         )
     return actions
 
@@ -817,8 +938,8 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def action_key(a: dict) -> str:
-    return f"{a['kind']}:{a['file']}:{a['line']}:{a['function']}"
+def action_key(a: Action) -> str:
+    return f"{a.kind}:{a.file}:{a.line}:{a.function}"
 
 
 def changed_files(repo: Path, base: str) -> set[str]:
@@ -834,8 +955,8 @@ def changed_files(repo: Path, base: str) -> set[str]:
     return set()
 
 
-def _coverage_context(repo: Path, covered, coverage_source: str) -> tuple[str, bool, str]:
-    """Coverage provenance label + staleness verdict -> (label, graph_preferred, stale_note)."""
+def _coverage_context(repo: Path, covered, coverage_source: str) -> CoverageContext:
+    """Coverage provenance label + staleness verdict."""
     if coverage_source == ".coverage" and (repo / ".coverage").exists():
         coverage_source += " (mtime " + time.strftime("%Y-%m-%d %H:%M", time.localtime((repo / ".coverage").stat().st_mtime)) + ")"
     graph_preferred = False
@@ -846,78 +967,78 @@ def _coverage_context(repo: Path, covered, coverage_source: str) -> tuple[str, b
         if newest_test > cov_mtime:
             graph_preferred = True
             stale_note = " (coverage snapshot older than the repo's tests — graph verdict used; verify against htmlcov/ if present)"
-    return coverage_source, graph_preferred, stale_note
+    return CoverageContext(label=coverage_source, graph_preferred=graph_preferred, stale_note=stale_note)
 
 
-def _git_head(repo: Path) -> tuple[str, str]:
+def _git_head(repo: Path) -> GitHead:
     """Current branch and short commit for report provenance."""
     branch = subprocess.run(["git", "-C", str(repo), "branch", "--show-current"],
                             capture_output=True, text=True).stdout.strip()
     commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
                             capture_output=True, text=True).stdout.strip()
-    return branch, commit
+    return GitHead(branch=branch, commit=commit)
 
 
-def _dedupe(actions: list[dict]) -> list[dict]:
+def _dedupe(actions: list[Action]) -> list[Action]:
     """Same kind+file+line+function fires once (graph and radon can both flag a function)."""
-    seen: dict[tuple, dict] = {}
+    seen: dict[tuple, Action] = {}
     for a in actions:
-        key = (a["kind"], a["file"], a["line"], a["function"])
-        if key not in seen or a["raw"] > seen[key]["raw"]:
+        key = (a.kind, a.file, a.line, a.function)
+        if key not in seen or a.raw > seen[key].raw:
             seen[key] = a
     return list(seen.values())
 
 
-def _percentile_rank(unique: list[dict], diff: set[str]) -> None:
+def _percentile_rank(unique: list[Action], diff: set[str]) -> None:
     """Rank raw risk 1-99 (percentile) so the list spreads; tag in-diff actions."""
     if not unique:
         return
-    lo, hi = min(a["raw"] for a in unique), max(a["raw"] for a in unique)
+    lo, hi = min(a.raw for a in unique), max(a.raw for a in unique)
     for a in unique:
-        a["priority"] = 99 if hi <= lo else max(1, round(1 + 98 * (a["raw"] - lo) / (hi - lo)))
-        a["in_diff"] = a["file"] in diff
+        a.priority = 99 if hi <= lo else max(1, round(1 + 98 * (a.raw - lo) / (hi - lo)))
+        a.in_diff = a.file in diff
 
 
-def _merge_key(a: dict) -> tuple:
+def _merge_key(a: Action) -> tuple:
     """(file, function, kind-group): complexity and large-function are one fix family;
     every other kind (hotspot, hub-file, high-risk, record-shape) is its own target —
     a hub-file and a hotspot on the same file are different problems."""
-    group = a["kind"] if a["kind"] not in ("complexity", "large-function") else "fn"
-    return (a["file"], a.get("function", ""), group)
+    group = a.kind if a.kind not in ("complexity", "large-function") else "fn"
+    return (a.file, a.function, group)
 
 
-def _merge_targets(unique: list[dict]) -> list[dict]:
+def _merge_targets(unique: list[Action]) -> list[Action]:
     """Per-target merge: complexity + large-function on the same function is one fix."""
-    merged: dict[tuple, dict] = {}
-    for a in sorted(unique, key=lambda a: (-a["raw"], a["file"], a["line"])):
+    merged: dict[tuple, Action] = {}
+    for a in sorted(unique, key=lambda a: (-a.raw, a.file, a.line)):
         key = _merge_key(a)
         if key not in merged:
             merged[key] = a
         else:
             prev = merged[key]
-            prev["kinds"] = sorted({prev.get("kind"), a["kind"]})
-            prev["raw"] = max(prev["raw"], a["raw"])
-            if a["note"] and a["note"] not in prev.get("note", ""):
-                prev["note"] = (prev.get("note", "") + " " + a["note"]).strip()
-            prev["line"] = min(prev["line"], a["line"])
+            prev.kinds = sorted({prev.kind, a.kind})
+            prev.raw = max(prev.raw, a.raw)
+            if a.note and a.note not in prev.note:
+                prev.note = (prev.note + " " + a.note).strip()
+            prev.line = min(prev.line, a.line)
     return list(merged.values())
 
 
-def _lifecycle_notes(unique: list[dict]) -> None:
+def _lifecycle_notes(unique: list[Action]) -> None:
     """Facts only — low-churn scripts/tools. Delete-vs-refactor is the agent's call."""
     for a in unique:
-        if a["file"].startswith(("scripts/", "tools/")) and a.get("churn", 0) <= 2 and a.get("last_modified"):
-            a["note"] = (a.get("note", "") + f" Lifecycle: {a['churn']}x churn, last touched {a['last_modified']} — "
-                         f"low-change file under scripts/tools.").strip()
+        if a.file.startswith(("scripts/", "tools/")) and a.churn <= 2 and a.last_modified:
+            a.note = (a.note + f" Lifecycle: {a.churn}x churn, last touched {a.last_modified} — "
+                      f"low-change file under scripts/tools.").strip()
 
 
-def _dedupe_merge(actions: list[dict], diff: set[str]) -> list[dict]:
+def _dedupe_merge(actions: list[Action], diff: set[str]) -> list[Action]:
     """Dedupe, rank, merge per-target kinds, then lifecycle notes."""
     unique = _dedupe(actions)
     _percentile_rank(unique, diff)
     unique = _merge_targets(unique)
     _percentile_rank(unique, set())
-    unique.sort(key=lambda a: (-a["priority"], a["file"], a["line"]))
+    unique.sort(key=lambda a: (-a.priority, a.file, a.line))
     _lifecycle_notes(unique)
     return unique
 
@@ -932,7 +1053,7 @@ def _load_baseline(path) -> set[str]:
     return set()
 
 
-def _render_json(repo: Path, args, unique: list[dict], branch: str, commit: str, coverage_source: str) -> None:
+def _render_json(repo: Path, args, unique: list[Action], branch: str, commit: str, coverage_source: str) -> None:
     print(json.dumps({
         "meta": {
             "repo": str(repo), "branch": branch, "commit": commit,
@@ -949,23 +1070,23 @@ def _render_json(repo: Path, args, unique: list[dict], branch: str, commit: str,
             },
         },
         "baseline": str(args.baseline) if args.baseline else "",
-        "actions": unique,
+        "actions": [a.to_dict() for a in unique],
     }, indent=2))
 
 
-def _render_summary(repo: Path, args, fails: list[dict], acks: list[dict],
+def _render_summary(repo: Path, args, fails: list[Action], acks: list[Action],
                     diff: set[str], coverage_source: str, graph_preferred: bool) -> None:
     """Gate verdict, scope, and formula lines."""
     top = fails[0]
-    mine = sum(1 for a in fails if a.get("in_diff"))
+    mine = sum(1 for a in fails if a.in_diff)
     mine_txt = (f"; {mine} of {len(fails)} actions in files your diff touches"
                 if diff else "; diff base unresolved")
     mine_txt += " (no baseline — cannot tell what is new)"
-    targets = len({(a["file"], a.get("function", "")) for a in fails})
+    targets = len({(a.file, a.function) for a in fails})
     verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
     print(f"{verdict} — {len(fails)} action(s) across {targets} distinct targets "
           f"(+{len(acks)} acknowledged in baseline){mine_txt}, "
-          f"top P{top['priority']} {top['file']}:{top['line']} ({top['function'] or top['kind']})")
+          f"top P{top.priority} {top.file}:{top.line} ({top.function or top.kind})")
     print("priority ranks change-cost (churn x fan-in), not brokenness — which item is worth fixing first is a judgement call; "
           "the hotspot entries are the usual starting set")
     if graph_preferred:
@@ -980,28 +1101,28 @@ def _render_summary(repo: Path, args, fails: list[dict], acks: list[dict],
           f"; coverage: {coverage_source}")
 
 
-def _render_file_group(file: str, items: list[dict]) -> None:
+def _render_file_group(file: str, items: list[Action]) -> None:
     """One file's actions, priority-ordered, with notes."""
-    touched = " [in your diff]" if any(i["in_diff"] for i in items) else ""
+    touched = " [in your diff]" if any(i.in_diff for i in items) else ""
     print(f"\n{file}{touched}")
     for a in items:
-        loc = f":{a['line']}" + (f" ({a['function']})" if a["function"] else "")
-        churn = f" [churn {a['churn']}x]" if a.get("churn") else ""
-        kinds = ",".join(a["kinds"]) if a.get("kinds") else a["kind"]
-        print(f"  [P{a['priority']:02d}][{kinds}] {loc}{churn} — {a['message']}")
-        if a.get("note"):
-            print(f"      -> {a['note']}")
+        loc = f":{a.line}" + (f" ({a.function})" if a.function else "")
+        churn = f" [churn {a.churn}x]" if a.churn else ""
+        kinds = ",".join(a.kinds) if a.kinds else a.kind
+        print(f"  [P{a.priority:02d}][{kinds}] {loc}{churn} — {a.message}")
+        if a.note:
+            print(f"      -> {a.note}")
 
 
-def _render_actions(repo: Path, args, fails: list[dict], acks: list[dict]) -> None:
+def _render_actions(repo: Path, args, fails: list[Action], acks: list[Action]) -> None:
     """Per-file grouped action lines, baseline acknowledgements, and the footer."""
-    by_file: dict[str, list[dict]] = {}
+    by_file: dict[str, list[Action]] = {}
     for a in fails:
-        by_file.setdefault(a["file"], []).append(a)
-    for file, items in sorted(by_file.items(), key=lambda kv: -max(i["priority"] for i in kv[1])):
+        by_file.setdefault(a.file, []).append(a)
+    for file, items in sorted(by_file.items(), key=lambda kv: -max(i.priority for i in kv[1])):
         _render_file_group(file, items)
     if acks:
-        print(f"\nacknowledged in baseline ({len(acks)}): " + ", ".join(f"{a['file']}:{a['line']}" for a in acks[:5]) + (" …" if len(acks) > 5 else ""))
+        print(f"\nacknowledged in baseline ({len(acks)}): " + ", ".join(f"{a.file}:{a.line}" for a in acks[:5]) + (" …" if len(acks) > 5 else ""))
     print("\nre-run: uv run --with radon python3 code_health.py --repo " + str(repo) +
           (" --baseline " + str(args.baseline) if args.baseline else "") +
           "   | tool lives in build-tools (github.com/ashbywinch/build-tools); thresholds and per-action data in --json output")
@@ -1009,7 +1130,7 @@ def _render_actions(repo: Path, args, fails: list[dict], acks: list[dict]) -> No
           "gate only fails on NEW actions; this report is a snapshot, not wired into CI")
 
 
-def _render_text(repo: Path, args, unique: list[dict], fails: list[dict], acks: list[dict],
+def _render_text(repo: Path, args, unique: list[Action], fails: list[Action], acks: list[Action],
                  diff: set[str], coverage_source: str, graph_preferred: bool) -> None:
     if not unique:
         print("GATE: PASS — clean, no actions")
@@ -1022,9 +1143,9 @@ def _render_text(repo: Path, args, unique: list[dict], fails: list[dict], acks: 
 
 
 def _record_actions(repo: Path, include_tests: bool,
-                    file_churn: Counter[str], last_modified: dict[str, str]) -> list[dict]:
+                    file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
     """Record-shaped collections (bare dicts/tuples as records) via check_records."""
-    actions: list[dict] = []
+    actions: list[Action] = []
     for finding in check_records.scan([repo]).findings:
         rel = rel_path(repo, finding.split(":", 1)[0])
         if not include_tests and is_test_path(rel):
@@ -1039,17 +1160,17 @@ def _record_actions(repo: Path, include_tests: bool,
             fn = m.group(1)
         body = finding.split(": ", 1)[1] if ": " in finding else finding
         churn = file_churn.get(rel, 0)
-        actions.append({
-            "kind": "record-shape", "severity": "fail", "file": rel, "line": line, "function": fn,
-            "message": f"{body} — {GUIDANCE['record-shape']}", "metric": 1, "churn": churn,
-            "last_modified": last_modified.get(rel, ""), "tested": "", "note": "",
-            "raw": _raw_score("record-shape", 1, churn),
-        })
+        actions.append(Action(
+            kind="record-shape", severity="fail", file=rel, line=line, function=fn,
+            message=f"{body} — {GUIDANCE['record-shape']}", metric=1, churn=churn,
+            last_modified=last_modified.get(rel, ""), tested="",
+            raw=_raw_score("record-shape", 1, churn),
+        ))
     return actions
 
 
-def _collect_actions(repo: Path, args, file_churn, last_modified, covered, graph_preferred: bool, stale_note: str) -> list[dict]:
-    actions: list[dict] = []
+def _collect_actions(repo: Path, args, file_churn, last_modified, covered, graph_preferred: bool, stale_note: str) -> list[Action]:
+    actions: list[Action] = []
     actions += complexity_actions(repo, args.max_complexity, args.include_tests, file_churn, last_modified, covered, graph_preferred, stale_note)
     actions += graph_actions(repo, args.max_function_lines, args.max_file_edges, args.max_risk, args.include_tests, file_churn, last_modified, covered, graph_preferred, stale_note)
     actions += hotspot_actions(repo, args.hotspot_top_frac, args.hotspot_min_cc, file_churn, last_modified)
@@ -1064,7 +1185,7 @@ def _refresh_coverage(repo: Path) -> None:
     log("coverage refresh exit " + str(proc.returncode))
 
 
-def _write_baseline(args, unique: list[dict]) -> int:
+def _write_baseline(args, unique: list[Action]) -> int:
     """--update-baseline: lock all current action keys and exit clean."""
     if not args.baseline:
         log("--update-baseline requires --baseline PATH")
@@ -1075,11 +1196,11 @@ def _write_baseline(args, unique: list[dict]) -> int:
     return 0
 
 
-def _apply_baseline(unique: list[dict], baseline_keys: set[str]) -> None:
+def _apply_baseline(unique: list[Action], baseline_keys: set[str]) -> None:
     """Mark acknowledged actions so they report but never fail the gate."""
     for a in unique:
         if action_key(a) in baseline_keys:
-            a["severity"] = "ack"
+            a.severity = "ack"
 
 
 def main() -> int:
@@ -1089,26 +1210,26 @@ def main() -> int:
         log(f"{repo} is not a git repository")
         return 2
 
-    file_churn, last_modified = file_history(repo)
+    fh = file_history(repo)
     if args.refresh_coverage:
         _refresh_coverage(repo)
-    covered, coverage_source = load_coverage(repo)
-    coverage_source, graph_preferred, stale_note = _coverage_context(repo, covered, coverage_source)
+    cr = load_coverage(repo)
+    cc = _coverage_context(repo, cr.lines, cr.source)
     diff = changed_files(repo, args.base)
-    actions = _collect_actions(repo, args, file_churn, last_modified, covered, graph_preferred, stale_note)
+    actions = _collect_actions(repo, args, fh.churn, fh.last_modified, cr.lines, cc.graph_preferred, cc.stale_note)
     unique = _dedupe_merge(actions, diff)
 
     if args.update_baseline:
         return _write_baseline(args, unique)
     _apply_baseline(unique, _load_baseline(args.baseline))
-    fails = [a for a in unique if a["severity"] != "ack"]
-    acks = [a for a in unique if a["severity"] == "ack"]
-    branch, commit = _git_head(repo)
+    fails = [a for a in unique if a.severity != "ack"]
+    acks = [a for a in unique if a.severity == "ack"]
+    head = _git_head(repo)
 
     if args.json:
-        _render_json(repo, args, unique, branch, commit, coverage_source)
+        _render_json(repo, args, unique, head.branch, head.commit, cc.label)
     else:
-        _render_text(repo, args, unique, fails, acks, diff, coverage_source, graph_preferred)
+        _render_text(repo, args, unique, fails, acks, diff, cc.label, cc.graph_preferred)
 
     if fails and not args.warn:
         log(f"{len(fails)} action(s) found — failing (use --warn to run informational)")

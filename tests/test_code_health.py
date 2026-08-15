@@ -254,9 +254,9 @@ def test_raw_score_caps():
 
 
 def test_mix_text():
-    strong = [("houses/a", 3, ["x"]), ("houses/b", 1, ["y"])]
+    strong = [ch.Cluster("houses/a", 3, ["x"]), ch.Cluster("houses/b", 1, ["y"])]
     assert ch.mix_text(strong, True) == "mixes concerns: houses/a (3 (x)), houses/b (1 (y))"
-    weak = [("houses/a", 1, ["x"])]
+    weak = [ch.Cluster("houses/a", 1, ["x"])]
     assert ch.mix_text(weak, False) == "possible seams (weak signal): houses/a (1 (x))"
     assert ch.mix_text([], False) == ""
 
@@ -264,39 +264,39 @@ def test_mix_text():
 # --------------------------------------------------------------------------- coverage
 def test_load_coverage_none(tmp_path):
     repo = make_repo(tmp_path)
-    covered, source = ch.load_coverage(repo)
-    assert covered is None
-    assert "no coverage" in source
+    cr = ch.load_coverage(repo)
+    assert cr.lines is None
+    assert "no coverage" in cr.source
 
 
 def test_load_coverage_xml(tmp_path):
     repo = make_repo(tmp_path)
     make_coverage_xml(repo, {"houses/app.py": [2, 3]})
-    covered, source = ch.load_coverage(repo)
-    assert source == "coverage.xml"
-    assert covered["houses/app.py"] == {2, 3}
+    cr = ch.load_coverage(repo)
+    assert cr.source == "coverage.xml"
+    assert cr.lines["houses/app.py"] == {2, 3}
 
 
 def test_load_coverage_dot(tmp_path):
     repo = make_repo(tmp_path)
     make_dot_coverage(repo, {"houses/app.py": [1, 2]})
-    covered, source = ch.load_coverage(repo)
-    assert source == ".coverage"
-    assert covered["houses/app.py"] == {1, 2}
+    cr = ch.load_coverage(repo)
+    assert cr.source == ".coverage"
+    assert cr.lines["houses/app.py"] == {1, 2}
 
 
 def test_load_coverage_prefers_xml(tmp_path):
     repo = make_repo(tmp_path)
     make_coverage_xml(repo, {"houses/app.py": [2]})
     make_dot_coverage(repo, {"houses/app.py": [1]})
-    covered, source = ch.load_coverage(repo)
-    assert source == "coverage.xml"
+    cr = ch.load_coverage(repo)
+    assert cr.source == "coverage.xml"
 
 
 def test_covered_span_semantics(tmp_path):
     repo = make_repo(tmp_path)
     make_dot_coverage(repo, {"houses/app.py": [2]})
-    covered, _ = ch.load_coverage(repo)
+    covered = ch.load_coverage(repo).lines
     assert ch.covered_span(covered, "houses/app.py", 2, 2) is True
     assert ch.covered_span(covered, "houses/app.py", 5, 5) is False  # present file, no hits
     assert ch.covered_span(covered, "scripts/oneoff.py", 1, 1) is None  # absent file = unknown
@@ -306,8 +306,8 @@ def test_covered_span_semantics(tmp_path):
 def test_verdict_precedence(tmp_path):
     repo = make_repo(tmp_path)
     make_dot_coverage(repo, {"houses/app.py": [2]})
-    covered, _ = ch.load_coverage(repo)
-    info = {"line_start": 1, "line_end": 4}
+    covered = ch.load_coverage(repo).lines
+    info = ch.NodeInfo("f", "", "", "untested", "", "", 1, 4)
 
     # fresh coverage wins over graph
     assert ch._verdict(covered, "houses/app.py", info, "untested", False) == "tested"
@@ -344,12 +344,12 @@ def test_concern_clusters(tmp_path):
     ])
     db = sqlite3.connect(repo / ".code-review-graph" / "graph.db")
     db.row_factory = sqlite3.Row
-    clusters, strong, unresolved = ch.concern_clusters(db, repo, source_qn=qn, own_module="houses")
+    res = ch.concern_clusters(db, repo, source_qn=qn, own_module="houses")
     db.close()
-    assert strong is True  # 2 distinct subsystems, 3 distinct callees
-    assert ("houses/web", 2, ["web_other", "web_other2"]) in clusters  # own module excluded, callees named
-    assert ("houses/nodes", 1, ["nodes_b"]) in clusters
-    assert "get" in unresolved
+    assert res.strong is True  # 2 distinct subsystems, 3 distinct callees
+    assert any(c.name == "houses/web" and c.count == 2 and c.callees == ["web_other", "web_other2"] for c in res.clusters)
+    assert any(c.name == "houses/nodes" and c.count == 1 and c.callees == ["nodes_b"] for c in res.clusters)
+    assert "get" in res.unresolved
 
 
 def test_concern_clusters_weak_returned(tmp_path):
@@ -363,10 +363,10 @@ def test_concern_clusters_weak_returned(tmp_path):
     ], edges=[("CALLS", qn, f"{abs_web}::web_other", abs_app, 2)])
     db = sqlite3.connect(repo / ".code-review-graph" / "graph.db")
     db.row_factory = sqlite3.Row
-    clusters, strong, _ = ch.concern_clusters(db, repo, source_qn=qn, own_module="houses")
+    res = ch.concern_clusters(db, repo, source_qn=qn, own_module="houses")
     db.close()
-    assert strong is False  # single subsystem = weak, but still returned
-    assert len(clusters) == 1
+    assert res.strong is False  # single subsystem = weak, but still returned
+    assert len(res.clusters) == 1
 
 
 # --------------------------------------------------------------------------- builders
@@ -378,11 +378,11 @@ def test_complexity_actions(tmp_path):
     ]
     with Env(routes=git_routes(), functions=fake_fns):
         actions = ch.complexity_actions(repo, 15, False, {}, {}, None, False, "")
-    names = {(a["function"], a["file"]) for a in actions}
+    names = {(a.function, a.file) for a in actions}
     assert ("alpha", "houses/app.py") in names
     assert ("beta", "houses/app.py") not in names  # below threshold
-    assert all(a["kind"] == "complexity" for a in actions)
-    assert all(a["severity"] == "fail" for a in actions)
+    assert all(a.kind == "complexity" for a in actions)
+    assert all(a.severity == "fail" for a in actions)
 
 
 def test_complexity_actions_skips_tests(tmp_path):
@@ -396,7 +396,7 @@ def test_complexity_actions_skips_tests(tmp_path):
     assert leftover == 1  # the test file's fns were never consumed
     with Env(routes=git_routes(), functions=[list(x) for x in fns]):
         actions = ch.complexity_actions(repo, 15, True, {}, {}, None, False, "")
-    assert [a["function"] for a in actions] == ["test_x"]  # include_tests scans it
+    assert [a.function for a in actions] == ["test_x"]  # include_tests scans it
 
 
 def test_graph_actions_large_function(tmp_path):
@@ -409,11 +409,11 @@ def test_graph_actions_large_function(tmp_path):
     ], risks=[(1, f"{abs_app}::big", 0.3, 0, "untested")])
     with Env(routes=git_routes()):
         actions = ch.graph_actions(repo, 120, 150, 0.8, False, {}, {}, None, False, "")
-    big = [a for a in actions if a["kind"] == "large-function"]
+    big = [a for a in actions if a.kind == "large-function"]
     assert len(big) == 1  # Test node excluded
-    assert big[0]["function"] == "big"
-    assert big[0]["metric"] == 291
-    assert "untested" in big[0]["tested"]
+    assert big[0].function == "big"
+    assert big[0].metric == 291
+    assert "untested" in big[0].tested
 
 
 def test_graph_actions_hub_file(tmp_path):
@@ -434,12 +434,12 @@ def test_graph_actions_hub_file(tmp_path):
     ])
     with Env(routes=git_routes(), functions=[[FakeFn("a", 1, 30)]]):
         actions = ch.graph_actions(repo, 120, 2, 0.8, False, {}, {}, None, False, "")
-    hub = [a for a in actions if a["kind"] == "hub-file"]
+    hub = [a for a in actions if a.kind == "hub-file"]
     assert len(hub) == 1
-    assert hub[0]["file"] == "houses/app.py"
-    assert hub[0]["metric"] == 2  # TESTED_BY/CONTAINS excluded
-    assert "fattest: a:1 (CC 30)" in hub[0]["message"]
-    assert hub[0]["line"] == 1  # anchored at the fattest function
+    assert hub[0].file == "houses/app.py"
+    assert hub[0].metric == 2  # TESTED_BY/CONTAINS excluded
+    assert "fattest: a:1 (CC 30)" in hub[0].message
+    assert hub[0].line == 1  # anchored at the fattest function
 
 
 def test_graph_actions_high_risk(tmp_path):
@@ -455,11 +455,11 @@ def test_graph_actions_high_risk(tmp_path):
     ], risks=[(1, qn, 0.9, 2, "tested")])
     with Env(routes=git_routes()):
         actions = ch.graph_actions(repo, 120, 150, 0.8, False, {}, {}, None, False, "")
-    hr = [a for a in actions if a["kind"] == "high-risk"]
+    hr = [a for a in actions if a.kind == "high-risk"]
     assert len(hr) == 1
-    assert "callers: caller" in hr[0]["message"]
-    assert "7 call site(s)" not in hr[0]["message"]  # 1 distinct caller
-    assert hr[0]["tested"] == "tested"  # graph says tested, no coverage data
+    assert "callers: caller" in hr[0].message
+    assert "7 call site(s)" not in hr[0].message  # 1 distinct caller
+    assert hr[0].tested == "tested"  # graph says tested, no coverage data
 
 
 def test_hotspot_actions(tmp_path):
@@ -473,12 +473,12 @@ def test_hotspot_actions(tmp_path):
                "2026-08-03\nhouses/app.py\n2026-08-04\nhouses/app.py\n"
                "2026-08-05\nhouses/app.py\n2026-08-01\nscripts/oneoff.py\n")
     with Env(routes=git_routes(history=history, log_l="abc1234 fix\n"), functions=[[FakeFn("alpha", 1, 20)]]):
-        churn, last = ch.file_history(repo)
-        actions = ch.hotspot_actions(repo, 0.5, 15, churn, last)
+        fh = ch.file_history(repo)
+        actions = ch.hotspot_actions(repo, 0.5, 15, fh.churn, fh.last_modified)
     assert len(actions) == 1
-    assert actions[0]["file"] == "houses/app.py"
-    assert "alpha:1" in actions[0]["message"]  # volatile part named
-    assert actions[0]["churn"] == 5
+    assert actions[0].file == "houses/app.py"
+    assert "alpha:1" in actions[0].message  # volatile part named
+    assert actions[0].churn == 5
 
 
 def test_file_history(tmp_path):
@@ -486,11 +486,11 @@ def test_file_history(tmp_path):
     history = ("2026-08-01\nhouses/app.py\n2026-08-02\nhouses/app.py\n"
                "2026-08-03\nnotpy.txt\n2026-08-04\n.venv/x.py\n")
     with Env(routes=git_routes(history=history)):
-        churn, last = ch.file_history(repo)
-    assert churn["houses/app.py"] == 2
-    assert "notpy.txt" not in churn  # non-py ignored
-    assert ".venv/x.py" not in churn
-    assert last["houses/app.py"] == "2026-08-02"
+        fh = ch.file_history(repo)
+    assert fh.churn["houses/app.py"] == 2
+    assert "notpy.txt" not in fh.churn  # non-py ignored
+    assert ".venv/x.py" not in fh.churn
+    assert fh.last_modified["houses/app.py"] == "2026-08-02"
 
 
 # --------------------------------------------------------------------------- main
@@ -607,10 +607,10 @@ def test_record_actions(tmp_path):
     )
     with Env(routes=git_routes()):
         actions = ch._record_actions(repo, False, {}, {})
-    kinds = [a for a in actions if a["kind"] == "record-shape"]
+    kinds = [a for a in actions if a.kind == "record-shape"]
     # grab-bag param (line 1), grab-bag return (line 1), return-position dict literal (line 2)
     assert len(kinds) == 3
-    assert all(a["file"] == "houses/app.py" for a in kinds)
+    assert all(a.file == "houses/app.py" for a in kinds)
     assert "record-shape" in ch.ACTION_KINDS
 
 
@@ -636,9 +636,17 @@ def test_merge_keeps_file_level_kinds(tmp_path, capsys):
     # one file-level hotspot + one hub-file + one high-risk on the same file
     history = "2026-08-01\nhouses/app.py\n2026-08-02\nhouses/app.py\n"
     with Env(routes=git_routes(history=history), functions=[[FakeFn("a", 1, 20)], [FakeFn("a", 1, 20)]]):
-        churn, last = ch.file_history(repo)
-        actions = ch.graph_actions(repo, 120, 1, 0.8, False, churn, last, None, False, "")
-        actions += ch.hotspot_actions(repo, 1.0, 15, churn, last)
+        fh = ch.file_history(repo)
+        actions = ch.graph_actions(repo, 120, 1, 0.8, False, fh.churn, fh.last_modified, None, False, "")
+        actions += ch.hotspot_actions(repo, 1.0, 15, fh.churn, fh.last_modified)
         merged = ch._merge_targets(ch._dedupe(actions))
-    kinds = {a["kind"] for a in merged}
+    kinds = {a.kind for a in merged}
     assert kinds == {"hub-file", "high-risk", "hotspot"}  # all three survive
+
+
+def test_tool_passes_its_own_record_check():
+    """The record-shape kind must never fire on the tool's own code."""
+    repo = Path(__file__).resolve().parent.parent
+    actions = ch._record_actions(repo, False, {}, {})
+    self_findings = [a for a in actions if a.file in ("code_health.py", "check_records.py")]
+    assert self_findings == []
