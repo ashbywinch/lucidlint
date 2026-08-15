@@ -22,23 +22,24 @@ code-health-scan <file.py>...
   suppressions are applied before output; a why-less suppression is itself
   a finding.
 
-## LSP wiring (why this is trivial)
+## LSP server (built in)
 
-A language server wraps the binary per file: spawn on `didOpen`/`didChange`,
-parse stdout, map each finding to a `Diagnostic` (line − 1, severity:
-`warn` → `Warning`, else `Error`, message as-is, `source: "code-health"`).
-No repo state, no git dependency, no config; a single file scans in ~0.2 s
-including process startup (largest file in build-tools, 4.1 k lines).
+`code-health-scan --lsp` is a stdio JSON-RPC language server. Point an
+editor at it as a custom server command — no Python, no wrapper:
 
-The Python wrapper's richer per-file mode adds the Python-only families
-(latent-class partition, record-shape) that need repo context:
+- `didOpen` / `didChange` (full sync) / `didSave` → the buffer is scanned
+  **in-process** (`scan_source`, no subprocess, no disk round-trip) and
+  diagnostics are published; `didClose` clears the gutter.
+- Every per-file family plus complexity (CC ≥ 15) becomes a `Diagnostic`
+  (line − 1, full-line range, severity `warn` → `Warning` else `Error`,
+  `source: "code-health"`). The repo-wide families (duplicate, unused)
+  are meaningless for one buffer and are dropped.
+- Latency: 5–10 ms per `didChange` on typical files, ~70 ms on the
+  4,100-line largest file in build-tools.
 
-```
-code_health.py --repo <root> --file <rel> --json
-```
-
-Findings arrive as `actions` with `line`/`severity`/`kind`/`message` —
-the same diagnostic mapping applies.
+The Python wrapper's `--file` mode (`code_health.py --repo <root> --file
+<rel> --json`) adds the one Python-only family (latent-class partition)
+but pays process startup; the LSP server does not include the partition.
 
 ## Repo-wide mode
 

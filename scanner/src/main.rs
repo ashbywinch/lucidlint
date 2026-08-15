@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 mod checks;
+mod lsp;
 use checks::*;
 use checks::Q;
 
@@ -670,7 +671,18 @@ fn is_test_path(name: &str) -> bool {
     name.contains("/test") || name.starts_with("test")
 }
 
+/// The full scan (CLI): per-file families + repo-wide collections.
 fn scan_source(source: &str, name: &str) -> FileScan {
+    scan_source_impl(source, name, true)
+}
+
+/// The LSP scan: per-file families only — the duplicate-candidate BFS and
+/// its per-function skeleton walks are pure waste for a single buffer.
+pub fn scan_source_lsp(source: &str, name: &str) -> FileScan {
+    scan_source_impl(source, name, false)
+}
+
+fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     let parsed: Parsed<ModModule> = match parse_module(source) {
         Ok(p) => p,
         Err(_) => {
@@ -705,8 +717,9 @@ fn scan_source(source: &str, name: &str) -> FileScan {
     strewing_findings(&mut state, &body);
     record_shape_findings(&mut state, &body, source);
     // duplicate candidates in ast.walk BFS order — module-level functions
-    // (any depth) come before class methods regardless of source line
-    if !state.is_test {
+    // (any depth) come before class methods regardless of source line;
+    // skipped for a single buffer (repo-wide families need the whole repo)
+    if repo_wide && !state.is_test {
         let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
         let mut qi = 0usize;
         while qi < queue.len() {
@@ -788,6 +801,11 @@ fn rel_of(path: &str, root: &str) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--lsp") {
+        // stdio JSON-RPC language server — in-process scans, no spawns
+        lsp::run();
+        return;
+    }
     let root = repo_root(&args);
     let mut scans = Vec::new();
     for path in &args {
