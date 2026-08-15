@@ -64,7 +64,7 @@ VAGUE_SUFFIXES = ("Manager", "Orchestrator", "Handler", "Store", "Repository", "
 
 EXCLUDED_DIRS = {".git", ".venv", "node_modules", "__pycache__", "dist", "build", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 
-ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk", "record-shape", "latent-class", "vague-name", "standard")
+ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk", "record-shape", "latent-class", "vague-name", "standard", "docs")
 
 @dataclass
 class Action:
@@ -191,6 +191,33 @@ class VolatilePart:
 CoverageLines = dict[str, set[int]]
 MethodFields = dict[str, set[str]]
 MethodGroups = list[list[str]]
+@dataclass(frozen=True)
+class ClassRef:
+    """A class identified by its defining file and name — the two have distinct
+    meanings, so a bare (file, name) tuple or a 'Key' alias would erase them."""
+
+    file: str
+    name: str
+
+
+@dataclass(frozen=True)
+class ImportedSymbol:
+    """A symbol brought in by an import: the dotted module and its original name."""
+
+    module: str
+    name: str
+
+
+@dataclass
+class ClassScan:
+    """One repo-wide pass over classes: the registry, per-module import maps, and the class list."""
+
+    classes: dict[ClassRef, ast.ClassDef]
+    imports: dict[str, ImportAliases]
+    rels: list[ClassRef]
+
+
+ImportAliases = dict[str, ImportedSymbol]
 
 
 class _RadonProvider:
@@ -232,6 +259,8 @@ GUIDANCE = {
     "hotspot": "Make the volatile part small and data-driven behind a stable interface — frequent changes become cheap and cannot disturb the stable core.",
     "high-risk": "Pin behavior with tests, then reduce the caller surface — when many things depend on it, the simplest code is the safest.",
     "standard": "A coding-standard rule with a checkable form is enforced in code, not left to review — fix it at its site; the fix is stated in the finding.",
+    "over-abstraction": "An abstract base class with a single concrete implementation is ceremony, not design — the standard names it directly. Fold the one subclass into the base (or drop the ABC); an abstraction earns its keep at two real, differing implementations.",
+    "docs": "A documentation standard with a checkable form is enforced in code: every relative markdown link must resolve, and every doc must be discoverable from AGENTS.md (directly or one link deep) — an undiscoverable doc does not exist for the reader who starts where all readers start.",
     "vague-name": "A role-suffix name (Controller, Handler, Store, Repository, Manager, Orchestrator, Utils, Info) is communicative only for a thin framework-role class that delegates — an MVC controller or event handler named for its role. This class carries real weight (see the span and method count): the domain noun it operates on should be taking the name and the logic. Name the class for that noun, or move the logic into the domain classes it should be delegating to; a genuinely thin role class is fine as-is.",
     "latent-class": "Closures that capture state are a class in disguise — if the inner functions form behavior groups, extract a class per group and hoist the closures to its methods (the captured state becomes fields). If methods touch disjoint field sets, that partition is the latent seam: extract a class per group and let the connectors compose them. If the grouping is incidental (no shared state, no shared fields), leave it — the evidence is state and field access, not a guess.",
     "record-shape": "The record wants a class — named fields with domain meaning, so a reader sees what the data IS without tracing it (encapsulation, obvious correctness). Make a small domain class/dataclass. If the shape is genuinely a map, name it by what it MEANS (CoverageLines = dict[str, set[int]]: the lines covered per file), never as SomethingDict — a *Dict alias just renames the smell. If the data crosses a boundary (parsing or serialization), the fix is to ingest it into a domain class at that boundary: parse into the type and carry the type, don't carry the bare mapping. Constant lookup tables stay at module scope, never in an interface.",
@@ -536,6 +565,7 @@ def _raw_score(kind: str, metric: float, churn: int, callers: int | None = None)
     norm = {
         "latent-class": 0.7,
         "standard": 0.6,
+        "docs": 0.5,
         "vague-name": 0.7,
         "record-shape": 0.7,
         "complexity": min(metric / 40, 1.0),
@@ -1220,9 +1250,9 @@ def _scan_file(py: Path, rel: str, include_tests: bool, Visitor, repo: Path,
         return []
     supps = _suppressions(source)
     if is_test and not include_tests:
-        # test files are excluded from the health scan, but the monkeypatch
-        # rule lives in tests — scan them for that signal alone
-        findings = _monkeypatch_findings(tree, rel)
+        # test files are excluded from the health scan, but the rules that live
+        # in tests (monkeypatch, env-skipif) are scanned for alone
+        findings = _monkeypatch_findings(tree, rel) + _skipif_findings(tree, rel)
         findings += _invalid_suppressions(supps)
         return [_latent_action(repo, rel, f, file_churn, last_modified)
                 for f in findings if not _suppressed(f.signal, f.line, supps)]
@@ -1231,7 +1261,8 @@ def _scan_file(py: Path, rel: str, include_tests: bool, Visitor, repo: Path,
         for f in Visitor.from_code(source).functions:
             fn_map[(f.name, f.lineno)] = f.complexity
     findings = (_closure_findings(tree, rel, fn_map) + _partition_findings(tree, rel)
-                + _vague_name_findings(tree, rel) + _standard_findings(tree, rel, source))
+                + _vague_name_findings(tree, rel) + _standard_findings(tree, rel, source)
+                + _class_module_findings(tree, rel))
     findings += _invalid_suppressions(supps)
     return [_latent_action(repo, rel, f, file_churn, last_modified)
             for f in findings if not _suppressed(f.signal, f.line, supps)]
@@ -1392,6 +1423,7 @@ def _standard_findings(tree: ast.Module, rel: str, source: str) -> list[LatentFi
     findings += _type_ignore_findings(source, rel)
     findings += _strewing_findings(tree, rel)
     findings += _monkeypatch_findings(tree, rel)
+    findings += _tuple_alias_findings(tree, rel)
     return findings
 
 
@@ -1528,6 +1560,33 @@ def _all_constant(node: ast.AST) -> bool:
     return False
 
 
+def _tuple_alias_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """A type alias for a fixed-size tuple hides a positional record.
+
+    Each element has a meaning the alias erases (the standard: GeoPoint, not
+    LatLngPair) — 'Key = tuple[str, str]' hides which element is which. A
+    variadic tuple (tuple[str, ...]) is a homogeneous sequence, not a record.
+    """
+    findings: list[LatentFinding] = []
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        v = node.value
+        if not isinstance(v, ast.Subscript) or _annotation_base_name(v.value).lower() != "tuple":
+            continue
+        parts = v.slice
+        elts = parts.elts if isinstance(parts, ast.Tuple) else [parts]
+        if len(elts) >= 2 and not any(isinstance(e, ast.Constant) and e.value is Ellipsis for e in elts):
+            findings.append(LatentFinding(
+                signal="tuple-alias", function="", line=node.lineno, metric=1,
+                detail=f"alias '{node.targets[0].id} = {ast.unparse(v)}' hides a positional record — "
+                       f"each element has a meaning the alias erases (the standard: GeoPoint, not "
+                       f"LatLngPair). Make a class with named fields so the reader sees which element "
+                       f"is which",
+                inner=[]))
+    return findings
+
+
 def _type_ignore_findings(source: str, rel: str) -> list[LatentFinding]:
     """A # type: ignore is itself a finding; it requires a comment explaining why.
 
@@ -1589,6 +1648,54 @@ def _suppressed(signal: str, line: int, supps: dict[int, tuple[str, str]]) -> bo
         if entry and entry[0] == signal and entry[1]:
             return True
     return False
+
+
+def _class_module_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """Each class lives in its own module named after the class.
+
+    A module with exactly one top-level class whose name does not match the
+    file is the finding; a module grouping several closely-related models
+    (the standard's own exception) passes.
+    """
+    if rel.endswith("__init__.py"):
+        return []
+    classes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
+    if len(classes) != 1:
+        return []
+    cls = classes[0]
+    stem = Path(rel).stem.lower()
+    if cls.name.lower() == stem or cls.name.lower() == stem.replace("_", ""):
+        return []
+    return [LatentFinding(
+        signal="class-module", function=cls.name, line=cls.lineno, metric=1,
+        detail=f"module '{rel}' holds one class '{cls.name}' — each class lives in its own module named "
+               f"after the class; rename the file to {cls.name.lower()}.py (exception: a module grouping "
+               f"closely related models that share one reason to change)",
+        inner=[])]
+
+
+def _skipif_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """Never skip a test for a missing environment — fake it instead.
+
+    @pytest.mark.skipif keyed on environment presence is forbidden; only the
+    E2E suite may skip (real external APIs that cannot be faked faithfully).
+    """
+    findings: list[LatentFinding] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "skipif":
+            continue
+        cond = " ".join(ast.unparse(a) for a in node.args) + " " + " ".join(
+            ast.unparse(v) for k, v in node.keywords)
+        if any(needle in cond for needle in ("os.environ", "environ", "getenv", "os.path.exists", "sys.platform")):
+            findings.append(LatentFinding(
+                signal="skipif", function="", line=node.lineno, metric=1,
+                detail=f"@pytest.mark.skipif on environment presence at line {node.lineno} — never skip a "
+                       f"test for a missing dependency: fake it (a fixture builds a stand-in) so it runs "
+                       f"identically everywhere; only the E2E suite may skip",
+                inner=[]))
+    return findings
 
 
 def _monkeypatch_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
@@ -1667,13 +1774,16 @@ def _strewing_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
 
 
 def _annotation_base_name(ann: ast.expr | None) -> str:
-    """Root name of an annotation: Subscript -> its value's name; Name -> id."""
+    """Root name of an annotation: Subscript -> its value's name; Name -> id;
+    Attribute -> the attribute (abc.ABC -> ABC)."""
     if ann is None:
         return ""
     if isinstance(ann, ast.Subscript):
         return _annotation_base_name(ann.value)
     if isinstance(ann, ast.Name):
         return ann.id
+    if isinstance(ann, ast.Attribute):
+        return ann.attr
     return ""
 
 
@@ -1684,15 +1794,211 @@ def _latent_action(repo: Path, rel: str, finding: LatentFinding,
         kind = "latent-class"
     elif finding.signal == "vague-name":
         kind = "vague-name"
+    elif finding.signal in ("docs-link", "docs-undiscoverable"):
+        kind = "docs"
     else:
-        kind = "standard"  # including the suppression signal
+        kind = "standard"  # including suppression and over-abstraction signals
+    guidance_key = "over-abstraction" if finding.signal == "over-abstraction" else kind
     return Action(
         kind=kind, severity="fail", file=rel, line=finding.line, function=finding.function,
-        message=f"{finding.detail} — {GUIDANCE[kind]}",
+        message=f"{finding.detail} — {GUIDANCE[guidance_key]}",
         metric=finding.metric, churn=churn,
         last_modified=last_modified.get(rel, ""), tested="",
         raw=_raw_score("latent-class", finding.metric, churn),
     )
+
+
+ABSTRACT_DECORATORS = ("abstractmethod", "abstractproperty", "abstractclassmethod", "abstractstaticmethod")
+MD_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+MD_FENCE_RE = re.compile(r"^```", re.MULTILINE)
+MD_BACKTICK_RE = re.compile(r"`([A-Za-z0-9_./*-]+\.md)`")
+MD_SKIP_PREFIXES = ("http://", "https://", "#", "skill://", "rule://", "agent://", "memory://", "artifact://")
+
+
+def _abstraction_actions(repo: Path, include_tests: bool,
+                         file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+    """Repo-wide: an abstract base class with exactly one concrete subclass is ceremony."""
+    scan = _collect_classes(repo, include_tests)
+    concrete = _concrete_counts(scan.classes, scan.imports, scan.rels)
+    actions: list[Action] = []
+    for ref, cls in scan.classes.items():
+        if not _is_abstract(cls):
+            continue
+        subs = concrete.get(ref, [])
+        if len(subs) == 1:
+            actions.append(_latent_action(repo, ref.file, LatentFinding(
+                signal="over-abstraction", function=ref.name, line=cls.lineno, metric=1,
+                detail=f"abstract class '{ref.name}' in {ref.file} has exactly one concrete subclass "
+                       f"('{subs[0]}') — an ABC with a single implementation is ceremony: fold the "
+                       f"subclass into the base or drop the ABC; an abstraction earns its keep at "
+                       f"two real, differing implementations",
+                inner=subs), file_churn, last_modified))
+    return actions
+
+
+def _collect_classes(repo: Path, include_tests: bool) -> ClassScan:
+    """One pass over the repo: every top-level class, its module's import map, and the class list."""
+    classes: dict[ClassRef, ast.ClassDef] = {}
+    imports: dict[str, ImportAliases] = {}
+    rels: list[ClassRef] = []
+    for py in sorted(repo.rglob("*.py")):
+        rel = py.relative_to(repo).as_posix()
+        if any(part in EXCLUDED_DIRS for part in py.parts):
+            continue
+        if not include_tests and ("/test" in f"/{rel}" or rel.startswith("test")):
+            continue
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
+        except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped, not a scan failure
+            continue
+        imports[rel] = _import_map(tree)
+        for cls in [n for n in tree.body if isinstance(n, ast.ClassDef)]:
+            classes[ClassRef(rel, cls.name)] = cls
+            rels.append(ClassRef(rel, cls.name))
+    return ClassScan(classes, imports, rels)
+
+
+def _concrete_counts(classes: dict[ClassRef, ast.ClassDef], imports: dict[str, ImportAliases],
+                     rels: list[ClassRef]) -> dict[ClassRef, list[str]]:
+    """Abstract class -> its concrete subclasses, resolved via imports."""
+    concrete: dict[ClassRef, list[str]] = defaultdict(list)
+    for ref in rels:
+        for base in classes[ref].bases:
+            for cand in _resolve_base(ref.file, base, imports):
+                key = _class_key(classes, cand.file, cand.name)
+                if key and _is_abstract(classes[key]) and key != ref:
+                    concrete[key].append(ref.name)
+    return concrete
+
+
+def _import_map(tree: ast.Module) -> ImportAliases:
+    """local name -> the ImportedSymbol it refers to, from top-level imports."""
+    out: ImportAliases = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for a in node.names:
+                out[a.asname or a.name] = ImportedSymbol(node.module, a.name)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                out[a.asname or a.name] = ImportedSymbol(a.name, a.name)
+    return out
+
+
+def _is_abstract(cls: ast.ClassDef) -> bool:
+    for dec in cls.decorator_list:
+        if isinstance(dec, ast.Name) and dec.id in ABSTRACT_DECORATORS:
+            return True
+        if isinstance(dec, ast.Attribute) and dec.attr in ABSTRACT_DECORATORS:
+            return True
+    return any(_annotation_base_name(b) in ("ABC", "ABCMeta") for b in cls.bases)
+
+
+def _resolve_base(crel: str, base: ast.expr, imports: dict[str, ImportAliases]) -> list[ClassRef]:
+    """(module, name) candidates for a base: same module, or via imports."""
+    candidates: list[ClassRef] = []
+    if isinstance(base, ast.Name):
+        candidates.append(ClassRef(crel, base.id))
+        entry = imports.get(crel, {}).get(base.id)
+        if entry:
+            candidates.append(ClassRef(entry.module, entry.name))
+    elif isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name):
+        entry = imports.get(crel, {}).get(base.value.id)
+        if entry:
+            candidates.append(ClassRef(entry.module, base.attr))
+    return candidates
+
+
+def _class_key(classes: dict[ClassRef, ast.ClassDef], mrel: str, mname: str) -> ClassRef | None:
+    """Resolve a module reference to a file rel: an already-file rel, or a
+    dotted module to base.py / base/__init__.py."""
+    if mrel.endswith(".py"):
+        ref = ClassRef(mrel, mname)
+        return ref if ref in classes else None
+    base = mrel.replace(".", "/")
+    for candidate in (f"{base}.py", f"{base}/__init__.py"):
+        ref = ClassRef(candidate, mname)
+        if ref in classes:
+            return ref
+    return None
+
+
+def _md_link_targets(text: str) -> list[str]:
+    """Relative markdown link targets, skipping fences and external/scheme links."""
+    targets: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if MD_FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        for m in MD_LINK_RE.finditer(line):
+            target = m.group(2).strip()
+            if target and not target.startswith(MD_SKIP_PREFIXES):
+                targets.append(target)
+    return targets
+
+
+def _docs_actions(repo: Path, file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+    """Documentation standards with a checkable form: links resolve, docs discoverable."""
+    actions: list[Action] = []
+    mds: list[Path] = []
+    if (repo / "docs").exists():
+        mds += sorted((repo / "docs").rglob("*.md"))
+    for root in ("README.md", "AGENTS.md"):
+        p = repo / root
+        if p.exists():
+            mds.append(p)
+    for md in mds:
+        rel = md.relative_to(repo).as_posix()
+        text = md.read_text(encoding="utf-8", errors="replace")
+        for target in _md_link_targets(text):
+            if not (md.parent / target).exists():
+                actions.append(_latent_action(repo, rel, LatentFinding(
+                    signal="docs-link", function="", line=0, metric=1,
+                    detail=f"link to '{target}' from {rel} does not resolve — a doc that links "
+                           f"nowhere is a finding", inner=[]), file_churn, last_modified))
+        for path in MD_BACKTICK_RE.findall(text):
+            if not path.startswith(("docs/", "standards/", "./", "../")):
+                continue  # a bare name (coding-standards.md) is a reference, not a path
+            if not (repo / path).exists():
+                actions.append(_latent_action(repo, rel, LatentFinding(
+                    signal="docs-link", function="", line=0, metric=1,
+                    detail=f"backtick path '{path}' from {rel} does not resolve — a doc that links "
+                           f"nowhere is a finding", inner=[]), file_churn, last_modified))
+    actions += _docs_reachability_actions(repo, file_churn, last_modified)
+    return actions
+
+
+def _docs_reachability_actions(repo: Path, file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+    """Every doc in docs/ is discoverable from AGENTS.md, directly or one link deep."""
+    agents = repo / "AGENTS.md"
+    if not agents.exists() or not (repo / "docs").exists():
+        return []
+    docs = sorted((repo / "docs").rglob("*.md"))
+    doc_set = {d.relative_to(repo).as_posix() for d in docs}
+    links: dict[str, set[str]] = {}
+    for md in [agents] + docs:
+        src = md.relative_to(repo).as_posix()
+        links[src] = set()
+        text = md.read_text(encoding="utf-8", errors="replace")
+        for target in _md_link_targets(text) + MD_BACKTICK_RE.findall(text):
+            cand = (md.parent / target).resolve().relative_to(repo).as_posix()
+            if cand in doc_set:
+                links[src].add(cand)
+    reachable = {agents.relative_to(repo).as_posix()}
+    for _ in range(2):  # AGENTS.md, plus one link deep
+        reachable |= {n for src in list(reachable) for n in links.get(src, set())}
+    actions: list[Action] = []
+    for d in docs:
+        rel = d.relative_to(repo).as_posix()
+        if rel not in reachable:
+            actions.append(_latent_action(repo, "AGENTS.md", LatentFinding(
+                signal="docs-undiscoverable", function="", line=0, metric=1,
+                detail=f"doc '{rel}' is not discoverable from AGENTS.md (directly or one link deep) — "
+                       f"an undiscoverable doc is a finding: it does not exist for the reader who "
+                       f"starts where all readers start", inner=[]), file_churn, last_modified))
+    return actions
 
 
 def _record_actions(repo: Path, include_tests: bool,
@@ -1729,6 +2035,8 @@ def _collect_actions(repo: Path, args, file_churn, last_modified, covered, graph
     actions += hotspot_actions(repo, args.hotspot_top_frac, args.hotspot_min_cc, file_churn, last_modified)
     actions += _record_actions(repo, args.include_tests, file_churn, last_modified)
     actions += _latent_class_actions(repo, args.include_tests, file_churn, last_modified)
+    actions += _abstraction_actions(repo, args.include_tests, file_churn, last_modified)
+    actions += _docs_actions(repo, file_churn, last_modified)
     return actions
 
 

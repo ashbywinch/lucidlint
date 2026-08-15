@@ -170,8 +170,18 @@ rather than a number.
   imports at module top (never in function bodies), no private-symbol
   imports, no `global` or module-level mutable state, `# type: ignore`
   needs a why (tokenize-read real comments), no vague-suffix class names
-  hiding load, and function strewing over a same-module record is a missed
-  class.
+  hiding load, function strewing over a same-module record is a missed
+  class, no ABC with a single concrete implementation (repo-wide, resolved
+  through imports), each class in its own module named after the class,
+  no type alias for a fixed tuple (a `Key = tuple[str, str]` erases which
+  element is which — make a class with named fields, GeoPoint not
+  LatLngPair), and no `@pytest.mark.skipif` on environment presence
+  (tests fake dependencies; only E2E may skip).
+- **R20 — Documentation standards are enforced too.** Every relative
+  markdown link in the repo's docs resolves; backtick paths that look like
+  real paths resolve; every doc in `docs/` is discoverable from AGENTS.md
+  directly or one link deep. Bare names like `coding-standards.md` are
+  references, not paths, and are left alone.
 
 ## Non-goals
 

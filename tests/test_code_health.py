@@ -1017,3 +1017,131 @@ def test_except_returning_empty_dict_is_a_finding(tmp_path):
         "    except ValueError:\n"
         "        return {}\n"))
     assert len([a for a in actions if a.kind == "standard" and "swallows" in a.message]) == 1
+
+
+# --------------------------------------------------------------------------- ABC / class-module / skipif / tuple-alias
+def test_abc_single_concrete_is_a_finding(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "from abc import ABC, abstractmethod\n"
+        "class Base(ABC):\n"
+        "    @abstractmethod\n"
+        "    def run(self):\n"
+        "        pass\n"
+        "class Only(Base):\n"
+        "    def run(self):\n"
+        "        return 1\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._abstraction_actions(repo, False, {}, {})
+    over = [a for a in actions if "ceremony" in a.message]
+    assert len(over) == 1
+    assert "Base" in over[0].message and "Only" in over[0].message
+    assert "ceremony" in over[0].message
+
+
+def test_abc_with_two_subclasses_is_fine(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "from abc import ABC, abstractmethod\n"
+        "class Base(ABC):\n"
+        "    @abstractmethod\n"
+        "    def run(self):\n"
+        "        pass\n"
+        "class A(Base):\n"
+        "    def run(self):\n"
+        "        return 1\n"
+        "class B(Base):\n"
+        "    def run(self):\n"
+        "        return 2\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._abstraction_actions(repo, False, {}, {})
+    assert [a for a in actions if "over-abstraction" in a.message] == []
+
+
+def test_abc_cross_file_single_concrete(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "base.py").write_text(
+        "from abc import ABC, abstractmethod\n"
+        "class Strategy(ABC):\n"
+        "    @abstractmethod\n"
+        "    def run(self):\n"
+        "        pass\n")
+    (repo / "houses" / "impl.py").write_text(
+        "from houses.base import Strategy\n"
+        "class Fast(Strategy):\n"
+        "    def run(self):\n"
+        "        return 1\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._abstraction_actions(repo, False, {}, {})
+    over = [a for a in actions if "ceremony" in a.message]
+    assert len(over) == 1
+    assert "Fast" in over[0].message
+
+
+def test_tuple_alias_hides_positional_record(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "Key = tuple[str, str]\n"
+        "Seq = tuple[str, ...]\n"
+        "Lookup = dict[str, int]\n"
+        "def f():\n    return 1\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    aliases = [a for a in actions if "tuple-alias" in a.message or "positional record" in a.message]
+    assert len(aliases) == 1
+    assert "Key" in aliases[0].message and "LatLngPair" in aliases[0].message
+
+
+def test_class_module_mismatch_is_a_finding(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "helpers.py").write_text(
+        "class PropertyService:\n"
+        "    def get(self):\n"
+        "        return 1\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    cm = [a for a in actions if "holds one class" in a.message]
+    assert len(cm) == 1
+    assert "helpers.py" in cm[0].message and "PropertyService" in cm[0].message
+
+
+def test_class_module_matching_name_and_multi_class_pass(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "property_service.py").write_text(
+        "class PropertyService:\n"
+        "    def get(self):\n"
+        "        return 1\n")
+    (repo / "houses" / "models.py").write_text(
+        "class A:\n    pass\n"
+        "class B:\n    pass\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    assert [a for a in actions if "holds one class" in a.message] == []
+
+
+def test_skipif_on_environment_is_a_finding(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "tests" / "unit" / "test_app.py").write_text(
+        "import os\n"
+        "import pytest\n"
+        "@pytest.mark.skipif(os.environ.get('API_KEY') is None)\n"
+        "def test_x():\n"
+        "    pass\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    sk = [a for a in actions if "skipif" in a.message]
+    assert len(sk) == 1
+    assert "fake it" in sk[0].message
+
+
+def test_skipif_on_version_is_fine(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "tests" / "unit" / "test_app.py").write_text(
+        "import sys\n"
+        "import pytest\n"
+        "@pytest.mark.skipif(sys.version_info < (3, 11))\n"
+        "def test_x():\n"
+        "    pass\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    assert [a for a in actions if "skipif" in a.message] == []
