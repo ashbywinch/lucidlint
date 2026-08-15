@@ -35,15 +35,24 @@ from __future__ import annotations
 import argparse
 import ast
 import datetime
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
+from itertools import combinations
+
+try:
+    from radon.visitors import ComplexityVisitor  # optional dependency
+except ImportError:  # code-health: ignore except radon is an optional dependency; absence is handled explicitly below
+    ComplexityVisitor = None
 import json
 import os
 import re
+import io
 import sqlite3
 import subprocess
 import sys
-import check_records
 import time
+import tokenize
+import check_records
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -55,7 +64,7 @@ VAGUE_SUFFIXES = ("Manager", "Orchestrator", "Handler", "Store", "Repository", "
 
 EXCLUDED_DIRS = {".git", ".venv", "node_modules", "__pycache__", "dist", "build", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 
-ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk", "record-shape", "latent-class", "vague-name")
+ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk", "record-shape", "latent-class", "vague-name", "standard")
 
 @dataclass
 class Action:
@@ -184,23 +193,32 @@ MethodFields = dict[str, set[str]]
 MethodGroups = list[list[str]]
 
 
-# Injectable seam: tests assign code_health.radon_visitor to a fake. Loaded
-# lazily so the tool runs without radon until complexity analysis is needed.
-radon_visitor = None
+class _RadonProvider:
+    """Lazy radon services object: tests inject a fake via .visitor at setup.
+
+    One module-level instance (RADON), populated at the entry point or in
+    test setup with whatever object the run needs — the standard's
+    'one global services object' pattern, never a bare global.
+    """
+
+    visitor: type | None = None
+
+    def get(self, required: bool = True):
+        if self.visitor is None:
+            if ComplexityVisitor is None:
+                if required:
+                    log("radon not importable — run via `uv run --with radon python3 code_health.py`")
+                    sys.exit(2)
+                return None
+            self.visitor = ComplexityVisitor
+        return self.visitor
+
+
+RADON = _RadonProvider()
 
 
 def _radon_visitor(required: bool = True):
-    global radon_visitor
-    if radon_visitor is None:
-        try:
-            from radon.visitors import ComplexityVisitor
-        except ImportError:
-            if required:
-                log("radon not importable — run via `uv run --with radon python3 code_health.py`")
-                sys.exit(2)
-            return None
-        radon_visitor = ComplexityVisitor
-    return radon_visitor
+    return RADON.get(required)
 
 # Fix guidance per action kind. One sentence each: what to do, not just what's
 # wrong. Tied to the real requirements (readability, maintainability,
@@ -213,6 +231,7 @@ GUIDANCE = {
     "hub-file": "Decide what this file is first: if it is an assembly/composition root whose job is wiring (app layer, router), move handler logic out to the service layer and keep the assembly thin — the cross-module orchestration is its job, not a smell. Otherwise separate the concerns it mixes into modules with narrow, stable interfaces.",
     "hotspot": "Make the volatile part small and data-driven behind a stable interface — frequent changes become cheap and cannot disturb the stable core.",
     "high-risk": "Pin behavior with tests, then reduce the caller surface — when many things depend on it, the simplest code is the safest.",
+    "standard": "A coding-standard rule with a checkable form is enforced in code, not left to review — fix it at its site; the fix is stated in the finding.",
     "vague-name": "A role-suffix name (Controller, Handler, Store, Repository, Manager, Orchestrator, Utils, Info) is communicative only for a thin framework-role class that delegates — an MVC controller or event handler named for its role. This class carries real weight (see the span and method count): the domain noun it operates on should be taking the name and the logic. Name the class for that noun, or move the logic into the domain classes it should be delegating to; a genuinely thin role class is fine as-is.",
     "latent-class": "Closures that capture state are a class in disguise — if the inner functions form behavior groups, extract a class per group and hoist the closures to its methods (the captured state becomes fields). If methods touch disjoint field sets, that partition is the latent seam: extract a class per group and let the connectors compose them. If the grouping is incidental (no shared state, no shared fields), leave it — the evidence is state and field access, not a guess.",
     "record-shape": "The record wants a class — named fields with domain meaning, so a reader sees what the data IS without tracing it (encapsulation, obvious correctness). Make a small domain class/dataclass. If the shape is genuinely a map, name it by what it MEANS (CoverageLines = dict[str, set[int]]: the lines covered per file), never as SomethingDict — a *Dict alias just renames the smell. If the data crosses a boundary (parsing or serialization), the fix is to ingest it into a domain class at that boundary: parse into the type and carry the type, don't carry the bare mapping. Constant lookup tables stay at module scope, never in an interface.",
@@ -416,7 +435,6 @@ def load_coverage(repo: Path) -> CoverageResult:
 
 def _coverage_from_xml(repo: Path) -> CoverageResult:
     """Cobertura coverage.xml: class line elements with hits > 0."""
-    import xml.etree.ElementTree as ET
     try:
         root = ET.parse(repo / "coverage.xml").getroot()
     except ET.ParseError:
@@ -431,8 +449,8 @@ def _coverage_from_xml(repo: Path) -> CoverageResult:
             if int(ln.get("hits", "0") or 0) > 0:
                 try:
                     lines.add(int(ln.get("number")))
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError):  # code-health: ignore except malformed <line> elements are safe to skip; the rest of the file still counts
+                    log(f"ignoring malformed <line> element in {repo / 'coverage.xml'}")
     return CoverageResult(covered or None, "coverage.xml")
 
 
@@ -517,6 +535,7 @@ def _raw_score(kind: str, metric: float, churn: int, callers: int | None = None)
     """
     norm = {
         "latent-class": 0.7,
+        "standard": 0.6,
         "vague-name": 0.7,
         "record-shape": 0.7,
         "complexity": min(metric / 40, 1.0),
@@ -552,7 +571,7 @@ def complexity_actions(repo: Path, max_cc: int, include_tests: bool,
         try:
             source = py.read_text(encoding="utf-8", errors="replace")
             visitor = ComplexityVisitor.from_code(source)
-        except (SyntaxError, UnicodeDecodeError, RecursionError):
+        except (SyntaxError, UnicodeDecodeError, RecursionError):  # code-health: ignore except an unparseable file is skipped, not a scan failure
             continue
         for fn in visitor.functions:
             if fn.complexity < max_cc:
@@ -669,7 +688,7 @@ def _read_source(src_cache: dict[str, str], repo: Path, rel: str) -> str:
     if rel not in src_cache:
         try:
             src_cache[rel] = (repo / rel).read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except OSError:  # code-health: ignore except an unreadable file yields no def signature, not a scan failure
             src_cache[rel] = ""
     return src_cache[rel]
 
@@ -777,8 +796,8 @@ def _hub_file_actions(db, repo: Path, max_file_edges: int, include_tests: bool,
                 if top:
                     fat = " fattest: " + ", ".join(f"{f.name}:{f.lineno} (CC {f.complexity})" for f in top)
                     anchor = top[0].lineno
-        except Exception:
-            pass
+        except Exception as exc:  # code-health: ignore except fattest analysis is best-effort; the file parsed successfully above, so this cannot hide a real failure
+            log(f"fattest-handler analysis failed for {rel}: {exc}")
         message += fat
         churn = file_churn.get(rel, 0)
         actions.append(Action(
@@ -904,7 +923,7 @@ def hotspot_actions(repo: Path, top_frac: float, min_cc: float,
         try:
             source = fpath.read_text(encoding="utf-8", errors="replace")
             visitor = ComplexityVisitor.from_code(source)
-        except (SyntaxError, UnicodeDecodeError):
+        except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped, not a scan failure
             continue
         fns = visitor.functions
         if not fns:
@@ -1071,7 +1090,7 @@ def _load_baseline(path) -> set[str]:
     if path and path.exists():
         try:
             return set(json.loads(path.read_text()).get("actions", []))
-        except (json.JSONDecodeError, AttributeError):
+        except (json.JSONDecodeError, AttributeError):  # code-health: ignore except a corrupt baseline is surfaced: the gate runs unbaselined and fails on the unacknowledged actions
             log(f"baseline {path} unreadable — ignoring")
     return set()
 
@@ -1180,33 +1199,51 @@ def _latent_class_actions(repo: Path, include_tests: bool,
     Guidance is conditional: the evidence is stated, the interpretation is
     offered, coincidental grouping is left alone.
     """
-    try:
-        Visitor = _radon_visitor(required=False)
-    except SystemExit:
-        Visitor = None
+    Visitor = _radon_visitor(required=False)
     actions: list[Action] = []
     for py in sorted(repo.rglob("*.py")):
         rel = py.relative_to(repo).as_posix()
         if any(part in EXCLUDED_DIRS for part in py.parts):
             continue
-        if not include_tests and ("/test" in f"/{rel}" or rel.startswith("test")):
-            continue
-        try:
-            source = py.read_text(encoding="utf-8", errors="replace")
-            tree = ast.parse(source)
-        except (SyntaxError, UnicodeDecodeError):
-            continue
-        fn_map = {}
-        if Visitor is not None:
-            for f in Visitor.from_code(source).functions:
-                fn_map[(f.name, f.lineno)] = f.complexity
-        for finding in _closure_findings(tree, rel, fn_map):
-            actions.append(_latent_action(repo, rel, finding, file_churn, last_modified))
-        for finding in _partition_findings(tree, rel):
-            actions.append(_latent_action(repo, rel, finding, file_churn, last_modified))
-        for finding in _vague_name_findings(tree, rel):
-            actions.append(_latent_action(repo, rel, finding, file_churn, last_modified))
+        actions += _scan_file(py, rel, include_tests, Visitor, repo, file_churn, last_modified)
     return actions
+
+
+def _scan_file(py: Path, rel: str, include_tests: bool, Visitor, repo: Path,
+               file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+    """One file's latent-class / vague-name / standard findings."""
+    is_test = ("/test" in f"/{rel}" or rel.startswith("test"))
+    try:
+        source = py.read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source)
+    except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped, not a scan failure
+        return []
+    supps = _suppressions(source)
+    if is_test and not include_tests:
+        # test files are excluded from the health scan, but the monkeypatch
+        # rule lives in tests — scan them for that signal alone
+        findings = _monkeypatch_findings(tree, rel)
+        findings += _invalid_suppressions(supps)
+        return [_latent_action(repo, rel, f, file_churn, last_modified)
+                for f in findings if not _suppressed(f.signal, f.line, supps)]
+    fn_map = {}
+    if Visitor is not None:
+        for f in Visitor.from_code(source).functions:
+            fn_map[(f.name, f.lineno)] = f.complexity
+    findings = (_closure_findings(tree, rel, fn_map) + _partition_findings(tree, rel)
+                + _vague_name_findings(tree, rel) + _standard_findings(tree, rel, source))
+    findings += _invalid_suppressions(supps)
+    return [_latent_action(repo, rel, f, file_churn, last_modified)
+            for f in findings if not _suppressed(f.signal, f.line, supps)]
+
+
+def _invalid_suppressions(supps: dict[int, tuple[str, str]]) -> list[LatentFinding]:
+    """A `# code-health: ignore <signal>` without a why is itself a finding."""
+    return [LatentFinding(
+        signal="suppression", function="", line=line, metric=1,
+        detail=f"suppression '# code-health: ignore {sig}' at line {line} without a why — "
+               f"the tool is only skipped when you explain why it is wrong",
+        inner=[]) for line, (sig, why) in supps.items() if not why]
 
 
 def _closure_findings(tree: ast.Module, rel: str, fn_map: dict[tuple[str, int], int]) -> list[LatentFinding]:
@@ -1284,7 +1321,6 @@ def _partition_detail(connectors: list[str], groups: MethodGroups) -> str:
 def _find_partition(names: list[str], mf: MethodFields):
     """Smallest connector removal that splits the shared-field graph into
     >= 2 groups of >= 2 methods each touching >= 2 distinct fields."""
-    from itertools import combinations
     for removal in range(3):
         for removed in combinations(names, removal):
             kept = [n for n in names if n not in removed]
@@ -1346,13 +1382,313 @@ def _vague_name_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     return findings
 
 
+def _standard_findings(tree: ast.Module, rel: str, source: str) -> list[LatentFinding]:
+    """Coding-standard rules with a checkable form (Tier-1, near-zero false positives)."""
+    findings: list[LatentFinding] = []
+    findings += _inline_import_findings(tree, rel)
+    findings += _private_import_findings(tree, rel)
+    findings += _except_findings(tree, rel)
+    findings += _global_state_findings(tree, rel)
+    findings += _type_ignore_findings(source, rel)
+    findings += _strewing_findings(tree, rel)
+    findings += _monkeypatch_findings(tree, rel)
+    return findings
+
+
+def _has_function_ancestor(node: ast.AST, parents: dict[int, ast.AST]) -> bool:
+    cur = parents.get(id(node))
+    while cur is not None:
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return True
+        cur = parents.get(id(cur))
+    return False
+
+
+def _inline_import_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """Never import inside a function body — inline imports hide dependencies."""
+    findings: list[LatentFinding] = []
+    parents = {id(child): parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and _has_function_ancestor(node, parents):
+            findings.append(LatentFinding(
+                signal="inline-import", function="", line=node.lineno, metric=1,
+                detail=f"import inside function body at line {node.lineno}: '{ast.unparse(node)}' — "
+                       f"inline imports hide dependencies from static analysis; move every import to module top",
+                inner=[]))
+    return findings
+
+
+def _private_import_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """Never import private (underscore) symbols from another module."""
+    findings: list[LatentFinding] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module != "__future__":
+            for alias in node.names:
+                private_module = node.module and any(seg.startswith("_") for seg in node.module.split("."))
+                if alias.name.startswith("_") or private_module:
+                    target = alias.name if alias.name.startswith("_") else f"{node.module}.{alias.name}"
+                    findings.append(LatentFinding(
+                        signal="private-import", function="", line=node.lineno, metric=1,
+                        detail=f"imports private symbol '{target}' at line {node.lineno} — "
+                               f"never import underscore symbols: make the logic public and documented, or extract it to a shared module",
+                        inner=[]))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if any(seg.startswith("_") for seg in alias.name.split(".")):
+                    findings.append(LatentFinding(
+                        signal="private-import", function="", line=node.lineno, metric=1,
+                        detail=f"imports private path '{alias.name}' at line {node.lineno} — "
+                               f"never import underscore symbols: make the logic public and documented, or extract it to a shared module",
+                        inner=[]))
+    return findings
+
+
+def _except_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """A catch must fail fast: bare except, an empty body, or a body that never
+    raises or surfaces a return swallows the error. Logging alone is not
+    fail-fast — the only sanctioned swallow is an explicitly safe-to-ignore
+    error, marked `# code-health: ignore except <why>` and logged.
+    """
+    findings: list[LatentFinding] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+            continue
+        for h in node.handlers:
+            if _handler_swallows(h):
+                kind = "bare except" if h.type is None else "except that swallows"
+                findings.append(LatentFinding(
+                    signal="except", function="", line=h.lineno, metric=1,
+                    detail=f"{kind} at line {h.lineno} — the catch never raises or surfaces a return, so the "
+                           f"error is invisible. Logging alone is not fail-fast: re-raise, surface it, or if "
+                           f"this error is genuinely safe to ignore, mark `# code-health: ignore except <why>` "
+                           f"and log with that explanation",
+                    inner=[]))
+    return findings
+
+
+def _handler_swallows(h) -> bool:
+    """True when the handler hides the failure: bare, or no raise and no
+    return that surfaces a value (None/empty returns are silent degradation)."""
+    if h.type is None:
+        return True
+    if any(isinstance(n, ast.Raise) for n in ast.walk(h)):
+        return False
+    return all(_silent_return(s) for s in h.body if isinstance(s, ast.Return))
+
+
+def _silent_return(stmt: ast.Return) -> bool:
+    """A return of None or an empty literal — silent degradation, not surfacing."""
+    v = stmt.value
+    if v is None or isinstance(v, ast.Constant) and v.value is None:
+        return True
+    if isinstance(v, ast.Dict):
+        return not v.keys
+    if isinstance(v, (ast.List, ast.Set, ast.Tuple)):
+        return not v.elts
+    return False
+
+
+def _global_state_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """No module-level mutable state and no global statements. Constant lookup
+    tables (all-literal values, module scope) pass — the record gate's rule."""
+    findings: list[LatentFinding] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Global):
+            findings.append(LatentFinding(
+                signal="global-state", function="", line=node.lineno, metric=1,
+                detail=f"global statement at line {node.lineno} — no module-level mutable state. The fix: "
+                       f"instantiate the object at the entry point and pass it around (parameter injection), "
+                       f"or keep ONE global services object that is set at the entry point or in test setup "
+                       f"and populated with whatever objects it needs — fakes in tests",
+                inner=[]))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        if isinstance(node.value, (ast.List, ast.Dict, ast.Set)) and not _all_constant(node.value):
+            findings.append(LatentFinding(
+                signal="global-state", function="", line=node.lineno, metric=1,
+                detail=f"module-level mutable {type(node.value).__name__} '{node.targets[0].id}' at line {node.lineno} — "
+                       f"no module-level mutable state. The fix: instantiate the object at the entry point and "
+                       f"pass it around (parameter injection), or keep ONE global services object set at the "
+                       f"entry point / test setup and populated with what it needs — fakes in tests",
+                inner=[]))
+    return findings
+
+
+def _all_constant(node: ast.AST) -> bool:
+    """A literal subtree of only constants — a constant lookup table, not state."""
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, (ast.List, ast.Set)):
+        return bool(node.elts) and all(_all_constant(e) for e in node.elts)
+    if isinstance(node, ast.Tuple):
+        return all(_all_constant(e) for e in node.elts)
+    if isinstance(node, ast.Dict):
+        return bool(node.keys) and all(k is not None and _all_constant(k) for k in node.keys) and all(_all_constant(v) for v in node.values)
+    return False
+
+
+def _type_ignore_findings(source: str, rel: str) -> list[LatentFinding]:
+    """A # type: ignore is itself a finding; it requires a comment explaining why.
+
+    tokenize finds real COMMENT tokens, so '# type: ignore' inside a string
+    or docstring is never a false positive.
+    """
+    findings: list[LatentFinding] = []
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (IndentationError, tokenize.TokenError):
+        return findings
+    for tok in tokens:
+        if tok.type != tokenize.COMMENT or "type: ignore" not in tok.string:
+            continue
+        rest = tok.string.split("type: ignore", 1)[1]
+        if "#" not in rest:  # a second comment on the line is the why
+            findings.append(LatentFinding(
+                signal="type-ignore", function="", line=tok.start[0], metric=1,
+                detail=f"# type: ignore at line {tok.start[0]} without a why — a suppression is itself a "
+                       f"finding: add a comment explaining why the checker is wrong",
+                inner=[]))
+    return findings
+
+
+_MONKEYPATCH_METHODS = ("setattr", "setitem", "delattr", "setenv", "delenv")
+
+
+SUPPRESSION_RE = re.compile(r"# code-health: ignore\s+(\S+)\s*(.*)")
+
+
+def _suppressions(source: str) -> dict[int, tuple[str, str]]:
+    """Lint-style exemptions: `# code-health: ignore <signal> <why>` per line.
+
+    The why is required — a suppression without an explanation is itself a
+    finding. Matches the standard's only sanctioned swallow: an explicitly
+    safe-to-ignore error with an explanation of why it is safe. tokenize
+    reads real COMMENT tokens, so marker text inside a string is not a
+    suppression.
+    """
+    out: dict[int, tuple[str, str]] = {}
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (IndentationError, tokenize.TokenError):
+        return out
+    for tok in tokens:
+        if tok.type != tokenize.COMMENT:
+            continue
+        m = SUPPRESSION_RE.search(tok.string)
+        if m:
+            out[tok.start[0]] = (m.group(1), m.group(2).strip())
+    return out
+
+
+def _suppressed(signal: str, line: int, supps: dict[int, tuple[str, str]]) -> bool:
+    """A finding is exempt when its line (or the line above) carries an
+    explained suppression for that signal."""
+    for ln in (line, line - 1):
+        entry = supps.get(ln)
+        if entry and entry[0] == signal and entry[1]:
+            return True
+    return False
+
+
+def _monkeypatch_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """monkeypatch/unittest.mock.patch is forbidden — inject object fakes instead.
+
+    Fakes are objects (a class implementing the real protocol), never patched
+    globals and never bare functions swapped in.
+    """
+    mock_imports = {a.name for n in tree.body
+                    if isinstance(n, ast.ImportFrom) and n.module and "mock" in n.module
+                    for a in n.names}
+    return _mock_calls(tree, mock_imports) + _mock_decorators(tree, mock_imports)
+
+
+def _mp_finding(desc: str, line: int) -> LatentFinding:
+    return LatentFinding(
+        signal="monkeypatch", function="", line=line, metric=1,
+        detail=f"{desc} at line {line} — never monkeypatch global state; inject an object fake "
+               f"(a class implementing the real protocol) via parameter injection or the services "
+               f"container — fakes are objects, not functions",
+        inner=[])
+
+
+def _mock_calls(tree: ast.Module, mock_imports: set[str]) -> list[LatentFinding]:
+    findings: list[LatentFinding] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            if isinstance(func.value, ast.Name) and func.value.id == "monkeypatch" and func.attr in _MONKEYPATCH_METHODS:
+                findings.append(_mp_finding(f"monkeypatch.{func.attr}", node.lineno))
+            elif func.attr == "patch" and isinstance(func.value, ast.Attribute):
+                findings.append(_mp_finding(f"{ast.unparse(func.value)}.patch", node.lineno))
+        elif isinstance(func, ast.Name) and func.id in mock_imports and func.id == "patch":
+            findings.append(_mp_finding("patch", node.lineno))
+    return findings
+
+
+def _mock_decorators(tree: ast.Module, mock_imports: set[str]) -> list[LatentFinding]:
+    findings: list[LatentFinding] = []
+    for fn in [n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]:
+        for dec in fn.decorator_list:
+            func = dec.func if isinstance(dec, ast.Call) else dec
+            if isinstance(func, ast.Name) and func.id in mock_imports:
+                findings.append(_mp_finding(f"@{func.id}", getattr(dec, "lineno", 0)))
+            elif isinstance(func, ast.Attribute) and func.attr == "patch":
+                findings.append(_mp_finding("@patch", getattr(dec, "lineno", 0)))
+    return findings
+
+
+def _strewing_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """3+ free functions sharing a leading parameter that is a class defined in
+    THIS module — a missed class. Stdlib-param strewing (Path, str) is not the
+    'same record' pattern the rule means, so it is left alone."""
+    findings: list[LatentFinding] = []
+    class_names = {n.name for n in tree.body if isinstance(n, ast.ClassDef)}
+    groups: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or not node.args.args:
+            continue
+        ann = node.args.args[0].annotation
+        base = _annotation_base_name(ann)
+        if base in class_names:
+            groups[base].append((node.name, node.lineno))
+    for ann_base, members in sorted(groups.items()):
+        if len(members) >= 3:
+            names = ", ".join(f"{n} (line {ln})" for n, ln in sorted(members, key=lambda m: m[1]))
+            findings.append(LatentFinding(
+                signal="strewing", function="", line=members[0][1], metric=len(members),
+                detail=f"{len(members)} free functions share leading parameter '{ann_base}' — "
+                       f"a {ann_base} class is missing (function strewing is a missed class): {names}",
+                inner=[n for n, _ in members]))
+    return findings
+
+
+def _annotation_base_name(ann: ast.expr | None) -> str:
+    """Root name of an annotation: Subscript -> its value's name; Name -> id."""
+    if ann is None:
+        return ""
+    if isinstance(ann, ast.Subscript):
+        return _annotation_base_name(ann.value)
+    if isinstance(ann, ast.Name):
+        return ann.id
+    return ""
+
+
 def _latent_action(repo: Path, rel: str, finding: LatentFinding,
                    file_churn: Counter[str], last_modified: dict[str, str]) -> Action:
     churn = file_churn.get(rel, 0)
-    kind = "latent-class" if finding.signal in ("closures", "partition") else "vague-name"
+    if finding.signal in ("closures", "partition", "strewing"):
+        kind = "latent-class"
+    elif finding.signal == "vague-name":
+        kind = "vague-name"
+    else:
+        kind = "standard"  # including the suppression signal
     return Action(
         kind=kind, severity="fail", file=rel, line=finding.line, function=finding.function,
-        message=f"{finding.detail} — {GUIDANCE['latent-class']}",
+        message=f"{finding.detail} — {GUIDANCE[kind]}",
         metric=finding.metric, churn=churn,
         last_modified=last_modified.get(rel, ""), tested="",
         raw=_raw_score("latent-class", finding.metric, churn),

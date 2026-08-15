@@ -355,7 +355,7 @@ def scan(paths: list[Path]) -> ScanResult:
     for f in files:
         try:
             tree = ast.parse(f.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeDecodeError):
+        except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped, not a scan failure; the parse is best-effort
             continue
         scanner = ModuleScanner(tree, f)
         findings.extend(scanner.signature_findings())

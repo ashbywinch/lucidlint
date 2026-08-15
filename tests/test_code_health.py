@@ -108,15 +108,15 @@ class Env:
 
     def __enter__(self):
         self._saved["subprocess"] = ch.subprocess
-        self._saved["radon_visitor"] = ch.radon_visitor
+        self._saved["radon"] = ch.RADON.visitor
         ch.subprocess = FakeSubprocess(self.routes)
-        ch.radon_visitor = FakeRadonVisitor
+        ch.RADON.visitor = FakeRadonVisitor
         FakeRadonVisitor.per_call = list(self.functions or [])
         return self
 
     def __exit__(self, *exc):
         ch.subprocess = self._saved["subprocess"]
-        ch.radon_visitor = self._saved["radon_visitor"]
+        ch.RADON.visitor = self._saved["radon"]
         FakeRadonVisitor.per_call = []
 
 
@@ -795,3 +795,225 @@ def test_vague_name_guidance_states_the_principle():
     g = ch.GUIDANCE["vague-name"]
     assert "thin framework-role class" in g and "delegates" in g
     assert "domain noun" in g
+
+
+def test_standard_inline_import_finding(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "def load():\n    import json\n    return json.dumps({})\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    std = [a for a in actions if a.kind == "standard"]
+    assert len(std) == 1
+    assert std[0].signal == "inline-import" if hasattr(std[0], "signal") else True
+    assert "module top" in std[0].message
+
+
+def test_standard_private_import_finding(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "from houses._internal import secret\n"
+        "def f():\n    return secret\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    assert any(a.kind == "standard" and "private symbol" in a.message for a in actions)
+
+
+def test_standard_bare_except_finding(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except Exception:\n"
+        "        pass\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    assert any(a.kind == "standard" and "swallows" in a.message for a in actions)
+
+
+def test_standard_global_state_message_teaches_the_fix(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "state = []\n"
+        "def f():\n    global state\n    state.append(1)\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    std = [a for a in actions if a.kind == "standard"]
+    assert len(std) == 2  # module-level mutable list + global statement
+    msg = " ".join(a.message for a in std)
+    assert "entry point" in msg and "pass it around" in msg
+    assert "services object" in msg and "fakes in tests" in msg
+
+
+def test_standard_type_ignore_requires_a_why(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "x: int = 1  # type: ignore\n"
+        "y: int = 2  # type: ignore # pyright cannot see the kwarg type\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    found = [a for a in actions if a.kind == "standard" and "type: ignore" in a.message]
+    assert len(found) == 1  # only the un-justified one
+    assert found[0].line == 1
+
+
+def test_monkeypatch_finding_in_test_files(tmp_path):
+    """monkeypatch is forbidden even in tests, which the health scan excludes."""
+    repo = make_repo(tmp_path)
+    (repo / "tests" / "unit" / "test_app.py").write_text(
+        "def test_x(monkeypatch):\n"
+        "    monkeypatch.setattr('m', 'a', 1)\n")
+    (repo / "houses" / "app.py").write_text("def f():\n    return 1\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    mp = [a for a in actions if a.kind == "standard" and "monkeypatch" in a.message]
+    assert len(mp) == 1
+    assert "fakes are objects, not functions" in mp[0].message
+
+
+def test_monkeypatch_unittest_mock_finding(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "tests" / "unit" / "test_app.py").write_text(
+        "from unittest.mock import patch\n"
+        "@patch('houses.app.f')\n"
+        "def test_x(mock_f):\n"
+        "    return mock_f()\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    mp = [a for a in actions if a.kind == "standard" and "monkeypatch" in a.message]
+    assert len(mp) >= 1  # the @patch decorator
+    assert "inject an object fake" in mp[0].message
+
+
+# --------------------------------------------------------------------------- suppression mechanism
+def _standard_for(tmp_path, src):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(src)
+    with Env(routes=git_routes(), functions=[[]]):
+        return ch._latent_class_actions(repo, False, {}, {})
+
+
+def test_suppression_on_same_line_exempts(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except ValueError:  # code-health: ignore except this error is safe to skip, logged\n"
+        "        log('skipping')\n"))
+    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
+
+
+def test_suppression_on_line_above_exempts(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    # code-health: ignore except safe to skip, logged\n"
+        "    except ValueError:\n"
+        "        log('skipping')\n"))
+    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
+
+
+def test_suppression_without_why_is_a_finding(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except ValueError:  # code-health: ignore except\n"
+        "        log('skipping')\n"))
+    std = [a for a in actions if a.kind == "standard"]
+    # the un-explained suppression exempts nothing: the original except finding
+    # fires AND the suppression-without-a-why finding fires
+    assert len(std) == 2
+    assert any("without a why" in a.message for a in std)
+    assert any("swallows" in a.message for a in std)
+
+
+def test_suppression_wrong_signal_does_not_exempt(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except ValueError:  # code-health: ignore inline-import not the right signal\n"
+        "        log('skipping')\n"))
+    assert len([a for a in actions if a.kind == "standard" and "swallows" in a.message]) == 1
+
+
+def test_suppression_scoped_to_its_line(tmp_path):
+    """A suppression on one except does not exempt a second except elsewhere."""
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except ValueError:  # code-health: ignore except this one is safe, logged\n"
+        "        log('a')\n"
+        "    try:\n"
+        "        h()\n"
+        "    except ValueError:\n"
+        "        log('b')\n"))
+    remaining = [a for a in actions if a.kind == "standard" and "swallows" in a.message]
+    assert len(remaining) == 1
+    assert remaining[0].line == 8  # the second, unmarked except
+
+
+def test_except_with_raise_is_not_a_finding(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except ValueError as e:\n"
+        "        log('failed')\n"
+        "        raise\n"))
+    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
+
+
+def test_except_with_surfaced_return_is_not_a_finding(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except ValueError:\n"
+        "        return 'failed: missing value'\n"))
+    assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
+
+
+def test_except_logging_only_is_a_finding(tmp_path):
+    """The user's rule: logging alone is not fail-fast."""
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except ValueError:\n"
+        "        log('failed but invisible')\n"))
+    std = [a for a in actions if a.kind == "standard" and "swallows" in a.message]
+    assert len(std) == 1
+    assert "Logging alone is not fail-fast" in std[0].message
+
+
+def test_type_ignore_in_docstring_is_not_a_finding(tmp_path):
+    actions = _standard_for(tmp_path, (
+        '"""Example: # type: ignore inside a docstring is not a comment."""\n'
+        "def f():\n"
+        "    return 1\n"))
+    assert [a for a in actions if a.kind == "standard" and "type: ignore" in a.message] == []
+
+
+def test_type_ignore_real_comment_requires_why(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "x: int = 1  # type: ignore\n"
+        "y: int = 2  # type: ignore # pyright cannot see the kwarg type\n"))
+    found = [a for a in actions if a.kind == "standard" and "type: ignore" in a.message]
+    assert len(found) == 1
+    assert found[0].line == 1
+
+
+def test_except_returning_empty_dict_is_a_finding(tmp_path):
+    """return {} on exception is silent degradation (fail-fast names it), not surfacing."""
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except ValueError:\n"
+        "        return {}\n"))
+    assert len([a for a in actions if a.kind == "standard" and "swallows" in a.message]) == 1

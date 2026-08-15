@@ -39,7 +39,14 @@ tag and runs it as its review-attribution gate.
   `latent-class` kind detects fat functions/classes carrying unextracted
   classes inside them: nested closures that capture state (a class in
   disguise) and field-disjoint method groups (the partition is the seam;
-  connectors are named). Actions are grouped by file and
+  connectors are named). A `standard` kind enforces the checkable-form
+  rules from coding-standards.md deterministically: top-level imports,
+  no private-symbol imports, no `global`/module-level mutable state,
+  catches that fail fast (logging alone is not fail-fast), `# type: ignore`
+  with a why, vague-suffix class names that hide load, and strewing over a
+  same-module record. Lint-style exemptions: `# code-health: ignore <signal>
+  <why>` on the line (or above) — a suppression without a why is itself a
+  finding. Actions are grouped by file and
   ranked by priority (percentile of metric x churn x fan-in); a baseline file
   (`--baseline`, `--update-baseline`) locks acknowledged debt so the gate can
   go green incrementally, and `--base <ref>` marks actions in your branch's

@@ -156,6 +156,22 @@ rather than a number.
 - **R16 — Testable with fakes.** The tool's behavior is unit-tested with
   injected fakes (no real libraries, no real repos), so every rule change
   is verified deterministically.
+- **R17 — A catch must fail fast.** Bare excepts, empty bodies, and
+  log-only catches (no raise, no surfaced return) are findings — logging
+  alone is not fail-fast. The only sanctioned swallow is an explicitly
+  safe-to-ignore error, and it must be marked and explained.
+- **R18 — Lint-style suppressions carry a why.** A finding is exempted by
+  `# code-health: ignore <signal> <why>` on its line or the line above;
+  a suppression without an explanation is itself a finding (the tool is
+  only skipped when the reader knows why the tool is wrong). Only real
+  comments count — marker text inside a string never suppresses.
+- **R19 — More standard rules are enforced in code, not by review.** The
+  checkable-form rules from coding-standards.md run deterministically:
+  imports at module top (never in function bodies), no private-symbol
+  imports, no `global` or module-level mutable state, `# type: ignore`
+  needs a why (tokenize-read real comments), no vague-suffix class names
+  hiding load, and function strewing over a same-module record is a missed
+  class.
 
 ## Non-goals
 
