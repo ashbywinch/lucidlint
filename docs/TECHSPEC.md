@@ -44,7 +44,7 @@ How the product in `docs/PRD.md` is built. Requirements by name: R1–R20
 - **`CoverageResult` / `CoverageContext`** — covered lines + source;
   provenance label + staleness verdict.
 - **`FileHistory`** — per-file churn and last-modified.
-- **`GitHead`, `Callers`, `VolatilePart`, `MethodGroups`, `MethodFields`,
+- **`GitHead`, `Callers`, `VolatilePart`, `NameGroups`, `MethodFields`,
   `CoverageLines`, `ImportAliases`** — named result and map types; the maps
   are named by meaning, never `SomethingDict`.
 - **`_RadonProvider`** — the lazily-loaded radon services object; tests

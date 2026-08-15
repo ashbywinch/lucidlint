@@ -1519,7 +1519,9 @@ def _dedupe_merge(actions: list[Action], diff: set[str]) -> list[Action]:
     unique = _dedupe(actions)
     _percentile_rank(unique, diff)
     unique = _merge_targets(unique)
-    _percentile_rank(unique, set())
+    # Re-rank on the merged raw values, but KEEP the diff marking — the
+    # merged actions must still show "[in your diff]" (PRD R10).
+    _percentile_rank(unique, diff)
     unique.sort(key=lambda a: (-a.priority, a.file, a.line))
     _lifecycle_notes(unique)
     return unique
@@ -1577,7 +1579,8 @@ def _render_summary(
     top = fails[0]
     mine = sum(1 for a in fails if a.in_diff)
     mine_txt = f"; {mine} of {len(fails)} actions in files your diff touches" if diff else "; diff base unresolved"
-    mine_txt += " (no baseline — cannot tell what is new)"
+    if args.baseline is None:
+        mine_txt += " (no baseline — cannot tell what is new)"
     targets = len({(a.file, a.function) for a in fails})
     verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
     print(
@@ -2942,7 +2945,7 @@ ABSTRACT_DECORATORS = ("abstractmethod", "abstractproperty", "abstractclassmetho
 MD_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 MD_FENCE_RE = re.compile(r"^```", re.MULTILINE)
 MD_BACKTICK_RE = re.compile(r"`([A-Za-z0-9_./*-]+\.md)`")
-MD_SKIP_PREFIXES = ("http://", "https://", "#", "skill://", "rule://", "agent://", "memory://", "artifact://")
+MD_SKIP_PREFIXES = ("http://", "https://", "#", "mailto:", "tel:", "skill://", "rule://", "agent://", "memory://", "artifact://")
 
 
 def _abstraction_actions(
@@ -3081,9 +3084,28 @@ def _md_link_targets(text: str) -> list[str]:
             continue
         for m in MD_LINK_RE.finditer(line):
             target = m.group(2).strip()
+            target = target.split("#", 1)[0]  # strip the anchor — docs/PRD.md#goals is docs/PRD.md
             if target and not target.startswith(MD_SKIP_PREFIXES):
                 targets.append(target)
     return targets
+
+
+def _md_backtick_paths(text: str) -> list[str]:
+    """Backticked .md paths OUTSIDE code fences (a fence's command examples
+    are not doc references)."""
+    paths: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if MD_FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        for m in MD_BACKTICK_RE.finditer(line):
+            path = m.group(1).split("#", 1)[0]
+            if path:
+                paths.append(path)
+    return paths
 
 
 def _duplicate_actions(
@@ -3567,7 +3589,7 @@ def _docs_actions(repo: Path, file_churn: Counter[str], last_modified: dict[str,
                         last_modified,
                     )
                 )
-        for path in MD_BACKTICK_RE.findall(text):
+        for path in _md_backtick_paths(text):
             if not path.startswith(("docs/", "standards/", "./", "../")):
                 continue  # a bare name (coding-standards.md) is a reference, not a path
             if not (repo / path).exists():
@@ -3604,8 +3626,11 @@ def _docs_reachability_actions(repo: Path, file_churn: Counter[str], last_modifi
         src = md.relative_to(repo).as_posix()
         links[src] = set()
         text = md.read_text(encoding="utf-8", errors="replace")
-        for target in _md_link_targets(text) + MD_BACKTICK_RE.findall(text):
-            cand = (md.parent / target).resolve().relative_to(repo).as_posix()
+        for target in _md_link_targets(text) + _md_backtick_paths(text):
+            try:
+                cand = (md.parent / target).resolve().relative_to(repo).as_posix()
+            except ValueError:  # code-health: ignore except an out-of-repo link is skipped, not a crash
+                continue
             if cand in doc_set:
                 links[src].add(cand)
     reachable = {agents.relative_to(repo).as_posix()}

@@ -16,6 +16,7 @@ Fakes:
 - the repo under analysis: a tmp directory with fake source files.
 """
 
+import argparse
 import json
 import sqlite3
 import sys
@@ -1855,3 +1856,20 @@ def test_except_sys_exit_surfaces(tmp_path):
         "        sys.exit(2)\n"
         "    return data\n"))
     assert [a for a in actions if a.kind == "standard" and "swallows" in a.message] == []
+
+
+def test_in_diff_marking_survives_merge(tmp_path):
+    """PRD R10: the diff marking must survive the re-rank after merging —
+    the second percentile call used to wipe it with an empty diff set."""
+    repo = make_repo(tmp_path)
+    abs_app = str(repo / "houses" / "app.py")
+    make_graph(repo, nodes=[
+        ("Function", "alpha", f"{abs_app}::alpha", abs_app, 1, 400, None, None, 0),
+    ], risks=[(1, f"{abs_app}::alpha", 0.3, 0, "untested")])
+    with Env(routes=git_routes(), functions=[[FakeFn("alpha", 1, 44)]]):
+        args = argparse.Namespace(max_complexity=15, max_function_lines=120,
+                                  max_file_edges=150, max_risk=0.8, include_tests=False,
+                                  hotspot_top_frac=0.1, hotspot_min_cc=15)
+        actions = ch._collect_actions(repo, args, {}, {}, None, False, "")
+    merged = ch._dedupe_merge(actions, {"houses/app.py"})
+    assert merged and all(a.in_diff for a in merged)
