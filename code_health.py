@@ -47,9 +47,15 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
+# Role/pattern suffixes from coding-standards.md: communicative for a thin
+# framework-role class (MVC controller, event handler) that delegates; a smell
+# when they hide load-bearing code under a vague name.
+VAGUE_SUFFIXES = ("Manager", "Orchestrator", "Handler", "Store", "Repository", "Controller", "Utils", "Info")
+
+
 EXCLUDED_DIRS = {".git", ".venv", "node_modules", "__pycache__", "dist", "build", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 
-ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk", "record-shape", "latent-class")
+ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk", "record-shape", "latent-class", "vague-name")
 
 @dataclass
 class Action:
@@ -207,6 +213,7 @@ GUIDANCE = {
     "hub-file": "Decide what this file is first: if it is an assembly/composition root whose job is wiring (app layer, router), move handler logic out to the service layer and keep the assembly thin — the cross-module orchestration is its job, not a smell. Otherwise separate the concerns it mixes into modules with narrow, stable interfaces.",
     "hotspot": "Make the volatile part small and data-driven behind a stable interface — frequent changes become cheap and cannot disturb the stable core.",
     "high-risk": "Pin behavior with tests, then reduce the caller surface — when many things depend on it, the simplest code is the safest.",
+    "vague-name": "A role-suffix name (Controller, Handler, Store, Repository, Manager, Orchestrator, Utils, Info) is communicative only for a thin framework-role class that delegates — an MVC controller or event handler named for its role. This class carries real weight (see the span and method count): the domain noun it operates on should be taking the name and the logic. Name the class for that noun, or move the logic into the domain classes it should be delegating to; a genuinely thin role class is fine as-is.",
     "latent-class": "Closures that capture state are a class in disguise — if the inner functions form behavior groups, extract a class per group and hoist the closures to its methods (the captured state becomes fields). If methods touch disjoint field sets, that partition is the latent seam: extract a class per group and let the connectors compose them. If the grouping is incidental (no shared state, no shared fields), leave it — the evidence is state and field access, not a guess.",
     "record-shape": "The record wants a class — named fields with domain meaning, so a reader sees what the data IS without tracing it (encapsulation, obvious correctness). Make a small domain class/dataclass. If the shape is genuinely a map, name it by what it MEANS (CoverageLines = dict[str, set[int]]: the lines covered per file), never as SomethingDict — a *Dict alias just renames the smell. If the data crosses a boundary (parsing or serialization), the fix is to ingest it into a domain class at that boundary: parse into the type and carry the type, don't carry the bare mapping. Constant lookup tables stay at module scope, never in an interface.",
 }
@@ -510,6 +517,7 @@ def _raw_score(kind: str, metric: float, churn: int, callers: int | None = None)
     """
     norm = {
         "latent-class": 0.7,
+        "vague-name": 0.7,
         "record-shape": 0.7,
         "complexity": min(metric / 40, 1.0),
         "large-function": min(metric / 200, 1.0),
@@ -1196,6 +1204,8 @@ def _latent_class_actions(repo: Path, include_tests: bool,
             actions.append(_latent_action(repo, rel, finding, file_churn, last_modified))
         for finding in _partition_findings(tree, rel):
             actions.append(_latent_action(repo, rel, finding, file_churn, last_modified))
+        for finding in _vague_name_findings(tree, rel):
+            actions.append(_latent_action(repo, rel, finding, file_churn, last_modified))
     return actions
 
 
@@ -1307,11 +1317,41 @@ def _connected_groups(kept: list[str], mf: MethodFields) -> MethodGroups:
     return groups
 
 
+def _vague_name_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """Classes whose role-suffix name hides load-bearing code.
+
+    A thin framework-role class (MVC controller, event handler) that only
+    delegates is communicatively named and passes; the finding is the load —
+    a vague-suffix class with >= 120 lines or >= 6 methods, where the domain
+    noun it operates on should be taking the name.
+    """
+    findings: list[LatentFinding] = []
+    for cls in [n for n in tree.body if isinstance(n, ast.ClassDef)]:
+        for suffix in VAGUE_SUFFIXES:
+            if not cls.name.endswith(suffix):
+                continue
+            methods = [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            span = (cls.end_lineno or cls.lineno) - cls.lineno
+            if span < 120 and len(methods) < 6:
+                break  # thin role class — the name is the communication, not a smell
+            findings.append(LatentFinding(
+                signal="vague-name", function=cls.name, line=cls.lineno,
+                metric=len(methods),
+                detail=f"'{suffix}' name carries a {span}-line class with {len(methods)} methods — "
+                       f"a thin role class that only delegates is communicative; this one takes real "
+                       f"weight, so the domain noun it operates on should carry the name and the logic",
+                inner=[],
+            ))
+            break
+    return findings
+
+
 def _latent_action(repo: Path, rel: str, finding: LatentFinding,
                    file_churn: Counter[str], last_modified: dict[str, str]) -> Action:
     churn = file_churn.get(rel, 0)
+    kind = "latent-class" if finding.signal in ("closures", "partition") else "vague-name"
     return Action(
-        kind="latent-class", severity="fail", file=rel, line=finding.line, function=finding.function,
+        kind=kind, severity="fail", file=rel, line=finding.line, function=finding.function,
         message=f"{finding.detail} — {GUIDANCE['latent-class']}",
         metric=finding.metric, churn=churn,
         last_modified=last_modified.get(rel, ""), tested="",

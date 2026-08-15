@@ -144,7 +144,12 @@ rather than a number.
   closures that capture state (a class in disguise) and field-disjoint
   method groups (the partition is the seam; connectors named) are findings,
   gated on size/complexity so they are plausible fix items, with conditional
-  guidance that leaves coincidental grouping alone.
+  guidance that leaves coincidental grouping alone. A role-suffix class
+  name (Controller, Handler, Store, Repository, Manager, Orchestrator,
+  Utils, Info) is a finding only when it hides load (>= 120 lines or >= 6
+  methods): a thin framework-role class that delegates is communicatively
+  named, and the message says so while pointing at the domain noun that
+  should carry the weight.
 - **R15 — The tool passes itself.** Self-run is clean, the record gate
   passes on the tool's own code, and regression tests pin both; the tool's
   own code is the exemplar of its prescriptions.

@@ -752,3 +752,46 @@ def test_latent_class_guidance_is_conditional():
     g = ch.GUIDANCE["latent-class"]
     assert "extract a class per group" in g
     assert "If the grouping is incidental" in g and "leave it" in g
+
+
+def test_vague_name_thin_role_class_passes(tmp_path):
+    """An MVC controller / event handler that only delegates is communicative."""
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "class PropertyController:\n"
+        "    def __init__(self, service):\n"
+        "        self.service = service\n"
+        "    def get(self, rid):\n"
+        "        return self.service.get(rid)\n"
+        "    def post(self, body):\n"
+        "        return self.service.save(body)\n")
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    assert [a for a in actions if a.kind == "vague-name"] == []
+
+
+def test_vague_name_load_bearing_class_is_found(tmp_path):
+    """A fat class hiding behind a role suffix is a finding — the domain noun should carry it."""
+    repo = make_repo(tmp_path)
+    pad = "    # pad\n" * 130
+    src = ("class PropertyManager:\n" + pad +
+           "    def __init__(self):\n"
+           "        self.props = []\n"
+           "    def add(self, p):\n"
+           "        self.props.append(p)\n"
+           "    def total(self):\n"
+           "        return sum(p.price for p in self.props)\n")
+    (repo / "houses" / "app.py").write_text(src)
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._latent_class_actions(repo, False, {}, {})
+    vague = [a for a in actions if a.kind == "vague-name"]
+    assert len(vague) == 1
+    assert vague[0].function == "PropertyManager"
+    assert "thin role class" in vague[0].message  # the exemption is stated
+    assert "domain noun" in vague[0].message
+
+
+def test_vague_name_guidance_states_the_principle():
+    g = ch.GUIDANCE["vague-name"]
+    assert "thin framework-role class" in g and "delegates" in g
+    assert "domain noun" in g
