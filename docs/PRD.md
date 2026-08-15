@@ -198,6 +198,15 @@ rather than a number.
   I/O like sqlite3 — and `# code-health: ignore-file <signal> <why>`
   exempts a whole file with an explanation (a why-less ignore-file is
   itself a finding).
+- **R23 — Cycles, dead code, and shadowed builtins are findings.** Import
+  cycles between local modules (from the graph's IMPORTS_FROM edges,
+  strongly-connected components) are always fixed by restructuring — the
+  fix direction is to hoist the shared interface into its own module and
+  have both sides depend on it, never to bodge with lazy imports.
+  Statements after an unconditional return/raise/continue/break are dead
+  code — deleted, not kept. Parameters and locals named after builtins
+  (list, dict, id, input, …) are renamed: a shadowed builtin makes the
+  code read wrong.
 
 ## Non-goals
 

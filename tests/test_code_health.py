@@ -1357,3 +1357,80 @@ def test_file_suppression_without_why_is_a_finding(tmp_path):
     # the why-less suppression is a finding AND the real-FS finding still fires
     assert any("without a why" in f.message for f in findings)
     assert any("fakefs" in f.message and "without a why" not in f.message for f in findings)
+
+
+# --------------------------------------------------------------------------- import cycles / unreachable / builtin shadow
+def test_import_cycle_detected(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "a.py").write_text("import houses.b\n")
+    (repo / "houses" / "b.py").write_text("import houses.a\n")
+    abs_a = str(repo / "houses" / "a.py")
+    abs_b = str(repo / "houses" / "b.py")
+    make_graph(repo, nodes=[
+        ("File", "a", abs_a, abs_a, 1, 1, None, None, 0),
+        ("File", "b", abs_b, abs_b, 1, 1, None, None, 0),
+    ], edges=[
+        ("IMPORTS_FROM", abs_a, "houses.b", abs_a, 1),
+        ("IMPORTS_FROM", abs_b, "houses.a", abs_b, 1),
+    ])
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._cycle_actions(repo, {}, {})
+    cycles = [a for a in actions if "import cycle" in a.message]
+    assert len(cycles) == 1
+    assert "houses/a.py" in cycles[0].message and "houses/b.py" in cycles[0].message
+    assert "hoist the shared interface" in cycles[0].message  # the user's fix direction
+
+
+def test_import_cycle_acyclic_passes(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "a.py").write_text("import houses.b\n")
+    (repo / "houses" / "b.py").write_text("")
+    abs_a = str(repo / "houses" / "a.py")
+    abs_b = str(repo / "houses" / "b.py")
+    make_graph(repo, nodes=[
+        ("File", "a", abs_a, abs_a, 1, 1, None, None, 0),
+        ("File", "b", abs_b, abs_b, 1, 1, None, None, 0),
+    ], edges=[("IMPORTS_FROM", abs_a, "houses.b", abs_a, 1)])
+    with Env(routes=git_routes(), functions=[[]]):
+        actions = ch._cycle_actions(repo, {}, {})
+    assert [a for a in actions if "import cycle" in a.message] == []
+
+
+def test_unreachable_code_after_return(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "def f():\n"
+        "    return 1\n"
+        "    print('never')\n"))
+    un = [a for a in actions if "unreachable statement" in a.message]
+    assert len(un) == 1
+    assert un[0].line == 3
+
+
+def test_return_inside_if_is_not_unreachable(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "def f(x):\n"
+        "    if x:\n"
+        "        return 1\n"
+        "    print('reachable')\n"))
+    assert [a for a in actions if "unreachable statement" in a.message] == []
+
+
+def test_builtin_shadow_parameter_and_variable(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "def f(list, id):\n"
+        "    x = 1\n"
+        "    str = 'x'\n"
+        "    return x\n"))
+    shadows = [a for a in actions if "shadows a builtin" in a.message]
+    assert len(shadows) == 3  # list, id params + str variable
+    assert any("parameter 'list'" in a.message for a in shadows)
+    assert any("parameter 'id'" in a.message for a in shadows)
+    assert any("variable 'str'" in a.message for a in shadows)
+
+
+def test_no_builtin_shadow_in_clean_fn(tmp_path):
+    actions = _standard_for(tmp_path, (
+        "def f(price, name):\n"
+        "    total = price\n"
+        "    return total\n"))
+    assert [a for a in actions if "shadows a builtin" in a.message] == []

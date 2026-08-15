@@ -190,7 +190,8 @@ class VolatilePart:
 # SomethingDict — the name is the communication.
 CoverageLines = dict[str, set[int]]
 MethodFields = dict[str, set[str]]
-MethodGroups = list[list[str]]
+StatementBlocks = list[list[ast.stmt]]
+NameGroups = list[list[str]]
 @dataclass(frozen=True)
 class ClassRef:
     """A class identified by its defining file and name — the two have distinct
@@ -214,6 +215,9 @@ class FileSuppressions:
 
     exemptions: dict[str, str]
     invalid: list[InvalidFileSuppression]
+
+
+ModuleGraph = dict[str, set[str]]
 
 
 @dataclass(frozen=True)
@@ -1397,7 +1401,7 @@ def _find_partition(names: list[str], mf: MethodFields):
     return None
 
 
-def _connected_groups(kept: list[str], mf: MethodFields) -> MethodGroups:
+def _connected_groups(kept: list[str], mf: MethodFields) -> NameGroups:
     """Methods connected by sharing at least one field."""
     groups: list[list[str]] = []
     seen: set[str] = set()
@@ -1459,6 +1463,8 @@ def _standard_findings(tree: ast.Module, rel: str, source: str) -> list[LatentFi
     findings += _strewing_findings(tree, rel)
     findings += _monkeypatch_findings(tree, rel)
     findings += _tuple_alias_findings(tree, rel)
+    findings += _unreachable_findings(tree, rel)
+    findings += _shadowing_findings(tree, rel)
     return findings
 
 
@@ -1593,6 +1599,82 @@ def _all_constant(node: ast.AST) -> bool:
     if isinstance(node, ast.Dict):
         return bool(node.keys) and all(k is not None and _all_constant(k) for k in node.keys) and all(_all_constant(v) for v in node.values)
     return False
+
+
+SHADOWED_BUILTINS = frozenset({
+    "abs", "all", "any", "bin", "bool", "bytes", "callable", "chr", "classmethod", "complex",
+    "dict", "dir", "divmod", "enumerate", "eval", "exec", "filter", "float", "format",
+    "frozenset", "getattr", "globals", "hasattr", "hash", "hex", "id", "input", "int",
+    "isinstance", "issubclass", "iter", "len", "list", "locals", "map", "max", "memoryview",
+    "min", "next", "object", "oct", "open", "ord", "pow", "print", "property", "range",
+    "repr", "reversed", "round", "set", "setattr", "slice", "sorted", "staticmethod", "str",
+    "sum", "super", "tuple", "type", "vars", "zip",
+})
+
+
+def _unreachable_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """Statements after an unconditional return/raise/continue/break are dead code."""
+    findings: list[LatentFinding] = []
+    for fn in [n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        for body in _statement_lists(fn):
+            for i, stmt in enumerate(body[:-1]):
+                if isinstance(stmt, (ast.Return, ast.Raise, ast.Continue, ast.Break)):
+                    dead = body[i + 1]
+                    findings.append(LatentFinding(
+                        signal="unreachable", function=fn.name, line=dead.lineno, metric=1,
+                        detail=f"unreachable statement at line {dead.lineno} in '{fn.name}' — "
+                               f"it follows an unconditional {type(stmt).__name__.lower()} and can "
+                               f"never run; dead code is deleted, not kept",
+                        inner=[]))
+                    break
+    return findings
+
+
+def _statement_lists(fn) -> StatementBlocks:
+    """All statement lists inside fn, excluding nested function bodies."""
+    lists: list[list[ast.stmt]] = [fn.body]
+
+    def walk(node: ast.AST) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node is not fn:
+            return
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.stmt) and isinstance(getattr(child, "body", None), list):
+                lists.append(child.body)
+            walk(child)
+
+    walk(fn)
+    return lists
+
+
+def _shadowing_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
+    """Parameters and locals that shadow builtins make the code read wrong."""
+    findings: list[LatentFinding] = []
+    for fn in [n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        args = fn.args.args + fn.args.posonlyargs + fn.args.kwonlyargs
+        if fn.args.vararg:
+            args = args + [fn.args.vararg]
+        if fn.args.kwarg:
+            args = args + [fn.args.kwarg]
+        for a in args:
+            if a.arg in SHADOWED_BUILTINS:
+                findings.append(_shadow_finding(a.arg, fn.lineno, fn.name, "parameter"))
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id in SHADOWED_BUILTINS:
+                        findings.append(_shadow_finding(target.id, node.lineno, fn.name, "variable"))
+    return findings
+
+
+def _shadow_finding(name: str, line: int, fn: str, kind: str) -> LatentFinding:
+    return LatentFinding(
+        signal="builtin-shadow", function=fn, line=line, metric=1,
+        detail=f"{kind} '{name}' at line {line} in '{fn}' shadows a builtin — rename it; a "
+               f"shadowed builtin makes the code read wrong (the name needing qualification is "
+               f"a failed name)",
+        inner=[])
 
 
 def _tuple_alias_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
@@ -2098,6 +2180,121 @@ def _md_link_targets(text: str) -> list[str]:
     return targets
 
 
+def _cycle_actions(repo: Path, file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+    """Import cycles between local modules — always fixed by restructuring.
+
+    Builds a file -> file import graph from the graph's IMPORTS_FROM edges
+    (local modules only; stdlib/external skip), then finds strongly-connected
+    components with >= 2 files. The fix: hoist the shared interface into its
+    own module and have both sides depend on it — never bodge with lazy
+    imports. No graph -> no signal.
+    """
+    conn = _graph_conn(repo)
+    if conn is None:
+        return []
+    rows = conn.execute("SELECT source_qualified, target_qualified FROM edges WHERE kind = 'IMPORTS_FROM'").fetchall()
+    conn.close()
+    graph: ModuleGraph = defaultdict(set)
+    files: set[str] = set()
+    for src, tgt in rows:
+        src_rel = rel_path(repo, src)
+        if not src_rel.endswith(".py"):
+            continue
+        files.add(src_rel)
+        target_rel = _module_to_file(repo, tgt)
+        if target_rel and target_rel != src_rel:
+            graph[src_rel].add(target_rel)
+    actions: list[Action] = []
+    for comp in _strongly_connected_components(graph, files):
+        if len(comp) < 2:
+            continue
+        chain = _find_cycle(graph, comp)
+        cycle_text = " -> ".join(chain) + " -> " + chain[0] if chain else ", ".join(sorted(comp))
+        actions.append(_latent_action(repo, chain[0] if chain else sorted(comp)[0], LatentFinding(
+            signal="import-cycle", function="", line=0, metric=len(comp),
+            detail=f"import cycle: {cycle_text} — circular imports are fixed by restructuring "
+                   f"modules, never bodged with lazy imports: hoist the shared interface into its "
+                   f"own module and have both sides depend on it",
+            inner=sorted(comp)), file_churn, last_modified))
+    return actions
+
+
+def _module_to_file(repo: Path, dotted: str) -> str | None:
+    """A dotted module name to its repo file rel (base.py or base/__init__.py)."""
+    base = dotted.replace(".", "/")
+    for candidate in (f"{base}.py", f"{base}/__init__.py"):
+        if (repo / candidate).exists():
+            return candidate
+    return None
+
+
+def _strongly_connected_components(graph: ModuleGraph, nodes: set[str]) -> NameGroups:
+    """Iterative Tarjan: strongly-connected components of the module graph."""
+    index = 0
+    indices: dict[str, int] = {}
+    low: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    comps: list[list[str]] = []
+    work: list[tuple[str, int, list[str]]] = []
+
+    def strongconnect(v: str) -> None:
+        nonlocal index
+        indices[v] = low[v] = index
+        index += 1
+        stack.append(v)
+        on_stack.add(v)
+        work.append((v, 0, list(graph.get(v, ()))))
+
+    for v in nodes:
+        if v in indices:
+            continue
+        strongconnect(v)
+        while work:
+            v2, i, neighbors = work[-1]
+            if i < len(neighbors):
+                w = neighbors[i]
+                work[-1] = (v2, i + 1, neighbors)
+                if w not in indices:
+                    strongconnect(w)
+                elif w in on_stack:
+                    low[v2] = min(low[v2], indices[w])
+            else:
+                work.pop()
+                if low[v2] == indices[v2]:
+                    comp = []
+                    while True:
+                        w = stack.pop()
+                        on_stack.discard(w)
+                        comp.append(w)
+                        if w == v2:
+                            break
+                    comps.append(comp)
+                if work:
+                    parent = work[-1][0]
+                    low[parent] = min(low[parent], low[v2])
+    return comps
+
+
+def _find_cycle(graph: ModuleGraph, comp: list[str]) -> list[str]:
+    """One concrete cycle within an SCC: start -> ... -> back to start."""
+    members = set(comp)
+    start = sorted(comp)[0]
+    path = [start]
+    seen = {start}
+    stack = [(start, [start], {start})]
+    while stack:
+        node, p, s = stack.pop()
+        for w in graph.get(node, ()):
+            if w not in members:
+                continue
+            if w == start:
+                return p + [w]
+            if w not in s:
+                stack.append((w, p + [w], s | {w}))
+    return path
+
+
 def _folder_mix_actions(repo: Path, file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
     """A folder whose direct files split across graph communities is a grab bag.
 
@@ -2313,6 +2510,7 @@ def _collect_actions(repo: Path, args, file_churn, last_modified, covered, graph
     actions += _docs_actions(repo, file_churn, last_modified)
     actions += _folder_mix_actions(repo, file_churn, last_modified)
     actions += _layer_mix_actions(repo, file_churn, last_modified)
+    actions += _cycle_actions(repo, file_churn, last_modified)
     return actions
 
 
