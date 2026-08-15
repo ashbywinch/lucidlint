@@ -1,0 +1,67 @@
+# build-tools — pyproject.toml
+#
+# CHANGE: bump requires-python with the current stable at scaffold time
+# (`uv python list` — never guess).
+#
+# DO NOT CHANGE:
+# - No `ignore = [...]` list in [tool.ruff.lint] — don't cargo-cult
+#   chat-workflow/energy_envelope's UP046/UP047 skip (a reflection
+#   constraint there, not a general practice).
+# - Dev deps live in PEP 735 [dependency-groups] dev, never split across
+#   optional-dependencies too.
+# - Runtime deps stay EMPTY: the tools are single-file scripts that must
+#   run in any repo's environment (houses invokes them via
+#   `uv run --with radon`). radon is an optional runtime import.
+
+[project]
+name = "build-tools"
+version = "0.1.0"
+description = "Deterministic code-health tooling: code_health.py (CodeScene-lite), check_records.py, shared CI utilities"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "pyfakefs>=5.0.0",
+    "radon>=6.0.0",
+    "ruff>=0.11.0",
+    "pyrefly>=1.2.0",
+]
+
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["build_tools*"]
+
+[tool.ruff]
+target-version = "py312"  # the RUNTIME FLOOR: houses invokes the tools on 3.12 (see README);
+# .python-version (3.14) is the dev pin — ruff must not emit 3.14-only syntax
+# (e.g. `except A, B:`) that would break the tool on the repos it scans.
+line-length = 120
+# tests/fixtures/ is intentionally non-compliant test input (standalone
+# snippets without imports) — check_records skips it for the same reason.
+extend-exclude = ["tests/fixtures"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "N"]
+# No ignore list: don't cargo-cult chat-workflow/energy_envelope's UP046/UP047
+# skip (a reflection constraint there, not a general practice).
+fixable = ["ALL"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+omit = ["*/__main__.py"]
+
+[tool.pyrefly]
+preset = "default"
+errors = { missing-override-decorator = true, missing-super-call = true }

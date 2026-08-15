@@ -6,9 +6,19 @@ fetch a tool at run time, pinned to a tag — never `main`.
 
 ## Quick start
 
-- `make test` — run the pytest suite and syntax-check every tool
-- `make code-health REPO=<path>` — run the gate on a repo (default `..`)
+- `make setup` — venv + deps + pre-commit/pre-push hooks
+- `make test` — lint + typecheck gate, then the pytest suite
+- `make check` — lint + typecheck only (what the pre-push hook and CI run)
 - `make self-check` — the gate must pass on this repo itself (PR gate)
+- `make code-health REPO=<path>` — run the gate on a repo (default `..`)
+- `make coverage` — pytest with coverage report (XML for CI)
+
+Toolchain: uv, ruff (E,F,I,UP,B,SIM,N, no ignores), pyrefly with a
+both-direction baseline lock (`scripts/pyrefly-lock.py`; refresh with
+`make typecheck-update-baseline`). Raw git hooks in `scripts/`, installed
+by `make install-hooks` — re-run `make setup` after pulling updates.
+`tests/fixtures/` is intentionally non-compliant test input: ruff and
+pyrefly both exclude it (check_records skips it for the same reason).
 
 ## Where things live
 
@@ -34,3 +44,14 @@ fetch a tool at run time, pinned to a tag — never `main`.
 - Never commit to main; branch + PR.
 - Every behavior change ships with a test — fakes only, no monkeypatch.
 - The tool passes itself: `make self-check` is green before any PR.
+
+## Repo self-checks
+
+- Docs integrity (links resolve, every doc reachable from this file) is
+  enforced by the tool itself: `make self-check` runs `code_health.py
+  --repo .`, whose `docs` kind fails on broken links and unreachable
+  docs. No separate docs-links test is needed — the tool IS the checker.
+- The tools import only stdlib at module level (radon is an optional
+  guarded import) — that invariant is what lets consuming repos run them
+  with a bare `uv run --with radon`; a test guards it
+  (`tests/test_tool_imports.py`).

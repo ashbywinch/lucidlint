@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import builtins
 import datetime
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
@@ -43,18 +44,18 @@ try:
     from radon.visitors import ComplexityVisitor  # optional dependency
 except ImportError:  # code-health: ignore except radon is an optional dependency; absence is handled explicitly below
     ComplexityVisitor = None
-import json
-import os
-import re
 import io
+import json
+import re
 import sqlite3
 import subprocess
 import sys
 import time
 import tokenize
-import check_records
 from collections import Counter, defaultdict
 from pathlib import Path
+
+import check_records
 
 # Role/pattern suffixes from coding-standards.md: communicative for a thin
 # framework-role class (MVC controller, event handler) that delegates; a smell
@@ -62,9 +63,33 @@ from pathlib import Path
 VAGUE_SUFFIXES = ("Manager", "Orchestrator", "Handler", "Store", "Repository", "Controller", "Utils", "Info")
 
 
-EXCLUDED_DIRS = {".git", ".venv", "node_modules", "__pycache__", "dist", "build", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
+EXCLUDED_DIRS = {
+    ".git",
+    ".venv",
+    "node_modules",
+    "__pycache__",
+    "dist",
+    "build",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+}
 
-ACTION_KINDS = ("complexity", "large-function", "hub-file", "hotspot", "high-risk", "record-shape", "latent-class", "vague-name", "standard", "docs", "folder-mix", "layer-mix")
+ACTION_KINDS = (
+    "complexity",
+    "large-function",
+    "hub-file",
+    "hotspot",
+    "high-risk",
+    "record-shape",
+    "latent-class",
+    "vague-name",
+    "standard",
+    "docs",
+    "folder-mix",
+    "layer-mix",
+)
+
 
 @dataclass
 class Action:
@@ -198,6 +223,8 @@ CoverageLines = dict[str, set[int]]
 MethodFields = dict[str, set[str]]
 StatementBlocks = list[list[ast.stmt]]
 NameGroups = list[list[str]]
+
+
 @dataclass(frozen=True)
 class ClassRef:
     """A class identified by its defining file and name — the two have distinct
@@ -310,25 +337,87 @@ RADON = _RadonProvider()
 def _radon_visitor(required: bool = True):
     return RADON.get(required)
 
+
 # Fix guidance per action kind. One sentence each: what to do, not just what's
 # wrong. Tied to the real requirements (readability, maintainability,
 # anti-fragility) via separation of concerns, domain language, encapsulation.
 # Deliberately resists gaming the metric: splitting a function to lower a
 # count without clarifying it is not a fix.
 GUIDANCE = {
-    "complexity": "Extract each decision branch into a named method that says what it decides in domain terms — one decision per method, happy path reads top-to-bottom. If the body is repeated similar blocks rather than distinct decisions, prefer a data table + loop over more methods. Where it mixes subsystems, extract a class per concern — for endpoints that usually means service-layer functions behind the Services DI, not new classes.",
-    "large-function": "Split by responsibility into named steps that read like a procedure in the domain; one job per step, each independently testable.",
-    "hub-file": "Decide what this file is first: if it is an assembly/composition root whose job is wiring (app layer, router), move handler logic out to the service layer and keep the assembly thin — the cross-module orchestration is its job, not a smell. Otherwise separate the concerns it mixes into modules with narrow, stable interfaces.",
-    "hotspot": "Make the volatile part small and data-driven behind a stable interface — frequent changes become cheap and cannot disturb the stable core.",
-    "high-risk": "Pin behavior with tests, then reduce the caller surface — when many things depend on it, the simplest code is the safest.",
-    "standard": "A coding-standard rule with a checkable form is enforced in code, not left to review — fix it at its site; the fix is stated in the finding.",
-    "over-abstraction": "An abstract base class with a single concrete implementation is ceremony, not design — the standard names it directly. Fold the one subclass into the base (or drop the ABC); an abstraction earns its keep at two real, differing implementations.",
-    "folder-mix": "A folder whose direct files split across graph communities mixes concerns — each community is a dependency-tied group that wants its own sub-folder (folder-discipline: large clusters get their own folder). Extract a sub-folder per community; if the split is coincidental (the files genuinely share one reason to change), leave it — the evidence is the community graph, not intent.",
-    "layer-mix": "A file whose functions partition by the subsystem they call into mixes architecture layers — the call graph is the seam: functions calling the model, the sheets, and the web layer belong in different modules. Extract a module per layer; a single dominant caller for all functions is not a finding.",
-    "docs": "A documentation standard with a checkable form is enforced in code: every relative markdown link must resolve, and every doc must be reachable from AGENTS.md through links — several hops are the norm, not a finding. AGENTS.md carries only content relevant to every agent and links group indexes; it never flat-lists the whole doc tree, and each doc keeps one distinct purpose and audience.",
-    "vague-name": "A role-suffix name (Controller, Handler, Store, Repository, Manager, Orchestrator, Utils, Info) is communicative only for a thin framework-role class that delegates — an MVC controller or event handler named for its role. This class carries real weight (see the span and method count): the domain noun it operates on should be taking the name and the logic. Name the class for that noun, or move the logic into the domain classes it should be delegating to; a genuinely thin role class is fine as-is.",
-    "latent-class": "Closures that capture state are a class in disguise — if the inner functions form behavior groups, extract a class per group and hoist the closures to its methods (the captured state becomes fields). If methods touch disjoint field sets, that partition is the latent seam: extract a class per group and let the connectors compose them. If the grouping is incidental (no shared state, no shared fields), leave it — the evidence is state and field access, not a guess.",
-    "record-shape": "The record wants a class — named fields with domain meaning, so a reader sees what the data IS without tracing it (encapsulation, obvious correctness). Make a small class/dataclass. If the data crosses a boundary (parsing or serialization), the fix is to ingest it into a domain class at that boundary: parse into the type and carry the type, don't carry the bare mapping. Constant lookup tables stay at module scope, never in an interface. If the keys are genuinely data (a true map: label -> value), suppress with `# code-health: ignore record-shape <why>` and name the alias by meaning — CoverageLines, never SomethingDict (a *Dict alias just renames the smell).",
+    "complexity": (
+        "Extract each decision branch into a named method that says what it decides in domain terms — one "
+        "decision per method, happy path reads top-to-bottom. If the body is repeated similar blocks rather than "
+        "distinct decisions, prefer a data table + loop over more methods. Where it mixes subsystems, extract a "
+        "class per concern — for endpoints that usually means service-layer functions behind the Services DI, not "
+        "new classes."
+    ),
+    "large-function": (
+        "Split by responsibility into named steps that read like a procedure in the domain; one job per step, "
+        "each independently testable."
+    ),
+    "hub-file": (
+        "Decide what this file is first: if it is an assembly/composition root whose job is wiring (app layer, "
+        "router), move handler logic out to the service layer and keep the assembly thin — the cross-module "
+        "orchestration is its job, not a smell. Otherwise separate the concerns it mixes into modules with "
+        "narrow, stable interfaces."
+    ),
+    "hotspot": (
+        "Make the volatile part small and data-driven behind a stable interface — frequent changes become cheap "
+        "and cannot disturb the stable core."
+    ),
+    "high-risk": (
+        "Pin behavior with tests, then reduce the caller surface — when many things depend on it, the simplest "
+        "code is the safest."
+    ),
+    "standard": (
+        "A coding-standard rule with a checkable form is enforced in code, not left to review — fix it at its "
+        "site; the fix is stated in the finding."
+    ),
+    "over-abstraction": (
+        "An abstract base class with a single concrete implementation is ceremony, not design — the standard "
+        "names it directly. Fold the one subclass into the base (or drop the ABC); an abstraction earns its keep "
+        "at two real, differing implementations."
+    ),
+    "folder-mix": (
+        "A folder whose direct files split across graph communities mixes concerns — each community is a "
+        "dependency-tied group that wants its own sub-folder (folder-discipline: large clusters get their own "
+        "folder). Extract a sub-folder per community; if the split is coincidental (the files genuinely share one "
+        "reason to change), leave it — the evidence is the community graph, not intent."
+    ),
+    "layer-mix": (
+        "A file whose functions partition by the subsystem they call into mixes architecture layers — the call "
+        "graph is the seam: functions calling the model, the sheets, and the web layer belong in different "
+        "modules. Extract a module per layer; a single dominant caller for all functions is not a finding."
+    ),
+    "docs": (
+        "A documentation standard with a checkable form is enforced in code: every relative markdown link must "
+        "resolve, and every doc must be reachable from AGENTS.md through links — several hops are the norm, not a "
+        "finding. AGENTS.md carries only content relevant to every agent and links group indexes; it never "
+        "flat-lists the whole doc tree, and each doc keeps one distinct purpose and audience."
+    ),
+    "vague-name": (
+        "A role-suffix name (Controller, Handler, Store, Repository, Manager, Orchestrator, Utils, Info) is "
+        "communicative only for a thin framework-role class that delegates — an MVC controller or event handler "
+        "named for its role. This class carries real weight (see the span and method count): the domain noun it "
+        "operates on should be taking the name and the logic. Name the class for that noun, or move the logic "
+        "into the domain classes it should be delegating to; a genuinely thin role class is fine as-is."
+    ),
+    "latent-class": (
+        "Closures that capture state are a class in disguise — if the inner functions form behavior groups, "
+        "extract a class per group and hoist the closures to its methods (the captured state becomes fields). If "
+        "methods touch disjoint field sets, that partition is the latent seam: extract a class per group and let "
+        "the connectors compose them. If the grouping is incidental (no shared state, no shared fields), leave it "
+        "— the evidence is state and field access, not a guess."
+    ),
+    "record-shape": (
+        "The record wants a class — named fields with domain meaning, so a reader sees what the data IS without "
+        "tracing it (encapsulation, obvious correctness). Make a small class/dataclass. If the data crosses a "
+        "boundary (parsing or serialization), the fix is to ingest it into a domain class at that boundary: parse "
+        "into the type and carry the type, don't carry the bare mapping. Constant lookup tables stay at module "
+        "scope, never in an interface. If the keys are genuinely data (a true map: label -> value), suppress with "
+        "`# code-health: ignore record-shape <why>` and name the alias by meaning — CoverageLines, never "
+        "SomethingDict (a *Dict alias just renames the smell)."
+    ),
 }
 
 
@@ -337,7 +426,7 @@ def rel_path(repo: Path, p: str) -> str:
     p = p.replace("\\", "/")
     root = str(repo.resolve()).replace("\\", "/") + "/"
     if p.startswith(root):
-        p = p[len(root):]
+        p = p[len(root) :]
     return p
 
 
@@ -368,8 +457,13 @@ def _module_key(repo: Path, file_path: str) -> str:
     return "/".join(parts[:2])
 
 
-def concern_clusters(conn: sqlite3.Connection, repo: Path, source_qn: str | None = None,
-                     source_prefix: str | None = None, own_module: str | None = None) -> Clusters:
+def concern_clusters(
+    conn: sqlite3.Connection,
+    repo: Path,
+    source_qn: str | None = None,
+    source_prefix: str | None = None,
+    own_module: str | None = None,
+) -> Clusters:
     """Group a function's (or file's) cross-module callees by subsystem.
 
     clusters always lists what resolved (even a single subsystem — the caller
@@ -378,15 +472,19 @@ def concern_clusters(conn: sqlite3.Connection, repo: Path, source_qn: str | None
     Never silently empty: callers show an explicit "unresolved" marker.
     """
     if source_qn is not None:
-        rows = list(conn.execute(
-            "SELECT DISTINCT target_qualified FROM edges WHERE source_qualified = ? AND kind = 'CALLS'",
-            (source_qn,),
-        ))
+        rows = list(
+            conn.execute(
+                "SELECT DISTINCT target_qualified FROM edges WHERE source_qualified = ? AND kind = 'CALLS'",
+                (source_qn,),
+            )
+        )
     else:
-        rows = list(conn.execute(
-            "SELECT DISTINCT target_qualified FROM edges WHERE source_qualified LIKE ? AND kind = 'CALLS'",
-            (source_prefix + "%",),
-        ))
+        rows = list(
+            conn.execute(
+                "SELECT DISTINCT target_qualified FROM edges WHERE source_qualified LIKE ? AND kind = 'CALLS'",
+                (source_prefix + "%",),
+            )
+        )
     counts: Counter[str] = Counter()
     names: dict[str, list[str]] = {}
     for r in rows:
@@ -445,8 +543,10 @@ def _test_file_for(repo: Path, rel: str) -> str:
     parts = rel.split("/")
     base = parts[-1][:-3] if parts[-1].endswith(".py") else parts[-1]
     dirs = parts[:-1]
-    candidates = ["/".join(["tests", "unit"] + dirs + ["test_" + base + ".py"]),
-                  "/".join(["tests", "unit", "test_" + base + ".py"])]
+    candidates = [
+        "/".join(["tests", "unit"] + dirs + ["test_" + base + ".py"]),
+        "/".join(["tests", "unit", "test_" + base + ".py"]),
+    ]
     for c in candidates:
         if (repo / c).exists():
             return c
@@ -475,7 +575,9 @@ def function_churn(repo: Path, rel_file: str, start: int, end: int) -> int:
     try:
         proc = subprocess.run(
             ["git", "-C", str(repo), "log", "--oneline", "-L", f"{start},{end}:{rel_file}"],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True,
+            text=True,
+            timeout=20,
         )
     except subprocess.TimeoutExpired:
         return 0
@@ -494,7 +596,9 @@ def file_history(repo: Path) -> FileHistory:
     last: dict[str, str] = {}
     proc = subprocess.run(
         ["git", "-C", str(repo), "log", "--name-only", "--pretty=format:%ad", "--date=short"],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     if proc.returncode != 0:
         return FileHistory(churn, last)
@@ -543,7 +647,7 @@ def _coverage_from_xml(repo: Path) -> CoverageResult:
             if int(ln.get("hits", "0") or 0) > 0:
                 try:
                     lines.add(int(ln.get("number")))
-                except (TypeError, ValueError):  # code-health: ignore except malformed <line> elements are safe to skip; the rest of the file still counts
+                except (TypeError, ValueError):  # code-health: ignore except malformed <line> elements are skipped
                     log(f"ignoring malformed <line> element in {repo / 'coverage.xml'}")
     return CoverageResult(covered or None, "coverage.xml")
 
@@ -592,7 +696,7 @@ def covered_span(covered: CoverageLines | None, rel: str, start: int, end: int) 
     lines = covered.get(rel)
     if lines is None:
         return None
-    return any(l in lines for l in range(start, end + 1))
+    return any(ln in lines for ln in range(start, end + 1))
 
 
 def _node_info(conn: sqlite3.Connection | None, repo: Path, rel_file: str, name: str) -> NodeInfo | None:
@@ -652,11 +756,18 @@ def log(msg: str) -> None:
 
 
 # --------------------------------------------------------------------------- complexity (radon)
-def complexity_actions(repo: Path, max_cc: int, include_tests: bool,
-                       file_churn: Counter[str], last_modified: dict[str, str],
-                       covered: CoverageLines | None, graph_preferred: bool, stale_note: str) -> list[Action]:
+def complexity_actions(
+    repo: Path,
+    max_cc: int,
+    include_tests: bool,
+    file_churn: Counter[str],
+    last_modified: dict[str, str],
+    covered: CoverageLines | None,
+    graph_preferred: bool,
+    stale_note: str,
+) -> list[Action]:
     """Cyclomatic complexity per function via radon's fast pure-Python analyzer."""
-    ComplexityVisitor = _radon_visitor()
+    complexity_visitor = _radon_visitor()
     conn = _graph_conn(repo)
     actions: list[Action] = []
     for py in sorted(repo.rglob("*.py")):
@@ -667,15 +778,21 @@ def complexity_actions(repo: Path, max_cc: int, include_tests: bool,
             continue
         try:
             source = py.read_text(encoding="utf-8", errors="replace")
-            visitor = ComplexityVisitor.from_code(source)
-        except (SyntaxError, UnicodeDecodeError, RecursionError):  # code-health: ignore except an unparseable file is skipped, not a scan failure
+            visitor = complexity_visitor.from_code(source)
+        except (
+            SyntaxError,
+            UnicodeDecodeError,
+            RecursionError,
+        ):  # code-health: ignore except an unparseable file is skipped, not a scan failure
             continue
         for fn in visitor.functions:
             if fn.complexity < max_cc:
                 continue
-            actions.append(_complexity_action(
-                repo, rel, fn, max_cc, conn, source, covered, graph_preferred, stale_note,
-                file_churn, last_modified))
+            actions.append(
+                _complexity_action(
+                    repo, rel, fn, max_cc, conn, source, covered, graph_preferred, stale_note, file_churn, last_modified
+                )
+            )
     return actions
 
 
@@ -686,9 +803,19 @@ def _function_mix(conn, repo: Path, rel: str, name: str, info: NodeInfo | None) 
     return concern_clusters(conn, repo, source_qn=info.qualified_name, own_module=_module_key(repo, info.file_path))
 
 
-def _complexity_action(repo: Path, rel: str, fn, max_cc: int, conn, source: str,
-                       covered, graph_preferred: bool, stale_note: str,
-                       file_churn: Counter[str], last_modified: dict[str, str]) -> Action:
+def _complexity_action(
+    repo: Path,
+    rel: str,
+    fn,
+    max_cc: int,
+    conn,
+    source: str,
+    covered,
+    graph_preferred: bool,
+    stale_note: str,
+    file_churn: Counter[str],
+    last_modified: dict[str, str],
+) -> Action:
     """One complexity action: finding + seam wording + coverage note."""
     info = _node_info(conn, repo, rel, fn.name)
     mix = _function_mix(conn, repo, rel, fn.name, info)
@@ -696,18 +823,28 @@ def _complexity_action(repo: Path, rel: str, fn, max_cc: int, conn, source: str,
         info.def_sig = _def_signature(source, fn.lineno)
     finding = f"cyclomatic complexity {fn.complexity} (>= {max_cc})"
     if mix.clusters:
-        message = f"{finding} — {mix_text(mix.clusters, mix.strong)} — extract a class per concern; the seams are those subsystem boundaries, not line breaks."
+        message = (
+            f"{finding} — {mix_text(mix.clusters, mix.strong)} — extract a class per concern; "
+            f"the seams are those subsystem boundaries, not line breaks."
+        )
     else:
         snippet = "calls: " + ", ".join(mix.unresolved) if mix.unresolved else "no cross-module callees resolved"
         message = f"{finding} — {GUIDANCE['complexity']} [concern mix unresolved — {snippet}]"
     note = coverage_note(covered, repo, rel, info, info.tested, graph_preferred, stale_note) if info else ""
     churn = file_churn.get(rel, 0)
     return Action(
-        kind="complexity", severity="fail", file=rel, line=fn.lineno, function=fn.name,
-        message=message, metric=fn.complexity, churn=churn,
+        kind="complexity",
+        severity="fail",
+        file=rel,
+        line=fn.lineno,
+        function=fn.name,
+        message=message,
+        metric=fn.complexity,
+        churn=churn,
         last_modified=last_modified.get(rel, ""),
         tested=final_tested(covered, rel, info, graph_preferred) if info else "",
-        note=note, raw=_raw_score("complexity", fn.complexity, churn),
+        note=note,
+        raw=_raw_score("complexity", fn.complexity, churn),
     )
 
 
@@ -738,8 +875,15 @@ def final_tested(covered: CoverageLines | None, rel: str, info: NodeInfo, graph_
     return _verdict(covered, rel, info, info.tested, graph_preferred)
 
 
-def coverage_note(covered: CoverageLines | None, repo: Path, rel: str, info: NodeInfo, graph_tested: str,
-                  graph_preferred: bool = False, stale_note: str = "") -> str:
+def coverage_note(
+    covered: CoverageLines | None,
+    repo: Path,
+    rel: str,
+    info: NodeInfo,
+    graph_tested: str,
+    graph_preferred: bool = False,
+    stale_note: str = "",
+) -> str:
     """Append a coverage-based instruction when the function is untested."""
     contract = contract_text(info.name, info.params, info.return_type, info.def_sig)
     tfile = _test_file_for(repo, rel)
@@ -748,12 +892,17 @@ def coverage_note(covered: CoverageLines | None, repo: Path, rel: str, info: Nod
     if verdict == "tested":
         return ""
     if verdict == "untested":
-        return f" Not covered by the repo's coverage data — write the failing tests first. Contract to pin: {contract}.{extend}"
+        return (
+            f" Not covered by the repo's coverage data — write the failing tests first. "
+            f"Contract to pin: {contract}.{extend}"
+        )
     # unknown: stale snapshot and graph blind to it — verify, never assert
-    return (f" Coverage snapshot is older than the repo's tests and the graph's TESTED_BY edges "
-            f"don't reach this function (in-body imports and HTTP-path tests are invisible to it) — "
-            f"verify with make coverage / htmlcov; if truly uncovered, pin "
-            f"{contract} with tests first.{extend}")
+    return (
+        f" Coverage snapshot is older than the repo's tests and the graph's TESTED_BY edges "
+        f"don't reach this function (in-body imports and HTTP-path tests are invisible to it) — "
+        f"verify with make coverage / htmlcov; if truly uncovered, pin "
+        f"{contract} with tests first.{extend}"
+    )
 
 
 # --------------------------------------------------------------------------- graph (code-review-graph)
@@ -762,20 +911,38 @@ def _graph_db(repo: Path) -> Path | None:
     return db if db.exists() else None
 
 
-def graph_actions(repo: Path, max_fn_lines: int, max_file_edges: int, max_risk: float, include_tests: bool,
-                  file_churn: Counter[str], last_modified: dict[str, str],
-                  covered: CoverageLines | None, graph_preferred: bool, stale_note: str) -> list[Action]:
+def graph_actions(
+    repo: Path,
+    max_fn_lines: int,
+    max_file_edges: int,
+    max_risk: float,
+    include_tests: bool,
+    file_churn: Counter[str],
+    last_modified: dict[str, str],
+    covered: CoverageLines | None,
+    graph_preferred: bool,
+    stale_note: str,
+) -> list[Action]:
     """Repo-structure actions from the code-review-graph SQLite: large functions, hub files, high risk."""
     db_path = _graph_db(repo)
     if db_path is None:
-        log(f"no graph at {repo / '.code-review-graph' / 'graph.db'} — run `code-review-graph build --repo {repo}` first")
+        log(
+            f"no graph at {repo / '.code-review-graph' / 'graph.db'} — run "
+            f"`code-review-graph build --repo {repo}` first"
+        )
         return []
     db = sqlite3.connect(db_path)
     db.row_factory = sqlite3.Row
     actions: list[dict] = []
-    actions += _large_function_actions(db, repo, max_fn_lines, include_tests, file_churn, last_modified, covered, graph_preferred, stale_note)
-    actions += _hub_file_actions(db, repo, max_file_edges, include_tests, file_churn, last_modified, covered, graph_preferred, stale_note)
-    actions += _high_risk_actions(db, repo, max_risk, include_tests, file_churn, last_modified, covered, graph_preferred, stale_note)
+    actions += _large_function_actions(
+        db, repo, max_fn_lines, include_tests, file_churn, last_modified, covered, graph_preferred, stale_note
+    )
+    actions += _hub_file_actions(
+        db, repo, max_file_edges, include_tests, file_churn, last_modified, covered, graph_preferred, stale_note
+    )
+    actions += _high_risk_actions(
+        db, repo, max_risk, include_tests, file_churn, last_modified, covered, graph_preferred, stale_note
+    )
     db.close()
     return actions
 
@@ -805,9 +972,17 @@ def _info_signature(info: NodeInfo, src_cache: dict[str, str], repo: Path, rel: 
     return info
 
 
-def _large_function_actions(db, repo: Path, max_fn_lines: int, include_tests: bool,
-                             file_churn: Counter[str], last_modified: dict[str, str],
-                             covered, graph_preferred: bool, stale_note: str) -> list[Action]:
+def _large_function_actions(
+    db,
+    repo: Path,
+    max_fn_lines: int,
+    include_tests: bool,
+    file_churn: Counter[str],
+    last_modified: dict[str, str],
+    covered,
+    graph_preferred: bool,
+    stale_note: str,
+) -> list[Action]:
     """Functions whose node line span exceeds the threshold (non-test, Python)."""
     actions: list[Action] = []
     src_cache: dict[str, str] = {}
@@ -829,24 +1004,49 @@ def _large_function_actions(db, repo: Path, max_fn_lines: int, include_tests: bo
         rel = rel_path(repo, row["file_path"])
         if not include_tests and is_test_path(rel):
             continue
-        mix = concern_clusters(db, repo, source_qn=row["qualified_name"], own_module=_module_key(repo, row["file_path"]))
+        mix = concern_clusters(
+            db, repo, source_qn=row["qualified_name"], own_module=_module_key(repo, row["file_path"])
+        )
         message = _mix_message(
-            f"function spans {span} lines (>= {max_fn_lines})", mix,
+            f"function spans {span} lines (>= {max_fn_lines})",
+            mix,
             GUIDANCE["large-function"],
-            "extract a class per concern, then split each class's methods into named domain steps.")
+            "extract a class per concern, then split each class's methods into named domain steps.",
+        )
         info = _info_signature(
-            NodeInfo(name=row["name"], qualified_name=row["qualified_name"], file_path=row["file_path"],
-                     tested=row["test_coverage"] or "", params=row["params"] or "", return_type=row["return_type"] or "",
-                     line_start=row["line_start"], line_end=row["line_end"]),
-            src_cache, repo, rel, row["line_start"])
+            NodeInfo(
+                name=row["name"],
+                qualified_name=row["qualified_name"],
+                file_path=row["file_path"],
+                tested=row["test_coverage"] or "",
+                params=row["params"] or "",
+                return_type=row["return_type"] or "",
+                line_start=row["line_start"],
+                line_end=row["line_end"],
+            ),
+            src_cache,
+            repo,
+            rel,
+            row["line_start"],
+        )
         note = coverage_note(covered, repo, rel, info, row["test_coverage"] or "", graph_preferred, stale_note)
         churn = file_churn.get(rel, 0)
-        actions.append(Action(
-            kind="large-function", severity="fail", file=rel, line=row["line_start"],
-            function=row["name"], message=message, metric=span, churn=churn,
-            last_modified=last_modified.get(rel, ""), tested=final_tested(covered, rel, info),
-            note=note, raw=_raw_score("large-function", span, churn),
-        ))
+        actions.append(
+            Action(
+                kind="large-function",
+                severity="fail",
+                file=rel,
+                line=row["line_start"],
+                function=row["name"],
+                message=message,
+                metric=span,
+                churn=churn,
+                last_modified=last_modified.get(rel, ""),
+                tested=final_tested(covered, rel, info),
+                note=note,
+                raw=_raw_score("large-function", span, churn),
+            )
+        )
     return actions
 
 
@@ -865,13 +1065,20 @@ def _hub_edge_counts(db) -> Counter[str]:
 
 
 def _is_builtin_call(row) -> bool:
-    return (row["kind"] == "CALLS"
-            and row["target_qualified"].split("::")[-1].split(".")[-1] in BUILTIN_NAMES)
+    return row["kind"] == "CALLS" and row["target_qualified"].split("::")[-1].split(".")[-1] in BUILTIN_NAMES
 
 
-def _hub_file_actions(db, repo: Path, max_file_edges: int, include_tests: bool,
-                      file_churn: Counter[str], last_modified: dict[str, str],
-                      covered, graph_preferred: bool, stale_note: str) -> list[Action]:
+def _hub_file_actions(
+    db,
+    repo: Path,
+    max_file_edges: int,
+    include_tests: bool,
+    file_churn: Counter[str],
+    last_modified: dict[str, str],
+    covered,
+    graph_preferred: bool,
+    stale_note: str,
+) -> list[Action]:
     """Files with heavy coupling (CALLS/IMPORTS_FROM/INHERITS/REFERENCES, no test-harness edges)."""
     actions: list[Action] = []
     src_cache: dict[str, str] = {}
@@ -885,9 +1092,11 @@ def _hub_file_actions(db, repo: Path, max_file_edges: int, include_tests: bool,
         abs_file = str(repo.resolve()) + "/" + rel
         mix = concern_clusters(db, repo, source_prefix=abs_file + "::", own_module=_module_key(repo, file_path))
         message = _mix_message(
-            f"{edge_count} call/import edges (>= {max_file_edges})", mix,
+            f"{edge_count} call/import edges (>= {max_file_edges})",
+            mix,
             GUIDANCE["hub-file"],
-            "split into one module per concern with narrow, stable interfaces so changes stay contained.")
+            "split into one module per concern with narrow, stable interfaces so changes stay contained.",
+        )
         # Point at the file's fattest handlers: top-3 by cyclomatic complexity.
         first = db.execute(
             "SELECT MIN(line_start) FROM nodes WHERE file_path = ? AND kind IN ('Function', 'Method')",
@@ -895,45 +1104,68 @@ def _hub_file_actions(db, repo: Path, max_file_edges: int, include_tests: bool,
         ).fetchone()[0]
         fat = ""
         try:
-            Visitor = _radon_visitor(required=False)
-            if Visitor is not None:
+            visitor = _radon_visitor(required=False)
+            if visitor is not None:
                 source = _read_source(src_cache, repo, rel)
-                fns = Visitor.from_code(source).functions if source else []
+                fns = visitor.from_code(source).functions if source else []
                 top = sorted(fns, key=lambda f: f.complexity, reverse=True)[:3]
                 if top:
                     fat = " fattest: " + ", ".join(f"{f.name}:{f.lineno} (CC {f.complexity})" for f in top)
                     anchor = top[0].lineno
-        except Exception as exc:  # code-health: ignore except fattest analysis is best-effort; the file parsed successfully above, so this cannot hide a real failure
+        except Exception as exc:  # code-health: ignore except fattest analysis is best-effort; the file parsed above
             log(f"fattest-handler analysis failed for {rel}: {exc}")
         message += fat
         churn = file_churn.get(rel, 0)
-        actions.append(Action(
-            kind="hub-file", severity="fail", file=rel, line=anchor if fat else (first or 1),
-            function="", message=message, metric=edge_count, churn=churn,
-            last_modified=last_modified.get(rel, ""), tested="",
-            raw=_raw_score("hub-file", edge_count, churn),
-        ))
+        actions.append(
+            Action(
+                kind="hub-file",
+                severity="fail",
+                file=rel,
+                line=anchor if fat else (first or 1),
+                function="",
+                message=message,
+                metric=edge_count,
+                churn=churn,
+                last_modified=last_modified.get(rel, ""),
+                tested="",
+                raw=_raw_score("hub-file", edge_count, churn),
+            )
+        )
     return actions
 
 
 def _callers_text(db, row) -> Callers:
     """Distinct callers of a node from CALLS edges (qualified and bare-name targets)."""
-    callers = [r[0].split("::")[-1] for r in db.execute(
-        "SELECT DISTINCT source_qualified FROM edges WHERE kind = 'CALLS' "
-        "AND (target_qualified = ? OR target_qualified = ? OR target_qualified LIKE ?)",
-        (row["qualified_name"], row["name"], "%::" + row["name"]),
-    )][:8]
+    callers = [
+        r[0].split("::")[-1]
+        for r in db.execute(
+            "SELECT DISTINCT source_qualified FROM edges WHERE kind = 'CALLS' "
+            "AND (target_qualified = ? OR target_qualified = ? OR target_qualified LIKE ?)",
+            (row["qualified_name"], row["name"], "%::" + row["name"]),
+        )
+    ][:8]
     if not callers:
         return Callers([], "")
     text = f", callers: {', '.join(callers)}"
     if len(callers) < row["caller_count"]:
-        text += f" ({len(callers)} distinct of {row['caller_count']} call sites per risk index — count includes repeated call sites)"
+        text += (
+            f" ({len(callers)} distinct of {row['caller_count']} call sites per risk index — "
+            f"count includes repeated call sites)"
+        )
     return Callers(callers, text)
 
 
-def _high_risk_actions(db, repo: Path, max_risk: float, include_tests: bool,
-                       file_churn: Counter[str], last_modified: dict[str, str],
-                       covered, graph_preferred: bool, stale_note: str) -> list[Action]:
+def _high_risk_actions(
+    db,
+    repo: Path,
+    max_risk: float,
+    include_tests: bool,
+    file_churn: Counter[str],
+    last_modified: dict[str, str],
+    covered,
+    graph_preferred: bool,
+    stale_note: str,
+) -> list[Action]:
     """Graph risk-index nodes above the threshold, with resolved callers."""
     actions: list[Action] = []
     src_cache: dict[str, str] = {}
@@ -948,16 +1180,37 @@ def _high_risk_actions(db, repo: Path, max_risk: float, include_tests: bool,
         """.format(extra="" if include_tests else "AND n.kind != 'Test'"),
         (max_risk,),
     ):
-        action = _high_risk_action(db, repo, row, max_risk, include_tests, src_cache,
-                                   file_churn, last_modified, covered, graph_preferred, stale_note)
+        action = _high_risk_action(
+            db,
+            repo,
+            row,
+            max_risk,
+            include_tests,
+            src_cache,
+            file_churn,
+            last_modified,
+            covered,
+            graph_preferred,
+            stale_note,
+        )
         if action:
             actions.append(action)
     return actions
 
 
-def _high_risk_action(db, repo: Path, row, max_risk: float, include_tests: bool, src_cache: dict[str, str],
-                      file_churn: Counter[str], last_modified: dict[str, str],
-                      covered, graph_preferred: bool, stale_note: str) -> Action | None:
+def _high_risk_action(
+    db,
+    repo: Path,
+    row,
+    max_risk: float,
+    include_tests: bool,
+    src_cache: dict[str, str],
+    file_churn: Counter[str],
+    last_modified: dict[str, str],
+    covered,
+    graph_preferred: bool,
+    stale_note: str,
+) -> Action | None:
     """One high-risk action, or None for test files."""
     rel = rel_path(repo, row["file_path"])
     if not include_tests and is_test_path(rel):
@@ -965,21 +1218,41 @@ def _high_risk_action(db, repo: Path, row, max_risk: float, include_tests: bool,
     resolved = _callers_text(db, row)
     callers = resolved.callers
     message = (
-        f"graph risk {row['risk_score']:.2f} (>= {max_risk}), {len(callers) or row['caller_count']} call site(s){resolved.text} — "
+        f"graph risk {row['risk_score']:.2f} (>= {max_risk}), "
+        f"{len(callers) or row['caller_count']} call site(s){resolved.text} — "
         f"{GUIDANCE['high-risk']}"
     )
     info = _info_signature(
-        NodeInfo(name=row["name"], qualified_name=row["qualified_name"], file_path=row["file_path"],
-                 tested=row["test_coverage"] or "", params=row["params"] or "", return_type=row["return_type"] or "",
-                 line_start=row["line_start"] or 1, line_end=row["line_end"] or row["line_start"] or 1),
-        src_cache, repo, rel, row["line_start"] or 1)
+        NodeInfo(
+            name=row["name"],
+            qualified_name=row["qualified_name"],
+            file_path=row["file_path"],
+            tested=row["test_coverage"] or "",
+            params=row["params"] or "",
+            return_type=row["return_type"] or "",
+            line_start=row["line_start"] or 1,
+            line_end=row["line_end"] or row["line_start"] or 1,
+        ),
+        src_cache,
+        repo,
+        rel,
+        row["line_start"] or 1,
+    )
     note = coverage_note(covered, repo, rel, info, row["test_coverage"] or "", graph_preferred, stale_note)
     churn = file_churn.get(rel, 0)
     return Action(
-        kind="high-risk", severity="fail", file=rel, line=row["line_start"] or 1,
-        function=row["name"], message=message, metric=round(row["risk_score"], 2), churn=churn,
-        last_modified=last_modified.get(rel, ""), tested=final_tested(covered, rel, info),
-        callers=callers, note=note,
+        kind="high-risk",
+        severity="fail",
+        file=rel,
+        line=row["line_start"] or 1,
+        function=row["name"],
+        message=message,
+        metric=round(row["risk_score"], 2),
+        churn=churn,
+        last_modified=last_modified.get(rel, ""),
+        tested=final_tested(covered, rel, info),
+        callers=callers,
+        note=note,
         raw=_raw_score("high-risk", row["risk_score"], churn, len(callers) if callers else row["caller_count"]),
     )
 
@@ -991,11 +1264,13 @@ def _volatile_parts(conn, repo: Path, rel: str, fns, min_cc: float) -> list[Vola
     if conn is None:
         return volatile
     abs_file = str(repo.resolve()) + "/" + rel
-    nodes = {r["name"]: r for r in conn.execute(
-        "SELECT name, line_start, line_end FROM nodes WHERE file_path = ? "
-        "AND kind IN ('Function', 'Method')",
-        (abs_file,),
-    )}
+    nodes = {
+        r["name"]: r
+        for r in conn.execute(
+            "SELECT name, line_start, line_end FROM nodes WHERE file_path = ? AND kind IN ('Function', 'Method')",
+            (abs_file,),
+        )
+    }
     for fn in fns:
         if fn.complexity < min_cc:
             continue
@@ -1007,8 +1282,9 @@ def _volatile_parts(conn, repo: Path, rel: str, fns, min_cc: float) -> list[Vola
     return volatile
 
 
-def hotspot_actions(repo: Path, top_frac: float, min_cc: float,
-                    file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+def hotspot_actions(
+    repo: Path, top_frac: float, min_cc: float, file_churn: Counter[str], last_modified: dict[str, str]
+) -> list[Action]:
     """CodeScene hotspot: files that change often AND are complex.
 
     Change frequency from the shared `git log --name-only` pass; complexity =
@@ -1017,7 +1293,7 @@ def hotspot_actions(repo: Path, top_frac: float, min_cc: float,
     CodeScene's hotspot signal is the concentration of complexity in a
     frequently-changed file.
     """
-    ComplexityVisitor = _radon_visitor()
+    complexity_visitor = _radon_visitor()
     cutoff = max(1, int(len(file_churn) * top_frac))
     hottest = {f for f, c in file_churn.most_common(cutoff) if c >= 2}
 
@@ -1029,8 +1305,11 @@ def hotspot_actions(repo: Path, top_frac: float, min_cc: float,
             continue
         try:
             source = fpath.read_text(encoding="utf-8", errors="replace")
-            visitor = ComplexityVisitor.from_code(source)
-        except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped, not a scan failure
+            visitor = complexity_visitor.from_code(source)
+        except (
+            SyntaxError,
+            UnicodeDecodeError,
+        ):  # code-health: ignore except an unparseable file is skipped, not a scan failure
             continue
         fns = visitor.functions
         if not fns:
@@ -1040,8 +1319,9 @@ def hotspot_actions(repo: Path, top_frac: float, min_cc: float,
             continue
         # Name the volatile part: complex functions in this file, with their own
         # churn (git log -L over the graph's line range). Cap at 3 per file.
-        volatile = sorted(_volatile_parts(conn, repo, rel, fns, min_cc),
-                           key=lambda v: (v.churn, v.complexity), reverse=True)
+        volatile = sorted(
+            _volatile_parts(conn, repo, rel, fns, min_cc), key=lambda v: (v.churn, v.complexity), reverse=True
+        )
         parts = []
         for v in volatile[:3]:
             parts.append(f"{v.name}:{v.line} (CC {v.complexity}" + (f", {v.churn}x churn)" if v.churn else ")"))
@@ -1069,20 +1349,56 @@ def hotspot_actions(repo: Path, top_frac: float, min_cc: float,
 
 # --------------------------------------------------------------------------- main
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="CodeScene-lite: complexity/dependency/hotspot actions from code-review-graph + radon + git")
+    p = argparse.ArgumentParser(
+        description="CodeScene-lite: complexity/dependency/hotspot actions from code-review-graph + radon + git"
+    )
     p.add_argument("--repo", type=Path, default=Path.cwd(), help="repository root (default: cwd)")
-    p.add_argument("--max-complexity", type=int, default=15, help="fail functions with cyclomatic complexity >= N (default 15)")
-    p.add_argument("--max-function-lines", type=int, default=120, help="fail functions spanning >= N lines (default 120)")
-    p.add_argument("--max-file-edges", type=int, default=150, help="fail files with >= N call/import edges (default 150)")
+    p.add_argument(
+        "--max-complexity", type=int, default=15, help="fail functions with cyclomatic complexity >= N (default 15)"
+    )
+    p.add_argument(
+        "--max-function-lines", type=int, default=120, help="fail functions spanning >= N lines (default 120)"
+    )
+    p.add_argument(
+        "--max-file-edges", type=int, default=150, help="fail files with >= N call/import edges (default 150)"
+    )
     p.add_argument("--max-risk", type=float, default=0.8, help="fail nodes with graph risk score >= N (default 0.8)")
-    p.add_argument("--hotspot-top-frac", type=float, default=0.1, help="hotspot candidate set: top fraction of files by change count (default 0.1)")
-    p.add_argument("--hotspot-min-cc", type=float, default=15.0, help="hotspot requires file max complexity >= N (default 15)")
+    p.add_argument(
+        "--hotspot-top-frac",
+        type=float,
+        default=0.1,
+        help="hotspot candidate set: top fraction of files by change count (default 0.1)",
+    )
+    p.add_argument(
+        "--hotspot-min-cc", type=float, default=15.0, help="hotspot requires file max complexity >= N (default 15)"
+    )
     p.add_argument("--include-tests", action="store_true", help="also analyze test files/nodes")
-    p.add_argument("--baseline", type=Path, default=None, help="baseline JSON of acknowledged actions; listed actions are reported but do not fail the gate")
-    p.add_argument("--update-baseline", action="store_true", help="write all current action keys to --baseline and exit 0 (lock the list, like pyrefly baselines)")
-    p.add_argument("--base", type=str, default="", help="git ref to diff against; actions in files your branch changed are marked 'in your diff' (default: origin/main, then main)")
+    p.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="baseline JSON of acknowledged actions; listed actions are reported but do not fail the gate",
+    )
+    p.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="write all current action keys to --baseline and exit 0 (lock the list, like pyrefly baselines)",
+    )
+    p.add_argument(
+        "--base",
+        type=str,
+        default="",
+        help=(
+            "git ref to diff against; actions in files your branch changed are marked "
+            "'in your diff' (default: origin/main, then main)"
+        ),
+    )
     p.add_argument("--json", action="store_true", help="emit actions as JSON object (meta + actions) on stdout")
-    p.add_argument("--refresh-coverage", action="store_true", help="run the repo's coverage suite (make coverage) before scanning so coverage verdicts are fresh (slow)")
+    p.add_argument(
+        "--refresh-coverage",
+        action="store_true",
+        help="run the repo's coverage suite (make coverage) before scanning so coverage verdicts are fresh (slow)",
+    )
     p.add_argument("--warn", action="store_true", help="exit 0 even when actions exist (informational run)")
     return p.parse_args()
 
@@ -1097,7 +1413,9 @@ def changed_files(repo: Path, base: str) -> set[str]:
     for ref in refs:
         proc = subprocess.run(
             ["git", "-C", str(repo), "diff", "--name-only", f"{ref}...HEAD"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if proc.returncode == 0 and proc.stdout.strip():
             return {ln.strip() for ln in proc.stdout.splitlines() if ln.strip()}
@@ -1107,7 +1425,9 @@ def changed_files(repo: Path, base: str) -> set[str]:
 def _coverage_context(repo: Path, covered, coverage_source: str) -> CoverageContext:
     """Coverage provenance label + staleness verdict."""
     if coverage_source == ".coverage" and (repo / ".coverage").exists():
-        coverage_source += " (mtime " + time.strftime("%Y-%m-%d %H:%M", time.localtime((repo / ".coverage").stat().st_mtime)) + ")"
+        coverage_source += (
+            " (mtime " + time.strftime("%Y-%m-%d %H:%M", time.localtime((repo / ".coverage").stat().st_mtime)) + ")"
+        )
     graph_preferred = False
     stale_note = ""
     if covered is not None and (repo / ".coverage").exists():
@@ -1115,16 +1435,21 @@ def _coverage_context(repo: Path, covered, coverage_source: str) -> CoverageCont
         newest_test = max((p.stat().st_mtime for p in (repo / "tests").rglob("*.py")), default=0.0)
         if newest_test > cov_mtime:
             graph_preferred = True
-            stale_note = " (coverage snapshot older than the repo's tests — graph verdict used; verify against htmlcov/ if present)"
+            stale_note = (
+                " (coverage snapshot older than the repo's tests — graph verdict used; "
+                "verify against htmlcov/ if present)"
+            )
     return CoverageContext(label=coverage_source, graph_preferred=graph_preferred, stale_note=stale_note)
 
 
 def _git_head(repo: Path) -> GitHead:
     """Current branch and short commit for report provenance."""
-    branch = subprocess.run(["git", "-C", str(repo), "branch", "--show-current"],
-                            capture_output=True, text=True).stdout.strip()
-    commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
-                            capture_output=True, text=True).stdout.strip()
+    branch = subprocess.run(
+        ["git", "-C", str(repo), "branch", "--show-current"], capture_output=True, text=True
+    ).stdout.strip()
+    commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
     return GitHead(branch=branch, commit=commit)
 
 
@@ -1183,8 +1508,10 @@ def _lifecycle_notes(unique: list[Action]) -> None:
     """Facts only — low-churn scripts/tools. Delete-vs-refactor is the agent's call."""
     for a in unique:
         if a.file.startswith(("scripts/", "tools/")) and a.churn <= 2 and a.last_modified:
-            a.note = (a.note + f" Lifecycle: {a.churn}x churn, last touched {a.last_modified} — "
-                      f"low-change file under scripts/tools.").strip()
+            a.note = (
+                a.note + f" Lifecycle: {a.churn}x churn, last touched {a.last_modified} — "
+                f"low-change file under scripts/tools."
+            ).strip()
 
 
 def _dedupe_merge(actions: list[Action], diff: set[str]) -> list[Action]:
@@ -1203,57 +1530,88 @@ def _load_baseline(path) -> set[str]:
     if path and path.exists():
         try:
             return set(json.loads(path.read_text()).get("actions", []))
-        except (json.JSONDecodeError, AttributeError):  # code-health: ignore except a corrupt baseline is surfaced: the gate runs unbaselined and fails on the unacknowledged actions
+        except (json.JSONDecodeError, AttributeError):  # code-health: ignore except corrupt baseline; gate unbaselined
             log(f"baseline {path} unreadable — ignoring")
     return set()
 
 
 def _render_json(repo: Path, args, unique: list[Action], branch: str, commit: str, coverage_source: str) -> None:
-    print(json.dumps({
-        "meta": {
-            "repo": str(repo), "branch": branch, "commit": commit,
-            "generated_at": datetime.date.today().isoformat(),
-            "base_ref": args.base or "origin/main|main",
-            "coverage_source": coverage_source,
-            "thresholds": {
-                "max_complexity": args.max_complexity,
-                "max_function_lines": args.max_function_lines,
-                "max_file_edges": args.max_file_edges,
-                "max_risk": args.max_risk,
-                "hotspot_top_frac": args.hotspot_top_frac,
-                "hotspot_min_cc": args.hotspot_min_cc,
+    print(
+        json.dumps(
+            {
+                "meta": {
+                    "repo": str(repo),
+                    "branch": branch,
+                    "commit": commit,
+                    "generated_at": datetime.date.today().isoformat(),
+                    "base_ref": args.base or "origin/main|main",
+                    "coverage_source": coverage_source,
+                    "thresholds": {
+                        "max_complexity": args.max_complexity,
+                        "max_function_lines": args.max_function_lines,
+                        "max_file_edges": args.max_file_edges,
+                        "max_risk": args.max_risk,
+                        "hotspot_top_frac": args.hotspot_top_frac,
+                        "hotspot_min_cc": args.hotspot_min_cc,
+                    },
+                },
+                "baseline": str(args.baseline) if args.baseline else "",
+                "actions": [asdict(a) for a in unique],
             },
-        },
-        "baseline": str(args.baseline) if args.baseline else "",
-        "actions": [asdict(a) for a in unique],
-    }, indent=2))
+            indent=2,
+        )
+    )
 
 
-def _render_summary(repo: Path, args, fails: list[Action], warns: list[Action], acks: list[Action],
-                    diff: set[str], coverage_source: str, graph_preferred: bool) -> None:
+def _render_summary(
+    repo: Path,
+    args,
+    fails: list[Action],
+    warns: list[Action],
+    acks: list[Action],
+    diff: set[str],
+    coverage_source: str,
+    graph_preferred: bool,
+) -> None:
     """Gate verdict, scope, and formula lines."""
     top = fails[0]
     mine = sum(1 for a in fails if a.in_diff)
-    mine_txt = (f"; {mine} of {len(fails)} actions in files your diff touches"
-                if diff else "; diff base unresolved")
+    mine_txt = f"; {mine} of {len(fails)} actions in files your diff touches" if diff else "; diff base unresolved"
     mine_txt += " (no baseline — cannot tell what is new)"
     targets = len({(a.file, a.function) for a in fails})
     verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
-    print(f"{verdict} — {len(fails)} action(s) across {targets} distinct targets "
-          f"(+{len(acks)} acknowledged in baseline, {len(warns)} warnings never-fail){mine_txt}, "
-          f"top P{top.priority} {top.file}:{top.line} ({top.function or top.kind})")
-    print("priority ranks change-cost (churn x fan-in), not brokenness — which item is worth fixing first is a judgement call; "
-          "the hotspot entries are the usual starting set")
+    print(
+        f"{verdict} — {len(fails)} action(s) across {targets} distinct targets "
+        f"(+{len(acks)} acknowledged in baseline, {len(warns)} warnings never-fail){mine_txt}, "
+        f"top P{top.priority} {top.file}:{top.line} ({top.function or top.kind})"
+    )
+    print(
+        "priority ranks change-cost (churn x fan-in), not brokenness — which item is worth "
+        "fixing first is a judgement call; the hotspot entries are the usual starting set"
+    )
     if graph_preferred:
-        print("WARNING: coverage snapshot predates the repo's tests — hard 'untested' claims are suppressed; "
-              "run --refresh-coverage (make coverage) for definite test-status verdicts")
-    print("priority = percentile of raw risk (metric norm x (1 + churn/30) x (1 + callers/5)); "
-          "norms: CC/40, lines/200, edges/400, risk/1 (norm capped at 1.0, churn factor at 1.5, callers factor at 1.0) "
-          "— the displayed thresholds are the fail bars, not the norms; "
-          "thresholds: CC>=" + str(args.max_complexity) + ", fn>=" + str(args.max_function_lines) +
-          " lines, file>=" + str(args.max_file_edges) + " edges, risk>=" + str(args.max_risk) +
-          ", hotspot top " + f"{args.hotspot_top_frac:.0%}" + " by churn with CC>=" + str(args.hotspot_min_cc) +
-          f"; coverage: {coverage_source}")
+        print(
+            "WARNING: coverage snapshot predates the repo's tests — hard 'untested' claims are suppressed; "
+            "run --refresh-coverage (make coverage) for definite test-status verdicts"
+        )
+    print(
+        "priority = percentile of raw risk (metric norm x (1 + churn/30) x (1 + callers/5)); "
+        "norms: CC/40, lines/200, edges/400, risk/1 (norm capped at 1.0, churn factor at 1.5, callers factor at 1.0) "
+        "— the displayed thresholds are the fail bars, not the norms; "
+        "thresholds: CC>="
+        + str(args.max_complexity)
+        + ", fn>="
+        + str(args.max_function_lines)
+        + " lines, file>="
+        + str(args.max_file_edges)
+        + " edges, risk>="
+        + str(args.max_risk)
+        + ", hotspot top "
+        + f"{args.hotspot_top_frac:.0%}"
+        + " by churn with CC>="
+        + str(args.hotspot_min_cc)
+        + f"; coverage: {coverage_source}"
+    )
 
 
 def _render_file_group(file: str, items: list[Action]) -> None:
@@ -1285,16 +1643,35 @@ def _render_actions(repo: Path, args, fails: list[Action], acks: list[Action]) -
     for file, items in sorted(by_file.items(), key=lambda kv: -max(i.priority for i in kv[1])):
         _render_file_group(file, items)
     if acks:
-        print(f"\nacknowledged in baseline ({len(acks)}): " + ", ".join(f"{a.file}:{a.line}" for a in acks[:5]) + (" …" if len(acks) > 5 else ""))
-    print("\nre-run: uv run --with radon python3 code_health.py --repo " + str(repo) +
-          (" --baseline " + str(args.baseline) if args.baseline else "") +
-          "   | tool lives in build-tools (github.com/ashbywinch/build-tools); thresholds and per-action data in --json output")
-    print("baseline: '--update-baseline --baseline code-health.json' acknowledges today's debt so the "
-          "gate only fails on NEW actions; this report is a snapshot, not wired into CI")
+        print(
+            f"\nacknowledged in baseline ({len(acks)}): "
+            + ", ".join(f"{a.file}:{a.line}" for a in acks[:5])
+            + (" …" if len(acks) > 5 else "")
+        )
+    print(
+        "\nre-run: uv run --with radon python3 code_health.py --repo "
+        + str(repo)
+        + (" --baseline " + str(args.baseline) if args.baseline else "")
+        + "   | tool lives in build-tools (github.com/ashbywinch/build-tools); thresholds and"
+        + " per-action data in --json output"
+    )
+    print(
+        "baseline: '--update-baseline --baseline code-health.json' acknowledges today's debt so the "
+        "gate only fails on NEW actions; this report is a snapshot, not wired into CI"
+    )
 
 
-def _render_text(repo: Path, args, unique: list[Action], fails: list[Action], warns: list[Action],
-                 acks: list[Action], diff: set[str], coverage_source: str, graph_preferred: bool) -> None:
+def _render_text(
+    repo: Path,
+    args,
+    unique: list[Action],
+    fails: list[Action],
+    warns: list[Action],
+    acks: list[Action],
+    diff: set[str],
+    coverage_source: str,
+    graph_preferred: bool,
+) -> None:
     if not unique:
         print("GATE: PASS — clean, no actions")
         return
@@ -1313,8 +1690,9 @@ def _render_text(repo: Path, args, unique: list[Action], fails: list[Action], wa
         _render_actions(repo, args, warns, [])
 
 
-def _latent_class_actions(repo: Path, include_tests: bool,
-                         file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+def _latent_class_actions(
+    repo: Path, include_tests: bool, file_churn: Counter[str], last_modified: dict[str, str]
+) -> list[Action]:
     """Fat classes/functions carrying unextracted classes inside them.
 
     Two factual signals, both gated so the finding is a plausible fix item:
@@ -1328,59 +1706,93 @@ def _latent_class_actions(repo: Path, include_tests: bool,
     Guidance is conditional: the evidence is stated, the interpretation is
     offered, coincidental grouping is left alone.
     """
-    Visitor = _radon_visitor(required=False)
+    visitor = _radon_visitor(required=False)
     actions: list[Action] = []
     for py in sorted(repo.rglob("*.py")):
         rel = py.relative_to(repo).as_posix()
         if any(part in EXCLUDED_DIRS for part in py.parts):
             continue
-        actions += _scan_file(py, rel, include_tests, Visitor, repo, file_churn, last_modified)
+        actions += _scan_file(py, rel, include_tests, visitor, repo, file_churn, last_modified)
     return actions
 
 
-def _scan_file(py: Path, rel: str, include_tests: bool, Visitor, repo: Path,
-               file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+def _scan_file(
+    py: Path,
+    rel: str,
+    include_tests: bool,
+    visitor_cls,
+    repo: Path,
+    file_churn: Counter[str],
+    last_modified: dict[str, str],
+) -> list[Action]:
     """One file's latent-class / vague-name / standard findings."""
-    is_test = ("/test" in f"/{rel}" or rel.startswith("test"))
+    is_test = "/test" in f"/{rel}" or rel.startswith("test")
     try:
         source = py.read_text(encoding="utf-8", errors="replace")
         tree = ast.parse(source)
-    except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped, not a scan failure
+    except (
+        SyntaxError,
+        UnicodeDecodeError,
+    ):  # code-health: ignore except an unparseable file is skipped, not a scan failure
         return []
     supps = _suppressions(source)
     file_supps = _file_suppressions(source)
     if is_test and not include_tests:
         # test files are excluded from the health scan, but the rules that live
         # in tests (monkeypatch, env-skipif, fakefs) are scanned for alone
-        findings = (_monkeypatch_findings(tree, rel) + _skipif_findings(tree, rel)
-                    + _fakefs_findings(tree, rel))
+        findings = _monkeypatch_findings(tree, rel) + _skipif_findings(tree, rel) + _fakefs_findings(tree, rel)
         findings += _invalid_suppressions(supps)
-        findings += [LatentFinding(
-            signal="suppression", function="", line=s.line, metric=1,
-            detail=f"file suppression '# code-health: ignore-file {s.signal}' at line {s.line} without a why — "
-                   f"exemptions only apply with an explanation", inner=[])
-            for s in file_supps.invalid]
-        return [_latent_action(repo, rel, f, file_churn, last_modified)
-                for f in findings if not _suppressed(f.signal, f.line, supps) and f.signal not in file_supps.exemptions]
+        findings += [
+            LatentFinding(
+                signal="suppression",
+                function="",
+                line=s.line,
+                metric=1,
+                detail=f"file suppression '# code-health: ignore-file {s.signal}' at line {s.line} without a why — "
+                f"exemptions only apply with an explanation",
+                inner=[],
+            )
+            for s in file_supps.invalid
+        ]
+        return [
+            _latent_action(repo, rel, f, file_churn, last_modified)
+            for f in findings
+            if not _suppressed(f.signal, f.line, supps) and f.signal not in file_supps.exemptions
+        ]
     fn_map = {}
-    if Visitor is not None:
-        for f in Visitor.from_code(source).functions:
+    if visitor_cls is not None:
+        for f in visitor_cls.from_code(source).functions:
             fn_map[(f.name, f.lineno)] = f.complexity
-    findings = (_closure_findings(tree, rel, fn_map) + _partition_findings(tree, rel)
-                + _vague_name_findings(tree, rel) + _standard_findings(tree, rel, source)
-                + _class_module_findings(tree, rel))
+    findings = (
+        _closure_findings(tree, rel, fn_map)
+        + _partition_findings(tree, rel)
+        + _vague_name_findings(tree, rel)
+        + _standard_findings(tree, rel, source)
+        + _class_module_findings(tree, rel)
+    )
     findings += _invalid_suppressions(supps)
-    return [_latent_action(repo, rel, f, file_churn, last_modified)
-            for f in findings if not _suppressed(f.signal, f.line, supps)]
+    return [
+        _latent_action(repo, rel, f, file_churn, last_modified)
+        for f in findings
+        if not _suppressed(f.signal, f.line, supps)
+    ]
 
 
 def _invalid_suppressions(supps: dict[int, tuple[str, str]]) -> list[LatentFinding]:
     """A `# code-health: ignore <signal>` without a why is itself a finding."""
-    return [LatentFinding(
-        signal="suppression", function="", line=line, metric=1,
-        detail=f"suppression '# code-health: ignore {sig}' at line {line} without a why — "
-               f"the tool is only skipped when you explain why it is wrong",
-        inner=[]) for line, (sig, why) in supps.items() if not why]
+    return [
+        LatentFinding(
+            signal="suppression",
+            function="",
+            line=line,
+            metric=1,
+            detail=f"suppression '# code-health: ignore {sig}' at line {line} without a why — "
+            f"the tool is only skipped when you explain why it is wrong",
+            inner=[],
+        )
+        for line, (sig, why) in supps.items()
+        if not why
+    ]
 
 
 def _closure_findings(tree: ast.Module, rel: str, fn_map: dict[tuple[str, int], int]) -> list[LatentFinding]:
@@ -1391,17 +1803,20 @@ def _closure_findings(tree: ast.Module, rel: str, fn_map: dict[tuple[str, int], 
         cc = fn_map.get((fn.name, fn.lineno), 0)
         if cc < 15 and span < 60:
             continue
-        inner = [n.name for n in ast.walk(fn)
-                 if n is not fn and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        inner = [n.name for n in ast.walk(fn) if n is not fn and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
         lambdas = sum(1 for n in ast.walk(fn) if isinstance(n, ast.Lambda))
         if len(inner) + lambdas < 2:
             continue
-        findings.append(LatentFinding(
-            signal="closures", function=fn.name, line=fn.lineno,
-            metric=len(inner) + lambdas,
-            detail=_closure_detail(inner, lambdas, cc, span),
-            inner=inner[:6],
-        ))
+        findings.append(
+            LatentFinding(
+                signal="closures",
+                function=fn.name,
+                line=fn.lineno,
+                metric=len(inner) + lambdas,
+                detail=_closure_detail(inner, lambdas, cc, span),
+                inner=inner[:6],
+            )
+        )
     return findings
 
 
@@ -1432,27 +1847,34 @@ def _partition_for_class(cls: ast.ClassDef) -> LatentFinding | None:
         return None
     mf = {}
     for m in methods:
-        mf[m.name] = {node.attr for node in ast.walk(m)
-                      if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self"}
+        mf[m.name] = {
+            node.attr
+            for node in ast.walk(m)
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self"
+        }
     partition = _find_partition(list(mf), mf)
     if partition is None:
         return None
     connectors, groups = partition
     return LatentFinding(
-        signal="partition", function=cls.name, line=cls.lineno,
+        signal="partition",
+        function=cls.name,
+        line=cls.lineno,
         metric=sum(len(g) for g in groups),
         detail=_partition_detail(connectors, groups),
         inner=[],
     )
 
 
-def _partition_detail(connectors: list[str], groups: MethodGroups) -> str:
+def _partition_detail(connectors: list[str], groups: NameGroups) -> str:
     """Wording: the field-disjoint groups and which connectors were removed."""
     groups_text = "/".join("{" + ",".join(g) + "}" for g in groups)
     conn_text = "{" + ",".join(connectors) + "}" if connectors else "none"
-    return (f"methods split into {len(groups)} field-disjoint groups ({groups_text}), "
-            f"connectors removed: {conn_text} — each group touches only its own fields, "
-            f"so each is a latent class")
+    return (
+        f"methods split into {len(groups)} field-disjoint groups ({groups_text}), "
+        f"connectors removed: {conn_text} — each group touches only its own fields, "
+        f"so each is a latent class"
+    )
 
 
 def _find_partition(names: list[str], mf: MethodFields):
@@ -1470,7 +1892,7 @@ def _find_partition(names: list[str], mf: MethodFields):
 
 def _connected_groups(kept: list[str], mf: MethodFields) -> NameGroups:
     """Methods connected by sharing at least one field."""
-    groups: list[list[str]] = []
+    groups: NameGroups = []
     seen: set[str] = set()
     for start in kept:
         if start in seen:
@@ -1507,14 +1929,18 @@ def _vague_name_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
             span = (cls.end_lineno or cls.lineno) - cls.lineno
             if span < 120 and len(methods) < 6:
                 break  # thin role class — the name is the communication, not a smell
-            findings.append(LatentFinding(
-                signal="vague-name", function=cls.name, line=cls.lineno,
-                metric=len(methods),
-                detail=f"'{suffix}' name carries a {span}-line class with {len(methods)} methods — "
-                       f"a thin role class that only delegates is communicative; this one takes real "
-                       f"weight, so the domain noun it operates on should carry the name and the logic",
-                inner=[],
-            ))
+            findings.append(
+                LatentFinding(
+                    signal="vague-name",
+                    function=cls.name,
+                    line=cls.lineno,
+                    metric=len(methods),
+                    detail=f"'{suffix}' name carries a {span}-line class with {len(methods)} methods — "
+                    f"a thin role class that only delegates is communicative; this one takes real "
+                    f"weight, so the domain noun it operates on should carry the name and the logic",
+                    inner=[],
+                )
+            )
             break
     return findings
 
@@ -1553,11 +1979,17 @@ def _inline_import_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     parents = {id(child): parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)) and _has_function_ancestor(node, parents):
-            findings.append(LatentFinding(
-                signal="inline-import", function="", line=node.lineno, metric=1,
-                detail=f"import inside function body at line {node.lineno}: '{ast.unparse(node)}' — "
-                       f"inline imports hide dependencies from static analysis; move every import to module top",
-                inner=[]))
+            findings.append(
+                LatentFinding(
+                    signal="inline-import",
+                    function="",
+                    line=node.lineno,
+                    metric=1,
+                    detail=f"import inside function body at line {node.lineno}: '{ast.unparse(node)}' — "
+                    f"inline imports hide dependencies from static analysis; move every import to module top",
+                    inner=[],
+                )
+            )
     return findings
 
 
@@ -1570,19 +2002,33 @@ def _private_import_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
                 private_module = node.module and any(seg.startswith("_") for seg in node.module.split("."))
                 if alias.name.startswith("_") or private_module:
                     target = alias.name if alias.name.startswith("_") else f"{node.module}.{alias.name}"
-                    findings.append(LatentFinding(
-                        signal="private-import", function="", line=node.lineno, metric=1,
-                        detail=f"imports private symbol '{target}' at line {node.lineno} — "
-                               f"never import underscore symbols: make the logic public and documented, or extract it to a shared module",
-                        inner=[]))
+                    findings.append(
+                        LatentFinding(
+                            signal="private-import",
+                            function="",
+                            line=node.lineno,
+                            metric=1,
+                            detail=f"imports private symbol '{target}' at line {node.lineno} — "
+                            f"never import underscore symbols: make the logic public and documented, "
+                            f"or extract it to a shared module",
+                            inner=[],
+                        )
+                    )
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if any(seg.startswith("_") for seg in alias.name.split(".")):
-                    findings.append(LatentFinding(
-                        signal="private-import", function="", line=node.lineno, metric=1,
-                        detail=f"imports private path '{alias.name}' at line {node.lineno} — "
-                               f"never import underscore symbols: make the logic public and documented, or extract it to a shared module",
-                        inner=[]))
+                    findings.append(
+                        LatentFinding(
+                            signal="private-import",
+                            function="",
+                            line=node.lineno,
+                            metric=1,
+                            detail=f"imports private path '{alias.name}' at line {node.lineno} — "
+                            f"never import underscore symbols: make the logic public and documented, "
+                            f"or extract it to a shared module",
+                            inner=[],
+                        )
+                    )
     return findings
 
 
@@ -1602,13 +2048,19 @@ def _except_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
         for h in node.handlers:
             if _handler_swallows(h, returned):
                 kind = "bare except" if h.type is None else "except that swallows"
-                findings.append(LatentFinding(
-                    signal="except", function="", line=h.lineno, metric=1,
-                    detail=f"{kind} at line {h.lineno} — the catch never raises, returns, or surfaces "
-                           f"the error, so it is invisible. Logging alone is not fail-fast: re-raise, "
-                           f"surface it, or if this error is genuinely safe to ignore, mark "
-                           f"`# code-health: ignore except <why>` and log with that explanation",
-                    inner=[]))
+                findings.append(
+                    LatentFinding(
+                        signal="except",
+                        function="",
+                        line=h.lineno,
+                        metric=1,
+                        detail=f"{kind} at line {h.lineno} — the catch never raises, returns, or surfaces "
+                        f"the error, so it is invisible. Logging alone is not fail-fast: re-raise, "
+                        f"surface it, or if this error is genuinely safe to ignore, mark "
+                        f"`# code-health: ignore except <why>` and log with that explanation",
+                        inner=[],
+                    )
+                )
     return findings
 
 
@@ -1623,7 +2075,19 @@ def _handler_swallows(h, returned: set[str]) -> bool:
         return True
     if any(isinstance(n, (ast.Raise, ast.Return, ast.Break, ast.Continue)) for n in ast.walk(h)):
         return False
+    if any(_is_process_exit(n) for n in ast.walk(h)):
+        return False  # sys.exit(...) terminates with the error surfaced in the process result
     return not _mutates_returned(h, returned)
+
+
+def _is_process_exit(node: ast.AST) -> bool:
+    """A sys.exit()/exit()/quit() call — the handler terminates, so the
+    failure is not invisible (exit code + stderr are the surface)."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        return node.func.id in ("exit", "quit")
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "sys"
+            and node.func.attr == "exit")
 
 
 def _mutates_returned(h, returned: set[str]) -> bool:
@@ -1632,13 +2096,21 @@ def _mutates_returned(h, returned: set[str]) -> bool:
     if not returned:
         return False
     for node in ast.walk(h):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name) and node.func.value.id in returned):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in returned
+        ):
             return True
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in returned:
             return True
-        if (isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del))
-                and isinstance(node.value, ast.Name) and node.value.id in returned):
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and isinstance(node.value, ast.Name)
+            and node.value.id in returned
+        ):
             return True
     return False
 
@@ -1671,13 +2143,19 @@ def _global_state_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     findings: list[LatentFinding] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Global):
-            findings.append(LatentFinding(
-                signal="global-state", function="", line=node.lineno, metric=1,
-                detail=f"global statement at line {node.lineno} — no module-level mutable state. The fix: "
-                       f"instantiate the object at the entry point and pass it around (parameter injection), "
-                       f"or keep ONE global services object that is set at the entry point or in test setup "
-                       f"and populated with whatever objects it needs — fakes in tests",
-                inner=[]))
+            findings.append(
+                LatentFinding(
+                    signal="global-state",
+                    function="",
+                    line=node.lineno,
+                    metric=1,
+                    detail=f"global statement at line {node.lineno} — no module-level mutable state. The fix: "
+                    f"instantiate the object at the entry point and pass it around (parameter injection), "
+                    f"or keep ONE global services object that is set at the entry point or in test setup "
+                    f"and populated with whatever objects it needs — fakes in tests",
+                    inner=[],
+                )
+            )
     flagged: set[str] = set()
     for node in tree.body:
         target = _module_assignment_target(node)
@@ -1685,13 +2163,19 @@ def _global_state_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
             continue
         if isinstance(node.value, (ast.List, ast.Dict, ast.Set)) and not _all_constant(node.value):
             flagged.add(target)
-            findings.append(LatentFinding(
-                signal="global-state", function="", line=node.lineno, metric=1,
-                detail=f"module-level mutable {type(node.value).__name__} '{target}' at line {node.lineno} — "
-                       f"no module-level mutable state. The fix: instantiate the object at the entry point and "
-                       f"pass it around (parameter injection), or keep ONE global services object set at the "
-                       f"entry point / test setup and populated with what it needs — fakes in tests",
-                inner=[]))
+            findings.append(
+                LatentFinding(
+                    signal="global-state",
+                    function="",
+                    line=node.lineno,
+                    metric=1,
+                    detail=f"module-level mutable {type(node.value).__name__} '{target}' at line {node.lineno} — "
+                    f"no module-level mutable state. The fix: instantiate the object at the entry point and "
+                    f"pass it around (parameter injection), or keep ONE global services object set at the "
+                    f"entry point / test setup and populated with what it needs — fakes in tests",
+                    inner=[],
+                )
+            )
     _mutation_findings(tree, flagged, findings)
     return findings
 
@@ -1709,22 +2193,31 @@ def _mutation_findings(tree: ast.Module, flagged: set[str], findings: list[Laten
     """Module-level collections reassigned or mutated inside functions are
     still module state, even when the literal itself looks constant
     (`_oauth_states: dict = {}` populated by login/callback)."""
-    mutable = {_module_assignment_target(n) for n in tree.body
-               if isinstance(getattr(n, "value", None), (ast.List, ast.Dict, ast.Set))} - {None}
+    mutable = {
+        _module_assignment_target(n)
+        for n in tree.body
+        if isinstance(getattr(n, "value", None), (ast.List, ast.Dict, ast.Set))
+    } - {None}
     seen: set[str] = set()
     for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
         for node in ast.walk(fn):
             container = _mutation_target(node, mutable)
             if container and container not in seen and container not in flagged:
                 seen.add(container)
-                findings.append(LatentFinding(
-                    signal="global-state", function="", line=node.lineno, metric=1,
-                    detail=f"module-level collection '{container}' is mutated at line {node.lineno} — "
-                           f"no module-level mutable state. The fix: instantiate the object at the "
-                           f"entry point and pass it around (parameter injection), or keep ONE global "
-                           f"services object set at the entry point / test setup and populated with "
-                           f"what it needs — fakes in tests",
-                    inner=[]))
+                findings.append(
+                    LatentFinding(
+                        signal="global-state",
+                        function="",
+                        line=node.lineno,
+                        metric=1,
+                        detail=f"module-level collection '{container}' is mutated at line {node.lineno} — "
+                        f"no module-level mutable state. The fix: instantiate the object at the "
+                        f"entry point and pass it around (parameter injection), or keep ONE global "
+                        f"services object set at the entry point / test setup and populated with "
+                        f"what it needs — fakes in tests",
+                        inner=[],
+                    )
+                )
 
 
 def _mutation_target(node: ast.AST, mutable: set[str]) -> str | None:
@@ -1732,8 +2225,12 @@ def _mutation_target(node: ast.AST, mutable: set[str]) -> str | None:
     in-place subscript store/del, or None when the node mutates nothing."""
     if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in mutable:
         return node.id
-    if (isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del))
-            and isinstance(node.value, ast.Name) and node.value.id in mutable):
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+        and isinstance(node.value, ast.Name)
+        and node.value.id in mutable
+    ):
         return node.value.id
     return None
 
@@ -1754,36 +2251,102 @@ def _container_all_constant(node: ast.AST) -> bool:
     if isinstance(node, ast.Tuple):
         return all(_all_constant(e) for e in node.elts)
     if isinstance(node, ast.Dict):
-        return bool(node.keys) and all(k is not None and _all_constant(k) for k in node.keys) and all(_all_constant(v) for v in node.values)
+        return (
+            bool(node.keys)
+            and all(k is not None and _all_constant(k) for k in node.keys)
+            and all(_all_constant(v) for v in node.values)
+        )
     return False
 
 
-SHADOWED_BUILTINS = frozenset({
-    "abs", "all", "any", "bin", "bool", "bytes", "callable", "chr", "classmethod", "complex",
-    "dict", "dir", "divmod", "enumerate", "eval", "exec", "filter", "float", "format",
-    "frozenset", "getattr", "globals", "hasattr", "hash", "hex", "id", "input", "int",
-    "isinstance", "issubclass", "iter", "len", "list", "locals", "map", "max", "memoryview",
-    "min", "next", "object", "oct", "open", "ord", "pow", "print", "property", "range",
-    "repr", "reversed", "round", "set", "setattr", "slice", "sorted", "staticmethod", "str",
-    "sum", "super", "tuple", "type", "vars", "zip",
-})
+SHADOWED_BUILTINS = frozenset(
+    {
+        "abs",
+        "all",
+        "any",
+        "bin",
+        "bool",
+        "bytes",
+        "callable",
+        "chr",
+        "classmethod",
+        "complex",
+        "dict",
+        "dir",
+        "divmod",
+        "enumerate",
+        "eval",
+        "exec",
+        "filter",
+        "float",
+        "format",
+        "frozenset",
+        "getattr",
+        "globals",
+        "hasattr",
+        "hash",
+        "hex",
+        "id",
+        "input",
+        "int",
+        "isinstance",
+        "issubclass",
+        "iter",
+        "len",
+        "list",
+        "locals",
+        "map",
+        "max",
+        "memoryview",
+        "min",
+        "next",
+        "object",
+        "oct",
+        "open",
+        "ord",
+        "pow",
+        "print",
+        "property",
+        "range",
+        "repr",
+        "reversed",
+        "round",
+        "set",
+        "setattr",
+        "slice",
+        "sorted",
+        "staticmethod",
+        "str",
+        "sum",
+        "super",
+        "tuple",
+        "type",
+        "vars",
+        "zip",
+    }
+)
 
 
 def _unreachable_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     """Statements after an unconditional return/raise/continue/break are dead code."""
     findings: list[LatentFinding] = []
-    for fn in [n for n in ast.walk(tree)
-               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
         for body in _statement_lists(fn):
             for i, stmt in enumerate(body[:-1]):
                 if isinstance(stmt, (ast.Return, ast.Raise, ast.Continue, ast.Break)):
                     dead = body[i + 1]
-                    findings.append(LatentFinding(
-                        signal="unreachable", function=fn.name, line=dead.lineno, metric=1,
-                        detail=f"unreachable statement at line {dead.lineno} in '{fn.name}' — "
-                               f"it follows an unconditional {type(stmt).__name__.lower()} and can "
-                               f"never run; dead code is deleted, not kept",
-                        inner=[]))
+                    findings.append(
+                        LatentFinding(
+                            signal="unreachable",
+                            function=fn.name,
+                            line=dead.lineno,
+                            metric=1,
+                            detail=f"unreachable statement at line {dead.lineno} in '{fn.name}' — "
+                            f"it follows an unconditional {type(stmt).__name__.lower()} and can "
+                            f"never run; dead code is deleted, not kept",
+                            inner=[],
+                        )
+                    )
                     break
     return findings
 
@@ -1806,7 +2369,7 @@ def _statement_lists(fn) -> StatementBlocks:
 
 _MAGIC_SKIP = (0, 1, 2, -1)
 
-import builtins
+
 BUILTIN_NAMES = {n for n in dir(builtins) if not n.startswith("_")}
 
 
@@ -1817,8 +2380,7 @@ def _magic_number_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     not descended into here: only literals whose parent is an operation.
     """
     findings: list[LatentFinding] = []
-    for fn in [n for n in ast.walk(tree)
-               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
         parents = {id(child): node for node in ast.walk(fn) for child in ast.iter_child_nodes(node)}
         for node in ast.walk(fn):
             if not isinstance(node, ast.Constant) or isinstance(node.value, bool):
@@ -1828,12 +2390,19 @@ def _magic_number_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
                 continue
             parent = parents.get(id(node))
             if isinstance(parent, (ast.BinOp, ast.Compare, ast.UnaryOp, ast.Subscript, ast.Call)):
-                findings.append(LatentFinding(
-                    signal="magic-number", function=fn.name, line=node.lineno, metric=1,
-                    detail=f"magic number {v} at line {node.lineno} in '{fn.name}' — name it as a "
-                           f"constant (the name is the documentation); raw integers as operands "
-                           f"and indices are a finding",
-                    inner=[], severity="warn"))
+                findings.append(
+                    LatentFinding(
+                        signal="magic-number",
+                        function=fn.name,
+                        line=node.lineno,
+                        metric=1,
+                        detail=f"magic number {v} at line {node.lineno} in '{fn.name}' — name it as a "
+                        f"constant (the name is the documentation); raw integers as operands "
+                        f"and indices are a finding",
+                        inner=[],
+                        severity="warn",
+                    )
+                )
     return findings
 
 
@@ -1851,17 +2420,21 @@ def _noop_statement_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
         if not isinstance(node, ast.Expr):
             continue
         v = node.value
-        if isinstance(v, (ast.Call, ast.Await, ast.Yield, ast.YieldFrom,
-                          ast.Constant, ast.Lambda, ast.NamedExpr)):
+        if isinstance(v, (ast.Call, ast.Await, ast.Yield, ast.YieldFrom, ast.Constant, ast.Lambda, ast.NamedExpr)):
             continue
         fn = _enclosing_function(parents, node)
         expr = ast.unparse(v)
-        findings.append(LatentFinding(
-            signal="noop-statement", function=fn.name if fn is not None else "",
-            line=node.lineno, metric=1,
-            detail=f"no-op statement at line {node.lineno}: `{expr[:60]}` discards its value — dead "
-                   f"statement, likely a refactor leftover: assign it or delete it",
-            inner=[]))
+        findings.append(
+            LatentFinding(
+                signal="noop-statement",
+                function=fn.name if fn is not None else "",
+                line=node.lineno,
+                metric=1,
+                detail=f"no-op statement at line {node.lineno}: `{expr[:60]}` discards its value — dead "
+                f"statement, likely a refactor leftover: assign it or delete it",
+                inner=[],
+            )
+        )
     return findings
 
 
@@ -1881,19 +2454,25 @@ def _broad_except_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
         for h in node.handlers:
             base = _annotation_base_name(h.type) if h.type else ""
             if base in ("Exception", "BaseException") and not _handler_swallows(h, returned):
-                findings.append(LatentFinding(
-                    signal="broad-except", function="", line=h.lineno, metric=1,
-                    detail=f"broad `except {ast.unparse(h.type)}` at line {h.lineno} — catch the "
-                           f"specific exception; a broad catch hides which failures are expected",
-                    inner=[], severity="warn"))
+                findings.append(
+                    LatentFinding(
+                        signal="broad-except",
+                        function="",
+                        line=h.lineno,
+                        metric=1,
+                        detail=f"broad `except {ast.unparse(h.type)}` at line {h.lineno} — catch the "
+                        f"specific exception; a broad catch hides which failures are expected",
+                        inner=[],
+                        severity="warn",
+                    )
+                )
     return findings
 
 
 def _shadowing_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     """Parameters and locals that shadow builtins make the code read wrong."""
     findings: list[LatentFinding] = []
-    for fn in [n for n in ast.walk(tree)
-               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
         args = fn.args.args + fn.args.posonlyargs + fn.args.kwonlyargs
         if fn.args.vararg:
             args = args + [fn.args.vararg]
@@ -1912,11 +2491,15 @@ def _shadowing_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
 
 def _shadow_finding(name: str, line: int, fn: str, kind: str) -> LatentFinding:
     return LatentFinding(
-        signal="builtin-shadow", function=fn, line=line, metric=1,
+        signal="builtin-shadow",
+        function=fn,
+        line=line,
+        metric=1,
         detail=f"{kind} '{name}' at line {line} in '{fn}' shadows a builtin — rename it; a "
-               f"shadowed builtin makes the code read wrong (the name needing qualification is "
-               f"a failed name)",
-        inner=[])
+        f"shadowed builtin makes the code read wrong (the name needing qualification is "
+        f"a failed name)",
+        inner=[],
+    )
 
 
 def _tuple_alias_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
@@ -1936,13 +2519,19 @@ def _tuple_alias_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
         parts = v.slice
         elts = parts.elts if isinstance(parts, ast.Tuple) else [parts]
         if len(elts) >= 2 and not any(isinstance(e, ast.Constant) and e.value is Ellipsis for e in elts):
-            findings.append(LatentFinding(
-                signal="tuple-alias", function="", line=node.lineno, metric=1,
-                detail=f"alias '{node.targets[0].id} = {ast.unparse(v)}' hides a positional record — "
-                       f"each element has a meaning the alias erases (the standard: GeoPoint, not "
-                       f"LatLngPair). Make a class with named fields so the reader sees which element "
-                       f"is which",
-                inner=[]))
+            findings.append(
+                LatentFinding(
+                    signal="tuple-alias",
+                    function="",
+                    line=node.lineno,
+                    metric=1,
+                    detail=f"alias '{node.targets[0].id} = {ast.unparse(v)}' hides a positional record — "
+                    f"each element has a meaning the alias erases (the standard: GeoPoint, not "
+                    f"LatLngPair). Make a class with named fields so the reader sees which element "
+                    f"is which",
+                    inner=[],
+                )
+            )
     return findings
 
 
@@ -1962,11 +2551,17 @@ def _type_ignore_findings(source: str, rel: str) -> list[LatentFinding]:
             continue
         rest = tok.string.split("type: ignore", 1)[1]
         if "#" not in rest:  # a second comment on the line is the why
-            findings.append(LatentFinding(
-                signal="type-ignore", function="", line=tok.start[0], metric=1,
-                detail=f"# type: ignore at line {tok.start[0]} without a why — a suppression is itself a "
-                       f"finding: add a comment explaining why the checker is wrong",
-                inner=[]))
+            findings.append(
+                LatentFinding(
+                    signal="type-ignore",
+                    function="",
+                    line=tok.start[0],
+                    metric=1,
+                    detail=f"# type: ignore at line {tok.start[0]} without a why — a suppression is itself a "
+                    f"finding: add a comment explaining why the checker is wrong",
+                    inner=[],
+                )
+            )
     return findings
 
 
@@ -2049,12 +2644,18 @@ def _class_module_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     stem = Path(rel).stem.lower()
     if cls.name.lower() == stem or cls.name.lower() == stem.replace("_", ""):
         return []
-    return [LatentFinding(
-        signal="class-module", function=cls.name, line=cls.lineno, metric=1,
-        detail=f"module '{rel}' holds one class '{cls.name}' — each class lives in its own module named "
-               f"after the class; rename the file to {cls.name.lower()}.py (exception: a module grouping "
-               f"closely related models that share one reason to change)",
-        inner=[])]
+    return [
+        LatentFinding(
+            signal="class-module",
+            function=cls.name,
+            line=cls.lineno,
+            metric=1,
+            detail=f"module '{rel}' holds one class '{cls.name}' — each class lives in its own module named "
+            f"after the class; rename the file to {cls.name.lower()}.py (exception: a module grouping "
+            f"closely related models that share one reason to change)",
+            inner=[],
+        )
+    ]
 
 
 def _skipif_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
@@ -2069,15 +2670,20 @@ def _skipif_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
             continue
         if node.func.attr != "skipif":
             continue
-        cond = " ".join(ast.unparse(a) for a in node.args) + " " + " ".join(
-            ast.unparse(v) for k, v in node.keywords)
+        cond = " ".join(ast.unparse(a) for a in node.args) + " " + " ".join(ast.unparse(v) for k, v in node.keywords)
         if any(needle in cond for needle in ("os.environ", "environ", "getenv", "os.path.exists", "sys.platform")):
-            findings.append(LatentFinding(
-                signal="skipif", function="", line=node.lineno, metric=1,
-                detail=f"@pytest.mark.skipif on environment presence at line {node.lineno} — never skip a "
-                       f"test for a missing dependency: fake it (a fixture builds a stand-in) so it runs "
-                       f"identically everywhere; only the E2E suite may skip",
-                inner=[]))
+            findings.append(
+                LatentFinding(
+                    signal="skipif",
+                    function="",
+                    line=node.lineno,
+                    metric=1,
+                    detail=f"@pytest.mark.skipif on environment presence at line {node.lineno} — never skip a "
+                    f"test for a missing dependency: fake it (a fixture builds a stand-in) so it runs "
+                    f"identically everywhere; only the E2E suite may skip",
+                    inner=[],
+                )
+            )
     return findings
 
 
@@ -2087,19 +2693,23 @@ def _monkeypatch_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     Fakes are objects (a class implementing the real protocol), never patched
     globals and never bare functions swapped in.
     """
-    mock_imports = {a.name for n in tree.body
-                    if isinstance(n, ast.ImportFrom) and n.module and "mock" in n.module
-                    for a in n.names}
+    mock_imports = {
+        a.name for n in tree.body if isinstance(n, ast.ImportFrom) and n.module and "mock" in n.module for a in n.names
+    }
     return _mock_calls(tree, mock_imports) + _mock_decorators(tree, mock_imports)
 
 
 def _mp_finding(desc: str, line: int) -> LatentFinding:
     return LatentFinding(
-        signal="monkeypatch", function="", line=line, metric=1,
+        signal="monkeypatch",
+        function="",
+        line=line,
+        metric=1,
         detail=f"{desc} at line {line} — never monkeypatch global state; inject an object fake "
-               f"(a class implementing the real protocol) via parameter injection or the services "
-               f"container — fakes are objects, not functions",
-        inner=[])
+        f"(a class implementing the real protocol) via parameter injection or the services "
+        f"container — fakes are objects, not functions",
+        inner=[],
+    )
 
 
 def _mock_calls(tree: ast.Module, mock_imports: set[str]) -> list[LatentFinding]:
@@ -2109,7 +2719,11 @@ def _mock_calls(tree: ast.Module, mock_imports: set[str]) -> list[LatentFinding]
             continue
         func = node.func
         if isinstance(func, ast.Attribute):
-            if isinstance(func.value, ast.Name) and func.value.id == "monkeypatch" and func.attr in _MONKEYPATCH_METHODS:
+            if (
+                isinstance(func.value, ast.Name)
+                and func.value.id == "monkeypatch"
+                and func.attr in _MONKEYPATCH_METHODS
+            ):
                 findings.append(_mp_finding(f"monkeypatch.{func.attr}", node.lineno))
             elif func.attr == "patch" and isinstance(func.value, ast.Attribute):
                 findings.append(_mp_finding(f"{ast.unparse(func.value)}.patch", node.lineno))
@@ -2120,8 +2734,7 @@ def _mock_calls(tree: ast.Module, mock_imports: set[str]) -> list[LatentFinding]
 
 def _mock_decorators(tree: ast.Module, mock_imports: set[str]) -> list[LatentFinding]:
     findings: list[LatentFinding] = []
-    for fn in [n for n in ast.walk(tree)
-               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]:
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]:
         for dec in fn.decorator_list:
             func = dec.func if isinstance(dec, ast.Call) else dec
             if isinstance(func, ast.Name) and func.id in mock_imports:
@@ -2131,9 +2744,25 @@ def _mock_decorators(tree: ast.Module, mock_imports: set[str]) -> list[LatentFin
     return findings
 
 
-_FS_PATH_METHODS = ("read_text", "write_text", "read_bytes", "write_bytes", "mkdir", "unlink",
-                     "rename", "replace", "touch", "rmdir", "iterdir", "glob", "rglob",
-                     "exists", "resolve", "symlink_to", "copy")
+_FS_PATH_METHODS = (
+    "read_text",
+    "write_text",
+    "read_bytes",
+    "write_bytes",
+    "mkdir",
+    "unlink",
+    "rename",
+    "replace",
+    "touch",
+    "rmdir",
+    "iterdir",
+    "glob",
+    "rglob",
+    "exists",
+    "resolve",
+    "symlink_to",
+    "copy",
+)
 _FS_OS_OPS = ("remove", "rename", "mkdir", "makedirs", "rmdir", "unlink", "symlink", "link", "replace")
 _FS_SHUTIL_OPS = ("copy", "copy2", "move", "rmtree", "copytree")
 _FS_TEMPFILE = ("TemporaryDirectory", "NamedTemporaryFile", "TemporaryFile", "mkdtemp", "mkstemp", "mktemp")
@@ -2149,8 +2778,7 @@ def _fakefs_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     """
     findings: list[LatentFinding] = []
     uses_fakefs_base = _uses_fakefs_base(tree)
-    for fn in [n for n in ast.walk(tree)
-               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
         finding = _fakefs_finding_for_fn(fn, tree, uses_fakefs_base)
         if finding:
             findings.append(finding)
@@ -2180,21 +2808,27 @@ def _fakefs_finding_for_fn(fn, tree: ast.Module, uses_fakefs_base: bool) -> Late
     if not _real_fs_usage(fn) or _needs_real_fs(fn):
         return None
     return LatentFinding(
-        signal="fakefs", function=fn.name, line=fn.lineno, metric=1,
+        signal="fakefs",
+        function=fn.name,
+        line=fn.lineno,
+        metric=1,
         detail=f"test '{fn.name}' at line {fn.lineno} touches the real filesystem "
-               f"(tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` "
-               f"fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code "
-               f"under test needs real FS semantics (subprocess interop, symlinks, C-level I/O "
-               f"like sqlite3) and comment why — or mark `# code-health: ignore-file fakefs <why>`",
-        inner=[])
+        f"(tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` "
+        f"fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code "
+        f"under test needs real FS semantics (subprocess interop, symlinks, C-level I/O "
+        f"like sqlite3) and comment why — or mark `# code-health: ignore-file fakefs <why>`",
+        inner=[],
+    )
 
 
 def _test_function(fn, tree: ast.Module) -> bool:
     """A test: name starts with test_, or a method of a test class."""
     if fn.name.startswith("test_"):
         return True
-    return any(isinstance(n, ast.ClassDef) and n.name.lower().startswith("test")
-               and any(m is fn for m in n.body) for n in tree.body)
+    return any(
+        isinstance(n, ast.ClassDef) and n.name.lower().startswith("test") and any(m is fn for m in n.body)
+        for n in tree.body
+    )
 
 
 def _uses_fakefs(fn) -> bool:
@@ -2244,11 +2878,17 @@ def _strewing_findings(tree: ast.Module, rel: str) -> list[LatentFinding]:
     for ann_base, members in sorted(groups.items()):
         if len(members) >= 3:
             names = ", ".join(f"{n} (line {ln})" for n, ln in sorted(members, key=lambda m: m[1]))
-            findings.append(LatentFinding(
-                signal="strewing", function="", line=members[0][1], metric=len(members),
-                detail=f"{len(members)} free functions share leading parameter '{ann_base}' — "
-                       f"a {ann_base} class is missing (function strewing is a missed class): {names}",
-                inner=[n for n, _ in members]))
+            findings.append(
+                LatentFinding(
+                    signal="strewing",
+                    function="",
+                    line=members[0][1],
+                    metric=len(members),
+                    detail=f"{len(members)} free functions share leading parameter '{ann_base}' — "
+                    f"a {ann_base} class is missing (function strewing is a missed class): {names}",
+                    inner=[n for n, _ in members],
+                )
+            )
     return findings
 
 
@@ -2266,8 +2906,9 @@ def _annotation_base_name(ann: ast.expr | None) -> str:
     return ""
 
 
-def _latent_action(repo: Path, rel: str, finding: LatentFinding,
-                   file_churn: Counter[str], last_modified: dict[str, str]) -> Action:
+def _latent_action(
+    repo: Path, rel: str, finding: LatentFinding, file_churn: Counter[str], last_modified: dict[str, str]
+) -> Action:
     churn = file_churn.get(rel, 0)
     if finding.signal in ("closures", "partition", "strewing"):
         kind = "latent-class"
@@ -2283,10 +2924,16 @@ def _latent_action(repo: Path, rel: str, finding: LatentFinding,
         kind = "standard"  # including suppression and over-abstraction signals
     guidance_key = "over-abstraction" if finding.signal == "over-abstraction" else kind
     return Action(
-        kind=kind, severity=finding.severity, file=rel, line=finding.line, function=finding.function,
+        kind=kind,
+        severity=finding.severity,
+        file=rel,
+        line=finding.line,
+        function=finding.function,
         message=f"{finding.detail} — {GUIDANCE[guidance_key]}",
-        metric=finding.metric, churn=churn,
-        last_modified=last_modified.get(rel, ""), tested="",
+        metric=finding.metric,
+        churn=churn,
+        last_modified=last_modified.get(rel, ""),
+        tested="",
         raw=_raw_score("latent-class", finding.metric, churn),
     )
 
@@ -2298,8 +2945,9 @@ MD_BACKTICK_RE = re.compile(r"`([A-Za-z0-9_./*-]+\.md)`")
 MD_SKIP_PREFIXES = ("http://", "https://", "#", "skill://", "rule://", "agent://", "memory://", "artifact://")
 
 
-def _abstraction_actions(repo: Path, include_tests: bool,
-                         file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+def _abstraction_actions(
+    repo: Path, include_tests: bool, file_churn: Counter[str], last_modified: dict[str, str]
+) -> list[Action]:
     """Repo-wide: an abstract base class with exactly one concrete subclass is ceremony."""
     scan = _collect_classes(repo, include_tests)
     concrete = _concrete_counts(scan.classes, scan.imports, scan.rels)
@@ -2309,13 +2957,25 @@ def _abstraction_actions(repo: Path, include_tests: bool,
             continue
         subs = concrete.get(ref, [])
         if len(subs) == 1:
-            actions.append(_latent_action(repo, ref.file, LatentFinding(
-                signal="over-abstraction", function=ref.name, line=cls.lineno, metric=1,
-                detail=f"abstract class '{ref.name}' in {ref.file} has exactly one concrete subclass "
-                       f"('{subs[0]}') — an ABC with a single implementation is ceremony: fold the "
-                       f"subclass into the base or drop the ABC; an abstraction earns its keep at "
-                       f"two real, differing implementations",
-                inner=subs), file_churn, last_modified))
+            actions.append(
+                _latent_action(
+                    repo,
+                    ref.file,
+                    LatentFinding(
+                        signal="over-abstraction",
+                        function=ref.name,
+                        line=cls.lineno,
+                        metric=1,
+                        detail=f"abstract class '{ref.name}' in {ref.file} has exactly one concrete subclass "
+                        f"('{subs[0]}') — an ABC with a single implementation is ceremony: fold the "
+                        f"subclass into the base or drop the ABC; an abstraction earns its keep at "
+                        f"two real, differing implementations",
+                        inner=subs,
+                    ),
+                    file_churn,
+                    last_modified,
+                )
+            )
     return actions
 
 
@@ -2332,7 +2992,10 @@ def _collect_classes(repo: Path, include_tests: bool) -> ClassScan:
             continue
         try:
             tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
-        except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped, not a scan failure
+        except (
+            SyntaxError,
+            UnicodeDecodeError,
+        ):  # code-health: ignore except an unparseable file is skipped, not a scan failure
             continue
         imports[rel] = _import_map(tree)
         for cls in [n for n in tree.body if isinstance(n, ast.ClassDef)]:
@@ -2341,8 +3004,9 @@ def _collect_classes(repo: Path, include_tests: bool) -> ClassScan:
     return ClassScan(classes, imports, rels)
 
 
-def _concrete_counts(classes: dict[ClassRef, ast.ClassDef], imports: dict[str, ImportAliases],
-                     rels: list[ClassRef]) -> dict[ClassRef, list[str]]:
+def _concrete_counts(
+    classes: dict[ClassRef, ast.ClassDef], imports: dict[str, ImportAliases], rels: list[ClassRef]
+) -> dict[ClassRef, list[str]]:
     """Abstract class -> its concrete subclasses, resolved via imports."""
     concrete: dict[ClassRef, list[str]] = defaultdict(list)
     for ref in rels:
@@ -2422,8 +3086,9 @@ def _md_link_targets(text: str) -> list[str]:
     return targets
 
 
-def _duplicate_actions(repo: Path, include_tests: bool,
-                        file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+def _duplicate_actions(
+    repo: Path, include_tests: bool, file_churn: Counter[str], last_modified: dict[str, str]
+) -> list[Action]:
     """Copy-paste: functions with near-identical structural skeletons.
 
     The skeleton collapses names, constants, and arguments to placeholders,
@@ -2436,12 +3101,25 @@ def _duplicate_actions(repo: Path, include_tests: bool,
     for i, fr in enumerate(fns):
         dup = _first_duplicate(fns, i, fr.skeleton)
         if dup:
-            actions.append(_latent_action(repo, dup.rel, LatentFinding(
-                signal="duplicate", function=dup.name, line=dup.line, metric=1,
-                detail=f"function '{dup.name}' ({dup.rel}:{dup.line}) is {dup.sim:.0%} similar to "
-                       f"'{fr.name}' ({fr.rel}:{fr.line}) — copy-paste; extract the shared logic "
-                       f"into one function",
-                inner=[], severity="warn"), file_churn, last_modified))
+            actions.append(
+                _latent_action(
+                    repo,
+                    dup.rel,
+                    LatentFinding(
+                        signal="duplicate",
+                        function=dup.name,
+                        line=dup.line,
+                        metric=1,
+                        detail=f"function '{dup.name}' ({dup.rel}:{dup.line}) is {dup.sim:.0%} similar to "
+                        f"'{fr.name}' ({fr.rel}:{fr.line}) — copy-paste; extract the shared logic "
+                        f"into one function",
+                        inner=[],
+                        severity="warn",
+                    ),
+                    file_churn,
+                    last_modified,
+                )
+            )
     return actions
 
 
@@ -2454,10 +3132,12 @@ def _collect_functions(repo: Path) -> list[FunctionRecord]:
             continue
         try:
             tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
-        except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped, not a scan failure
+        except (
+            SyntaxError,
+            UnicodeDecodeError,
+        ):  # code-health: ignore except an unparseable file is skipped, not a scan failure
             continue
-        for fn in [n for n in ast.walk(tree)
-                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
             if _is_duplicate_candidate(fn):
                 fns.append(FunctionRecord(rel, fn.name, fn.lineno, _fn_skeleton(fn)))
     return fns
@@ -2469,9 +3149,11 @@ def _is_duplicate_candidate(fn) -> bool:
     12+ token skeleton."""
     if fn.name == "__init__":
         return False  # init boilerplate is conventional, not copy-paste
-    stmts = [s for s in fn.body
-             if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant)
-                     and isinstance(s.value.value, str))]
+    stmts = [
+        s
+        for s in fn.body
+        if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str))
+    ]
     return len(stmts) >= 2 and len(_fn_skeleton(fn)) >= 12
 
 
@@ -2513,15 +3195,16 @@ def _fn_skeleton(fn) -> list[str]:
 
 
 def _dice_similarity(a: list[str], b: list[str]) -> float:
-    sa = set(zip(a, a[1:]))
-    sb = set(zip(b, b[1:]))
+    sa = set(zip(a, a[1:], strict=False))
+    sb = set(zip(b, b[1:], strict=False))
     if not sa and not sb:
         return 0.0
     return 2 * len(sa & sb) / (len(sa) + len(sb))
 
 
-def _unused_actions(repo: Path, include_tests: bool,
-                    file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+def _unused_actions(
+    repo: Path, include_tests: bool, file_churn: Counter[str], last_modified: dict[str, str]
+) -> list[Action]:
     """Module-level functions defined but never referenced — dead code.
 
     Referenced = any Name, any import alias, or a mention in a string
@@ -2536,17 +3219,29 @@ def _unused_actions(repo: Path, include_tests: bool,
             if name == "main" or name in scan.prod_references or any(name in s for s in scan.strings):
                 continue
             if name in scan.test_references:
-                detail = (f"function '{name}' ({rel}:{line}) is referenced only from tests — if it is "
-                          f"a deliberate test seam (isolation hook, fixture helper), document it with "
-                          f"`# code-health: ignore unused <why>`; otherwise production code that "
-                          f"nothing ships calls is dead — delete it")
+                detail = (
+                    f"function '{name}' ({rel}:{line}) is referenced only from tests — if it is "
+                    f"a deliberate test seam (isolation hook, fixture helper), document it with "
+                    f"`# code-health: ignore unused <why>`; otherwise production code that "
+                    f"nothing ships calls is dead — delete it"
+                )
             else:
-                detail = (f"function '{name}' ({rel}:{line}) is defined but never referenced — dead "
-                          f"code is deleted, not kept (unless it is a CLI command or public API "
-                          f"entry point)")
-            actions.append(_latent_action(repo, rel, LatentFinding(
-                signal="unused", function=name, line=line, metric=1,
-                detail=detail, inner=[], severity="warn"), file_churn, last_modified))
+                detail = (
+                    f"function '{name}' ({rel}:{line}) is defined but never referenced — dead "
+                    f"code is deleted, not kept (unless it is a CLI command or public API "
+                    f"entry point)"
+                )
+            actions.append(
+                _latent_action(
+                    repo,
+                    rel,
+                    LatentFinding(
+                        signal="unused", function=name, line=line, metric=1, detail=detail, inner=[], severity="warn"
+                    ),
+                    file_churn,
+                    last_modified,
+                )
+            )
     return actions
 
 
@@ -2568,7 +3263,10 @@ def _collect_references(repo: Path) -> ReferenceScan:
         is_test = "/test" in f"/{rel}" or rel.startswith("test")
         try:
             tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
-        except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped, not a scan failure
+        except (
+            SyntaxError,
+            UnicodeDecodeError,
+        ):  # code-health: ignore except an unparseable file is skipped, not a scan failure
             continue
         _collect_file_references(tree, rel, is_test, defined, prod_refs, test_refs, strings)
     return ReferenceScan(defined, prod_refs, test_refs, strings)
@@ -2624,12 +3322,24 @@ def _cycle_actions(repo: Path, file_churn: Counter[str], last_modified: dict[str
             continue
         chain = _find_cycle(graph, comp)
         cycle_text = " -> ".join(chain) + " -> " + chain[0] if chain else ", ".join(sorted(comp))
-        actions.append(_latent_action(repo, chain[0] if chain else sorted(comp)[0], LatentFinding(
-            signal="import-cycle", function="", line=0, metric=len(comp),
-            detail=f"import cycle: {cycle_text} — circular imports are fixed by restructuring "
-                   f"modules, never bodged with lazy imports: hoist the shared interface into its "
-                   f"own module and have both sides depend on it",
-            inner=sorted(comp)), file_churn, last_modified))
+        actions.append(
+            _latent_action(
+                repo,
+                chain[0] if chain else sorted(comp)[0],
+                LatentFinding(
+                    signal="import-cycle",
+                    function="",
+                    line=0,
+                    metric=len(comp),
+                    detail=f"import cycle: {cycle_text} — circular imports are fixed by restructuring "
+                    f"modules, never bodged with lazy imports: hoist the shared interface into its "
+                    f"own module and have both sides depend on it",
+                    inner=sorted(comp),
+                ),
+                file_churn,
+                last_modified,
+            )
+        )
     return actions
 
 
@@ -2695,7 +3405,6 @@ def _find_cycle(graph: ModuleGraph, comp: list[str]) -> list[str]:
     members = set(comp)
     start = sorted(comp)[0]
     path = [start]
-    seen = {start}
     stack = [(start, [start], {start})]
     while stack:
         node, p, s = stack.pop()
@@ -2722,7 +3431,8 @@ def _folder_mix_actions(repo: Path, file_churn: Counter[str], last_modified: dic
     rows = conn.execute(
         "SELECT file_path, community_id, COUNT(*) c FROM nodes "
         "WHERE community_id IS NOT NULL AND file_path LIKE '%.py' "
-        "GROUP BY file_path, community_id").fetchall()
+        "GROUP BY file_path, community_id"
+    ).fetchall()
     best: dict[str, tuple[int, int]] = {}
     for fp, cid, c in rows:
         if fp not in best or c > best[fp][1]:
@@ -2754,10 +3464,14 @@ def _folder_mix_for_dir(rel: str, files: list[DirFile], names: dict[int, str]) -
         return None
     groups = ", ".join(f"{names.get(cid, cid)} ({', '.join(fns[:4])})" for cid, fns in list(big.items())[:3])
     return LatentFinding(
-        signal="folder-mix", function="", line=0, metric=len(files),
+        signal="folder-mix",
+        function="",
+        line=0,
+        metric=len(files),
         detail=f"folder '{rel}' has {len(files)} files split across {len(big)} graph communities: "
-               f"{groups} — the folder mixes concerns; extract a sub-folder per community",
-        inner=[])
+        f"{groups} — the folder mixes concerns; extract a sub-folder per community",
+        inner=[],
+    )
 
 
 def _layer_mix_actions(repo: Path, file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
@@ -2786,8 +3500,8 @@ def _layer_mix_actions(repo: Path, file_churn: Counter[str], last_modified: dict
 def _layer_mix_for_file(conn, repo: Path, py: Path, rel: str) -> LatentFinding | None:
     """One file's layer partition, or None when it has no clear split."""
     fns = conn.execute(
-        "SELECT qualified_name FROM nodes WHERE file_path = ? AND kind IN ('Function', 'Method')",
-        (str(py.resolve()),)).fetchall()
+        "SELECT qualified_name FROM nodes WHERE file_path = ? AND kind IN ('Function', 'Method')", (str(py.resolve()),)
+    ).fetchall()
     if len(fns) < 6:
         return None
     layers: dict[str, list[str]] = defaultdict(list)
@@ -2800,18 +3514,21 @@ def _layer_mix_for_file(conn, repo: Path, py: Path, rel: str) -> LatentFinding |
         return None
     groups = ", ".join(f"{m} ({', '.join(names[:4])})" for m, names in list(big.items())[:3])
     return LatentFinding(
-        signal="layer-mix", function="", line=0, metric=sum(len(n) for n in big.values()),
-        detail=f"file '{rel}' mixes layers: {groups} — the call graph is the seam; "
-               f"extract a module per layer",
-        inner=[])
+        signal="layer-mix",
+        function="",
+        line=0,
+        metric=sum(len(n) for n in big.values()),
+        detail=f"file '{rel}' mixes layers: {groups} — the call graph is the seam; extract a module per layer",
+        inner=[],
+    )
 
 
 def _dominant_callee(conn, repo: Path, qn: str, own_rel: str) -> str:
     """The most-called external subsystem of a function, or '' when none."""
     counts: Counter[str] = Counter()
     for (target,) in conn.execute(
-            "SELECT DISTINCT target_qualified FROM edges WHERE source_qualified = ? AND kind = 'CALLS'",
-            (qn,)):
+        "SELECT DISTINCT target_qualified FROM edges WHERE source_qualified = ? AND kind = 'CALLS'", (qn,)
+    ):
         mod = _resolve_callee_module(conn, repo, target)
         if mod and mod != _module_key(repo, own_rel):
             counts[mod] += 1
@@ -2833,18 +3550,44 @@ def _docs_actions(repo: Path, file_churn: Counter[str], last_modified: dict[str,
         text = md.read_text(encoding="utf-8", errors="replace")
         for target in _md_link_targets(text):
             if not (md.parent / target).exists():
-                actions.append(_latent_action(repo, rel, LatentFinding(
-                    signal="docs-link", function="", line=0, metric=1,
-                    detail=f"link to '{target}' from {rel} does not resolve — a doc that links "
-                           f"nowhere is a finding", inner=[]), file_churn, last_modified))
+                actions.append(
+                    _latent_action(
+                        repo,
+                        rel,
+                        LatentFinding(
+                            signal="docs-link",
+                            function="",
+                            line=0,
+                            metric=1,
+                            detail=f"link to '{target}' from {rel} does not resolve — a doc that links "
+                            f"nowhere is a finding",
+                            inner=[],
+                        ),
+                        file_churn,
+                        last_modified,
+                    )
+                )
         for path in MD_BACKTICK_RE.findall(text):
             if not path.startswith(("docs/", "standards/", "./", "../")):
                 continue  # a bare name (coding-standards.md) is a reference, not a path
             if not (repo / path).exists():
-                actions.append(_latent_action(repo, rel, LatentFinding(
-                    signal="docs-link", function="", line=0, metric=1,
-                    detail=f"backtick path '{path}' from {rel} does not resolve — a doc that links "
-                           f"nowhere is a finding", inner=[]), file_churn, last_modified))
+                actions.append(
+                    _latent_action(
+                        repo,
+                        rel,
+                        LatentFinding(
+                            signal="docs-link",
+                            function="",
+                            line=0,
+                            metric=1,
+                            detail=f"backtick path '{path}' from {rel} does not resolve — a doc that links "
+                            f"nowhere is a finding",
+                            inner=[],
+                        ),
+                        file_churn,
+                        last_modified,
+                    )
+                )
     actions += _docs_reachability_actions(repo, file_churn, last_modified)
     return actions
 
@@ -2876,18 +3619,31 @@ def _docs_reachability_actions(repo: Path, file_churn: Counter[str], last_modifi
     for d in docs:
         rel = d.relative_to(repo).as_posix()
         if rel not in reachable:
-            actions.append(_latent_action(repo, "AGENTS.md", LatentFinding(
-                signal="docs-undiscoverable", function="", line=0, metric=1,
-                detail=f"doc '{rel}' is not reachable from AGENTS.md at any hop — a doc the reader "
-                       f"cannot reach from where everyone starts does not exist. Link it from its "
-                       f"group's index: AGENTS.md links group indexes and stays lean — never a flat "
-                       f"list of every doc, and each doc keeps one distinct purpose and audience",
-                inner=[]), file_churn, last_modified))
+            actions.append(
+                _latent_action(
+                    repo,
+                    "AGENTS.md",
+                    LatentFinding(
+                        signal="docs-undiscoverable",
+                        function="",
+                        line=0,
+                        metric=1,
+                        detail=f"doc '{rel}' is not reachable from AGENTS.md at any hop — a doc the reader "
+                        f"cannot reach from where everyone starts does not exist. Link it from its "
+                        f"group's index: AGENTS.md links group indexes and stays lean — never a flat "
+                        f"list of every doc, and each doc keeps one distinct purpose and audience",
+                        inner=[],
+                    ),
+                    file_churn,
+                    last_modified,
+                )
+            )
     return actions
 
 
-def _record_actions(repo: Path, include_tests: bool,
-                    file_churn: Counter[str], last_modified: dict[str, str]) -> list[Action]:
+def _record_actions(
+    repo: Path, include_tests: bool, file_churn: Counter[str], last_modified: dict[str, str]
+) -> list[Action]:
     """Record-shaped collections (bare dicts/tuples as records) via check_records."""
     actions: list[Action] = []
     for finding in check_records.scan([repo]).findings:
@@ -2904,12 +3660,21 @@ def _record_actions(repo: Path, include_tests: bool,
             fn = m.group(1)
         body = finding.split(": ", 1)[1] if ": " in finding else finding
         churn = file_churn.get(rel, 0)
-        actions.append(Action(
-            kind="record-shape", severity="fail", file=rel, line=line, function=fn,
-            message=_record_shape_message(repo, body, rel, line), metric=1, churn=churn,
-            last_modified=last_modified.get(rel, ""), tested="",
-            raw=_raw_score("record-shape", 1, churn),
-        ))
+        actions.append(
+            Action(
+                kind="record-shape",
+                severity="fail",
+                file=rel,
+                line=line,
+                function=fn,
+                message=_record_shape_message(repo, body, rel, line),
+                metric=1,
+                churn=churn,
+                last_modified=last_modified.get(rel, ""),
+                tested="",
+                raw=_raw_score("record-shape", 1, churn),
+            )
+        )
     return actions
 
 
@@ -2927,18 +3692,23 @@ def _record_shape_message(repo: Path, body: str, rel: str, line: int) -> str:
     m = re.search(r"'([^']*)'", body)
     annotation = m.group(1) if m else body
     if "Any" in annotation or "object" in annotation:
-        evidence += (" 'Any'/'object' values have no fields at all — every read is a string-keyed "
-                     "guess at a blob; the annotation says nothing about what the record holds.")
+        evidence += (
+            " 'Any'/'object' values have no fields at all — every read is a string-keyed "
+            "guess at a blob; the annotation says nothing about what the record holds."
+        )
     if " in parameter " in body:
-        evidence += (" A parameter is a boundary without a type — a dataclass or pydantic model is "
-                     "the framework's normal shape for request bodies and injected config.")
+        evidence += (
+            " A parameter is a boundary without a type — a dataclass or pydantic model is "
+            "the framework's normal shape for request bodies and injected config."
+        )
     if " as return type " in body:
-        evidence += (" A return re-creates the shape at every call site; the constant-lookup-table "
-                     "carve-out is for module-scope literals, not returned shapes.")
+        evidence += (
+            " A return re-creates the shape at every call site; the constant-lookup-table "
+            "carve-out is for module-scope literals, not returned shapes."
+        )
     if body.startswith("dict literal"):
         keys = _literal_keys(repo, rel, line)
-        evidence += (f" The fixed string keys ({', '.join(keys)}) are fields, not data — this is a "
-                     "record being built.")
+        evidence += f" The fixed string keys ({', '.join(keys)}) are fields, not data — this is a record being built."
     return f"{body} —{evidence} {GUIDANCE['record-shape']}"
 
 
@@ -2947,20 +3717,37 @@ def _literal_keys(repo: Path, rel: str, line: int) -> list[str]:
     that a 'dict literal with constant keys' really is a record."""
     try:
         tree = ast.parse((repo / rel).read_text(encoding="utf-8", errors="replace"))
-    except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except the file already parsed in check_records; this re-parse is best-effort evidence only
+    except (
+        SyntaxError,
+        UnicodeDecodeError,
+    ):  # code-health: ignore except the file parsed in check_records; this re-parse is best-effort
         return []
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict) and node.lineno == line:
-            keys = [k.value for k in node.keys
-                    if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+            keys = [k.value for k in node.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)]
             return keys[:4] + (["..."] if len(keys) > 4 else [])
     return []
 
 
-def _collect_actions(repo: Path, args, file_churn, last_modified, covered, graph_preferred: bool, stale_note: str) -> list[Action]:
+def _collect_actions(
+    repo: Path, args, file_churn, last_modified, covered, graph_preferred: bool, stale_note: str
+) -> list[Action]:
     actions: list[Action] = []
-    actions += complexity_actions(repo, args.max_complexity, args.include_tests, file_churn, last_modified, covered, graph_preferred, stale_note)
-    actions += graph_actions(repo, args.max_function_lines, args.max_file_edges, args.max_risk, args.include_tests, file_churn, last_modified, covered, graph_preferred, stale_note)
+    actions += complexity_actions(
+        repo, args.max_complexity, args.include_tests, file_churn, last_modified, covered, graph_preferred, stale_note
+    )
+    actions += graph_actions(
+        repo,
+        args.max_function_lines,
+        args.max_file_edges,
+        args.max_risk,
+        args.include_tests,
+        file_churn,
+        last_modified,
+        covered,
+        graph_preferred,
+        stale_note,
+    )
     actions += hotspot_actions(repo, args.hotspot_top_frac, args.hotspot_min_cc, file_churn, last_modified)
     actions += _record_actions(repo, args.include_tests, file_churn, last_modified)
     actions += _latent_class_actions(repo, args.include_tests, file_churn, last_modified)

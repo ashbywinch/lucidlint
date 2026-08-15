@@ -1,0 +1,8 @@
+# Pyrefly config — standalone file uses TOP-LEVEL keys, no [pyrefly] wrapper
+# (a [pyrefly] section here is silently ignored; that header belongs in
+# pyproject.toml's [tool.pyrefly]).
+preset = "default"
+
+# tests/fixtures/ is intentionally non-compliant test input (standalone
+# snippets without imports) — type-checking them is noise.
+exclude = ["tests/fixtures"]

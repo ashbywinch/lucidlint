@@ -1,2 +1,43 @@
+# .gitignore — the house set, curated (each pattern observed in 3+ repos).
+#
+# CHANGE: add repo-specific artifacts (build output, generated files) here.
+#
+# DO NOT CHANGE:
+# - Never ignore lockfiles (uv.lock) — committed for reproducibility.
+# - Test fixtures are committed under tests/fixtures/, never ignored.
+# - Keep the list short and alphabetized.
+
+# env/secrets
+.env
+.env.local
+*.keystore
+
+# envs/deps
+.venv/
+venv/
+node_modules/
+dist/
+
+# caches
 __pycache__/
-*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# build artifacts
+*.egg-info/
+
+# agent/tool state
+.sisyphus/
+.opencode/
+.code-review-graph/
+.logs/
+
+# IDE/OS
+.vscode/
+.idea/
+.DS_Store
+*.log

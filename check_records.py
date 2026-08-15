@@ -180,9 +180,7 @@ class ModuleScanner:
                     return True  # grab-bag: no shape
                 if isinstance(val, ast.Subscript):
                     return not cls._is_variadic_tuple(val)  # collection values are records; variadic is a sequence
-                if cls._base_name(val) in ("dict", "tuple", "list"):
-                    return True
-                return False  # dict[str, primitive | domain] = a map
+                return cls._base_name(val) in ("dict", "tuple", "list")  # dict[str, primitive | domain] = a map
             return True  # dict[X] single-arg or dict[()] — bare-ish
         if base == "tuple":
             return not cls._is_variadic_tuple(node)  # fixed-size pairs are records
@@ -192,7 +190,9 @@ class ModuleScanner:
                 return any(cls._annotation_is_record(p) for p in parts)
             value = parts[0]
             if isinstance(value, ast.Subscript):
-                return not cls._is_variadic_tuple(value)  # list[dict[...]] / list[tuple[...]] / list[list[...]] — records; variadic is a sequence
+                return not cls._is_variadic_tuple(
+                    value
+                )  # list[dict[...]] / list[tuple[...]] / list[list[...]] — records; variadic is a sequence
             return isinstance(value, ast.Name) and cls._base_name(value) in ("dict", "tuple", "list")
         return False
 
@@ -288,9 +288,7 @@ class ModuleScanner:
                 # record being built. Keys are ast.DictUnpack on 3.5-3.13 and None on 3.14.
                 if any(k is None or (hasattr(ast, "DictUnpack") and isinstance(k, ast.DictUnpack)) for k in keys):
                     return
-                has_const_key = any(
-                    isinstance(k, ast.Constant) and isinstance(k.value, str) for k in keys
-                )
+                has_const_key = any(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in keys)
                 has_dynamic_value = any(not self._is_constant_value(v) for v in node.values)
                 if len(keys) >= 2 and has_const_key and has_dynamic_value:
                     found.add(node.lineno)
@@ -361,7 +359,10 @@ def scan(paths: list[Path]) -> ScanResult:
     for f in files:
         try:
             tree = ast.parse(f.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeDecodeError):  # code-health: ignore except an unparseable file is skipped, not a scan failure; the parse is best-effort
+        except (
+            SyntaxError,
+            UnicodeDecodeError,
+        ):  # code-health: ignore except an unparseable file is skipped, not a scan failure; the parse is best-effort
             continue
         scanner = ModuleScanner(tree, f)
         findings.extend(scanner.signature_findings())
