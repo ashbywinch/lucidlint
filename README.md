@@ -1,116 +1,115 @@
-# build-tools
+# lucidlint — your codebase's sanity check
 
-Shared CI utilities used by the house repos' workflows. Each tool is
-self-contained (stdlib only), reads its inputs from environment variables,
-and is fetched by the consuming workflow at run time — e.g. the pr-agent
-"AI Code Review" workflow fetches `check_review_posted.py` from the pinned
-tag and runs it as its review-attribution gate.
+A deterministic code-health gate for Python and Rust. It scans architecture-level problems — complexity, duplicate code, import cycles, test quality, layering — and produces a single `GATE: PASS` / `GATE: FAIL` verdict. No false-positive drift: same code, same report, every run.
 
-## Tools
+## Quick start
 
-- `check_review_posted.py` — fail the PR when the AI review bot did not post
-  a "PR Reviewer Guide" comment covering the head commit. Env: `SHA`,
-  `GITHUB_REPOSITORY`, `PR_NUMBER`, `GITHUB_TOKEN`. Attribution: the comment
-  body references the head SHA (incremental reviews), or the comment was
-  created after the head commit landed (first-review case — regular pr-agent
-  reviews never contain the SHA).
+```bash
+# 1. Download the latest release bundle
+#    (https://github.com/ashbywinch/build-tools/releases)
+#    Choose your platform: linux musl, macos arm64/x64, windows x64
 
-- `code_health.py` — deterministic code-health gate. Emits a list of actions to address
-  (high cyclomatic complexity, oversized functions, dependency hubs, git
-  hotspots, high graph-risk nodes) and exits 1 when any exist, so it works
-  as a failing test gate. Every finding family computes in the Rust scan
-  core (scanner/, built with `make scanner-check`); the graph families read
-  a versioned export contract generated through the code-review-graph tool's
-  own public API (never its SQLite schema or location), and `git log`
-  supplies change frequency. Metrics are proxies — the requirement
-  is code that is obviously correct and cheap to change (readability,
-  maintainability, anti-fragility), so each action's message gives a fix
-  guideline in those terms: separation of concerns, domain language,
-  effective encapsulation. Where the graph's CALLS edges show a function or
-  file pulling from >= 2 subsystems, the action names those subsystems (with
-  example callees) — the seams to extract classes/modules along — and hotspot
-  actions name the exact volatile functions with their own churn (`git log -L`).
-  Coverage verdicts come from the repo's own data (coverage.xml, else
-  .coverage line_bits, else the graph risk index) and untested functions get
-  the contract to pin (`name(params) -> ret`). A `record-shape` kind flags
-  bare dict/tuple
-  collections as records — the fix is a small domain class; a genuine map is
-  named by its meaning (CoverageLines, never SomethingDict), and data
-  crossing a boundary is ingested into a domain class at that boundary. A
-  `latent-class` kind detects fat functions/classes carrying unextracted
-  classes inside them: nested closures that capture state (a class in
-  disguise) and field-disjoint method groups (the partition is the seam;
-  connectors are named). A `standard` kind enforces the checkable-form
-  rules from coding-standards.md deterministically: top-level imports,
-  no private-symbol imports, no `global`/module-level mutable state,
-  catches that fail fast (logging alone is not fail-fast), `# type: ignore`
-  with a why, vague-suffix class names that hide load, strewing over a
-  same-module record, no ABC with a single concrete implementation, each
-  class in its own module, no fixed-tuple type aliases (they erase which
-  element is which), and no env-keyed `skipif` in tests. A `docs` kind
-  checks that markdown links resolve and every doc is reachable from
-  AGENTS.md (multi-hop is the norm — AGENTS.md links groups, never flat
-  lists). `folder-mix` and `layer-mix` detect a folder or file whose parts
-  split across graph communities / callee subsystems — the seams for
-  splitting. Import cycles (the fix: hoist the shared interface), unreachable
-  statements after unconditional returns, and builtin-shadowing params and
-  locals are standard-family findings. Tests touching the real filesystem
-  without pyfakefs are
-  findings (fakefs), except subprocess/symlink/sqlite3 C-level I/O. A
-  **warn tier** reports noisy-but-useful signals that never fail the gate
-  (tagged `[warn]`, counted as "N warnings never-fail", excluded from the
-  baseline): magic numbers (raw int/float operands, indices, and call
-  args outside (0, 1, 2, -1) — lookup tables pass), copy-paste
-  near-duplicates (functions ≥ 90% structurally similar, two+ body
-  statements — one-line accessors are not copy-paste), unused
-  module-level functions (never referenced, imported, or dispatched by
-  string; decorated functions are registered; a function referenced
-  only from tests is a conditional test-seam finding), and broad
-  `except Exception`/`BaseException` handlers. A swallow finding
-  requires a handler with no control-flow exit at all — an explicit
-  return is the documented contract, and a handler that mutates a name
-  the enclosing function returns (accumulator) surfaces the error.
-  No-op statements (a ternary or arithmetic as a bare line — value
-  discarded) are dead-statement findings. Text reports open with a
-  per-kind roll-up of fail and warning counts.
-  Lint-style exemptions: `# code-health: ignore <signal>
-  <why>` on the line (or above) — a suppression without a why is itself a
-  finding. Actions are grouped by file and
-  ranked by priority (percentile of metric x churn x fan-in); a baseline file
-  (`--baseline`, `--update-baseline`) locks acknowledged debt so the gate can
-  go green incrementally — and it is a BOTH-DIRECTION lock, like the pyrefly
-  gate: a stale entry (a finding the code no longer produces) fails the run
-  with "run --update-baseline", so debt paid without shrinking the baseline
-  is drift, never silent. `--base <ref>` marks actions in your branch's
-  diff. Flags: `--repo`, `--max-complexity`
-  (15), `--max-function-lines` (120), `--max-file-edges` (150),
-  `--max-risk` (0.8), `--hotspot-top-frac` (0.1), `--hotspot-min-cc` (15),
-  `--json`, `--warn` (informational, exit 0).
+tar xzf lucidlint-v0.1.0-<platform>.tar.gz
+cd lucidlint-v0.1.0-<platform>/
 
-## Use in a workflow
+# 2. Run the gate on a Python or Rust project
+./bin/lucidlint --version        # "lucidlint v0.1.0"
+python3 code_health.py --repo .  # GATE: PASS / FAIL
 
-```yaml
-- name: Fail loud if no review covers the head commit
-  env:
-    SHA: ${{ github.event.pull_request.head.sha }}
-    PR_NUMBER: ${{ github.event.pull_request.number }}
-    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  run: |
-    curl -fsSL -o check_review_posted.py \
-      https://raw.githubusercontent.com/ashbywinch/build-tools/v1/check_review_posted.py
-    python3 check_review_posted.py
+# 3. (optional) Acknowledge today's debt — the gate then fails only on NEW findings
+python3 code_health.py --repo . --update-baseline --baseline code-health.json
 ```
 
-Pin the URL to a tag, never `main`, so a later change cannot silently alter
-what CI runs.
+The bundle is self-contained: `code_health.py` finds its sibling `bin/lucidlint` by itself — no `PATH`, no `make`, no `cargo` needed.
 
-## Tests
+## What it finds
 
-`make test` runs the pytest suite (`tests/test_code_health.py` plus the
-LSP session tests) and the Rust unit suite (`cargo test`, via
-scanner-check). The orchestrator tests drive the real binary through a
-passthrough subprocess route with faked git, so they run without a real
-repo; the finding logic itself is owned by the Rust suite. They cover the
-priority/merge/baseline logic, the gate's exit codes, and rendering.
-`code_health.py`
-also runs on itself: `make code-health REPO=.` reports its own hotspots.
+[**Full rule reference → RULES.md**](RULES.md)
+
+| Group | What the gate flags |
+|---|---|
+| **Style & correctness** | Magic numbers, dead code, shadows builtins, broad excepts, inline imports, unused functions, circular imports, `# type: ignore` without a why, broken doc links |
+| **Complexity & size** | Cyclomatic CC ≥ 15, functions ≥ 120 lines, near-duplicate code |
+| **Architecture** | Import cycles, layer violations, folder community splits, hub files, high-risk untested functions, record-shaped structs, abstract classes with one subclass |
+| **Test discipline** | `monkeypatch` / `patch` instead of DI, `skipif` on environment, real filesystem I/O without `pyfakefs`, `#[ignore]`d tests |
+| **Suppressions** | Any `ignore` / `allow` / `type: ignore` without a written reason — the gate trusts your judgment once you explain it |
+| **&dagger; Controversial** | Vague role names (Manager/Handler), closures as missed classes, inline imports for performance, except-swallows, global state, file churn × CC hotspots, community-based folder mixing, similarity-based duplicates |
+
+&dagger; These rules can conflict with existing team conventions or framework idioms. Each is individually suppressible (see RULES.md). A rule that doesn't fit your project is acknowledged debt, not a blocker.
+
+## Verdict
+
+```
+GATE: PASS — 0 action(s) acknowledged in baseline (29 warnings reported, never fail)
+```
+
+The gate exits:
+
+| Exit | Meaning |
+|---|---|
+| **0** | **PASS** — clean, or all findings are acknowledged in the baseline; only warnings (magic numbers, broad excepts) remain |
+| **1** | **FAIL** — new fail-severity findings exist, or the baseline contains entries the code no longer produces (stale baseline — run `--update-baseline`) |
+| **2** | Usage or configuration error |
+
+- **Warn tier**: Findings like magic numbers are reported but never cause a FAIL. They're visible in the output so you can fix them if you want, but they don't block merges.
+- **Baselines**: `--update-baseline --baseline code-health.json` captures the current state of fail-severity findings. Subsequent runs only fail on NEW findings. A stale baseline (entries that no longer correspond to any code) is itself a FAIL — your debt shrinks, and the baseline shrinks with it.
+
+## Installation as an LSP
+
+The same binary serves as a language server — it checks what you type, in your editor, on save. Each LSP method (`didOpen`, `didChange`, `didSave`) runs the per-file scan *in process* (no shell, no spawn) and returns diagnostics.
+
+### Generic LSP configuration
+
+Point your editor's LSP client at:
+
+```
+lucidlint --lsp
+```
+
+The binary speaks stdio JSON-RPC (Content-Length framing). Any editor with LSP support can use it.
+
+### Editor-specific notes
+
+**VS Code**: Create a `.vscode/tasks.json` or a custom extension that starts the server. Alternatively, use the "LSP Client" extension (or your preferred one) with the command `lucidlint --lsp`.
+
+**Neovim** (built-in LSP):
+```lua
+vim.api.nvim_create_autocmd({ "BufEnter" }, {
+  pattern = { "*.py", "*.rs" },
+  callback = function()
+    vim.lsp.start({
+      name = "lucidlint",
+      cmd = { "/path/to/lucidlint", "--lsp" },
+    })
+  end,
+})
+```
+
+**Emacs** (eglot):
+```elisp
+(add-to-list 'eglot-server-programs
+  '((python-mode rust-mode) . ("/path/to/lucidlint" "--lsp")))
+```
+
+**Helix** (built-in LSP — add to your `languages.toml`):
+```toml
+[language-server.lucidlint]
+command = "/path/to/lucidlint"
+args = ["--lsp"]
+
+[[language]]
+name = "python"
+language-servers = ["lucidlint"]
+
+[[language]]
+name = "rust"
+language-servers = ["lucidlint"]
+```
+
+## Project status
+
+Lucidlint is in active development toward a v0.8 public release. The version scheme is 0.x — minor bumps per capability (release pipeline, fleet wiring, PyPI wheels, the Rust library split). The rule set grows with each minor version; baselines absorb new findings so existing projects stay green.
+
+## License & contributing
+
+MIT. Issues and PRs at [github.com/ashbywinch/build-tools](https://github.com/ashbywinch/build-tools).
