@@ -505,8 +505,8 @@ class _RustScan:
         env = os.environ.get("CODE_HEALTH_SCANNER")
         if env:
             candidates.append(Path(env))
-        candidates.append(repo / "scanner" / "target" / "release" / "lucidlint")
-        candidates.append(Path(__file__).resolve().parent / "scanner" / "target" / "release" / "lucidlint")
+        candidates.append(repo / "scanner" / "target" / "release" / f"lucidlint{exe}")
+        candidates.append(Path(__file__).resolve().parent / "scanner" / "target" / "release" / f"lucidlint{exe}")
         bundle_dir = Path(__file__).resolve().parent / "bin"
         candidates.append(bundle_dir / f"lucidlint{exe}")
         found = next((p for p in candidates if p.is_file()), None)
@@ -628,7 +628,9 @@ def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
     if file_val in rels:
         return file_val
     try:
-        rel = Path(file_val).resolve().relative_to(repo).as_posix()
+        # resolve BOTH sides: with --repo . (relative), a relative base makes
+        # relative_to raise and the finding would be silently dropped
+        rel = Path(file_val).resolve().relative_to(repo.resolve()).as_posix()
     except (ValueError, OSError):  # lucidlint: ignore swallow an unmappable path means the finding
         # is for a file outside this scan set — drop it, not a failure to surface
         rel = ""
@@ -802,8 +804,11 @@ class _GraphContract:
             tmp.write_text(json.dumps(contract, separators=(",", ":")), encoding="utf-8")
             result = tmp
         # surfaces via `result = None` — the caller falls back to non-graph
-        # families; not a swallow
-        except _SCANNER_FAILURES:
+        # families; not a swallow. The direct code-review-graph API can raise
+        # sqlite3.Error (corrupt/older graph.db), KeyError (rows without the
+        # expected columns), or TypeError/AttributeError (version mismatch) —
+        # all must degrade, not crash the scan (PRD R21)
+        except (*_SCANNER_FAILURES, sqlite3.Error, KeyError, TypeError, AttributeError):
             log(f"graph contract export failed for {repo} — graph families skipped")
             result = None
         self._cache[repo] = result
@@ -1363,7 +1368,7 @@ def _actions_from_rust(
                     churn=churn,
                     last_modified=last_modified.get(rel, ""),
                     tested="",
-                    raw=_raw_score(f.kind, 1, churn),
+                    raw=_raw_score(f.kind, f.metric or 1, churn),
                 )
             )
     return actions

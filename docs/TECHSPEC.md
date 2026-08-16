@@ -7,10 +7,12 @@ How the product in `docs/PRD.md` is built. Requirements by name: R1–R20
 
 | Component | Responsibility | Provides | Consumes |
 |---|---|---|---|
-| `lucidlint.py` | the gate: scan → findings → actions → report | `lucidlint` module (CLI + testable functions) | radon (optional), the repo's `.code-review-graph/graph.db`, git history, `check_records.py` |
-| `check_records.py` | record-vs-bare-dict gate (stdlib AST) | `scan(paths) -> ScanResult` | repo `.py` files |
-| `check_review_posted.py` | PR review-attribution gate | exit code for CI | GitHub API via env creds |
-| `tests/` | fake-based unit suite for lucidlint + check_records (`tests/fixtures/`) | 130+ tests | fakes only — never real radon/repos/git |
+| `scanner/` (Rust binary `lucidlint`) | the finding engine: every family (per-file, partition, test rules, duplicate/unused, record-shape, complexity, graph, hotspot, abstraction, docs) computed in Rust; thresholds live here (schema 2) | language-neutral findings JSON (`schema_version` 2) + CC array | repo `.py`/`.rs`/`.md` files, the graph contract JSON (exported from `.code-review-graph/graph.db`), churn JSON, docs root |
+| `scanner/radonc` (Rust crate) | the radon-mirroring CC API (visitors, cc_rank, cc_visit) — parity-tested against radon 6.0.1 | `function_cc`, block linenos | ruff-python-ast (pinned `=0.0.9`) |
+| `lucidlint.py` | the orchestrator: prepare the file set (pygit2 or rglob fallback), run the binary (fail-fast when missing), convert findings → actions, rank (churn × metric × fan-in), baseline, report, gate verdict | CLI + testable functions; `--fix-*` surface (R27) | the Rust binary, git history (pygit2, optional `git` extra), coverage.xml |
+| `fix_engine.py` | the auto-fix transforms (libcst): mechanical (stale-suppression, noop, unreachable, positional-literals) + structural (extract-method, extract-class, magic-number, vague-name, long-param-list) | `fix:` directives in finding messages | optional `fix` extra (libcst) |
+| `rule_metadata.py` | canonical per-kind metadata; RULES.md tables are generated from it (`make rules`) | the RULES.md group tables | — |
+| `tests/` | pytest suite driving the real binary + the fix engine against real temp files | 85+ tests | real filesystem (declared `ignore-file fakefs`) |
 | `docs/` | PRD (requirements), TECHSPEC (this), PLAN (phases) | — | — |
 
 ## Object model (the naming authority — classes are these nouns)
@@ -55,20 +57,15 @@ How the product in `docs/PRD.md` is built. Requirements by name: R1–R20
 
 ```mermaid
 flowchart LR
-    A[repo files] --> B[per-file AST scan]
-    A --> C[radon visitor]
-    A --> D[graph.db SQLite]
-    A --> E[git history]
-    B --> F[LatentFinding + standard findings]
-    C --> F
-    D --> F
-    E --> G[FileHistory]
-    F --> H[Action]
-    G --> H
-    H --> I[_dedupe/_merge_targets/_percentile_rank]
-    I --> J[baseline ack]
-    J --> K[text/JSON report]
-    K --> L[exit code = the gate]
+    A[repo .py/.rs/.md files] --> B[lucidlint binary: per-file + repo-wide families]
+    C[.code-review-graph/graph.db] --> D[graph contract JSON export]
+    D --> B
+    E[git history / pygit2] --> F[file list + churn]
+    F --> B
+    B --> G[findings JSON schema 2]
+    G --> H[lucidlint.py: actions, rank, baseline]
+    H --> I[report + gate verdict]
+    I --> J[exit code]
 ```
 
 The pipeline is deterministic end-to-end (R1, R3): AST rules, graph edges,
@@ -121,10 +118,12 @@ tokens (R17, R18).
 
 | Choice | Why | Rejected |
 |---|---|---|
-| stdlib only + radon via `uv run --with radon` | the tool must run anywhere; radon is the one optional dep, loaded lazily through `_RadonProvider` | full dependency tree, vendored radon |
-| code-review-graph SQLite read directly | the graph is already built per repo (`.code-review-graph/graph.db`); sqlite3 is stdlib; no MCP dependency in the scan | querying via the MCP server |
-| `tokenize` for comment-based rules (`type: ignore`, suppressions) | only real COMMENT tokens count — string/docstring text can never fire a finding (false-positive class eliminated) | line-regex scans |
-| `unittest`/pytest with fakes (Env context manager, FakeRadonVisitor, FakeSubprocess, real SQLite with fake data) | the house testing standard: inject, never monkeypatch; fakes are objects | mock.patch/monkeypatch fixtures |
+| Rust scan core (ruff parser, pinned `=0.0.9`) | the pure-Python scan hit ~9-10s; Rust on the AST work is the only path below it (0.04s for 145 files at the parse layer) | PyO3, a Python port of ruff |
+| CC from the `radonc` crate mirroring radon 6.0.1 | exact parity (0 CC mismatches on houses); one rule table shared by both layers | a Rust re-implementation of the rules that might drift |
+| `lucidlint.py` orchestrates; the binary is required (fail-fast) | a missing/failed scanner must never report a vacuous GATE: PASS | silent Python fallback |
+| pygit2 optional (`git` extra) | file listing + history; rglob/no-history degradation keeps the mandatory dep set empty | mandatory libgit2 for every consumer |
+| graph contract JSON export (versioned) | the in-process graph DB is read by a small exporter; the binary consumes the contract, not the DB | the binary reading sqlite directly |
+| `libcst` for the fix engine (`fix` extra) | structural rewrites (extract-method/class) need a real CST with comments preserved | rope, comby, `ast.unparse` |
 
 ## Strategic technical decisions (requirement references)
 
@@ -140,8 +139,13 @@ tokens (R17, R18).
   stale data.
 - **D7 — the tool passes itself.** R15. Self-run must be GATE: PASS, and
   the tool's own code is the exemplar of every rule it enforces
-  (ClassRef not ClassKey; RADON services object not `global`; suppressions
-  with whys on its own safe-to-ignore excepts).
+  (suppressions with whys on its own safe-to-ignore excepts).
+- **D8 — the Rust port is the engine, not a fast path.** The binary owns
+  every finding family and the thresholds; `lucidlint.py` converts and
+  renders. The port mirrors the Python reference's structure and tests;
+  deviations are commented at the point of divergence, and the reference's
+  expected values are never edited (the porting rule in
+  standards/coding-standards.md).
 
 ## Spikes required to confirm
 

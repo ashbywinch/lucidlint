@@ -55,7 +55,7 @@ class StrewingGroup:
 # structural kinds need a name (agent-supplied via --fix-name, or defaulted to
 # the shared leading type) — they are never applied blindly
 STRUCTURAL_KINDS = {
-    "extract-method": "extract the best self-contained seam into a named function (preview, then --confirm)",
+    "extract-method": "extract the seam into a private function (preview without a name, apply with --fix-name)",
     "extract-class": "move the strewing free functions into a class, rewriting call sites",
     "magic-number": "Replace Magic Literal: introduce the named constant",
     "vague-name": "Rename the type and its references (same-file)",
@@ -365,35 +365,32 @@ def fix_extract_class(source: str, line: int, name: str | None) -> str | None:
     fns = found.fns
     class_name = name or shared
 
-    originals = _collect_defs(module, set(fns))
-    receiver_name = (
-        originals[0].params.params[0].name.value
-        if originals and originals[0].params.params
-        else None
-    )
-
     # pass 1: rewrite the call sites WITHOUT deleting — the moved bodies must
     # be collected from this pass so their inter-fn calls are method calls
     # (`_window_score(state, ...)` -> `state._window_score(...)`)
     call_rewritten = wrapper.visit(_MoveIntoClass(set(fns), delete=False)).code
 
-    # pass 2: collect the moved fns from the rewritten module, drop the
-    # receiver param (becomes `self`), and rename the old receiver name in
-    # the bodies — `state._window_score(...)` -> `self._window_score(...)`
+    # pass 2: per-function receiver rename (each fn's OWN first param, LOAD
+    # references only), then swap the first param to `self`
     methods = _collect_defs(cst.parse_module(call_rewritten), set(fns))
+    receivers = {
+        m.name.value: (m.params.params[0].name.value if m.params.params else None)
+        for m in methods
+    }
+    mod2 = cst.parse_module(call_rewritten)
+    wrap2 = cst.MetadataWrapper(mod2)
+    stores = _CollectStores()
+    wrap2.visit(stores)
+    renamed = wrap2.visit(_ReceiverToSelf(receivers, stores.per_fn))
     new_methods = []
-    for method in methods:
+    for method in _collect_defs(renamed, set(fns)):
         params = method.params.params
-        rest = params[1:] if params else []
-        body = method.body
-        if receiver_name is not None:
-            body = body.visit(_RenameName(receiver_name, "self"))
         new_methods.append(
             method.with_changes(
                 params=method.params.with_changes(
-                    params=[cst.Param(name=cst.Name("self"), annotation=None), *rest]
+                    params=[cst.Param(name=cst.Name("self"), annotation=None), *params[1:]]
                 ),
-                body=body,
+                body=method.body,
             )
         )
 
@@ -619,7 +616,7 @@ class _FnBodyState:
         return bool(writes_all & after)
 
     def best_seam(self, min_lines: int = 2, max_window_decisions: int | None = None,
-            max_free_vars: int = 6,
+            min_window_decisions: int = 0, max_free_vars: int = 6,
         ):
         """The window with the MOST decisions (real CC progress — extraction
         splits complexity, it does not move it) among those whose free
@@ -644,6 +641,9 @@ class _FnBodyState:
                     )
                     if window_decisions > max_window_decisions:
                         continue  # the extracted fn would still be complex
+                    if window_decisions < min_window_decisions:
+                        continue  # the ORIGINAL would still be >= 15 — the
+                        # seam must SPLIT enough for both sides to land clean
                     # decisions FIRST (CC progress), then interface width,
                     # then size — the descending order of the bound mode
                     score = (-window_decisions, *score)
@@ -823,17 +823,55 @@ def collect_stmt_names(add_target, line_stmt, names):
 
 
 
+def _is_nested_target(wrapper: cst.MetadataWrapper, fn_node) -> bool:
+    """Is the target function nested inside another function? The extracted
+    helper is inserted at module/class level — a nested target would leave
+    the call undefined (refuse rather than write a broken file)."""
+    parent_resolver = wrapper.resolve(ParentNodeProvider)
+    parent = parent_resolver[fn_node]
+    while parent is not None and not isinstance(parent, (cst.Module, cst.ClassDef, cst.FunctionDef)):
+        parent = parent_resolver[parent]
+    return isinstance(parent, cst.FunctionDef)
+
+
+def _min_seam_decisions(state) -> int:
+    """The seam must take enough decisions that the ORIGINAL lands under the
+    CC-15 gate too (the max bound keeps the extracted side clean; this min
+    bound keeps the original side clean). The fn's CC is its DIRECT body
+    statements — a compound's own count already includes its subtree, so
+    summing every flat entry would double-count loop bodies."""
+    fn_sid = id(state.fn_node)
+    total = sum(
+        state.decisions[sid] for sid, container, _ in state.flat if container == fn_sid
+    )
+    return max(0, total - 14) if total > 14 else 0
+
+
 def extract_method_proposal(
-    source: str, line: int, name: str, max_decisions: int | None = None
+    source: str, line: int, name: str | None = None, max_decisions: int | None = None
 ):
     """Compute the best extraction seam and the resulting source, WITHOUT
     writing. Returns (new_source, seam_text) or (None, None) when no safe
-    seam exists. `max_decisions` bounds the seam so the extracted function
-    does not inherit the original's complexity."""
+    seam exists. `name` may be None — the preview then shows a placeholder
+    (`_extracted`) the agent replaces after reviewing the seam; a supplied
+    name is normalized to the private convention (the extracted function
+    cannot have external callers, so it takes the underscore)."""
+    if name is None:
+        name = "_extracted"
+    elif _extraction_is_private() and not name.startswith("_"):
+        name = "_" + name
     module, wrapper, state = _fn_seam_analysis(source, line)
     if state.fn_node is None or len(state.flat) < 2:
         return None, None
-    seam = state.best_seam(max_window_decisions=max_decisions)
+    # a nested-function target cannot host the extracted helper — the insert
+    # lands at module/class level, so the rewritten call would NameError
+    # (refuse rather than write a broken file)
+    if _is_nested_target(wrapper, state.fn_node):
+        return None, None
+    seam = state.best_seam(
+        max_window_decisions=max_decisions,
+        min_window_decisions=_min_seam_decisions(state),
+    )
     if seam is None:
         return None, None
     block_sids, free_vars = seam
@@ -862,11 +900,23 @@ def extract_method_proposal(
     return inserted, f"line {first_span[0]}: {seam_text.strip()}"
 
 
-def fix_extract_method(source: str, line: int, name: str) -> str | None:
+def _extraction_is_private() -> bool:
+    """Is an extracted function private (leading underscore)? Yes — a fresh
+    helper cannot have external callers (it did not exist before the fix),
+    so by construction any extraction is an implementation detail of its
+    source function. The convention propagates automatically: the seam's
+    name gets the underscore whether the agent supplies it or not."""
+
+    return True
+
+
+def fix_extract_method(source: str, line: int, name: str | None) -> str | None:
     """Extract Function (applied): the best self-contained seam of the
     function at `line` becomes a new function named `name`. The seam is
     bounded to <= 13 decisions so the extracted function lands under the
-    CC-15 gate — extraction SPLITS complexity, it does not move it."""
+    CC-15 gate — extraction SPLITS complexity, it does not move it. The
+    name is normalized: the extracted function is private by construction
+    (see _extraction_is_private), so a public-looking name is underscored."""
     new_source, _ = extract_method_proposal(source, line, name, max_decisions=13)
     return new_source
 
@@ -882,8 +932,8 @@ def propose_finding(kind: str, rel: str, repo: Path, line: int, opts: FixOptions
     if kind not in STRUCTURAL_KINDS:
         return None, None  # mechanical kinds apply directly, no preview
     if kind == "extract-method":
-        if opts.name is None:
-            return None, None
+        # name-free preview: the seam is shown with a placeholder name the
+        # agent replaces — naming AFTER seeing the diff, not before
         new_source, seam = extract_method_proposal(source, line, opts.name, max_decisions=13)
         if new_source is None or new_source == source:
             return None, None
@@ -894,17 +944,91 @@ def propose_finding(kind: str, rel: str, repo: Path, line: int, opts: FixOptions
     return new_source, STRUCTURAL_KINDS[kind]
 
 
-class _RenameName(cst.CSTTransformer):
-    """Rename every Name node — the extract-class receiver rename."""
+class _CollectStores(cst.CSTVisitor):
+    """The names each function assigns anywhere in its body — those are
+    locals, never the receiver (a shadowing `state = state.line` must not
+    have its loads renamed to `self`). One pass over the whole module,
+    tracking the current function."""
 
-    def __init__(self, old: str, new: str) -> None:
-        self.old = old
-        self.new = new
+    METADATA_DEPENDENCIES = (ExpressionContextProvider,)
+
+    def __init__(self) -> None:
+        self.per_fn: dict[str, set[str]] = {}
+        self._current: str | None = None
+        self._in_param = False
+
+    @override
+    def visit_FunctionDef(self, node) -> None:
+        self._current = node.name.value
+        self.per_fn.setdefault(self._current, set())
+
+    @override
+    def leave_FunctionDef(self, original_node) -> None:
+        self._current = None
+
+    @override
+    def visit_Param(self, node) -> None:
+        # parameter names are STORE-context Names — they are the signature,
+        # not body locals; skip them
+        self._in_param = True
+
+    @override
+    def leave_Param(self, original_node) -> None:
+        self._in_param = False
+
+    @override
+    def visit_Name(self, node) -> None:
+        try:
+            ctx = self.get_metadata(ExpressionContextProvider, node)
+        except KeyError:
+            return  # attribute names (obj.state) are not refs
+        if ctx == cst.metadata.ExpressionContext.STORE and self._current is not None and not self._in_param:
+            self.per_fn[self._current].add(node.value)
+
+
+# each moved function's stored-name set — a named alias so the signature is
+# not a bare dict collection (record-shape)
+StoredNames = dict[str, set[str]]
+
+
+class _ReceiverToSelf(cst.CSTTransformer):
+    """The extract-class receiver rename: in each moved function, LOAD
+    references to THAT function's own first parameter become `self`.
+    Per-function (different strewing fns may name their receiver
+    differently) and shadow-aware — a name stored anywhere in the body
+    is a local and is never renamed, so `state = state.line` survives
+    intact instead of becoming `self = self.line`."""
+
+    METADATA_DEPENDENCIES = (ExpressionContextProvider,)
+
+    def __init__(self, receivers: dict[str, str | None], shadowed: StoredNames) -> None:
+        self.receivers = receivers  # fn name -> its receiver param name
+        self.shadowed = shadowed  # fn name -> names stored in its body
+        self._current: str | None = None
+
+    @override
+    def visit_FunctionDef(self, node) -> None:
+        self._current = node.name.value
+
+    @override
+    def leave_FunctionDef(self, original_node, updated_node):
+        self._current = None
+        return updated_node
 
     @override
     def leave_Name(self, original_node, updated_node):
-        if updated_node.value == self.old:
-            return updated_node.with_changes(value=self.new)
+        fn = self._current or ""
+        old = self.receivers.get(fn)
+        if old is None or updated_node.value != old:
+            return updated_node
+        if updated_node.value in self.shadowed.get(fn, set()):
+            return updated_node  # a local shadows the receiver — not the param
+        try:
+            ctx = self.get_metadata(ExpressionContextProvider, original_node)
+        except KeyError:
+            return updated_node  # attribute names (obj.state) are not refs
+        if ctx == cst.metadata.ExpressionContext.LOAD:
+            return updated_node.with_changes(value="self")
         return updated_node
 
 
@@ -979,6 +1103,13 @@ class _BodyParamRewrite(cst.CSTTransformer):
 
     def __init__(self, params: list[str]) -> None:
         self.params = set(params)
+
+    @override
+    def on_visit(self, node) -> bool:
+        # nested functions and lambdas are their own scopes: a bundled name
+        # there is a local/parameter of THAT scope, not the outer param
+        # (def inner(a) must not become def inner(options.a))
+        return not isinstance(node, (cst.FunctionDef, cst.Lambda))
 
     @override
     def leave_Name(
@@ -1273,17 +1404,20 @@ def fix_rename(source: str, line: int, name: str) -> str | None:
 
 class _DecisionCount(cst.CSTVisitor):
     """Counts the radon-style decisions in one statement: ifs + elifs, and/or
-    BoolOps, loops, asserts, match arms — the same families the scanner's
-    complexity rule counts (extraction must SPLIT the CC, not move it)."""
+    BooleanOperations, loops, asserts, match arms, comprehension clauses —
+    the same families the scanner's complexity rule counts (extraction must
+    SPLIT the CC, not move it)."""
 
     def __init__(self) -> None:
         self.n = 0
+        self._in_boolop = False
 
     @override
     def visit_If(self, node) -> None:
         # libcst models elifs as nested Ifs in orelse — the descent counts
-        # them; an else IndentedBlock adds nothing (radon: else is free)
-        self.n += 1 + _boolop_decisions(node.test)
+        # them; an else IndentedBlock adds nothing (radon: else is free);
+        # the test's and/or is counted by visit_BooleanOperation below
+        self.n += 1
 
     @override
     def visit_For(self, node) -> None:
@@ -1294,12 +1428,26 @@ class _DecisionCount(cst.CSTVisitor):
         self.n += 1
 
     @override
+    def visit_CompFor(self, node) -> None:
+        # comprehension clauses: radon counts the for + each if filter
+        self.n += 1 + len(node.ifs)
+
+    @override
     def visit_Match(self, node) -> None:
         self.n += sum(1 for c in node.cases if not _wildcard(c.pattern))
 
     @override
-    def visit_BoolOp(self, node) -> None:
-        self.n += _boolop_decisions(node)
+    def visit_BooleanOperation(self, node) -> None:
+        # libcst's and/or node (the old visit_BoolOp never fired). A chain
+        # is left-nested; radon counts len(values) - 1 — count once at the
+        # chain's root only (the _in_boolop guard skips the nested nodes)
+        if isinstance(node.operator, (cst.And, cst.Or)) and not self._in_boolop:
+            self.n += _chain_operands(node) - 1
+        self._in_boolop = True
+
+    @override
+    def leave_BooleanOperation(self, original_node) -> None:
+        self._in_boolop = False
 
     @override
     def visit_Assert(self, node) -> None:
@@ -1314,10 +1462,12 @@ class _DecisionCount(cst.CSTVisitor):
         self.n += 1  # radon counts each except handler
 
 
-def _boolop_decisions(node) -> int:
+def _chain_operands(node) -> int:
+    """The number of operands in a chained and/or tree — radon's
+    `len(values)` for a BoolOp; a non-BoolOp leaf is one operand."""
     if isinstance(node, cst.BooleanOperation) and isinstance(node.operator, (cst.And, cst.Or)):
-        return 1
-    return 0
+        return _chain_operands(node.left) + _chain_operands(node.right)
+    return 1
 
 
 def _wildcard(pattern) -> bool:

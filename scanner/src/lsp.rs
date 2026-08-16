@@ -96,9 +96,16 @@ fn publish(uri: &str, diagnostics: &[serde_json::Value], out: &mut impl Write) {
 
 /// file:///path/to/x.py -> the path; anything else is used as-is.
 fn uri_to_path(uri: &str) -> String {
-    uri.strip_prefix("file://")
-        .map(|p| p.strip_prefix('/').unwrap_or(p).to_string())
-        .unwrap_or_else(|| uri.to_string())
+    let p = uri
+        .strip_prefix("file://")
+        .unwrap_or(uri)
+        // percent-decode the path component (spaces as %20, etc.)
+        .replace("%20", " ")
+        .replace("%23", "#")
+        .replace("%3F", "?");
+    // file:///tmp/x keeps its leading / (an absolute path); file://tmp/x
+    // is a relative URI — strip nothing
+    p.to_string()
 }
 
 fn scan_buffer(uri: &str, text: &str) -> FileScan {
@@ -277,7 +284,9 @@ mod tests {
 
     #[test]
     fn uri_path_mapping() {
-        assert_eq!(uri_to_path("file:///a/b.py"), "a/b.py");
+        // file:/// keeps its absolute root; percent-encoding is decoded
+        assert_eq!(uri_to_path("file:///a/b.py"), "/a/b.py");
+        assert_eq!(uri_to_path("file:///tmp/my%20file.py"), "/tmp/my file.py");
         assert_eq!(uri_to_path("plain.py"), "plain.py");
     }
 

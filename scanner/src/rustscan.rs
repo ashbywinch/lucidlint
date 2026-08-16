@@ -54,6 +54,9 @@ pub struct RustScan {
     pub mod_decls: Vec<(String, bool)>,
     /// Raw `use` paths ("crate::a::b", "super::x", "serde::Deserialize", ...).
     pub uses: Vec<String>,
+    /// The file's parsed `lucidlint: ignore` suppressions — the orchestrator
+    /// needs them to suppress the repo-wide families (duplicate/unused).
+    pub supps: common::Suppressions,
 }
 
 impl RustScan {
@@ -67,6 +70,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         Ok(f) => f,
         Err(_) => {
             return RustScan {
+                supps: common::Suppressions::default(),
                 file_name: name.to_string(),
                 findings: Vec::new(),
                 cc: Vec::new(),
@@ -84,6 +88,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         .collect();
 
     let mut state = RsState {
+        supps: common::Suppressions::default(),
         file: name,
         file_name: name.to_string(),
         reason_lines,
@@ -138,6 +143,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         });
     }
     scan.findings = common::apply_suppressions_impl(scan.findings, &comments, name, "//", &pre_used);
+    scan.supps = supps;
     scan
 }
 
@@ -155,6 +161,7 @@ struct RsState<'a> {
     mod_decls: Vec<(String, bool)>,
     uses: Vec<String>,
     structs: Vec<RsStruct>,
+    supps: common::Suppressions,
     /// (self type name, method count) — record-shape post-pass.
     impls: Vec<(String, usize)>,
     /// (fn name, line, param type idents) — the boundary record-shape check.
@@ -271,6 +278,7 @@ impl<'a> RsState<'a> {
             );
         }
         RustScan {
+            supps: self.supps.clone(),
             file_name: self.file_name.clone(),
             findings: self.findings,
             cc: self.cc,

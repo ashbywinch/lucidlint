@@ -615,6 +615,10 @@ pub struct FileScan {
     pub skeletons: Vec<SkeletonFn>,
     pub classes: Vec<ClassInfo>,
     pub imports: Vec<ImportInfo>,
+    /// The file's parsed `lucidlint: ignore` suppressions — the repo-wide
+    /// families (duplicate/unused/docs/graph) are filtered through them at
+    /// the end of the scan (per-file families apply theirs during the scan).
+    pub supps: common::Suppressions,
 }
 
 pub(crate) fn is_test_path(name: &str) -> bool {
@@ -676,6 +680,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
                 skeletons: Vec::new(),
                 classes: Vec::new(),
                 imports: Vec::new(),
+                supps: common::Suppressions::default(),
             };
         }
     };
@@ -768,6 +773,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         skeletons: state.skeletons,
         classes,
         imports,
+        supps,
     }
 }
 
@@ -789,6 +795,7 @@ fn scan_file(path: &Path) -> FileScan {
 /// `unused` is rustc dead_code's job and the graph families need the Rust
 /// exporter — the rustscan data (mod/use/structs) travels via `RustScan`.
 fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
+    let supps = rs.supps.clone();
     FileScan {
         file_name: name.to_string(),
         findings: rs.findings.clone(),
@@ -801,6 +808,7 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         skeletons: rs.skeletons.clone(),
         classes: Vec::new(),
         imports: Vec::new(),
+        supps,
     }
 }
 
@@ -1077,6 +1085,10 @@ fn main() {
         .iter()
         .map(|s| (rel_of(&s.file_name, &root), s.classes.clone(), s.imports.clone()))
         .collect();
+    let supps_by_rel: std::collections::HashMap<String, common::Suppressions> = scans
+        .iter()
+        .map(|s| (rel_of(&s.file_name, &root), s.supps.clone()))
+        .collect();
     for scan in scans {
         all_findings.extend(scan.findings);
         all_cc.extend(scan.cc);
@@ -1227,6 +1239,53 @@ fn main() {
         }
     }
     // the contract: schema_version + final action kinds
+    // repo-wide families (duplicate/unused/docs/graph/abstraction) were
+    // appended after the per-file suppression passes — filter them through
+    // each file's suppressions now so `lucidlint: ignore <signal> <why>`
+    // exempts them too (PRD R18)
+    // which (file, line, signal) suppressions the repo-wide retain actually
+    // used — a stale-suppression finding for one of those is wrong (the
+    // suppression IS used; the per-file pass just ran before this filter)
+    let mut used_supps: std::collections::HashSet<(String, usize, String)> = std::collections::HashSet::new();
+    all_findings.retain(|f| {
+        let Some(supps) = supps_by_rel.get(&f.file) else {
+            return true;
+        };
+        if let Some(why) = supps.file.get(&f.kind) {
+            if !why.is_empty() {
+                return false; // ignore-file <signal> <why> suppresses the whole file
+            }
+        }
+        for ln in [f.line, f.line.saturating_sub(1)] {
+            if let Some(entries) = supps.line.get(&ln) {
+                for (sig, why) in entries {
+                    if sig == &f.kind && !why.is_empty() {
+                        used_supps.insert((f.file.clone(), ln, sig.clone()));
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    });
+    // drop stale-suppression findings for suppressions the retain just used
+    all_findings.retain(|f| {
+        if f.kind != "stale-suppression" {
+            return true;
+        }
+        // message shape: "suppression 'lucidlint: ignore <sig>' at line <ln> ..."
+        let msg = &f.message;
+        let Some(sig_start) = msg.find("ignore ") else {
+            return true;
+        };
+        let sig = msg[sig_start + 7..]
+            .split(|c: char| c.is_whitespace() || c == '\'')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        !used_supps.contains(&(f.file.clone(), f.line, sig))
+    });
+
     let contract_findings: Vec<serde_json::Value> = all_findings
         .iter()
         .map(|f| {

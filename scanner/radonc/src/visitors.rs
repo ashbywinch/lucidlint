@@ -163,20 +163,35 @@ pub struct ComplexityVisitor {
     pub total: i32,
     /// Whether assertions are counted (radon's `no_assert`).
     pub no_assert: bool,
+    /// The module source — present when built via `from_code`, so block
+    /// linenos are SOURCE LINES; `from_ast` has no source and keeps the
+    /// ruff byte offsets (documented deviation).
+    source: Option<String>,
 }
 
 impl ComplexityVisitor {
     /// Instantiate the visitor from Python source (radon's `from_code`).
     pub fn from_code(code: &str) -> Self {
         let parsed = code2ast(code);
-        Self::from_ast(&parsed.syntax())
+        let mut visitor = Self::from_ast(&parsed.syntax());
+        visitor.source = Some(code.to_string());
+        visitor
     }
 
-    /// Instantiate from a parsed module (radon's `from_ast`).
+    /// Instantiate from a parsed module (radon's `from_ast`). Block linenos
+    /// are byte offsets when no source is attached.
     pub fn from_ast(mod_: &ModModule) -> Self {
         let mut visitor = ComplexityVisitor::default();
         visitor.visit(mod_);
         visitor
+    }
+
+    /// Byte offset -> 1-based source line (or the offset when no source).
+    fn line_of(&self, offset: usize) -> i32 {
+        match &self.source {
+            Some(src) => (src.as_bytes()[..offset.min(src.len())].iter().filter(|&&b| b == b'\n').count() + 1) as i32,
+            None => offset as i32,
+        }
     }
 
     /// The module-level complexity.
@@ -225,8 +240,8 @@ impl ComplexityVisitor {
             match stmt {
                 Stmt::FunctionDef(f) => {
                     let name = f.name.to_string();
-                    let lineno = f.range.start().to_usize() as i32; // byte offset — radon's `lineno` is source-line-based; ruff AST carries bytes, see NOTICE
-                    let endline = f.range.end().to_usize() as i32;
+                    let lineno = self.line_of(f.range.start().to_usize());
+                    let endline = self.line_of(f.range.end().to_usize());
                     let col = 0; // byte offsets carry no column in ruff_text_size
                     self.functions.push(Function {
                         name,
@@ -242,8 +257,8 @@ impl ComplexityVisitor {
                 }
                 Stmt::ClassDef(c) => {
                     let name = c.name.to_string();
-                    let lineno = c.range.start().to_usize() as i32;
-                    let endline = c.range.end().to_usize() as i32;
+                    let lineno = self.line_of(c.range.start().to_usize());
+                    let endline = self.line_of(c.range.end().to_usize());
                     let col = 0;
                     // methods
                     let mut methods = Vec::new();
@@ -251,9 +266,9 @@ impl ComplexityVisitor {
                         if let Stmt::FunctionDef(m) = body_stmt {
                             methods.push(Function {
                                 name: m.name.to_string(),
-                                lineno: m.range.start().to_usize() as i32,
+                                lineno: self.line_of(m.range.start().to_usize()),
                                 col_offset: 0,
-                                endline: m.range.end().to_usize() as i32,
+                                endline: self.line_of(m.range.end().to_usize()),
                                 is_method: true,
                                 classname: Some(c.name.to_string()),
                                 closures: Vec::new(),
@@ -342,6 +357,9 @@ impl<'a> SourceOrderVisitor<'a> for CountVisitor {
                 }
                 return;
             }
+            // NOTE: the pinned ruff (0.0.9) has no Stmt::TryStar node —
+            // try/except* (3.11 exception groups) cannot be counted here
+            // until the ruff pin is bumped (see the parity review note)
             Stmt::Try(t) => {
                 self.d += t.handlers.len() as i32 + (!t.orelse.is_empty()) as i32;
                 for s in &t.body {

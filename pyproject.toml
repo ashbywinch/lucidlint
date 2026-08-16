@@ -19,11 +19,13 @@ version = "0.1.0"
 description = "Deterministic lucidlint tooling: a Rust scan core under a thin Python orchestrator"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = [
-    "pygit2>=1.20.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
+# git history + file listing; the orchestrator degrades to rglob/no-history
+# when pygit2 is absent — genuinely optional, so it must not be a mandatory
+# runtime dependency (a consuming repo would pay for libgit2 unused)
+git = ["pygit2>=1.20.0"]
 graph = ["code-review-graph>=2.3.7"]
 fix = ["libcst>=1.9.0"]
 

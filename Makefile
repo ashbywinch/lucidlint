@@ -78,11 +78,11 @@ test: deps lint-check typecheck scanner-check scanner-test
 # The Rust suite is part of the gate — a change to the core must pass its
 # own tests, not just build.
 scanner-test:
-	@cd scanner && cargo test --release 2>&1 | tail -1
+	@cd scanner && cargo test --release 2>&1 | tail -30
 	@echo "${GREEN}✓ scanner tests passed${NC}"
 
 scanner-check:
-	@cd scanner && cargo build --release 2>&1 | tail -1
+	@cd scanner && cargo build --release 2>&1 | tail -30
 	@echo "${GREEN}✓ scanner built${NC}"
 
 rules:
@@ -93,7 +93,7 @@ coverage: deps
 	@$(UV) run coverage report -m
 	@$(UV) run coverage xml
 	@$(UV) run coverage html
-	@cd scanner && cargo llvm-cov --lcov --output-path ../lcov.info 2>&1 | tail -1
+	@cd scanner && cargo llvm-cov --lcov --output-path ../lcov.info 2>&1 | tail -30
 	@echo "${GREEN}Coverage reports: htmlcov/index.html + lcov.info${NC}"
 
 lint: deps lint-check
@@ -113,7 +113,7 @@ lint-github: deps   # CI only: findings surface as PR annotations
 # rust-toolchain.toml pin, so it needs no baseline.
 typecheck: deps
 	@$(PYTHON) scripts/pyrefly-lock.py check --pyrefly-config pyrefly.toml
-	@cd scanner && cargo check --all-targets 2>&1 | tail -1
+	@cd scanner && cargo check --all-targets 2>&1 | tail -30
 
 # After a deliberate diagnostic change, commit the refresh
 typecheck-update-baseline: deps

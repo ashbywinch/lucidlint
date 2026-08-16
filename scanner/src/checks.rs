@@ -1206,7 +1206,10 @@ fn dispatch_key(e: &Expr) -> Option<String> {
             _ => None,
         },
         Expr::Call(c) => {
-            // isinstance(x, A) dispatches on x
+            // isinstance(x, A) dispatches on x — conditional-polymorphism
+            // groups chains by the VALUE they discriminate on (the
+            // latent-visitor family keys by the dispatched TYPE instead,
+            // see dispatch_arm)
             if let Expr::Name(n) = c.func.as_ref() {
                 if n.id.as_str() == "isinstance" {
                     if let Some(Expr::Name(t)) = c.arguments.args.first() {
@@ -1529,21 +1532,24 @@ pub fn latent_visitor_findings(state: &mut ScanState, body: &[Stmt], source: &st
                     .chain(i.elif_else_clauses.iter().filter_map(|c| c.test.as_ref()))
                     .collect();
                 if arms.len() >= 2 {
-                    // every arm must dispatch on the same FAMILY (type tag);
-                    // the visitor signal is the MULTI-SITE (>= 2 operations),
-                    // not the arm count — a repeated 2-arm type check is
-                    // already the visitor shape
-                    let first = dispatch_arm(arms[0]);
-                    if let Some((fam0, _)) = &first {
-                        let same_family = arms
-                            .iter()
-                            .all(|t| matches!(dispatch_arm(t), Some((f, _)) if &f == fam0));
-                        if same_family {
-                            let line = line_of(source, s.range().start());
-                            let e = families.entry(fam0.clone()).or_insert((0, line));
-                            e.0 += 1;
-                            site_lines.insert(line, fam0.clone());
-                        }
+                    // the chain's FAMILY is the SET of types it dispatches
+                    // on (sorted, deduped) — the visitor signal is the
+                    // MULTI-SITE (>= 2 operations over the same type set),
+                    // not the arm count; keying by the value's name would
+                    // merge chains that share a variable but test different
+                    // types (and could suppress a conditional-polymorphism
+                    // ruling on one of them)
+                    let type_keys: Vec<Option<String>> =
+                        arms.iter().map(|t| dispatch_arm(t).map(|(tk, _)| tk)).collect();
+                    if type_keys.iter().all(Option::is_some) {
+                        let mut fam: Vec<String> = type_keys.into_iter().flatten().collect();
+                        fam.sort_unstable();
+                        fam.dedup();
+                        let chain_family = fam.join("|");
+                        let line = line_of(source, s.range().start());
+                        let e = families.entry(chain_family.clone()).or_insert((0, line));
+                        e.0 += 1;
+                        site_lines.insert(line, chain_family);
                     }
                 }
                 walk(&i.body, source, families, site_lines);
@@ -1603,9 +1609,13 @@ fn dispatch_arm(e: &Expr) -> Option<(String, String)> {
                         let Expr::Name(f) = &args[0] else {
                             return None;
                         };
-                        let family = f.id.to_string();
+                        // the FAMILY is the dispatched TYPE — two functions
+                        // that both use `x` but test different types are
+                        // different element families; keying by the value's
+                        // name merged them and could suppress a legitimate
+                        // conditional-polymorphism ruling on one of them
                         match &args[1] {
-                            Expr::Name(t) => return Some((family, t.id.to_string())),
+                            Expr::Name(t) => return Some((t.id.to_string(), f.id.to_string())),
                             Expr::Tuple(t) => {
                                 let types: Vec<String> = t
                                     .elts
@@ -1619,9 +1629,9 @@ fn dispatch_arm(e: &Expr) -> Option<(String, String)> {
                                     })
                                     .collect();
                                 if types.len() == 1 {
-                                    return Some((family, types[0].clone()));
+                                    return Some((types[0].clone(), f.id.to_string()));
                                 }
-                                return Some((family, types.join("|")));
+                                return Some((types.join("|"), f.id.to_string()));
                             }
                             _ => return None,
                         }
@@ -1653,7 +1663,8 @@ fn dispatch_arm(e: &Expr) -> Option<(String, String)> {
             };
             if c.ops.len() == 1 && c.comparators.len() == 1 {
                 if let Expr::Name(t) = &c.comparators[0] {
-                    return Some((family, t.id.to_string()));
+                    // (type, value) — the family is the compared TYPE
+                    return Some((t.id.to_string(), family));
                 }
             }
             None
@@ -3373,7 +3384,12 @@ fn has_assertion(body: &[Stmt]) -> bool {
                 AnyNodeRef::StmtAssert(_) => return true,
                 AnyNodeRef::ExprCall(call) => match call.func.as_ref() {
                     Expr::Attribute(a) => {
-                        if a.attr.as_str() == "raises" || a.attr.as_str() == "fail" {
+                        // unittest: self.assertEqual/assertTrue/assertRaises/...
+                        // and pytest: pytest.raises / self.fail
+                        if a.attr.as_str().starts_with("assert")
+                            || a.attr.as_str() == "raises"
+                            || a.attr.as_str() == "fail"
+                        {
                             return true;
                         }
                     }

@@ -241,9 +241,9 @@
    "severity": "error"
   },
   {
-   "line": 854,
+   "line": 886,
    "column": 25,
-   "stop_line": 854,
+   "stop_line": 886,
    "stop_column": 51,
    "path": "fix_engine.py",
    "code": -2,
@@ -253,9 +253,9 @@
    "severity": "error"
   },
   {
-   "line": 858,
+   "line": 890,
    "column": 37,
-   "stop_line": 858,
+   "stop_line": 890,
    "stop_column": 47,
    "path": "fix_engine.py",
    "code": -2,
@@ -265,9 +265,9 @@
    "severity": "error"
   },
   {
-   "line": 1083,
+   "line": 1196,
    "column": 13,
-   "stop_line": 1083,
+   "stop_line": 1196,
    "stop_column": 52,
    "path": "fix_engine.py",
    "code": -2,
@@ -277,9 +277,9 @@
    "severity": "error"
   },
   {
-   "line": 1086,
+   "line": 1199,
    "column": 23,
-   "stop_line": 1086,
+   "stop_line": 1199,
    "stop_column": 44,
    "path": "fix_engine.py",
    "code": -2,
@@ -289,9 +289,9 @@
    "severity": "error"
   },
   {
-   "line": 1115,
+   "line": 1228,
    "column": 21,
-   "stop_line": 1115,
+   "stop_line": 1228,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -301,9 +301,9 @@
    "severity": "error"
   },
   {
-   "line": 1142,
+   "line": 1255,
    "column": 12,
-   "stop_line": 1142,
+   "stop_line": 1255,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -313,9 +313,9 @@
    "severity": "error"
   },
   {
-   "line": 1177,
+   "line": 1290,
    "column": 12,
-   "stop_line": 1177,
+   "stop_line": 1290,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -325,9 +325,9 @@
    "severity": "error"
   },
   {
-   "line": 1189,
+   "line": 1302,
    "column": 12,
-   "stop_line": 1189,
+   "stop_line": 1302,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -337,9 +337,9 @@
    "severity": "error"
   },
   {
-   "line": 1208,
+   "line": 1321,
    "column": 34,
-   "stop_line": 1208,
+   "stop_line": 1321,
    "stop_column": 81,
    "path": "fix_engine.py",
    "code": -2,
@@ -349,9 +349,9 @@
    "severity": "error"
   },
   {
-   "line": 1214,
+   "line": 1327,
    "column": 34,
-   "stop_line": 1214,
+   "stop_line": 1327,
    "stop_column": 81,
    "path": "fix_engine.py",
    "code": -2,
@@ -361,9 +361,9 @@
    "severity": "error"
   },
   {
-   "line": 1256,
+   "line": 1369,
    "column": 12,
-   "stop_line": 1256,
+   "stop_line": 1369,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -373,9 +373,9 @@
    "severity": "error"
   },
   {
-   "line": 1282,
+   "line": 1395,
    "column": 32,
-   "stop_line": 1282,
+   "stop_line": 1395,
    "stop_column": 79,
    "path": "fix_engine.py",
    "code": -2,
@@ -385,21 +385,9 @@
    "severity": "error"
   },
   {
-   "line": 1319,
-   "column": 9,
-   "stop_line": 1319,
-   "stop_column": 21,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "bad-override",
-   "description": "Class member `_DecisionCount.visit_BoolOp` is marked as an override, but no parent class has a matching attribute",
-   "concise_description": "Class member `_DecisionCount.visit_BoolOp` is marked as an override, but no parent class has a matching attribute",
-   "severity": "error"
-  },
-  {
-   "line": 1438,
+   "line": 1570,
    "column": 16,
-   "stop_line": 1438,
+   "stop_line": 1570,
    "stop_column": 25,
    "path": "fix_engine.py",
    "code": -2,
@@ -409,9 +397,9 @@
    "severity": "error"
   },
   {
-   "line": 1438,
+   "line": 1570,
    "column": 42,
-   "stop_line": 1438,
+   "stop_line": 1570,
    "stop_column": 49,
    "path": "fix_engine.py",
    "code": -2,
@@ -421,9 +409,9 @@
    "severity": "error"
   },
   {
-   "line": 1439,
+   "line": 1571,
    "column": 26,
-   "stop_line": 1439,
+   "stop_line": 1571,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -469,9 +457,9 @@
    "severity": "error"
   },
   {
-   "line": 679,
+   "line": 681,
    "column": 21,
-   "stop_line": 679,
+   "stop_line": 681,
    "stop_column": 28,
    "path": "lucidlint.py",
    "code": -2,
@@ -481,9 +469,9 @@
    "severity": "error"
   },
   {
-   "line": 761,
+   "line": 763,
    "column": 24,
-   "stop_line": 761,
+   "stop_line": 763,
    "stop_column": 33,
    "path": "lucidlint.py",
    "code": -2,
@@ -493,9 +481,9 @@
    "severity": "error"
   },
   {
-   "line": 890,
+   "line": 895,
    "column": 17,
-   "stop_line": 890,
+   "stop_line": 895,
    "stop_column": 35,
    "path": "lucidlint.py",
    "code": -2,
@@ -505,9 +493,9 @@
    "severity": "error"
   },
   {
-   "line": 1137,
+   "line": 1142,
    "column": 16,
-   "stop_line": 1137,
+   "stop_line": 1142,
    "stop_column": 37,
    "path": "lucidlint.py",
    "code": -2,
@@ -517,9 +505,9 @@
    "severity": "error"
   },
   {
-   "line": 1141,
+   "line": 1146,
    "column": 20,
-   "stop_line": 1141,
+   "stop_line": 1146,
    "stop_column": 43,
    "path": "lucidlint.py",
    "code": -2,
@@ -529,9 +517,9 @@
    "severity": "error"
   },
   {
-   "line": 1158,
+   "line": 1163,
    "column": 24,
-   "stop_line": 1158,
+   "stop_line": 1163,
    "stop_column": 48,
    "path": "lucidlint.py",
    "code": -2,
@@ -541,9 +529,9 @@
    "severity": "error"
   },
   {
-   "line": 1164,
+   "line": 1169,
    "column": 39,
-   "stop_line": 1164,
+   "stop_line": 1169,
    "stop_column": 65,
    "path": "lucidlint.py",
    "code": -2,
@@ -553,9 +541,9 @@
    "severity": "error"
   },
   {
-   "line": 1170,
+   "line": 1175,
    "column": 20,
-   "stop_line": 1178,
+   "stop_line": 1183,
    "stop_column": 14,
    "path": "lucidlint.py",
    "code": -2,
@@ -565,9 +553,9 @@
    "severity": "error"
   },
   {
-   "line": 1230,
+   "line": 1235,
    "column": 33,
-   "stop_line": 1230,
+   "stop_line": 1235,
    "stop_column": 41,
    "path": "lucidlint.py",
    "code": -2,
@@ -577,9 +565,9 @@
    "severity": "error"
   },
   {
-   "line": 1241,
+   "line": 1246,
    "column": 28,
-   "stop_line": 1241,
+   "stop_line": 1246,
    "stop_column": 37,
    "path": "lucidlint.py",
    "code": -2,
@@ -589,9 +577,9 @@
    "severity": "error"
   },
   {
-   "line": 1247,
+   "line": 1252,
    "column": 23,
-   "stop_line": 1247,
+   "stop_line": 1252,
    "stop_column": 45,
    "path": "lucidlint.py",
    "code": -2,
@@ -601,9 +589,9 @@
    "severity": "error"
   },
   {
-   "line": 1305,
+   "line": 1310,
    "column": 12,
-   "stop_line": 1305,
+   "stop_line": 1310,
    "stop_column": 35,
    "path": "lucidlint.py",
    "code": -2,
@@ -613,9 +601,9 @@
    "severity": "error"
   },
   {
-   "line": 1305,
+   "line": 1310,
    "column": 49,
-   "stop_line": 1305,
+   "stop_line": 1310,
    "stop_column": 72,
    "path": "lucidlint.py",
    "code": -2,
@@ -625,9 +613,9 @@
    "severity": "error"
   },
   {
-   "line": 1313,
+   "line": 1318,
    "column": 53,
-   "stop_line": 1313,
+   "stop_line": 1318,
    "stop_column": 55,
    "path": "lucidlint.py",
    "code": -2,

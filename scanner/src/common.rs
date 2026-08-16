@@ -78,9 +78,17 @@ pub fn is_duplicate_size(skeleton_len: usize, non_doc_stmts: usize) -> bool {
 /// sets collide, so the hash IS the dice=1.0 test. XOR keeps it order-free;
 /// DefaultHasher::new() has fixed keys, so the value is deterministic.
 pub fn bigram_set_hash(t: &[String]) -> u64 {
+    // hash the UNIQUE bigram set: under XOR, a repeated bigram cancels
+    // itself out, so two skeletons with different unique sets could collide
+    // and be reported as exact copies without a dice computation
     let mut h = 0u64;
     if t.len() >= 2 {
+        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
         for w in t.windows(2) {
+            let pair = (w[0].clone(), w[1].clone());
+            if !seen.insert(pair) {
+                continue;
+            }
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             w[0].hash(&mut hasher);
             w[1].hash(&mut hasher);
@@ -120,6 +128,7 @@ pub fn dice_similarity(a: &[String], b: &[String]) -> f64 {
 /// One line-level suppression and the (signal, why) parsed from it.
 /// Line suppressions exempt a finding on that line or the line before;
 /// file suppressions exempt the signal anywhere in the file (with a why).
+#[derive(Clone, Default)]
 pub struct Suppressions {
     pub line: HashMap<usize, Vec<(String, String)>>,
     pub file: HashMap<String, String>,
@@ -202,11 +211,12 @@ pub fn apply_suppressions_impl(
     let mut out = Vec::new();
     let mut used_line: std::collections::HashSet<(usize, String)> = pre_used.lines.clone();
     let mut used_file: std::collections::HashSet<String> = pre_used.files.clone();
-    // the Python tool dedups suppressions by line (one per line)
-    let mut seen_invalid: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // dedup per (line, signal) — `ignore sig1,sig2` with no why must report
+    // BOTH signals' missing reasons, not just the first on the line
+    let mut seen_invalid: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
     for (ln, entries) in &supps.line {
         for (sig, why) in entries {
-            if why.is_empty() && seen_invalid.insert(*ln) {
+            if why.is_empty() && seen_invalid.insert((*ln, sig.clone())) {
                 out.push(crate::Finding {
                 file: file.to_string(),
                 line: *ln,

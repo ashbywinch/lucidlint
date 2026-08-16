@@ -5,7 +5,12 @@ never depend on a later phase.
 
 ## Phase 1 — deterministic gate core
 
-- **Inputs:** repo path; radon; code-review-graph SQLite; git log.
+> **Status: shipped, and re-architected.** The scan engine is the Rust
+> binary (`scanner/`, ruff parser pinned `=0.0.9`); `lucidlint.py` is the
+> orchestrator (fail-fast when the binary is missing). See TECHSPEC D8.
+
+- **Inputs:** repo path; the Rust binary's findings JSON (schema 2);
+  code-review-graph contract export; git log via pygit2 (optional).
 - **Outputs:** a prioritized action list: complexity, large functions,
   hub files, hotspots (volatile functions named, with per-function churn),
   graph-risk (callers resolved).
