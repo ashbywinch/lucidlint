@@ -424,7 +424,7 @@ pub fn large_function_findings(
             function: n.name.clone(),
             kind: "large-function".into(),
             severity: "fail".into(),
-            message: format!("function spans {span} lines (>= {max_lines})"),
+            message: format!("function spans {span} lines (>= {max_lines}) — Extract Function: split it into one rule per named method"),
         });
     }
     out

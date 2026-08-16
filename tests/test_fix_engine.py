@@ -251,6 +251,95 @@ def test_parameter_object_introduced(tmp_path):
     assert "BuildOptions.build(a=1, b=2, c=3, d=4, e=5, f=6)" in fixed
 
 
+def test_extract_method_preview_and_confirm(tmp_path):
+    src = (
+        "def process(data, factor):\n"
+        "    results = []\n"
+        "    for item in data:\n"
+        "        results.append(item * factor)\n"
+        "    return sum(results)\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    # preview: proposal without writing
+    new_source, desc = fix_engine.propose_finding(
+        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="scale_total")
+    )
+    assert desc is not None
+    assert p.read_text() == src  # nothing written
+    # apply
+    out = fix_engine.fix_finding(
+        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="scale_total")
+    )
+    assert out is not None
+    fixed = p.read_text()
+    assert "def scale_total(" in fixed
+    assert fixed.count("scale_total(") >= 2  # the def AND the call site
+    # the extraction is valid Python and preserves behavior
+    ns = {}
+    exec(compile(fixed, "app.py", "exec"), ns)
+    assert ns["process"]([1, 2, 3], 2) == 12
+
+
+def test_extract_method_no_safe_seam(tmp_path):
+    # every block feeds the rest of the function — no out-var-free seam
+    src = (
+        "def f(a, b):\n"
+        "    x = a + b\n"
+        "    y = x * 2\n"
+        "    return y\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    new_source, desc = fix_engine.propose_finding(
+        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="calc")
+    )
+    assert desc is None  # no self-contained seam — refuse rather than break
+
+
+def test_extract_method_cli_preview_confirm_flow(tmp_path, capsys):
+    """The CLI protocol: the fix previews (no write), --confirm applies, and
+    the re-gate sees a clean file. Agents are bad at line numbers — the
+    preview IS the line-number-free contract."""
+    src = (
+        "def process(data, factor):\n"
+        "    results = []\n"
+        "    for item in data:\n"
+        "        results.append(item * factor)\n"
+        "    return sum(results)\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    # preview: prints a diff, writes NOTHING
+    rc = run_main(
+        repo, "--fix-kind", "extract-method", "--fix-file", "houses/app.py",
+        "--fix-line", "1", "--fix-name", "accumulate",
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "+++" in out  # a unified diff was shown
+    assert p.read_text() == src  # nothing written yet
+    # confirm: applies
+    rc = run_main(
+        repo, "--fix-kind", "extract-method", "--fix-file", "houses/app.py",
+        "--fix-line", "1", "--fix-name", "accumulate", "--confirm",
+    )
+    assert rc == 0
+    capsys.readouterr()
+    fixed = p.read_text()
+    assert "def accumulate(" in fixed
+    ns = {}
+    exec(compile(fixed, "app.py", "exec"), ns)
+    assert ns["process"]([1, 2, 3], 2) == 12  # behavior preserved
+    # the gate still passes (no fail findings introduced)
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    assert not [a for a in data["actions"] if a["severity"] == "fail"]
+
+
 def test_message_to_fix_end_to_end(tmp_path, capsys):
     """The full loop the agent runs: gate -> read the finding -> apply the fix
     (supplying a name/signature where the message cannot) -> re-gate, until

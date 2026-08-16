@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import difflib
 import json
 import os
 import sqlite3
@@ -864,7 +865,15 @@ def parse_args() -> argparse.Namespace:
         "--fix-name",
         type=str,
         default=None,
-        help="class name for extract-class (default: the shared leading type)",
+        help="class name for extract-class (default: the shared leading type); new function name for extract-method",
+    )
+    p.add_argument(
+        "--confirm",
+        action="store_true",
+        help=(
+            "extract-method applies the previewed fix (without it, the "
+            "proposal diff is printed and nothing is written)"
+        ),
     )
     return p.parse_args()
 
@@ -1129,6 +1138,25 @@ def main() -> int:
             params=args.fix_params.split(",") if args.fix_params else None,
             name=args.fix_name,
         )
+        if fix_engine.KIND_ALIASES.get(args.fix_kind, args.fix_kind) == "extract-method" and not args.confirm:
+            # the preview surface: show the proposed refactoring as a diff;
+            # the agent reviews it, then re-runs with --confirm to apply
+            new_source, description = fix_engine.propose_finding(
+                args.fix_kind, args.fix_file, repo, args.fix_line, opts
+            )
+            if new_source is None:
+                print(f"fix: no safe extraction seam for {args.fix_kind} at {args.fix_file}:{args.fix_line}")
+                return 0
+            diff = difflib.unified_diff(
+                (repo / args.fix_file).read_text().splitlines(),
+                new_source.splitlines(),
+                fromfile=args.fix_file,
+                tofile=args.fix_file + " (proposed)",
+                lineterm="",
+            )
+            print("\n".join(diff))
+            print(f"# review the diff, then re-run with --confirm ({description})")
+            return 0
         description = fix_engine.fix_finding(
             args.fix_kind, args.fix_file, repo, args.fix_line, opts
         )

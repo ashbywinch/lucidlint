@@ -59,7 +59,7 @@ with a why).
 
 | Rule | Severity | What it checks |
 |---|---|---|
-| **complexity** | fail | Cyclomatic complexity ≥ 15 (radon-equivalent rules: `if`/`elif` count, `match` arms minus wildcard, `&&`/`||`, ternary, loops, `assert!`, closures +0 walked) |
+| **complexity** | fail | Cyclomatic complexity ≥ 15 (radon-equivalent rules: `if`/`elif` count, `match` arms minus wildcard, `&&`/`||`, ternary, loops, `assert!`, closures +0 walked) — Extract Function: `fix --fix-kind extract-method --fix-line <L> --fix-name <N>` previews the best self-contained seam, `--confirm` applies |
 | **long-param-list** | fail | A function with > 5 parameters (receiver/`self` excluded) — introduce a parameter object |
 | **large-function** | fail | Function spans ≥ 120 lines — split it: one rule per function |
 | **closures → latent-class** | fail | A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line span) — the nested structure is a class waiting to be extracted |

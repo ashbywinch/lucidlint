@@ -444,7 +444,7 @@ impl<'a> RsState<'a> {
                     line,
                     &sig.ident.to_string(),
                     format!(
-                        "function '{}' spans {span} lines (>= 120) — split it: one rule per function",
+                        "function '{}' spans {span} lines (>= 120) — Extract Function: split it into one rule per named method",
                         sig.ident
                     ),
                 );

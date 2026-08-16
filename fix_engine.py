@@ -16,13 +16,14 @@ here — those are agent-furnished (`--name`) and hand-verified.
 
 from __future__ import annotations
 
+import builtins
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import override
 
 import libcst as cst
 import libcst.matchers as m
-from libcst.metadata import PositionProvider
+from libcst.metadata import ExpressionContextProvider, ParentNodeProvider, PositionProvider
 
 MECHANICAL_KINDS = {
     "stale-suppression": "delete the stale lucidlint: ignore comment",
@@ -54,6 +55,7 @@ class StrewingGroup:
 # structural kinds need a name (agent-supplied via --fix-name, or defaulted to
 # the shared leading type) — they are never applied blindly
 STRUCTURAL_KINDS = {
+    "extract-method": "extract the best self-contained seam into a named function (preview, then --confirm)",
     "extract-class": "move the strewing free functions into a class, rewriting call sites",
     "magic-number": "Replace Magic Literal: introduce the named constant",
     "vague-name": "Rename the type and its references (same-file)",
@@ -65,6 +67,8 @@ STRUCTURAL_KINDS = {
 # finding's message tees up the fix by name
 KIND_ALIASES = {
     "latent-class": "extract-class",
+    "complexity": "extract-method",
+    "large-function": "extract-method",
 }
 
 
@@ -430,6 +434,137 @@ class _InsertClass(cst.CSTTransformer):
         return updated_node.with_changes(body=body)
 
 
+class _FnBodyState:
+    """The extract-method analysis state: the target function's body
+    statements with per-statement spans, first-use contexts, writes, and
+    control-flow flags."""
+
+    def __init__(self, line: int) -> None:
+        self.line = line
+        self.fn_node: cst.FunctionDef | None = None
+        self.stmt_ids: list[int] = []
+        self.stmt_spans: dict[int, tuple[int, int]] = {}
+        self.first_use: dict[int, dict[str, str]] = {}
+        self.writes: dict[int, set[str]] = {}
+        self.control_flow: dict[int, bool] = {}
+
+    def _window_score(self, i: int, j: int, min_lines: int):
+        """Score one candidate window: (free_count, -span, start) when it is
+        a safe seam, or None. Free = names whose first use in the window is a
+        read (builtins excluded); out-variables and control-flow exits
+        disqualify."""
+        if i == 0 and j == len(self.stmt_ids) - 1:
+            return None  # extracting the whole body is not a refactoring
+        if any(self.control_flow[self.stmt_ids[k]] for k in range(i, j + 1)):
+            return None  # a return/break inside the seam changes control flow
+        span = self.stmt_spans[self.stmt_ids[j]][1] - self.stmt_spans[self.stmt_ids[i]][0] + 1
+        if span < min_lines:
+            return None
+        free: set[str] = set()
+        seen: set[str] = set()
+        writes_all: set[str] = set()
+        for k in range(i, j + 1):
+            sid = self.stmt_ids[k]
+            for name, ctx in self.first_use[sid].items():
+                if name not in seen:
+                    seen.add(name)
+                    if ctx == "read":
+                        free.add(name)
+            writes_all |= self.writes[sid]
+        free -= _BUILTINS
+        if self._window_has_outvars(j, writes_all) or not free:
+            return None  # out-variable or no-input seam — skip
+        return len(free), -span, i, sorted(free)
+
+    def _window_has_outvars(self, j: int, writes_all: set[str]) -> bool:
+        """Does any name written in the window get read after it?
+        Out-variables would need a return value — the seam must be
+        self-contained."""
+        after: set[str] = set()
+        for k in range(j + 1, len(self.stmt_ids)):
+            for name, ctx in self.first_use[self.stmt_ids[k]].items():
+                if ctx == "read":
+                    after.add(name)
+        return bool(writes_all & after)
+
+    def best_seam(self, min_lines: int = 2):
+        """The window whose free variables are the smallest subset of the
+        function's variables (builtins excluded — they are available in any
+        scope) and whose out-variables are empty. A name is free iff its
+        FIRST use in the window is a read. Ties go to the larger window.
+        Returns (block_ids, free_vars) or None. Out-variables are a smell —
+        the seam must be self-contained; the whole body is not a seam."""
+        n = len(self.stmt_ids)
+        best = None  # (free_count, -lines, start, block_ids, free_vars)
+        for i in range(n):
+            for j in range(i, n):
+                score = self._window_score(i, j, min_lines)
+                if score is not None and (best is None or score < best[0]):
+                    best = (score, list(range(i, j + 1)))
+        if best is None:
+            return None
+        (_, _, _, free_vars), block_ids = best
+        return list(block_ids), free_vars
+
+
+class _Analyse(cst.CSTVisitor):
+    """Collects the target function's body statement data. Module-level so
+    the latent-class rule does not fire on the enclosing analysis function."""
+
+    METADATA_DEPENDENCIES = (PositionProvider, ExpressionContextProvider, ParentNodeProvider)
+
+    def __init__(self, state: _FnBodyState) -> None:
+        self.state = state
+
+    @override
+    def visit_FunctionDef(self, node) -> None:
+        if self.state.fn_node is not None:
+            return
+        if self.get_metadata(PositionProvider, node).start.line != self.state.line:
+            return
+        self.state.fn_node = node
+        for s in node.body.body:
+            p = self.get_metadata(PositionProvider, s)
+            sid = id(s)
+            self.state.stmt_spans[sid] = (p.start.line, p.end.line)
+            self.state.stmt_ids.append(sid)
+            self.state.first_use[sid] = {}
+            self.state.writes[sid] = set()
+            self.state.control_flow[sid] = isinstance(s, cst.SimpleStatementLine) and any(
+                isinstance(st, (cst.Return, cst.Break, cst.Continue, cst.Raise, cst.Yield))
+                for st in s.body
+            )
+
+    @override
+    def visit_Name(self, node) -> None:
+        if self.state.fn_node is None:
+            return
+        sid = None
+        parent = self.get_metadata(ParentNodeProvider, node)
+        while parent is not None and not isinstance(parent, cst.Module):
+            if parent is self.state.fn_node:
+                break
+            if id(parent) in self.state.stmt_ids:
+                sid = id(parent)
+                break
+            parent = self.get_metadata(ParentNodeProvider, parent)
+        if sid is None:
+            return  # the fn's own signature/name — not a body read
+        try:
+            ctx = self.get_metadata(ExpressionContextProvider, node)
+        except KeyError:
+            return  # attribute names (obj.append) are not variable refs
+        parent = self.get_metadata(ParentNodeProvider, node)
+        is_aug_target = isinstance(parent, cst.AugAssign)
+        if node.value not in self.state.first_use[sid]:
+            if ctx == cst.metadata.ExpressionContext.LOAD or is_aug_target:
+                self.state.first_use[sid][node.value] = "read"
+            else:
+                self.state.first_use[sid][node.value] = "write"
+        if ctx == cst.metadata.ExpressionContext.STORE:
+            self.state.writes[sid].add(node.value)
+
+
 # --------------------------------------------------------------------------- magic literal / rename / parameter object
 
 class _ReplaceLiteral(cst.CSTTransformer):
@@ -731,6 +866,152 @@ def fix_parameter_object(source: str, line: int, name: str) -> str | None:
     return module3.with_changes(body=_ensure_dataclasses_import(body)).code
 
 
+class _ExtractMethodRewrite(cst.CSTTransformer):
+    """Replace the target block with a call to the new function."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, fn_name: str, fn_line: int, block_indices: set[int], new_name: str,
+            free_vars: list[str],
+        ) -> None:
+        self.fn_name = fn_name
+        self.fn_line = fn_line
+        self.block_indices = block_indices
+        self.new_name = new_name
+        self.free_vars = free_vars
+
+    @override
+    def leave_FunctionDef(self, original_node, updated_node):
+        if updated_node.name.value != self.fn_name:
+            return updated_node
+        if self.get_metadata(PositionProvider, original_node).start.line != self.fn_line:
+            return updated_node
+        kept = []
+        inserted_call = False
+        for idx, stmt in enumerate(updated_node.body.body):
+            if idx in self.block_indices:
+                if not inserted_call:
+                    kept.append(
+                        cst.SimpleStatementLine(
+                            body=[
+                                cst.Expr(
+                                    cst.Call(
+                                        func=cst.Name(self.new_name),
+                                        args=[cst.Arg(cst.Name(v)) for v in self.free_vars],
+                                    )
+                                )
+                            ]
+                        )
+                    )
+                    inserted_call = True
+            else:
+                kept.append(stmt)
+        return updated_node.with_changes(body=updated_node.body.with_changes(body=kept))
+
+
+class _InsertExtractedFn(cst.CSTTransformer):
+    """Insert the extracted function after its source function, in the same
+    container (module or class body)."""
+
+    METADATA_DEPENDENCIES = (ParentNodeProvider,)
+
+    def __init__(self, fn_name: str, fn_line: int, new_def: cst.FunctionDef) -> None:
+        self.fn_name = fn_name
+        self.fn_line = fn_line
+        self.new_def = new_def
+        self.done = False
+
+    def _maybe_insert(self, body: list) -> list:
+        if self.done:
+            return body
+        out = []
+        for stmt in body:
+            out.append(stmt)
+            if not self.done and isinstance(stmt, cst.FunctionDef) and stmt.name.value == self.fn_name:
+                out.append(self.new_def)
+                self.done = True
+        return out
+
+    @override
+    def leave_Module(self, original_node, updated_node):
+        return updated_node.with_changes(body=self._maybe_insert(list(updated_node.body)))
+
+    @override
+    def leave_ClassDef(self, original_node, updated_node):
+        return updated_node.with_changes(
+            body=updated_node.body.with_changes(body=self._maybe_insert(list(updated_node.body.body)))
+        )
+
+
+def _fn_seam_analysis(source: str, line: int):
+    """Analyze the function at `line`: its body statements with per-statement
+    spans, first-use contexts, writes, and control-flow flags."""
+    module = cst.parse_module(source)
+    wrapper = cst.MetadataWrapper(module)
+    state = _FnBodyState(line)
+    wrapper.visit(_Analyse(state))
+    return module, wrapper, state
+
+
+_BUILTINS = frozenset(dir(builtins))
+
+
+
+
+
+def extract_method_proposal(source: str, line: int, name: str):
+    """Compute the best extraction seam and the resulting source, WITHOUT
+    writing. Returns (new_source, seam_text) or (None, None) when no safe
+    seam exists."""
+    module, wrapper, state = _fn_seam_analysis(source, line)
+    if state.fn_node is None or len(state.stmt_ids) < 2:
+        return None, None
+    seam = state.best_seam()
+    if seam is None:
+        return None, None
+    block_indices, free_vars = seam
+    block_sids = [state.stmt_ids[i] for i in block_indices]
+    first_span = state.stmt_spans[block_sids[0]]
+    new_def = cst.FunctionDef(
+        name=cst.Name(name),
+        params=cst.Parameters(params=[cst.Param(cst.Name(v)) for v in free_vars]),
+        body=cst.IndentedBlock(
+            body=[s for s in state.fn_node.body.body if id(s) in set(block_sids)]
+        ),
+        returns=None,
+    )
+    replaced = wrapper.visit(
+        _ExtractMethodRewrite(state.fn_node.name.value, line, set(block_indices), name, free_vars)
+    ).code
+    inserted = cst.MetadataWrapper(cst.parse_module(replaced)).visit(
+        _InsertExtractedFn(state.fn_node.name.value, line, new_def)
+    ).code
+    seam_text = source.splitlines()[first_span[0] - 1] if source else ""
+    return inserted, f"line {first_span[0]}: {seam_text.strip()}"
+
+
+def fix_extract_method(source: str, line: int, name: str) -> str | None:
+    """Extract Function (applied): the best self-contained seam of the
+    function at `line` becomes a new function named `name`."""
+    new_source, _ = extract_method_proposal(source, line, name)
+    return new_source
+
+
+def propose_finding(kind: str, rel: str, repo: Path, line: int, opts: FixOptions | None = None):
+    """Compute the fix WITHOUT writing — the preview surface. Returns
+    (new_source, description) or (None, None) when nothing changes."""
+    opts = opts or FixOptions()
+    kind = KIND_ALIASES.get(kind, kind)
+    path = repo / rel
+    source = path.read_text(encoding="utf-8")
+    if kind == "extract-method":
+        if opts.name is None:
+            return None, None
+        new_source = fix_extract_method(source, line, opts.name)
+        return (new_source, STRUCTURAL_KINDS["extract-method"]) if new_source else (None, None)
+    return None, None
+
+
 # --------------------------------------------------------------------------- the fix surface
 
 def _fix_mechanical(kind: str, source: str, line: int, opts) -> str | None:
@@ -750,6 +1031,10 @@ def _fix_mechanical(kind: str, source: str, line: int, opts) -> str | None:
 
 def _fix_structural(kind: str, source: str, line: int, opts) -> str | None:
     """The name-driven transforms — the agent supplies the semantic bit."""
+    if kind == "extract-method":
+        if opts.name is None:
+            return None
+        return fix_extract_method(source, line, opts.name)
     if kind == "extract-class":
         return fix_extract_class(source, line, opts.name)
     if kind == "magic-number":

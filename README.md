@@ -126,8 +126,10 @@ and `unreachable` (delete the statement), `positional-literals` (keyword the
 args — callee resolved repo-wide, or supplied via `--fix-params`). Structural:
 `extract-class` moves the strewing free functions into a class named by
 `--fix-name` (default: the shared leading type) and rewrites the call sites.
-Transforms are lossless (libcst) and touch only the finding's node; the gate
-re-run confirms the fix.
+`extract-method` (for complexity/large-function findings) PREVIEWS the best
+self-contained seam as a diff — no line numbers needed, out-variables are
+never extracted — and applies only on `--confirm`. Transforms are lossless
+(libcst) and touch only the finding's node; the gate re-run confirms the fix.
 
 ## Configuration
 
