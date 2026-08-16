@@ -1,4 +1,4 @@
-# Makefile for build-tools — single dev entry point
+# Makefile for lucidlint — single dev entry point
 #
 # CHANGE: none expected — this repo is the tools themselves; add new tool
 # targets below `clean` (keep them behind `deps`, never `install-hooks`).
@@ -29,7 +29,7 @@ RED := \033[0;31m
 NC := \033[0m
 
 help:
-	@echo "build-tools — available commands:"
+	@echo "lucidlint — available commands:"
 	@echo "  ${GREEN}make setup${NC}        Create venv, install deps + pre-commit hooks"
 	@echo "  ${GREEN}make check${NC}        Lint + typecheck — the gate CI and the pre-push hook run"
 	@echo "  ${GREEN}make test${NC}         Run tests (lint + typecheck gate)"

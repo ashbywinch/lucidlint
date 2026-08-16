@@ -35,7 +35,7 @@ editor at it as a custom server command — no Python, no wrapper:
   `source: "lucidlint"`). The repo-wide families (duplicate, unused)
   are meaningless for one buffer and are dropped.
 - Latency: 5–10 ms per `didChange` on typical files, ~70 ms on the
-  4,100-line largest file in build-tools.
+  4,100-line largest file in lucidlint.
 
 The Python wrapper's `--file` mode (`lucidlint.py --repo <root> --file
 <rel> --json`) adds the one Python-only family (latent-class partition)

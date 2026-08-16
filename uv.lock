@@ -76,46 +76,6 @@ wheels = [
 ]
 
 [[package]]
-name = "build-tools"
-version = "0.1.0"
-source = { editable = "." }
-
-[package.optional-dependencies]
-fix = [
-    { name = "libcst" },
-]
-git = [
-    { name = "pygit2" },
-]
-graph = [
-    { name = "code-review-graph" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pyrefly" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "code-review-graph", marker = "extra == 'graph'", specifier = ">=2.3.7" },
-    { name = "libcst", marker = "extra == 'fix'", specifier = ">=1.9.0" },
-    { name = "pygit2", marker = "extra == 'git'", specifier = ">=1.20.0" },
-]
-provides-extras = ["git", "graph", "fix"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pyrefly", specifier = ">=1.2.0" },
-    { name = "pytest", specifier = ">=8.0.0" },
-    { name = "pytest-cov", specifier = ">=5.0.0" },
-    { name = "ruff", specifier = ">=0.11.0" },
-]
-
-[[package]]
 name = "cachetools"
 version = "7.1.7"
 source = { registry = "https://pypi.org/simple" }
@@ -804,6 +764,46 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/4d/5433d3d62250b2e4325938db101766bcab2a006819684713bcccb6259a88/libcst-1.9.0-cp315-cp315t-musllinux_1_2_x86_64.whl", hash = "sha256:9f92c75283030fd58fb7d6e560168a00381e0e3368ec8a026a3ec8a828a05f93", size = 2368709, upload-time = "2026-08-11T05:54:23.276Z" },
     { url = "https://files.pythonhosted.org/packages/87/39/9f0e1690727623f99489895db0e42048a3e1e8cea0627517c593e437fd83/libcst-1.9.0-cp315-cp315t-win_amd64.whl", hash = "sha256:4adf97bb1aff8039b0bd4991e2f838be6e4fad552821b26b71a5d1a653c2582f", size = 2177866, upload-time = "2026-08-11T05:54:25.144Z" },
     { url = "https://files.pythonhosted.org/packages/cd/79/9dc7811883e67ea771057e8937bc536eb3e77f3635fc5a93cd85b6fe1ea8/libcst-1.9.0-cp315-cp315t-win_arm64.whl", hash = "sha256:8f0dd08a5773d7051e105250b2a2c73d8065ea9b2d68e7e1bdc5244660e75f93", size = 2052908, upload-time = "2026-08-11T05:54:26.835Z" },
+]
+
+[[package]]
+name = "lucidlint"
+version = "0.1.0"
+source = { editable = "." }
+
+[package.optional-dependencies]
+fix = [
+    { name = "libcst" },
+]
+git = [
+    { name = "pygit2" },
+]
+graph = [
+    { name = "code-review-graph" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pyrefly" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "code-review-graph", marker = "extra == 'graph'", specifier = ">=2.3.7" },
+    { name = "libcst", marker = "extra == 'fix'", specifier = ">=1.9.0" },
+    { name = "pygit2", marker = "extra == 'git'", specifier = ">=1.20.0" },
+]
+provides-extras = ["git", "graph", "fix"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pyrefly", specifier = ">=1.2.0" },
+    { name = "pytest", specifier = ">=8.0.0" },
+    { name = "pytest-cov", specifier = ">=5.0.0" },
+    { name = "ruff", specifier = ">=0.11.0" },
 ]
 
 [[package]]

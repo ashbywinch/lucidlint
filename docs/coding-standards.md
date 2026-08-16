@@ -285,7 +285,7 @@ without a check is a wish:
   of well-known computation is worth it; one that adds more complexity than
   the code it replaces is not.
 
-# build-tools language conventions
+# lucidlint language conventions
 
 ## Python conventions
 

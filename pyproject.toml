@@ -1,4 +1,4 @@
-# build-tools — pyproject.toml
+# lucidlint — pyproject.toml
 #
 # CHANGE: bump requires-python with the current stable at scaffold time
 # (`uv python list` — never guess).
@@ -14,7 +14,7 @@
 #   run in any repo's environment; the scan engine is the Rust binary.
 
 [project]
-name = "build-tools"
+name = "lucidlint"
 version = "0.1.0"
 description = "Deterministic lucidlint tooling: a Rust scan core under a thin Python orchestrator"
 readme = "README.md"

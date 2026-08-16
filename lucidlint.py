@@ -1153,7 +1153,7 @@ def _render_actions(repo: Path, args, fails: list[Action], acks: list[Action]) -
         "\nre-run: python3 lucidlint.py --repo "
         + str(repo)
         + (" --baseline " + str(args.baseline) if args.baseline else "")
-        + "   | tool lives in build-tools (github.com/ashbywinch/build-tools); thresholds and"
+        + "   | tool lives in lucidlint (github.com/ashbywinch/lucidlint); thresholds and"
         + " per-action data in --json output"
     )
     print(

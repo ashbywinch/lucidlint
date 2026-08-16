@@ -1,4 +1,4 @@
-# build-tools
+# lucidlint
 
 Shared CI utilities for the house repos, plus the deterministic
 lucidlint gate (`lucidlint.py`) and its test suite. Consuming workflows
@@ -24,6 +24,8 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 
 | Task | Route to |
 |---|---|
+| User-facing entry point (what/why/install/contribute) | `README.md` |
+| LSP setup (editor-by-editor) | `docs/lsp-setup.md` |
 | Why this repo exists, requirements | `docs/PRD.md` |
 | How the tool is built | `docs/TECHSPEC.md` |
 | Phased delivery and gates | `docs/PLAN.md` |
@@ -36,7 +38,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 
 ## Tools
 
-- `check_review_posted.py` — PR review-attribution gate (env: `SHA`,
+- `check_review_posted.py (in omp-config — the harness config repo)` — PR review-attribution gate (env: `SHA`,
   `GITHUB_REPOSITORY`, `PR_NUMBER`, `GITHUB_TOKEN`)
 - the Rust scan core (`scanner/`) — every finding family; the Python
   orchestrator converts + renders

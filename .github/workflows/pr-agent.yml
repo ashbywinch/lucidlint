@@ -77,5 +77,5 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # check_review_posted.py reads GITHUB_TOKEN (the omp-config contract)
         run: |
           curl -fsSL -o check_review_posted.py \
-            https://raw.githubusercontent.com/ashbywinch/build-tools/7ff9a3c17a12e59e1e71912171746cbc2caa7bf9/check_review_posted.py
+            https://raw.githubusercontent.com/ashbywinch/omp-config/9a23d89713f89de8ab447ee135520f5088dc5cb9/tools/check_review_posted.py
           python3 check_review_posted.py

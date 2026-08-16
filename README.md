@@ -1,77 +1,105 @@
 # lucidlint — deterministic code health for humans and agents
 
-Lucidlint is a deterministic code-health gate for Python and Rust. It scans
-your codebase for architecture-level problems — complexity, duplicate code,
-swallowed errors, test quality, layering — and produces a single
-`GATE: PASS` / `GATE: FAIL` verdict. Same code, same report, every run:
-there is no model judgment anywhere in the scan.
+Lucidlint is a code-health gate for Python and Rust that tells you — and
+your coding agent — *exactly* what to fix and how, with zero guesswork.
+It scans for architecture-level problems: complexity, duplicate code,
+swallowed errors, test quality, layering. Same code, same report, every
+run — there is no model judgment anywhere in the scan, and every fix it
+offers is a deterministic refactoring the tool can apply itself.
 
-## What "lucid code" means
+Built for the era when much of the code being written is written by
+agents. A lucid codebase is one an agent — or you, six months later — can
+modify safely, because the invariants are visible and every exception is
+documented.
 
-Lucid code is code a reader — human or agent — can look at and immediately
-understand *why it exists and what it does*. Concretely, lucidlint's rules
-define it:
+```
+$ lucidlint --repo .
+GATE: FAIL — 2 action(s) ... top P99 houses/app.py:149 (parse_netex_fares)
+  [complexity] houses/app.py:149 — cyclomatic complexity 88 (>= 15) — fix: lucidlint fix --kind extract-method --file houses/app.py --line 149
+  [swallow]    houses/app.py:210 — except that swallows — re-raise or handle it
+```
 
+---
+
+## Decide if this is what you need
+
+**You want lucidlint if you write (or generate) Python or Rust and care
+that the code stays explainable:**
+
+- your functions stay under ~15 decision points and fit on a screen — and
+  complexity is *split*, not hidden in a helper that is just as big;
 - every non-trivial number is a named constant, not a magic literal;
-- every error is either handled, re-raised, or explicitly surfaced —
-  never swallowed;
-- a function has at most ~15 decision points and fits on a screen — and
-  the complexity is *split*, not hidden in a helper that is just as big;
+- every error is handled, re-raised, or explicitly surfaced — never
+  swallowed;
 - a test can actually fail — it has an assertion, doesn't skip on the
   environment, doesn't touch the real filesystem;
 - types and classes are named for the domain they model, not their role;
 - nothing is suppressed without a written reason — and suppressions that
   stop firing are deleted.
 
-**Why you want it, especially in agent-created code:** agents write code
-fast and in volume, and two failure modes compound in their output —
-*latent complexity* (each individual change looks reasonable; the function
-creeps past the complexity budget one commit at a time) and *borrowed
-patterns* (an agent copying a shape from another file propagates its
-problems). A lucid codebase is one where a future agent — or you, six
-months later — can modify any part safely, because the invariants are
-visible and the exceptions are documented. Unlucid code is where agents
-confidently make the wrong change, because the hidden state and swallowed
-errors are invisible to them too.
+**Why it matters for agent-created code.** Agents write code fast and in
+volume, and two failure modes compound in their output: *latent
+complexity* (each individual change looks reasonable; the function creeps
+past the budget one commit at a time) and *borrowed patterns* (an agent
+copying a shape from another file propagates its problems). Unlucid code
+is where agents confidently make the wrong change, because the hidden
+state and swallowed errors are invisible to them too.
+
+**What it is not:**
+
+- not a formatter or a style linter — it finds *structural* problems with
+  real consequences (a swallowed error, a function past its complexity
+  budget, a test that can never fail);
+- not a code reviewer — it makes no judgment calls, ever; the same input
+  always produces the same report;
+- not a model — the scan is a compiled binary. Deterministic checks beat
+  model judgment.
+
+**What it finds** — the full, generated rule reference is in
+[RULES.md](RULES.md). A quick map:
+
+| Area | Examples |
+|---|---|
+| Correctness | swallowed errors, debug artifacts (`dbg!`, `breakpoint`, `.unwrap()`), dead statements, unreachable code, boolean-literal args, shadowed builtins |
+| Complexity | cyclomatic CC ≥ 15, functions ≥ 120 lines, > 5 parameters, near-duplicate code |
+| Architecture | import cycles, layer violations, record-shaped structs, strewing, latent classes, churn without tests |
+| Tests | monkeypatch, skipped tests, real filesystem I/O, tests with no assertion |
+| Suppressions | every `ignore`/`allow`/`noqa` needs a written reason — and stale ones are deleted |
 
 ## Designed for agents
 
-The tool is built around how agents actually work:
+The tool is built around how agents actually work — nothing about using it
+burns tokens:
 
 - **They always understand what they should change and why.** Every
-  finding names the rule, the evidence (the exact number, function, line),
-  and — where a fix exists — the exact command to run. The message ends
-  with a machine-parseable `fix:` directive.
-- **They learn about a problem as soon as they create it.** Run as an LSP,
-  the tool checks every file on save. The agent sees the finding the moment
-  the complexity creeps past the threshold — not at review time, when the
-  context is gone.
-- **They spend minimum tokens fixing it.** Deterministic fixes mean no
-  exploration: the agent runs one command, reviews a precise diff, and
-  applies. No trial-and-error, no guessing line numbers (the tool owns its
-  coordinates), no re-scanning to see if the fix worked. Where a
-  refactoring needs a judgment call — a name — the tool shows the seam and
-  asks for just that one thing.
-
-None of this burns tokens: the scan is a compiled binary, the findings are
-one line each, and the fix flow is one command in, one diff out.
+  finding names the rule, the evidence (the exact number, function,
+  line), and the full command to run. The message ends with a
+  machine-parseable `fix:` directive.
+- **They learn about a problem as soon as they create it.** Run as an LSP
+  (see below), the tool checks every file on save — the finding appears
+  the moment the complexity creeps past the threshold, not at review time
+  when the context is gone.
+- **They spend minimum tokens fixing it.** The fix surface is one command
+  in, one diff out: the tool previews the exact seam it will move, the
+  agent supplies the one thing the tool cannot invent — a name — and the
+  refactoring lands, verified. No trial-and-error, no counting lines (the
+  tool owns its coordinates), no re-scanning to see if it worked.
 
 ### The agent loop, end to end
 
 ```
-1. Gate (or LSP on save) reports a finding:
+1. The gate (or LSP on save) reports a finding:
    [complexity] houses/app.py:149 (parse_netex_fares)
-   cyclomatic complexity 88 (>= 15) — fix: extract-method
+   cyclomatic complexity 88 (>= 15) — fix: lucidlint fix --kind extract-method
+       --file houses/app.py --line 149
 
-2. Agent runs the fix command — no name needed yet:
-   lucidlint.py --repo . --fix-kind extract-method \
-       --fix-file houses/app.py --fix-line 149
+2. The agent runs the message's command — no name needed yet:
+   lucidlint fix --kind extract-method --file houses/app.py --line 149
 
-3. The tool shows the seam as a preview — what moves, its signature,
+3. The tool shows the seam as a preview — what moves, its new signature,
    its first lines, and the exact command to apply:
    ...
    -    for dmep in root.iter():
-   -        tag = _unprefixed(dmep.tag)
    ...
    +    _extracted(dme_zone_pairs, root, zone_fares)
    # seam: line 305: for dmep in root.iter():
@@ -80,221 +108,218 @@ one line each, and the fix flow is one command in, one diff out.
 
    def _extracted(dme_zone_pairs, root, zone_fares):
        for dmep in root.iter():
-           tag = _unprefixed(dmep.tag)
    ...
    # the name `_extracted` is a placeholder — pick a real one; apply it:
-   #   --fix-kind extract-method --fix-file houses/app.py --fix-line 149 \
-   #   --fix-name <name>
+   #   lucidlint fix --kind extract-method --file houses/app.py --line 149 \
+   #     --name lookup_dmep_prices
 
 4. The agent supplies the semantic bit — the name — and applies:
-   lucidlint.py --repo . --fix-kind extract-method \
-       --fix-file houses/app.py --fix-line 149 --fix-name lookup_dmep_prices
+   lucidlint fix --kind extract-method --file houses/app.py \
+       --line 149 --name lookup_dmep_prices
 
-5. The extraction lands: a private helper (the underscore is applied
-   automatically — a fresh extraction has no external callers), the
-   original function drops under the complexity gate, and the next gate
-   run is clean. The tool verifies its own work: if the seam can't
-   actually split the complexity, it refuses rather than proposing a
-   broken refactoring.
+5. The extraction lands: a private helper (the underscore is automatic —
+   a fresh extraction has no external callers), the original function
+   drops under the gate, and the next run is clean. The tool verifies its
+   own work: if the seam can't actually split the complexity, it refuses
+   rather than proposing a broken refactoring.
 ```
 
-## Quick start
+---
+
+## Install
+
+**Requirements:** Python ≥ 3.12, 64-bit Linux / macOS / Windows. The scan
+engine ships as a compiled binary — the bundle is self-contained, no
+`cargo`, no `PATH` fiddling.
+
+### Option 1 — the release bundle (recommended, self-contained)
+
+Download the archive for your platform from the
+[releases page](https://github.com/ashbywinch/lucidlint/releases)
+(`SHA256SUMS` is published alongside for verification):
+
+```
+linux x64   lucidlint-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz
+macOS arm64 lucidlint-vX.Y.Z-aarch64-apple-darwin.tar.gz
+macOS x64   lucidlint-vX.Y.Z-x86_64-apple-darwin.tar.gz
+Windows x64 lucidlint-vX.Y.Z-x86_64-pc-windows-msvc.tar.gz
+```
 
 ```bash
-# 1. Download the latest release bundle
-#    (https://github.com/ashbywinch/build-tools/releases)
-#    Choose your platform: linux musl, macos arm64/x64, windows x64
-
-tar xzf lucidlint-v0.1.0-<platform>.tar.gz
-cd lucidlint-v0.1.0-<platform>/
-
-# 2. Run the gate on a Python or Rust project
-./bin/lucidlint --version        # "lucidlint v0.1.0"
-python3 lucidlint.py --repo .  # GATE: PASS / FAIL
-
-# 3. (optional) Acknowledge today's debt — the gate then fails only on NEW findings
-python3 lucidlint.py --repo . --update-baseline --baseline lucidlint.json
+tar xzf lucidlint-vX.Y.Z-<platform>.tar.gz
+cd lucidlint-vX.Y.Z-<platform>/
+./bin/lucidlint --version        # "lucidlint vX.Y.Z"
+python3 lucidlint.py --repo .    # GATE: PASS / FAIL
 ```
 
-The bundle is self-contained: `lucidlint.py` finds its sibling `bin/lucidlint` by itself — no `PATH`, no `make`, no `cargo` needed.
+The orchestrator finds its sibling `bin/lucidlint` by itself — no PATH, no
+make, no cargo.
 
-## What it finds
-
-[**Full rule reference → RULES.md**](RULES.md)
-
-| Group | What the gate flags |
-|---|---|
-| **Style & correctness** | Magic numbers, dead statements, unreachable code, `dbg!()`/`.unwrap()`/`breakpoint()` left in, boolean-literal arguments, shadowed builtins, broad excepts, swallowed errors, inline/private imports, unused functions, circular imports, broken doc links |
-| **Complexity & size** | Cyclomatic CC ≥ 15, functions ≥ 120 lines, > 5 parameters, near-duplicate code |
-| **Architecture** | Import cycles, layer violations, folder community splits, hub files, high-risk untested functions, record-shaped structs, strewing, latent classes, abstract classes with one subclass, churn without tests |
-| **Test discipline** | `monkeypatch` / `patch` instead of DI, `skipif`/`#[ignore]`/permanent skips, real filesystem I/O without `pyfakefs`, tests with no assertion |
-| **Suppressions** | Any `ignore` / `allow` / `type: ignore` / `noqa` without a written reason — plus suppressions that no longer fire (stale) |
-| **Refactoring advice** | Guard clauses, latent visitors, conditional polymorphism, special cases, middle men, unused setters, loop pipelines — detected, never blocked |
-| **&dagger; Controversial** | Vague role names (Manager/Handler), closures as missed classes, inline imports for performance, swallowed errors, global state, file churn × CC hotspots, community-based folder mixing, similarity-based duplicates |
-
-&dagger; These rules can conflict with existing team conventions or framework idioms. Each is individually suppressible (see RULES.md). A rule that doesn't fit your project is acknowledged debt, not a blocker.
-
-## Verdict
-
-```
-GATE: PASS — 0 action(s) acknowledged in baseline (29 warnings reported, never fail)
-```
-
-The gate exits:
-
-| Exit | Meaning |
-|---|---|
-| **0** | **PASS** — clean, or all findings are acknowledged in the baseline; only warnings (magic numbers, broad excepts) remain |
-| **1** | **FAIL** — new fail-severity findings exist, or the baseline contains entries the code no longer produces (stale baseline — run `--update-baseline`) |
-| **2** | Usage or configuration error |
-
-- **Warn tier**: Findings like magic numbers are reported but never cause a FAIL. They're visible in the output so you can fix them if you want, but they don't block merges.
-- **Baselines**: `--update-baseline --baseline lucidlint.json` captures the current state of fail-severity findings. Subsequent runs only fail on NEW findings. A stale baseline (entries that no longer correspond to any code) is itself a FAIL — your debt shrinks, and the baseline shrinks with it.
-
-## Using lucidlint from a script
-
-The gate is a plain CLI — call it anywhere a shell runs:
-
-**Git pre-commit hook** (`.git/hooks/pre-commit`, or via `pre-commit`):
+### Option 2 — pip (the `lucidlint` command)
 
 ```bash
-#!/bin/sh
-# fail the commit on new findings; acknowledge known debt in lucidlint.json
-python3 /path/to/lucidlint.py --repo . --baseline lucidlint.json || exit 1
+pip install lucidlint            # once published to PyPI
+# or directly from GitHub today:
+pip install "git+https://github.com/ashbywinch/lucidlint.git"
+lucidlint --repo .
 ```
 
-**CI** (any runner — the exit code is the verdict):
+The pip install gives the `lucidlint` command (no `.py`, no flags with
+`fix-` prefixes). It needs the scan binary — install one of the release
+bundles and the orchestrator finds it, or build it once with
+`make scanner-check`.
 
-```yaml
-# GitHub Actions
-- name: lucidlint gate
-  run: python3 lucidlint.py --repo . --baseline lucidlint.json
-# other CI: run the same command; exit 1 blocks the pipeline
-```
+### Option 3 — as an LSP (checks what you type, on save)
 
-**A full scan with JSON output** (for other tooling):
-
-```bash
-python3 lucidlint.py --repo . --json > lucidlint-report.json
-```
-
-The JSON has the full action model: kind, severity, file, line, function,
-message, metric, churn, priority. The scan itself never needs a git remote
-or network — it reads the working tree and (optionally) the
-`code-review-graph` contract and `coverage.xml` if you have them.
-
-## Installation as an LSP
-
-The same binary serves as a language server — it checks what you type, in
-your editor, on save. Each LSP method (`didOpen`, `didChange`, `didSave`)
-runs the per-file scan *in process* (no shell, no spawn) and returns
-diagnostics.
-
-### Generic LSP configuration
-
-Point your editor's LSP client at:
+The same binary is a language server. Point your editor's LSP client at:
 
 ```
 lucidlint --lsp
 ```
 
-The binary speaks stdio JSON-RPC (Content-Length framing). Any editor with
-LSP support can use it.
+The binary speaks stdio JSON-RPC and checks `.py` and `.rs` files — each
+`didOpen`/`didChange`/`didSave` runs the per-file scan in process and
+returns diagnostics, so you (or your agent) see findings the moment they
+are created. Editor recipes (VS Code, Neovim, Emacs/eglot, Helix) are
+[in this repo's docs](docs/lsp-setup.md).
 
-### Editor-specific notes
+### Option 4 — from a script (git hooks, CI)
 
-**VS Code**: Create a `.vscode/tasks.json` or a custom extension that starts the server. Alternatively, use the "LSP Client" extension (or your preferred one) with the command `lucidlint --lsp`.
-
-**Neovim** (built-in LSP):
-```lua
-vim.api.nvim_create_autocmd({ "BufEnter" }, {
-  pattern = { "*.py", "*.rs" },
-  callback = function()
-    vim.lsp.start({
-      name = "lucidlint",
-      cmd = { "/path/to/lucidlint", "--lsp" },
-    })
-  end,
-})
-```
-
-**Emacs** (eglot):
-```elisp
-(add-to-list 'eglot-server-programs
-  '((python-mode rust-mode) . ("/path/to/lucidlint" "--lsp")))
-```
-
-**Helix** (built-in LSP — add to your `languages.toml`):
-```toml
-[language-server.lucidlint]
-command = "/path/to/lucidlint"
-args = ["--lsp"]
-
-[[language]]
-name = "python"
-language-servers = ["lucidlint"]
-
-[[language]]
-name = "rust"
-language-servers = ["lucidlint"]
-```
-
-## Auto-fixing findings
-
-Every fixable finding's message ends with a machine-parseable `fix:`
-directive — the agent (or you) runs it and the tool does the rest. The
-flow differs by fix family:
-
-- **Mechanical** (stale-suppression, noop-statement, unreachable,
-  positional-literals): apply directly — the tool edits the one node,
-  losslessly (libcst), and the gate re-run confirms the finding is gone.
-- **Structural** (extract-method, extract-class, long-param-list,
-  magic-number, vague-name): the tool previews first. No name needed to
-  see the seam; the preview shows the diff, the seam anchor, the new
-  signature, and the exact apply command. Then one tool call with the
-  name applies it — the name IS the commitment, no `--confirm` dance.
+The gate is a plain CLI — call it anywhere a shell runs:
 
 ```bash
-# preview a complexity extraction (no name needed):
-lucidlint.py --repo . --fix-kind extract-method --fix-file x.py --fix-line 149
-# apply it, naming the extracted method:
-lucidlint.py --repo . --fix-kind extract-method --fix-file x.py \
-    --fix-line 149 --fix-name lookup_dmep_prices
-# mechanical fix, direct:
-lucidlint.py --repo . --fix-kind stale-suppression --fix-file x.py --fix-line 12
+# git pre-commit hook
+python3 lucidlint.py --repo . --baseline lucidlint.json || exit 1
 ```
 
-The tool guarantees the refactoring is correct: seams are self-contained
-(no out-variables, no control flow moved), bounded to split the complexity
-on both sides, and verified by behavior-preservation tests. When no safe
-seam exists it says so — it never writes a broken file.
+```yaml
+# CI (GitHub Actions — the exit code is the verdict; other CI: same command)
+- name: lucidlint gate
+  run: python3 lucidlint.py --repo . --baseline lucidlint.json
+```
 
-## Configuration
+`--json` emits the full action model (kind, severity, file, line,
+function, message, metric, churn, priority) for other tooling. The scan
+never needs a network or a remote — it reads the working tree.
 
-Create a `.lucidlint.toml` in your repo root (or add a `[tool.lucidlint]` section to `pyproject.toml`) to suppress entire rules or rule groups across your codebase:
+### First run and the baseline
+
+```bash
+lucidlint --repo .                 # see today's debt
+lucidlint --repo . --update-baseline --baseline lucidlint.json   # acknowledge it
+lucidlint --repo . --baseline lucidlint.json   # now fails only on NEW findings
+```
+
+Baselines lock today's debt so the gate blocks only what is new — and a
+baseline entry whose finding disappeared is itself a FAIL (your debt
+shrinks, the baseline shrinks with it).
+
+---
+
+## Use
+
+### The gate
+
+`lucidlint --repo .` prints a verdict and the prioritized findings, and
+exits:
+
+| Exit | Meaning |
+|---|---|
+| 0 | PASS — clean, or everything is baselined; warnings (magic numbers, broad excepts) are reported but never block |
+| 1 | FAIL — new fail-severity findings, or the baseline is stale |
+| 2 | usage or configuration error |
+
+### The fix surface
+
+Every fixable finding's message ends with the full command — copy it, run
+it. The `fix` subcommand:
+
+```
+lucidlint fix --kind <family> --file <file> [--line <line>] [--name <name>] [--params a,b] [--confirm]
+```
+
+- **Mechanical** families (stale-suppression, noop-statement, unreachable,
+  positional-literals) apply directly — the tool edits the one node,
+  losslessly, and the next run confirms the finding is gone.
+- **Structural** families (extract-method, extract-class, long-param-list,
+  magic-number, vague-name) preview first — the tool shows the diff, the
+  seam, the new signature, and the exact apply command; the name IS the
+  commitment. `--line` is optional when the file has exactly one finding
+  of the kind (R27: the tool owns its coordinates — agents never count
+  lines).
+
+### Configuration
+
+A `.lucidlint.toml` (or `[tool.lucidlint]` in `pyproject.toml`) silences
+rules or whole groups repo-wide, with per-path overrides:
 
 ```toml
-# Suppress specific rules
 [lucidlint]
-ignore = ["vague-name", "inline-import"]
-
-# Suppress whole groups (definitions in RULES.md)
-# ignore = ["group:architecture", "group:test-discipline"]
-
-# Per-path overrides — silence rules only in certain paths
+ignore = ["vague-name"]
 [lucidlint."tests/**"]
 ignore = ["group:architecture"]
-
-[lucidlint."scripts/**"]
-ignore = ["global-state"]
 ```
 
-The config works at the orchestrator level — no recompile needed, no per-file suppression comments. The same rule references as the suppression system (`ignore` + `group:` prefix) with the same semantics: every rule can be silenced, and a config change is visible in the repo's diff.
+Every rule is individually suppressible — a rule that doesn't fit your
+project is acknowledged debt, not a blocker.
 
-## Project status
+---
 
-Lucidlint is in active development toward a v0.8 public release. The version scheme is 0.x — minor bumps per capability (release pipeline, fleet wiring, PyPI wheels, the Rust library split). The rule set grows with each minor version; baselines absorb new findings so existing projects stay green.
+## Contribute
 
-## License & contributing
+Everything is deterministic and tested, and the tool gates its own repo —
+`make self-check` must pass before a change lands (the house code is the
+exemplar of every rule it enforces).
 
-MIT. Issues and PRs at [github.com/ashbywinch/build-tools](https://github.com/ashbywinch/build-tools).
+**Repo layout**
+
+| Path | What it is |
+|---|---|
+| `scanner/` | the Rust scan core: every finding family + the radon-exact CC (`radonc/`), the LSP, the CLI scan |
+| `lucidlint.py` | the orchestrator: file gathering, actions, ranking, baselines, the gate verdict, the `fix` subcommand |
+| `fix_engine.py` | the deterministic refactorings (libcst): extract-method, extract-class, parameter objects, renames |
+| `rule_metadata.py` | the canonical rule registry — RULES.md is generated from it (`make rules`) |
+| `docs/` | PRD (requirements), TECHSPEC (mechanics), PLAN (phases), the standards |
+
+**Getting started**
+
+```bash
+make setup          # symlink hooks etc.
+make test           # lint + typecheck + scanner tests + pytest
+make self-check     # the tool gates itself — must be GATE: PASS
+make rules          # regenerate RULES.md from rule_metadata.py
+```
+
+**Adding a finding family** — follow the checklist in
+[RULES.md](RULES.md) ("Adding a finding family"): emit it in the scanner,
+register it in `FAMILY_KINDS` + `RULE_GROUPS` + `rule_metadata.py`,
+add the `fix:` directive, test it, and keep `make self-check` green.
+
+**How it works** — the requirements live in [docs/PRD.md](docs/PRD.md),
+the mechanics in [docs/TECHSPEC.md](docs/TECHSPEC.md), the delivery plan
+in [docs/PLAN.md](docs/PLAN.md).
+
+---
+
+## Documentation index
+
+- **[RULES.md](RULES.md)** — every rule, severity, language, and what it
+  checks (generated from `rule_metadata.py`).
+- **[docs/PRD.md](docs/PRD.md)** — the product requirements (R1–R27): why
+  each capability exists.
+- **[docs/TECHSPEC.md](docs/TECHSPEC.md)** — how it's built: components,
+  object model, architecture, technology choices, strategic decisions.
+- **[docs/PLAN.md](docs/PLAN.md)** — the delivery phases.
+- **[docs/lsp-setup.md](docs/lsp-setup.md)** — editor-by-editor LSP
+  configuration.
+- **[docs/coding-standards.md](docs/coding-standards.md)** ·
+  **[docs/testing-standards.md](docs/testing-standards.md)** ·
+  **[docs/ux-standards.md](docs/ux-standards.md)** — the house standards
+  the tool enforces (and the ones scaffolded into new repos).
+- **[docs/writing-documentation.md](docs/writing-documentation.md)** ·
+  **[docs/documentation-structure.md](docs/documentation-structure.md)** —
+  the documentation standards.
+
+## License
+
+MIT. Issues and PRs at [github.com/ashbywinch/lucidlint](https://github.com/ashbywinch/lucidlint).

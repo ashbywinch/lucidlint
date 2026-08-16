@@ -107,7 +107,7 @@ rather than a number.
 - **Longevity.** The tool passes its own checks (self-run, record gate,
   regression tests); its messages carry the house dialect so agents and
   humans converge on the same fixes.
-- **Hosting.** build-tools repo; fetched by consuming workflows at run time
+- **Hosting.** lucidlint repo; fetched by consuming workflows at run time
   (pin to a tag, never main). No runtime services.
 
 ## Requirements learned this session (2026-08-14)
