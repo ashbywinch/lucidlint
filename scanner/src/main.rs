@@ -154,7 +154,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 // The radon-equivalent CC comes from the radonc crate (its rules
                 // match radon 6.0.1 exactly; the visitor still tracks decisions
                 // for the closures/latent-class gate).
-                let cc = radonc::function_cc(f);
+                let cc = radonc::function_cc(f) as u32;
                 // repo-wide collections: module-level defs + duplicate
                 // candidates (the def line is the NAME's line — ruff's
                 // FunctionDef range starts at the decorator)

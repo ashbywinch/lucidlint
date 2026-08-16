@@ -232,6 +232,16 @@ rather than a number.
   I/O like sqlite3 — and `# code-health: ignore-file <signal> <why>`
   exempts a whole file with an explanation (a why-less ignore-file is
   itself a finding).
+- **R26 — The radonc crate mirrors upstream radon structurally.** The
+  cyclomatic-complexity rules that power the complexity finding are a
+  port of the Python radon library, kept in a standalone crate
+  (`radonc`) whose module layout, public function names, and test cases
+  mirror `radon/visitors.py`, `radon/complexity.py`, and
+  `tests/test_complexity_visitor.py` as closely as the language boundary
+  allows. The intent: diffing the crate against upstream radon is
+  mechanical, updating it when radon changes is findable, and handing it
+  to the original maintainers would require only a rename. radon's MIT
+  license is preserved verbatim in the crate's NOTICE.
 - **R25 — A swallow must fail fast; a surfaced handler is not one.** A
   catch that neither re-raises nor exits with control flow (no return,
   no break/continue) is invisible — bare, empty, and log-only handlers
