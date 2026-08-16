@@ -601,7 +601,7 @@ impl<'a> Visit<'a> for RsState<'a> {
                             let line = f.sig.span().start().line;
                             self.finding(
                                 "detached-method",
-                                "fail",
+                                "warn",
                                 line,
                                 &f.sig.ident.to_string(),
                                 format!(

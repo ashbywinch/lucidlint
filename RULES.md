@@ -65,7 +65,7 @@ with a why).
 | **closures → latent-class** | fail | A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line span) — the nested structure is a class waiting to be extracted |
 | **strewing** | fail | ≥3 free functions sharing the same leading parameter — they share data, they're a class |
 | **record-shape** | fail | A function takes a struct/class with ≥5 fields and no methods — the struct's rules belong as methods on it |
-| **detached-method** | fail | A method that never touches its receiver — it doesn't use instance state; make it a `@staticmethod`/associated fn or move it out of the class |
+| **detached-method** | **warn** | A method that never touches its receiver — a classmethod should always use `cls`; a plain method should use `self` or move out — it doesn't use instance state; make it a `@staticmethod`/associated fn or move it out of the class |
 | **duplicate** | fail | Dice similarity ≥ 0.9 (structural skeleton bigrams) — copy-paste; extract the shared logic |
 | **layer-mix** | fail | A file calls into multiple architectural layers (determined via the code-review-graph contract) — files belong in one layer |
 | **folder-mix** | fail | Files in a directory are split across graph communities — they belong together |

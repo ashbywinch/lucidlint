@@ -445,7 +445,7 @@ pub fn detached_method_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
         line,
         function: fn_name.clone(),
         kind: "detached-method".into(),
-        severity: "fail".into(),
+        severity: "warn".into(),
         message: format!(
             "method '{fn_name}' never uses '{recv}' — it does not touch instance state; make it a @staticmethod or move it out of the class"
         ),
