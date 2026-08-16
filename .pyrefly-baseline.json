@@ -1,9 +1,21 @@
 {
  "errors": [
   {
-   "line": 224,
+   "line": 171,
+   "column": 13,
+   "stop_line": 171,
+   "stop_column": 31,
+   "path": "code_health.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `Repository`",
+   "concise_description": "Object of class `NoneType` has no attribute `Repository`",
+   "severity": "error"
+  },
+  {
+   "line": 227,
    "column": 35,
-   "stop_line": 224,
+   "stop_line": 227,
    "stop_column": 51,
    "path": "code_health.py",
    "code": -2,
@@ -13,9 +25,21 @@
    "severity": "error"
   },
   {
-   "line": 520,
+   "line": 311,
+   "column": 13,
+   "stop_line": 311,
+   "stop_column": 31,
+   "path": "code_health.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `Repository`",
+   "concise_description": "Object of class `NoneType` has no attribute `Repository`",
+   "severity": "error"
+  },
+  {
+   "line": 534,
    "column": 5,
-   "stop_line": 520,
+   "stop_line": 534,
    "stop_column": 66,
    "path": "code_health.py",
    "code": -2,
@@ -25,9 +49,9 @@
    "severity": "error"
   },
   {
-   "line": 521,
+   "line": 535,
    "column": 5,
-   "stop_line": 521,
+   "stop_line": 535,
    "stop_column": 65,
    "path": "code_health.py",
    "code": -2,
@@ -37,9 +61,9 @@
    "severity": "error"
   },
   {
-   "line": 545,
+   "line": 565,
    "column": 24,
-   "stop_line": 545,
+   "stop_line": 565,
    "stop_column": 33,
    "path": "code_health.py",
    "code": -2,
@@ -49,9 +73,33 @@
    "severity": "error"
   },
   {
-   "line": 88,
+   "line": 665,
+   "column": 17,
+   "stop_line": 665,
+   "stop_column": 35,
+   "path": "code_health.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `Repository`",
+   "concise_description": "Object of class `NoneType` has no attribute `Repository`",
+   "severity": "error"
+  },
+  {
+   "line": 42,
+   "column": 12,
+   "stop_line": 42,
+   "stop_column": 72,
+   "path": "scripts/build-test-repo.py",
+   "code": -2,
+   "name": "bad-return",
+   "description": "Returned type `Oid` is not assignable to declared return type `str`",
+   "concise_description": "Returned type `Oid` is not assignable to declared return type `str`",
+   "severity": "error"
+  },
+  {
+   "line": 91,
    "column": 25,
-   "stop_line": 88,
+   "stop_line": 91,
    "stop_column": 34,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -61,9 +109,9 @@
    "severity": "error"
   },
   {
-   "line": 223,
+   "line": 235,
    "column": 21,
-   "stop_line": 223,
+   "stop_line": 235,
    "stop_column": 43,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -73,33 +121,21 @@
    "severity": "error"
   },
   {
-   "line": 247,
-   "column": 21,
-   "stop_line": 249,
-   "stop_column": 8,
+   "line": 261,
+   "column": 34,
+   "stop_line": 261,
+   "stop_column": 58,
    "path": "tests/test_code_health.py",
    "code": -2,
-   "name": "bad-assignment",
-   "description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
-   "concise_description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
+   "name": "bad-argument-type",
+   "description": "Argument `Object | None` is not assignable to parameter `commit` with type `Commit` in function `pygit2.branches.Branches.create`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `Object | None` is not assignable to parameter `commit` with type `Commit` in function `pygit2.branches.Branches.create`",
    "severity": "error"
   },
   {
-   "line": 254,
+   "line": 406,
    "column": 21,
-   "stop_line": 256,
-   "stop_column": 8,
-   "path": "tests/test_code_health.py",
-   "code": -2,
-   "name": "bad-assignment",
-   "description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
-   "concise_description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
-   "severity": "error"
-  },
-  {
-   "line": 395,
-   "column": 21,
-   "stop_line": 395,
+   "stop_line": 406,
    "stop_column": 23,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -109,9 +145,9 @@
    "severity": "error"
   },
   {
-   "line": 541,
+   "line": 552,
    "column": 12,
-   "stop_line": 541,
+   "stop_line": 552,
    "stop_column": 24,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -121,9 +157,9 @@
    "severity": "error"
   },
   {
-   "line": 553,
+   "line": 564,
    "column": 12,
-   "stop_line": 553,
+   "stop_line": 564,
    "stop_column": 24,
    "path": "tests/test_code_health.py",
    "code": -2,

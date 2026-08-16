@@ -69,6 +69,9 @@ check: deps lint-check typecheck
 
 # The Rust scan core must be freshly built before pytest — the orchestrator
 # tests drive the real binary, and a stale binary would test nothing.
+test-fixture:
+	@$(PYTHON) scripts/build-test-repo.py
+
 test: deps lint-check typecheck scanner-check scanner-test
 	@$(PYTEST) tests/ -q --tb=short
 

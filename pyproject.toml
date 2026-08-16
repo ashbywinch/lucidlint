@@ -19,7 +19,9 @@ version = "0.1.0"
 description = "Deterministic code-health tooling: a Rust scan core under a thin Python orchestrator"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pygit2>=1.20.0",
+]
 
 [project.optional-dependencies]
 graph = ["code-review-graph>=2.3.7"]

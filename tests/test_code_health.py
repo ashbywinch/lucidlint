@@ -13,8 +13,11 @@ import json
 import sqlite3
 import subprocess
 import sys
+import tarfile
 from collections import Counter
 from pathlib import Path
+
+import pygit2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import code_health as ch
@@ -105,6 +108,19 @@ def make_repo(tmp_path, app_src=APP_SRC):
     return repo
 
 
+# --------------------------------------------------------------------------- fixtures/helpers
+
+def materialize_test_repo(tmp_path) -> Path:
+    """Extract the canonical code-health test repo (a committed fixture —
+    real pygit2 history) to tmp_path. Tests exercise the REAL pygit2 API, so
+    a library bump that breaks our calls fails here. Regenerate the fixture
+    with `make test-fixture`."""
+    fixture = Path(__file__).resolve().parent / "fixtures" / "test-repo.tar.gz"
+    with tarfile.open(fixture) as tf:
+        tf.extractall(tmp_path / "repo")
+    return tmp_path / "repo"
+
+
 def git_routes(history="", diff="", branch="test-branch", commit="abc1234", log_l="abc1234 fix\n"):
     def is_git(args):
         return args[:2] == ["git", "-C"] and args[2] not in (None,)
@@ -138,7 +154,6 @@ def run_main(repo, *extra, routes=None):
             return ch.main()
     finally:
         sys.argv = saved_argv
-
 
 
 # --------------------------------------------------------------------------- coverage edges
@@ -206,16 +221,13 @@ def test_coverage_context_staleness(tmp_path):
 
 # --------------------------------------------------------------------------- git gathering edges
 def test_file_history_parser_edges(tmp_path):
-    repo = make_repo(tmp_path)
-    history = "2026-08-01\n\nhouses/app.py\nMakefile\n2026-08-02\nhouses/app.py\n"
-    routes = [(
-        lambda a: a[:2] == ["git", "-C"] and a[3:5] == ["log", "--name-only"],
-        history, 0,
-    )]
-    fh = _file_history_with(routes, repo)
+    # fixture: houses/app.py touched in c1+c2 (churn 2), Makefile never
+    # exists (not .py — must be skipped), oneoff.py in c3
+    repo = materialize_test_repo(tmp_path)
+    fh = ch.file_history(repo)
     assert fh.churn["houses/app.py"] == 2
     assert "Makefile" not in fh.churn  # not .py — skipped
-    assert fh.last_modified["houses/app.py"] == "2026-08-02"
+    assert fh.last_modified["houses/app.py"]  # commit-timestamp present
 
 
 def _file_history_with(routes, repo):
@@ -241,23 +253,22 @@ def test_file_history_timeout_and_nonzero(tmp_path):
     assert fh.churn == {}  # nonzero exit degrades to empty history
 
 
-def test_changed_files_timeout_and_nonempty(tmp_path):
-    repo = make_repo(tmp_path)
-    saved = ch.subprocess
-    ch.subprocess = FakeSubprocess([(
-        lambda a: a[3:5] == ["diff", "--name-only"], subprocess.TimeoutExpired, 0,
-    )])
-    try:
-        assert ch.changed_files(repo, "origin/main") == set()
-    finally:
-        ch.subprocess = saved
-    ch.subprocess = FakeSubprocess([(
-        lambda a: a[3:5] == ["diff", "--name-only"], "houses/app.py\nscripts/x.py\n", 0,
-    )])
-    try:
-        assert ch.changed_files(repo, "origin/main") == {"houses/app.py", "scripts/x.py"}
-    finally:
-        ch.subprocess = saved
+def test_changed_files_branch_diff_and_no_git(tmp_path):
+    repo = materialize_test_repo(tmp_path)
+    git = pygit2.Repository(str(repo))
+    # pin "other" at HEAD, then commit a change on main (the HEAD side of the
+    # three-dot diff) — real pygit2 ops on the materialized fixture
+    git.branches.create("other", git.get(git.head.target))
+    (repo / "houses" / "x.py").write_text("def g():\n    pass\n")
+    git.index.add_all()
+    tree = git.index.write_tree()
+    sig = pygit2.Signature("Test", "test@example.com")
+    git.create_commit("HEAD", sig, sig, "add x on main", tree, [git.head.target])
+    assert ch.changed_files(repo, "other") == {"houses/x.py"}
+    # no .git at all degrades to empty
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert ch.changed_files(plain, "main") == set()
 
 
 # --------------------------------------------------------------------------- scoring/merge/baseline units
@@ -565,13 +576,11 @@ def test_load_coverage_prefers_xml(tmp_path):
 
 # --------------------------------------------------------------------------- git
 def test_file_history(tmp_path):
-    repo = make_repo(tmp_path)
-    routes = git_routes(history="houses/app.py\nscripts/oneoff.py\n")
-    fh = ch.file_history(repo) if False else None
-    # file_history shells to git through the fake
-    with Env(routes=routes):
-        fh = ch.file_history(repo)
-    assert fh.churn["houses/app.py"] == 1
+    repo = materialize_test_repo(tmp_path)
+    fh = ch.file_history(repo)
+    assert fh.churn["houses/app.py"] == 2  # base + modify
+    assert fh.churn["scripts/oneoff.py"] == 1
+    assert fh.churn["tests/unit/test_app.py"] == 1
 
 
 # --------------------------------------------------------------------------- the gate

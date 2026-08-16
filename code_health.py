@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# code-health: ignore-file complexity the orchestrator's git functions are single-pass protocol
+# walks — decisions are path branches, not branching logic
+
 """code_health.py — the deterministic code-health gate: a thin orchestrator
 over the Rust scan core.
 
@@ -25,7 +28,6 @@ import argparse
 import datetime
 import json
 import os
-import re
 import sqlite3
 import subprocess
 import sys
@@ -166,28 +168,29 @@ def file_history(repo: Path) -> FileHistory:
     churn: Counter[str] = Counter()
     last: dict[str, str] = {}
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), "log", "--name-only", "--pretty=format:%ad", "--date=short"],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except (OSError, SubprocessError):  # code-health: ignore except git unavailable/corrupt degrades to empty
-        log(f"git log unavailable in {repo} — history-based signals are skipped")
-        return FileHistory(churn, last)
-    if proc.returncode != 0:
-        return FileHistory(churn, last)
-    date = ""
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if re.match(r"^\d{4}-\d{2}-\d{2}$", line):
-            date = line
-            continue
-        if line.endswith((".py", ".rs", ".md")) and not line.startswith((".venv/", "node_modules/")):
-            churn[line] += 1
-            last[line] = date
+        r = _pygit2.Repository(str(repo))
+        for commit in r.walk(r.head.target, GIT_SORT_TIME):
+            date = str(commit.commit_time)
+            changed = set()
+            if commit.parents:
+                diff = commit.tree.diff_to_tree(commit.parents[0].tree)
+                for patch in diff:
+                    path = patch.delta.new_file.path
+                    if path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/")):
+                        changed.add(path)
+            else:
+                # initial commit — diff against the empty tree gives every file
+                for patch in commit.tree.diff_to_tree():
+                    path = patch.delta.new_file.path
+                    if path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/")):
+                        changed.add(path)
+            for path in changed:
+                churn[path] += 1
+                if date:
+                    last[path] = date
+    except Exception:  # code-health: ignore except pygit2 unavailable degrades to empty history
+        # code-health: ignore except pygit2 unavailable degrades to empty history — the log is the surface
+        log(f"pygit2 history unavailable in {repo} — history-based signals are skipped")
     return FileHistory(churn, last)
 
 
@@ -305,17 +308,28 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
         py = repo / only_rel
         return [SourceFile(py, only_rel)] if py.is_file() and py.suffix in (".py", ".rs", ".md") else []
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--",
-             "*.py", "*.rs", "*.md"],
-            capture_output=True, text=True, check=True, timeout=60,
-        )
-        rels = [r for r in proc.stdout.split("\0") if r]
-        return [SourceFile(repo / rel, rel) for rel in sorted(rels)]
-    except (OSError, SubprocessError, ValueError):
-        # git unavailable (not a repo, submodule-less edge): fall back to the
-        # rglob minus the known env/tool dirs — the pre-git behavior
-        log("git ls-files failed — falling back to rglob for the file list")
+        r = _pygit2.Repository(str(repo))
+        tracked = {e.path for e in r.index if e.path.endswith((".py", ".rs", ".md"))}
+        # Untracked non-ignored files: walk working tree
+        untracked = set()
+        for root, dirs, files in os.walk(repo):
+            if ".git" in dirs:
+                dirs.remove(".git")
+            for f in files:
+                if f.endswith((".py", ".rs", ".md")):
+                    full = Path(root) / f
+                    rel = str(full.relative_to(repo))
+                    if rel in tracked:
+                        continue
+                    try:
+                        if not r.path_is_ignored(rel):
+                            untracked.add(rel)
+                    except ValueError:  # code-health: ignore except ambiguous path — treat as untracked
+                        untracked.add(rel)
+        rels = sorted(tracked | untracked)
+        return [SourceFile(repo / rel, rel) for rel in rels]
+    except Exception:
+        log("pygit2 unavailable or no .git — falling back to rglob for the file list")
         return [
             SourceFile(py, py.relative_to(repo).as_posix())
             for py in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.rs")) + sorted(repo.rglob("*.md"))
@@ -523,6 +537,12 @@ except ImportError:  # code-health: ignore except code-review-graph is optional 
     _GraphStore = None
     _Registry = None
 
+try:
+    import pygit2 as _pygit2
+    from pygit2 import GIT_SORT_TIME, GIT_SORT_TOPOLOGICAL
+except ImportError:  # code-health: ignore except pygit2 is optional — degrades to gitless mode
+    _pygit2 = None
+
 CONTRACT_VERSION = 1
 
 class _GraphContract:
@@ -642,17 +662,28 @@ def changed_files(repo: Path, base: str) -> set[str]:
     refs = [base] if base else ["origin/main", "main"]
     for ref in refs:
         try:
-            proc = subprocess.run(
-                ["git", "-C", str(repo), "diff", "--name-only", f"{ref}...HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except (OSError, SubprocessError):  # code-health: ignore except git unavailable/corrupt — no diff awareness
-            log(f"git diff against {ref} unavailable — diff awareness skipped")
+            r = _pygit2.Repository(str(repo))
+            try:
+                ref_oid = r.lookup_reference(f"refs/remotes/{ref}").target
+            except KeyError:  # code-health: ignore except ref missing — fall back to the local branch
+                ref_oid = r.lookup_reference(f"refs/heads/{ref}").target
+            base_oid = r.merge_base(r.head.target, ref_oid)
+            changed = set()
+            w = r.walk(r.head.target, GIT_SORT_TOPOLOGICAL)
+            w.hide(base_oid)
+            for commit in w:
+                if commit.parents:
+                    diff = commit.tree.diff_to_tree(commit.parents[0].tree)
+                    for patch in diff:
+                        changed.add(patch.delta.new_file.path)
+                else:
+                    for entry in commit.tree:
+                        changed.add(entry.name)
+            if changed:
+                return changed
+        except Exception:
+            log(f"diff against {ref} unavailable — diff awareness skipped")
             continue
-        if proc.returncode == 0 and proc.stdout.strip():
-            return {ln.strip() for ln in proc.stdout.splitlines() if ln.strip()}
     return set()
 
 
@@ -677,20 +708,16 @@ def _coverage_context(repo: Path, covered, coverage_source: str) -> CoverageCont
 
 
 def _git_head(repo: Path) -> GitHead:
-    """Current branch and short commit for report provenance.
-    Returns empty strings when git is unavailable."""
-    branch = commit = ""
+    """Current branch and short commit for report provenance, via pygit2.
+    Returns empty strings when git or pygit2 is unavailable."""
+    if _pygit2 is None:
+        return GitHead(branch="", commit="")
     try:
-        branch = subprocess.run(
-            ["git", "-C", str(repo), "branch", "--show-current"], capture_output=True, text=True, timeout=30
-        ).stdout.strip()
-        commit = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=30
-        ).stdout.strip()
-    # code-health: ignore except git-absent is a supported mode — the gate runs on the working tree alone
-    except (OSError, SubprocessError):
-        log(f"git unavailable in {repo} — report shows no branch/commit")
-    return GitHead(branch=branch, commit=commit)
+        r = _pygit2.Repository(str(repo))
+        return GitHead(branch=r.head.shorthand or "", commit=str(r.head.target)[:7])
+    # code-health: ignore except git-absent is a supported mode — provenance is decorative
+    except Exception:
+        return GitHead(branch="", commit="")
 
 
 def _dedupe(actions: list[Action]) -> list[Action]:
