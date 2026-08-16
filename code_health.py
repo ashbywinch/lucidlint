@@ -34,6 +34,14 @@ import sys
 import tempfile
 import time
 import tomllib
+
+# the fix engine is optional — the fix command degrades to a clear error
+# when the `fix` extra is not installed
+try:
+    import fix_engine
+    # code-health: ignore swallow optional extra — fix degrades to a clear error
+except ImportError:
+    fix_engine = None
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -836,6 +844,20 @@ def parse_args() -> argparse.Namespace:
         help="run the repo's coverage suite (make coverage) before scanning so coverage verdicts are fresh (slow)",
     )
     p.add_argument("--warn", action="store_true", help="exit 0 even when actions exist (informational run)")
+    p.add_argument(
+        "--fix-kind",
+        type=str,
+        default=None,
+        help="auto-fix ONE mechanical finding: apply the libcst transform for this kind and write the file",
+    )
+    p.add_argument("--fix-file", type=str, default=None, help="repo-relative file for --fix-kind")
+    p.add_argument("--fix-line", type=int, default=0, help="line of the finding for --fix-kind")
+    p.add_argument(
+        "--fix-params",
+        type=str,
+        default=None,
+        help="comma-separated callee parameter names for positional-literals (external callees)",
+    )
     return p.parse_args()
 
 
@@ -1090,6 +1112,16 @@ def _baseline_identity(key: str) -> BaselineIdentity:
 def main() -> int:
     args = parse_args()
     repo = args.repo.resolve()
+
+    if args.fix_kind:
+        # the agent-driven fix surface: `fix --fix-kind X --fix-file F --fix-line N`
+        params = args.fix_params.split(",") if args.fix_params else None
+        description = fix_engine.fix_finding(args.fix_kind, args.fix_file, repo, args.fix_line, params)
+        if description is None:
+            print(f"fix: nothing to change for {args.fix_kind} at {args.fix_file}:{args.fix_line}")
+            return 0
+        print(f"fix: {description} — {args.fix_file}:{args.fix_line} ({args.fix_kind})")
+        return 0
 
     if args.file:
         # Single-file / LSP mode: no git history, coverage, or diff — the

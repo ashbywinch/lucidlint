@@ -49,7 +49,7 @@ deps: uv-sync
 
 uv-sync:
 	@$(UV) --version >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
-	@$(UV) sync
+	@$(UV) sync --all-extras
 
 install-hooks:
 	@mkdir -p .git/hooks

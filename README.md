@@ -110,6 +110,24 @@ language-servers = ["lucidlint"]
 
 Lucidlint is in active development toward a v0.8 public release. The version scheme is 0.x — minor bumps per capability (release pipeline, fleet wiring, PyPI wheels, the Rust library split). The rule set grows with each minor version; baselines absorb new findings so existing projects stay green.
 
+## Auto-fixing mechanical findings
+
+Every mechanical finding can be applied by an agent (no editor clicks):
+
+```bash
+# the finding's kind + file + line come from the gate report
+code_health.py fix --fix-kind stale-suppression --fix-file x.py --fix-line 12
+code_health.py fix --fix-kind positional-literals --fix-file x.py --fix-line 71 \
+    --fix-params amount,currency   # external callee: supply the signature once
+```
+
+Mechanical kinds: `stale-suppression` (delete the comment), `noop-statement`
+and `unreachable` (delete the statement), `positional-literals` (keyword the
+args — callee resolved repo-wide, or supplied via `--fix-params`). Transforms
+are lossless (libcst) and touch only the finding's node; the gate re-run
+confirms the fix. Structural fixes (extract-class, split-function) need a
+name and are not auto-applied.
+
 ## Configuration
 
 Create a `.lucidlint.toml` in your repo root (or add a `[tool.lucidlint]` section to `pyproject.toml`) to suppress entire rules or rule groups across your codebase:

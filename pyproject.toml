@@ -25,6 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 graph = ["code-review-graph>=2.3.7"]
+fix = ["libcst>=1.9.0"]
 
 [dependency-groups]
 dev = [
