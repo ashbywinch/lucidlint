@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -522,6 +523,87 @@ def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
         # is for a file outside this scan set — drop it, not a failure to surface
         rel = ""
     return rel if rel in rels else None
+
+
+# Rule groups matching RULES.md — reference by name in the config file
+# to suppress whole groups across the codebase.
+# code-health: ignore record-shape wire-format dict — a class is ceremony for a rule-group map
+RULE_GROUPS = {
+    "architecture": {"complexity", "large-function", "closures", "strewing", "record-shape",
+                     "duplicate", "layer-mix", "folder-mix", "hub-file", "high-risk",
+                     "hotspot", "abstraction"},
+    "style": {"magic-number", "noop-statement", "unreachable", "vague-name", "class-module",
+              "shadow", "broad-except", "inline-import", "private-import", "global-state",
+              "unused", "import-cycle", "docs-link", "docs-undiscoverable"},
+    "test-discipline": {"monkeypatch", "skipif", "fakefs", "ignored-test"},
+    "suppression": {"suppression", "type-ignore", "allow-reason"},
+}
+
+# Cache for config loading
+# code-health: ignore global-state per-repo cache of the config file — one entry per repo per run
+_CONFIG_CACHE: dict[Path, dict] = {}
+
+
+# code-health: ignore record-shape wire-format envelope for the config — a class is ceremony
+def _load_lucidlint_config(repo: Path) -> dict:
+    """Load the project-wide lucidlint config, looking for (in order):
+    1. .lucidlint.toml in the repo root
+    2. [tool.lucidlint] in pyproject.toml
+    Returns a dict with 'global_ignore' (set of signal names) and
+    'per_path_ignore' (list of (glob_pattern, set)) or empty defaults.
+    The config lets a team suppress entire rule groups or specific signals
+    without per-file suppression comments."""
+    if repo in _CONFIG_CACHE and _CONFIG_CACHE.get(repo) is not None:
+        return _CONFIG_CACHE[repo]
+
+    # code-health: ignore record-shape wire-format envelope for the config
+    result = {"global_ignore": set(), "per_path_ignore": []}
+
+    # code-health: ignore record-shape wire-format envelope for the config
+    def _merge_config(raw: dict) -> None:
+        ignores = raw.get("ignore", raw.get("ignored_signals", []))
+        for item in ignores:
+            item = item.strip()
+            if item.startswith("group:"):
+                group_name = item[6:]
+                group_signals = RULE_GROUPS.get(group_name)
+                if group_signals:
+                    result["global_ignore"].update(group_signals)
+            else:
+                result["global_ignore"].add(item)
+        # Per-path overrides: keys that are glob patterns
+        for key, val in raw.items():
+            if key in ("ignore", "ignored_signals"):
+                continue
+            if isinstance(val, dict) and "ignore" in val:
+                path_ignores = set()
+                for item in val["ignore"]:
+                    item = item.strip()
+                    if item.startswith("group:"):
+                        gs = RULE_GROUPS.get(item[6:])
+                        if gs:
+                            path_ignores.update(gs)
+                    else:
+                        path_ignores.add(item)
+                result["per_path_ignore"].append((key, path_ignores))
+
+    # Try .lucidlint.toml first (standalone, for Rust projects)
+    toml_path = repo / ".lucidlint.toml"
+    if toml_path.is_file():
+        with open(toml_path, "rb") as f:
+            _merge_config(tomllib.load(f).get("lucidlint", {}))
+    else:
+        # Fall back to pyproject.toml [tool.lucidlint]
+        pyproject = repo / "pyproject.toml"
+        if pyproject.is_file():
+            with open(pyproject, "rb") as f:
+                data = tomllib.load(f)
+            tool_config = data.get("tool", {}).get("lucidlint", {})
+            if tool_config:
+                _merge_config(tool_config)
+
+    _CONFIG_CACHE[repo] = result
+    return result
 
 
 RUST_SCAN = _RustScan()
@@ -1018,6 +1100,16 @@ def main() -> int:
         cc = _coverage_context(repo, cr.lines, cr.source)
         diff = changed_files(repo, args.base)
     actions = _collect_actions(repo, args, fh.churn, fh.last_modified, only_rel=args.file)
+    # Apply project-wide config (global ignore / per-path ignore)
+    ignored_config = _load_lucidlint_config(repo)
+    if ignored_config["global_ignore"] or ignored_config["per_path_ignore"]:
+        actions = [a for a in actions if a.signal not in ignored_config["global_ignore"]]
+        # Per-path removals
+        for a in list(actions):
+            for pattern, path_ignored in ignored_config["per_path_ignore"]:
+                if Path(a.file).match(pattern) and a.signal in path_ignored:
+                    actions.remove(a)
+                    break
     unique = _dedupe_merge(actions, diff)
 
     if args.update_baseline:

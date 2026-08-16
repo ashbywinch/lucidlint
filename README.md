@@ -110,6 +110,28 @@ language-servers = ["lucidlint"]
 
 Lucidlint is in active development toward a v0.8 public release. The version scheme is 0.x — minor bumps per capability (release pipeline, fleet wiring, PyPI wheels, the Rust library split). The rule set grows with each minor version; baselines absorb new findings so existing projects stay green.
 
+## Configuration
+
+Create a `.lucidlint.toml` in your repo root (or add a `[tool.lucidlint]` section to `pyproject.toml`) to suppress entire rules or rule groups across your codebase:
+
+```toml
+# Suppress specific rules
+[lucidlint]
+ignore = ["vague-name", "inline-import"]
+
+# Suppress whole groups (definitions in RULES.md)
+# ignore = ["group:architecture", "group:test-discipline"]
+
+# Per-path overrides — silence rules only in certain paths
+[lucidlint."tests/**"]
+ignore = ["group:architecture"]
+
+[lucidlint."scripts/**"]
+ignore = ["global-state"]
+```
+
+The config works at the orchestrator level — no recompile needed, no per-file suppression comments. The same rule references as the suppression system (`ignore` + `group:` prefix) with the same semantics: every rule can be silenced, and a config change is visible in the repo's diff.
+
 ## License & contributing
 
 MIT. Issues and PRs at [github.com/ashbywinch/build-tools](https://github.com/ashbywinch/build-tools).
