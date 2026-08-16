@@ -480,6 +480,22 @@ class RustFindings(NamedTuple):
         return self.by_rel.get(rel, [])
 
 
+def _scanner_candidates(repo: Path, exe: str) -> list[Path]:
+    """The binary locations tried in order: the CODE_HEALTH_SCANNER env var,
+    the repo-local build, the tool-checkout build, then the release bundle.
+    `exe` carries the platform suffix (.exe on Windows) — every candidate
+    must use it, or a Windows build is silently skipped."""
+    candidates: list[Path] = []
+    env = os.environ.get("CODE_HEALTH_SCANNER")
+    if env:
+        candidates.append(Path(env))
+    candidates.append(repo / "scanner" / "target" / "release" / f"lucidlint{exe}")
+    candidates.append(Path(__file__).resolve().parent / "scanner" / "target" / "release" / f"lucidlint{exe}")
+    bundle_dir = Path(__file__).resolve().parent / "bin"
+    candidates.append(bundle_dir / f"lucidlint{exe}")
+    return candidates
+
+
 class _RustScan:
     """The Rust scan core — the required finding engine.
 
@@ -501,15 +517,7 @@ class _RustScan:
         if repo in self._binary_cache:
             return self._binary_cache[repo]
         exe = ".exe" if os.name == "nt" else ""
-        candidates: list[Path] = []
-        env = os.environ.get("CODE_HEALTH_SCANNER")
-        if env:
-            candidates.append(Path(env))
-        candidates.append(repo / "scanner" / "target" / "release" / f"lucidlint{exe}")
-        candidates.append(Path(__file__).resolve().parent / "scanner" / "target" / "release" / f"lucidlint{exe}")
-        bundle_dir = Path(__file__).resolve().parent / "bin"
-        candidates.append(bundle_dir / f"lucidlint{exe}")
-        found = next((p for p in candidates if p.is_file()), None)
+        found = next((p for p in _scanner_candidates(repo, exe) if p.is_file()), None)
         self._binary_cache[repo] = found
         return found
 

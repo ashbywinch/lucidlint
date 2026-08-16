@@ -172,9 +172,12 @@ pub struct ComplexityVisitor {
 impl ComplexityVisitor {
     /// Instantiate the visitor from Python source (radon's `from_code`).
     pub fn from_code(code: &str) -> Self {
+        // the source must be attached BEFORE the walk — the linenos are
+        // computed during it (from_ast has no source and keeps offsets)
         let parsed = code2ast(code);
-        let mut visitor = Self::from_ast(&parsed.syntax());
+        let mut visitor = ComplexityVisitor::default();
         visitor.source = Some(code.to_string());
+        visitor.visit(&parsed.syntax());
         visitor
     }
 

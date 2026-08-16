@@ -3,7 +3,7 @@
 //! radon to keep the port in sync.
 
 use radonc::complexity::{cc_rank, cc_visit};
-use radonc::visitors::ComplexityVisitor;
+use radonc::visitors::{Block, ComplexityVisitor};
 
 fn dedent(code: &str) -> String {
     // strip leading newline + common indentation (like textwrap.dedent)
@@ -82,6 +82,24 @@ fn test_visitor_simple() {
 }
 
 /// test_visitor_single_functions — (code, (module_complexity_diff, fn_complexity))
+#[test]
+fn test_visitor_linenos_are_source_lines() {
+    // radon's blocks carry 1-based SOURCE lines — a byte offset like 342 for
+    // a function near the top would break Order::Lines and the mirror API
+    let code = "# comment\nx = 1\n\ndef f(a):\n    return a\n\nclass C:\n    def m(self):\n        return 1\n";
+    let v = ComplexityVisitor::from_code(code);
+    let blocks = v.blocks();
+    let f = blocks.iter().find(|b| match b { Block::Function(f) => f.name == "f", _ => false }).unwrap();
+    let Block::Function(fb) = f else { unreachable!() };
+    assert_eq!(fb.lineno, 4, "f starts on line 4 (bytes 10, not 4)");
+    let m = blocks.iter().find(|b| match b { Block::Function(f) => f.name == "m", _ => false }).unwrap();
+    let Block::Function(mb) = m else { unreachable!() };
+    assert_eq!(mb.lineno, 8, "method m starts on line 8");
+    let c = blocks.iter().find(|b| matches!(b, Block::Class(_))).unwrap();
+    let Block::Class(cb) = c else { unreachable!() };
+    assert_eq!(cb.lineno, 7, "class C starts on line 7");
+}
+
 #[test]
 fn test_visitor_single_functions() {
     let cases = [

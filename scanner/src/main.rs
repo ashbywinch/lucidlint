@@ -2042,10 +2042,13 @@ mod tests {
         let mut test_refs = HashSet::new();
         let mut strings = Vec::new();
         let mut all = Vec::new();
+        let mut supps_by_rel: std::collections::HashMap<String, common::Suppressions> =
+            std::collections::HashMap::new();
         let root = "repo";
         for (name, src) in files {
             let mut scan = scan_source(src, name);
             scan.file_name = name.to_string();
+            supps_by_rel.insert(name.to_string(), std::mem::take(&mut scan.supps));
             all.extend(scan.findings);
             let rel = name.to_string();
             let is_test = is_test_path(&rel);
@@ -2070,7 +2073,46 @@ mod tests {
         }
         all.extend(duplicate_findings(&skeletons));
         all.extend(unused_findings(&definitions, &prod_refs, &test_refs, &strings));
+        // mirror the production finalize: repo-wide findings honor per-file
+        // suppressions too, and a suppression the retain uses is not stale
+        let mut used_supps: std::collections::HashSet<(String, usize, String)> = std::collections::HashSet::new();
         let _ = root;
+        all.retain(|f| {
+            let Some(supps) = supps_by_rel.get(&f.file) else {
+                return true;
+            };
+            if let Some(why) = supps.file.get(&f.kind) {
+                if !why.is_empty() {
+                    return false;
+                }
+            }
+            for ln in [f.line, f.line.saturating_sub(1)] {
+                if let Some(entries) = supps.line.get(&ln) {
+                    for (sig, why) in entries {
+                        if sig == &f.kind && !why.is_empty() {
+                            used_supps.insert((f.file.clone(), ln, sig.clone()));
+                            return false;
+                        }
+                    }
+                }
+            }
+            true
+        });
+        all.retain(|f| {
+            if f.kind != "stale-suppression" {
+                return true;
+            }
+            let msg = &f.message;
+            let Some(sig_start) = msg.find("ignore ") else {
+                return true;
+            };
+            let sig = msg[sig_start + 7..]
+                .split(|c: char| c.is_whitespace() || c == '\'')
+                .next()
+                .unwrap_or("")
+                .to_string();
+            !used_supps.contains(&(f.file.clone(), f.line, sig))
+        });
         all
     }
 
@@ -2090,6 +2132,71 @@ mod tests {
             "def alpha(a):\n    return a * 3\n\ndef beta(b):\n    if b:\n        return [x for x in b if x]\n    return []\n",
         );
         assert!(!f.iter().any(|x| x.kind == "duplicate"));
+    }
+
+    #[test]
+    fn test_with_unittest_assert_passes() {
+        // unittest-style assertions count: self.assertEqual/assertTrue/...
+        let ok = scan_src_test("def test_x(self):\n    self.assertEqual(1, 1)\n    self.assertTrue(True)\n");
+        assert!(!ok.iter().any(|x| x.kind == "no-assert-test"));
+        let ok2 = scan_src_test("def test_x(self):\n    with self.assertRaises(ValueError):\n        int('x')\n");
+        assert!(!ok2.iter().any(|x| x.kind == "no-assert-test"));
+    }
+
+    #[test]
+    fn async_def_record_shape_is_found() {
+        // async def parses as FunctionDef with is_async at the ruff pin —
+        // the signature pass must still see it (review: async gap)
+        let f = scan_src("from typing import Any\nasync def fetch(url: str) -> dict[str, Any]:\n    return {}\n");
+        assert!(f.iter().any(|x| x.kind == "record-shape"));
+    }
+
+    #[test]
+    fn repo_wide_duplicate_suppressed_by_comment() {
+        // a why'd `ignore duplicate` on the finding's line suppresses the
+        // repo-wide duplicate AND is not itself reported stale
+        let f = scan_corpus(&[
+            ("one.py", "def alpha(a, b):\n    x = a + b\n    if x > 10:\n        return x * 2\n    return x\n"),
+            ("two.py", "def alpha(a, b):  # lucidlint: ignore duplicate known pair — intentional scaffold\n    x = a + b\n    if x > 10:\n        return x * 2\n    return x\n"),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "duplicate"), "duplicate not suppressed");
+        assert!(
+            !f.iter().any(|x| x.kind == "stale-suppression"),
+            "used suppression flagged stale"
+        );
+    }
+
+    #[test]
+    fn same_variable_name_different_types_are_distinct_families() {
+        // two functions both dispatch a variable named x but over different
+        // types — distinct element families, so no latent-visitor (the old
+        // value-name key merged them into one family)
+        let src = "class A:\n    pass\n\nclass B:\n    pass\n\nclass C:\n    pass\n\nclass D:\n    pass\n\ndef op1(x):\n    if isinstance(x, A):\n        return 1\n    elif isinstance(x, B):\n        return 2\n    return 0\n\ndef op2(x):\n    if isinstance(x, C):\n        return 3\n    elif isinstance(x, D):\n        return 4\n    return 0\n";
+        let f = scan_src(src);
+        assert!(!f.iter().any(|x| x.kind == "latent-visitor"));
+    }
+
+    #[test]
+    fn why_less_comma_suppression_reports_each_signal() {
+        // `ignore sig1,sig2` without a why: BOTH signals need a reason
+        let f = scan_src("def f():\n    return 1  # lucidlint: ignore magic-number,noop-statement\n");
+        let s: Vec<&Finding> = f.iter().filter(|x| x.kind == "suppression").collect();
+        assert_eq!(s.len(), 2, "each signal's missing why must be reported");
+    }
+
+    #[test]
+    fn bigram_hash_dedups_repeated_bigrams() {
+        // [ab, ba, ab] and [ab, ba] share the unique set — equal hashes;
+        // [ab, ba] and [ba] differ (the pre-fix XOR cancelled repeats and
+        // collided the two)
+        use common::bigram_set_hash;
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // [a, b, a, b] -> windows (a,b),(b,a),(a,b) — the (a,b) pair repeats
+        let rep = bigram_set_hash(&s(&["a", "b", "a", "b"]));
+        let uniq = bigram_set_hash(&s(&["a", "b", "a"])); // windows (a,b),(b,a)
+        let single = bigram_set_hash(&s(&["b"])); // no windows at all
+        assert_eq!(rep, uniq, "repeated bigrams cancel under dedup");
+        assert_ne!(uniq, single, "different unique sets must not collide");
     }
 
     #[test]

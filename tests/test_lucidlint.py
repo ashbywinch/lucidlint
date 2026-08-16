@@ -557,6 +557,40 @@ def test_config_per_path_ignore_suppresses(tmp_path, capsys):
     assert "magic number" not in out
 
 
+# --------------------------------------------------------------------------- fix + scan contracts
+def test_raw_score_uses_the_metric():
+    """R8: priority ranks churn x complexity x fan-in — a higher metric must
+    score higher at equal churn (a constant 1.0 metric flattened every
+    complexity/large-function finding to the same priority)."""
+    assert ch._raw_score("complexity", 60, 10) > ch._raw_score("complexity", 15, 10)
+    assert ch._raw_score("large-function", 300, 5) > ch._raw_score("large-function", 100, 5)
+    # the churn factor still scales within a metric
+    assert ch._raw_score("complexity", 20, 30) > ch._raw_score("complexity", 20, 5)
+
+
+def test_scanner_candidates_carry_the_exe_suffix():
+    """Every candidate path must use the platform exe suffix — a Windows
+    build produces lucidlint.exe; a suffixless candidate silently falls back
+    to no scanner at all."""
+    repo = Path("/tmp/repo")
+    for p in ch._scanner_candidates(repo, ".exe"):
+        assert p.name == "lucidlint.exe" or p.name.endswith(".exe"), p
+    for p in ch._scanner_candidates(repo, ""):
+        assert p.name == "lucidlint"
+
+
+def test_graph_contract_corrupt_db_degrades(tmp_path):
+    """A corrupt/older-schema graph.db must degrade to the non-graph
+    families, never crash the scan (PRD R21)."""
+    db_dir = tmp_path / ".code-review-graph"
+    db_dir.mkdir()
+    (db_dir / "graph.db").write_bytes(b"this is not a sqlite database at all")
+    contract = ch.GRAPH_CONTRACT
+    result = contract.contract(tmp_path)
+    assert result is None  # either the extra is absent (early None) or the
+    # corrupt db raised and was caught — never an exception
+
+
 # --------------------------------------------------------------------------- family registration consistency
 def _family_kinds() -> set[str]:
     """Every kind the scanner can emit — parsed from the Rust registry const

@@ -457,9 +457,9 @@
    "severity": "error"
   },
   {
-   "line": 681,
+   "line": 689,
    "column": 21,
-   "stop_line": 681,
+   "stop_line": 689,
    "stop_column": 28,
    "path": "lucidlint.py",
    "code": -2,
@@ -469,9 +469,9 @@
    "severity": "error"
   },
   {
-   "line": 763,
+   "line": 771,
    "column": 24,
-   "stop_line": 763,
+   "stop_line": 771,
    "stop_column": 33,
    "path": "lucidlint.py",
    "code": -2,
@@ -481,9 +481,9 @@
    "severity": "error"
   },
   {
-   "line": 895,
+   "line": 903,
    "column": 17,
-   "stop_line": 895,
+   "stop_line": 903,
    "stop_column": 35,
    "path": "lucidlint.py",
    "code": -2,
@@ -493,9 +493,9 @@
    "severity": "error"
   },
   {
-   "line": 1142,
+   "line": 1150,
    "column": 16,
-   "stop_line": 1142,
+   "stop_line": 1150,
    "stop_column": 37,
    "path": "lucidlint.py",
    "code": -2,
@@ -505,9 +505,9 @@
    "severity": "error"
   },
   {
-   "line": 1146,
+   "line": 1154,
    "column": 20,
-   "stop_line": 1146,
+   "stop_line": 1154,
    "stop_column": 43,
    "path": "lucidlint.py",
    "code": -2,
@@ -517,9 +517,9 @@
    "severity": "error"
   },
   {
-   "line": 1163,
+   "line": 1171,
    "column": 24,
-   "stop_line": 1163,
+   "stop_line": 1171,
    "stop_column": 48,
    "path": "lucidlint.py",
    "code": -2,
@@ -529,9 +529,9 @@
    "severity": "error"
   },
   {
-   "line": 1169,
+   "line": 1177,
    "column": 39,
-   "stop_line": 1169,
+   "stop_line": 1177,
    "stop_column": 65,
    "path": "lucidlint.py",
    "code": -2,
@@ -541,9 +541,9 @@
    "severity": "error"
   },
   {
-   "line": 1175,
+   "line": 1183,
    "column": 20,
-   "stop_line": 1183,
+   "stop_line": 1191,
    "stop_column": 14,
    "path": "lucidlint.py",
    "code": -2,
@@ -553,9 +553,9 @@
    "severity": "error"
   },
   {
-   "line": 1235,
+   "line": 1243,
    "column": 33,
-   "stop_line": 1235,
+   "stop_line": 1243,
    "stop_column": 41,
    "path": "lucidlint.py",
    "code": -2,
@@ -565,9 +565,9 @@
    "severity": "error"
   },
   {
-   "line": 1246,
+   "line": 1254,
    "column": 28,
-   "stop_line": 1246,
+   "stop_line": 1254,
    "stop_column": 37,
    "path": "lucidlint.py",
    "code": -2,
@@ -577,9 +577,9 @@
    "severity": "error"
   },
   {
-   "line": 1252,
+   "line": 1260,
    "column": 23,
-   "stop_line": 1252,
+   "stop_line": 1260,
    "stop_column": 45,
    "path": "lucidlint.py",
    "code": -2,
@@ -589,9 +589,9 @@
    "severity": "error"
   },
   {
-   "line": 1310,
+   "line": 1318,
    "column": 12,
-   "stop_line": 1310,
+   "stop_line": 1318,
    "stop_column": 35,
    "path": "lucidlint.py",
    "code": -2,
@@ -601,9 +601,9 @@
    "severity": "error"
   },
   {
-   "line": 1310,
+   "line": 1318,
    "column": 49,
-   "stop_line": 1310,
+   "stop_line": 1318,
    "stop_column": 72,
    "path": "lucidlint.py",
    "code": -2,
@@ -613,9 +613,9 @@
    "severity": "error"
   },
   {
-   "line": 1318,
+   "line": 1326,
    "column": 53,
-   "stop_line": 1318,
+   "stop_line": 1326,
    "stop_column": 55,
    "path": "lucidlint.py",
    "code": -2,
@@ -877,9 +877,9 @@
    "severity": "error"
   },
   {
-   "line": 690,
+   "line": 724,
    "column": 12,
-   "stop_line": 690,
+   "stop_line": 724,
    "stop_column": 24,
    "path": "tests/test_lucidlint.py",
    "code": -2,
@@ -889,9 +889,9 @@
    "severity": "error"
   },
   {
-   "line": 702,
+   "line": 736,
    "column": 12,
-   "stop_line": 702,
+   "stop_line": 736,
    "stop_column": 24,
    "path": "tests/test_lucidlint.py",
    "code": -2,

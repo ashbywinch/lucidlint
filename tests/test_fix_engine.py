@@ -407,21 +407,45 @@ def test_extract_method_keyword_args_are_not_phantom_params(tmp_path):
     assert "leading_lines)" not in fixed
 
 
-def test_extract_method_no_safe_seam(tmp_path):
-    # every block feeds the rest of the function — no out-var-free seam
+def test_extract_method_refuses_nested_function_target(tmp_path):
+    """A complexity finding on a nested function cannot host the extracted
+    helper (the insert lands at module level — the call would NameError).
+    Refuse rather than write a broken file."""
     src = (
-        "def f(a, b):\n"
-        "    x = a + b\n"
-        "    y = x * 2\n"
-        "    return y\n"
+        "def outer():\n"
+        "    def inner():\n"
+        "        if a:\n"
+        "            x = 1\n"
+        "        if b:\n"
+        "            x = 2\n"
+        "        return x\n"
+        "    return inner()\n"
     )
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     p = repo / "houses" / "app.py"
     p.write_text(src)
     new_source, desc = fix_engine.propose_finding(
-        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="calc")
+        "extract-method", "houses/app.py", repo, 2, fix_engine.FixOptions(name="_x")
     )
-    assert desc is None  # no self-contained seam — refuse rather than break
+    assert desc is None  # no safe seam — refuse, do not corrupt
+
+
+def test_extract_method_min_bound_refuses_insufficient_splits(tmp_path):
+    """CC-splitting: when the function's only seams take too few decisions to
+    land the ORIGINAL under CC 15 (the extracted side is bounded separately),
+    the tool refuses — a 1-decision extraction of a 16-CC function leaves 15
+    and the fix loop would thrash."""
+    src = "def f(" + ", ".join(f"c{i}" for i in range(16)) + "):\n" + "".join(
+        f"    if c{i}:\n        x{i} = {i}\n" for i in range(16)
+    ) + "    return " + " + ".join(f"x{i}" for i in range(16)) + "\n"
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    new_source, desc = fix_engine.propose_finding(
+        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="_x")
+    )
+    assert desc is None  # every same-container window is a single if — no split
+
 
 
 def test_extract_method_cli_preview_confirm_flow(tmp_path, capsys):
