@@ -380,6 +380,33 @@ def test_extract_method_descends_into_loop_body(tmp_path):
     assert ns["grade_all"](rows, "quiet") == ["A+", "D+"]
 
 
+def test_extract_method_keyword_args_are_not_phantom_params(tmp_path):
+    """The 2026-08-16 self-fix regression: a keyword-argument name
+    (`with_changes(leading_lines=[])` — the `leading_lines`) is not a
+    variable reference, but the seam analysis counted it as a free var,
+    so the proposal carried a phantom parameter and the rewritten call
+    would have raised NameError at runtime."""
+    src = (
+        "def wrap(stmts):\n"
+        "    body_stmts = stmts\n"
+        "    if body_stmts:\n"
+        "        body_stmts[0] = body_stmts[0].with_changes(leading_lines=[])\n"
+        "    return body_stmts\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    out = fix_engine.fix_finding(
+        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="reset_leading")
+    )
+    assert out is not None
+    fixed = p.read_text()
+    assert "def _reset_leading(body_stmts):" in fixed
+    # the call takes ONLY the real free var — no phantom leading_lines param
+    assert "_reset_leading(body_stmts)" in fixed
+    assert "leading_lines)" not in fixed
+
+
 def test_extract_method_no_safe_seam(tmp_path):
     # every block feeds the rest of the function — no out-var-free seam
     src = (

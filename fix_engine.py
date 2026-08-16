@@ -656,6 +656,14 @@ class _FnBodyState:
         return list(block_sids), free_vars
 
 
+def _is_keyword_name(node, parent) -> bool:
+    """A Name that is a keyword-argument's keyword (`f(a=1)` — the `a`) is
+    not a variable reference; counting it made the seam analysis fabricate
+    phantom parameters (the `leading_lines` in `with_changes(leading_lines=[])`
+    would appear as a free var and the rewritten call would NameError)."""
+    return isinstance(parent, cst.Arg) and parent.keyword is node
+
+
 class _Analyse(cst.CSTVisitor):
     """Collects the target function's body statement data — flattened so
     seams can descend into compound statements (a big loop's inner chunks
@@ -740,6 +748,8 @@ class _Analyse(cst.CSTVisitor):
             return
         sid = None
         parent = self.get_metadata(ParentNodeProvider, node)
+        if _is_keyword_name(node, parent):
+            return  # a keyword-argument name (f(a=1)) is not a variable ref
         while parent is not None and not isinstance(parent, cst.Module):
             if parent is self.state.fn_node:
                 break
@@ -999,7 +1009,7 @@ class _ReceiverToSelf(cst.CSTTransformer):
     is a local and is never renamed, so `state = state.line` survives
     intact instead of becoming `self = self.line`."""
 
-    METADATA_DEPENDENCIES = (ExpressionContextProvider,)
+    METADATA_DEPENDENCIES = (ExpressionContextProvider, ParentNodeProvider)
 
     def __init__(self, receivers: dict[str, str | None], shadowed: StoredNames) -> None:
         self.receivers = receivers  # fn name -> its receiver param name
@@ -1019,6 +1029,9 @@ class _ReceiverToSelf(cst.CSTTransformer):
     def leave_Name(self, original_node, updated_node):
         fn = self._current or ""
         old = self.receivers.get(fn)
+        parent = self.get_metadata(ParentNodeProvider, original_node)
+        if _is_keyword_name(original_node, parent):
+            return updated_node  # f(state=1): a keyword name, not the receiver
         if old is None or updated_node.value != old:
             return updated_node
         if updated_node.value in self.shadowed.get(fn, set()):
