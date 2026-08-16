@@ -1,4 +1,4 @@
-//! `code-health-scan --lsp` — a stdio JSON-RPC language server.
+//! `lucidlint --lsp` — a stdio JSON-RPC language server.
 //!
 //! The scan core runs IN-PROCESS: buffers from didOpen/didChange are fed to
 //! `scan_source` directly, so a keystroke costs a parse, not a process. No
@@ -6,7 +6,7 @@
 //! complexity (CC >= 15) become diagnostics on save; the repo-wide families
 //! (duplicate, unused) are meaningless for a single buffer and are dropped.
 //!
-//! Editors point at: `code-health-scan --lsp`
+//! Editors point at: `lucidlint --lsp`
 
 use crate::{scan_source_lsp, FileScan, Finding};
 use std::collections::HashMap;
@@ -39,7 +39,7 @@ pub fn diagnostics_for(scan: &FileScan, source: &str) -> Vec<serde_json::Value> 
                 "end": {"line": line, "character": line_len},
             },
             "severity": severity_of(f),
-            "source": "code-health",
+            "source": "lucidlint",
             "message": f.message,
         }));
     }
@@ -53,7 +53,7 @@ pub fn diagnostics_for(scan: &FileScan, source: &str) -> Vec<serde_json::Value> 
                     "end": {"line": line, "character": line_len},
                 },
                 "severity": 1,
-                "source": "code-health",
+                "source": "lucidlint",
                 "message": format!(
                     "cyclomatic complexity {} (>= 15) — extract each decision branch into a named method",
                     e.cc
@@ -79,7 +79,7 @@ fn write_message(out: &mut impl Write, msg: serde_json::Value) {
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
     // the client may have closed the pipe — a failed diagnostic write ends
     // the session either way; run() exits when the next read returns None
-    // code-health: ignore swallow best-effort diagnostic write — see above
+    // lucidlint: ignore swallow best-effort diagnostic write — see above
     let _ = write_frame(out, header.as_bytes(), body.as_bytes());
 }
 
@@ -148,7 +148,7 @@ pub fn dispatch(documents: &mut HashMap<String, String>, msg: &serde_json::Value
                 serde_json::json!({
                     "capabilities": {
                         "textDocumentSync": {"openClose": true, "change": 1},
-                        "serverInfo": {"name": "code-health", "version": "0.1.0"}
+                        "serverInfo": {"name": "lucidlint", "version": "0.1.0"}
                     }
                 }),
                 out,

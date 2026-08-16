@@ -92,21 +92,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "code-health-scan"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "radonc",
- "ruff_python_ast",
- "ruff_python_parser",
- "ruff_text_size",
- "serde",
- "serde_json",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "collection_literals"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -265,6 +250,21 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+
+[[package]]
+name = "lucidlint"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "radonc",
+ "ruff_python_ast",
+ "ruff_python_parser",
+ "ruff_text_size",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "manyhow"

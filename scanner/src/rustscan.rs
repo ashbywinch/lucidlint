@@ -1,4 +1,4 @@
-// code-health: ignore-file complexity the syn walkers are single dispatch tables — match-arm count,
+// lucidlint: ignore-file complexity the syn walkers are single dispatch tables — match-arm count,
 // not branching; keep NEW functions under cc 15
 
 //! The Rust language layer — syn-based per-file scan.
@@ -110,7 +110,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     state.walk_file(&file);
     let mut scan = state.finish();
     // suppressions parse from the whole file, filtering every family — the
-    // shared why-less rule applies (`// code-health: ignore` needs a why)
+    // shared why-less rule applies (`// lucidlint: ignore` needs a why)
     let comments = rs_comment_lines(source);
     let supps = common::suppressions_from_comments(&comments);
     // complexity findings are generated from the cc array AFTER the per-file
@@ -1200,7 +1200,7 @@ fn ignored_test_findings(file: &File, file_name: &str) -> Vec<Finding> {
 /// `//` and `/* */` comments with their (1-based) line — string-aware so a
 /// `//` inside a string literal or a char is not a comment. Python's comments
 /// come from ruff tokens; Rust's from here; both feed `common`'s matching.
-// code-health: ignore large-function the string-aware comment scanner is one linear pass — splitting it scatters the byte-state
+// lucidlint: ignore large-function the string-aware comment scanner is one linear pass — splitting it scatters the byte-state
 pub fn rs_comment_lines(source: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let bytes = source.as_bytes();
@@ -1383,7 +1383,7 @@ fn skel_stmt(toks: &mut Vec<String>, s: &Stmt) {
     }
 }
 
-// code-health: ignore large-function the skeleton mirrors syn's expr shapes — one exhaustive match is the point
+// lucidlint: ignore large-function the skeleton mirrors syn's expr shapes — one exhaustive match is the point
 fn skel_expr(toks: &mut Vec<String>, e: &Expr) {
     match e {
         Expr::Binary(b) => {
@@ -1983,11 +1983,10 @@ mod tests {
     // ------------------------------------------------------------- suppressions
     #[test]
     fn suppression_with_why_exempts_and_whyless_is_finding() {
-        let src =
-            "fn f() -> u32 {\n    // code-health: ignore magic-number the gate threshold\n    let x = 3 * 60;\n}\n";
+        let src = "fn f() -> u32 {\n    // lucidlint: ignore magic-number the gate threshold\n    let x = 3 * 60;\n}\n";
         let fs = scan(src);
         assert!(!has_kind(&fs, "magic-number"));
-        let src2 = "fn f() -> u32 {\n    // code-health: ignore magic-number\n    let x = 3 * 60;\n}\n";
+        let src2 = "fn f() -> u32 {\n    // lucidlint: ignore magic-number\n    let x = 3 * 60;\n}\n";
         assert!(has_kind(&scan(src2), "suppression"));
     }
 
@@ -2191,9 +2190,9 @@ mod tests {
 
     #[test]
     fn stale_suppression_flagged() {
-        let fs = scan("// code-health: ignore magic-number this line has nothing\nfn f() {}\n");
+        let fs = scan("// lucidlint: ignore magic-number this line has nothing\nfn f() {}\n");
         assert!(has_kind(&fs, "stale-suppression"));
-        let ok = scan("fn f() {\n    let x = 3 * 60; // code-health: ignore magic-number the gate threshold\n}\n");
+        let ok = scan("fn f() {\n    let x = 3 * 60; // lucidlint: ignore magic-number the gate threshold\n}\n");
         assert!(!has_kind(&ok, "stale-suppression"));
     }
 

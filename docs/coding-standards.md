@@ -301,7 +301,7 @@ without a check is a wish:
   bare float/Decimal in signatures).
 - Raw git hooks delegate to make (lint + typecheck + gitleaks); pre-push
   runs `make check` — hook and CI can never drift.
-- The gate (`code_health.py`) is the house finding engine for Python code:
+- The gate (`lucidlint.py`) is the house finding engine for Python code:
   every finding family computes in the Rust scan core; the orchestrator
   converts the versioned contract and renders.
 
@@ -326,6 +326,6 @@ without a check is a wish:
 - Modules: the scan-core modules (`checks`, `graph_families`, `docs`,
   `lsp`) are standalone — only `main` composes them. Enforced by
   `scanner/tests/layers.rs` (exact-path assertions).
-- The graph contract (`code_health_graph_export.py`) is the code-review-graph
+- The graph contract (`lucidlint_graph_export.py`) is the code-review-graph
   interface: generated through the tool's own public API, versioned, never
   the SQLite schema or location.

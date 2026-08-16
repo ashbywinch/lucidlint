@@ -1,7 +1,7 @@
-// code-health: ignore-file complexity the ruff visitor walkers are parity-locked dispatch tables —
+// lucidlint: ignore-file complexity the ruff visitor walkers are parity-locked dispatch tables —
 // match-arm count, not branching; keep NEW functions under cc 15
 
-//! code-health-scan — the Rust scan core for the deterministic code-health gate.
+//! lucidlint — the Rust scan core for the deterministic lucidlint gate.
 //!
 //! Phase 1 of the port: parsing + the pure-walk checks. The finding schema is
 //! deliberately language-neutral (file/line/function/kind/severity/message) —
@@ -104,7 +104,7 @@ enum ParentEntry {
 }
 
 impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
-    // code-health: ignore large-function the ruff visitor dispatches statement kinds in CPython's visit order
+    // lucidlint: ignore large-function the ruff visitor dispatches statement kinds in CPython's visit order
     fn visit_stmt(&mut self, stmt: &'a Stmt) {
         // module scope = no open function scope and no class nesting (the
         // FunctionDef arm walks bodies manually, so parent_stack is not the
@@ -780,7 +780,7 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
 
 /// EVERY family kind the scanner can emit — the registration registry.
 /// A new family MUST be added here, get a `final_kind` arm (or be listed in
-/// STANDARD_KINDS), be added to RULE_GROUPS (code_health.py), and get a
+/// STANDARD_KINDS), be added to RULE_GROUPS (lucidlint.py), and get a
 /// RULES.md row (see RULES.md "Adding a finding family").
 ///
 /// The consistency
@@ -866,7 +866,7 @@ pub const STANDARD_KINDS: &[&str] = &[
 /// - `kind` — display kind, `final_kind` output (named buckets; families
 ///   without one collapse to "standard", the message explains the rest).
 /// - `signal` — the raw family kind; THIS is what suppressions match on
-///   (`code-health: ignore <signal>`, config `ignore = [<signal>]`,
+///   (`lucidlint: ignore <signal>`, config `ignore = [<signal>]`,
 ///   RULE_GROUPS membership, baseline identity).
 ///
 /// A new family MUST be registered in both places (see RULES.md "Adding a
@@ -935,7 +935,7 @@ fn rel_of(path: &str, root: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-// code-health: ignore large-function the CLI orchestrates every repo-wide family in one flow — extracting helpers would thread six collections
+// lucidlint: ignore large-function the CLI orchestrates every repo-wide family in one flow — extracting helpers would thread six collections
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--version") {
@@ -1371,14 +1371,14 @@ mod tests {
     // ------------------------------------------------------------- suppressions
     #[test]
     fn suppression_with_why_exempts() {
-        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # code-health: ignore swallow this is safe, logged\n        log('x')\n");
+        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # lucidlint: ignore swallow this is safe, logged\n        log('x')\n");
         assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn suppression_without_why_is_a_finding() {
         let f = scan_src(
-            "def f():\n    try:\n        g()\n    except ValueError:  # code-health: ignore swallow\n        log('x')\n",
+            "def f():\n    try:\n        g()\n    except ValueError:  # lucidlint: ignore swallow\n        log('x')\n",
         );
         assert!(f.iter().any(|x| x.kind == "suppression"));
         assert!(f.iter().any(|x| x.kind == "swallow")); // not actually exempted
@@ -1388,13 +1388,13 @@ mod tests {
     fn suppression_on_line_above_exempts() {
         // the comment must sit on the finding's line or line-1 — the except
         // handler is line 5, so line 4 (the try) is the line-1 position
-        let f = scan_src("def f():\n    try:\n        g()\n    # code-health: ignore swallow deliberate skip\n    except ValueError:\n        log('x')\n");
+        let f = scan_src("def f():\n    try:\n        g()\n    # lucidlint: ignore swallow deliberate skip\n    except ValueError:\n        log('x')\n");
         assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn ignore_file_exempts() {
-        let src = "# code-health: ignore-file class-module helper inside a CLI utility\nclass Helper:\n    def run(self):\n        return 1\n";
+        let src = "# lucidlint: ignore-file class-module helper inside a CLI utility\nclass Helper:\n    def run(self):\n        return 1\n";
         let f = scan_src(src);
         assert!(!f.iter().any(|x| x.kind == "class-module"));
     }
@@ -1591,7 +1591,7 @@ mod tests {
     #[test]
     fn suppression_scoped_to_its_line() {
         // an explained ignore on one except does not exempt a second except
-        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # code-health: ignore swallow this one is safe, logged\n        log('a')\n    try:\n        h()\n    except ValueError:\n        log('b')\n");
+        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # lucidlint: ignore swallow this one is safe, logged\n        log('a')\n    try:\n        h()\n    except ValueError:\n        log('b')\n");
         let exc: Vec<&Finding> = f.iter().filter(|x| x.kind == "swallow").collect();
         assert_eq!(exc.len(), 1);
         assert_eq!(exc[0].line, 8); // the second handler (line 8) is not exempted
@@ -1599,13 +1599,13 @@ mod tests {
 
     #[test]
     fn suppression_wrong_signal_does_not_exempt() {
-        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # code-health: ignore inline-import not the right signal\n        log('skipping')\n");
+        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # lucidlint: ignore inline-import not the right signal\n        log('skipping')\n");
         assert!(f.iter().any(|x| x.kind == "swallow")); // still a swallow; an explained mis-scoped ignore emits no suppression finding
     }
 
     #[test]
     fn ignore_file_without_why_is_a_finding() {
-        let src = "# code-health: ignore-file except\ndef f():\n    try:\n        g()\n    except ValueError:\n        log('x')\n";
+        let src = "# lucidlint: ignore-file except\ndef f():\n    try:\n        g()\n    except ValueError:\n        log('x')\n";
         let f = scan_src(src);
         assert!(f.iter().any(|x| x.kind == "swallow")); // not exempted
         assert!(f.iter().any(|x| x.kind == "suppression"));
@@ -1920,8 +1920,7 @@ mod tests {
 
     #[test]
     fn record_suppression_with_why_exempts() {
-        let f =
-            scan_src("def f(x):\n    return {\"a\": 1, \"b\": x}  # code-health: ignore record-shape genuine map\n");
+        let f = scan_src("def f(x):\n    return {\"a\": 1, \"b\": x}  # lucidlint: ignore record-shape genuine map\n");
         assert!(!f.iter().any(|x| x.kind == "record-shape"));
     }
 
@@ -2089,7 +2088,7 @@ mod tests {
     fn comma_signal_suppresses_both_families() {
         // one comment, comma-separated signals — the only shape that fits the
         // line/line-1 window for two families on one def
-        let src = "class X:\n    # code-health: ignore long-param-list,detached-method override signature\n    def m(self, a, b, c, d, e, f):\n        return 1\n";
+        let src = "class X:\n    # lucidlint: ignore long-param-list,detached-method override signature\n    def m(self, a, b, c, d, e, f):\n        return 1\n";
         let f = scan_src(src);
         assert!(!f.iter().any(|x| x.kind == "long-param-list"));
         assert!(!f.iter().any(|x| x.kind == "detached-method"));

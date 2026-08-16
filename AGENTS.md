@@ -1,7 +1,7 @@
 # build-tools
 
 Shared CI utilities for the house repos, plus the deterministic
-code-health gate (`code_health.py`) and its test suite. Consuming workflows
+lucidlint gate (`lucidlint.py`) and its test suite. Consuming workflows
 fetch a tool at run time, pinned to a tag — never `main`.
 
 ## Quick start
@@ -10,7 +10,7 @@ fetch a tool at run time, pinned to a tag — never `main`.
 - `make test` — lint + typecheck gate, then the pytest suite
 - `make check` — lint + typecheck only (what the pre-push hook and CI run)
 - `make self-check` — the gate must pass on this repo itself (PR gate)
-- `make code-health REPO=<path>` — run the gate on a repo (default `..`)
+- `make lucidlint REPO=<path>` — run the gate on a repo (default `..`)
 - `make coverage` — pytest with coverage report (XML for CI)
 
 Toolchain: uv, ruff (E,F,I,UP,B,SIM,N, no ignores), pyrefly with a
@@ -40,7 +40,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
   `GITHUB_REPOSITORY`, `PR_NUMBER`, `GITHUB_TOKEN`)
 - the Rust scan core (`scanner/`) — every finding family; the Python
   orchestrator converts + renders
-- `code_health.py` — the deterministic code-health gate: complexity, size,
+- `lucidlint.py` — the deterministic lucidlint gate: complexity, size,
   coupling, hotspots, risk, record shape, latent classes, vague names,
   coding-standard rules, docs integrity — actions with facts and fix
   guidance, exit 1 when any exist, baselines for acknowledged debt
@@ -54,7 +54,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 ## Repo self-checks
 
 - Docs integrity (links resolve, every doc reachable from this file) is
-  enforced by the tool itself: `make self-check` runs `code_health.py
+  enforced by the tool itself: `make self-check` runs `lucidlint.py
   --repo .`, whose `docs` kind fails on broken links and unreachable
   docs. No separate docs-links test is needed — the tool IS the checker.
 - The tools import only stdlib at module level; the scan engine is the

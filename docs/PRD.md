@@ -1,6 +1,6 @@
-# PRD — code_health: the deterministic code-health gate
+# PRD — lucidlint: the deterministic lucidlint gate
 
-A deterministic, gate-shaped code-health scanner that turns
+A deterministic, gate-shaped lucidlint scanner that turns
 the maintainability requirements into a prioritized, actionable list of fix
 actions — cheap to run, machine-readable, testable as a failing gate, and
 honest about what it can and cannot know.
@@ -195,7 +195,7 @@ rather than a number.
   alone is not fail-fast. The only sanctioned swallow is an explicitly
   safe-to-ignore error, and it must be marked and explained.
 - **R18 — Lint-style suppressions carry a why.** A finding is exempted by
-  `# code-health: ignore <signal> <why>` on its line or the line above;
+  `# lucidlint: ignore <signal> <why>` on its line or the line above;
   a suppression without an explanation is itself a finding (the tool is
   only skipped when the reader knows why the tool is wrong). Only real
   comments count — marker text inside a string never suppresses.
@@ -229,7 +229,7 @@ rather than a number.
   (tmp_path/open/Path) without pyfakefs is a finding; the `fs` fixture and
   fake_filesystem_unittest pass. Real FS is sanctioned only when the code
   under test needs real semantics — subprocess interop, symlinks, C-level
-  I/O like sqlite3 — and `# code-health: ignore-file <signal> <why>`
+  I/O like sqlite3 — and `# lucidlint: ignore-file <signal> <why>`
   exempts a whole file with an explanation (a why-less ignore-file is
   itself a finding).
 - **R26 — The radonc crate mirrors upstream radon structurally.** The

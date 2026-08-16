@@ -5,7 +5,7 @@
 #   the four platform bundles every consumer downloads.
 # - CODE_HEALTH_VERSION: the tag IS the version; the binary is stamped at
 #   build time so `lucidscan --version` matches the bundle it ships in.
-# - The bundle layout: <prefix>/bin/lucidscan + code_health.py next to it —
+# - The bundle layout: <prefix>/bin/lucidscan + lucidlint.py next to it —
 #   the orchestrator resolves its sibling binary, so the bundle is
 #   self-contained (no PATH, no env).
 #
@@ -58,8 +58,8 @@ jobs:
           if [ "$target" = "x86_64-pc-windows-msvc" ]; then exe=".exe"; fi
           dir="lucidlint-${ver}-${target}"
           mkdir -p "dist/${dir}/bin"
-          cp "scanner/target/${target}/release/code-health-scan${exe}" "dist/${dir}/bin/lucidlint${exe}"
-          cp code_health.py code_health_graph_export.py "dist/${dir}/"
+          cp "scanner/target/${target}/release/lucidlint${exe}" "dist/${dir}/bin/lucidlint${exe}"
+          cp lucidlint.py lucidlint_graph_export.py "dist/${dir}/"
           cp release/Makefile "dist/${dir}/Makefile"
           printf '%s\n' "$ver" > "dist/${dir}/version.txt"
           tar -C dist -czf "dist/${dir}.tar.gz" "${dir}"

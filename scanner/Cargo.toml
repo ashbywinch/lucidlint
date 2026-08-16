@@ -1,8 +1,8 @@
 [package]
-name = "code-health-scan"
+name = "lucidlint"
 version = "0.1.0"
 edition = "2021"
-description = "Rust scan core for the deterministic code-health gate — ruff parser, parity-gated against the Python implementation"
+description = "Rust scan core for the deterministic lucidlint gate — ruff parser, parity-gated against the Python implementation"
 
 [dependencies]
 # PINNED: ruff's internal crates are versioned 0.0.x and move fast; the parity

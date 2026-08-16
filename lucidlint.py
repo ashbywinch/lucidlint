@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# code-health: ignore-file complexity the orchestrator's git functions are single-pass protocol
+# lucidlint: ignore-file complexity the orchestrator's git functions are single-pass protocol
 # walks — decisions are path branches, not branching logic
 
-"""code_health.py — the deterministic code-health gate: a thin orchestrator
+"""lucidlint.py — the deterministic lucidlint gate: a thin orchestrator
 over the Rust scan core.
 
 The finding engine is the Rust binary (scanner/): every family — per-file,
@@ -13,7 +13,7 @@ the inputs (git file list/history, the graph contract, churn, coverage),
 converts the contract findings to Actions verbatim, and renders the gate:
 baselines, dedupe/merge, priority, diff marking, exit codes.
 
-    python3 code_health.py --repo /path/to/repo --json
+    python3 lucidlint.py --repo /path/to/repo --json
     echo $?   # 1 when there is work to do
 
 The scan thresholds live in the binary (schema 2): CC>=15, fn>=120 lines,
@@ -39,7 +39,7 @@ import tomllib
 # when the `fix` extra is not installed
 try:
     import fix_engine
-    # code-health: ignore swallow optional extra — fix degrades to a clear error
+    # lucidlint: ignore swallow optional extra — fix degrades to a clear error
 except ImportError:
     fix_engine = None
 import xml.etree.ElementTree as ET
@@ -305,7 +305,7 @@ def file_history(repo: Path) -> FileHistory:
                 churn[path] += 1
                 if date:
                     last[path] = date
-    except Exception:  # code-health: ignore swallow pygit2 unavailable degrades to empty history
+    except Exception:  # lucidlint: ignore swallow pygit2 unavailable degrades to empty history
         log(f"pygit2 history unavailable in {repo} — history-based signals are skipped")
     return FileHistory(churn, last)
 
@@ -341,7 +341,7 @@ def _coverage_from_xml(repo: Path) -> CoverageResult:
             if int(ln.get("hits", "0") or 0) > 0:
                 try:
                     lines.add(int(ln.get("number")))
-                except (TypeError, ValueError):  # code-health: ignore swallow malformed <line> elements are skipped
+                except (TypeError, ValueError):  # lucidlint: ignore swallow malformed <line> elements are skipped
                     log(f"ignoring malformed <line> element in {repo / 'coverage.xml'}")
     return CoverageResult(covered or None, "coverage.xml")
 
@@ -440,7 +440,7 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
                     try:
                         if not r.path_is_ignored(rel):
                             untracked.add(rel)
-                    except ValueError:  # code-health: ignore swallow ambiguous path — treat as untracked
+                    except ValueError:  # lucidlint: ignore swallow ambiguous path — treat as untracked
                         untracked.add(rel)
         rels = sorted(tracked | untracked)
         return [SourceFile(repo / rel, rel) for rel in rels]
@@ -495,7 +495,7 @@ class _RustScan:
         """The scan binary: env override, then the repo's own build, then the
         tool checkout's build, then the distribution bundle's sibling binary
         (a `lucidlint` release installs as <prefix>/bin/lucidlint next to
-        code_health.py — the bundle is self-contained, no env needed).
+        lucidlint.py — the bundle is self-contained, no env needed).
         None when not built — the Python path takes over."""
         if repo in self._binary_cache:
             return self._binary_cache[repo]
@@ -504,8 +504,8 @@ class _RustScan:
         env = os.environ.get("CODE_HEALTH_SCANNER")
         if env:
             candidates.append(Path(env))
-        candidates.append(repo / "scanner" / "target" / "release" / "code-health-scan")
-        candidates.append(Path(__file__).resolve().parent / "scanner" / "target" / "release" / "code-health-scan")
+        candidates.append(repo / "scanner" / "target" / "release" / "lucidlint")
+        candidates.append(Path(__file__).resolve().parent / "scanner" / "target" / "release" / "lucidlint")
         bundle_dir = Path(__file__).resolve().parent / "bin"
         candidates.append(bundle_dir / f"lucidlint{exe}")
         found = next((p for p in candidates if p.is_file()), None)
@@ -584,7 +584,7 @@ class _RustScan:
                         )
                 else:
                     result = None
-            except _SCANNER_FAILURES:  # code-health: ignore swallow degraded runs report nothing — visible
+            except _SCANNER_FAILURES:  # lucidlint: ignore swallow degraded runs report nothing — visible
                 result = None
         wrapped = (
             RustFindings(result, cc_result)
@@ -608,7 +608,7 @@ class _RustScan:
         if only_rel is None:
             self._pending_graph = GRAPH_CONTRACT.contract(repo)
             if file_churn:
-                tmp = Path(tempfile.mkstemp(prefix="code-health-churn-", suffix=".json")[1])
+                tmp = Path(tempfile.mkstemp(prefix="lucidlint-churn-", suffix=".json")[1])
                 tmp.write_text(json.dumps(dict(file_churn)), encoding="utf-8")
                 self._pending_churn = tmp
             self._pending_docs = str(repo)
@@ -628,7 +628,7 @@ def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
         return file_val
     try:
         rel = Path(file_val).resolve().relative_to(repo).as_posix()
-    except (ValueError, OSError):  # code-health: ignore swallow an unmappable path means the finding
+    except (ValueError, OSError):  # lucidlint: ignore swallow an unmappable path means the finding
         # is for a file outside this scan set — drop it, not a failure to surface
         rel = ""
     return rel if rel in rels else None
@@ -636,7 +636,7 @@ def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
 
 # Rule groups matching RULES.md — reference by name in the config file
 # to suppress whole groups across the codebase.
-# code-health: ignore record-shape wire-format dict — a class is ceremony for a rule-group map
+# lucidlint: ignore record-shape wire-format dict — a class is ceremony for a rule-group map
 RULE_GROUPS = {
     "architecture": {"complexity", "large-function", "closures", "partition", "strewing", "record-shape",
                      "duplicate", "layer-mix", "folder-mix", "hub-file", "high-risk",
@@ -651,11 +651,11 @@ RULE_GROUPS = {
 }
 
 # Cache for config loading
-# code-health: ignore global-state per-repo cache of the config file — one entry per repo per run
+# lucidlint: ignore global-state per-repo cache of the config file — one entry per repo per run
 _CONFIG_CACHE: dict[Path, dict] = {}
 
 
-# code-health: ignore record-shape wire-format envelope for the config — a class is ceremony
+# lucidlint: ignore record-shape wire-format envelope for the config — a class is ceremony
 def _load_lucidlint_config(repo: Path) -> dict:
     """Load the project-wide lucidlint config, looking for (in order):
     1. .lucidlint.toml in the repo root
@@ -667,10 +667,10 @@ def _load_lucidlint_config(repo: Path) -> dict:
     if repo in _CONFIG_CACHE and _CONFIG_CACHE.get(repo) is not None:
         return _CONFIG_CACHE[repo]
 
-    # code-health: ignore record-shape wire-format envelope for the config
+    # lucidlint: ignore record-shape wire-format envelope for the config
     result = {"global_ignore": set(), "per_path_ignore": []}
 
-    # code-health: ignore record-shape wire-format envelope for the config
+    # lucidlint: ignore record-shape wire-format envelope for the config
     def _merge_config(raw: dict) -> None:
         ignores = raw.get("ignore", raw.get("ignored_signals", []))
         for item in ignores:
@@ -726,14 +726,14 @@ _SCANNER_FAILURES = (OSError, SubprocessError, json.JSONDecodeError, ValueError)
 try:
     from code_review_graph.graph import GraphStore as _GraphStore
     from code_review_graph.registry import Registry as _Registry
-except ImportError:  # code-health: ignore swallow code-review-graph is optional — degrades to non-graph families
+except ImportError:  # lucidlint: ignore swallow code-review-graph is optional — degrades to non-graph families
     _GraphStore = None
     _Registry = None
 
 try:
     import pygit2 as _pygit2
     from pygit2 import GIT_SORT_TIME, GIT_SORT_TOPOLOGICAL
-except ImportError:  # code-health: ignore swallow pygit2 is optional — degrades to gitless mode
+except ImportError:  # lucidlint: ignore swallow pygit2 is optional — degrades to gitless mode
     _pygit2 = None
 
 CONTRACT_VERSION = 1
@@ -788,14 +788,14 @@ class _GraphContract:
                 communities = {}
                 for row in store.get_communities_list():
                     communities[str(row["id"])] = row["name"]
-            # code-health: ignore record-shape wire-format envelope — a class is ceremony for JSON
+            # lucidlint: ignore record-shape wire-format envelope — a class is ceremony for JSON
             contract = {
                 "contract_version": CONTRACT_VERSION,
                 "nodes": nodes,
                 "edges": edges,
                 "communities": communities,
             }
-            tmp = Path(tempfile.mkstemp(prefix="code-health-graph-", suffix=".json")[1])
+            tmp = Path(tempfile.mkstemp(prefix="lucidlint-graph-", suffix=".json")[1])
             tmp.write_text(json.dumps(contract, separators=(",", ":")), encoding="utf-8")
             result = tmp
         # surfaces via `result = None` — the caller falls back to non-graph
@@ -810,7 +810,7 @@ class _GraphContract:
 GRAPH_CONTRACT = _GraphContract()
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="deterministic code-health gate: a Rust scan core under a thin orchestrator"
+        description="deterministic lucidlint gate: a Rust scan core under a thin orchestrator"
     )
     p.add_argument("--repo", type=Path, default=Path.cwd(), help="repository root (default: cwd)")
     p.add_argument("--file", type=str, default=None,
@@ -858,6 +858,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="comma-separated callee parameter names for positional-literals (external callees)",
     )
+    p.add_argument(
+        "--fix-name",
+        type=str,
+        default=None,
+        help="class name for extract-class (default: the shared leading type)",
+    )
     return p.parse_args()
 
 
@@ -873,7 +879,7 @@ def changed_files(repo: Path, base: str) -> set[str]:
             r = _pygit2.Repository(str(repo))
             try:
                 ref_oid = r.lookup_reference(f"refs/remotes/{ref}").target
-            except KeyError:  # code-health: ignore swallow ref missing — fall back to the local branch
+            except KeyError:  # lucidlint: ignore swallow ref missing — fall back to the local branch
                 ref_oid = r.lookup_reference(f"refs/heads/{ref}").target
             base_oid = r.merge_base(r.head.target, ref_oid)
             changed = set()
@@ -1007,7 +1013,7 @@ def _load_baseline(path) -> set[str]:
     if path and path.exists():
         try:
             return set(json.loads(path.read_text()).get("actions", []))
-        except (json.JSONDecodeError, AttributeError):  # code-health: ignore swallow corrupt baseline; gate unbaselined
+        except (json.JSONDecodeError, AttributeError):  # lucidlint: ignore swallow corrupt baseline; gate unbaselined
             log(f"baseline {path} unreadable — ignoring")
     return set()
 
@@ -1047,14 +1053,14 @@ def _render_actions(repo: Path, args, fails: list[Action], acks: list[Action]) -
             + (" …" if len(acks) > 5 else "")
         )
     print(
-        "\nre-run: python3 code_health.py --repo "
+        "\nre-run: python3 lucidlint.py --repo "
         + str(repo)
         + (" --baseline " + str(args.baseline) if args.baseline else "")
         + "   | tool lives in build-tools (github.com/ashbywinch/build-tools); thresholds and"
         + " per-action data in --json output"
     )
     print(
-        "baseline: '--update-baseline --baseline code-health.json' acknowledges today's debt so the "
+        "baseline: '--update-baseline --baseline lucidlint.json' acknowledges today's debt so the "
         "gate only fails on NEW actions; this report is a snapshot, not wired into CI"
     )
 
@@ -1066,7 +1072,7 @@ def _write_baseline(args, unique: list[Action]) -> int:
         return 2
     keys = [action_key(a) for a in unique if a.severity != "warn"]
     args.baseline.write_text(json.dumps({"actions": keys}, indent=2))
-    print(f"code-health: baseline written — {len(keys)} action(s) locked to {args.baseline}")
+    print(f"lucidlint: baseline written — {len(keys)} action(s) locked to {args.baseline}")
     return 0
 
 
@@ -1115,8 +1121,13 @@ def main() -> int:
 
     if args.fix_kind:
         # the agent-driven fix surface: `fix --fix-kind X --fix-file F --fix-line N`
-        params = args.fix_params.split(",") if args.fix_params else None
-        description = fix_engine.fix_finding(args.fix_kind, args.fix_file, repo, args.fix_line, params)
+        opts = fix_engine.FixOptions(
+            params=args.fix_params.split(",") if args.fix_params else None,
+            name=args.fix_name,
+        )
+        description = fix_engine.fix_finding(
+            args.fix_kind, args.fix_file, repo, args.fix_line, opts
+        )
         if description is None:
             print(f"fix: nothing to change for {args.fix_kind} at {args.fix_file}:{args.fix_line}")
             return 0

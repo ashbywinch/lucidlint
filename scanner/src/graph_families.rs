@@ -1,8 +1,8 @@
-// code-health: ignore-file complexity the graph families are single dispatch tables over
+// lucidlint: ignore-file complexity the graph families are single dispatch tables over
 // contract nodes/edges — match-arm count is the family rule, not branching
 
 //! The repo-wide families computed from the code-review-graph contract
-//! (a versioned, schema-neutral JSON emitted by code_health_graph_export.py
+//! (a versioned, schema-neutral JSON emitted by lucidlint_graph_export.py
 //! through the graph tool's own public API — the gate never touches the
 //! SQLite schema or the DB location). Plus hotspot (git churn + max CC) and
 //! churn-untested (top churn with no test coverage).

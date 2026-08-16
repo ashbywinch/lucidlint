@@ -9,16 +9,16 @@ Every finding is one of two severities:
 
 ## Suppression
 
-Any finding can be silenced with a `code-health: ignore` comment on its line or the line above, provided you write a *reason*:
+Any finding can be silenced with a `lucidlint: ignore` comment on its line or the line above, provided you write a *reason*:
 
 ```python
-# code-health: ignore magic-number the gate threshold — this literal is the defined limit
+# lucidlint: ignore magic-number the gate threshold — this literal is the defined limit
 MAX_RETRIES = 3
 ```
 
 A suppression without a why is itself a finding. Every `# type: ignore` / `#[allow(...)]` / `#[ignore]` follows the same rule — the gate checks that a reason accompanies it.
 
-A multi-line suppression comment must put its `code-health: ignore` marker
+A multi-line suppression comment must put its `lucidlint: ignore` marker
 on the **last** line, directly above the code — the gate matches the marker's
 line against the finding's line (or the one above it); a marker on the first
 comment line never matches and is reported stale.
@@ -30,7 +30,7 @@ The first two groups are the ones most likely to collide with existing codebase 
 Every finding has two identifiers — don't conflate them:
 
 - **`signal`** — the raw family kind (e.g. `magic-number`). This is what
-  suppressions match on: `code-health: ignore <signal> <why>`, config
+  suppressions match on: `lucidlint: ignore <signal> <why>`, config
   `ignore = ["<signal>"]`, `group:<name>` membership, and baseline
   identity.
 - **`kind`** — the display kind in reports, `final_kind`'s output. Families
@@ -45,12 +45,12 @@ A new family must be registered in **four places**:
    graph: `scanner/src/graph_families.rs`.)
 2. **`final_kind`** (`scanner/src/main.rs`) — a named display bucket, or
    accept the `standard` collapse deliberately.
-3. **`RULE_GROUPS`** (`code_health.py`) — every kind belongs to exactly one
+3. **`RULE_GROUPS`** (`lucidlint.py`) — every kind belongs to exactly one
    group so `ignore = ["group:<name>"]` works.
 4. **RULES.md** — a row here: severity and what it checks.
 
 Then: unit tests for the scanner path, an orchestrator test if the family
-changes gate behavior, a suppression test (`code-health: ignore` + config
+changes gate behavior, a suppression test (`lucidlint: ignore` + config
 `ignore`), and `make self-check` — the tool scans its own repo, so the
 house code must be clean under the new family (or the finding baselined
 with a why).
@@ -109,11 +109,11 @@ with a why).
 
 | Rule | Severity | What it checks |
 |---|---|---|
-| **suppression** | fail | `code-health: ignore <signal>` with no explanation — every exemption needs a why |
+| **suppression** | fail | `lucidlint: ignore <signal>` with no explanation — every exemption needs a why |
 | **type-ignore** | fail | `# type: ignore` with no comment — a suppression is itself a finding; explain why the checker is wrong |
 | **allow-reason** (Rust) | fail | `#[allow(...)]` / `#[expect(...)]` with no reason comment on the line or the line above |
 | **noqa** | fail | `# noqa` / `# pragma: no cover` with no explanation — a suppression is itself a finding |
-| **stale-suppression** | fail | A `code-health: ignore` / `ignore-file` that no longer suppresses anything — remove it |
+| **stale-suppression** | fail | A `lucidlint: ignore` / `ignore-file` that no longer suppresses anything — remove it |
 
 ## Group 5: Hotspot & risk (graph-based)
 

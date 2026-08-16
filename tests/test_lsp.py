@@ -1,4 +1,4 @@
-# code-health: ignore-file fakefs the LSP test spawns the real binary over a
+# lucidlint: ignore-file fakefs the LSP test spawns the real binary over a
 # pipe — subprocess interop, the same named real-FS exception as the parity gate
 """End-to-end LSP session: the server speaks stdio JSON-RPC over a pipe and
 publishes diagnostics from the in-process scan core."""
@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-BINARY = ROOT / "scanner" / "target" / "release" / "code-health-scan"
+BINARY = ROOT / "scanner" / "target" / "release" / "lucidlint"
 
 
 def frame(msg) -> bytes:

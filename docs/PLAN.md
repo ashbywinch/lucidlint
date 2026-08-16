@@ -1,4 +1,4 @@
-# PLAN — code_health: the deterministic code-health gate
+# PLAN — lucidlint: the deterministic lucidlint gate
 
 Phases in delivery order; each ships the app working at its gate. Phases
 never depend on a later phase.
@@ -47,7 +47,7 @@ never depend on a later phase.
   AGENTS.md).
 - **Quality gate:** the tool passes its own gate (self-run GATE: PASS,
   max CC < 15, record check clean); lint-style exemptions
-  (`# code-health: ignore <signal> <why>`) tested thoroughly; suppression
+  (`# lucidlint: ignore <signal> <why>`) tested thoroughly; suppression
   without a why is itself a finding.
 
 ## Phase 5 — Deployment readiness

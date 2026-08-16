@@ -1,4 +1,4 @@
-# TECHSPEC — code_health: the deterministic code-health gate
+# TECHSPEC — lucidlint: the deterministic lucidlint gate
 
 How the product in `docs/PRD.md` is built. Requirements by name: R1–R20
 (references are to requirement numbers in the PRD).
@@ -7,10 +7,10 @@ How the product in `docs/PRD.md` is built. Requirements by name: R1–R20
 
 | Component | Responsibility | Provides | Consumes |
 |---|---|---|---|
-| `code_health.py` | the gate: scan → findings → actions → report | `code_health` module (CLI + testable functions) | radon (optional), the repo's `.code-review-graph/graph.db`, git history, `check_records.py` |
+| `lucidlint.py` | the gate: scan → findings → actions → report | `lucidlint` module (CLI + testable functions) | radon (optional), the repo's `.code-review-graph/graph.db`, git history, `check_records.py` |
 | `check_records.py` | record-vs-bare-dict gate (stdlib AST) | `scan(paths) -> ScanResult` | repo `.py` files |
 | `check_review_posted.py` | PR review-attribution gate | exit code for CI | GitHub API via env creds |
-| `tests/` | fake-based unit suite for code_health + check_records (`tests/fixtures/`) | 130+ tests | fakes only — never real radon/repos/git |
+| `tests/` | fake-based unit suite for lucidlint + check_records (`tests/fixtures/`) | 130+ tests | fakes only — never real radon/repos/git |
 | `docs/` | PRD (requirements), TECHSPEC (this), PLAN (phases) | — | — |
 
 ## Object model (the naming authority — classes are these nouns)
@@ -114,7 +114,7 @@ literals and `_mutation_findings` catches module collections mutated
 inside functions. `_hub_edge_counts` excludes CALLS to true builtins.
 `_dedupe_merge` ranks by
 churn × complexity × fan-in (R8); `_suppressions` reads
-`# code-health: ignore <signal> <why>` exemptions via tokenize COMMENT
+`# lucidlint: ignore <signal> <why>` exemptions via tokenize COMMENT
 tokens (R17, R18).
 
 ## Technology choices

@@ -16,7 +16,7 @@
 [project]
 name = "build-tools"
 version = "0.1.0"
-description = "Deterministic code-health tooling: a Rust scan core under a thin Python orchestrator"
+description = "Deterministic lucidlint tooling: a Rust scan core under a thin Python orchestrator"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

@@ -1,7 +1,7 @@
-# code-health: ignore-file fakefs the fixtures build real repo trees and the
+# lucidlint: ignore-file fakefs the fixtures build real repo trees and the
 # gate runs the actual Rust binary — real-FS subprocess interop, the same
 # named exception as test_lsp.py
-"""Orchestrator tests for the code-health gate.
+"""Orchestrator tests for the lucidlint gate.
 
 The finding engine is the Rust binary (verified by its own unit suite);
 these tests cover the orchestrator: git/coverage gathering, the gate
@@ -21,7 +21,7 @@ from pathlib import Path
 import pygit2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import code_health as ch
+import lucidlint as ch
 
 APP_SRC = """def alpha(a):
     if a:
@@ -79,7 +79,7 @@ class FakeSubprocess:
 
 
 class Env:
-    """Injects fakes into code_health and restores on exit (no monkeypatch).
+    """Injects fakes into lucidlint and restores on exit (no monkeypatch).
     git calls are routed; the Rust binary passes through to the real one."""
 
     def __init__(self, routes=None):
@@ -112,7 +112,7 @@ def make_repo(tmp_path, app_src=APP_SRC):
 # --------------------------------------------------------------------------- fixtures/helpers
 
 def materialize_test_repo(tmp_path) -> Path:
-    """Extract the canonical code-health test repo (a committed fixture —
+    """Extract the canonical lucidlint test repo (a committed fixture —
     real pygit2 history) to tmp_path. Tests exercise the REAL pygit2 API, so
     a library bump that breaks our calls fails here. Regenerate the fixture
     with `make test-fixture`."""
@@ -133,7 +133,7 @@ def git_routes(history="", diff="", branch="test-branch", commit="abc1234", log_
     routes.append((lambda a: is_git(a) and a[3] == "branch", branch, 0))
     routes.append((lambda a: is_git(a) and a[3] == "rev-parse", commit, 0))
     # the Rust scan binary + the graph-contract adapter pass through
-    routes.append((lambda a: str(a[0]).endswith("code-health-scan"), PASSTHROUGH, 0))
+    routes.append((lambda a: str(a[0]).endswith("lucidlint"), PASSTHROUGH, 0))
 
     def ls_files_stdout(args):
         repo = Path(args[2])
@@ -149,7 +149,7 @@ def git_routes(history="", diff="", branch="test-branch", commit="abc1234", log_
 
 def run_main(repo, *extra, routes=None):
     saved_argv = sys.argv
-    sys.argv = ["code_health.py", "--repo", str(repo), *extra]
+    sys.argv = ["lucidlint.py", "--repo", str(repo), *extra]
     try:
         with Env(routes=routes or git_routes()):
             return ch.main()
@@ -343,7 +343,7 @@ def test_git_lsfiles_failure_falls_back_to_rglob(tmp_path, capsys):
         (lambda a: a[:2] == ["git", "-C"] and a[3] == "branch", "test-branch", 0),
         (lambda a: a[:2] == ["git", "-C"] and a[3] == "rev-parse", "abc1234", 0),
         (lambda a: a[:2] == ["git", "-C"] and a[3] == "ls-files", "", 1),  # git fails
-        (lambda a: str(a[0]).endswith("code-health-scan"), PASSTHROUGH, 0),
+        (lambda a: str(a[0]).endswith("lucidlint"), PASSTHROUGH, 0),
         (lambda a: a[:2] == ["make", "coverage"], "", 0),
     ]
     rc = run_main(repo, routes=routes)
@@ -356,7 +356,7 @@ def test_refresh_coverage_runs_make(tmp_path):
     repo = make_repo(tmp_path)
     with Env(routes=git_routes()) as env:
         saved_argv = sys.argv
-        sys.argv = ["code_health.py", "--repo", str(repo), "--refresh-coverage"]
+        sys.argv = ["lucidlint.py", "--repo", str(repo), "--refresh-coverage"]
         try:
             rc = ch.main()
         finally:
@@ -368,7 +368,7 @@ def test_refresh_coverage_runs_make(tmp_path):
 def test_scanner_failure_raises(tmp_path):
     repo = make_repo(tmp_path)
     routes = git_routes()
-    routes.insert(0, (lambda a: str(a[0]).endswith("code-health-scan"), "not json at all", 0))
+    routes.insert(0, (lambda a: str(a[0]).endswith("lucidlint"), "not json at all", 0))
     try:
         run_main(repo, routes=routes)
         raise AssertionError("expected RuntimeError")
@@ -388,7 +388,7 @@ def test_scanner_garbage_findings_dropped(tmp_path, capsys):
         "complexity": [],
     })
     routes = git_routes()
-    routes.insert(0, (lambda a: str(a[0]).endswith("code-health-scan"), scan_json, 0))
+    routes.insert(0, (lambda a: str(a[0]).endswith("lucidlint"), scan_json, 0))
     rc = run_main(repo, routes=routes)
     assert rc == 0  # findings for files outside the scan set are dropped, not failures
     assert "drop me" not in capsys.readouterr().out
@@ -397,7 +397,7 @@ def test_scanner_garbage_findings_dropped(tmp_path, capsys):
 def test_scanner_cache_hits(tmp_path):
     repo = make_repo(tmp_path)
     rs = ch._RustScan()
-    fs = FakeSubprocess([(lambda a: str(a[0]).endswith("code-health-scan"), PASSTHROUGH, 0)])
+    fs = FakeSubprocess([(lambda a: str(a[0]).endswith("lucidlint"), PASSTHROUGH, 0)])
     files = [ch.SourceFile(repo / "houses/app.py", "houses/app.py")]
     rs._pending_graph = None  # exactly what prepare() sets when no graph/churn is available
     rs._pending_churn = None
@@ -410,7 +410,7 @@ def test_scanner_cache_hits(tmp_path):
         assert rs.load(repo, files) is not None
     finally:
         ch.subprocess = saved
-    assert sum(1 for a in fs.calls if str(a[0]).endswith("code-health-scan")) == 1
+    assert sum(1 for a in fs.calls if str(a[0]).endswith("lucidlint")) == 1
 
 
 def test_scanner_binary_missing_raises(tmp_path):
@@ -735,7 +735,7 @@ def test_main_merges_function_targets(tmp_path, capsys):
 
 def test_main_baseline_ack(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
-    baseline = tmp_path / "code-health.json"
+    baseline = tmp_path / "lucidlint.json"
     assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
     assert run_main(repo, "--baseline", str(baseline)) == 0
     out = capsys.readouterr().out
@@ -744,7 +744,7 @@ def test_main_baseline_ack(tmp_path, capsys):
 
 def test_main_update_baseline(tmp_path):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
-    baseline = tmp_path / "code-health.json"
+    baseline = tmp_path / "lucidlint.json"
     assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
     assert baseline.exists()
     keys = json.loads(baseline.read_text())["actions"]
@@ -769,7 +769,7 @@ def test_main_priority_percentile(tmp_path, capsys):
 
 def test_update_baseline_excludes_warns(tmp_path):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 60\n")
-    baseline = tmp_path / "code-health.json"
+    baseline = tmp_path / "lucidlint.json"
     assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
     keys = json.loads(baseline.read_text())["actions"]
     assert keys == []  # magic number is a warn — never baselined
@@ -793,7 +793,7 @@ def test_kind_rollup_in_fail_output(tmp_path, capsys):
 # --------------------------------------------------------------------------- baseline semantics
 def test_stale_baseline_entry_fails(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
-    baseline = tmp_path / "code-health.json"
+    baseline = tmp_path / "lucidlint.json"
     run_main(repo, "--update-baseline", "--baseline", str(baseline))
     # fix the code — the baselined finding is now stale
     (repo / "houses" / "app.py").write_text(APP_SRC)
@@ -803,7 +803,7 @@ def test_stale_baseline_entry_fails(tmp_path, capsys):
 
 def test_stale_baseline_clears_after_update(tmp_path):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
-    baseline = tmp_path / "code-health.json"
+    baseline = tmp_path / "lucidlint.json"
     run_main(repo, "--update-baseline", "--baseline", str(baseline))
     (repo / "houses" / "app.py").write_text(APP_SRC)
     run_main(repo, "--update-baseline", "--baseline", str(baseline))
@@ -812,7 +812,7 @@ def test_stale_baseline_clears_after_update(tmp_path):
 
 def test_baseline_line_shift_is_not_stale(tmp_path):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
-    baseline = tmp_path / "code-health.json"
+    baseline = tmp_path / "lucidlint.json"
     run_main(repo, "--update-baseline", "--baseline", str(baseline))
     # add a line above the finding — same function, new line
     shifted = "# comment\n" * 3 + SWALLOW_SRC
@@ -822,7 +822,7 @@ def test_baseline_line_shift_is_not_stale(tmp_path):
 
 def test_baseline_gone_function_is_stale(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
-    baseline = tmp_path / "code-health.json"
+    baseline = tmp_path / "lucidlint.json"
     run_main(repo, "--update-baseline", "--baseline", str(baseline))
     (repo / "houses" / "app.py").write_text(APP_SRC)
     assert run_main(repo, "--baseline", str(baseline)) == 1

@@ -1,6 +1,6 @@
 # lucidlint — your codebase's sanity check
 
-A deterministic code-health gate for Python and Rust. It scans architecture-level problems — complexity, duplicate code, import cycles, test quality, layering — and produces a single `GATE: PASS` / `GATE: FAIL` verdict. No false-positive drift: same code, same report, every run.
+A deterministic lucidlint gate for Python and Rust. It scans architecture-level problems — complexity, duplicate code, import cycles, test quality, layering — and produces a single `GATE: PASS` / `GATE: FAIL` verdict. No false-positive drift: same code, same report, every run.
 
 ## Quick start
 
@@ -14,13 +14,13 @@ cd lucidlint-v0.1.0-<platform>/
 
 # 2. Run the gate on a Python or Rust project
 ./bin/lucidlint --version        # "lucidlint v0.1.0"
-python3 code_health.py --repo .  # GATE: PASS / FAIL
+python3 lucidlint.py --repo .  # GATE: PASS / FAIL
 
 # 3. (optional) Acknowledge today's debt — the gate then fails only on NEW findings
-python3 code_health.py --repo . --update-baseline --baseline code-health.json
+python3 lucidlint.py --repo . --update-baseline --baseline lucidlint.json
 ```
 
-The bundle is self-contained: `code_health.py` finds its sibling `bin/lucidlint` by itself — no `PATH`, no `make`, no `cargo` needed.
+The bundle is self-contained: `lucidlint.py` finds its sibling `bin/lucidlint` by itself — no `PATH`, no `make`, no `cargo` needed.
 
 ## What it finds
 
@@ -52,7 +52,7 @@ The gate exits:
 | **2** | Usage or configuration error |
 
 - **Warn tier**: Findings like magic numbers are reported but never cause a FAIL. They're visible in the output so you can fix them if you want, but they don't block merges.
-- **Baselines**: `--update-baseline --baseline code-health.json` captures the current state of fail-severity findings. Subsequent runs only fail on NEW findings. A stale baseline (entries that no longer correspond to any code) is itself a FAIL — your debt shrinks, and the baseline shrinks with it.
+- **Baselines**: `--update-baseline --baseline lucidlint.json` captures the current state of fail-severity findings. Subsequent runs only fail on NEW findings. A stale baseline (entries that no longer correspond to any code) is itself a FAIL — your debt shrinks, and the baseline shrinks with it.
 
 ## Installation as an LSP
 
@@ -116,17 +116,18 @@ Every mechanical finding can be applied by an agent (no editor clicks):
 
 ```bash
 # the finding's kind + file + line come from the gate report
-code_health.py fix --fix-kind stale-suppression --fix-file x.py --fix-line 12
-code_health.py fix --fix-kind positional-literals --fix-file x.py --fix-line 71 \
+lucidlint.py fix --fix-kind stale-suppression --fix-file x.py --fix-line 12
+lucidlint.py fix --fix-kind positional-literals --fix-file x.py --fix-line 71 \
     --fix-params amount,currency   # external callee: supply the signature once
 ```
 
 Mechanical kinds: `stale-suppression` (delete the comment), `noop-statement`
 and `unreachable` (delete the statement), `positional-literals` (keyword the
-args — callee resolved repo-wide, or supplied via `--fix-params`). Transforms
-are lossless (libcst) and touch only the finding's node; the gate re-run
-confirms the fix. Structural fixes (extract-class, split-function) need a
-name and are not auto-applied.
+args — callee resolved repo-wide, or supplied via `--fix-params`). Structural:
+`extract-class` moves the strewing free functions into a class named by
+`--fix-name` (default: the shared leading type) and rewrites the call sites.
+Transforms are lossless (libcst) and touch only the finding's node; the gate
+re-run confirms the fix.
 
 ## Configuration
 

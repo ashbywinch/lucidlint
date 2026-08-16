@@ -18,7 +18,7 @@ use ruff_python_parser::{parse_module, Parsed};
 pub fn code2ast(code: &str) -> Parsed<ModModule> {
     // the panic mirrors radon's code2ast raising SyntaxError on invalid
     // source (R26) — a parse failure here is a programming error
-    // code-health: ignore debug-artifact the panic mirrors radon's raise (R26)
+    // lucidlint: ignore debug-artifact the panic mirrors radon's raise (R26)
     parse_module(code).expect("invalid Python source")
 }
 
@@ -92,7 +92,7 @@ impl Class {
     /// radon's `Class.letter`: always 'C'.
     // the mirror keeps letter as a method to match radon's property (R26) —
     // structure over instance-state purity
-    // code-health: ignore detached-method radon mirror keeps letter a method
+    // lucidlint: ignore detached-method radon mirror keeps letter a method
     pub fn letter(&self) -> char {
         'C'
     }

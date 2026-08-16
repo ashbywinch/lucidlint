@@ -125,7 +125,7 @@ pub struct Suppressions {
     pub file: HashMap<String, String>,
 }
 
-/// Parse `code-health: ignore <signal> <why>` / `ignore-file` comments.
+/// Parse `lucidlint: ignore <signal> <why>` / `ignore-file` comments.
 /// `comments` are (line, full comment text incl. the marker) — each language
 /// layer extracts them its own way (ruff tokens for Python, a string-aware
 /// scan for Rust); the parse and the matching are shared.
@@ -134,14 +134,14 @@ pub fn suppressions_from_comments(comments: &[(usize, String)]) -> Suppressions 
     let mut file_map = HashMap::new();
     for (ln, text) in comments {
         let trimmed = text.trim_start_matches(['#', '/']).trim_start();
-        if let Some(rest) = trimmed.strip_prefix("code-health: ignore-file ") {
+        if let Some(rest) = trimmed.strip_prefix("lucidlint: ignore-file ") {
             let mut it = rest.splitn(2, char::is_whitespace);
             let signal = it.next().unwrap_or("").to_string();
             let why = it.next().unwrap_or("").trim().to_string();
             if !signal.is_empty() {
                 file_map.insert(signal, why);
             }
-        } else if let Some(rest) = trimmed.strip_prefix("code-health: ignore ") {
+        } else if let Some(rest) = trimmed.strip_prefix("lucidlint: ignore ") {
             let mut it = rest.splitn(2, char::is_whitespace);
             let signals = it.next().unwrap_or("");
             let why = it.next().unwrap_or("").trim().to_string();
@@ -214,7 +214,7 @@ pub fn apply_suppressions_impl(
                 kind: "suppression".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "suppression '{marker} code-health: ignore {sig}' at line {ln} without a why — exemptions only apply with an explanation"
+                    "suppression '{marker} lucidlint: ignore {sig}' at line {ln} without a why — exemptions only apply with an explanation"
                 ),
             });
             }
@@ -224,7 +224,7 @@ pub fn apply_suppressions_impl(
         if why.is_empty() {
             if let Some((ln, _)) = comments
                 .iter()
-                .find(|(_, t)| t.contains(&format!("code-health: ignore-file {sig}")))
+                .find(|(_, t)| t.contains(&format!("lucidlint: ignore-file {sig}")))
             {
                 out.push(crate::Finding {
                     file: file.to_string(),
@@ -233,7 +233,7 @@ pub fn apply_suppressions_impl(
                     kind: "suppression".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "file suppression '{marker} code-health: ignore-file {sig}' at line {ln} without a why — exemptions only apply with an explanation"
+                        "file suppression '{marker} lucidlint: ignore-file {sig}' at line {ln} without a why — exemptions only apply with an explanation"
                     ),
                 });
             }
@@ -324,7 +324,7 @@ impl<'a> StaleCtx<'a> {
                     kind: "stale-suppression".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "suppression '{} code-health: ignore {sig}' at line {ln} no longer fires — remove it",
+                        "suppression '{} lucidlint: ignore {sig}' at line {ln} no longer fires — remove it",
                         self.marker
                     ),
                 });
@@ -337,7 +337,7 @@ impl<'a> StaleCtx<'a> {
             if let Some((ln, _)) = self
                 .comments
                 .iter()
-                .find(|(_, t)| t.contains(&format!("code-health: ignore-file {sig}")))
+                .find(|(_, t)| t.contains(&format!("lucidlint: ignore-file {sig}")))
             {
                 out.push(crate::Finding {
                     file: self.file.to_string(),
@@ -346,7 +346,7 @@ impl<'a> StaleCtx<'a> {
                     kind: "stale-suppression".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "file suppression '{} code-health: ignore-file {sig}' no longer fires — remove it",
+                        "file suppression '{} lucidlint: ignore-file {sig}' no longer fires — remove it",
                         self.marker
                     ),
                 });

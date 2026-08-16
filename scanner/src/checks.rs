@@ -1,4 +1,4 @@
-// code-health: ignore-file complexity the parity-locked AST walkers are single dispatch tables —
+// lucidlint: ignore-file complexity the parity-locked AST walkers are single dispatch tables —
 // match-arm count is table size, not branching; keep NEW functions under cc 15
 
 //! The remaining standard-family checks, mirroring the Python implementation
@@ -536,7 +536,7 @@ pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
                 kind: "swallow".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "{kind} at line {line} — the catch never raises, returns, or surfaces the error; re-raise or mark `# code-health: ignore swallow <why>`"
+                    "{kind} at line {line} — the catch never raises, returns, or surfaces the error; re-raise or mark `# lucidlint: ignore swallow <why>`"
                 ),
             });
         } else if let Some(ty) = type_opt {
@@ -1127,7 +1127,7 @@ pub fn module_flagged_names(body: &[Stmt]) -> HashSet<String> {
 // repo-wide families: duplicate (Dice on structural skeletons) + unused
 // (defined-but-never-referenced). These are computed in the Rust runner
 // across ALL files of one invocation — mirroring _duplicate_actions and
-// _unused_actions in code_health.py.
+// _unused_actions in lucidlint.py.
 // =====================================================================
 
 pub use crate::common::{dice_similarity, SkeletonFn};
@@ -1283,7 +1283,7 @@ fn skel_tok<'a>(q: &mut Vec<Q<'a>>, t: &'static str) {
     q.push(Q::T(t));
 }
 
-// code-health: ignore large-function the parity-locked walker mirrors CPython's field order — one dispatch table
+// lucidlint: ignore large-function the parity-locked walker mirrors CPython's field order — one dispatch table
 pub fn skel_children<'a>(node: AnyNodeRef<'a>, queue: &mut Vec<Q<'a>>) {
     use ruff_python_ast::Pattern;
     match node {
@@ -1877,7 +1877,7 @@ pub fn unused_findings(
         let (message, kind) = if test_refs.contains(name) {
             (
                 format!(
-                    "function '{name}' ({rel}:{line}) is referenced only from tests — if it is a deliberate test seam (isolation hook, fixture helper), document it with `# code-health: ignore unused <why>`; otherwise production code that nothing ships calls is dead — delete it"
+                    "function '{name}' ({rel}:{line}) is referenced only from tests — if it is a deliberate test seam (isolation hook, fixture helper), document it with `# lucidlint: ignore unused <why>`; otherwise production code that nothing ships calls is dead — delete it"
                 ),
                 "unused",
             )
@@ -2692,7 +2692,7 @@ const FS_TEMPFILE: [&str; 6] = [
 ];
 
 /// `_fakefs_findings` — real FS access in tests without pyfakefs.
-// code-health: ignore large-function the fake-filesystem grammar is one decision table per backend
+// lucidlint: ignore large-function the fake-filesystem grammar is one decision table per backend
 pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
     let uses_fakefs_base = {
         let mut base = false;
@@ -2810,7 +2810,7 @@ pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                         kind: "fakefs".into(),
                         severity: "fail".into(),
                         message: format!(
-                            "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3) and comment why — or mark `# code-health: ignore-file fakefs <why>`",
+                            "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3) and comment why — or mark `# lucidlint: ignore-file fakefs <why>`",
                             f.name.as_str()
                         ),
                     });

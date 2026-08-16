@@ -1,4 +1,4 @@
-# code-health: ignore-file class-module the class is a small HTTP-redirect helper
+# lucidlint: ignore-file class-module the class is a small HTTP-redirect helper
 # (urllib's auto-follow would leak the Authorization header to the signed blob
 # host); the script is one unit with one reason to change, not a model module.
 """Called by .github/workflows/pr-agent.yml — fail the PR if the review bot
@@ -66,7 +66,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     # urllib's HTTPRedirectHandler.redirect_request override requires this
     # exact signature and ignores its receiver — the framework defines the
     # contract; it can be neither slimmed nor made an associated fn
-    # code-health: ignore long-param-list,detached-method framework-mandated override
+    # lucidlint: ignore long-param-list,detached-method framework-mandated override
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 

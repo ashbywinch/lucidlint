@@ -14,7 +14,7 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-.PHONY: help setup deps uv-sync install-hooks check lint lint-check lint-github typecheck typecheck-update-baseline format test scanner-check coverage self-check code-health clean
+.PHONY: help setup deps uv-sync install-hooks check lint lint-check lint-github typecheck typecheck-update-baseline format test scanner-check coverage self-check lucidlint clean
 
 # Tool paths. uv is the package manager (installs itself if missing).
 PYTHON := .venv/bin/python
@@ -33,9 +33,9 @@ help:
 	@echo "  ${GREEN}make setup${NC}        Create venv, install deps + pre-commit hooks"
 	@echo "  ${GREEN}make check${NC}        Lint + typecheck — the gate CI and the pre-push hook run"
 	@echo "  ${GREEN}make test${NC}         Run tests (lint + typecheck gate)"
-	@echo "  ${GREEN}make self-check${NC}   The tool's own gate: code_health on this repo + record check"
+	@echo "  ${GREEN}make self-check${NC}   The tool's own gate: lucidlint on this repo + record check"
 	@echo "  ${GREEN}make coverage${NC}     Run tests with coverage report"
-	@echo "  ${GREEN}make code-health${NC}  Run code_health.py on REPO (default: ..)"
+	@echo "  ${GREEN}make lucidlint${NC}  Run lucidlint.py on REPO (default: ..)"
 	@echo "  ${GREEN}make format${NC}       Auto-fix lint + formatting issues"
 	@echo "  ${GREEN}make clean${NC}        Remove .venv and generated files"
 
@@ -123,12 +123,12 @@ format: setup
 # The repo's defining gate: the tool must pass on itself — every finding
 # family (record-shape included) computes in the Rust core.
 self-check:
-	@$(PYTHON) code_health.py --repo .
+	@$(PYTHON) lucidlint.py --repo .
 	@echo "ok — the tool passes its own gate"
 
 # Run the health tool on another repo (default: the parent directory).
-code-health: deps scanner-check
-	@$(PYTHON) code_health.py --repo $(REPO)
+lucidlint: deps scanner-check
+	@$(PYTHON) lucidlint.py --repo $(REPO)
 
 clean:
 	@rm -rf .venv htmlcov/

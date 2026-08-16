@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the canonical code-health test repo and store it as a fixture.
+"""Build the canonical lucidlint test repo and store it as a fixture.
 
 The repo history is DETERMINISTIC: fixed commit timestamps and a fixed
 signature, so churn counts and last-modified dates asserted by the tests
@@ -29,7 +29,7 @@ import pygit2
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "tests" / "fixtures" / "test-repo.tar.gz"
 
-SIG = pygit2.Signature("CodeHealth Test", "code-health@example.com", time=1700000000, offset=0)
+SIG = pygit2.Signature("CodeHealth Test", "lucidlint@example.com", time=1700000000, offset=0)
 
 
 def commit_all(repo: pygit2.Repository, files: dict[str, str], message: str, parents) -> str:
