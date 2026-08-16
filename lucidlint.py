@@ -277,17 +277,49 @@ def log(msg: str) -> None:
 
 
 # --------------------------------------------------------------------------- complexity (radon)
-def file_history(repo: Path) -> FileHistory:
-    """One pass over git history: per-file change counts and last-modified date.
+# how much history the churn signal needs: 200 commits reaches ~2 weeks on
+# an active repo and years on a quiet one — the percentile ranking is
+# relative within the window, so the bound adapts to the repo's activity;
+# the age cap is the hard floor for the "is this still live?" judgement
+_CHURN_MAX_COMMITS = 200
+_CHURN_MAX_AGE_DAYS = 730
 
-    Cheap even on long histories; drives the 'is this still live?' judgement
-    and the priority ranking.
+
+def file_history(repo: Path) -> FileHistory:
+    """The recent git history: per-file change counts and last-modified date.
+
+    The walk is bounded (the last 200 commits or 730 days, whichever stops
+    first) — old churn dilutes the CURRENT hotspot signal, so limiting the
+    window is more signal, not less. The walk is deterministic for a given
+    HEAD, so the result is cached per (HEAD, window) — repeat gate runs skip
+    the walk entirely. `last_modified` is the NEWEST touch (the walk is
+    newest-first; first-seen-wins).
     """
+    head = ""
+    cache_key = ""
+    try:
+        r = _pygit2.Repository(str(repo))
+        head = str(r.head.target)
+        cutoff = int(time.time()) - _CHURN_MAX_AGE_DAYS * 86400
+        cutoff_day = time.strftime("%Y-%m-%d", time.localtime(cutoff))
+        cache_key = f"churn-{head}-{_CHURN_MAX_COMMITS}-{cutoff_day}.json"
+        cache_path = repo / ".lucidlint-cache" / cache_key
+        try:
+            data = json.loads(cache_path.read_text())
+            return FileHistory(Counter(data["churn"]), data["last_modified"])
+        except (OSError, ValueError, KeyError):  # lucidlint: ignore swallow a missing/corrupt cache just walks
+            pass  # no cache yet — walk
+    except Exception:  # lucidlint: ignore swallow pygit2 unavailable degrades to empty history
+        head = ""  # no git — walk without caching
+
     churn: Counter[str] = Counter()
     last: dict[str, str] = {}
     try:
         r = _pygit2.Repository(str(repo))
-        for commit in r.walk(r.head.target, GIT_SORT_TIME):
+        cutoff = int(time.time()) - _CHURN_MAX_AGE_DAYS * 86400
+        for seen, commit in enumerate(r.walk(r.head.target, GIT_SORT_TIME)):
+            if seen >= _CHURN_MAX_COMMITS or commit.commit_time < cutoff:
+                break
             date = str(commit.commit_time)
             changed = set()
             if commit.parents:
@@ -304,10 +336,19 @@ def file_history(repo: Path) -> FileHistory:
                         changed.add(path)
             for path in changed:
                 churn[path] += 1
-                if date:
-                    last[path] = date
+                if date and path not in last:
+                    last[path] = date  # first-seen = newest in a newest-first walk
     except Exception:  # lucidlint: ignore swallow pygit2 unavailable degrades to empty history
         log(f"pygit2 history unavailable in {repo} — history-based signals are skipped")
+
+    if cache_key:
+        try:
+            (repo / ".lucidlint-cache").mkdir(exist_ok=True)
+            (repo / ".lucidlint-cache" / cache_key).write_text(
+                json.dumps({"churn": dict(churn), "last_modified": last})
+            )
+        except OSError:  # lucidlint: ignore swallow the cache is best-effort — a read-only repo still works
+            pass  # the cache is best-effort — a read-only repo still works
     return FileHistory(churn, last)
 
 

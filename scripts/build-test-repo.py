@@ -29,7 +29,8 @@ import pygit2
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "tests" / "fixtures" / "test-repo.tar.gz"
 
-SIG = pygit2.Signature("CodeHealth Test", "lucidlint@example.com", time=1700000000, offset=0)
+# 2026-08-01 — inside the churn window (730d), fixed for determinism
+SIG = pygit2.Signature("CodeHealth Test", "lucidlint@example.com", time=1785542400, offset=0)
 
 
 def commit_all(repo: pygit2.Repository, files: dict[str, str], message: str, parents) -> str:

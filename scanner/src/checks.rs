@@ -5,6 +5,7 @@
 //! exactly: suppressions, type-ignore, global-state, builtin-shadow, closures,
 //! class-module, vague-name, strewing, except-swallows, broad-except.
 
+use rayon::prelude::*;
 use ruff_python_ast::token::{TokenKind, Tokens};
 use ruff_python_ast::{
     AnyNodeRef, BoolOp, CmpOp, Decorator, Expr, ExprAttribute, ExprCall, ExprContext, Operator, Pattern, Stmt,
@@ -2370,44 +2371,55 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
     }
     let mut len_keys: Vec<usize> = buckets.keys().copied().collect();
     len_keys.sort_unstable();
-    for (i, fr) in fns.iter().enumerate() {
-        let l = fr.skeleton.len();
-        let tol = (l / 5).max(2);
-        let lo = l.saturating_sub(tol);
-        let hi = l + tol;
-        let mut best: Option<(usize, f64)> = None;
-        for &len in len_keys.iter().filter(|&&k| k >= lo && k <= hi) {
-            let bucket = &buckets[&len];
-            let start = bucket.partition_point(|&j| j <= i);
-            for &j in &bucket[start..] {
-                // identical bigram sets -> dice is exactly 1.0, no computation
-                let sim = if hashes[j] == hashes[i] {
-                    1.0
-                } else {
-                    dice_similarity(&fr.skeleton, &fns[j].skeleton)
-                };
-                if sim >= 0.9 {
-                    if best.is_none_or(|(b, _)| j < b) {
-                        best = Some((j, sim));
+    // the outer loop is independent per candidate (reads the shared buckets,
+    // writes only its own result) — parallel, reassembled in index order so
+    // the finding order stays deterministic
+    let results: Vec<Option<Finding>> = (0..fns.len())
+        .into_par_iter()
+        .map(|i| {
+            let fr = &fns[i];
+            let l = fr.skeleton.len();
+            let tol = (l / 5).max(2);
+            let lo = l.saturating_sub(tol);
+            let hi = l + tol;
+            let mut best: Option<(usize, f64)> = None;
+            for &len in len_keys.iter().filter(|&&k| k >= lo && k <= hi) {
+                let bucket = &buckets[&len];
+                let start = bucket.partition_point(|&j| j <= i);
+                for &j in &bucket[start..] {
+                    // identical bigram sets -> dice is exactly 1.0, no computation
+                    let sim = if hashes[j] == hashes[i] {
+                        1.0
+                    } else {
+                        dice_similarity(&fr.skeleton, &fns[j].skeleton)
+                    };
+                    if sim >= 0.9 {
+                        if best.is_none_or(|(b, _)| j < b) {
+                            best = Some((j, sim));
+                        }
+                        break; // later members of this bucket are later indices
                     }
-                    break; // later members of this bucket are later indices
                 }
             }
-        }
-        if let Some((j, sim)) = best {
-            let dup = &fns[j];
-            out.push(Finding {
-                file: dup.rel.clone(),
-                line: dup.line,
-                function: dup.name.clone(),
-                kind: "duplicate".into(),
-                severity: "warn".into(),
-                message: format!(
-                    "function '{}' ({}:{}) is {:.0}% similar to '{}' ({}:{}) — copy-paste; extract the shared logic into one function",
-                    dup.name, dup.rel, dup.line, sim * 100.0, fr.name, fr.rel, fr.line
-                ),
-            });
-        }
+            if let Some((j, sim)) = best {
+                let dup = &fns[j];
+                return Some(Finding {
+                    file: dup.rel.clone(),
+                    line: dup.line,
+                    function: dup.name.clone(),
+                    kind: "duplicate".into(),
+                    severity: "warn".into(),
+                    message: format!(
+                        "function '{}' ({}:{}) is {:.0}% similar to '{}' ({}:{}) — copy-paste; extract the shared logic into one function",
+                        dup.name, dup.rel, dup.line, sim * 100.0, fr.name, fr.rel, fr.line
+                    ),
+                });
+            }
+            None
+        })
+        .collect();
+    for f in results.into_iter().flatten() {
+        out.push(f);
     }
     out
 }

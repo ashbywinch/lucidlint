@@ -14,6 +14,7 @@
 //! functions report cyclomatic complexity, exactly as radon does (nested
 //! functions and class bodies contribute no decisions to their parent).
 
+use rayon::prelude::*;
 use ruff_python_ast::visitor::source_order::{walk_expr, walk_stmt, SourceOrderVisitor};
 use ruff_python_ast::{AnyNodeRef, Expr, ModModule, Stmt};
 use ruff_python_parser::{parse_module, Parsed};
@@ -1027,23 +1028,30 @@ fn main() {
     }
     let root = repo_root(&paths);
     let mut scans = Vec::new();
+    // per-file scans are independent — parse in parallel (rayon), then the
+    // repo-wide passes consume the scans in ORDER (duplicate first-seen,
+    // unused refs, cycles all depend on the deterministic file order)
+    let paired: Vec<(Option<rustscan::RustScan>, FileScan)> = paths
+        .par_iter()
+        .map(|path| {
+            if path.ends_with(".rs") {
+                let source = std::fs::read_to_string(path).unwrap_or_default();
+                let repo_wide = true;
+                let rs = rustscan::scan_source(&source, path, repo_wide);
+                let rel = path.clone();
+                let fs = rustscan_to_filescan_ref(&rs, &rel);
+                (Some(rs), fs)
+            } else {
+                (None, scan_file(Path::new(path)))
+            }
+        })
+        .collect();
     let mut rust_scans: Vec<rustscan::RustScan> = Vec::new();
-    for path in &paths {
-        if path.ends_with(".rs") {
-            let source = std::fs::read_to_string(path).unwrap_or_default();
-            let name = path.clone();
-            let repo_wide = true;
-            let rs = rustscan::scan_source(&source, &name, repo_wide);
-            let rel = name.clone();
-            rust_scans.push(rs);
-            // a scan was just pushed — the pair stays in lockstep
-            let Some(scan) = rust_scans.last() else {
-                continue;
-            };
-            scans.push(rustscan_to_filescan_ref(scan, &rel));
-        } else {
-            scans.push(scan_file(Path::new(path)));
+    for (rs, fs) in paired {
+        if let Some(r) = rs {
+            rust_scans.push(r);
         }
+        scans.push(fs);
     }
     // repo-wide families: duplicate (Dice, per-language pools) + unused
     // (Python reference scan; Rust's dead code is rustc's, so Rust scans

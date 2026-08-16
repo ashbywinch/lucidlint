@@ -46,3 +46,4 @@ target/
 
 # leaf library crate — its lock is regenerated; scanner/Cargo.lock governs
 scanner/radonc/Cargo.lock
+lucidlint-cache
