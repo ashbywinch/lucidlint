@@ -90,10 +90,10 @@ def test_extract_class_moves_fns_and_rewrites_calls(tmp_path):
         "    return len(contract.edges)\n"
         "\n"
         "def dominant_callee(contract: GraphContract, x):\n"
-        "    return x\n"
+        "    return len(contract.edges) + x\n"
         "\n"
         "def resolve_callee_module(contract: GraphContract, y):\n"
-        "    return y\n"
+        "    return contract.edges\n"
         "\n"
         "def g():\n"
         "    return hub_edge_counts(GraphContract())\n"
@@ -120,10 +120,10 @@ def test_extract_class_with_explicit_name(tmp_path):
         "    return 1\n"
         "\n"
         "def dominant_callee(contract: GraphContract, x):\n"
-        "    return x\n"
+        "    return len(contract.edges) + x\n"
         "\n"
         "def resolve_callee_module(contract: GraphContract, y):\n"
-        "    return y\n"
+        "    return contract.edges\n"
     )
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     (repo / "houses" / "app.py").write_text(src)
@@ -163,10 +163,10 @@ _FIX_ALL_SRC = (
     "    return len(contract.edges)\n"
     "\n"
     "def dominant_callee(contract: GraphContract, x):\n"
-    "    return x\n"
+    "    return len(contract.edges) + x\n"
     "\n"
     "def resolve_callee_module(contract: GraphContract, y):\n"
-    "    return y\n"
+    "    return contract.edges\n"
     "\n"
     "def g():\n"
     "    set_limits(10, 20)\n"
@@ -176,12 +176,13 @@ _FIX_ALL_SRC = (
     "    x = 2\n"
 )
 
+# the gate reports display kinds; the fix command maps them to transforms
 FIXABLE_KINDS = {
-    "stale-suppression",
-    "noop-statement",
-    "unreachable",
-    "positional-literals",
-    "extract-class",
+    "stale-suppression": "stale-suppression",
+    "noop-statement": "noop-statement",
+    "unreachable": "unreachable",
+    "positional-literals": "positional-literals",
+    "latent-class": "extract-class",  # strewing's display kind
 }
 
 
@@ -193,29 +194,48 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
     (repo / "houses" / "app.py").write_text(_FIX_ALL_SRC)
     attempts: dict = {}
 
+    last_count: int | None = None  # fixable count before the previous fix
+    prev_applied = False
     for _ in range(25):  # bounded — the workflow normally converges in ~7
         run_main(repo, "--warn", "--json")
         actions = json.loads(capsys.readouterr().out)["actions"]
-        finding = next((a for a in actions if a["kind"] in FIXABLE_KINDS), None)
+        fixable = [a for a in actions if a["kind"] in FIXABLE_KINDS]
+        finding = next(iter(fixable), None)
         if finding is None:
             break
+        # monotone convergence: an applied fix must strictly reduce the count
+        # from the count that existed before it; a no-op (the params/name
+        # retry protocol) leaves it unchanged
+        if last_count is not None:
+            if prev_applied:
+                assert len(fixable) < last_count, (
+                    f"applied fix did not reduce findings ({last_count} -> "
+                    f"{len(fixable)}) — the loop would thrash; fix the transform"
+                )
+            else:
+                assert len(fixable) <= last_count, (
+                    f"no-op fix changed the file ({last_count} -> {len(fixable)})"
+                )
+        fix_kind = FIXABLE_KINDS[finding["kind"]]
         key = (finding["kind"], finding["file"], finding["line"])
         extra = []
-        if finding["kind"] == "positional-literals" and attempts.get(key, 0) >= 1:
+        if fix_kind == "positional-literals" and attempts.get(key, 0) >= 1:
             # attempt 0 resolved the same-file callee; the external Money
             # call needs the agent's signature read
             extra = ["--fix-params", "amount,currency"]
         rc = run_main(
             repo,
-            "--fix-kind", finding["kind"],
+            "--fix-kind", fix_kind,
             "--fix-file", finding["file"],
             "--fix-line", str(finding["line"]),
             *extra,
         )
         assert rc == 0
-        capsys.readouterr()  # drain the fix subcommand's own output
+        fix_out = capsys.readouterr().out  # "fix: ..." or "fix: nothing to change"
         attempts[key] = attempts.get(key, 0) + 1
         assert attempts[key] <= 2, f"fix did not converge on {key}"
+        prev_applied = "nothing to change" not in fix_out
+        last_count = len(fixable)
 
     # every fixable kind is gone and the file still parses
     run_main(repo, "--warn", "--json")

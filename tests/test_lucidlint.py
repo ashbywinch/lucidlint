@@ -281,6 +281,21 @@ def test_raw_score_high_risk_callers():
     assert ch._raw_score("standard", 0.5, 0, callers=6) == ch._raw_score("standard", 0.5, 0)
 
 
+def test_merge_keeps_distinct_line_findings(tmp_path, capsys):
+    """Two positional-literals calls in ONE function are two fixes at two
+    lines — the per-target merge must not collapse them (it would hide one
+    finding behind the other and the fix loop would thrash)."""
+    repo = make_repo(
+        tmp_path,
+        app_src="def g():\n    set_limits(10, 20)\n    Money(\"0\", \"GBP\")\n",
+    )
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    pl = [a for a in data["actions"] if a["kind"] == "positional-literals"]
+    assert len(pl) == 2, f"expected two distinct findings, got {len(pl)}"
+    assert {a["line"] for a in pl} == {2, 3}
+
+
 def test_merge_warn_into_fail_target():
     fail = ch.Action("complexity", "fail", "houses/app.py", 3, "alpha", "m1", 1, 0, "", "", note="n1", raw=2)
     # same target (file+function+kind-group) but a different line — distinct dedupe keys,

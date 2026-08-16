@@ -961,7 +961,11 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
             None => None,
         };
         if let Some(base) = ann {
-            if class_names.contains(&base) {
+            // strewing is "they SHARE DATA": a fn that never reads its leading
+            // param has nothing to share — moving it into the class would make
+            // the class field-disjoint (partition) and the fix would thrash
+            let recv = f.parameters.args[0].parameter.name.id.as_str();
+            if class_names.contains(&base) && body_refs_name(&f.body, recv) {
                 groups
                     .entry(base)
                     .or_default()

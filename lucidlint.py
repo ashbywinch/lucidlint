@@ -955,11 +955,13 @@ def _percentile_rank(unique: list[Action], diff: set[str]) -> None:
 
 
 def _merge_key(a: Action) -> tuple:
-    """(file, function, kind-group): complexity and large-function are one fix family;
-    every other kind (hotspot, hub-file, high-risk, record-shape) is its own target —
-    a hub-file and a hotspot on the same file are different problems."""
-    group = a.kind if a.kind not in ("complexity", "large-function") else "fn"
-    return (a.file, a.function, group)
+    """complexity + large-function on the same function are ONE fix; every
+    other kind is per-LINE — two positional-literals calls in one function
+    are two different fixes at two lines, and merging them would hide one
+    finding behind the other (the fix loop would thrash)."""
+    if a.kind in ("complexity", "large-function"):
+        return (a.file, a.function, "fn")
+    return (a.file, a.function, a.line, a.kind)
 
 
 def _merge_targets(unique: list[Action]) -> list[Action]:

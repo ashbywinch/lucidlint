@@ -54,6 +54,13 @@ STRUCTURAL_KINDS = {
     "extract-class": "move the strewing free functions into a class, rewriting call sites",
 }
 
+# the gate reports DISPLAY kinds (final_kind output: strewing shows as
+# latent-class); the fix command accepts either and normalizes here — the
+# finding's message tees up the fix by name
+KIND_ALIASES = {
+    "latent-class": "extract-class",
+}
+
 
 # --------------------------------------------------------------------------- transforms
 
@@ -431,6 +438,7 @@ def fix_finding(
     path = repo / rel
     source = path.read_text(encoding="utf-8")
     opts = opts or FixOptions()
+    kind = KIND_ALIASES.get(kind, kind)
     if kind in ("noop-statement", "unreachable"):
         transformer = _DeleteStatement(line)
     elif kind == "stale-suppression":

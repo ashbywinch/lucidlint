@@ -1,9 +1,9 @@
 {
  "errors": [
   {
-   "line": 76,
+   "line": 83,
    "column": 12,
-   "stop_line": 76,
+   "stop_line": 83,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -13,9 +13,9 @@
    "severity": "error"
   },
   {
-   "line": 76,
+   "line": 83,
    "column": 50,
-   "stop_line": 76,
+   "stop_line": 83,
    "stop_column": 57,
    "path": "fix_engine.py",
    "code": -2,
@@ -25,9 +25,9 @@
    "severity": "error"
   },
   {
-   "line": 101,
+   "line": 108,
    "column": 12,
-   "stop_line": 101,
+   "stop_line": 108,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -37,9 +37,9 @@
    "severity": "error"
   },
   {
-   "line": 107,
+   "line": 114,
    "column": 9,
-   "stop_line": 107,
+   "stop_line": 114,
    "stop_column": 22,
    "path": "fix_engine.py",
    "code": -2,
@@ -49,9 +49,9 @@
    "severity": "error"
   },
   {
-   "line": 113,
+   "line": 120,
    "column": 12,
-   "stop_line": 113,
+   "stop_line": 120,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -61,9 +61,9 @@
    "severity": "error"
   },
   {
-   "line": 137,
+   "line": 144,
    "column": 17,
-   "stop_line": 137,
+   "stop_line": 144,
    "stop_column": 26,
    "path": "fix_engine.py",
    "code": -2,
@@ -73,9 +73,9 @@
    "severity": "error"
   },
   {
-   "line": 137,
+   "line": 144,
    "column": 55,
-   "stop_line": 137,
+   "stop_line": 144,
    "stop_column": 62,
    "path": "fix_engine.py",
    "code": -2,
@@ -85,9 +85,9 @@
    "severity": "error"
   },
   {
-   "line": 254,
+   "line": 261,
    "column": 16,
-   "stop_line": 254,
+   "stop_line": 261,
    "stop_column": 39,
    "path": "fix_engine.py",
    "code": -2,
@@ -97,9 +97,9 @@
    "severity": "error"
   },
   {
-   "line": 277,
+   "line": 284,
    "column": 22,
-   "stop_line": 277,
+   "stop_line": 284,
    "stop_column": 27,
    "path": "fix_engine.py",
    "code": -2,
@@ -109,9 +109,9 @@
    "severity": "error"
   },
   {
-   "line": 278,
+   "line": 285,
    "column": 20,
-   "stop_line": 278,
+   "stop_line": 285,
    "stop_column": 31,
    "path": "fix_engine.py",
    "code": -2,
@@ -121,9 +121,9 @@
    "severity": "error"
   },
   {
-   "line": 305,
+   "line": 312,
    "column": 16,
-   "stop_line": 305,
+   "stop_line": 312,
    "stop_column": 25,
    "path": "fix_engine.py",
    "code": -2,
@@ -133,9 +133,9 @@
    "severity": "error"
   },
   {
-   "line": 478,
+   "line": 486,
    "column": 16,
-   "stop_line": 478,
+   "stop_line": 486,
    "stop_column": 25,
    "path": "fix_engine.py",
    "code": -2,
@@ -145,9 +145,9 @@
    "severity": "error"
   },
   {
-   "line": 478,
+   "line": 486,
    "column": 42,
-   "stop_line": 478,
+   "stop_line": 486,
    "stop_column": 49,
    "path": "fix_engine.py",
    "code": -2,
@@ -157,9 +157,9 @@
    "severity": "error"
   },
   {
-   "line": 479,
+   "line": 487,
    "column": 26,
-   "stop_line": 479,
+   "stop_line": 487,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -241,9 +241,9 @@
    "severity": "error"
   },
   {
-   "line": 1124,
+   "line": 1126,
    "column": 16,
-   "stop_line": 1124,
+   "stop_line": 1126,
    "stop_column": 37,
    "path": "lucidlint.py",
    "code": -2,
@@ -253,9 +253,9 @@
    "severity": "error"
   },
   {
-   "line": 1128,
+   "line": 1130,
    "column": 23,
-   "stop_line": 1128,
+   "stop_line": 1130,
    "stop_column": 45,
    "path": "lucidlint.py",
    "code": -2,
@@ -493,9 +493,9 @@
    "severity": "error"
   },
   {
-   "line": 407,
+   "line": 422,
    "column": 21,
-   "stop_line": 407,
+   "stop_line": 422,
    "stop_column": 23,
    "path": "tests/test_lucidlint.py",
    "code": -2,
@@ -505,9 +505,9 @@
    "severity": "error"
   },
   {
-   "line": 660,
+   "line": 675,
    "column": 12,
-   "stop_line": 660,
+   "stop_line": 675,
    "stop_column": 24,
    "path": "tests/test_lucidlint.py",
    "code": -2,
@@ -517,9 +517,9 @@
    "severity": "error"
   },
   {
-   "line": 672,
+   "line": 687,
    "column": 12,
-   "stop_line": 672,
+   "stop_line": 687,
    "stop_column": 24,
    "path": "tests/test_lucidlint.py",
    "code": -2,

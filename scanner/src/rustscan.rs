@@ -484,13 +484,19 @@ impl<'a> RsState<'a> {
             // strewing: module-level free fns (methods have a non-empty
             // fn_stack; test fns already set in_test_code) — the leading
             // param's bare type name, filtered against file-local structs
-            // in finish()
+            // in finish(). The param must be USED: "they share data" — a fn
+            // that never reads it would make the extracted class
+            // field-disjoint (partition) and the fix would thrash.
             if module_level {
                 if let Some(FnArg::Typed(pt)) = sig.inputs.first() {
-                    let mut tids = Vec::new();
-                    collect_type_idents(&pt.ty, &mut tids);
-                    if let Some(t) = tids.first() {
-                        self.strew_candidates.push((sig.ident.to_string(), line, t.clone()));
+                    if let Pat::Ident(pi) = pt.pat.as_ref() {
+                        if tokens_contain_ident(quote::ToTokens::to_token_stream(block), &pi.ident.to_string()) {
+                            let mut tids = Vec::new();
+                            collect_type_idents(&pt.ty, &mut tids);
+                            if let Some(t) = tids.first() {
+                                self.strew_candidates.push((sig.ident.to_string(), line, t.clone()));
+                            }
+                        }
                     }
                 }
             }
@@ -1150,16 +1156,16 @@ fn block_asserts(block: &Block) -> bool {
 /// touches self via `write!` would look detached. The token stream sees it.
 fn block_refs_self(block: &Block) -> bool {
     use quote::ToTokens;
-    tokens_contain_self(block.to_token_stream())
+    tokens_contain_ident(block.to_token_stream(), "self")
 }
 
 /// Recursive: a macro invocation's tokens live in a nested group (`write!`,
 /// `format!`) — only a full descent sees `self` inside them.
-fn tokens_contain_self(stream: proc_macro2::TokenStream) -> bool {
+fn tokens_contain_ident(stream: proc_macro2::TokenStream, ident: &str) -> bool {
     use proc_macro2::TokenTree;
     stream.into_iter().any(|tt| match tt {
-        TokenTree::Ident(id) => id == "self",
-        TokenTree::Group(g) => tokens_contain_self(g.stream()),
+        TokenTree::Ident(id) => id == ident,
+        TokenTree::Group(g) => tokens_contain_ident(g.stream(), ident),
         _ => false,
     })
 }
@@ -2160,7 +2166,7 @@ mod tests {
 
     #[test]
     fn strewing_free_fns_sharing_struct_param() {
-        let fs = scan("struct S {}\nfn a(s: S) {}\nfn b(s: S) {}\nfn c(s: S) {}\n");
+        let fs = scan("struct S { x: i32 }\nfn a(s: S) { let _ = s.x; }\nfn b(s: S) { let _ = s.x; }\nfn c(s: S) { let _ = s.x; }\n");
         assert!(has_kind(&fs, "strewing"));
         let fs2 = scan("struct S {}\nfn a(s: S) {}\nfn b(s: S) {}\n");
         assert!(!has_kind(&fs2, "strewing"));
