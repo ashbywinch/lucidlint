@@ -18,6 +18,11 @@ MAX_RETRIES = 3
 
 A suppression without a why is itself a finding. Every `# type: ignore` / `#[allow(...)]` / `#[ignore]` follows the same rule — the gate checks that a reason accompanies it.
 
+A multi-line suppression comment must put its `code-health: ignore` marker
+on the **last** line, directly above the code — the gate matches the marker's
+line against the finding's line (or the one above it); a marker on the first
+comment line never matches and is reported stale.
+
 The first two groups are the ones most likely to collide with existing codebase conventions. Each is individually suppressible.
 
 ## Adding a finding family
