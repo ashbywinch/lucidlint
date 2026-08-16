@@ -368,7 +368,7 @@ class _RustScan:
     def binary(self, repo: Path) -> Path | None:
         """The scan binary: env override, then the repo's own build, then the
         tool checkout's build, then the distribution bundle's sibling binary
-        (a `lucidscan` release installs as <prefix>/bin/lucidscan next to
+        (a `lucidlint` release installs as <prefix>/bin/lucidlint next to
         code_health.py — the bundle is self-contained, no env needed).
         None when not built — the Python path takes over."""
         if repo in self._binary_cache:
@@ -381,7 +381,7 @@ class _RustScan:
         candidates.append(repo / "scanner" / "target" / "release" / "code-health-scan")
         candidates.append(Path(__file__).resolve().parent / "scanner" / "target" / "release" / "code-health-scan")
         bundle_dir = Path(__file__).resolve().parent / "bin"
-        candidates.append(bundle_dir / f"lucidscan{exe}")
+        candidates.append(bundle_dir / f"lucidlint{exe}")
         found = next((p for p in candidates if p.is_file()), None)
         self._binary_cache[repo] = found
         return found

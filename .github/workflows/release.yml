@@ -55,9 +55,9 @@ jobs:
           target="${{ matrix.target }}"
           exe=""
           if [ "$target" = "x86_64-pc-windows-msvc" ]; then exe=".exe"; fi
-          dir="lucidscan-${ver}-${target}"
+          dir="lucidlint-${ver}-${target}"
           mkdir -p "dist/${dir}/bin"
-          cp "scanner/target/${target}/release/code-health-scan${exe}" "dist/${dir}/bin/lucidscan${exe}"
+          cp "scanner/target/${target}/release/code-health-scan${exe}" "dist/${dir}/bin/lucidlint${exe}"
           cp code_health.py code_health_graph_export.py "dist/${dir}/"
           cp release/Makefile "dist/${dir}/Makefile"
           printf '%s\n' "$ver" > "dist/${dir}/version.txt"

@@ -845,7 +845,7 @@ fn main() {
         // the release pipeline stamps CODE_HEALTH_VERSION at build time; the
         // crate version is the local/dev fallback
         let version = option_env!("CODE_HEALTH_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
-        println!("lucidscan {version}");
+        println!("lucidlint {version}");
         return;
     }
     if args.first().map(String::as_str) == Some("--lsp") {
