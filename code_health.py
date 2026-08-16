@@ -186,7 +186,7 @@ def file_history(repo: Path) -> FileHistory:
         if re.match(r"^\d{4}-\d{2}-\d{2}$", line):
             date = line
             continue
-        if line.endswith(".py") and not line.startswith((".venv/", "node_modules/")):
+        if line.endswith((".py", ".rs", ".md")) and not line.startswith((".venv/", "node_modules/")):
             churn[line] += 1
             last[line] = date
     return FileHistory(churn, last)
@@ -304,11 +304,11 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
     """
     if only_rel is not None:
         py = repo / only_rel
-        return [SourceFile(py, only_rel)] if py.is_file() and py.suffix in (".py", ".rs") else []
+        return [SourceFile(py, only_rel)] if py.is_file() and py.suffix in (".py", ".rs", ".md") else []
     try:
         proc = subprocess.run(
             ["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--",
-             "*.py", "*.rs"],
+             "*.py", "*.rs", "*.md"],
             capture_output=True, text=True, check=True, timeout=60,
         )
         rels = [r for r in proc.stdout.split("\0") if r]
@@ -319,7 +319,7 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
         log("git ls-files failed — falling back to rglob for the file list")
         return [
             SourceFile(py, py.relative_to(repo).as_posix())
-            for py in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.rs"))
+            for py in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.rs")) + sorted(repo.rglob("*.md"))
             if not any(_excluded_part(part) for part in py.parts)
         ]
 

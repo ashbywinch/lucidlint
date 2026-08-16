@@ -579,11 +579,21 @@ fn has_attr(attrs: &[Attribute], ident: &str) -> bool {
 }
 
 fn has_cfg_test(attrs: &[Attribute]) -> bool {
+    // Check if a cfg predicate includes the `test` config option — the
+    // substring approach fires on #[cfg(not(test))] and #[cfg(feature = "testing")]
+    // which are NOT test-code. The correct check: the token string, split
+    // by non-alphanumeric/non-underscore characters, contains the word "test"
+    // AND is not disabled by a surrounding `not(test)`.
     attrs.iter().any(|a| {
         a.path().is_ident("cfg")
-            && a.meta
-                .require_list()
-                .is_ok_and(|m| m.tokens.to_string().contains("test"))
+            && a.meta.require_list().is_ok_and(|m| {
+                let token_str = m.tokens.to_string();
+                let contains_not_test = token_str.contains("not(test");
+                token_str
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .any(|w| w == "test")
+                    && !contains_not_test
+            })
     })
 }
 
@@ -633,7 +643,7 @@ fn is_assert_macro(path: &Path) -> bool {
     path.segments.last().is_some_and(|s| {
         matches!(
             s.ident.to_string().as_str(),
-            "assert" | "assert_eq" | "assert_ne" | "debug_assert"
+            "assert" | "assert_eq" | "assert_ne" | "debug_assert" | "debug_assert_eq" | "debug_assert_ne"
         )
     })
 }

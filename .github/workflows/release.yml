@@ -32,7 +32,7 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-14
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15-intel
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
@@ -44,7 +44,8 @@ jobs:
         with:
           target: ${{ matrix.target }}
       - name: Build the binary (version-stamped)
-        run: cargo build --release --manifest-path scanner/Cargo.toml --target ${{ matrix.target }}
+        working-directory: scanner
+        run: cargo build --release --manifest-path Cargo.toml --target ${{ matrix.target }}
         env:
           CODE_HEALTH_VERSION: ${{ github.ref_name }}
       - name: Assemble the bundle

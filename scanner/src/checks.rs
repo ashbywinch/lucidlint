@@ -361,7 +361,11 @@ fn handler_exits(handler_body: &[&Stmt], returned: &HashSet<String>) -> bool {
     while let Some(stmt) = walks.pop() {
         match stmt {
             Stmt::Return(_) | Stmt::Raise(_) | Stmt::Break(_) | Stmt::Continue(_) => return true,
-            Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
+            Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {
+                // Nested fn/class bodies can't exit the handler — `return`
+                // inside a nested fn returns from THAT fn, not the handler.
+                continue;
+            }
             _ => {}
         }
         let mut process_exit = false;
@@ -381,10 +385,8 @@ fn walk_handler(stmt: &Stmt, exits: &mut bool, process_exit: &mut bool, returned
             *exits = true;
             return;
         }
-        if let Stmt::FunctionDef(f) = s {
-            for body_stmt in &f.body {
-                stack.push(body_stmt);
-            }
+        if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            // Nested fn/class bodies can't exit the handler.
             continue;
         }
         // store-target mutation of a returned name surfaces the error

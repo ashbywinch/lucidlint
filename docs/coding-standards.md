@@ -20,8 +20,7 @@ Language-agnostic by design; per-language toolchain conventions (ruff, eslint, f
   derived values. Public-field classes that others manipulate are
   poorly-organised dicts; accessor chains feeding procedural code are missed
   abstractions. **Function strewing is a missed class** — when several
-  functions share the same data (the same record, the same fields), they are
-  leading parameter are a class waiting to happen. A module that is a pile
+  functions share the same data (the same record, the same fields), they are methods on that class. A module that is a pile
   of functions over one structure is a finding, not a style preference.
   **Name the class for the domain concept, and model the single record.**
   When a family of functions over a record becomes a class, the class is
@@ -48,7 +47,7 @@ Language-agnostic by design; per-language toolchain conventions (ruff, eslint, f
   `Callable` aliases are fine for defining a seam; a hierarchy with one leaf
   is ceremony.
   **Imports.** Inline imports hide dependencies from static analysis (the gate
-  flags them). Private (underscore) symbols from another module are never
+The gate flags them). Private (underscore) symbols from another module are never
   imported — make the logic public or extract it to a shared module.
   Circular imports are fixed by restructuring modules, never bodged with lazy
   imports.
@@ -82,7 +81,7 @@ Language-agnostic by design; per-language toolchain conventions (ruff, eslint, f
   class is the domain concept the verb operates on (`RelationshipGraph`,
   `Letter`, `Feed`) — "geocoder" is a smell, the geocoded *place* is the
   noun. Functions are verbs; variables hold what they name (`price`, not
-  `x`); booleans read in `if` (`hasSchool`, not `schoolFlag`); an id is
+  `x`); booleans read in `if` (`hasSchool`, not `schoolFlag`); an id is never a label
   **The docstring test:** a docstring that merely rephrases the name
   (`TransitOrchestrator` → "orchestrates transit") means the name or the
   concept boundary is wrong — fix the name or split the concept. **The
@@ -192,9 +191,7 @@ without a check is a wish:
   (what happened + what to do next, no internal identifiers, no stack traces)
   and a dev log (root cause + exact resolution). One half alone is a bug.
 - **No backward-compat shims.** Delete the old path; migrate callers in the
-  same change. No aliases, no re-exports, no "will remove later". A shim
-**Dead code is deleted, not kept** — the git log is the archive.
-  column indices, and  string literals for domain concepts are named constants. If you would write
+  same change. No aliases, no re-exports, no "will remove later". **Dead code is deleted, not kept** — the git log is the archive. If you would write
   a comment to explain a block, extract it into a named function — the name is
   the documentation.
 - **One way through for invariants — never parallel paths.** When a store or

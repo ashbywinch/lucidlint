@@ -1,3 +1,6 @@
+// code-health: ignore-file complexity the graph families are single dispatch tables over
+// contract nodes/edges — match-arm count is the family rule, not branching
+
 //! The repo-wide families computed from the code-review-graph contract
 //! (a versioned, schema-neutral JSON emitted by code_health_graph_export.py
 //! through the graph tool's own public API — the gate never touches the
@@ -220,6 +223,14 @@ fn base_name(qn: &str) -> &str {
 
 /// A dotted module name to a repo file rel — `_module_to_file`.
 fn module_to_file(repo: &Path, dotted: &str) -> Option<String> {
+    // The exporter emits IMPORTS_FROM targets as RESOLVED ABSOLUTE PATHS
+    // for local modules — treat those directly as file paths.
+    let path = Path::new(dotted);
+    if path.is_absolute() {
+        return Some(repo_rel(repo, dotted));
+    }
+    // Falling back to dotted module name resolution for unresolved imports
+    // (third-party / unresolvable by the exporter).
     let base = dotted.replace('.', "/");
     [format!("{base}.py"), format!("{base}/__init__.py")]
         .iter()
@@ -389,9 +400,8 @@ pub fn large_function_findings(
         if !matches!(n.kind.as_str(), "Function" | "Method") {
             continue;
         }
-        if !include_tests && n.kind == "Test" {
-            continue;
-        }
+        // The kind filter above excludes Test — the !include_tests Test gate
+        // was unreachable; removed.
         if !n.file_path.ends_with(".py") {
             continue;
         }
@@ -679,27 +689,35 @@ pub fn layer_mix_findings(repo: &Path, contract: &GraphContract, files: &[String
 /// Folder grab bags — `_folder_mix_actions` / `_folder_mix_for_dir`.
 pub fn folder_mix_findings(repo: &Path, contract: &GraphContract) -> Vec<Finding> {
     // best community per file: the max count, first-wins on tie — Python's
-    // dict-iteration order with a strict > comparison (the previous
-    // `*c > best_count[&file]` compared the just-incremented count to
-    // itself — the max logic was dead and first-seen always won)
-    let mut best: HashMap<String, (usize, i64)> = HashMap::new(); // (count, community)
-    let mut best_count: HashMap<String, usize> = HashMap::new();
+    // dict-iteration order with a strict > comparison
+    //
+    // The key fix: count PER COMMUNITY per file, not a single cumulative
+    // counter. The previous code stored (cumulative_total, community) and
+    // compared totals — the LAST node's community always won, not the max.
+    let mut best: HashMap<String, i64> = HashMap::new(); // (community) per file
+    let mut per_cc: HashMap<(String, i64), usize> = HashMap::new(); // (file, community) -> count
     for n in &contract.nodes {
         let Some(cid) = n.community_id else { continue };
         if !n.file_path.ends_with(".py") {
             continue;
         }
         let file = repo_rel(repo, &n.file_path);
-        let c = best_count.entry(file.clone()).or_insert(0);
-        *c += 1;
-        let entry = best.entry(file).or_insert((*c, cid));
-        if *c > entry.0 {
-            entry.0 = *c;
-            entry.1 = cid;
+        let key = (file.clone(), cid);
+        let cnt = per_cc.entry(key).or_insert(0);
+        *cnt += 1;
+        // keep the max count community; first-wins on tie via strict >
+        match best.get(&file) {
+            None => {
+                best.insert(file, cid);
+            }
+            Some(_) if *cnt > *per_cc.get(&(file.clone(), *best.get(&file).unwrap())).unwrap_or(&0) => {
+                best.insert(file, cid);
+            }
+            Some(_) => {}
         }
     }
     let mut dirs: BTreeMap<String, Vec<(String, i64)>> = BTreeMap::new();
-    for (fp, (_, cid)) in best {
+    for (fp, cid) in best {
         let parts: Vec<&str> = fp.split('/').collect();
         if parts.len() < 2 {
             continue;

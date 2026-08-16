@@ -913,7 +913,7 @@ fn main() {
                 skeleton: s.skeleton.clone(),
             });
         }
-        let _ = &is_test;
+
         for (name, line) in &scan.defs {
             definitions.push((rel.clone(), name.clone(), *line));
         }
@@ -991,7 +991,6 @@ fn main() {
             contract.as_ref().unwrap().contract_version
         );
         // drop the contract so the graph families are skipped
-        let _ = graph_path.take();
     }
     let contract = if contract.as_ref().is_some_and(|c| c.contract_version == 1) {
         contract

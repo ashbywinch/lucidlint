@@ -20,7 +20,7 @@ HERE := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 .PHONY: code-health code-health-baseline version
 
 code-health:
-	$(PYTHON) $(HERE)code_health.py --repo $(REPO)
+	$(PYTHON) $(HERE)code_health.py --repo $(REPO) $$([ -z "$(BASELINE)" ] || echo "--baseline $(BASELINE)")
 
 code-health-baseline:
 	$(PYTHON) $(HERE)code_health.py --repo $(REPO) --update-baseline --baseline $(BASELINE)
