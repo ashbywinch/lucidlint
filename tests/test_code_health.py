@@ -468,6 +468,26 @@ def test_main_stale_coverage_warning(tmp_path, capsys):
     assert rc == 1  # the except finding still fails the gate
     assert "snapshot predates the repo's tests" in out
 
+# --------------------------------------------------------------------------- scan-core contract
+def test_empty_repo_passes_clean(tmp_path, capsys):
+    repo = tmp_path / "emptyrepo"
+    (repo / ".git").mkdir(parents=True)  # a repo with no .py/.rs files
+    rc = run_main(repo)
+    assert rc == 0
+    assert "GATE: PASS" in capsys.readouterr().out
+
+
+def test_missing_binary_fails_fast(tmp_path):
+    repo = make_repo(tmp_path)
+    # the binary cache says "not built" — the gate must raise, never pass un-scanned
+    ch.RUST_SCAN._binary_cache[repo] = None
+    try:
+        run_main(repo)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "scan binary is required" in str(e)
+
+
 # --------------------------------------------------------------------------- rust layer
 def test_rust_files_are_scanned(tmp_path, capsys):
     repo = make_repo(tmp_path)

@@ -326,7 +326,8 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
 class RustFinding(NamedTuple):
     """One contract finding — the final action model: kind (action kind,
     owned by the Rust core), signal (suppression identity), severity,
-    location, message."""
+    location, message, and the raw metric the priority percentile runs on
+    (cc for complexity; 1.0 for families with fixed norms)."""
 
     kind: str
     signal: str
@@ -335,6 +336,7 @@ class RustFinding(NamedTuple):
     line: int
     function: str
     message: str
+    metric: float = 1.0
 
 
 class RustFindings(NamedTuple):
@@ -410,7 +412,9 @@ class _RustScan:
             )
         result: dict[str, list[RustFinding]] | None = None
         cc_result: dict[str, list[tuple[str, int, int]]] = {}
-        if files:
+        if not files:
+            result = {}  # a repo with no .py/.rs files scans clean — GATE: PASS, not an error
+        else:
             result = {}
             try:
                 cmd = [str(binary)]
@@ -445,6 +449,7 @@ class _RustScan:
                                 line=int(f.get("line", 0)),
                                 function=f.get("function", ""),
                                 message=f.get("message", ""),
+                                metric=float(f.get("metric", 1.0)),
                             )
                         )
                     for e in data.get("cc", []):
@@ -1008,7 +1013,7 @@ def _actions_from_rust(
                     line=f.line,
                     function=f.function,
                     message=f.message,
-                    metric=1,
+                    metric=f.metric,
                     churn=churn,
                     last_modified=last_modified.get(rel, ""),
                     tested="",
@@ -1024,14 +1029,19 @@ def _collect_actions(repo: Path, args, file_churn: Counter[str], last_modified: 
     test rules, duplicate/unused, record-shape, complexity, the graph
     families, hotspot, abstraction, docs); the orchestrator converts and
     renders. The thresholds live in the binary (schema 2)."""
-    if RUST_SCAN.active(repo):
-        RUST_SCAN.prepare(repo, only_rel, args.include_tests, file_churn)
-        files = _py_files(repo, only_rel)
-        rust = RUST_SCAN.load(repo, files)
-        if rust is None:
-            raise RuntimeError("the Rust scan core failed — rebuild with `make scanner-check`")
-        return _actions_from_rust(rust, args.include_tests, file_churn, last_modified)
-    return []
+    if not RUST_SCAN.active(repo):
+        # no Python fallback — the binary is required; a silent empty scan
+        # would report GATE: PASS without checking anything (fail-fast)
+        raise RuntimeError(
+            "the scan binary is required — build it with `make scanner-check` "
+            "or install the lucidscan release bundle"
+        )
+    RUST_SCAN.prepare(repo, only_rel, args.include_tests, file_churn)
+    files = _py_files(repo, only_rel)
+    rust = RUST_SCAN.load(repo, files)
+    if rust is None:
+        raise RuntimeError("the Rust scan core failed — rebuild with `make scanner-check`")
+    return _actions_from_rust(rust, args.include_tests, file_churn, last_modified)
 
 
 def _refresh_coverage(repo: Path) -> None:

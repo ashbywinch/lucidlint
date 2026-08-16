@@ -781,6 +781,7 @@ fn ignored_test_findings(file: &File, file_name: &str) -> Vec<Finding> {
 /// `//` and `/* */` comments with their (1-based) line — string-aware so a
 /// `//` inside a string literal or a char is not a comment. Python's comments
 /// come from ruff tokens; Rust's from here; both feed `common`'s matching.
+// code-health: ignore large-function the string-aware comment scanner is one linear pass — splitting it scatters the byte-state
 pub fn rs_comment_lines(source: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let bytes = source.as_bytes();
@@ -879,6 +880,31 @@ pub fn rs_comment_lines(source: &str) -> Vec<(usize, String)> {
                 }
                 i += 1;
                 continue;
+            }
+            b'r' if i + 2 < bytes.len() && bytes[i + 1] == b'#' => {
+                // hashed raw strings: r#"..."#, r##"..."## — count the hashes
+                // and match the same count at the closing quote
+                let mut hashes = 1usize;
+                let mut j = i + 2;
+                while j < bytes.len() && bytes[j] == b'#' {
+                    hashes += 1;
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'"' {
+                    j += 1;
+                    while j + hashes < bytes.len() {
+                        if bytes[j] == b'"' && bytes[j + 1..j + 1 + hashes].iter().all(|&b| b == b'#') {
+                            break;
+                        }
+                        if bytes[j] == b'\n' {
+                            line += 1;
+                        }
+                        j += 1;
+                    }
+                    i = (j + 1 + hashes).min(bytes.len());
+                    continue;
+                }
+                i += 1; // not a raw string after all — a plain r
             }
             _ => i += 1,
         }
@@ -1566,6 +1592,16 @@ mod tests {
     }
 
     // ------------------------------------------------------------- comments
+    #[test]
+    fn comment_extraction_handles_hashed_raw_strings() {
+        // r#"..."# content may contain " and // — neither is a comment
+        let src = "let a = r#\"not // a comment \" inside\"#;\n// real comment\nlet b = r##\"has # in it\"##;\n";
+        let lines = rs_comment_lines(src);
+        let texts: Vec<String> = lines.iter().map(|(_, t)| t.clone()).collect();
+        assert_eq!(texts.len(), 1);
+        assert!(texts[0].contains("real comment"));
+    }
+
     #[test]
     fn comment_extraction_is_string_aware() {
         let src = "// real comment\nlet s = \"// not a comment\";\nlet c = '/'; // trailing\n/* block\ncomment */\n";

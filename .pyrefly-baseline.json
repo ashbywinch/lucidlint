@@ -97,9 +97,9 @@
    "severity": "error"
   },
   {
-   "line": 524,
+   "line": 544,
    "column": 12,
-   "stop_line": 524,
+   "stop_line": 544,
    "stop_column": 24,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -109,9 +109,9 @@
    "severity": "error"
   },
   {
-   "line": 536,
+   "line": 556,
    "column": 12,
-   "stop_line": 536,
+   "stop_line": 556,
    "stop_column": 24,
    "path": "tests/test_code_health.py",
    "code": -2,

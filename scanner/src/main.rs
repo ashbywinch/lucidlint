@@ -1066,6 +1066,7 @@ fn main() {
                 "function": e.function,
                 "kind": "complexity",
                 "severity": "fail",
+                "metric": e.cc,
                 "message": format!(
                     "cyclomatic complexity {} (>= 15) — extract each decision branch into a named method that captures one rule",
                     e.cc

@@ -399,7 +399,9 @@ pub fn large_function_findings(
             continue;
         };
         let span = le - ls + 1;
-        if le - ls < max_lines as i64 {
+        // span > max_lines fires (le-ls >= max_lines is the same boundary —
+        // the span variable keeps the message and the check on one number)
+        if span <= max_lines as i64 {
             continue;
         }
         let rel = repo_rel(repo, &n.file_path);
@@ -676,8 +678,11 @@ pub fn layer_mix_findings(repo: &Path, contract: &GraphContract, files: &[String
 
 /// Folder grab bags — `_folder_mix_actions` / `_folder_mix_for_dir`.
 pub fn folder_mix_findings(repo: &Path, contract: &GraphContract) -> Vec<Finding> {
-    // best community per file (max count)
-    let mut best: HashMap<String, i64> = HashMap::new();
+    // best community per file: the max count, first-wins on tie — Python's
+    // dict-iteration order with a strict > comparison (the previous
+    // `*c > best_count[&file]` compared the just-incremented count to
+    // itself — the max logic was dead and first-seen always won)
+    let mut best: HashMap<String, (usize, i64)> = HashMap::new(); // (count, community)
     let mut best_count: HashMap<String, usize> = HashMap::new();
     for n in &contract.nodes {
         let Some(cid) = n.community_id else { continue };
@@ -687,14 +692,14 @@ pub fn folder_mix_findings(repo: &Path, contract: &GraphContract) -> Vec<Finding
         let file = repo_rel(repo, &n.file_path);
         let c = best_count.entry(file.clone()).or_insert(0);
         *c += 1;
-        if *c == 1 || *c > best_count[&file] {
-            // keep the FIRST community seen when counts tie; Python keeps the
-            // max count, first-wins on tie (dict iteration order)
-            best.entry(file).or_insert(cid);
+        let entry = best.entry(file).or_insert((*c, cid));
+        if *c > entry.0 {
+            entry.0 = *c;
+            entry.1 = cid;
         }
     }
     let mut dirs: BTreeMap<String, Vec<(String, i64)>> = BTreeMap::new();
-    for (fp, cid) in best {
+    for (fp, (_, cid)) in best {
         let parts: Vec<&str> = fp.split('/').collect();
         if parts.len() < 2 {
             continue;
@@ -950,6 +955,58 @@ mod tests {
         assert_eq!(f.len(), 1);
         assert!(f[0].message.contains("import cycle"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folder_mix_max_count_community_wins() {
+        // pkg/x.py has 1 node in community 1 (first-seen) and 4 in community
+        // 2 — the MAX count must assign it to community 2 (the pre-fix code
+        // compared the count to itself, so first-seen always won and the
+        // spread would have been m1 (4), m2 (2))
+        let mut nodes = vec![
+            node("Function", "a", "/repo/pkg/a.py::a", "/repo/pkg/a.py", 1, 2, Some(1)),
+            node("Function", "b", "/repo/pkg/b.py::b", "/repo/pkg/b.py", 1, 2, Some(1)),
+            node("Function", "c", "/repo/pkg/c.py::c", "/repo/pkg/c.py", 1, 2, Some(1)),
+            node("Function", "y", "/repo/pkg/y.py::y", "/repo/pkg/y.py", 1, 2, Some(2)),
+            node("Function", "z", "/repo/pkg/z.py::z", "/repo/pkg/z.py", 1, 2, Some(2)),
+        ];
+        nodes.push(node(
+            "Function",
+            "x1",
+            "/repo/pkg/x.py::x1",
+            "/repo/pkg/x.py",
+            1,
+            2,
+            Some(1),
+        ));
+        for i in 0..4 {
+            nodes.push(node(
+                "Function",
+                &format!("x2_{i}"),
+                &format!("/repo/pkg/x.py::x2_{i}"),
+                "/repo/pkg/x.py",
+                1,
+                2,
+                Some(2),
+            ));
+        }
+        let mut c = contract(nodes, vec![]);
+        c.communities.insert("1".into(), "m1".into());
+        c.communities.insert("2".into(), "m2".into());
+        let f = folder_mix_findings(Path::new("/repo"), &c);
+        let msg = f
+            .iter()
+            .find(|x| x.kind == "folder-mix")
+            .map(|x| x.message.clone())
+            .unwrap_or_default();
+        // x.py must join the MAX-count community (m2): it must NOT appear in
+        // the m1 group that precedes the m2 marker
+        let before_m2 = msg.split("m2 (").next().unwrap_or("");
+        assert!(
+            !before_m2.contains("x.py"),
+            "x.py joined first-seen instead of max-count: {msg}"
+        );
+        assert!(msg.contains("x.py"), "x.py missing from the m2 group: {msg}");
     }
 
     #[test]
