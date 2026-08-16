@@ -35,6 +35,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from importlib import metadata
 
 # the fix engine is optional — the fix command degrades to a clear error
 # when the `fix` extra is not installed
@@ -599,8 +600,11 @@ class _RustScan:
                     cmd.append("--include-tests")
                 if flags.docs_root is not None:
                     cmd += ["--docs", flags.docs_root]
-                cmd += [str(sf.py) for sf in files]
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                # pass REPO-RELATIVE paths (the binary runs with the repo as
+                # its cwd): findings — and the fix: directives they carry —
+                # stay repo-relative, matching the Action model
+                cmd += [str(sf.rel) for sf in files]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=str(repo))
                 if proc.returncode == 0:
                     data = json.loads(proc.stdout)
                     if data.get("schema_version") != 2:
@@ -867,11 +871,23 @@ class _GraphContract:
 GRAPH_CONTRACT = _GraphContract()
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="deterministic lucidlint gate: a Rust scan core under a thin orchestrator"
+        prog="lucidlint",
+        description=(
+            "deterministic code health for Python and Rust: a compiled scan core "
+            "under a thin orchestrator. Run the gate with no subcommand; apply "
+            "deterministic fixes with the `fix` subcommand (finding messages "
+            "carry the exact command)."
+        ),
+    )
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"lucidlint {_VERSION}",
+        help="print the version and exit",
     )
     p.add_argument("--repo", type=Path, default=Path.cwd(), help="repository root (default: cwd)")
     p.add_argument("--file", type=str, default=None,
-                   help="scan ONE repo-relative .py file (the LSP mode): per-file findings only, "
+                   help="scan ONE repo-relative file (the LSP mode): per-file findings only, "
                         "no git history / graph / coverage / repo-wide scans")
     p.add_argument("--include-tests", action="store_true", help="also analyze test files/nodes")
     p.add_argument(
@@ -901,35 +917,49 @@ def parse_args() -> argparse.Namespace:
         help="run the repo's coverage suite (make coverage) before scanning so coverage verdicts are fresh (slow)",
     )
     p.add_argument("--warn", action="store_true", help="exit 0 even when actions exist (informational run)")
-    p.add_argument(
-        "--fix-kind",
+
+    sub = p.add_subparsers(dest="command", metavar="COMMAND")
+    fix = sub.add_parser(
+        "fix",
+        help="apply a deterministic fix for one finding (the finding's message carries the exact command)",
+    )
+    fix.add_argument(
+        "--kind",
         type=str,
         default=None,
-        help="auto-fix ONE mechanical finding: apply the libcst transform for this kind and write the file",
+        help="the fix family (from the finding message: magic-number, extract-method, stale-suppression, ...)",
     )
-    p.add_argument("--fix-file", type=str, default=None, help="repo-relative file for --fix-kind")
-    p.add_argument("--fix-line", type=int, default=0, help="line of the finding for --fix-kind")
-    p.add_argument(
-        "--fix-params",
+    fix.add_argument("--file", type=str, default=None, help="repo-relative file for the finding")
+    fix.add_argument("--line", type=int, default=0, help="line of the finding (omitted when the file has one)")
+    fix.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help="the semantic name the tool cannot invent: a constant for magic-number, the extracted method/class name",
+    )
+    fix.add_argument(
+        "--params",
         type=str,
         default=None,
         help="comma-separated callee parameter names for positional-literals (external callees)",
     )
-    p.add_argument(
-        "--fix-name",
-        type=str,
-        default=None,
-        help="class name for extract-class (default: the shared leading type); new function name for extract-method",
-    )
-    p.add_argument(
+    fix.add_argument(
         "--confirm",
         action="store_true",
-        help=(
-            "extract-method applies the previewed fix (without it, the "
-            "proposal diff is printed and nothing is written)"
-        ),
+        help="explicitly apply a previewed structural fix (the name IS the commitment for extract-method)",
     )
     return p.parse_args()
+
+
+def _version() -> str:
+    """The installed package version, or the dev fallback."""
+    try:
+        return metadata.version("lucidlint")
+    except Exception:
+        return "0.1.0"
+
+
+_VERSION = _version()
 
 
 def action_key(a: Action) -> str:
@@ -1186,47 +1216,47 @@ def main() -> int:
     args = parse_args()
     repo = args.repo.resolve()
 
-    if args.fix_kind:
-        # the agent-driven fix surface: `fix --fix-kind X --fix-file F --fix-line N`
+    if args.command == "fix":
+        # the agent-driven fix surface: `lucidlint fix --kind X --file F --line N`
         opts = fix_engine.FixOptions(
-            params=args.fix_params.split(",") if args.fix_params else None,
-            name=args.fix_name,
+            params=args.params.split(",") if args.params else None,
+            name=args.name,
         )
-        fix_kind = fix_engine.KIND_ALIASES.get(args.fix_kind, args.fix_kind)
-        if args.fix_line == 0:
+        fix_kind = fix_engine.KIND_ALIASES.get(args.kind, args.kind)
+        if args.line == 0:
             # R27: agents never compute line numbers — the tool owns its own
             # coordinates; when the file has exactly one finding of the kind,
-            # no --fix-line is needed
-            lines = _finding_lines(repo, args.fix_file, args.fix_kind)
+            # no --line is needed
+            lines = _finding_lines(repo, args.file, args.kind)
             if len(lines) == 1:
-                args.fix_line = lines[0]
+                args.line = lines[0]
             elif not lines:
-                print(f"fix: no {args.fix_kind} finding in {args.fix_file} — nothing to fix")
+                print(f"fix: no {args.kind} finding in {args.file} — nothing to fix")
                 return 0
             else:
                 print(
-                    f"fix: {len(lines)} {args.fix_kind} findings in {args.fix_file} "
-                    f"(lines {', '.join(map(str, lines))}) — pass --fix-line to pick one"
+                    f"fix: {len(lines)} {args.kind} findings in {args.file} "
+                    f"(lines {', '.join(map(str, lines))}) — pass --line to pick one"
                 )
                 return 0
-        if fix_kind in fix_engine.PREVIEW_KINDS and not args.fix_name and not args.confirm:
+        if fix_kind in fix_engine.PREVIEW_KINDS and not args.name and not args.confirm:
             # the name-free preview surface: show the proposed refactoring
             # as a diff (the seam with a placeholder name — no --fix-name
             # needed to see it). The agent reviews the seam, then re-runs
             # with --fix-name <name>; the name is the commitment, so the
             # named run applies — no --confirm dance
             new_source, description = fix_engine.propose_finding(
-                args.fix_kind, args.fix_file, repo, args.fix_line, opts
+                args.kind, args.file, repo, args.line, opts
             )
             if new_source is None:
-                print(f"fix: nothing to change for {args.fix_kind} at {args.fix_file}:{args.fix_line}")
+                print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
                 return 0
             diff = list(
                 difflib.unified_diff(
-                    (repo / args.fix_file).read_text().splitlines(),
+                    (repo / args.file).read_text().splitlines(),
                     new_source.splitlines(),
-                    fromfile=args.fix_file,
-                    tofile=args.fix_file + " (proposed)",
+                    fromfile=args.file,
+                    tofile=args.file + " (proposed)",
                     lineterm="",
                 )
             )
@@ -1236,7 +1266,7 @@ def main() -> int:
                 # from the method being created, not the diff head; a bare
                 # diff-head truncation left them wanting the cut part and
                 # unsure whether _extracted was the final name
-                name = args.fix_name or "_extracted"
+                name = args.name or "_extracted"
                 hunks, cur = [], []
                 for line in diff:
                     if line.startswith("@@"):
@@ -1294,17 +1324,17 @@ def main() -> int:
                 if len(diff) > 40:
                     diff = diff[:40] + [f"... ({len(diff) - 40} more lines omitted)"]
                 print("\n".join(diff))
-            print(f"# the name `{args.fix_name or '_extracted'}` is a placeholder — pick a real one; "
-                  f"apply it: --fix-kind {args.fix_kind} --fix-file {args.fix_file} "
-                  f"--fix-line {args.fix_line} --fix-name <name>")
+            print(f"# the name `{args.name or '_extracted'}` is a placeholder — pick a real one; "
+                  f"apply it: lucidlint fix --kind {args.kind} --file {args.file} "
+                  f"--line {args.line} --name <name>")
             return 0
         description = fix_engine.fix_finding(
-            args.fix_kind, args.fix_file, repo, args.fix_line, opts
+            args.kind, args.file, repo, args.line, opts
         )
         if description is None:
-            print(f"fix: nothing to change for {args.fix_kind} at {args.fix_file}:{args.fix_line}")
+            print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
             return 0
-        print(f"fix: {description} — {args.fix_file}:{args.fix_line} ({args.fix_kind})")
+        print(f"fix: {description} — {args.file}:{args.line} ({args.kind})")
         return 0
 
     if args.file:

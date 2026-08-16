@@ -1239,9 +1239,13 @@ fn main() {
                 "kind": "complexity",
                 "severity": "fail",
                 "metric": e.cc,
-                "message": format!(
-                    "cyclomatic complexity {} (>= 15) — extract part of this function into a named method (the preview shows the block) — fix: extract-method (preview without --fix-name; apply with --fix-name <name>)",
-                    e.cc
+                "message": common::full_fix_command(
+                    &e.file,
+                    e.line,
+                    &format!(
+                        "cyclomatic complexity {} (>= 15) — extract part of this function into a named method (the preview shows the block) — fix: extract-method (preview without --fix-name; apply with --fix-name <name>)",
+                        e.cc
+                    ),
                 ),
             }));
         }
@@ -1304,7 +1308,7 @@ fn main() {
                 "kind": final_kind(&f.kind),
                 "signal": f.kind,
                 "severity": f.severity,
-                "message": f.message,
+                "message": common::full_fix_command(&f.file, f.line, &f.message),
             })
         })
         .collect();

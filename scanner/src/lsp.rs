@@ -40,7 +40,7 @@ pub fn diagnostics_for(scan: &FileScan, source: &str) -> Vec<serde_json::Value> 
             },
             "severity": severity_of(f),
             "source": "lucidlint",
-            "message": f.message,
+            "message": crate::common::full_fix_command(&f.file, f.line, &f.message),
         }));
     }
     for e in &scan.cc {

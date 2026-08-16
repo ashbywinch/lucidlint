@@ -66,6 +66,34 @@ pub struct SkeletonFn {
     pub skeleton: Vec<String>,
 }
 
+/// Rewrite a finding message's `fix:` directive into the FULL runnable
+/// command. The scanner messages say `— fix: <kind> [--fix-name <N>]`; that
+/// reads as if a command named `<kind>` existed. The real surface is the
+/// `fix` subcommand: `lucidlint fix --kind <kind> --file <file> --line
+/// <line>` (the R27 contract: the tool owns its coordinates, so the
+/// directive is self-contained and the caller never types a `.py` or a
+/// `fix-` prefix). The preview-only families carry no --name — running the
+/// bare command previews; adding the name applies.
+pub fn full_fix_command(file: &str, line: usize, message: &str) -> String {
+    let Some(pos) = message.rfind("— fix: ") else {
+        return message.to_string();
+    };
+    let (head, tail) = message.split_at(pos);
+    let dir = tail.trim_start_matches("— fix: ");
+    let mut parts = dir.split_whitespace();
+    let Some(fix_kind) = parts.next() else {
+        return message.to_string();
+    };
+    let rest: Vec<&str> = parts.collect();
+    let mut name_slot = String::new();
+    if let Some(i) = rest.iter().position(|p| p.starts_with("--fix-name")) {
+        if let Some(slot) = rest.get(i + 1) {
+            name_slot = format!(" --name {slot}");
+        }
+    }
+    format!("{head}— fix: lucidlint fix --kind {fix_kind} --file {file} --line {line}{name_slot}")
+}
+
 /// A function is a duplicate candidate when it has real body substance:
 /// at least 2 non-doc statements and a skeleton of at least 12 tokens.
 /// Pure; each layer supplies its own statement count (docstring filtering

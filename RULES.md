@@ -42,8 +42,10 @@ A new family must be registered in **four places**:
 1. **Scanner** — emit the finding at the right AST hook with
    `finding("<kind>", "<fail|warn>", ...)`; the kind string is the signal.
    If the family has a fix (mechanical or structural), the MESSAGE ends
-   with the machine-parseable directive `— fix: <fix-kind> [--fix-name <N>]`
-   so the agent is told the tool exists and how to invoke it (R27).
+   with the machine-parseable directive `— fix: <kind> [--name <N>]`; the
+   output layer rewrites it into the FULL command
+   (`lucidlint fix --kind <kind> --file <file> --line <line> [--name <N>]`)
+   so the agent is told the exact invocation (R27).
    (Python layer: `scanner/src/checks.rs`; Rust layer: `scanner/src/rustscan.rs`;
    graph: `scanner/src/graph_families.rs`.)
 2. **`final_kind`** (`scanner/src/main.rs`) — a named display bucket, or
@@ -69,7 +71,7 @@ with a why).
 
 | Rule | Severity | Language | What it checks |
 |---|---|---|---|
-| **complexity** | fail | Both | Cyclomatic complexity ≥ 15 (radon-equivalent rules: `if`/`elif` count, `match` arms minus wildcard, `&&`/`||`, ternary, loops, `assert!`, closures +0 walked) — Extract Function: `fix --fix-kind extract-method --fix-line <L>` previews the best self-contained seam (placeholder name — the extracted function is private by construction, so the fix underscores it); apply with `--fix-name <N>` (the name IS the commitment — no `--confirm`). |
+| **complexity** | fail | Both | Cyclomatic complexity ≥ 15 (radon-equivalent rules: `if`/`elif` count, `match` arms minus wildcard, `&&`/`||`, ternary, loops, `assert!`, closures +0 walked) — Extract Function: `lucidlint fix --kind extract-method --file <F> --line <L>` previews the best self-contained seam (placeholder name — the extracted function is private by construction, so the fix underscores it); apply with `--name <N>` (the name IS the commitment — no `--confirm`). |
 | **long-param-list** | fail | Both | A function with > 5 parameters (receiver/`self` excluded) — introduce a parameter object. |
 | **large-function** | fail | Both | Function spans ≥ 120 lines — split it: one rule per function. |
 | **closures → latent-class** | fail | Both | A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line span) — the nested structure is a class waiting to be extracted. |

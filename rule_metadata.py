@@ -48,11 +48,11 @@ RULES = [
     ("complexity", None, "architecture", "Both", "fail",
      "Cyclomatic complexity ≥ 15 (radon-equivalent rules: `if`/`elif` count, "
      "`match` arms minus wildcard, `&&`/`||`, ternary, loops, `assert!`, "
-     "closures +0 walked) — Extract Function: `fix --fix-kind extract-method "
-     "--fix-line <L>` previews the best self-contained seam (placeholder name "
-     "— the extracted function is private by construction, so the fix "
-     "underscores it); apply with `--fix-name <N>` (the name IS the "
-     "commitment — no `--confirm`)."),
+     "closures +0 walked) — Extract Function: `lucidlint fix --kind "
+     "extract-method --file <F> --line <L>` previews the best self-contained "
+     "seam (placeholder name — the extracted function is private by "
+     "construction, so the fix underscores it); apply with `--name <N>` "
+     "(the name IS the commitment — no `--confirm`)."),
     ("long-param-list", None, "architecture", "Both", "fail",
      "A function with > 5 parameters (receiver/`self` excluded) — introduce "
      "a parameter object."),

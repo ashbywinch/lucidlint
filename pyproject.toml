@@ -21,6 +21,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
 
+[project.scripts]
+# `pip install` gives a `lucidlint` command — no .py, no fix- prefixes
+lucidlint = "lucidlint:main"
+
 [project.optional-dependencies]
 # git history + file listing; the orchestrator degrades to rglob/no-history
 # when pygit2 is absent — genuinely optional, so it must not be a mandatory

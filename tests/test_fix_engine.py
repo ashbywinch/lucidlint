@@ -465,8 +465,8 @@ def test_extract_method_cli_preview_confirm_flow(tmp_path, capsys):
     p.write_text(src)
     # preview WITHOUT a name: prints a diff, writes NOTHING
     rc = run_main(
-        repo, "--fix-kind", "extract-method", "--fix-file", "houses/app.py",
-        "--fix-line", "1",
+        repo, "fix", "--kind", "extract-method", "--file", "houses/app.py",
+        "--line", "1",
     )
     assert rc == 0
     out = capsys.readouterr().out
@@ -477,8 +477,8 @@ def test_extract_method_cli_preview_confirm_flow(tmp_path, capsys):
     assert p.read_text() == src  # nothing written yet
     # WITH a name: applies directly (no --confirm — the name is the commit)
     rc = run_main(
-        repo, "--fix-kind", "extract-method", "--fix-file", "houses/app.py",
-        "--fix-line", "1", "--fix-name", "accumulate",
+        repo, "fix", "--kind", "extract-method", "--file", "houses/app.py",
+        "--line", "1", "--name", "accumulate",
     )
     assert rc == 0
     capsys.readouterr()
@@ -520,7 +520,7 @@ def test_strewing_message_tees_up_the_fix(tmp_path, capsys):
     data = json.loads(capsys.readouterr().out)
     strewing = [a for a in data["actions"] if a["kind"] == "latent-class"]
     assert strewing, "expected a strewing finding"
-    assert "fix: extract-class" in strewing[0]["message"], strewing[0]["message"]
+    assert "fix: lucidlint fix --kind extract-class" in strewing[0]["message"], strewing[0]["message"]
 
 
 def test_fix_without_line_resolves_single_finding(tmp_path, capsys):
@@ -530,7 +530,7 @@ def test_fix_without_line_resolves_single_finding(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     (repo / "houses" / "app.py").write_text(src)
     # no --fix-line: the noop is the only finding of its kind in the file
-    rc = run_main(repo, "--fix-kind", "noop-statement", "--fix-file", "houses/app.py")
+    rc = run_main(repo, "fix", "--kind", "noop-statement", "--file", "houses/app.py")
     assert rc == 0
     out = capsys.readouterr().out
     assert "fix:" in out
@@ -557,12 +557,12 @@ def test_extract_class_previews_without_writing(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    rc = run_main(repo, "--fix-kind", "latent-class", "--fix-file", "houses/app.py", "--fix-line", "5")
+    rc = run_main(repo, "fix", "--kind", "latent-class", "--file", "houses/app.py", "--line", "5")
     assert rc == 0
     out = capsys.readouterr().out
     assert "+++" in out  # the preview diff
     assert p.read_text() == src  # nothing written
-    rc = run_main(repo, "--fix-kind", "latent-class", "--fix-file", "houses/app.py", "--fix-line", "5", "--confirm")
+    rc = run_main(repo, "fix", "--kind", "latent-class", "--file", "houses/app.py", "--line", "5", "--confirm")
     assert rc == 0
     capsys.readouterr()
     assert "def a(self):" in p.read_text()
@@ -669,20 +669,29 @@ def test_every_fix_directive_clears_its_finding(tmp_path, capsys):
         data = json.loads(capsys.readouterr().out)
         finding = next((a for a in data["actions"] if a["kind"] == kind), None)
         assert finding is not None, f"{kind}: no finding"
-        directive = re.search(r"fix: ([a-z-]+)(?: --fix-name <([^>]+)>)?", finding["message"])
-        assert directive, f"{kind}: message has no fix directive: {finding['message']}"
-        fix_kind = directive.group(1)
+        # the directive is the FULL command now — the message carries its own
+        # file/line (R27: the tool owns the coordinates), so executing it
+        # proves the message alone tells the agent what to run
+        directive = re.search(
+            r"fix: lucidlint fix --kind ([a-z-]+) --file (\S+) --line (\d+)(?: --name <([^>]+)>)?",
+            finding["message"],
+        )
+        assert directive, f"{kind}: message has no full fix command: {finding['message']}"
+        fix_kind, fix_file, fix_line = directive.group(1), directive.group(2), int(directive.group(3))
+        assert fix_file == finding["file"], f"{kind}: directive file {fix_file} != finding {finding['file']}"
+        assert fix_line == finding["line"], f"{kind}: directive line {fix_line} != finding {finding['line']}"
 
         args = [
-            "--fix-kind", fix_kind,
-            "--fix-file", finding["file"],
-            "--fix-line", str(finding["line"]),
+            "fix",
+            "--kind", fix_kind,
+            "--file", fix_file,
+            "--line", str(fix_line),
         ]
         # name-driven kinds get the table's name whether the message still
         # carries the slot or not (the extract-method directive no longer
         # demands a name — the preview supplies it; the suite knows it)
         if name_value:
-            args += ["--fix-name", name_value]
+            args += ["--name", name_value]
         if fix_engine.KIND_ALIASES.get(fix_kind, fix_kind) in fix_engine.PREVIEW_KINDS:
             args.append("--confirm")
         rc = run_main(repo, *args)
@@ -736,15 +745,16 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
         if fix_kind == "positional-literals" and attempts.get(key, 0) >= 1:
             # attempt 0 resolved the same-file callee; the external Money
             # call needs the agent's signature read
-            extra = ["--fix-params", "amount,currency"]
+            extra = ["--params", "amount,currency"]
         if fix_kind in FIX_NAMES and attempts.get(key, 0) >= 1:
             # name-driven fixes need the agent's name on the retry
-            extra = ["--fix-name", FIX_NAMES[fix_kind]]
+            extra = ["--name", FIX_NAMES[fix_kind]]
         rc = run_main(
             repo,
-            "--fix-kind", fix_kind,
-            "--fix-file", finding["file"],
-            "--fix-line", str(finding["line"]),
+            "fix",
+            "--kind", fix_kind,
+            "--file", finding["file"],
+            "--line", str(finding["line"]),
             "--confirm",  # structural fixes preview unless confirmed
             *extra,
         )
