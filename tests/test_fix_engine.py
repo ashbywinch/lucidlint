@@ -374,6 +374,79 @@ def test_extract_method_cli_preview_confirm_flow(tmp_path, capsys):
     assert not [a for a in data["actions"] if a["severity"] == "fail"]
 
 
+def test_strewing_message_tees_up_the_fix(tmp_path, capsys):
+    """The output gap that caused a manual missed-class hand-fix: the finding
+    must say the fix exists, with the exact command (R27)."""
+    src = (
+        "class _FnBodyState:\n"
+        "    def __init__(self, line):\n"
+        "        self.line = line\n"
+        "\n"
+        "def _window_score(state: _FnBodyState, i, j, min_lines):\n"
+        "    if state.line > 0:\n"
+        "        return 1\n"
+        "    return 0\n"
+        "\n"
+        "def _window_has_outvars(state: _FnBodyState, j, writes_all):\n"
+        "    return state.line > 0\n"
+        "\n"
+        "def _best_seam(state: _FnBodyState, min_lines=2):\n"
+        "    return _window_score(state, 0, 1, min_lines)\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    strewing = [a for a in data["actions"] if a["kind"] == "latent-class"]
+    assert strewing, "expected a strewing finding"
+    assert "fix: extract-class" in strewing[0]["message"], strewing[0]["message"]
+
+
+def test_fix_without_line_resolves_single_finding(tmp_path, capsys):
+    """R27: no --fix-line needed when the file has exactly one finding of the
+    kind — the tool scans and owns the coordinates."""
+    src = "def g():\n    x + 1\n    return 2\n"
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    # no --fix-line: the noop is the only finding of its kind in the file
+    rc = run_main(repo, "--fix-kind", "noop-statement", "--fix-file", "houses/app.py")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "fix:" in out
+    assert "x + 1" not in (repo / "houses" / "app.py").read_text()
+
+
+def test_extract_class_previews_without_writing(tmp_path, capsys):
+    """Structural fixes preview a diff and write NOTHING without --confirm —
+    the reviewable-application contract for every structural kind."""
+    src = (
+        "class S:\n"
+        "    def __init__(self):\n"
+        "        self.x = 0\n"
+        "\n"
+        "def a(s: S):\n"
+        "    return s.x\n"
+        "\n"
+        "def b(s: S):\n"
+        "    return s.x + 1\n"
+        "\n"
+        "def c(s: S):\n"
+        "    return s.x + 2\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    rc = run_main(repo, "--fix-kind", "latent-class", "--fix-file", "houses/app.py", "--fix-line", "5")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "+++" in out  # the preview diff
+    assert p.read_text() == src  # nothing written
+    rc = run_main(repo, "--fix-kind", "latent-class", "--fix-file", "houses/app.py", "--fix-line", "5", "--confirm")
+    assert rc == 0
+    capsys.readouterr()
+    assert "def a(self):" in p.read_text()
+
+
 def test_message_to_fix_end_to_end(tmp_path, capsys):
     """The full loop the agent runs: gate -> read the finding -> apply the fix
     (supplying a name/signature where the message cannot) -> re-gate, until
@@ -419,6 +492,7 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
             "--fix-kind", fix_kind,
             "--fix-file", finding["file"],
             "--fix-line", str(finding["line"]),
+            "--confirm",  # structural fixes preview unless confirmed
             *extra,
         )
         assert rc == 0

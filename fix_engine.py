@@ -696,18 +696,19 @@ def fix_extract_method(source: str, line: int, name: str) -> str | None:
 
 
 def propose_finding(kind: str, rel: str, repo: Path, line: int, opts: FixOptions | None = None):
-    """Compute the fix WITHOUT writing — the preview surface. Returns
-    (new_source, description) or (None, None) when nothing changes."""
+    """Compute the fix WITHOUT writing — the preview surface for every
+    structural kind. Returns (new_source, description) or (None, None) when
+    nothing changes or the agent's semantic bit is missing."""
     opts = opts or FixOptions()
     kind = KIND_ALIASES.get(kind, kind)
     path = repo / rel
     source = path.read_text(encoding="utf-8")
-    if kind == "extract-method":
-        if opts.name is None:
-            return None, None
-        new_source = fix_extract_method(source, line, opts.name)
-        return (new_source, STRUCTURAL_KINDS["extract-method"]) if new_source else (None, None)
-    return None, None
+    if kind not in STRUCTURAL_KINDS:
+        return None, None  # mechanical kinds apply directly, no preview
+    new_source = _fix_structural(kind, source, line, opts)
+    if new_source is None or new_source == source:
+        return None, None
+    return new_source, STRUCTURAL_KINDS[kind]
 
 
 class _RenameName(cst.CSTTransformer):

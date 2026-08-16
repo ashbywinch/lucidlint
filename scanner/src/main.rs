@@ -338,7 +338,7 @@ impl<'a> ScanState<'a> {
             function: fn_name,
             kind: "magic-number".into(),
             severity: "warn".into(),
-            message: format!("magic number {value} — name it as a constant"),
+            message: format!("magic number {value} — name it as a constant — fix: magic-number --fix-name <CONST>"),
         });
     }
 
@@ -367,7 +367,7 @@ impl<'a> ScanState<'a> {
                 function: fn_name,
                 kind: "noop-statement".into(),
                 severity: "fail".into(),
-                message: "expression statement discards its value — dead statement".into(),
+                message: "expression statement discards its value — dead statement — fix: noop-statement".into(),
             });
         }
     }
@@ -459,7 +459,9 @@ impl<'a> ScanState<'a> {
                             function: fn_name.clone(),
                             kind: "unreachable".into(),
                             severity: "fail".into(),
-                            message: format!("unreachable statement at line {line} — dead code is deleted"),
+                            message: format!(
+                                "unreachable statement at line {line} — dead code is deleted — fix: unreachable"
+                            ),
                         });
                     }
                     break;
@@ -1218,7 +1220,7 @@ fn main() {
                 "severity": "fail",
                 "metric": e.cc,
                 "message": format!(
-                    "cyclomatic complexity {} (>= 15) — extract each decision branch into a named method that captures one rule",
+                    "cyclomatic complexity {} (>= 15) — extract each decision branch into a named method that captures one rule — fix: extract-method --fix-name <name>",
                     e.cc
                 ),
             }));

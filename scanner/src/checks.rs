@@ -414,7 +414,7 @@ pub fn positional_literals_findings(state: &mut ScanState, call: &ExprCall, sour
         kind: "positional-literals".into(),
         severity: "warn".into(),
         message: format!(
-            "call passes {n} {kind} positionally — a swapped argument is a silent bug; use keyword arguments"
+            "call passes {n} {kind} positionally — a swapped argument is a silent bug; use keyword arguments — fix: positional-literals"
         ),
     });
 }
@@ -502,7 +502,9 @@ pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
             function: f.name.to_string(),
             kind: "long-param-list".into(),
             severity: "fail".into(),
-            message: format!("{n} parameters — introduce a parameter object"),
+            message: format!(
+                "{n} parameters — introduce a parameter object — fix: long-param-list --fix-name <Options>"
+            ),
         });
     }
 }
@@ -987,7 +989,7 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
             kind: "strewing".into(),
             severity: "fail".into(),
             message: format!(
-                "{} free functions share leading parameter '{base}' — a {base} class is missing (function strewing is a missed class): {}",
+                "{} free functions share leading parameter '{base}' — a {base} class is missing (function strewing is a missed class): {} — fix: extract-class",
                 members.len(),
                 names.join(", ")
             ),

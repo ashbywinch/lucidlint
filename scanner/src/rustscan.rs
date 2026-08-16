@@ -267,7 +267,7 @@ impl<'a> RsState<'a> {
                 "fail",
                 line,
                 "",
-                format!("{count} free functions take the same leading parameter ({detail}) — they share data, extract a class"),
+                format!("{count} free functions take the same leading parameter ({detail}) — they share data, extract a class — fix: extract-class"),
             );
         }
         RustScan {
@@ -348,7 +348,7 @@ impl<'a> RsState<'a> {
             "warn",
             line,
             &fn_name,
-            format!("magic number {text} — name it as a constant"),
+            format!("magic number {text} — name it as a constant — fix: magic-number --fix-name <CONST>"),
         );
     }
 
@@ -384,7 +384,7 @@ impl<'a> RsState<'a> {
                 "fail",
                 line,
                 &fn_name,
-                "expression statement discards its value — dead statement".into(),
+                "expression statement discards its value — dead statement — fix: noop-statement".into(),
             );
         }
     }
@@ -432,7 +432,7 @@ impl<'a> RsState<'a> {
                     line,
                     &sig.ident.to_string(),
                     format!(
-                        "'{}' takes {typed} parameters — introduce a parameter object",
+                        "'{}' takes {typed} parameters — introduce a parameter object — fix: long-param-list --fix-name <Options>",
                         sig.ident
                     ),
                 );

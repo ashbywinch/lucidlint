@@ -217,9 +217,9 @@
    "severity": "error"
   },
   {
-   "line": 878,
+   "line": 879,
    "column": 13,
-   "stop_line": 878,
+   "stop_line": 879,
    "stop_column": 52,
    "path": "fix_engine.py",
    "code": -2,
@@ -229,9 +229,9 @@
    "severity": "error"
   },
   {
-   "line": 881,
+   "line": 882,
    "column": 23,
-   "stop_line": 881,
+   "stop_line": 882,
    "stop_column": 44,
    "path": "fix_engine.py",
    "code": -2,
@@ -241,9 +241,9 @@
    "severity": "error"
   },
   {
-   "line": 910,
+   "line": 911,
    "column": 21,
-   "stop_line": 910,
+   "stop_line": 911,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -253,9 +253,9 @@
    "severity": "error"
   },
   {
-   "line": 937,
+   "line": 938,
    "column": 12,
-   "stop_line": 937,
+   "stop_line": 938,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -265,9 +265,9 @@
    "severity": "error"
   },
   {
-   "line": 972,
+   "line": 973,
    "column": 12,
-   "stop_line": 972,
+   "stop_line": 973,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -277,9 +277,9 @@
    "severity": "error"
   },
   {
-   "line": 984,
+   "line": 985,
    "column": 12,
-   "stop_line": 984,
+   "stop_line": 985,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -289,9 +289,9 @@
    "severity": "error"
   },
   {
-   "line": 1003,
+   "line": 1004,
    "column": 34,
-   "stop_line": 1003,
+   "stop_line": 1004,
    "stop_column": 81,
    "path": "fix_engine.py",
    "code": -2,
@@ -301,9 +301,9 @@
    "severity": "error"
   },
   {
-   "line": 1009,
+   "line": 1010,
    "column": 34,
-   "stop_line": 1009,
+   "stop_line": 1010,
    "stop_column": 81,
    "path": "fix_engine.py",
    "code": -2,
@@ -313,9 +313,9 @@
    "severity": "error"
   },
   {
-   "line": 1051,
+   "line": 1052,
    "column": 12,
-   "stop_line": 1051,
+   "stop_line": 1052,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -325,9 +325,9 @@
    "severity": "error"
   },
   {
-   "line": 1077,
+   "line": 1078,
    "column": 32,
-   "stop_line": 1077,
+   "stop_line": 1078,
    "stop_column": 79,
    "path": "fix_engine.py",
    "code": -2,
@@ -337,9 +337,9 @@
    "severity": "error"
   },
   {
-   "line": 1174,
+   "line": 1175,
    "column": 16,
-   "stop_line": 1174,
+   "stop_line": 1175,
    "stop_column": 25,
    "path": "fix_engine.py",
    "code": -2,
@@ -349,9 +349,9 @@
    "severity": "error"
   },
   {
-   "line": 1174,
+   "line": 1175,
    "column": 42,
-   "stop_line": 1174,
+   "stop_line": 1175,
    "stop_column": 49,
    "path": "fix_engine.py",
    "code": -2,
@@ -361,9 +361,9 @@
    "severity": "error"
   },
   {
-   "line": 1175,
+   "line": 1176,
    "column": 26,
-   "stop_line": 1175,
+   "stop_line": 1176,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -458,9 +458,9 @@
   },
   {
    "line": 1141,
-   "column": 12,
+   "column": 20,
    "stop_line": 1141,
-   "stop_column": 35,
+   "stop_column": 43,
    "path": "lucidlint.py",
    "code": -2,
    "name": "missing-attribute",
@@ -469,9 +469,21 @@
    "severity": "error"
   },
   {
-   "line": 1144,
+   "line": 1158,
+   "column": 24,
+   "stop_line": 1158,
+   "stop_column": 51,
+   "path": "lucidlint.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `STRUCTURAL_KINDS`",
+   "concise_description": "Object of class `NoneType` has no attribute `STRUCTURAL_KINDS`",
+   "severity": "error"
+  },
+  {
+   "line": 1161,
    "column": 39,
-   "stop_line": 1144,
+   "stop_line": 1161,
    "stop_column": 65,
    "path": "lucidlint.py",
    "code": -2,
@@ -481,9 +493,9 @@
    "severity": "error"
   },
   {
-   "line": 1150,
+   "line": 1167,
    "column": 20,
-   "stop_line": 1156,
+   "stop_line": 1173,
    "stop_column": 14,
    "path": "lucidlint.py",
    "code": -2,
@@ -493,15 +505,51 @@
    "severity": "error"
   },
   {
-   "line": 1160,
+   "line": 1177,
    "column": 23,
-   "stop_line": 1160,
+   "stop_line": 1177,
    "stop_column": 45,
    "path": "lucidlint.py",
    "code": -2,
    "name": "missing-attribute",
    "description": "Object of class `NoneType` has no attribute `fix_finding`",
    "concise_description": "Object of class `NoneType` has no attribute `fix_finding`",
+   "severity": "error"
+  },
+  {
+   "line": 1235,
+   "column": 12,
+   "stop_line": 1235,
+   "stop_column": 35,
+   "path": "lucidlint.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `KIND_ALIASES`",
+   "concise_description": "Object of class `NoneType` has no attribute `KIND_ALIASES`",
+   "severity": "error"
+  },
+  {
+   "line": 1235,
+   "column": 49,
+   "stop_line": 1235,
+   "stop_column": 72,
+   "path": "lucidlint.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `KIND_ALIASES`",
+   "concise_description": "Object of class `NoneType` has no attribute `KIND_ALIASES`",
+   "severity": "error"
+  },
+  {
+   "line": 1243,
+   "column": 53,
+   "stop_line": 1243,
+   "stop_column": 55,
+   "path": "lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `dict[@_, @_]` is not assignable to parameter `file_churn` with type `Counter[str]` in function `_RustScan.prepare`",
+   "concise_description": "Argument `dict[@_, @_]` is not assignable to parameter `file_churn` with type `Counter[str]` in function `_RustScan.prepare`",
    "severity": "error"
   },
   {

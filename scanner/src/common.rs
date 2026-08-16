@@ -324,7 +324,7 @@ impl<'a> StaleCtx<'a> {
                     kind: "stale-suppression".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "suppression '{} lucidlint: ignore {sig}' at line {ln} no longer fires — remove it",
+                        "suppression '{} lucidlint: ignore {sig}' at line {ln} no longer fires — remove it — fix: stale-suppression",
                         self.marker
                     ),
                 });
@@ -346,7 +346,7 @@ impl<'a> StaleCtx<'a> {
                     kind: "stale-suppression".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "file suppression '{} lucidlint: ignore-file {sig}' no longer fires — remove it",
+                        "file suppression '{} lucidlint: ignore-file {sig}' no longer fires — remove it — fix: stale-suppression",
                         self.marker
                     ),
                 });

@@ -1138,14 +1138,31 @@ def main() -> int:
             params=args.fix_params.split(",") if args.fix_params else None,
             name=args.fix_name,
         )
-        if fix_engine.KIND_ALIASES.get(args.fix_kind, args.fix_kind) == "extract-method" and not args.confirm:
+        fix_kind = fix_engine.KIND_ALIASES.get(args.fix_kind, args.fix_kind)
+        if args.fix_line == 0:
+            # R27: agents never compute line numbers — the tool owns its own
+            # coordinates; when the file has exactly one finding of the kind,
+            # no --fix-line is needed
+            lines = _finding_lines(repo, args.fix_file, args.fix_kind)
+            if len(lines) == 1:
+                args.fix_line = lines[0]
+            elif not lines:
+                print(f"fix: no {args.fix_kind} finding in {args.fix_file} — nothing to fix")
+                return 0
+            else:
+                print(
+                    f"fix: {len(lines)} {args.fix_kind} findings in {args.fix_file} "
+                    f"(lines {', '.join(map(str, lines))}) — pass --fix-line to pick one"
+                )
+                return 0
+        if fix_kind in fix_engine.STRUCTURAL_KINDS and not args.confirm:
             # the preview surface: show the proposed refactoring as a diff;
             # the agent reviews it, then re-runs with --confirm to apply
             new_source, description = fix_engine.propose_finding(
                 args.fix_kind, args.fix_file, repo, args.fix_line, opts
             )
             if new_source is None:
-                print(f"fix: no safe extraction seam for {args.fix_kind} at {args.fix_file}:{args.fix_line}")
+                print(f"fix: nothing to change for {args.fix_kind} at {args.fix_file}:{args.fix_line}")
                 return 0
             diff = difflib.unified_diff(
                 (repo / args.fix_file).read_text().splitlines(),
@@ -1208,6 +1225,28 @@ def main() -> int:
         rc.render_text(unique, fails, warns, acks)
 
     return _gate_exit(stale, fails, args)
+
+
+def _finding_lines(repo: Path, rel: str, kind: str) -> list[int]:
+    """The lines of every finding of `kind` in one file — the R27 line
+    resolution: the tool scans, the agent never counts lines."""
+    found = []
+    for line, k in _scan_single_file(repo, rel):
+        if fix_engine.KIND_ALIASES.get(k, k) == fix_engine.KIND_ALIASES.get(kind, kind):
+            found.append(line)
+    return sorted(found)
+
+
+def _scan_single_file(repo: Path, rel: str):
+    """Scan one file, yielding (line, kind) per finding."""
+    let_include_tests = False  # the fix resolves one file's findings
+    RUST_SCAN.prepare(repo, rel, let_include_tests, {})
+    files = _py_files(repo, rel)
+    rust = RUST_SCAN.load(repo, files)
+    if rust is None:
+        return
+    for f in rust.by_rel.get(rel, []):
+        yield f.line, f.kind
 
 
 def _gate_exit(stale: list[str], fails: list[Action], args) -> int:

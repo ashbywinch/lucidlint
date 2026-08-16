@@ -41,6 +41,9 @@ A new family must be registered in **four places**:
 
 1. **Scanner** — emit the finding at the right AST hook with
    `finding("<kind>", "<fail|warn>", ...)`; the kind string is the signal.
+   If the family has a fix (mechanical or structural), the MESSAGE ends
+   with the machine-parseable directive `— fix: <fix-kind> [--fix-name <N>]`
+   so the agent is told the tool exists and how to invoke it (R27).
    (Python layer: `scanner/src/checks.rs`; Rust layer: `scanner/src/rustscan.rs`;
    graph: `scanner/src/graph_families.rs`.)
 2. **`final_kind`** (`scanner/src/main.rs`) — a named display bucket, or

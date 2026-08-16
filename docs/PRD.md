@@ -232,6 +232,17 @@ rather than a number.
   I/O like sqlite3 — and `# lucidlint: ignore-file <signal> <why>`
   exempts a whole file with an explanation (a why-less ignore-file is
   itself a finding).
+- **R27 — Agents never compute line numbers; the tool owns its own
+  coordinates.** Findings are located for fixing by the finding's own
+  output (the report line and the JSON `line` field are the source of
+  truth — agents copy, never estimate). The fix command therefore accepts
+  a finding WITHOUT a line when the file has exactly one finding of that
+  kind, and every fixable finding's message carries a machine-parseable
+  `fix: <command>` directive so the agent is told the tool exists and how
+  to invoke it — the agent should never have to know the tool's fix
+  catalog, the kind-to-fix mapping, or a line number to apply a fix
+  (rationale: agents are bad at line numbers; the 2026-08-16 missed-class
+  hand-fix fumbled twice because the message never said the fix existed).
 - **R26 — The radonc crate mirrors upstream radon structurally.** The
   cyclomatic-complexity rules that power the complexity finding are a
   port of the Python radon library, kept in a standalone crate
