@@ -486,25 +486,29 @@ class _InsertExtractedFn(cst.CSTTransformer):
         self.new_def = new_def
         self.done = False
 
-    def _maybe_insert(self, body: list) -> list:
+    def _maybe_insert(self, body: list, blank_lines: int) -> list:
         if self.done:
             return body
         out = []
         for stmt in body:
             out.append(stmt)
             if not self.done and isinstance(stmt, cst.FunctionDef) and stmt.name.value == self.fn_name:
-                out.append(self.new_def)
+                out.append(
+                    self.new_def.with_changes(
+                        leading_lines=[cst.EmptyLine()] * blank_lines
+                    )
+                )
                 self.done = True
         return out
 
     @override
     def leave_Module(self, original_node, updated_node):
-        return updated_node.with_changes(body=self._maybe_insert(list(updated_node.body)))
+        return updated_node.with_changes(body=self._maybe_insert(list(updated_node.body), 2))
 
     @override
     def leave_ClassDef(self, original_node, updated_node):
         return updated_node.with_changes(
-            body=updated_node.body.with_changes(body=self._maybe_insert(list(updated_node.body.body)))
+            body=updated_node.body.with_changes(body=self._maybe_insert(list(updated_node.body.body), 1))
         )
 
 
@@ -836,10 +840,16 @@ def extract_method_proposal(
     first_span = state.stmt_spans[block_sids[0]]
     flat_entry = next(e for e in state.flat if e[0] == block_sids[0])
     container_sid, insert_index = flat_entry[1], flat_entry[2]
+    body_stmts = [state.nodes[sid] for sid in block_sids]
+    if body_stmts:
+        # the first moved statement carries its original leading blank
+        # lines (it was separated from the previous statement in the
+        # source) — that would render as an empty first body line
+        body_stmts[0] = body_stmts[0].with_changes(leading_lines=[])
     new_def = cst.FunctionDef(
         name=cst.Name(name),
         params=cst.Parameters(params=[cst.Param(cst.Name(v)) for v in free_vars]),
-        body=cst.IndentedBlock(body=[state.nodes[sid] for sid in block_sids]),
+        body=cst.IndentedBlock(body=body_stmts),
         returns=None,
     )
     replaced = wrapper.visit(
@@ -871,6 +881,13 @@ def propose_finding(kind: str, rel: str, repo: Path, line: int, opts: FixOptions
     source = path.read_text(encoding="utf-8")
     if kind not in STRUCTURAL_KINDS:
         return None, None  # mechanical kinds apply directly, no preview
+    if kind == "extract-method":
+        if opts.name is None:
+            return None, None
+        new_source, seam = extract_method_proposal(source, line, opts.name, max_decisions=13)
+        if new_source is None or new_source == source:
+            return None, None
+        return new_source, seam  # "line N: <first seam line>" — what moves
     new_source = _fix_structural(kind, source, line, opts)
     if new_source is None or new_source == source:
         return None, None
