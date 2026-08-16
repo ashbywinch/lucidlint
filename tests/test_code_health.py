@@ -117,7 +117,6 @@ def git_routes(history="", diff="", branch="test-branch", commit="abc1234", log_
     routes.append((lambda a: is_git(a) and a[3] == "rev-parse", commit, 0))
     # the Rust scan binary + the graph-contract adapter pass through
     routes.append((lambda a: str(a[0]).endswith("code-health-scan"), PASSTHROUGH, 0))
-    routes.append((lambda a: "code_health_graph_export.py" in " ".join(a), PASSTHROUGH, 0))
 
     def ls_files_stdout(args):
         repo = Path(args[2])
@@ -333,7 +332,6 @@ def test_git_lsfiles_failure_falls_back_to_rglob(tmp_path, capsys):
         (lambda a: a[:2] == ["git", "-C"] and a[3] == "rev-parse", "abc1234", 0),
         (lambda a: a[:2] == ["git", "-C"] and a[3] == "ls-files", "", 1),  # git fails
         (lambda a: str(a[0]).endswith("code-health-scan"), PASSTHROUGH, 0),
-        (lambda a: "code_health_graph_export.py" in " ".join(a), PASSTHROUGH, 0),
         (lambda a: a[:2] == ["make", "coverage"], "", 0),
     ]
     rc = run_main(repo, routes=routes)
@@ -422,7 +420,6 @@ def test_scanner_binary_missing_raises(tmp_path):
 def test_graph_contract_failure_degrades(tmp_path, capsys):
     repo = make_repo(tmp_path)
     routes = git_routes()
-    routes.insert(0, (lambda a: "code_health_graph_export.py" in " ".join(a), "", 1))
     rc = run_main(repo, routes=routes)
     assert rc == 0  # no graph contract — the non-graph families still gate
     assert "GATE: PASS" in capsys.readouterr().out

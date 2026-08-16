@@ -1,9 +1,9 @@
 {
  "errors": [
   {
-   "line": 225,
+   "line": 224,
    "column": 35,
-   "stop_line": 225,
+   "stop_line": 224,
    "stop_column": 51,
    "path": "code_health.py",
    "code": -2,
@@ -13,11 +13,11 @@
    "severity": "error"
   },
   {
-   "line": 27,
+   "line": 520,
    "column": 5,
-   "stop_line": 27,
-   "stop_column": 51,
-   "path": "code_health_graph_export.py",
+   "stop_line": 520,
+   "stop_column": 66,
+   "path": "code_health.py",
    "code": -2,
    "name": "missing-import",
    "description": "Cannot find module `code_review_graph.graph`\n  Looked in these locations (from config in `/home/ashby/Documents/code/build-tools/pyrefly.toml`):\n  Import root (inferred from project layout): \"/home/ashby/Documents/code/build-tools\"\n  Site package path queried from interpreter: [\"/home/ashby/Documents/code/build-tools/.venv/lib/python3.14/site-packages\"]",
@@ -25,15 +25,27 @@
    "severity": "error"
   },
   {
-   "line": 28,
+   "line": 521,
    "column": 5,
-   "stop_line": 28,
-   "stop_column": 52,
-   "path": "code_health_graph_export.py",
+   "stop_line": 521,
+   "stop_column": 65,
+   "path": "code_health.py",
    "code": -2,
    "name": "missing-import",
    "description": "Cannot find module `code_review_graph.registry`\n  Looked in these locations (from config in `/home/ashby/Documents/code/build-tools/pyrefly.toml`):\n  Import root (inferred from project layout): \"/home/ashby/Documents/code/build-tools\"\n  Site package path queried from interpreter: [\"/home/ashby/Documents/code/build-tools/.venv/lib/python3.14/site-packages\"]",
    "concise_description": "Cannot find module `code_review_graph.registry`",
+   "severity": "error"
+  },
+  {
+   "line": 545,
+   "column": 24,
+   "stop_line": 545,
+   "stop_column": 33,
+   "path": "code_health.py",
+   "code": -2,
+   "name": "not-callable",
+   "description": "Expected a callable, got `None`",
+   "concise_description": "Expected a callable, got `None`",
    "severity": "error"
   },
   {
@@ -49,9 +61,9 @@
    "severity": "error"
   },
   {
-   "line": 224,
+   "line": 223,
    "column": 21,
-   "stop_line": 224,
+   "stop_line": 223,
    "stop_column": 43,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -61,9 +73,9 @@
    "severity": "error"
   },
   {
-   "line": 248,
+   "line": 247,
    "column": 21,
-   "stop_line": 250,
+   "stop_line": 249,
    "stop_column": 8,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -73,9 +85,9 @@
    "severity": "error"
   },
   {
-   "line": 255,
+   "line": 254,
    "column": 21,
-   "stop_line": 257,
+   "stop_line": 256,
    "stop_column": 8,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -85,9 +97,9 @@
    "severity": "error"
   },
   {
-   "line": 397,
+   "line": 395,
    "column": 21,
-   "stop_line": 397,
+   "stop_line": 395,
    "stop_column": 23,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -97,9 +109,9 @@
    "severity": "error"
   },
   {
-   "line": 544,
+   "line": 541,
    "column": 12,
-   "stop_line": 544,
+   "stop_line": 541,
    "stop_column": 24,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -109,9 +121,9 @@
    "severity": "error"
   },
   {
-   "line": 556,
+   "line": 553,
    "column": 12,
-   "stop_line": 556,
+   "stop_line": 553,
    "stop_column": 24,
    "path": "tests/test_code_health.py",
    "code": -2,

@@ -26,7 +26,6 @@ import datetime
 import json
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -517,45 +516,78 @@ RUST_SCAN = _RustScan()
 _SCANNER_FAILURES = (OSError, SubprocessError, json.JSONDecodeError, ValueError)
 
 
+try:
+    from code_review_graph.graph import GraphStore as _GraphStore
+    from code_review_graph.registry import Registry as _Registry
+except ImportError:  # code-health: ignore except code-review-graph is optional — degrades to non-graph families
+    _GraphStore = None
+    _Registry = None
+
+CONTRACT_VERSION = 1
+
 class _GraphContract:
-    """The code-review-graph export contract, generated through the tool's own
-    public API by code_health_graph_export.py — the gate never touches the
-    SQLite schema or the DB location. None = tool missing or no graph."""
+    """The code-review-graph export contract, built through the tool's own
+    public API (GraphStore + Registry) — the gate never touches the SQLite
+    schema or the DB location, and never shells out. None = tool missing or
+    no graph. The contract JSON is consumed by the Rust binary via --graph."""
 
     def __init__(self) -> None:
         self._cache: dict[Path, Path | None] = {}
-        self._adapter = Path(__file__).resolve().parent / "code_health_graph_export.py"
-
-    def _interpreter(self) -> str:
-        """The graph tool's own Python (its CLI shebang), else this env."""
-        exe = shutil.which("code-review-graph")
-        if exe:
-            try:
-                first = Path(exe).read_text(encoding="utf-8", errors="replace").splitlines()[0]
-                if first.startswith("#!"):
-                    interp = first[2:].split()[0]
-                    if Path(interp).exists():
-                        return interp
-            except OSError:  # code-health: ignore except a missing interpreter degrades to this env
-                pass
-        return sys.executable
 
     def contract(self, repo: Path) -> Path | None:
-        """The contract JSON path for the repo, or None (no graph available)."""
         if repo in self._cache:
             return self._cache[repo]
+        if _GraphStore is None:
+            self._cache[repo] = None
+            return None
         result: Path | None = None
         try:
-            proc = subprocess.run(
-                [self._interpreter(), str(self._adapter), "--repo", str(repo)],
-                capture_output=True, text=True, timeout=180,
-            )
-            if proc.returncode == 0 and proc.stdout.strip():
-                tmp = Path(tempfile.mkstemp(prefix="code-health-graph-", suffix=".json")[1])
-                tmp.write_text(proc.stdout, encoding="utf-8")
-                result = tmp
-        except _SCANNER_FAILURES:  # code-health: ignore except no graph contract means the gate
-            # degrades to the non-graph families with a log, never a crash
+            data_dir = _Registry().get_data_dir_for_repo(str(repo))
+            db = Path(data_dir) / "graph.db" if data_dir else repo / ".code-review-graph" / "graph.db"
+            if not db.exists():
+                self._cache[repo] = None
+                return None
+            store = _GraphStore(db)
+            with store:
+                community_ids = store.get_all_community_ids()
+                nodes = []
+                for file_path in store.get_all_files():
+                    for gnode in store.get_nodes_by_file(file_path):
+                        nodes.append({
+                            "kind": gnode.kind,
+                            "name": gnode.name,
+                            "qualified_name": gnode.qualified_name,
+                            "file_path": gnode.file_path,
+                            "line_start": gnode.line_start,
+                            "line_end": gnode.line_end,
+                            "params": gnode.params,
+                            "return_type": gnode.return_type,
+                            "community_id": community_ids.get(gnode.qualified_name),
+                        })
+                edges = []
+                for e in store.get_all_edges():
+                    edges.append({
+                        "kind": e.kind,
+                        "source": e.source_qualified,
+                        "target": e.target_qualified,
+                        "file_path": e.file_path,
+                    })
+                communities = {}
+                for row in store.get_communities_list():
+                    communities[str(row["id"])] = row["name"]
+            # code-health: ignore record-shape wire-format envelope — a class is ceremony for JSON
+            contract = {
+                "contract_version": CONTRACT_VERSION,
+                "nodes": nodes,
+                "edges": edges,
+                "communities": communities,
+            }
+            tmp = Path(tempfile.mkstemp(prefix="code-health-graph-", suffix=".json")[1])
+            tmp.write_text(json.dumps(contract, separators=(",", ":")), encoding="utf-8")
+            result = tmp
+        # code-health: ignore except graph-export failures degrade to non-graph families — the log is the surface
+        except _SCANNER_FAILURES:
+            log(f"graph contract export failed for {repo} — graph families skipped")
             result = None
         self._cache[repo] = result
         return result
