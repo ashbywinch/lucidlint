@@ -1220,7 +1220,7 @@ fn main() {
                 "severity": "fail",
                 "metric": e.cc,
                 "message": format!(
-                    "cyclomatic complexity {} (>= 15) — extract each decision branch into a named method that captures one rule — fix: extract-method --fix-name <name>",
+                    "cyclomatic complexity {} (>= 15) — extract part of this function into a named method (the preview shows the block) — fix: extract-method (preview without --fix-name; apply with --fix-name <name>)",
                     e.cc
                 ),
             }));

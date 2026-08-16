@@ -297,20 +297,22 @@ def test_extract_method_preview_and_confirm(tmp_path):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    # preview: proposal without writing
+    # preview needs NO name — the seam shows with a placeholder, the agent
+    # names AFTER seeing it (the S3 flow)
     new_source, desc = fix_engine.propose_finding(
-        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="scale_total")
+        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions()
     )
     assert desc is not None
+    assert "_extracted(" in new_source  # the placeholder in the diff
     assert p.read_text() == src  # nothing written
-    # apply
+    # apply with a name — normalized to private: scale_total -> _scale_total
     out = fix_engine.fix_finding(
         "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="scale_total")
     )
     assert out is not None
     fixed = p.read_text()
-    assert "def scale_total(" in fixed
-    assert fixed.count("scale_total(") >= 2  # the def AND the call site
+    assert "def _scale_total(" in fixed
+    assert fixed.count("_scale_total(") >= 2  # the def AND the call site
     # the extraction is valid Python and preserves behavior
     ns = {}
     exec(compile(fixed, "app.py", "exec"), ns)
@@ -367,7 +369,7 @@ def test_extract_method_descends_into_loop_body(tmp_path):
     fixed = p.read_text()
     assert "for row in rows:" in fixed  # the loop survives
     # the call sits INSIDE the loop (4-space indent), not at fn level
-    call_lines = [ln for ln in fixed.splitlines() if "grade_row(" in ln and not ln.lstrip().startswith("def ")]
+    call_lines = [ln for ln in fixed.splitlines() if "_grade_row(" in ln and not ln.lstrip().startswith("def ")]
     assert call_lines, "no call site found"
     assert call_lines[0].startswith("        ") or call_lines[0].startswith("    ")
     # behavior preserved
@@ -396,8 +398,9 @@ def test_extract_method_no_safe_seam(tmp_path):
 
 
 def test_extract_method_cli_preview_confirm_flow(tmp_path, capsys):
-    """The CLI protocol: the fix previews (no write), --confirm applies, and
-    the re-gate sees a clean file. Agents are bad at line numbers — the
+    """The S3 CLI protocol: NO name previews (the seam with a placeholder
+    name, nothing written); a name applies DIRECTLY — the name IS the
+    commitment, no --confirm dance. Agents are bad at line numbers — the
     preview IS the line-number-free contract."""
     src = (
         "def process(data, factor):\n"
@@ -409,24 +412,29 @@ def test_extract_method_cli_preview_confirm_flow(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    # preview: prints a diff, writes NOTHING
+    # preview WITHOUT a name: prints a diff, writes NOTHING
+    rc = run_main(
+        repo, "--fix-kind", "extract-method", "--fix-file", "houses/app.py",
+        "--fix-line", "1",
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "+++" in out  # the call-site hunk was shown
+    assert "def _extracted(" in out  # the placeholder method head
+    assert "Extracted (the method being created" in out
+    assert "placeholder" in out  # the agent knows _extracted is not final
+    assert p.read_text() == src  # nothing written yet
+    # WITH a name: applies directly (no --confirm — the name is the commit)
     rc = run_main(
         repo, "--fix-kind", "extract-method", "--fix-file", "houses/app.py",
         "--fix-line", "1", "--fix-name", "accumulate",
     )
     assert rc == 0
-    out = capsys.readouterr().out
-    assert "+++" in out  # a unified diff was shown
-    assert p.read_text() == src  # nothing written yet
-    # confirm: applies
-    rc = run_main(
-        repo, "--fix-kind", "extract-method", "--fix-file", "houses/app.py",
-        "--fix-line", "1", "--fix-name", "accumulate", "--confirm",
-    )
-    assert rc == 0
     capsys.readouterr()
     fixed = p.read_text()
-    assert "def accumulate(" in fixed
+    assert "def _accumulate(" in fixed
+    assert fixed.count("_accumulate(") >= 2  # the def AND the call site
+    assert " accumulate(" not in fixed  # every reference is private
     ns = {}
     exec(compile(fixed, "app.py", "exec"), ns)
     assert ns["process"]([1, 2, 3], 2) == 12  # behavior preserved
@@ -613,14 +621,16 @@ def test_every_fix_directive_clears_its_finding(tmp_path, capsys):
         directive = re.search(r"fix: ([a-z-]+)(?: --fix-name <([^>]+)>)?", finding["message"])
         assert directive, f"{kind}: message has no fix directive: {finding['message']}"
         fix_kind = directive.group(1)
-        name = directive.group(2)
 
         args = [
             "--fix-kind", fix_kind,
             "--fix-file", finding["file"],
             "--fix-line", str(finding["line"]),
         ]
-        if name and name_value:
+        # name-driven kinds get the table's name whether the message still
+        # carries the slot or not (the extract-method directive no longer
+        # demands a name — the preview supplies it; the suite knows it)
+        if name_value:
             args += ["--fix-name", name_value]
         if fix_engine.KIND_ALIASES.get(fix_kind, fix_kind) in fix_engine.PREVIEW_KINDS:
             args.append("--confirm")

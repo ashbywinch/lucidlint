@@ -1155,24 +1155,94 @@ def main() -> int:
                     f"(lines {', '.join(map(str, lines))}) — pass --fix-line to pick one"
                 )
                 return 0
-        if fix_kind in fix_engine.PREVIEW_KINDS and not args.confirm:
-            # the preview surface: show the proposed refactoring as a diff;
-            # the agent reviews it, then re-runs with --confirm to apply
+        if fix_kind in fix_engine.PREVIEW_KINDS and not args.fix_name and not args.confirm:
+            # the name-free preview surface: show the proposed refactoring
+            # as a diff (the seam with a placeholder name — no --fix-name
+            # needed to see it). The agent reviews the seam, then re-runs
+            # with --fix-name <name>; the name is the commitment, so the
+            # named run applies — no --confirm dance
             new_source, description = fix_engine.propose_finding(
                 args.fix_kind, args.fix_file, repo, args.fix_line, opts
             )
             if new_source is None:
                 print(f"fix: nothing to change for {args.fix_kind} at {args.fix_file}:{args.fix_line}")
                 return 0
-            diff = difflib.unified_diff(
-                (repo / args.fix_file).read_text().splitlines(),
-                new_source.splitlines(),
-                fromfile=args.fix_file,
-                tofile=args.fix_file + " (proposed)",
-                lineterm="",
+            diff = list(
+                difflib.unified_diff(
+                    (repo / args.fix_file).read_text().splitlines(),
+                    new_source.splitlines(),
+                    fromfile=args.fix_file,
+                    tofile=args.fix_file + " (proposed)",
+                    lineterm="",
+                )
             )
-            print("\n".join(diff))
-            print(f"# review the diff, then re-run with --confirm ({description})")
+            if fix_kind == "extract-method":
+                # the C shape (subtask-tested): the call-site hunk plus the
+                # EXTRACTED METHOD's first lines — agents name and comprehend
+                # from the method being created, not the diff head; a bare
+                # diff-head truncation left them wanting the cut part and
+                # unsure whether _extracted was the final name
+                name = args.fix_name or "_extracted"
+                hunks, cur = [], []
+                for line in diff:
+                    if line.startswith("@@"):
+                        if cur:
+                            hunks.append(cur)
+                        cur = [line]
+                    else:
+                        cur.append(line)
+                if cur:
+                    hunks.append(cur)
+                call_hunk = next(
+                    (h for h in hunks
+                     if any(ln.startswith("+") and f"{name}(" in ln for ln in h)),
+                    hunks[0] if hunks else [],
+                )
+                # keep the hunk's shape, not its bulk: header + a few context
+                # lines + the inserted call + the next context line — the
+                # removed lines duplicate the extracted body shown below
+                if call_hunk:
+                    call_idx = next(
+                        i for i, ln in enumerate(call_hunk)
+                        if ln.startswith("+") and f"{name}(" in ln
+                    )
+                    head = [ln for ln in call_hunk[1:call_idx] if ln.startswith(" ")][:3]
+                    tail = next((ln for ln in call_hunk[call_idx + 1:] if ln.startswith(" ")), None)
+                    shown = [call_hunk[0]] + head + [call_hunk[call_idx]]
+                    if tail:
+                        shown.append(tail)
+                    omitted = len(call_hunk) - len(shown)
+                    if omitted > 0:
+                        shown.append(f"... ({omitted} diff lines omitted)")
+                    call_hunk = shown
+                src_lines = new_source.splitlines()
+                def_idx = next(
+                    (i for i, ln in enumerate(src_lines)
+                     if ln.startswith("def ") and name in ln),
+                    None,
+                )
+                body: list[str] = []
+                if def_idx is not None:
+                    for ln in src_lines[def_idx + 1:]:
+                        if ln and not ln[0].isspace():
+                            break
+                        body.append(ln)
+                print("\n".join(diff[:2]))  # --- / +++ file headers
+                print("\n".join(call_hunk))
+                print(f"# seam: {description}")
+                if def_idx is not None:
+                    print("\nExtracted (the method being created, first lines):\n")
+                    print(src_lines[def_idx])
+                    print("\n".join(body[:10]))
+                    if len(body) > 10:
+                        print(f"... ({len(body) - 10} more lines omitted)")
+            else:
+                if len(diff) > 40:
+                    diff = diff[:40] + [f"... ({len(diff) - 40} more lines omitted)"]
+                print("\n".join(diff))
+            print(f"# the name `{args.fix_name or '_extracted'}` is a placeholder — pick a real one; "
+                  f"apply it: --fix-kind {args.fix_kind} --fix-file {args.fix_file} "
+                  f"--fix-line {args.fix_line} --fix-name <name>")
             return 0
         description = fix_engine.fix_finding(
             args.fix_kind, args.fix_file, repo, args.fix_line, opts

@@ -55,7 +55,7 @@ pub fn diagnostics_for(scan: &FileScan, source: &str) -> Vec<serde_json::Value> 
                 "severity": 1,
                 "source": "lucidlint",
                 "message": format!(
-                    "cyclomatic complexity {} (>= 15) — extract each decision branch into a named method — fix: extract-method --fix-name <name>",
+                    "cyclomatic complexity {} (>= 15) — extract part of this function into a named method — fix: extract-method (preview without --fix-name; apply with --fix-name <name>)",
                     e.cc
                 ),
             }));

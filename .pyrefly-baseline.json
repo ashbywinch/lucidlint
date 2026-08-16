@@ -565,10 +565,10 @@
    "severity": "error"
   },
   {
-   "line": 1180,
-   "column": 24,
-   "stop_line": 1180,
-   "stop_column": 33,
+   "line": 1230,
+   "column": 33,
+   "stop_line": 1230,
+   "stop_column": 41,
    "path": "lucidlint.py",
    "code": -2,
    "name": "bad-index",
@@ -577,9 +577,21 @@
    "severity": "error"
   },
   {
-   "line": 1185,
+   "line": 1241,
+   "column": 28,
+   "stop_line": 1241,
+   "stop_column": 37,
+   "path": "lucidlint.py",
+   "code": -2,
+   "name": "bad-index",
+   "description": "Cannot index into `set[str]`\n  Object of class `set` has no attribute `__getitem__`",
+   "concise_description": "Cannot index into `set[str]`",
+   "severity": "error"
+  },
+  {
+   "line": 1247,
    "column": 23,
-   "stop_line": 1185,
+   "stop_line": 1247,
    "stop_column": 45,
    "path": "lucidlint.py",
    "code": -2,
@@ -589,9 +601,9 @@
    "severity": "error"
   },
   {
-   "line": 1243,
+   "line": 1305,
    "column": 12,
-   "stop_line": 1243,
+   "stop_line": 1305,
    "stop_column": 35,
    "path": "lucidlint.py",
    "code": -2,
@@ -601,9 +613,9 @@
    "severity": "error"
   },
   {
-   "line": 1243,
+   "line": 1305,
    "column": 49,
-   "stop_line": 1243,
+   "stop_line": 1305,
    "stop_column": 72,
    "path": "lucidlint.py",
    "code": -2,
@@ -613,9 +625,9 @@
    "severity": "error"
   },
   {
-   "line": 1251,
+   "line": 1313,
    "column": 53,
-   "stop_line": 1251,
+   "stop_line": 1313,
    "stop_column": 55,
    "path": "lucidlint.py",
    "code": -2,
