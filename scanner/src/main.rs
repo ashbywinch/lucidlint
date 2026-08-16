@@ -244,6 +244,10 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             Expr::Name(n) => {
                 self.refs.insert(n.id.to_string());
             }
+            Expr::Attribute(a) => {
+                // attribute names count as references (obj.set_x(v) uses set_x)
+                self.refs.insert(a.attr.to_string());
+            }
             Expr::StringLiteral(s) if !self.is_test => {
                 self.strings.push(s.value.to_str().to_string());
             }
@@ -630,6 +634,25 @@ pub fn scan_source_lsp(source: &str, name: &str) -> FileScan {
     scan_source_impl(source, name, repo_wide)
 }
 
+/// The module-level post-passes — structural families + the advisory
+/// refactorings — kept out of scan_source_impl (which was crossing the
+/// large-function line).
+fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: &str) {
+    class_module_findings(state, body, name);
+    vague_name_findings(state, body);
+    strewing_findings(state, body);
+    record_shape_findings(state, body, source);
+    partition_findings(state, body, source);
+    // advisory refactorings (warn): detection-only, the fix names the Fowler
+    // refactoring for the agent (or a future fix)
+    guard_clause_findings(state, body, source);
+    conditional_polymorphism_findings(state, body, source);
+    special_case_findings(state, body, source);
+    middle_man_findings(state, body, source);
+    unused_setter_findings(state, body, source);
+    loop_pipeline_findings(state, body, source);
+}
+
 fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     let parsed: Parsed<ModModule> = match parse_module(source) {
         Ok(p) => p,
@@ -662,11 +685,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     for stmt in &body {
         state.visit_stmt(stmt);
     }
-    class_module_findings(&mut state, &body, name);
-    vague_name_findings(&mut state, &body);
-    strewing_findings(&mut state, &body);
-    record_shape_findings(&mut state, &body, source);
-    partition_findings(&mut state, &body, source);
+    module_post_passes(&mut state, &body, name, source);
     if state.is_test {
         // the rules that live in tests — scanned for alone or with --include-tests
         monkeypatch_findings(&mut state, &body, source);
@@ -822,6 +841,13 @@ pub const FAMILY_KINDS: &[&str] = &[
     "positional-literals",
     // architecture (inverse of record-shape)
     "detached-method",
+    // refactoring advice (warn, detection-only)
+    "guard-clauses",
+    "conditional-polymorphism",
+    "special-case",
+    "middle-man",
+    "unused-setter",
+    "loop-pipeline",
     // test discipline
     "monkeypatch",
     "skipif",
@@ -898,6 +924,12 @@ pub fn final_kind(kind: &str) -> &'static str {
         "churn-untested" => "churn-untested",
         "positional-literals" => "positional-literals",
         "detached-method" => "detached-method",
+        "guard-clauses" => "guard-clauses",
+        "conditional-polymorphism" => "conditional-polymorphism",
+        "special-case" => "special-case",
+        "middle-man" => "middle-man",
+        "unused-setter" => "unused-setter",
+        "loop-pipeline" => "loop-pipeline",
         _ => "standard", // broad-except, imports, over-abstraction, cycles, duplicate, unused, ...
     }
 }
@@ -2093,6 +2125,62 @@ mod tests {
         assert!(!f.iter().any(|x| x.kind == "long-param-list"));
         assert!(!f.iter().any(|x| x.kind == "detached-method"));
         assert!(!f.iter().any(|x| x.kind == "stale-suppression"));
+    }
+
+    #[test]
+    fn guard_clauses_arrow_code_detected() {
+        let f = scan_src(
+            "def f(a, b, c):\n    if a:\n        if b:\n            if c:\n                return 1\n    return 0\n",
+        );
+        assert!(f.iter().any(|x| x.kind == "guard-clauses"));
+        let ok = scan_src("def f(a, b):\n    if a:\n        if b:\n            return 1\n    return 0\n");
+        assert!(!ok.iter().any(|x| x.kind == "guard-clauses")); // 2 levels is fine
+    }
+
+    #[test]
+    fn conditional_polymorphism_dispatch_detected() {
+        let src = "def f(x):\n    if x == 1:\n        return 'a'\n    elif x == 2:\n        return 'b'\n    elif x == 3:\n        return 'c'\n    elif x == 4:\n        return 'd'\n    return '?'\n";
+        let f = scan_src(src);
+        assert!(f.iter().any(|x| x.kind == "conditional-polymorphism"));
+        let ok = scan_src(
+            "def f(x, y):\n    if x == 1:\n        return 'a'\n    elif y == 2:\n        return 'b'\n    return '?'\n",
+        );
+        assert!(!ok.iter().any(|x| x.kind == "conditional-polymorphism")); // mixed keys
+    }
+
+    #[test]
+    fn special_case_repeated_none_checks() {
+        let src = "def f(a):\n    if a is None:\n        return 1\n    if a is None:\n        return 2\n    if a is None:\n        return 3\n    return 0\n";
+        let f = scan_src(src);
+        assert!(f.iter().any(|x| x.kind == "special-case"));
+        let ok = scan_src("def f(a):\n    if a is None:\n        return 1\n    return 0\n");
+        assert!(!ok.iter().any(|x| x.kind == "special-case"));
+    }
+
+    #[test]
+    fn middle_man_delegation_detected() {
+        let f = scan_src("class A:\n    def go(self, x):\n        return self.inner.go(x)\n");
+        assert!(f.iter().any(|x| x.kind == "middle-man"));
+        let ok = scan_src("class A:\n    def go(self, x):\n        self.count += 1\n        return self.inner.go(x)\n");
+        assert!(!ok.iter().any(|x| x.kind == "middle-man"));
+    }
+
+    #[test]
+    fn unused_setter_detected() {
+        let f = scan_src("class A:\n    def set_x(self, v):\n        self.x = v\n");
+        assert!(f.iter().any(|x| x.kind == "unused-setter"));
+        let ok = scan_src(
+            "class A:\n    def set_x(self, v):\n        self.x = v\n    def get(self):\n        return self.set_x(1)\n",
+        );
+        assert!(!ok.iter().any(|x| x.kind == "unused-setter"));
+    }
+
+    #[test]
+    fn loop_pipeline_detected() {
+        let f = scan_src("def f(xs):\n    out = []\n    for x in xs:\n        out.append(x)\n    return out\n");
+        assert!(f.iter().any(|x| x.kind == "loop-pipeline"));
+        let ok = scan_src("def f(xs):\n    total = 0\n    for x in xs:\n        total += x\n    return total\n");
+        assert!(!ok.iter().any(|x| x.kind == "loop-pipeline"));
     }
 
     #[test]

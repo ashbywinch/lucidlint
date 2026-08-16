@@ -34,9 +34,12 @@ MECHANICAL_KINDS = {
 @dataclass
 class FixOptions:
     """The agent-supplied bits a fix may need: the callee signature for
-    positional-literals, the class name for extract-class."""
+    positional-literals, the class name for extract-class. `repo`/`rel`
+    (filled by fix_finding) scope the repo-wide callee resolution."""
     params: list[str] | None = None
     name: str | None = None
+    repo: Path | None = None
+    rel: str | None = None
 
 
 @dataclass
@@ -52,6 +55,9 @@ class StrewingGroup:
 # the shared leading type) — they are never applied blindly
 STRUCTURAL_KINDS = {
     "extract-class": "move the strewing free functions into a class, rewriting call sites",
+    "magic-number": "Replace Magic Literal: introduce the named constant",
+    "vague-name": "Rename the type and its references (same-file)",
+    "long-param-list": "Introduce Parameter Object: bundle the params into a dataclass",
 }
 
 # the gate reports DISPLAY kinds (final_kind output: strewing shows as
@@ -424,7 +430,342 @@ class _InsertClass(cst.CSTTransformer):
         return updated_node.with_changes(body=body)
 
 
+# --------------------------------------------------------------------------- magic literal / rename / parameter object
+
+class _ReplaceLiteral(cst.CSTTransformer):
+    """Replace the numeric literal on the target line with a name."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, target_line: int, name: str) -> None:
+        self.target_line = target_line
+        self.name = name
+        self.replaced = False
+
+    @override
+    def leave_Integer(self, original_node, updated_node):
+        if self.replaced:
+            return updated_node
+        pos = self.get_metadata(PositionProvider, original_node)
+        if pos.start.line == self.target_line:
+            self.replaced = True
+            return cst.Name(self.name)
+        return updated_node
+
+    @override
+    def leave_Float(self, original_node, updated_node):
+        if self.replaced:
+            return updated_node
+        pos = self.get_metadata(PositionProvider, original_node)
+        if pos.start.line == self.target_line:
+            self.replaced = True
+            return cst.Name(self.name)
+        return updated_node
+
+
+def fix_magic_literal(source: str, line: int, name: str) -> str | None:
+    """Replace Magic Literal: `f(10, ...)` -> `f(MAX_RETRIES, ...)` with
+    `MAX_RETRIES = 10` inserted at module top."""
+    module = cst.parse_module(source)
+    wrapper = cst.MetadataWrapper(module)
+    value: str | None = None
+
+    class _Find(cst.CSTVisitor):
+        METADATA_DEPENDENCIES = (PositionProvider,)
+
+        @override
+        def visit_Integer(self, node) -> None:
+            nonlocal value
+            if value is None and self.get_metadata(PositionProvider, node).start.line == line:
+                value = node.value
+
+        @override
+        def visit_Float(self, node) -> None:
+            nonlocal value
+            if value is None and self.get_metadata(PositionProvider, node).start.line == line:
+                value = node.value
+
+    wrapper.visit(_Find())
+    if value is None:
+        return None
+    replaced = wrapper.visit(_ReplaceLiteral(line, name)).code
+    if replaced == source:
+        return None
+    # insert the constant assignment at module top (before the first def/class)
+    module2 = cst.parse_module(replaced)
+    assignment = cst.SimpleStatementLine(
+        body=[cst.Assign(targets=[cst.AssignTarget(cst.Name(name))], value=cst.parse_expression(value))]
+    )
+    body = list(module2.body)
+    first = next((i for i, s in enumerate(body) if isinstance(s, (cst.FunctionDef, cst.ClassDef))), len(body))
+    body.insert(first, assignment)
+    return module2.with_changes(body=body).code
+
+
+class _RenameClass(cst.CSTTransformer):
+    """Rename the class at the line + every Name reference in the file."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, target_line: int, old: str, new: str) -> None:
+        self.target_line = target_line
+        self.old = old
+        self.new = new
+
+    @override
+    def leave_ClassDef(self, original_node, updated_node):
+        pos = self.get_metadata(PositionProvider, original_node)
+        if pos.start.line == self.target_line and updated_node.name.value == self.old:
+            return updated_node.with_changes(name=cst.Name(self.new))
+        return updated_node
+
+    @override
+    def leave_Name(self, original_node, updated_node):
+        if updated_node.value == self.old:
+            return updated_node.with_changes(value=self.new)
+        return updated_node
+
+
+def fix_rename(source: str, line: int, name: str) -> str | None:
+    """Rename (vague-name): the class at `line` plus every same-file Name
+    reference. Cross-file call sites need FullRepoManager — same-file v1."""
+    module = cst.parse_module(source)
+    wrapper = cst.MetadataWrapper(module)
+    old: str | None = None
+
+    class _Find(cst.CSTVisitor):
+        METADATA_DEPENDENCIES = (PositionProvider,)
+
+        @override
+        def visit_ClassDef(self, node) -> None:
+            nonlocal old
+            if old is None and self.get_metadata(PositionProvider, node).start.line == line:
+                old = node.name.value
+
+    wrapper.visit(_Find())
+    if old is None or old == name:
+        return None
+    renamed = wrapper.visit(_RenameClass(line, old, name)).code
+    return None if renamed == source else renamed
+
+
+class _BodyParamRewrite(cst.CSTTransformer):
+    """Rewrite body references of the bundled params to options.<param>."""
+
+    def __init__(self, params: list[str]) -> None:
+        self.params = set(params)
+
+    @override
+    def leave_Name(self, original_node, updated_node):
+        if updated_node.value in self.params:
+            return cst.Attribute(
+                value=cst.Name("options"),
+                attr=cst.Name(updated_node.value),
+            )
+        return updated_node
+
+
+class _CallSiteRewrite(cst.CSTTransformer):
+    """f(a, b, c) -> Name.f(a=a, b=b, c=c) for the renamed function."""
+
+    def __init__(self, fn: str, params: list[str], class_name: str) -> None:
+        self.fn = fn
+        self.params = params
+        self.class_name = class_name
+
+    @override
+    def leave_Call(self, original_node, updated_node):
+        if not m.matches(updated_node.func, m.Name(value=self.fn)):
+            return updated_node
+        args = list(updated_node.args)
+        if len(args) != len(self.params):
+            return updated_node  # positional mismatch — leave untouched
+        new_args = [
+            cst.Arg(
+                keyword=cst.Name(p),
+                value=a.value,
+                equal=cst.AssignEqual(
+                    whitespace_before=cst.SimpleWhitespace(""),
+                    whitespace_after=cst.SimpleWhitespace(""),
+                ),
+            )
+            for p, a in zip(self.params, args, strict=True)
+        ]
+        return updated_node.with_changes(
+            func=cst.Attribute(
+                value=cst.Name(self.class_name),
+                attr=cst.Name(self.fn),
+                dot=cst.Dot(),
+            ),
+            args=new_args,
+        )
+
+
+def _find_fn_at(module: cst.Module, wrapper, line: int, name: str | None = None) -> cst.FunctionDef | None:
+    """The module-level def at `line` (optionally by name)."""
+    found: cst.FunctionDef | None = None
+
+    class _Find(cst.CSTVisitor):
+        METADATA_DEPENDENCIES = (PositionProvider,)
+
+        @override
+        def visit_FunctionDef(self, node) -> None:
+            nonlocal found
+            if (
+                found is None
+                and self.get_metadata(PositionProvider, node).start.line == line
+                and (name is None or node.name.value == name)
+            ):
+                found = node
+
+    wrapper.visit(_Find())
+    return found
+
+
+class _FnBodyRewrite(cst.CSTTransformer):
+    """The parameter-object fn: params -> options.<param> in the body, and the
+    signature collapses to (receiver, options: Name)."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, fn_name: str, line: int, params: list[str], class_name: str) -> None:
+        self.fn_name = fn_name
+        self.line = line
+        self.params = set(params)
+        self.class_name = class_name
+
+    @override
+    def leave_FunctionDef(self, original_node, updated_node):
+        if updated_node.name.value != self.fn_name:
+            return updated_node
+        if self.get_metadata(PositionProvider, original_node).start.line != self.line:
+            return updated_node
+        new_body = updated_node.body.visit(_BodyParamRewrite(list(self.params)))
+        receiver = [
+            p
+            for p in updated_node.params.params
+            if p.name is not None and p.name.value in ("self", "cls")
+        ]
+        options_param = cst.Param(
+            name=cst.Name("options"),
+            annotation=cst.Annotation(cst.Name(self.class_name)),
+        )
+        return updated_node.with_changes(
+            params=updated_node.params.with_changes(params=[*receiver, options_param]),
+            body=new_body,
+        )
+
+
+def _dataclass_def(name: str, params: list[cst.Param]) -> cst.ClassDef:
+    """The bundled-params dataclass — one AnnAssign field per param."""
+    field_lines = []
+    for p in params:
+        ann = p.annotation.annotation if p.annotation is not None else cst.Name("object")
+        field_lines.append(
+            cst.SimpleStatementLine(
+                body=[cst.AnnAssign(target=cst.Name(p.name.value), annotation=cst.Annotation(ann))]
+            )
+        )
+    return cst.ClassDef(
+        name=cst.Name(name),
+        bases=[],
+        decorators=[cst.Decorator(cst.Name("dataclass"))],
+        body=cst.IndentedBlock(body=field_lines),
+    )
+
+
+def _ensure_dataclasses_import(body: list) -> list:
+    """Prepend `from dataclasses import dataclass` when missing."""
+    has_import = any(
+        isinstance(s, cst.SimpleStatementLine)
+        and len(s.body) == 1
+        and isinstance(s.body[0], cst.ImportFrom)
+        and s.body[0].module is not None
+        and "dataclasses" in s.body[0].module.value
+        and any(
+            isinstance(a, cst.ImportAlias) and a.name.value == "dataclass"
+            for a in (s.body[0].names or [])
+        )
+        for s in body
+    )
+    if has_import:
+        return body
+    imp = cst.SimpleStatementLine(
+        body=[
+            cst.ImportFrom(
+                module=cst.Name("dataclasses"),
+                names=[cst.ImportAlias(cst.Name("dataclass"))],
+            )
+        ]
+    )
+    return [imp, *body]
+
+
+def fix_parameter_object(source: str, line: int, name: str) -> str | None:
+    """Introduce Parameter Object: bundle the function's params into a
+    dataclass named `name`, change the signature to `options: name`, rewrite
+    the body references and same-file call sites."""
+    module = cst.parse_module(source)
+    wrapper = cst.MetadataWrapper(module)
+    target = _find_fn_at(module, wrapper, line)
+    if target is None:
+        return None
+    raw_params = [p for p in target.params.params if p.name is not None]
+    params = [p for p in raw_params if p.name.value not in ("self", "cls")]
+    if len(params) < 6:
+        return None  # not the long-param-list shape (threshold is > 5)
+    param_names = [p.name.value for p in params]
+    renamed = wrapper.visit(_FnBodyRewrite(target.name.value, line, param_names, name)).code
+    call_fixed = (
+        cst.parse_module(renamed)
+        .visit(_CallSiteRewrite(target.name.value, param_names, name))
+        .code
+    )
+    module3 = cst.parse_module(call_fixed)
+    body = list(module3.body)
+    first = next(
+        (i for i, s in enumerate(body) if isinstance(s, (cst.FunctionDef, cst.ClassDef))),
+        len(body),
+    )
+    body.insert(first, _dataclass_def(name, params))
+    return module3.with_changes(body=_ensure_dataclasses_import(body)).code
+
+
 # --------------------------------------------------------------------------- the fix surface
+
+def _fix_mechanical(kind: str, source: str, line: int, opts) -> str | None:
+    """The mechanical transforms — a changed source, or None when the callee
+    is unresolvable (the retry protocol supplies params)."""
+    if kind in ("noop-statement", "unreachable"):
+        return cst.MetadataWrapper(cst.parse_module(source)).visit(_DeleteStatement(line)).code
+    if kind == "stale-suppression":
+        return cst.MetadataWrapper(cst.parse_module(source)).visit(_DeleteComment(line)).code
+    if kind == "positional-literals":
+        params = opts.params if opts.params is not None else _callee_params_for_call(opts.repo, opts.rel, source, line)
+        if params is None:
+            return None
+        return cst.MetadataWrapper(cst.parse_module(source)).visit(_KeywordArgs(line, params)).code
+    return None
+
+
+def _fix_structural(kind: str, source: str, line: int, opts) -> str | None:
+    """The name-driven transforms — the agent supplies the semantic bit."""
+    if kind == "extract-class":
+        return fix_extract_class(source, line, opts.name)
+    if kind == "magic-number":
+        if opts.name is None:
+            return None
+        return fix_magic_literal(source, line, opts.name)
+    if kind == "vague-name":
+        if opts.name is None:
+            return None
+        return fix_rename(source, line, opts.name)
+    if kind == "long-param-list":
+        if opts.name is None:
+            return None
+        return fix_parameter_object(source, line, opts.name)
+    return None
+
 
 def fix_finding(
     kind: str, rel: str, repo: Path, line: int, opts: FixOptions | None = None
@@ -434,36 +775,26 @@ def fix_finding(
 
     `opts` carries the agent-supplied semantic bits (the callee's parameter
     names for external/unresolved callees; the class name for extract-class)
-    — the tool does the mechanical edit; the agent reads the signature once."""
-    path = repo / rel
-    source = path.read_text(encoding="utf-8")
+    — the tool does the mechanical edit; the agent reads the signature once.
+    """
     opts = opts or FixOptions()
     kind = KIND_ALIASES.get(kind, kind)
-    if kind in ("noop-statement", "unreachable"):
-        transformer = _DeleteStatement(line)
-    elif kind == "stale-suppression":
-        transformer = _DeleteComment(line)
-    elif kind == "positional-literals":
-        if opts.params is None:
-            opts.params = _callee_params_for_call(repo, rel, source, line)
-        if opts.params is None:
-            return None  # callee not resolvable — skip, no edit
-        transformer = _KeywordArgs(line, opts.params)
-    elif kind == "extract-class":
-        new_source = fix_extract_class(source, line, opts.name)
-        if new_source is None or new_source == source:
-            return None
-        path.write_text(new_source, encoding="utf-8")
-        return STRUCTURAL_KINDS["extract-class"]
+    path = repo / rel
+    source = path.read_text(encoding="utf-8")
+    opts.repo = repo
+    opts.rel = rel
+    if kind in MECHANICAL_KINDS:
+        new_source = _fix_mechanical(kind, source, line, opts)
+        description = MECHANICAL_KINDS[kind]
+    elif kind in STRUCTURAL_KINDS:
+        new_source = _fix_structural(kind, source, line, opts)
+        description = STRUCTURAL_KINDS[kind]
     else:
         raise ValueError(f"kind '{kind}' has no fix (mechanical or structural)")
-    wrapper = cst.MetadataWrapper(cst.parse_module(source))
-    result = wrapper.visit(transformer)
-    new_source = result.code
-    if new_source == source:
+    if new_source is None or new_source == source:
         return None  # nothing changed — the finding is stale or unlocatable
     path.write_text(new_source, encoding="utf-8")
-    return MECHANICAL_KINDS.get(kind, "applied")
+    return description
 
 
 def _callee_params_for_call(repo: Path, rel: str, source: str, line: int) -> list[str] | None:

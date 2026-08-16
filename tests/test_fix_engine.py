@@ -168,6 +168,13 @@ _FIX_ALL_SRC = (
     "def resolve_callee_module(contract: GraphContract, y):\n"
     "    return contract.edges\n"
     "\n"
+    "class ConfigManager:\n"
+    "    def load(self):\n"
+    "        return 1\n"
+    "\n"
+    "def build(a, b, c, d, e, f):\n"
+    "    return a + b + c + d + e + f\n"
+    "\n"
     "def g():\n"
     "    set_limits(10, 20)\n"
     "    Money(\"0\", \"GBP\")\n"
@@ -183,7 +190,65 @@ FIXABLE_KINDS = {
     "unreachable": "unreachable",
     "positional-literals": "positional-literals",
     "latent-class": "extract-class",  # strewing's display kind
+    "magic-number": "magic-number",
+    "vague-name": "vague-name",
+    "long-param-list": "long-param-list",
 }
+
+# kinds whose fix needs the agent's semantic bit (supplied on the retry)
+FIX_NAMES = {
+    "magic-number": "MAX_RETRIES",
+    "vague-name": "ConfigRegistry",
+    "long-param-list": "BuildOptions",
+}
+
+
+def test_magic_literal_becomes_constant(tmp_path):
+    src = "def g():\n    return 60 * 24\n"
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    out = fix_engine.fix_finding(
+        "magic-number", "houses/app.py", repo, 2, fix_engine.FixOptions(name="MINUTES_PER_DAY")
+    )
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "MINUTES_PER_DAY = 60" in fixed
+    assert "return MINUTES_PER_DAY * 24" in fixed
+
+
+def test_vague_name_rename(tmp_path):
+    src = "class DataManager:\n    def run(self):\n        return 1\n\n\ndef use():\n    return DataManager()\n"
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    out = fix_engine.fix_finding(
+        "vague-name", "houses/app.py", repo, 1, fix_engine.FixOptions(name="DataRegistry")
+    )
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "class DataRegistry:" in fixed
+    assert "return DataRegistry()" in fixed
+    assert "DataManager" not in fixed
+
+
+def test_parameter_object_introduced(tmp_path):
+    src = (
+        "def build(a, b, c, d, e, f):\n"
+        "    return a + b + c + d + e + f\n"
+        "\n"
+        "def g():\n"
+        "    return build(1, 2, 3, 4, 5, 6)\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    out = fix_engine.fix_finding(
+        "long-param-list", "houses/app.py", repo, 1, fix_engine.FixOptions(name="BuildOptions")
+    )
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "class BuildOptions:" in fixed
+    assert "def build(options: BuildOptions):" in fixed
+    assert "return options.a + options.b + options.c" in fixed
+    assert "BuildOptions.build(a=1, b=2, c=3, d=4, e=5, f=6)" in fixed
 
 
 def test_message_to_fix_end_to_end(tmp_path, capsys):
@@ -223,6 +288,9 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
             # attempt 0 resolved the same-file callee; the external Money
             # call needs the agent's signature read
             extra = ["--fix-params", "amount,currency"]
+        if fix_kind in FIX_NAMES and attempts.get(key, 0) >= 1:
+            # name-driven fixes need the agent's name on the retry
+            extra = ["--fix-name", FIX_NAMES[fix_kind]]
         rc = run_main(
             repo,
             "--fix-kind", fix_kind,

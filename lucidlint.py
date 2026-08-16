@@ -645,7 +645,9 @@ RULE_GROUPS = {
     "style": {"magic-number", "noop-statement", "unreachable", "vague-name", "class-module",
               "builtin-shadow", "broad-except", "swallow", "inline-import", "private-import",
               "global-state", "unused", "import-cycle", "docs-link", "docs-undiscoverable",
-              "boolean-arg", "debug-artifact", "positional-literals"},
+              "boolean-arg", "debug-artifact", "positional-literals",
+              "guard-clauses", "conditional-polymorphism", "special-case",
+              "middle-man", "unused-setter", "loop-pipeline"},
     "test-discipline": {"monkeypatch", "skipif", "fakefs", "no-assert-test"},
     "suppression": {"suppression", "type-ignore", "allow-reason", "noqa", "stale-suppression"},
 }

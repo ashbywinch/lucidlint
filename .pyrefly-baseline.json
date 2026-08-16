@@ -1,9 +1,9 @@
 {
  "errors": [
   {
-   "line": 83,
+   "line": 89,
    "column": 12,
-   "stop_line": 83,
+   "stop_line": 89,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -13,9 +13,9 @@
    "severity": "error"
   },
   {
-   "line": 83,
+   "line": 89,
    "column": 50,
-   "stop_line": 83,
+   "stop_line": 89,
    "stop_column": 57,
    "path": "fix_engine.py",
    "code": -2,
@@ -25,9 +25,9 @@
    "severity": "error"
   },
   {
-   "line": 108,
+   "line": 114,
    "column": 12,
-   "stop_line": 108,
+   "stop_line": 114,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -37,9 +37,9 @@
    "severity": "error"
   },
   {
-   "line": 114,
+   "line": 120,
    "column": 9,
-   "stop_line": 114,
+   "stop_line": 120,
    "stop_column": 22,
    "path": "fix_engine.py",
    "code": -2,
@@ -49,9 +49,9 @@
    "severity": "error"
   },
   {
-   "line": 120,
+   "line": 126,
    "column": 12,
-   "stop_line": 120,
+   "stop_line": 126,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -61,9 +61,9 @@
    "severity": "error"
   },
   {
-   "line": 144,
+   "line": 150,
    "column": 17,
-   "stop_line": 144,
+   "stop_line": 150,
    "stop_column": 26,
    "path": "fix_engine.py",
    "code": -2,
@@ -73,9 +73,9 @@
    "severity": "error"
   },
   {
-   "line": 144,
+   "line": 150,
    "column": 55,
-   "stop_line": 144,
+   "stop_line": 150,
    "stop_column": 62,
    "path": "fix_engine.py",
    "code": -2,
@@ -85,9 +85,9 @@
    "severity": "error"
   },
   {
-   "line": 261,
+   "line": 267,
    "column": 16,
-   "stop_line": 261,
+   "stop_line": 267,
    "stop_column": 39,
    "path": "fix_engine.py",
    "code": -2,
@@ -97,9 +97,9 @@
    "severity": "error"
   },
   {
-   "line": 284,
+   "line": 290,
    "column": 22,
-   "stop_line": 284,
+   "stop_line": 290,
    "stop_column": 27,
    "path": "fix_engine.py",
    "code": -2,
@@ -109,9 +109,9 @@
    "severity": "error"
   },
   {
-   "line": 285,
+   "line": 291,
    "column": 20,
-   "stop_line": 285,
+   "stop_line": 291,
    "stop_column": 31,
    "path": "fix_engine.py",
    "code": -2,
@@ -121,9 +121,9 @@
    "severity": "error"
   },
   {
-   "line": 312,
+   "line": 318,
    "column": 16,
-   "stop_line": 312,
+   "stop_line": 318,
    "stop_column": 25,
    "path": "fix_engine.py",
    "code": -2,
@@ -133,9 +133,129 @@
    "severity": "error"
   },
   {
-   "line": 486,
+   "line": 450,
+   "column": 12,
+   "stop_line": 450,
+   "stop_column": 21,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 460,
+   "column": 12,
+   "stop_line": 460,
+   "stop_column": 21,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 479,
+   "column": 34,
+   "stop_line": 479,
+   "stop_column": 81,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 485,
+   "column": 34,
+   "stop_line": 485,
+   "stop_column": 81,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 518,
+   "column": 12,
+   "stop_line": 518,
+   "stop_column": 21,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 542,
+   "column": 32,
+   "stop_line": 542,
+   "stop_column": 79,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 616,
+   "column": 21,
+   "stop_line": 616,
+   "stop_column": 68,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 641,
+   "column": 12,
+   "stop_line": 641,
+   "stop_column": 68,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 684,
+   "column": 13,
+   "stop_line": 684,
+   "stop_column": 52,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "not-iterable",
+   "description": "`in` is not supported between `Literal['dataclasses']` and `BaseExpression`",
+   "concise_description": "`in` is not supported between `Literal['dataclasses']` and `BaseExpression`",
+   "severity": "error"
+  },
+  {
+   "line": 687,
+   "column": 23,
+   "stop_line": 687,
+   "stop_column": 44,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "not-iterable",
+   "description": "Type `ImportStar` is not iterable",
+   "concise_description": "Type `ImportStar` is not iterable",
+   "severity": "error"
+  },
+  {
+   "line": 817,
    "column": 16,
-   "stop_line": 486,
+   "stop_line": 817,
    "stop_column": 25,
    "path": "fix_engine.py",
    "code": -2,
@@ -145,9 +265,9 @@
    "severity": "error"
   },
   {
-   "line": 486,
+   "line": 817,
    "column": 42,
-   "stop_line": 486,
+   "stop_line": 817,
    "stop_column": 49,
    "path": "fix_engine.py",
    "code": -2,
@@ -157,9 +277,9 @@
    "severity": "error"
   },
   {
-   "line": 487,
+   "line": 818,
    "column": 26,
-   "stop_line": 487,
+   "stop_line": 818,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -205,9 +325,9 @@
    "severity": "error"
   },
   {
-   "line": 676,
+   "line": 678,
    "column": 21,
-   "stop_line": 676,
+   "stop_line": 678,
    "stop_column": 28,
    "path": "lucidlint.py",
    "code": -2,
@@ -217,9 +337,9 @@
    "severity": "error"
   },
   {
-   "line": 758,
+   "line": 760,
    "column": 24,
-   "stop_line": 758,
+   "stop_line": 760,
    "stop_column": 33,
    "path": "lucidlint.py",
    "code": -2,
@@ -229,9 +349,9 @@
    "severity": "error"
   },
   {
-   "line": 879,
+   "line": 881,
    "column": 17,
-   "stop_line": 879,
+   "stop_line": 881,
    "stop_column": 35,
    "path": "lucidlint.py",
    "code": -2,
@@ -241,9 +361,9 @@
    "severity": "error"
   },
   {
-   "line": 1126,
+   "line": 1128,
    "column": 16,
-   "stop_line": 1126,
+   "stop_line": 1128,
    "stop_column": 37,
    "path": "lucidlint.py",
    "code": -2,
@@ -253,9 +373,9 @@
    "severity": "error"
   },
   {
-   "line": 1130,
+   "line": 1132,
    "column": 23,
-   "stop_line": 1130,
+   "stop_line": 1132,
    "stop_column": 45,
    "path": "lucidlint.py",
    "code": -2,

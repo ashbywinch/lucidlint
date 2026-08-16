@@ -115,6 +115,21 @@ with a why).
 | **noqa** | fail | `# noqa` / `# pragma: no cover` with no explanation — a suppression is itself a finding |
 | **stale-suppression** | fail | A `lucidlint: ignore` / `ignore-file` that no longer suppresses anything — remove it |
 
+## Group 4.5: Refactoring advice &dagger; (all warn — detection-only)
+
+These detect the code SHAPE a Fowler refactoring targets. The fix is named
+in the message for the agent to hand-apply (auto-fixes exist for
+magic-number, vague-name, and long-param-list; see the fix engine):
+
+| Rule | Severity | What it checks |
+|---|---|---|
+| **guard-clauses** | **warn** | ≥3 levels of if-in-if ("arrow code") — Replace Nested Conditional with Guard Clauses: invert to early returns |
+| **conditional-polymorphism** | **warn** | An if/elif chain of ≥4 arms dispatching on the same value — Replace Conditional with Polymorphism |
+| **special-case** | **warn** | ≥3 repeated `None`/empty checks on one name — Introduce Special Case |
+| **middle-man** | **warn** | A method that only forwards (`return self.x.y(...)`) — Remove Middle Man |
+| **unused-setter** | **warn** | A `set_*` method or property setter never referenced — Remove Setting Method |
+| **loop-pipeline** | **warn** | A loop whose body is only a collection mutation — Replace Loop with Pipeline: use a comprehension |
+
 ## Group 5: Hotspot & risk (graph-based)
 
 These rules require the optional `code-review-graph` tool (installed separately or via `pip install code-review-graph`). Without it they degrade silently.

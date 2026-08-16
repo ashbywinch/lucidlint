@@ -1128,6 +1128,379 @@ pub fn module_flagged_names(body: &[Stmt]) -> HashSet<String> {
 }
 
 // =====================================================================
+// advisory refactorings (warn): the detection half of Fowler refactorings
+// whose fixes are too involved to auto-apply. Each message names the
+// refactoring so the agent can hand-apply it (or a future fix can).
+
+/// Guard Clauses: a chain of if-in-if ("arrow code") — the body of an if is
+/// exactly another if. Depth >= 3 levels. The fix (invert to early returns)
+/// is control-flow surgery; the finding names the refactoring.
+pub fn guard_clause_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    fn chain_len(s: &Stmt) -> usize {
+        if let Stmt::If(i) = s {
+            if i.body.len() == 1 && i.elif_else_clauses.is_empty() && matches!(i.body[0], Stmt::If(_)) {
+                return 1 + chain_len(&i.body[0]);
+            }
+        }
+        1
+    }
+    fn walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
+        for s in stmts {
+            if let Stmt::If(i) = s {
+                let len = chain_len(s);
+                if len >= 3 {
+                    let line = line_of(source, s.range().start());
+                    state.findings.push(Finding {
+                        file: state.file.to_string(),
+                        line,
+                        function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
+                        kind: "guard-clauses".into(),
+                        severity: "warn".into(),
+                        message: format!(
+                            "{len} levels of nested if — Replace Nested Conditional with Guard Clauses: invert the conditions to early returns"
+                        ),
+                    });
+                }
+                // descend: nested ifs inside the body (not the chain itself)
+                if !(i.body.len() == 1 && matches!(i.body[0], Stmt::If(_)) && i.elif_else_clauses.is_empty()) {
+                    walk(state, &i.body, source);
+                }
+                for cl in &i.elif_else_clauses {
+                    walk(state, &cl.body, source);
+                }
+            } else {
+                walk_children(state, s, source);
+            }
+        }
+    }
+    fn walk_children(state: &mut ScanState, s: &Stmt, source: &str) {
+        // descend into any nested statement containers (function/class/loop bodies)
+        match s {
+            Stmt::FunctionDef(f) => walk(state, &f.body, source),
+            Stmt::ClassDef(cd) => walk(state, &cd.body, source),
+            Stmt::For(f) => walk(state, &f.body, source),
+            Stmt::While(w) => walk(state, &w.body, source),
+            Stmt::Try(t) => {
+                walk(state, &t.body, source);
+                for h in &t.handlers {
+                    let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                    walk(state, &eh.body, source);
+                }
+            }
+            Stmt::With(w) => walk(state, &w.body, source),
+            _ => {}
+        }
+    }
+    walk(state, body, source);
+}
+
+/// The dispatch-key (left side) of a chain-arm test — the value all arms
+/// compare. None when the test is not a simple comparison on one value.
+fn dispatch_key(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Compare(c) => match c.left.as_ref() {
+            Expr::Name(n) => Some(n.id.to_string()),
+            Expr::Attribute(a) => Some(format!("{}.{}", base_name_of(&a.value)?, a.attr)),
+            _ => None,
+        },
+        Expr::Call(c) => {
+            // isinstance(x, A) dispatches on x
+            if let Expr::Name(n) = c.func.as_ref() {
+                if n.id.as_str() == "isinstance" {
+                    if let Some(Expr::Name(t)) = c.arguments.args.first() {
+                        return Some(format!("isinstance({})", t.id));
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn base_name_of(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Name(n) => Some(n.id.to_string()),
+        Expr::Attribute(a) => base_name_of(&a.value),
+        _ => None,
+    }
+}
+
+/// Replace Conditional with Polymorphism: an if/elif chain of >= 4 arms whose
+/// tests all dispatch on the same value — the type-tag conditional.
+pub fn conditional_polymorphism_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    fn walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
+        for s in stmts {
+            if let Stmt::If(i) = s {
+                let arms: Vec<&Expr> = std::iter::once(i.test.as_ref())
+                    .chain(i.elif_else_clauses.iter().filter_map(|c| c.test.as_ref()))
+                    .collect();
+                if arms.len() >= 4 {
+                    let keys: Vec<Option<String>> = arms.iter().map(|t| dispatch_key(t)).collect();
+                    if keys.iter().all(|k| k.is_some()) && keys.windows(2).all(|w| w[0] == w[1]) {
+                        let line = line_of(source, s.range().start());
+                        state.findings.push(Finding {
+                            file: state.file.to_string(),
+                            line,
+                            function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
+                            kind: "conditional-polymorphism".into(),
+                            severity: "warn".into(),
+                            message: format!(
+                                "{} arms dispatch on the same value ('{}') — Replace Conditional with Polymorphism: one method per case",
+                                arms.len(),
+                                keys[0].as_deref().unwrap_or("")
+                            ),
+                        });
+                    }
+                }
+                walk(state, &i.body, source);
+                for cl in &i.elif_else_clauses {
+                    walk(state, &cl.body, source);
+                }
+            } else {
+                match s {
+                    Stmt::FunctionDef(f) => walk(state, &f.body, source),
+                    Stmt::ClassDef(cd) => walk(state, &cd.body, source),
+                    Stmt::For(f) => walk(state, &f.body, source),
+                    Stmt::While(w) => walk(state, &w.body, source),
+                    Stmt::Try(t) => {
+                        walk(state, &t.body, source);
+                        for h in &t.handlers {
+                            let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                            walk(state, &eh.body, source);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    walk(state, body, source);
+}
+
+/// Introduce Special Case: >= 3 None/empty checks on the same name — the
+/// repeated null-handling the special-case object replaces.
+pub fn special_case_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    let mut counts: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+    scan_stmts(body, &mut counts, source);
+
+    let mut v: Vec<(&String, &(usize, usize))> = counts.iter().collect();
+    v.sort_by_key(|(_, (_, l))| *l);
+    for (name, (n, line)) in v {
+        if *n >= 3 {
+            state.findings.push(Finding {
+                file: state.file.to_string(),
+                line: *line,
+                function: String::new(),
+                kind: "special-case".into(),
+                severity: "warn".into(),
+                message: format!(
+                    "{n} repeated None/empty checks on '{name}' — Introduce Special Case: give the absent case an object"
+                ),
+            });
+        }
+    }
+}
+
+/// Remove Middle Man: a method whose body is a single delegation call
+/// (`return self.x.y(...)` / `return self.y(...)`) — it only forwards.
+pub fn middle_man_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    fn is_self_call(e: &Expr) -> bool {
+        match e {
+            Expr::Call(c) => match c.func.as_ref() {
+                Expr::Attribute(a) => base_name_of(&a.value).as_deref() == Some("self"),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+    fn walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
+        for s in stmts {
+            match s {
+                Stmt::FunctionDef(f) => {
+                    if f.body.len() == 1 {
+                        if let Stmt::Return(r) = &f.body[0] {
+                            if let Some(v) = &r.value {
+                                if is_self_call(v) {
+                                    let line = line_of(source, f.name.range().start());
+                                    state.findings.push(Finding {
+                                        file: state.file.to_string(),
+                                        line,
+                                        function: f.name.to_string(),
+                                        kind: "middle-man".into(),
+                                        severity: "warn".into(),
+                                        message: format!(
+                                            "'{}' is a pure delegation to self — Remove Middle Man: call the target directly",
+                                            f.name
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                Stmt::ClassDef(cd) => walk(state, &cd.body, source),
+                Stmt::For(f) => walk(state, &f.body, source),
+                Stmt::While(w) => walk(state, &w.body, source),
+                Stmt::If(i) => {
+                    walk(state, &i.body, source);
+                    for cl in &i.elif_else_clauses {
+                        walk(state, &cl.body, source);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(state, body, source);
+}
+
+/// Remove Setting Method: a `set_*` method (or a property setter) that is
+/// never referenced anywhere in the module — deletable, not just unused.
+/// Runs in the post-pass, so `state.refs` (incl. attribute names) is complete.
+pub fn unused_setter_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    let mut setters: Vec<(String, usize)> = Vec::new();
+    fn walk(stmts: &[Stmt], out: &mut Vec<(String, usize)>, source: &str) {
+        for s in stmts {
+            match s {
+                Stmt::FunctionDef(f) => {
+                    let is_setter = f.name.as_str().starts_with("set_")
+                        || f.decorator_list
+                            .iter()
+                            .any(|d| matches!(&d.expression, Expr::Attribute(a) if a.attr.as_str() == "setter"));
+                    if is_setter {
+                        out.push((f.name.to_string(), line_of(source, f.name.range().start())));
+                    }
+                }
+                Stmt::ClassDef(cd) => walk(&cd.body, out, source),
+                _ => {}
+            }
+        }
+    }
+    walk(body, &mut setters, source);
+    for (name, line) in setters {
+        if !state.refs.contains(&name) {
+            state.findings.push(Finding {
+                file: state.file.to_string(),
+                line,
+                function: name.clone(),
+                kind: "unused-setter".into(),
+                severity: "warn".into(),
+                message: format!("setter '{name}' is never referenced — Remove Setting Method: delete it"),
+            });
+        }
+    }
+}
+
+/// Replace Loop with Pipeline: a for-loop whose body is only a collection
+/// mutation (append/add/update or a subscript store) with at most one
+/// if-filter — the shape a comprehension replaces.
+pub fn loop_pipeline_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    fn is_collection_mutation(e: &Expr) -> bool {
+        match e {
+            Expr::Call(c) => matches!(c.func.as_ref(), Expr::Attribute(a)
+                if matches!(a.attr.as_str(), "append" | "add" | "extend" | "update" | "appendleft" | "add_update")),
+            Expr::Subscript(_) => true, // result[k] = v
+            _ => false,
+        }
+    }
+    fn body_is_pipeline(stmts: &[Stmt]) -> bool {
+        match stmts {
+            [Stmt::Expr(e)] => is_collection_mutation(&e.value),
+            [Stmt::If(i), ..] => {
+                i.body.len() == 1 && matches!(&i.body[0], Stmt::Expr(e) if is_collection_mutation(&e.value))
+            }
+            _ => false,
+        }
+    }
+    fn walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
+        for s in stmts {
+            match s {
+                Stmt::For(f) => {
+                    if body_is_pipeline(&f.body) {
+                        let line = line_of(source, f.range().start());
+                        state.findings.push(Finding {
+                            file: state.file.to_string(),
+                            line,
+                            function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
+                            kind: "loop-pipeline".into(),
+                            severity: "warn".into(),
+                            message: "loop builds a collection — Replace Loop with Pipeline: use a comprehension"
+                                .into(),
+                        });
+                    }
+                    walk(state, &f.body, source);
+                }
+                Stmt::ClassDef(cd) => walk(state, &cd.body, source),
+                Stmt::FunctionDef(f) => walk(state, &f.body, source),
+                Stmt::While(w) => walk(state, &w.body, source),
+                Stmt::If(i) => {
+                    walk(state, &i.body, source);
+                    for cl in &i.elif_else_clauses {
+                        walk(state, &cl.body, source);
+                    }
+                }
+                Stmt::Try(t) => {
+                    walk(state, &t.body, source);
+                    for h in &t.handlers {
+                        let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                        walk(state, &eh.body, source);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(state, body, source);
+}
+
+fn is_empty_literal(e: &Expr) -> bool {
+    matches!(e, Expr::StringLiteral(s) if s.value.is_empty())
+        || matches!(e, Expr::List(l) if l.elts.is_empty())
+        || matches!(e, Expr::Dict(d) if d.items.is_empty())
+        || matches!(e, Expr::Tuple(t) if t.elts.is_empty())
+}
+fn scan_stmts(stmts: &[Stmt], counts: &mut std::collections::HashMap<String, (usize, usize)>, source: &str) {
+    for s in stmts {
+        if let Stmt::If(i) = s {
+            if let Expr::Compare(c) = i.test.as_ref() {
+                if let Expr::Name(n) = c.left.as_ref() {
+                    let none_check = c.ops.len() == 1
+                        && matches!(c.ops[0], ruff_python_ast::CmpOp::Is)
+                        && matches!(c.comparators[0], Expr::NoneLiteral(_));
+                    let empty_check = c.ops.len() == 1
+                        && matches!(c.ops[0], ruff_python_ast::CmpOp::Eq)
+                        && is_empty_literal(&c.comparators[0]);
+                    if none_check || empty_check {
+                        let e = counts.entry(n.id.to_string()).or_insert((0, usize::MAX));
+                        e.0 += 1;
+                        e.1 = e.1.min(line_of(source, i.range().start()));
+                    }
+                }
+            }
+            scan_stmts(&i.body, counts, source);
+            for cl in &i.elif_else_clauses {
+                scan_stmts(&cl.body, counts, source);
+            }
+        } else {
+            match s {
+                Stmt::FunctionDef(f) => scan_stmts(&f.body, counts, source),
+                Stmt::ClassDef(cd) => scan_stmts(&cd.body, counts, source),
+                Stmt::For(f) => scan_stmts(&f.body, counts, source),
+                Stmt::While(w) => scan_stmts(&w.body, counts, source),
+                Stmt::Try(t) => {
+                    scan_stmts(&t.body, counts, source);
+                    for h in &t.handlers {
+                        let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                        scan_stmts(&eh.body, counts, source);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+// =====================================================================
 // repo-wide families: duplicate (Dice on structural skeletons) + unused
 // (defined-but-never-referenced). These are computed in the Rust runner
 // across ALL files of one invocation — mirroring _duplicate_actions and
