@@ -1434,7 +1434,7 @@ def _collect_actions(repo: Path, args, file_churn: Counter[str], last_modified: 
         # would report GATE: PASS without checking anything (fail-fast)
         raise RuntimeError(
             "the scan binary is required — build it with `make scanner-check` "
-            "or install the lucidscan release bundle"
+            "or install the lucidlint release bundle"
         )
     RUST_SCAN.prepare(repo, only_rel, args.include_tests, file_churn)
     files = _py_files(repo, only_rel)

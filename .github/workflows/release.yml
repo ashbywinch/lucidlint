@@ -1,11 +1,11 @@
-# Release — build the lucidscan bundles on a version tag and publish them.
+# Release — build the lucidlint bundles on a version tag and publish them.
 #
 # DO NOT CHANGE:
 # - The matrix targets: linux musl (static), macos arm64 + x64, windows x64 —
 #   the four platform bundles every consumer downloads.
 # - CODE_HEALTH_VERSION: the tag IS the version; the binary is stamped at
-#   build time so `lucidscan --version` matches the bundle it ships in.
-# - The bundle layout: <prefix>/bin/lucidscan + lucidlint.py next to it —
+#   build time so `lucidlint --version` matches the bundle it ships in.
+# - The bundle layout: <prefix>/bin/lucidlint + lucidlint.py next to it —
 #   the orchestrator resolves its sibling binary, so the bundle is
 #   self-contained (no PATH, no env).
 #
@@ -59,7 +59,7 @@ jobs:
           dir="lucidlint-${ver}-${target}"
           mkdir -p "dist/${dir}/bin"
           cp "scanner/target/${target}/release/lucidlint${exe}" "dist/${dir}/bin/lucidlint${exe}"
-          cp lucidlint.py lucidlint_graph_export.py "dist/${dir}/"
+          cp lucidlint.py "dist/${dir}/"
           cp release/Makefile "dist/${dir}/Makefile"
           printf '%s\n' "$ver" > "dist/${dir}/version.txt"
           tar -C dist -czf "dist/${dir}.tar.gz" "${dir}"

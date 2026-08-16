@@ -1,14 +1,14 @@
-# lucidscan — the lucidlint gate (release-bundle shim).
+# lucidlint — the lucidlint gate (release-bundle shim).
 #
 # This Makefile ships INSIDE the release bundle. A consumer repo copies or
-# unpacks the bundle (e.g. to .tools/lucidscan/) and runs:
+# unpacks the bundle (e.g. to .tools/lucidlint/) and runs:
 #
-#   make -C .tools/lucidscan lucidlint REPO=../..
+#   make -C .tools/lucidlint lucidlint REPO=../..
 #
-# The orchestrator finds its sibling binary (bin/lucidscan) by itself — no
+# The orchestrator finds its sibling binary (bin/lucidlint) by itself — no
 # PATH or env needed. The baseline flow locks acknowledged debt:
 #
-#   make -C .tools/lucidscan lucidlint-baseline REPO=../..
+#   make -C .tools/lucidlint lucidlint-baseline REPO=../..
 #
 # REPO is the repo to scan; PYTHON overrides the interpreter.
 
