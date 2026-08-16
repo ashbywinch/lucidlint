@@ -2261,18 +2261,41 @@ fn monkeypatch_decorator(state: &mut ScanState, source: &str, d: &Decorator, moc
     }
 }
 
+/// Check whether an expression chain (Attribute or Name) resolves to an
+/// imported mock symbol — guards against false positives on e.g. self.client.patch.
+fn attr_resolves_to_mock(val: &Expr, imps: &HashSet<String>) -> bool {
+    match val {
+        Expr::Name(n) => imps.contains(n.id.as_str()),
+        Expr::Attribute(inner) => {
+            let seg = inner.attr.to_string();
+            imps.contains(&seg) || attr_resolves_to_mock(&inner.value, imps)
+        }
+        _ => false,
+    }
+}
+
 /// `_monkeypatch_findings` — forbidden patch usage in tests.
 pub fn monkeypatch_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
     let mut mock_imports: HashSet<String> = HashSet::new();
     for s in body {
-        if let Stmt::ImportFrom(imp) = s {
-            if let Some(module) = &imp.module {
-                if module.to_string().contains("mock") {
-                    for a in &imp.names {
+        match s {
+            Stmt::ImportFrom(imp) => {
+                if let Some(module) = &imp.module {
+                    if module.to_string().contains("mock") {
+                        for a in &imp.names {
+                            mock_imports.insert(a.name.to_string());
+                        }
+                    }
+                }
+            }
+            Stmt::Import(imp) => {
+                for a in &imp.names {
+                    if a.name.to_string().contains("mock") {
                         mock_imports.insert(a.name.to_string());
                     }
                 }
             }
+            _ => {}
         }
     }
     // calls + decorators in one full walk
@@ -2289,7 +2312,10 @@ pub fn monkeypatch_findings(state: &mut ScanState, body: &[Stmt], source: &str) 
                         {
                             Some(format!("monkeypatch.{}", a.attr.as_str()))
                         }
-                        _ if a.attr.as_str() == "patch" && matches!(a.value.as_ref(), Expr::Attribute(_)) => {
+                        _ if a.attr.as_str() == "patch" && attr_resolves_to_mock(a.value.as_ref(), &mock_imports) => {
+                            // Only flag .patch when the receiver chain resolves
+                            // to an imported mock symbol — avoids false positives
+                            // on e.g. self.client.patch(url)
                             Some(format!("{}.patch", &source[a.value.range()]))
                         }
                         _ => None,

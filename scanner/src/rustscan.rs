@@ -1266,8 +1266,12 @@ pub fn module_graph(
 ) -> std::collections::BTreeMap<String, Vec<String>> {
     let mut graph: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
     let scan_set: std::collections::HashSet<String> = files.iter().cloned().collect();
-    // module path -> file rel, for every root's mod tree
+    // module path -> file rel, scoped per root to avoid workspace collisions
+    // (two crates with a module named "a" would collide with unqualified paths).
+    // Keys are prefixed with the root directory (e.g. "crate_a/src::a").
     let mut module_map: HashMap<String, String> = HashMap::new();
+    // Per-root top-level names for bare `use a::b` resolution
+    let mut top_level_by_root: HashMap<String, Vec<String>> = HashMap::new();
     for root in files {
         if !(root.ends_with("main.rs") || root.ends_with("lib.rs")) {
             continue;
@@ -1277,9 +1281,12 @@ pub fn module_graph(
             .next()
             .map(|_| root[..root.rfind('/').map_or(0, |i| i)].to_string());
         let dir = dir.unwrap_or_default();
+        let prefix = dir.clone(); // scope prefix for this root
+        let root_decls = top_level_by_root.entry(root.clone()).or_default();
         let mut stack: Vec<(String, String)> = Vec::new(); // (module path, dir)
         if let Some(decls) = mod_decls.get(root) {
             for (name, _inline) in decls {
+                root_decls.push(name.clone());
                 let child = if dir.is_empty() {
                     name.clone()
                 } else {
@@ -1289,11 +1296,16 @@ pub fn module_graph(
             }
         }
         while let Some((child_dir, path)) = stack.pop() {
-            // mod x; -> dir/x.rs or dir/x/mod.rs
             let candidates = [format!("{child_dir}.rs"), format!("{child_dir}/mod.rs")];
             let found = candidates.into_iter().find(|c| scan_set.contains(c));
             if let Some(file) = found {
-                module_map.insert(path.clone(), file.clone());
+                // Qualify the key with the root's directory prefix
+                let key = if prefix.is_empty() {
+                    path.clone()
+                } else {
+                    format!("{prefix}::{path}")
+                };
+                module_map.insert(key, file.clone());
                 graph.entry(file.clone()).or_default();
                 if let Some(decls) = mod_decls.get(&file) {
                     for (name, _) in decls {
@@ -1303,13 +1315,13 @@ pub fn module_graph(
             }
         }
     }
-    // top-level module names (for bare `use a::b` resolution)
+    // top-level module names for bare `use a::b` resolution (qualified by root)
     let top_level: std::collections::HashSet<String> = files
         .iter()
         .filter(|f| f.ends_with("main.rs") || f.ends_with("lib.rs"))
-        .filter_map(|f| mod_decls.get(f))
+        .filter_map(|f| top_level_by_root.get(f))
         .flatten()
-        .map(|(n, _)| n.clone())
+        .cloned()
         .collect();
     for file in files {
         let Some(paths) = uses.get(file) else { continue };
@@ -1380,11 +1392,10 @@ fn resolve_use(
 }
 
 fn resolve_dotted(path: &str, module_map: &HashMap<String, String>) -> Option<String> {
-    // the imported name is the last segment — the module owning it is the
-    // path minus that segment
     let parts: Vec<&str> = path.split("::").collect();
     for cut in (1..parts.len()).rev() {
         let candidate = parts[..cut].join("::");
+        // Try the exact key (which may include a root-scope prefix)
         if let Some(f) = module_map.get(&candidate) {
             return Some(f.clone());
         }

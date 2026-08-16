@@ -173,8 +173,8 @@ def file_history(repo: Path) -> FileHistory:
             text=True,
             timeout=120,
         )
-    except subprocess.TimeoutExpired:  # code-health: ignore except a slow checkout degrades to empty history
-        log(f"git log timed out in {repo} — history-based signals are skipped")
+    except (OSError, SubprocessError):  # code-health: ignore except git unavailable/corrupt degrades to empty
+        log(f"git log unavailable in {repo} — history-based signals are skipped")
         return FileHistory(churn, last)
     if proc.returncode != 0:
         return FileHistory(churn, last)
@@ -616,8 +616,8 @@ def changed_files(repo: Path, base: str) -> set[str]:
                 text=True,
                 timeout=30,
             )
-        except subprocess.TimeoutExpired:  # code-health: ignore except a slow checkout degrades to an empty diff
-            log(f"git diff against {ref} timed out — diff awareness skipped")
+        except (OSError, SubprocessError):  # code-health: ignore except git unavailable/corrupt — no diff awareness
+            log(f"git diff against {ref} unavailable — diff awareness skipped")
             continue
         if proc.returncode == 0 and proc.stdout.strip():
             return {ln.strip() for ln in proc.stdout.splitlines() if ln.strip()}
@@ -645,13 +645,19 @@ def _coverage_context(repo: Path, covered, coverage_source: str) -> CoverageCont
 
 
 def _git_head(repo: Path) -> GitHead:
-    """Current branch and short commit for report provenance."""
-    branch = subprocess.run(
-        ["git", "-C", str(repo), "branch", "--show-current"], capture_output=True, text=True
-    ).stdout.strip()
-    commit = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True
-    ).stdout.strip()
+    """Current branch and short commit for report provenance.
+    Returns empty strings when git is unavailable."""
+    branch = commit = ""
+    try:
+        branch = subprocess.run(
+            ["git", "-C", str(repo), "branch", "--show-current"], capture_output=True, text=True, timeout=30
+        ).stdout.strip()
+        commit = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=30
+        ).stdout.strip()
+    # code-health: ignore except git-absent is a supported mode — the gate runs on the working tree alone
+    except (OSError, SubprocessError):
+        log(f"git unavailable in {repo} — report shows no branch/commit")
     return GitHead(branch=branch, commit=commit)
 
 

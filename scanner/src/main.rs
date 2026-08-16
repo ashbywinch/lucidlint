@@ -290,6 +290,11 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             self.parent_stack.pop();
             return;
         }
+        // Class bodies contribute no decisions (radon sub-visitor), matching
+        // the visit_stmt guard at line 225.
+        if self.in_class > 0 {
+            return;
+        }
         if let Some(scope) = self.fn_stack.last_mut() {
             let slot = &mut scope.decisions;
             match expr {
