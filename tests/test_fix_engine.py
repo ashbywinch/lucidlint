@@ -251,6 +251,40 @@ def test_parameter_object_introduced(tmp_path):
     assert "BuildOptions.build(a=1, b=2, c=3, d=4, e=5, f=6)" in fixed
 
 
+def test_extract_class_renames_receiver_and_internal_calls(tmp_path):
+    """The missed-class scenario that tripped a hand-fix: moved methods must
+    rename the receiver to self AND rewrite inter-fn calls to self-calls —
+    otherwise the extraction produces broken code."""
+    src = (
+        "class _FnBodyState:\n"
+        "    def __init__(self, line):\n"
+        "        self.line = line\n"
+        "\n"
+        "def _window_score(state: _FnBodyState, i, j, min_lines):\n"
+        "    if state.line > 0:\n"
+        "        return 1\n"
+        "    return 0\n"
+        "\n"
+        "def _window_has_outvars(state: _FnBodyState, j, writes_all):\n"
+        "    return state.line > 0\n"
+        "\n"
+        "def _best_seam(state: _FnBodyState, min_lines=2):\n"
+        "    return _window_score(state, 0, 1, min_lines)\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    out = fix_engine.fix_finding("extract-class", "houses/app.py", repo, 5)
+    assert out is not None
+    fixed = p.read_text()
+    assert "def _window_score(self, i, j, min_lines):" in fixed  # receiver renamed
+    assert "if self.line > 0:" in fixed  # body reference renamed
+    assert "self._window_score(0, 1, min_lines)" in fixed  # inter-fn call rewritten
+    ns = {}
+    exec(compile(fixed, "app.py", "exec"), ns)
+    assert ns["_FnBodyState"](1)._best_seam() == 1  # behavior preserved
+
+
 def test_extract_method_preview_and_confirm(tmp_path):
     src = (
         "def process(data, factor):\n"

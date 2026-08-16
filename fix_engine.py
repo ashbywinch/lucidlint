@@ -251,14 +251,15 @@ class _MoveIntoClass(cst.CSTTransformer):
 
     METADATA_DEPENDENCIES = (PositionProvider,)
 
-    def __init__(self, fns: set[str]) -> None:
+    def __init__(self, fns: set[str], delete: bool = True) -> None:
         self.fns = fns
+        self.delete = delete
 
     @override
     def leave_FunctionDef(
         self, original_node, updated_node
     ):
-        if updated_node.name.value in self.fns:
+        if self.delete and updated_node.name.value in self.fns:
             return cst.RemoveFromParent()
         return updated_node
 
@@ -359,24 +360,39 @@ def fix_extract_class(source: str, line: int, name: str | None) -> str | None:
     fns = found.fns
     class_name = name or shared
 
-    # the group's defs, as methods: first param becomes `self`, annotation
-    # dropped; the rest of the signature and body are untouched
-    methods = _collect_defs(module, set(fns))
-    # methods keep source order; the receiver becomes `self`
+    originals = _collect_defs(module, set(fns))
+    receiver_name = (
+        originals[0].params.params[0].name.value
+        if originals and originals[0].params.params
+        else None
+    )
+
+    # pass 1: rewrite the call sites WITHOUT deleting — the moved bodies must
+    # be collected from this pass so their inter-fn calls are method calls
+    # (`_window_score(state, ...)` -> `state._window_score(...)`)
+    call_rewritten = wrapper.visit(_MoveIntoClass(set(fns), delete=False)).code
+
+    # pass 2: collect the moved fns from the rewritten module, drop the
+    # receiver param (becomes `self`), and rename the old receiver name in
+    # the bodies — `state._window_score(...)` -> `self._window_score(...)`
+    methods = _collect_defs(cst.parse_module(call_rewritten), set(fns))
     new_methods = []
     for method in methods:
         params = method.params.params
         rest = params[1:] if params else []
+        body = method.body
+        if receiver_name is not None:
+            body = body.visit(_RenameName(receiver_name, "self"))
         new_methods.append(
             method.with_changes(
                 params=method.params.with_changes(
                     params=[cst.Param(name=cst.Name("self"), annotation=None), *rest]
-                )
+                ),
+                body=body,
             )
         )
 
-    # two passes: delete the free fns, then insert the class after the last
-    # class def
+    # pass 3: delete the free fns (call sites already rewritten)
     deleted = wrapper.visit(_MoveIntoClass(set(fns))).code
     classdef = cst.ClassDef(
         name=cst.Name(class_name),
@@ -386,463 +402,13 @@ def fix_extract_class(source: str, line: int, name: str | None) -> str | None:
     return cst.parse_module(deleted).visit(_InsertClass(class_name, classdef, new_methods)).code
 
 
-def _collect_defs(module: cst.Module, fns: set[str]) -> list[cst.FunctionDef]:
-    """The group's def nodes, in source order."""
-    methods: list[cst.FunctionDef] = []
-
-    class _Collect(cst.CSTVisitor):
-        @override
-        def visit_FunctionDef(self, node) -> None:
-            if node.name.value in fns:
-                methods.append(node)
-
-    module.visit(_Collect())
-    return methods
-
-
-class _InsertClass(cst.CSTTransformer):
-    """Append the methods to the existing class, or insert a new class after
-    the last one."""
-
-    def __init__(self, class_name, classdef, methods) -> None:
-        self.class_name = class_name
-        self.classdef = classdef
-        self.methods = methods
-
-    @override
-    def leave_ClassDef(self, original_node, updated_node):
-        if updated_node.name.value == self.class_name:
-            existing = list(updated_node.body.body)
-            existing.extend(self.methods)
-            return updated_node.with_changes(
-                body=updated_node.body.with_changes(body=existing)
-            )
-        return updated_node
-
-    @override
-    def leave_Module(self, original_node, updated_node):
-        if self.class_name in {
-            s.name.value for s in updated_node.body if isinstance(s, cst.ClassDef)
-        }:
-            return updated_node
-        body = list(updated_node.body)
-        idx = max(
-            (i for i, s in enumerate(body) if isinstance(s, cst.ClassDef)),
-            default=-1,
-        )
-        body.insert(idx + 1, self.classdef)
-        return updated_node.with_changes(body=body)
-
-
-class _FnBodyState:
-    """The extract-method analysis state: the target function's body
-    statements with per-statement spans, first-use contexts, writes, and
-    control-flow flags."""
-
-    def __init__(self, line: int) -> None:
-        self.line = line
-        self.fn_node: cst.FunctionDef | None = None
-        self.stmt_ids: list[int] = []
-        self.stmt_spans: dict[int, tuple[int, int]] = {}
-        self.first_use: dict[int, dict[str, str]] = {}
-        self.writes: dict[int, set[str]] = {}
-        self.control_flow: dict[int, bool] = {}
-
-    def _window_score(self, i: int, j: int, min_lines: int):
-        """Score one candidate window: (free_count, -span, start) when it is
-        a safe seam, or None. Free = names whose first use in the window is a
-        read (builtins excluded); out-variables and control-flow exits
-        disqualify."""
-        if i == 0 and j == len(self.stmt_ids) - 1:
-            return None  # extracting the whole body is not a refactoring
-        if any(self.control_flow[self.stmt_ids[k]] for k in range(i, j + 1)):
-            return None  # a return/break inside the seam changes control flow
-        span = self.stmt_spans[self.stmt_ids[j]][1] - self.stmt_spans[self.stmt_ids[i]][0] + 1
-        if span < min_lines:
-            return None
-        free: set[str] = set()
-        seen: set[str] = set()
-        writes_all: set[str] = set()
-        for k in range(i, j + 1):
-            sid = self.stmt_ids[k]
-            for name, ctx in self.first_use[sid].items():
-                if name not in seen:
-                    seen.add(name)
-                    if ctx == "read":
-                        free.add(name)
-            writes_all |= self.writes[sid]
-        free -= _BUILTINS
-        if self._window_has_outvars(j, writes_all) or not free:
-            return None  # out-variable or no-input seam — skip
-        return len(free), -span, i, sorted(free)
-
-    def _window_has_outvars(self, j: int, writes_all: set[str]) -> bool:
-        """Does any name written in the window get read after it?
-        Out-variables would need a return value — the seam must be
-        self-contained."""
-        after: set[str] = set()
-        for k in range(j + 1, len(self.stmt_ids)):
-            for name, ctx in self.first_use[self.stmt_ids[k]].items():
-                if ctx == "read":
-                    after.add(name)
-        return bool(writes_all & after)
-
-    def best_seam(self, min_lines: int = 2):
-        """The window whose free variables are the smallest subset of the
-        function's variables (builtins excluded — they are available in any
-        scope) and whose out-variables are empty. A name is free iff its
-        FIRST use in the window is a read. Ties go to the larger window.
-        Returns (block_ids, free_vars) or None. Out-variables are a smell —
-        the seam must be self-contained; the whole body is not a seam."""
-        n = len(self.stmt_ids)
-        best = None  # (free_count, -lines, start, block_ids, free_vars)
-        for i in range(n):
-            for j in range(i, n):
-                score = self._window_score(i, j, min_lines)
-                if score is not None and (best is None or score < best[0]):
-                    best = (score, list(range(i, j + 1)))
-        if best is None:
-            return None
-        (_, _, _, free_vars), block_ids = best
-        return list(block_ids), free_vars
-
-
-class _Analyse(cst.CSTVisitor):
-    """Collects the target function's body statement data. Module-level so
-    the latent-class rule does not fire on the enclosing analysis function."""
-
-    METADATA_DEPENDENCIES = (PositionProvider, ExpressionContextProvider, ParentNodeProvider)
-
-    def __init__(self, state: _FnBodyState) -> None:
-        self.state = state
-
-    @override
-    def visit_FunctionDef(self, node) -> None:
-        if self.state.fn_node is not None:
-            return
-        if self.get_metadata(PositionProvider, node).start.line != self.state.line:
-            return
-        self.state.fn_node = node
-        for s in node.body.body:
-            p = self.get_metadata(PositionProvider, s)
-            sid = id(s)
-            self.state.stmt_spans[sid] = (p.start.line, p.end.line)
-            self.state.stmt_ids.append(sid)
-            self.state.first_use[sid] = {}
-            self.state.writes[sid] = set()
-            self.state.control_flow[sid] = isinstance(s, cst.SimpleStatementLine) and any(
-                isinstance(st, (cst.Return, cst.Break, cst.Continue, cst.Raise, cst.Yield))
-                for st in s.body
-            )
-
-    @override
-    def visit_Name(self, node) -> None:
-        if self.state.fn_node is None:
-            return
-        sid = None
-        parent = self.get_metadata(ParentNodeProvider, node)
-        while parent is not None and not isinstance(parent, cst.Module):
-            if parent is self.state.fn_node:
-                break
-            if id(parent) in self.state.stmt_ids:
-                sid = id(parent)
-                break
-            parent = self.get_metadata(ParentNodeProvider, parent)
-        if sid is None:
-            return  # the fn's own signature/name — not a body read
-        try:
-            ctx = self.get_metadata(ExpressionContextProvider, node)
-        except KeyError:
-            return  # attribute names (obj.append) are not variable refs
-        parent = self.get_metadata(ParentNodeProvider, node)
-        is_aug_target = isinstance(parent, cst.AugAssign)
-        if node.value not in self.state.first_use[sid]:
-            if ctx == cst.metadata.ExpressionContext.LOAD or is_aug_target:
-                self.state.first_use[sid][node.value] = "read"
-            else:
-                self.state.first_use[sid][node.value] = "write"
-        if ctx == cst.metadata.ExpressionContext.STORE:
-            self.state.writes[sid].add(node.value)
-
-
-# --------------------------------------------------------------------------- magic literal / rename / parameter object
-
-class _ReplaceLiteral(cst.CSTTransformer):
-    """Replace the numeric literal on the target line with a name."""
-
-    METADATA_DEPENDENCIES = (PositionProvider,)
-
-    def __init__(self, target_line: int, name: str) -> None:
-        self.target_line = target_line
-        self.name = name
-        self.replaced = False
-
-    @override
-    def leave_Integer(self, original_node, updated_node):
-        if self.replaced:
-            return updated_node
-        pos = self.get_metadata(PositionProvider, original_node)
-        if pos.start.line == self.target_line:
-            self.replaced = True
-            return cst.Name(self.name)
-        return updated_node
-
-    @override
-    def leave_Float(self, original_node, updated_node):
-        if self.replaced:
-            return updated_node
-        pos = self.get_metadata(PositionProvider, original_node)
-        if pos.start.line == self.target_line:
-            self.replaced = True
-            return cst.Name(self.name)
-        return updated_node
-
-
-def fix_magic_literal(source: str, line: int, name: str) -> str | None:
-    """Replace Magic Literal: `f(10, ...)` -> `f(MAX_RETRIES, ...)` with
-    `MAX_RETRIES = 10` inserted at module top."""
-    module = cst.parse_module(source)
-    wrapper = cst.MetadataWrapper(module)
-    value: str | None = None
-
-    class _Find(cst.CSTVisitor):
-        METADATA_DEPENDENCIES = (PositionProvider,)
-
-        @override
-        def visit_Integer(self, node) -> None:
-            nonlocal value
-            if value is None and self.get_metadata(PositionProvider, node).start.line == line:
-                value = node.value
-
-        @override
-        def visit_Float(self, node) -> None:
-            nonlocal value
-            if value is None and self.get_metadata(PositionProvider, node).start.line == line:
-                value = node.value
-
-    wrapper.visit(_Find())
-    if value is None:
-        return None
-    replaced = wrapper.visit(_ReplaceLiteral(line, name)).code
-    if replaced == source:
-        return None
-    # insert the constant assignment at module top (before the first def/class)
-    module2 = cst.parse_module(replaced)
-    assignment = cst.SimpleStatementLine(
-        body=[cst.Assign(targets=[cst.AssignTarget(cst.Name(name))], value=cst.parse_expression(value))]
-    )
-    body = list(module2.body)
-    first = next((i for i, s in enumerate(body) if isinstance(s, (cst.FunctionDef, cst.ClassDef))), len(body))
-    body.insert(first, assignment)
-    return module2.with_changes(body=body).code
-
-
-class _RenameClass(cst.CSTTransformer):
-    """Rename the class at the line + every Name reference in the file."""
-
-    METADATA_DEPENDENCIES = (PositionProvider,)
-
-    def __init__(self, target_line: int, old: str, new: str) -> None:
-        self.target_line = target_line
-        self.old = old
-        self.new = new
-
-    @override
-    def leave_ClassDef(self, original_node, updated_node):
-        pos = self.get_metadata(PositionProvider, original_node)
-        if pos.start.line == self.target_line and updated_node.name.value == self.old:
-            return updated_node.with_changes(name=cst.Name(self.new))
-        return updated_node
-
-    @override
-    def leave_Name(self, original_node, updated_node):
-        if updated_node.value == self.old:
-            return updated_node.with_changes(value=self.new)
-        return updated_node
-
-
-def fix_rename(source: str, line: int, name: str) -> str | None:
-    """Rename (vague-name): the class at `line` plus every same-file Name
-    reference. Cross-file call sites need FullRepoManager — same-file v1."""
-    module = cst.parse_module(source)
-    wrapper = cst.MetadataWrapper(module)
-    old: str | None = None
-
-    class _Find(cst.CSTVisitor):
-        METADATA_DEPENDENCIES = (PositionProvider,)
-
-        @override
-        def visit_ClassDef(self, node) -> None:
-            nonlocal old
-            if old is None and self.get_metadata(PositionProvider, node).start.line == line:
-                old = node.name.value
-
-    wrapper.visit(_Find())
-    if old is None or old == name:
-        return None
-    renamed = wrapper.visit(_RenameClass(line, old, name)).code
-    return None if renamed == source else renamed
-
-
-class _BodyParamRewrite(cst.CSTTransformer):
-    """Rewrite body references of the bundled params to options.<param>."""
-
-    def __init__(self, params: list[str]) -> None:
-        self.params = set(params)
-
-    @override
-    def leave_Name(self, original_node, updated_node):
-        if updated_node.value in self.params:
-            return cst.Attribute(
-                value=cst.Name("options"),
-                attr=cst.Name(updated_node.value),
-            )
-        return updated_node
-
-
-class _CallSiteRewrite(cst.CSTTransformer):
-    """f(a, b, c) -> Name.f(a=a, b=b, c=c) for the renamed function."""
-
-    def __init__(self, fn: str, params: list[str], class_name: str) -> None:
-        self.fn = fn
-        self.params = params
-        self.class_name = class_name
-
-    @override
-    def leave_Call(self, original_node, updated_node):
-        if not m.matches(updated_node.func, m.Name(value=self.fn)):
-            return updated_node
-        args = list(updated_node.args)
-        if len(args) != len(self.params):
-            return updated_node  # positional mismatch — leave untouched
-        new_args = [
-            cst.Arg(
-                keyword=cst.Name(p),
-                value=a.value,
-                equal=cst.AssignEqual(
-                    whitespace_before=cst.SimpleWhitespace(""),
-                    whitespace_after=cst.SimpleWhitespace(""),
-                ),
-            )
-            for p, a in zip(self.params, args, strict=True)
-        ]
-        return updated_node.with_changes(
-            func=cst.Attribute(
-                value=cst.Name(self.class_name),
-                attr=cst.Name(self.fn),
-                dot=cst.Dot(),
-            ),
-            args=new_args,
-        )
-
-
-def _find_fn_at(module: cst.Module, wrapper, line: int, name: str | None = None) -> cst.FunctionDef | None:
-    """The module-level def at `line` (optionally by name)."""
-    found: cst.FunctionDef | None = None
-
-    class _Find(cst.CSTVisitor):
-        METADATA_DEPENDENCIES = (PositionProvider,)
-
-        @override
-        def visit_FunctionDef(self, node) -> None:
-            nonlocal found
-            if (
-                found is None
-                and self.get_metadata(PositionProvider, node).start.line == line
-                and (name is None or node.name.value == name)
-            ):
-                found = node
-
-    wrapper.visit(_Find())
-    return found
-
-
-class _FnBodyRewrite(cst.CSTTransformer):
-    """The parameter-object fn: params -> options.<param> in the body, and the
-    signature collapses to (receiver, options: Name)."""
-
-    METADATA_DEPENDENCIES = (PositionProvider,)
-
-    def __init__(self, fn_name: str, line: int, params: list[str], class_name: str) -> None:
-        self.fn_name = fn_name
-        self.line = line
-        self.params = set(params)
-        self.class_name = class_name
-
-    @override
-    def leave_FunctionDef(self, original_node, updated_node):
-        if updated_node.name.value != self.fn_name:
-            return updated_node
-        if self.get_metadata(PositionProvider, original_node).start.line != self.line:
-            return updated_node
-        new_body = updated_node.body.visit(_BodyParamRewrite(list(self.params)))
-        receiver = [
-            p
-            for p in updated_node.params.params
-            if p.name is not None and p.name.value in ("self", "cls")
-        ]
-        options_param = cst.Param(
-            name=cst.Name("options"),
-            annotation=cst.Annotation(cst.Name(self.class_name)),
-        )
-        return updated_node.with_changes(
-            params=updated_node.params.with_changes(params=[*receiver, options_param]),
-            body=new_body,
-        )
-
-
-def _dataclass_def(name: str, params: list[cst.Param]) -> cst.ClassDef:
-    """The bundled-params dataclass — one AnnAssign field per param."""
-    field_lines = []
-    for p in params:
-        ann = p.annotation.annotation if p.annotation is not None else cst.Name("object")
-        field_lines.append(
-            cst.SimpleStatementLine(
-                body=[cst.AnnAssign(target=cst.Name(p.name.value), annotation=cst.Annotation(ann))]
-            )
-        )
-    return cst.ClassDef(
-        name=cst.Name(name),
-        bases=[],
-        decorators=[cst.Decorator(cst.Name("dataclass"))],
-        body=cst.IndentedBlock(body=field_lines),
-    )
-
-
-def _ensure_dataclasses_import(body: list) -> list:
-    """Prepend `from dataclasses import dataclass` when missing."""
-    has_import = any(
-        isinstance(s, cst.SimpleStatementLine)
-        and len(s.body) == 1
-        and isinstance(s.body[0], cst.ImportFrom)
-        and s.body[0].module is not None
-        and "dataclasses" in s.body[0].module.value
-        and any(
-            isinstance(a, cst.ImportAlias) and a.name.value == "dataclass"
-            for a in (s.body[0].names or [])
-        )
-        for s in body
-    )
-    if has_import:
-        return body
-    imp = cst.SimpleStatementLine(
-        body=[
-            cst.ImportFrom(
-                module=cst.Name("dataclasses"),
-                names=[cst.ImportAlias(cst.Name("dataclass"))],
-            )
-        ]
-    )
-    return [imp, *body]
-
-
 def fix_parameter_object(source: str, line: int, name: str) -> str | None:
     """Introduce Parameter Object: bundle the function's params into a
     dataclass named `name`, change the signature to `options: name`, rewrite
     the body references and same-file call sites."""
     module = cst.parse_module(source)
     wrapper = cst.MetadataWrapper(module)
-    target = _find_fn_at(module, wrapper, line)
+    target = _find_fn_at(wrapper, line)
     if target is None:
         return None
     raw_params = [p for p in target.params.params if p.name is not None]
@@ -943,6 +509,138 @@ class _InsertExtractedFn(cst.CSTTransformer):
         )
 
 
+class _FnBodyState:
+    """The extract-method analysis state: the target function's body
+    statements with per-statement spans, first-use contexts, writes, and
+    control-flow flags."""
+
+    def __init__(self, line: int) -> None:
+        self.line = line
+        self.fn_node: cst.FunctionDef | None = None
+        self.stmt_ids: list[int] = []
+        self.stmt_spans: dict[int, tuple[int, int]] = {}
+        self.first_use: dict[int, dict[str, str]] = {}
+        self.writes: dict[int, set[str]] = {}
+        self.control_flow: dict[int, bool] = {}
+
+    def _window_score(self, i: int, j: int, min_lines: int):
+        """Score one candidate window: (free_count, -span, start) when it is
+        a safe seam, or None. Free = names whose first use in the window is a
+        read (builtins excluded); out-variables and control-flow exits
+        disqualify."""
+        if i == 0 and j == len(self.stmt_ids) - 1:
+            return None  # extracting the whole body is not a refactoring
+        if any(self.control_flow[self.stmt_ids[k]] for k in range(i, j + 1)):
+            return None  # a return/break inside the seam changes control flow
+        span = self.stmt_spans[self.stmt_ids[j]][1] - self.stmt_spans[self.stmt_ids[i]][0] + 1
+        if span < min_lines:
+            return None
+        free: set[str] = set()
+        seen: set[str] = set()
+        writes_all: set[str] = set()
+        for k in range(i, j + 1):
+            sid = self.stmt_ids[k]
+            for name, ctx in self.first_use[sid].items():
+                if name not in seen:
+                    seen.add(name)
+                    if ctx == "read":
+                        free.add(name)
+            writes_all |= self.writes[sid]
+        free -= _BUILTINS
+        if self._window_has_outvars(j, writes_all) or not free:
+            return None  # out-variable or no-input seam — skip
+        return len(free), -span, i, sorted(free)
+
+    def _window_has_outvars(self, j: int, writes_all: set[str]) -> bool:
+        """Does any name written in the window get read after it?
+        Out-variables would need a return value — the seam must be
+        self-contained."""
+        after: set[str] = set()
+        for k in range(j + 1, len(self.stmt_ids)):
+            for name, ctx in self.first_use[self.stmt_ids[k]].items():
+                if ctx == "read":
+                    after.add(name)
+        return bool(writes_all & after)
+
+    def best_seam(self, min_lines: int = 2):
+        """The window whose free variables are the smallest subset of the
+        function's variables (builtins excluded — they are available in any
+        scope) and whose out-variables are empty. A name is free iff its
+        FIRST use in the window is a read. Ties go to the larger window.
+        Returns (block_ids, free_vars) or None. Out-variables are a smell —
+        the seam must be self-contained; the whole body is not a seam."""
+        n = len(self.stmt_ids)
+        best = None  # (free_count, -lines, start, block_ids, free_vars)
+        for i in range(n):
+            for j in range(i, n):
+                score = self._window_score(i, j, min_lines)
+                if score is not None and (best is None or score < best[0]):
+                    best = (score, list(range(i, j + 1)))
+        if best is None:
+            return None
+        (_, _, _, free_vars), block_ids = best
+        return list(block_ids), free_vars
+
+
+class _Analyse(cst.CSTVisitor):
+    """Collects the target function's body statement data. Module-level so
+    the latent-class rule does not fire on the enclosing analysis function."""
+
+    METADATA_DEPENDENCIES = (PositionProvider, ExpressionContextProvider, ParentNodeProvider)
+
+    def __init__(self, state: _FnBodyState) -> None:
+        self.state = state
+
+    @override
+    def visit_FunctionDef(self, node) -> None:
+        if (
+            self.state.fn_node is not None
+            or self.get_metadata(PositionProvider, node).start.line != self.state.line
+        ):
+            return
+        self.state.fn_node = node
+        for s in node.body.body:
+            p = self.get_metadata(PositionProvider, s)
+            sid = id(s)
+            self.state.stmt_spans[sid] = (p.start.line, p.end.line)
+            self.state.stmt_ids.append(sid)
+            self.state.first_use[sid] = {}
+            self.state.writes[sid] = set()
+            self.state.control_flow[sid] = isinstance(s, cst.SimpleStatementLine) and any(
+                isinstance(st, (cst.Return, cst.Break, cst.Continue, cst.Raise, cst.Yield))
+                for st in s.body
+            )
+
+    @override
+    def visit_Name(self, node) -> None:
+        if self.state.fn_node is None:
+            return
+        sid = None
+        parent = self.get_metadata(ParentNodeProvider, node)
+        while parent is not None and not isinstance(parent, cst.Module):
+            if parent is self.state.fn_node:
+                break
+            if id(parent) in self.state.stmt_ids:
+                sid = id(parent)
+                break
+            parent = self.get_metadata(ParentNodeProvider, parent)
+        if sid is None:
+            return  # the fn's own signature/name — not a body read
+        try:
+            ctx = self.get_metadata(ExpressionContextProvider, node)
+        except KeyError:
+            return  # attribute names (obj.append) are not variable refs
+        parent = self.get_metadata(ParentNodeProvider, node)
+        is_aug_target = isinstance(parent, cst.AugAssign)
+        if node.value not in self.state.first_use[sid]:
+            if ctx == cst.metadata.ExpressionContext.LOAD or is_aug_target:
+                self.state.first_use[sid][node.value] = "read"
+            else:
+                self.state.first_use[sid][node.value] = "write"
+        if ctx == cst.metadata.ExpressionContext.STORE:
+            self.state.writes[sid].add(node.value)
+
+
 def _fn_seam_analysis(source: str, line: int):
     """Analyze the function at `line`: its body statements with per-statement
     spans, first-use contexts, writes, and control-flow flags."""
@@ -1010,6 +708,380 @@ def propose_finding(kind: str, rel: str, repo: Path, line: int, opts: FixOptions
         new_source = fix_extract_method(source, line, opts.name)
         return (new_source, STRUCTURAL_KINDS["extract-method"]) if new_source else (None, None)
     return None, None
+
+
+class _RenameName(cst.CSTTransformer):
+    """Rename every Name node — the extract-class receiver rename."""
+
+    def __init__(self, old: str, new: str) -> None:
+        self.old = old
+        self.new = new
+
+    @override
+    def leave_Name(self, original_node, updated_node):
+        if updated_node.value == self.old:
+            return updated_node.with_changes(value=self.new)
+        return updated_node
+
+
+def _collect_defs(module: cst.Module, fns: set[str]) -> list[cst.FunctionDef]:
+    """The group's def nodes, in source order."""
+    methods: list[cst.FunctionDef] = []
+
+    class _Collect(cst.CSTVisitor):
+        @override
+        def visit_FunctionDef(self, node) -> None:
+            if node.name.value in fns:
+                methods.append(node)
+
+    module.visit(_Collect())
+    return methods
+
+
+class _InsertClass(cst.CSTTransformer):
+    """Append the methods to the existing class, or insert a new class after
+    the last one."""
+
+    def __init__(self, class_name, classdef, methods) -> None:
+        self.class_name = class_name
+        self.classdef = classdef
+        self.methods = methods
+
+    @override
+    def leave_ClassDef(
+        self, original_node, updated_node
+    ):
+        if updated_node.name.value == self.class_name:
+            existing = list(updated_node.body.body)
+            existing.extend(self.methods)
+            return updated_node.with_changes(
+                body=updated_node.body.with_changes(body=existing)
+            )
+        return updated_node
+
+    @override
+    def leave_Module(
+        self, original_node, updated_node
+    ):
+        if self.class_name in {
+            s.name.value for s in updated_node.body if isinstance(s, cst.ClassDef)
+        }:
+            return updated_node
+        body = list(updated_node.body)
+        idx = max(
+            (i for i, s in enumerate(body) if isinstance(s, cst.ClassDef)),
+            default=-1,
+        )
+        body.insert(idx + 1, self.classdef)
+        return updated_node.with_changes(body=body)
+
+
+def _collect_defs(module: cst.Module, fns: set[str]) -> list[cst.FunctionDef]:
+    """The group's def nodes, in source order."""
+    methods: list[cst.FunctionDef] = []
+
+    class _Collect(cst.CSTVisitor):
+        @override
+        def visit_FunctionDef(self, node) -> None:
+            if node.name.value in fns:
+                methods.append(node)
+
+    module.visit(_Collect())
+    return methods
+
+
+class _BodyParamRewrite(cst.CSTTransformer):
+    """Rewrite body references of the bundled params to options.<param>."""
+
+    def __init__(self, params: list[str]) -> None:
+        self.params = set(params)
+
+    @override
+    def leave_Name(
+        self, original_node, updated_node
+    ):
+        if updated_node.value in self.params:
+            return cst.Attribute(
+                value=cst.Name("options"),
+                attr=cst.Name(updated_node.value),
+            )
+        return updated_node
+
+
+class _CallSiteRewrite(cst.CSTTransformer):
+    """f(a, b, c) -> Name.f(a=a, b=b, c=c) for the renamed function."""
+
+    def __init__(self, fn: str, params: list[str], class_name: str) -> None:
+        self.fn = fn
+        self.params = params
+        self.class_name = class_name
+
+    @override
+    def leave_Call(
+        self, original_node, updated_node
+    ):
+        if not m.matches(updated_node.func, m.Name(value=self.fn)):
+            return updated_node
+        args = list(updated_node.args)
+        if len(args) != len(self.params):
+            return updated_node  # positional mismatch — leave untouched
+        new_args = [
+            cst.Arg(
+                keyword=cst.Name(p),
+                value=a.value,
+                equal=cst.AssignEqual(
+                    whitespace_before=cst.SimpleWhitespace(""),
+                    whitespace_after=cst.SimpleWhitespace(""),
+                ),
+            )
+            for p, a in zip(self.params, args, strict=True)
+        ]
+        return updated_node.with_changes(
+            func=cst.Attribute(
+                value=cst.Name(self.class_name),
+                attr=cst.Name(self.fn),
+                dot=cst.Dot(),
+            ),
+            args=new_args,
+        )
+
+
+def _dataclass_def(name: str, params: list[cst.Param]) -> cst.ClassDef:
+    """The bundled-params dataclass — one AnnAssign field per param."""
+    field_lines = []
+    for p in params:
+        ann = p.annotation.annotation if p.annotation is not None else cst.Name("object")
+        field_lines.append(
+            cst.SimpleStatementLine(
+                body=[
+                    cst.AnnAssign(
+                        target=cst.Name(p.name.value), annotation=cst.Annotation(ann)
+                    )
+                ]
+            )
+        )
+    return cst.ClassDef(
+        name=cst.Name(name),
+        bases=[],
+        decorators=[cst.Decorator(cst.Name("dataclass"))],
+        body=cst.IndentedBlock(body=field_lines),
+    )
+
+
+def _ensure_dataclasses_import(body: list) -> list:
+    """Prepend `from dataclasses import dataclass` when missing."""
+    has_import = any(
+        isinstance(s, cst.SimpleStatementLine)
+        and len(s.body) == 1
+        and isinstance(s.body[0], cst.ImportFrom)
+        and s.body[0].module is not None
+        and "dataclasses" in s.body[0].module.value
+        and any(
+            isinstance(a, cst.ImportAlias) and a.name.value == "dataclass"
+            for a in (s.body[0].names or [])
+        )
+        for s in body
+    )
+    if has_import:
+        return body
+    imp = cst.SimpleStatementLine(
+        body=[
+            cst.ImportFrom(
+                module=cst.Name("dataclasses"),
+                names=[cst.ImportAlias(cst.Name("dataclass"))],
+            )
+        ]
+    )
+    return [imp, *body]
+
+
+def _find_fn_at(wrapper, line: int, name: str | None = None) -> cst.FunctionDef | None:
+    """The module-level def at `line` (optionally by name)."""
+    found: cst.FunctionDef | None = None
+
+    class _Find(cst.CSTVisitor):
+        METADATA_DEPENDENCIES = (PositionProvider,)
+
+        @override
+        def visit_FunctionDef(self, node) -> None:
+            nonlocal found
+            if (
+                found is None
+                and self.get_metadata(PositionProvider, node).start.line == line
+                and (name is None or node.name.value == name)
+            ):
+                found = node
+
+    wrapper.visit(_Find())
+    return found
+
+
+class _FnBodyRewrite(cst.CSTTransformer):
+    """The parameter-object fn: params -> options.<param> in the body, and the
+    signature collapses to (receiver, options: Name)."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, fn_name: str, line: int, params: list[str], class_name: str) -> None:
+        self.fn_name = fn_name
+        self.line = line
+        self.params = set(params)
+        self.class_name = class_name
+
+    @override
+    def leave_FunctionDef(
+        self, original_node, updated_node
+    ):
+        if updated_node.name.value != self.fn_name:
+            return updated_node
+        if self.get_metadata(PositionProvider, original_node).start.line != self.line:
+            return updated_node
+        new_body = updated_node.body.visit(_BodyParamRewrite(list(self.params)))
+        receiver = [
+            p
+            for p in updated_node.params.params
+            if p.name is not None and p.name.value in ("self", "cls")
+        ]
+        options_param = cst.Param(
+            name=cst.Name("options"),
+            annotation=cst.Annotation(cst.Name(self.class_name)),
+        )
+        return updated_node.with_changes(
+            params=updated_node.params.with_changes(params=[*receiver, options_param]),
+            body=new_body,
+        )
+
+
+class _ReplaceLiteral(cst.CSTTransformer):
+    """Replace the numeric literal on the target line with a name."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, target_line: int, name: str) -> None:
+        self.target_line = target_line
+        self.name = name
+        self.replaced = False
+
+    @override
+    def leave_Integer(
+        self, original_node, updated_node
+    ):
+        if self.replaced:
+            return updated_node
+        pos = self.get_metadata(PositionProvider, original_node)
+        if pos.start.line == self.target_line:
+            self.replaced = True
+            return cst.Name(self.name)
+        return updated_node
+
+    @override
+    def leave_Float(
+        self, original_node, updated_node
+    ):
+        if self.replaced:
+            return updated_node
+        pos = self.get_metadata(PositionProvider, original_node)
+        if pos.start.line == self.target_line:
+            self.replaced = True
+            return cst.Name(self.name)
+        return updated_node
+
+
+def fix_magic_literal(source: str, line: int, name: str) -> str | None:
+    """Replace Magic Literal: `f(10, ...)` -> `f(MAX_RETRIES, ...)` with
+    `MAX_RETRIES = 10` inserted at module top."""
+    module = cst.parse_module(source)
+    wrapper = cst.MetadataWrapper(module)
+    value: str | None = None
+
+    class _Find(cst.CSTVisitor):
+        METADATA_DEPENDENCIES = (PositionProvider,)
+
+        @override
+        def visit_Integer(self, node) -> None:
+            nonlocal value
+            if value is None and self.get_metadata(PositionProvider, node).start.line == line:
+                value = node.value
+
+        @override
+        def visit_Float(self, node) -> None:
+            nonlocal value
+            if value is None and self.get_metadata(PositionProvider, node).start.line == line:
+                value = node.value
+
+    wrapper.visit(_Find())
+    if value is None:
+        return None
+    replaced = wrapper.visit(_ReplaceLiteral(line, name)).code
+    if replaced == source:
+        return None
+    module2 = cst.parse_module(replaced)
+    assignment = cst.SimpleStatementLine(
+        body=[
+            cst.Assign(
+                targets=[cst.AssignTarget(cst.Name(name))],
+                value=cst.parse_expression(value),
+            )
+        ]
+    )
+    body = list(module2.body)
+    first = next(
+        (i for i, s in enumerate(body) if isinstance(s, (cst.FunctionDef, cst.ClassDef))),
+        len(body),
+    )
+    body.insert(first, assignment)
+    return module2.with_changes(body=body).code
+
+
+class _RenameClass(cst.CSTTransformer):
+    """Rename the class at the line + every Name reference in the file."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, target_line: int, old: str, new: str) -> None:
+        self.target_line = target_line
+        self.old = old
+        self.new = new
+
+    @override
+    def leave_ClassDef(
+        self, original_node, updated_node
+    ):
+        pos = self.get_metadata(PositionProvider, original_node)
+        if pos.start.line == self.target_line and updated_node.name.value == self.old:
+            return updated_node.with_changes(name=cst.Name(self.new))
+        return updated_node
+
+    @override
+    def leave_Name(
+        self, original_node, updated_node
+    ):
+        if updated_node.value == self.old:
+            return updated_node.with_changes(value=self.new)
+        return updated_node
+
+
+def fix_rename(source: str, line: int, name: str) -> str | None:
+    """Rename (vague-name): the class at `line` plus every same-file Name
+    reference. Cross-file call sites need FullRepoManager — same-file v1."""
+    module = cst.parse_module(source)
+    wrapper = cst.MetadataWrapper(module)
+    old: str | None = None
+
+    class _Find(cst.CSTVisitor):
+        METADATA_DEPENDENCIES = (PositionProvider,)
+
+        @override
+        def visit_ClassDef(self, node) -> None:
+            nonlocal old
+            if old is None and self.get_metadata(PositionProvider, node).start.line == line:
+                old = node.name.value
+
+    wrapper.visit(_Find())
+    if old is None or old == name:
+        return None
+    renamed = wrapper.visit(_RenameClass(line, old, name)).code
+    return None if renamed == source else renamed
 
 
 # --------------------------------------------------------------------------- the fix surface
