@@ -841,6 +841,13 @@ fn rel_of(path: &str, root: &str) -> String {
 // code-health: ignore large-function the CLI orchestrates every repo-wide family in one flow — extracting helpers would thread six collections
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--version") {
+        // the release pipeline stamps CODE_HEALTH_VERSION at build time; the
+        // crate version is the local/dev fallback
+        let version = option_env!("CODE_HEALTH_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+        println!("lucidscan {version}");
+        return;
+    }
     if args.first().map(String::as_str) == Some("--lsp") {
         // stdio JSON-RPC language server — in-process scans, no spawns
         lsp::run();

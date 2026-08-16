@@ -1,0 +1,96 @@
+# Release — build the lucidscan bundles on a version tag and publish them.
+#
+# DO NOT CHANGE:
+# - The matrix targets: linux musl (static), macos arm64 + x64, windows x64 —
+#   the four platform bundles every consumer downloads.
+# - CODE_HEALTH_VERSION: the tag IS the version; the binary is stamped at
+#   build time so `lucidscan --version` matches the bundle it ships in.
+# - The bundle layout: <prefix>/bin/lucidscan + code_health.py next to it —
+#   the orchestrator resolves its sibling binary, so the bundle is
+#   self-contained (no PATH, no env).
+#
+# Trigger: push a tag v* (e.g. v0.1.0). The version cadence is 0.x toward the
+# full release; each capability (fleet wiring, wheels, the library split)
+# bumps the minor.
+
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable   # reads scanner/rust-toolchain.toml — the CI+local pin
+      - if: matrix.cross
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+      - name: Build the binary (version-stamped)
+        run: cargo build --release --manifest-path scanner/Cargo.toml --target ${{ matrix.target }}
+        env:
+          CODE_HEALTH_VERSION: ${{ github.ref_name }}
+      - name: Assemble the bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${{ github.ref_name }}"
+          target="${{ matrix.target }}"
+          exe=""
+          if [ "$target" = "x86_64-pc-windows-msvc" ]; then exe=".exe"; fi
+          dir="lucidscan-${ver}-${target}"
+          mkdir -p "dist/${dir}/bin"
+          cp "scanner/target/${target}/release/code-health-scan${exe}" "dist/${dir}/bin/lucidscan${exe}"
+          cp code_health.py code_health_graph_export.py "dist/${dir}/"
+          cp release/Makefile "dist/${dir}/Makefile"
+          printf '%s\n' "$ver" > "dist/${dir}/version.txt"
+          tar -C dist -czf "dist/${dir}.tar.gz" "${dir}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: bundles
+          merge-multiple: true
+      - name: Checksums over every bundle
+        run: |
+          cd bundles
+          python3 - <<'EOF'
+          import hashlib, pathlib
+          lines = []
+          for p in sorted(pathlib.Path(".").glob("*.tar.gz")):
+              lines.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")
+          pathlib.Path("SHA256SUMS").write_text("\n".join(lines) + "\n")
+          EOF
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bundles/*.tar.gz
+            bundles/SHA256SUMS
+          generate_release_notes: true
