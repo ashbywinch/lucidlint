@@ -102,10 +102,8 @@ work.
 
 ## Fake the filesystem before touching the real one
 
-File I/O in tests uses pyfakefs wherever possible (add `pyfakefs` to dev
-deps; it bundles the pytest `fs` fixture and the
-`fake_filesystem_unittest` base for unittest suites): in-memory,
-deterministic, no disk churn, no teardown.
+File I/O in tests uses pyfakefs wherever possible (the gate enforces it;
+  add `pyfakefs` to dev dependencies).
 
 - Write to fixed fake paths (`/store`, `/labels.jsonl`) — not pytest's
   `tmp_path`, which breaks under the fs patch (`Path.relative_to` fails);

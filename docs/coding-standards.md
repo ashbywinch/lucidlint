@@ -21,7 +21,6 @@ Language-agnostic by design; per-language toolchain conventions (ruff, eslint, f
   poorly-organised dicts; accessor chains feeding procedural code are missed
   abstractions. **Function strewing is a missed class** — when several
   functions share the same data (the same record, the same fields), they are
-  methods on that class: three or more free functions taking the same
   leading parameter are a class waiting to happen. A module that is a pile
   of functions over one structure is a finding, not a style preference.
   **Name the class for the domain concept, and model the single record.**
@@ -48,7 +47,11 @@ Language-agnostic by design; per-language toolchain conventions (ruff, eslint, f
   write straightforward functions that call each other. Protocols or
   `Callable` aliases are fine for defining a seam; a hierarchy with one leaf
   is ceremony.
-- **Imports.** Every import at the top of the file — never inside a function
+  **Imports.** Inline imports hide dependencies from static analysis (the gate
+  flags them). Private (underscore) symbols from another module are never
+  imported — make the logic public or extract it to a shared module.
+  Circular imports are fixed by restructuring modules, never bodged with lazy
+  imports.
   body (inline imports hide dependencies from static analysis). Never import
   private (underscore) symbols from another module — make the logic public
   and documented, or extract it to a shared module. Circular imports are fixed
@@ -80,8 +83,6 @@ Language-agnostic by design; per-language toolchain conventions (ruff, eslint, f
   `Letter`, `Feed`) — "geocoder" is a smell, the geocoded *place* is the
   noun. Functions are verbs; variables hold what they name (`price`, not
   `x`); booleans read in `if` (`hasSchool`, not `schoolFlag`); an id is
-  never a label. **Avoid vague suffixes** — Manager, Orchestrator, Handler, Store, Repository,
-  Controller, Utils, Info — unless a framework convention demands them.
   **The docstring test:** a docstring that merely rephrases the name
   (`TransitOrchestrator` → "orchestrates transit") means the name or the
   concept boundary is wrong — fix the name or split the concept. **The
@@ -149,8 +150,8 @@ without a check is a wish:
 - **Anti-fragile: correct by construction.** Types make invalid states
   unrepresentable; pure functions preferred; error paths explicit — in the
   type system where possible (discriminated unions, not `None`); never cast
-  or suppress type-checker flags (`# type: ignore` requires a comment
-  explaining why); happy paths read naturally. **Never mutate function
+  suppress type-checker flags (`# type: ignore` must have a reason — the
+  gate enforces it)  explaining why); happy paths read naturally. **Never mutate function
   arguments** — if a function must change a dict or list, create and return a
   new one; in-place mutation makes call-site behaviour unpredictable. Signs of
   coincidental correctness: works only in your test env, reordering "happens
@@ -192,11 +193,8 @@ without a check is a wish:
   and a dev log (root cause + exact resolution). One half alone is a bug.
 - **No backward-compat shims.** Delete the old path; migrate callers in the
   same change. No aliases, no re-exports, no "will remove later". A shim
-  compiles, passes tests, and never gets cleaned up. **Dead code is deleted,
-  not kept** — unused models, functions, scripts, unreachable branches, and
-  compatibility wrappers go; the git log is the archive.
-- **No mystery code.** Raw integers as column indices, magic numbers, and
-  string literals for domain concepts are named constants. If you would write
+**Dead code is deleted, not kept** — the git log is the archive.
+  column indices, and  string literals for domain concepts are named constants. If you would write
   a comment to explain a block, extract it into a named function — the name is
   the documentation.
 - **One way through for invariants — never parallel paths.** When a store or
