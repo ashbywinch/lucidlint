@@ -10,6 +10,8 @@ description = "Rust scan core for the deterministic code-health gate — ruff pa
 ruff_python_parser = "=0.0.9"
 ruff_python_ast = "=0.0.9"
 ruff_text_size = "=0.0.9"
+
+radonc = { path = "radonc" }
 # PINNED-ish: syn 2.x is the stable external Rust AST (parse_file + visit);
 # bump deliberately (the rust scan layer is written against its shapes)
 syn = { version = "2", features = ["full", "visit"] }

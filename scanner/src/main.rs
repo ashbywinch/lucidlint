@@ -34,7 +34,7 @@ use checks::*;
 /// One open function scope: its decision count and the names it returns
 /// (for the except-swallow analysis).
 pub struct FnScope {
-    pub decisions: u32,
+    /// Names this function returns (for the except-swallow analysis).
     pub returned: HashSet<String>,
 }
 
@@ -91,9 +91,6 @@ struct ScanState<'a> {
     skeletons: Vec<SkeletonFn>,
     /// File is under a test path — reference-scan split + skeleton skip.
     is_test: bool,
-    /// radon's visit_Assert never recurses: an assert counts 1 and its
-    /// test/msg subtrees contribute no decisions. Bumped while walking one.
-    suppress_decisions: u32,
 }
 
 fn line_of(source: &str, offset: ruff_text_size::TextSize) -> usize {
@@ -119,7 +116,6 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 let was_fn = self.current_fn.take();
                 self.current_fn = Some((f.name.to_string(), line_of(self.source, f.range.start())));
                 self.fn_stack.push(FnScope {
-                    decisions: 0,
                     returned: returned_names(&f.body),
                 });
                 self.unreachable_check(&f.body);
@@ -154,8 +150,11 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 for s in &f.body {
                     self.visit_stmt(s);
                 }
-                let scope = self.fn_stack.pop().unwrap();
-                let cc = scope.decisions + 1;
+                self.fn_stack.pop().unwrap();
+                // The radon-equivalent CC comes from the radonc crate (its rules
+                // match radon 6.0.1 exactly; the visitor still tracks decisions
+                // for the closures/latent-class gate).
+                let cc = radonc::function_cc(f);
                 // repo-wide collections: module-level defs + duplicate
                 // candidates (the def line is the NAME's line — ruff's
                 // FunctionDef range starts at the decorator)
@@ -219,47 +218,10 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             }
             _ => {}
         }
-        // cyclomatic decision points (radon-equivalent CCN) — only inside a
-        // function scope, outside class bodies
+        // CC (cyclomatic complexity) comes from the radonc crate — the scan
+        // walk itself no longer counts decisions.
         self.parent_stack.push(ParentEntry::Stmt);
-        if !self.fn_stack.is_empty() && self.in_class == 0 {
-            match stmt {
-                Stmt::If(i) => {
-                    // radon: if + each elif counts, the trailing else does NOT
-                    let elifs = i.elif_else_clauses.iter().filter(|c| c.test.is_some()).count() as u32;
-                    self.fn_stack.last_mut().unwrap().decisions += 1 + elifs;
-                }
-                Stmt::For(f) => self.fn_stack.last_mut().unwrap().decisions += 1 + (!f.orelse.is_empty()) as u32,
-                Stmt::While(w) => self.fn_stack.last_mut().unwrap().decisions += 1 + (!w.orelse.is_empty()) as u32,
-                Stmt::Try(t) => {
-                    self.fn_stack.last_mut().unwrap().decisions +=
-                        t.handlers.len() as u32 + (!t.orelse.is_empty()) as u32
-                }
-                Stmt::Assert(_) => self.fn_stack.last_mut().unwrap().decisions += 1,
-                Stmt::Match(m) => {
-                    for case in &m.cases {
-                        let wildcard = matches!(
-                            &case.pattern,
-                            ruff_python_ast::Pattern::MatchAs(p)
-                                if p.pattern.is_none() && p.name.is_none()
-                        );
-                        if !wildcard {
-                            self.fn_stack.last_mut().unwrap().decisions += 1;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        // radon's visit_Assert does not recurse — the assert's subtrees
-        // contribute no decisions (verified on 6.0.1)
-        if matches!(stmt, Stmt::Assert(_)) {
-            self.suppress_decisions += 1;
-        }
         walk_stmt(self, stmt);
-        if matches!(stmt, Stmt::Assert(_)) {
-            self.suppress_decisions -= 1;
-        }
         self.parent_stack.pop();
     }
 
@@ -290,43 +252,14 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             self.parent_stack.pop();
             return;
         }
-        // Class bodies contribute no decisions (radon sub-visitor), matching
-        // the visit_stmt guard at line 225.
+        // Class bodies are not walked for magic numbers (matching the
+        // pre-radonc behavior; CC itself now lives in the radonc crate).
         if self.in_class > 0 {
             return;
         }
-        if let Some(scope) = self.fn_stack.last_mut() {
-            let slot = &mut scope.decisions;
-            match expr {
-                Expr::NumberLiteral(n) => self.magic_check(n),
-                _ if self.suppress_decisions > 0 => {}
-                _ => {
-                    match expr {
-                        Expr::BoolOp(b) => *slot += b.values.len().saturating_sub(1) as u32,
-                        Expr::If(_) => *slot += 1,
-                        // radon's lambda: +0, but the body IS walked (verified on 6.0.1)
-                        // radon counts EACH generator clause (for x in ...) plus each
-                        // if — a two-for comprehension is +2, not +1 (verified)
-                        Expr::ListComp(c) => {
-                            *slot +=
-                                c.generators.len() as u32 + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
-                        }
-                        Expr::SetComp(c) => {
-                            *slot +=
-                                c.generators.len() as u32 + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
-                        }
-                        Expr::DictComp(c) => {
-                            *slot +=
-                                c.generators.len() as u32 + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
-                        }
-                        Expr::Generator(c) => {
-                            *slot +=
-                                c.generators.len() as u32 + c.generators.iter().map(|g| g.ifs.len() as u32).sum::<u32>()
-                        }
-                        _ => {}
-                    }
-                }
-            }
+        // magic numbers (a warn finding — distinct from the CC that radonc owns)
+        if let Expr::NumberLiteral(n) = expr {
+            self.magic_check(n);
         }
         self.parent_stack.push(ParentEntry::Expr(expr.clone()));
         walk_expr(self, expr);
