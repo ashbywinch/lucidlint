@@ -1235,10 +1235,11 @@ pub fn conditional_polymorphism_findings(state: &mut ScanState, body: &[Stmt], s
                 let arms: Vec<&Expr> = std::iter::once(i.test.as_ref())
                     .chain(i.elif_else_clauses.iter().filter_map(|c| c.test.as_ref()))
                     .collect();
-                if arms.len() >= 4 {
+                let chain_line = line_of(source, s.range().start());
+                if arms.len() >= 4 && !state.claimed_dispatch.contains(&chain_line) {
                     let keys: Vec<Option<String>> = arms.iter().map(|t| dispatch_key(t)).collect();
                     if keys.iter().all(|k| k.is_some()) && keys.windows(2).all(|w| w[0] == w[1]) {
-                        let line = line_of(source, s.range().start());
+                        let line = chain_line;
                         state.findings.push(Finding {
                             file: state.file.to_string(),
                             line,
@@ -1500,6 +1501,165 @@ fn scan_stmts(stmts: &[Stmt], counts: &mut std::collections::HashMap<String, (us
         }
     }
 }
+/// Latent Visitor: >= 2 functions dispatch over the SAME element family
+/// (isinstance / type()== / __class__ comparisons) — the signal that the
+/// OPERATIONS vary independently of the elements (GoF's visitor criterion).
+/// Detection-only: the message names the refactoring; the fix (a Visitor
+/// class + accept methods on every element) is structural.
+///
+/// The anti-thrash contract: every chain this rule claims is recorded in
+/// `claimed_dispatch` so conditional-polymorphism skips it — one ruling per
+/// chain. Single-operation dispatch stays polymorphism's territory.
+pub fn latent_visitor_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    // per family: (dispatch-site count, first-site line)
+    let mut families: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+    let mut site_lines: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+
+    fn walk(
+        stmts: &[Stmt],
+        source: &str,
+        families: &mut std::collections::HashMap<String, (usize, usize)>,
+        site_lines: &mut std::collections::HashMap<usize, String>,
+    ) {
+        for s in stmts {
+            if let Stmt::If(i) = s {
+                let arms: Vec<&Expr> = std::iter::once(i.test.as_ref())
+                    .chain(i.elif_else_clauses.iter().filter_map(|c| c.test.as_ref()))
+                    .collect();
+                if arms.len() >= 2 {
+                    // every arm must dispatch on the same FAMILY (type tag);
+                    // the visitor signal is the MULTI-SITE (>= 2 operations),
+                    // not the arm count — a repeated 2-arm type check is
+                    // already the visitor shape
+                    let first = dispatch_arm(arms[0]);
+                    if let Some((fam0, _)) = &first {
+                        let same_family = arms
+                            .iter()
+                            .all(|t| matches!(dispatch_arm(t), Some((f, _)) if &f == fam0));
+                        if same_family {
+                            let line = line_of(source, s.range().start());
+                            let e = families.entry(fam0.clone()).or_insert((0, line));
+                            e.0 += 1;
+                            site_lines.insert(line, fam0.clone());
+                        }
+                    }
+                }
+                walk(&i.body, source, families, site_lines);
+                for cl in &i.elif_else_clauses {
+                    walk(&cl.body, source, families, site_lines);
+                }
+            } else {
+                match s {
+                    Stmt::FunctionDef(f) => walk(&f.body, source, families, site_lines),
+                    Stmt::ClassDef(cd) => walk(&cd.body, source, families, site_lines),
+                    Stmt::For(f) => walk(&f.body, source, families, site_lines),
+                    Stmt::While(w) => walk(&w.body, source, families, site_lines),
+                    _ => {}
+                }
+            }
+        }
+    }
+    walk(body, source, &mut families, &mut site_lines);
+    let qualifying: std::collections::HashSet<String> = families
+        .iter()
+        .filter(|(_, (n, _))| *n >= 2)
+        .map(|(f, _)| f.clone())
+        .collect();
+    for (line, family) in &site_lines {
+        if qualifying.contains(family) {
+            state.claimed_dispatch.insert(*line);
+        }
+    }
+    let mut v: Vec<(&String, &(usize, usize))> = families.iter().collect();
+    v.sort_by_key(|(_, (_, l))| *l);
+    for (family, (n, line)) in v {
+        if *n >= 2 {
+            state.findings.push(Finding {
+                file: state.file.to_string(),
+                line: *line,
+                function: String::new(),
+                kind: "latent-visitor".into(),
+                severity: "warn".into(),
+                message: format!(
+                    "{n} operations dispatch over the same element family ('{family}') — Replace Conditional with Visitor: the elements accept a visitor with visit_<Type> methods"
+                ),
+            });
+        }
+    }
+}
+
+/// The (family, dispatched type) of one chain-arm test — the discriminated
+/// value and the type it dispatches on. Value comparisons (`x == 1`) return
+/// None: they are not type-tag dispatch.
+fn dispatch_arm(e: &Expr) -> Option<(String, String)> {
+    match e {
+        Expr::Call(c) => {
+            if let Expr::Name(n) = c.func.as_ref() {
+                if n.id.as_str() == "isinstance" {
+                    let args = &c.arguments.args;
+                    if args.len() >= 2 {
+                        let Expr::Name(f) = &args[0] else {
+                            return None;
+                        };
+                        let family = f.id.to_string();
+                        match &args[1] {
+                            Expr::Name(t) => return Some((family, t.id.to_string())),
+                            Expr::Tuple(t) => {
+                                let types: Vec<String> = t
+                                    .elts
+                                    .iter()
+                                    .filter_map(|e| {
+                                        if let Expr::Name(n) = e {
+                                            Some(n.id.to_string())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect();
+                                if types.len() == 1 {
+                                    return Some((family, types[0].clone()));
+                                }
+                                return Some((family, types.join("|")));
+                            }
+                            _ => return None,
+                        }
+                    }
+                }
+            }
+            None
+        }
+        Expr::Compare(c) => {
+            // type(x) == A / x.__class__ is A / x is A
+            let family = match c.left.as_ref() {
+                Expr::Name(n) => n.id.to_string(),
+                Expr::Call(tc) => {
+                    if let Expr::Name(f) = tc.func.as_ref() {
+                        if f.id.as_str() == "type" && tc.arguments.args.len() == 1 {
+                            if let Expr::Name(x) = &tc.arguments.args[0] {
+                                x.id.to_string()
+                            } else {
+                                return None;
+                            }
+                        } else {
+                            return None;
+                        }
+                    } else {
+                        return None;
+                    }
+                }
+                _ => return None,
+            };
+            if c.ops.len() == 1 && c.comparators.len() == 1 {
+                if let Expr::Name(t) = &c.comparators[0] {
+                    return Some((family, t.id.to_string()));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 // =====================================================================
 // repo-wide families: duplicate (Dice on structural skeletons) + unused
 // (defined-but-never-referenced). These are computed in the Rust runner

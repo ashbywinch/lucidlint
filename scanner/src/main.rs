@@ -70,6 +70,10 @@ struct ScanState<'a> {
     fn_stack: Vec<FnScope>,
     /// Class nesting: class bodies contribute no decisions (radon sub-visitor).
     in_class: u32,
+    /// Chains the latent-visitor rule claimed — conditional-polymorphism
+    /// must not double-flag them (one ruling per chain, or the agent thrashes
+    /// between implementing the visitor and the polymorphic methods).
+    claimed_dispatch: std::collections::HashSet<usize>,
     /// Parent chain for the magic-number position check — exprs plus the
     /// non-expr layers (stmt, keyword) that break the direct-parent link.
     parent_stack: Vec<ParentEntry>,
@@ -646,6 +650,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     // advisory refactorings (warn): detection-only, the fix names the Fowler
     // refactoring for the agent (or a future fix)
     guard_clause_findings(state, body, source);
+    latent_visitor_findings(state, body, source); // claims chains first — polymorphism skips them
     conditional_polymorphism_findings(state, body, source);
     special_case_findings(state, body, source);
     middle_man_findings(state, body, source);
@@ -843,6 +848,7 @@ pub const FAMILY_KINDS: &[&str] = &[
     "detached-method",
     // refactoring advice (warn, detection-only)
     "guard-clauses",
+    "latent-visitor",
     "conditional-polymorphism",
     "special-case",
     "middle-man",
@@ -925,6 +931,7 @@ pub fn final_kind(kind: &str) -> &'static str {
         "positional-literals" => "positional-literals",
         "detached-method" => "detached-method",
         "guard-clauses" => "guard-clauses",
+        "latent-visitor" => "latent-visitor",
         "conditional-polymorphism" => "conditional-polymorphism",
         "special-case" => "special-case",
         "middle-man" => "middle-man",
@@ -2181,6 +2188,48 @@ mod tests {
         assert!(f.iter().any(|x| x.kind == "loop-pipeline"));
         let ok = scan_src("def f(xs):\n    total = 0\n    for x in xs:\n        total += x\n    return total\n");
         assert!(!ok.iter().any(|x| x.kind == "loop-pipeline"));
+    }
+
+    #[test]
+    fn latent_visitor_detected_and_claims_chains() {
+        // two operations over the same element family — the visitor shape
+        let src = "class A:\n    pass\n\nclass B:\n    pass\n\ndef op1(x):\n    if isinstance(x, A):\n        return 1\n    elif isinstance(x, B):\n        return 2\n    return 0\n\ndef op2(x):\n    if isinstance(x, A):\n        return 3\n    elif isinstance(x, B):\n        return 4\n    return 0\n";
+        let f = scan_src(src);
+        assert!(f.iter().any(|x| x.kind == "latent-visitor"), "expected latent-visitor");
+        // the claimed chains must NOT also be polymorphism — one ruling per chain
+        assert!(
+            !f.iter().any(|x| x.kind == "conditional-polymorphism"),
+            "claimed chains must be exempt from conditional-polymorphism"
+        );
+    }
+
+    #[test]
+    fn single_dispatch_stays_polymorphism() {
+        // ONE operation over the family (4-arm chain) — polymorphic methods,
+        // not a visitor (a single 2-arm type check is idiomatic, no finding)
+        let src = "class A:\n    pass\n\nclass B:\n    pass\n\nclass C:\n    pass\n\nclass D:\n    pass\n\ndef op1(x):\n    if isinstance(x, A):\n        return 1\n    elif isinstance(x, B):\n        return 2\n    elif isinstance(x, C):\n        return 3\n    elif isinstance(x, D):\n        return 4\n    return 0\n";
+        let f = scan_src(src);
+        assert!(f.iter().any(|x| x.kind == "conditional-polymorphism"));
+        assert!(!f.iter().any(|x| x.kind == "latent-visitor"));
+    }
+
+    #[test]
+    fn value_dispatch_is_not_a_visitor() {
+        // x == 1/2/3/4 is value dispatch, not a type-tag visitor
+        let src = "def f(x):\n    if x == 1:\n        return 'a'\n    elif x == 2:\n        return 'b'\n    elif x == 3:\n        return 'c'\n    elif x == 4:\n        return 'd'\n    return '?'\n";
+        let f = scan_src(src);
+        assert!(f.iter().any(|x| x.kind == "conditional-polymorphism"));
+        assert!(!f.iter().any(|x| x.kind == "latent-visitor"));
+    }
+
+    #[test]
+    fn implemented_visitor_is_not_flagged() {
+        // the real visitor: accept on the elements + visit_* on the visitor —
+        // no dispatch chain remains, so nothing new fires (no thrash)
+        let src = "class A:\n    def accept(self, v):\n        return v.visit_a(self)\n\nclass B:\n    def accept(self, v):\n        return v.visit_b(self)\n\nclass Visitor:\n    def visit_a(self, e):\n        return 1\n    def visit_b(self, e):\n        return 2\n";
+        let f = scan_src(src);
+        assert!(!f.iter().any(|x| x.kind == "latent-visitor"));
+        assert!(!f.iter().any(|x| x.kind == "conditional-polymorphism"));
     }
 
     #[test]

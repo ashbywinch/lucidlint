@@ -124,6 +124,7 @@ magic-number, vague-name, and long-param-list; see the fix engine):
 | Rule | Severity | What it checks |
 |---|---|---|
 | **guard-clauses** | **warn** | ≥3 levels of if-in-if ("arrow code") — Replace Nested Conditional with Guard Clauses: invert to early returns |
+| **latent-visitor** | **warn** | ≥2 operations dispatching over the same element family (`isinstance`/`type()` chains) — Replace Conditional with Visitor: elements accept a visitor with `visit_<Type>` methods. Chains this rule claims are exempt from conditional-polymorphism — one ruling per chain |
 | **conditional-polymorphism** | **warn** | An if/elif chain of ≥4 arms dispatching on the same value — Replace Conditional with Polymorphism |
 | **special-case** | **warn** | ≥3 repeated `None`/empty checks on one name — Introduce Special Case |
 | **middle-man** | **warn** | A method that only forwards (`return self.x.y(...)`) — Remove Middle Man |
