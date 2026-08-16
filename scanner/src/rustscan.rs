@@ -665,6 +665,21 @@ impl<'a> Visit<'a> for RsState<'a> {
             if let Stmt::Expr(e, Some(_)) = stmt {
                 self.noop_check(e);
             }
+            // statement-position macros (dbg!(x);) parse as Stmt::Macro and
+            // never reach the Expr::Macro arm in visit_expr — the common
+            // form must be checked here too
+            if let Stmt::Macro(m) = stmt {
+                if is_dbg_macro(&m.mac.path) {
+                    let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
+                    self.finding(
+                        "debug-artifact",
+                        "fail",
+                        stmt.span().start().line,
+                        &fn_name,
+                        "dbg!() left in production code — remove it (clippy's dbg_macro lint is pedantic-only)".into(),
+                    );
+                }
+            }
         }
         visit::visit_stmt(self, stmt);
     }
@@ -2136,6 +2151,17 @@ mod tests {
         assert!(has_kind(&fs, "debug-artifact"));
         let fs2 = scan("fn f() {\n    let y = foo();\n}\n");
         assert!(!has_kind(&fs2, "debug-artifact"));
+    }
+
+    #[test]
+    fn debug_artifact_statement_position_dbg_alone() {
+        // the pre-fix walker only saw expression-position macros — the
+        // common `dbg!(x);` statement slipped through (found while proving
+        // the LSP install; the old fixture passed on the unwrap alone)
+        let fs = scan("fn f() {\n    dbg!(1);\n}\n");
+        assert!(has_kind(&fs, "debug-artifact"));
+        let ok = scan("fn f() {\n    println!(\"x\");\n}\n");
+        assert!(!has_kind(&ok, "debug-artifact"));
     }
 
     #[test]
