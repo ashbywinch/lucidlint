@@ -943,9 +943,6 @@ def _baseline_identity(key: str) -> BaselineIdentity:
 def main() -> int:
     args = parse_args()
     repo = args.repo.resolve()
-    if not (repo / ".git").exists():
-        log(f"{repo} is not a git repository")
-        return 2
 
     if args.file:
         # Single-file / LSP mode: no git history, coverage, or diff — the

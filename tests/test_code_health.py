@@ -594,10 +594,16 @@ def test_main_warn(tmp_path, capsys):
     assert "GATE: INFORMATIONAL" in capsys.readouterr().out
 
 
-def test_main_not_git_repo(tmp_path):
+def test_main_no_git_scans_clean(tmp_path, capsys):
+    # a directory with no .git at all — the gate scans it anyway (git
+    # degrades to rglob file gathering + empty history/diff/provenance)
     plain = tmp_path / "plain"
     plain.mkdir()
-    assert run_main(plain) == 2
+    (plain / "app.py").write_text("def f():\n    return 1\n")
+    rc = run_main(plain)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "GATE: PASS" in out
 
 
 def test_main_merges_function_targets(tmp_path, capsys):
