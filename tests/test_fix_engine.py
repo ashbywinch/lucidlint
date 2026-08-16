@@ -317,6 +317,67 @@ def test_extract_method_preview_and_confirm(tmp_path):
     assert ns["process"]([1, 2, 3], 2) == 12
 
 
+def test_extract_method_descends_into_loop_body(tmp_path):
+    """Nested descent: a loop body too complex to move whole (>13 decisions)
+    yields an inner chunk as the seam — the call lands INSIDE the loop, the
+    loop survives, and behavior is preserved. (The old flat analysis could
+    only move whole statements.)"""
+    src = (
+        "def grade_all(rows, mode):\n"
+        "    out = []\n"
+        "    for row in rows:\n"
+        "        s = row['score']\n"
+        "        if s >= 95:\n"
+        "            out.append('A+')\n"
+        "        elif s >= 90:\n"
+        "            out.append('A')\n"
+        "        elif s >= 85:\n"
+        "            out.append('A-')\n"
+        "        elif s >= 80:\n"
+        "            out.append('B+')\n"
+        "        elif s >= 75:\n"
+        "            out.append('B')\n"
+        "        elif s >= 70:\n"
+        "            out.append('B-')\n"
+        "        elif s >= 65:\n"
+        "            out.append('C+')\n"
+        "        elif s >= 60:\n"
+        "            out.append('C')\n"
+        "        elif s >= 55:\n"
+        "            out.append('C-')\n"
+        "        elif s >= 50:\n"
+        "            out.append('D+')\n"
+        "        elif s >= 45:\n"
+        "            out.append('D')\n"
+        "        elif s >= 40:\n"
+        "            out.append('D-')\n"
+        "        else:\n"
+        "            out.append('F')\n"
+        "        if mode == 'debug':\n"
+        "            out.append(row['name'])\n"
+        "    return out\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    out = fix_engine.fix_finding(
+        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="grade_row")
+    )
+    assert out is not None
+    fixed = p.read_text()
+    assert "for row in rows:" in fixed  # the loop survives
+    # the call sits INSIDE the loop (4-space indent), not at fn level
+    call_lines = [ln for ln in fixed.splitlines() if "grade_row(" in ln and not ln.lstrip().startswith("def ")]
+    assert call_lines, "no call site found"
+    assert call_lines[0].startswith("        ") or call_lines[0].startswith("    ")
+    # behavior preserved
+    ns = {}
+    exec(compile(fixed, "app.py", "exec"), ns)
+    rows = [{"score": 97, "name": "x"}, {"score": 50, "name": "y"}]
+    assert ns["grade_all"](rows, "debug") == ["A+", "x", "D+", "y"]
+    assert ns["grade_all"](rows, "quiet") == ["A+", "D+"]
+
+
 def test_extract_method_no_safe_seam(tmp_path):
     # every block feeds the rest of the function — no out-var-free seam
     src = (

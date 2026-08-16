@@ -438,46 +438,40 @@ def fix_parameter_object(source: str, line: int, name: str) -> str | None:
 
 
 class _ExtractMethodRewrite(cst.CSTTransformer):
-    """Replace the target block with a call to the new function."""
+    """Replace the target block with a call to the new function. Works at any
+    nesting depth: removed statements vanish via `on_leave`, and the call is
+    inserted into their container's body at the first removed statement's
+    index — so a seam inside a loop becomes a call inside the loop."""
 
-    METADATA_DEPENDENCIES = (PositionProvider,)
-
-    def __init__(self, fn_name: str, fn_line: int, block_indices: set[int], new_name: str,
-            free_vars: list[str],
-        ) -> None:
-        self.fn_name = fn_name
-        self.fn_line = fn_line
-        self.block_indices = block_indices
+    def __init__(self, block_sids: set[int], insertion, new_name: str, free_vars: list[str]) -> None:
+        self.block_sids = block_sids
+        self.container_sid, self.insert_index = insertion
         self.new_name = new_name
         self.free_vars = free_vars
 
-    @override
-    def leave_FunctionDef(self, original_node, updated_node):
-        if updated_node.name.value != self.fn_name:
-            return updated_node
-        if self.get_metadata(PositionProvider, original_node).start.line != self.fn_line:
-            return updated_node
-        kept = []
-        inserted_call = False
-        for idx, stmt in enumerate(updated_node.body.body):
-            if idx in self.block_indices:
-                if not inserted_call:
-                    kept.append(
-                        cst.SimpleStatementLine(
-                            body=[
-                                cst.Expr(
-                                    cst.Call(
-                                        func=cst.Name(self.new_name),
-                                        args=[cst.Arg(cst.Name(v)) for v in self.free_vars],
-                                    )
-                                )
-                            ]
+    def on_leave(self, original_node, updated_node):
+        if id(original_node) in self.block_sids:
+            return cst.RemoveFromParent()
+        if id(original_node) == self.container_sid:
+            suite = getattr(updated_node, "body", None)
+            if isinstance(suite, cst.IndentedBlock):
+                body = list(suite.body)
+                call = cst.SimpleStatementLine(
+                    body=[
+                        cst.Expr(
+                            cst.Call(
+                                func=cst.Name(self.new_name),
+                                args=[cst.Arg(cst.Name(v)) for v in self.free_vars],
+                            )
                         )
-                    )
-                    inserted_call = True
-            else:
-                kept.append(stmt)
-        return updated_node.with_changes(body=updated_node.body.with_changes(body=kept))
+                    ]
+                )
+                idx = min(self.insert_index, len(body))
+                body.insert(idx, call)
+                return updated_node.with_changes(
+                    body=suite.with_changes(body=body)
+                )
+        return updated_node
 
 
 class _InsertExtractedFn(cst.CSTTransformer):
@@ -522,87 +516,147 @@ class _FnBodyState:
     def __init__(self, line: int) -> None:
         self.line = line
         self.fn_node: cst.FunctionDef | None = None
-        self.stmt_ids: list[int] = []
+        # flattened statement list: (sid, container_sid, index_in_container)
+        self.flat: list[tuple[int, int, int]] = []
+        self.nodes: dict[int, object] = {}          # sid -> statement node
+        self.container_sids: dict[int, list[int]] = {}  # container -> body sids
         self.stmt_spans: dict[int, tuple[int, int]] = {}
         self.first_use: dict[int, dict[str, str]] = {}
         self.writes: dict[int, set[str]] = {}
         self.control_flow: dict[int, bool] = {}
         self.decisions: dict[int, int] = {}
+        # module-scope names — the extracted fn sits at module level too, so
+        # imports/constants/defs are ambient, not parameters
+        self.module_globals: set[str] = set()
+        # names the fn assigns anywhere — a local shadow, so the name IS a
+        # parameter even when a module binding exists
+        self.fn_writes: set[str] = set()
 
     def _window_score(self, i: int, j: int, min_lines: int):
-        """Score one candidate window: (free_count, -span, start) when it is
-        a safe seam, or None. Free = names whose first use in the window is a
-        read (builtins excluded); out-variables and control-flow exits
-        disqualify."""
-        if i == 0 and j == len(self.stmt_ids) - 1:
-            return None  # extracting the whole body is not a refactoring
-        if any(self.control_flow[self.stmt_ids[k]] for k in range(i, j + 1)):
+        """Score one candidate window over the FLAT statement list: a seam
+        must stay within ONE container (a window cannot span the loop body
+        and the fn body). Returns (free_count, -span, start) when safe, or
+        None. Free = names whose first use in the window is a read
+        (builtins excluded); out-variables and control-flow exits
+        disqualify; the whole function is not a seam."""
+        if i == 0 and j == len(self.flat) - 1:
+            return None  # the whole flattened body is not a refactoring
+        container = self.flat[i][1]
+        same_container = all(self.flat[k][1] == container for k in range(i, j + 1))
+        if not same_container:
+            return None
+        if any(self.control_flow[self.flat[k][0]] for k in range(i, j + 1)):
             return None  # a return/break inside the seam changes control flow
-        span = self.stmt_spans[self.stmt_ids[j]][1] - self.stmt_spans[self.stmt_ids[i]][0] + 1
+        span = self.stmt_spans[self.flat[j][0]][1] - self.stmt_spans[self.flat[i][0]][0] + 1
         if span < min_lines:
             return None
         free: set[str] = set()
         seen: set[str] = set()
         writes_all: set[str] = set()
-        for k in range(i, j + 1):
-            sid = self.stmt_ids[k]
+        # the window's statements PLUS their nested subtrees — a statement's
+        # body (the if's, the loop's) belongs to it for free/out-var math
+        window_sids = self._window_sids(i, j)
+        for sid in window_sids:
             for name, ctx in self.first_use[sid].items():
                 if name not in seen:
                     seen.add(name)
                     if ctx == "read":
                         free.add(name)
             writes_all |= self.writes[sid]
-        free -= _BUILTINS
-        if self._window_has_outvars(j, writes_all) or not free:
+        # builtins and true module globals (not shadowed by a fn-local) are
+        # ambient in the extracted fn; writes to them are not out-variables
+        shadowed = {n for n in self.module_globals if n in self.fn_writes}
+        ambient = _BUILTINS | (self.module_globals - shadowed)
+        free -= ambient
+        writes_all -= ambient
+        if self._window_has_outvars(i, j, writes_all) or not free:
             return None  # out-variable or no-input seam — skip
         return len(free), -span, i, sorted(free)
 
-    def _window_has_outvars(self, j: int, writes_all: set[str]) -> bool:
-        """Does any name written in the window get read after it?
-        Out-variables would need a return value — the seam must be
-        self-contained."""
+    def _subtree_sids(self, sid: int) -> list[int]:
+        """The statement's subtree ids in SOURCE ORDER — first-use analysis
+        must see a write before a later read or it fabricates free variables
+        (the phantom-param bug)."""
+        out = [sid]
+        for child in self.container_sids.get(sid, []):
+            out.extend(self._subtree_sids(child))
+        return out
+
+    def _window_sids(self, i: int, j: int) -> list[int]:
+        """The window's statement ids plus all descendant ids (a compound's
+        body) in SOURCE ORDER, so the free/out-var math sees the whole
+        subtree with writes before reads."""
+        sids: list[int] = []
+        for k in range(i, j + 1):
+            sids.extend(self._subtree_sids(self.flat[k][0]))
+        return sids
+
+    def _window_has_outvars(self, i: int, j: int, writes_all: set[str]) -> bool:
+        """Does any name written in the window get read after it — in the
+        SEQUENTIAL sense? Reads inside the window's own container (a loop's
+        other body statements) are iteration-scoped and not out-variables:
+        the loop target re-binds each pass. Only reads in LATER flat
+        positions outside the window's container count."""
+        container = self.flat[i][1]
+        container_node = self.nodes.get(container)
+        loop_scoped = isinstance(container_node, (cst.For, cst.While))
+        window_subtree = set(self._window_sids(i, j))
         after: set[str] = set()
-        for k in range(j + 1, len(self.stmt_ids)):
-            for name, ctx in self.first_use[self.stmt_ids[k]].items():
-                if ctx == "read":
-                    after.add(name)
+        for k in range(j + 1, len(self.flat)):
+            sid = self.flat[k][0]
+            if sid in window_subtree:
+                continue  # inside the window's own subtree, not sequential-after
+            if loop_scoped and self.flat[k][1] == container:
+                continue  # a loop's later body stmts re-bind per iteration
+            for dsid in self._subtree_sids(sid):
+                for name, ctx in self.first_use[dsid].items():
+                    if ctx == "read":
+                        after.add(name)
         return bool(writes_all & after)
 
-    def best_seam(self, min_lines: int = 2, max_window_decisions: int | None = None):
-        """The window whose free variables are the smallest subset of the
-        function's variables (builtins excluded — they are available in any
-        scope) and whose out-variables are empty. A name is free iff its
-        FIRST use in the window is a read. Ties go to the larger window.
-        Returns (block_ids, free_vars) or None. Out-variables are a smell —
-        the seam must be self-contained; the whole body is not a seam."""
-        n = len(self.stmt_ids)
-        best = None  # (free_count, -lines, start, block_ids, free_vars)
+    def best_seam(self, min_lines: int = 2, max_window_decisions: int | None = None,
+            max_free_vars: int = 6,
+        ):
+        """The window with the MOST decisions (real CC progress — extraction
+        splits complexity, it does not move it) among those whose free
+        variables fit the interface budget and whose out-variables are empty.
+        A name is free iff its FIRST use in the window is a read. Ties go to
+        fewer free vars, then the larger window. Returns (block_ids,
+        free_vars) or None. Out-variables are a smell — the seam must be
+        self-contained; the whole body is not a seam."""
+        n = len(self.flat)
+        best = None  # (score, flat indices)
         for i in range(n):
             for j in range(i, n):
                 score = self._window_score(i, j, min_lines)
                 if score is None:
                     continue
+                free_count, _, _, free_vars = score
+                if free_count > max_free_vars:
+                    continue  # too-wide interface — not a cohesive seam
                 if max_window_decisions is not None:
                     window_decisions = sum(
-                        self.decisions[self.stmt_ids[k]] for k in range(i, j + 1)
+                        self.decisions[self.flat[k][0]] for k in range(i, j + 1)
                     )
                     if window_decisions > max_window_decisions:
                         continue  # the extracted fn would still be complex
-                    # for a complexity finding the goal is to SPLIT the CC:
-                    # prefer the window that takes the most decisions (up to
-                    # the bound), then fewest free vars, then largest
+                    # decisions FIRST (CC progress), then interface width,
+                    # then size — the descending order of the bound mode
                     score = (-window_decisions, *score)
                 if best is None or score < best[0]:
                     best = (score, list(range(i, j + 1)))
         if best is None:
             return None
-        (*_, free_vars), block_ids = best
-        return list(block_ids), free_vars
+        (*_, free_vars), flat_indices = best
+        block_sids = [self.flat[k][0] for k in flat_indices]
+        return list(block_sids), free_vars
 
 
 class _Analyse(cst.CSTVisitor):
-    """Collects the target function's body statement data. Module-level so
-    the latent-class rule does not fire on the enclosing analysis function."""
+    """Collects the target function's body statement data — flattened so
+    seams can descend into compound statements (a big loop's inner chunks
+    become extractable, not just the whole loop). Module-level so the
+    latent-class rule does not fire on the enclosing analysis function."""
 
     METADATA_DEPENDENCIES = (PositionProvider, ExpressionContextProvider, ParentNodeProvider)
 
@@ -617,18 +671,64 @@ class _Analyse(cst.CSTVisitor):
         ):
             return
         self.state.fn_node = node
-        for s in node.body.body:
-            p = self.get_metadata(PositionProvider, s)
+        self._flatten(node)
+
+    def _flatten(self, container) -> None:
+        """Collect the IndentedBlock-bodied statements under `container`,
+        recursing into compounds (If/For/While/Try — their nested bodies
+        carry IndentedBlocks). Nested defs/classes are scopes — not
+        descended into."""
+        suite = getattr(container, "body", None)
+        if not isinstance(suite, cst.IndentedBlock):
+            return
+        children = []
+        for idx, s in enumerate(suite.body):
             sid = id(s)
+            self.state.flat.append((sid, id(container), idx))
+            self.state.nodes[sid] = s
+            p = self.get_metadata(PositionProvider, s)
             self.state.stmt_spans[sid] = (p.start.line, p.end.line)
-            self.state.stmt_ids.append(sid)
             self.state.first_use[sid] = {}
             self.state.writes[sid] = set()
-            self.state.control_flow[sid] = isinstance(s, cst.SimpleStatementLine) and any(
-                isinstance(st, (cst.Return, cst.Break, cst.Continue, cst.Raise, cst.Yield))
-                for st in s.body
-            )
+            self.state.control_flow[sid] = self._subtree_control_flow(s)
             self.state.decisions[sid] = _stmt_decision_count(s)
+            children.append(sid)
+            if isinstance(s, (cst.If, cst.For, cst.While, cst.Try)):
+                self._flatten(s)
+        self.state.container_sids[id(container)] = children
+
+    def _subtree_control_flow(self, stmt) -> bool:
+        """Would moving this statement alone change control flow? A
+        `return`/`yield` inside always escapes the extracted fn (the call
+        would return instead of continuing). A `break`/`continue` is only
+        safe when its enclosing loop MOVES ALONG (lives inside the
+        statement's subtree) — else it would escape to nothing. Nested
+        defs are their own scopes: skipped."""
+        nodes: list = []
+
+        def collect(node) -> None:
+            nodes.append(node)
+            if isinstance(node, cst.FunctionDef):
+                return  # a nested fn's control flow is its own
+            for child in node.children:
+                collect(child)
+
+        collect(stmt)
+        loops = {id(n) for n in nodes if isinstance(n, (cst.For, cst.While))}
+        for n in nodes:
+            if isinstance(n, (cst.Return, cst.Yield)):
+                return True
+            if isinstance(n, (cst.Break, cst.Continue)):
+                p = self.get_metadata(ParentNodeProvider, n)
+                ok = False
+                while p is not None and not isinstance(p, cst.Module):
+                    if isinstance(p, (cst.For, cst.While)):
+                        ok = id(p) in loops
+                        break
+                    p = self.get_metadata(ParentNodeProvider, p)
+                if not ok:
+                    return True
+        return False
 
     @override
     def visit_Name(self, node) -> None:
@@ -639,7 +739,7 @@ class _Analyse(cst.CSTVisitor):
         while parent is not None and not isinstance(parent, cst.Module):
             if parent is self.state.fn_node:
                 break
-            if id(parent) in self.state.stmt_ids:
+            if id(parent) in self.state.nodes:
                 sid = id(parent)
                 break
             parent = self.get_metadata(ParentNodeProvider, parent)
@@ -667,10 +767,53 @@ def _fn_seam_analysis(source: str, line: int):
     wrapper = cst.MetadataWrapper(module)
     state = _FnBodyState(line)
     wrapper.visit(_Analyse(state))
+    state.module_globals = _module_level_names(module)
+    state.fn_writes = set().union(*(w for w in state.writes.values())) if state.writes else set()
     return module, wrapper, state
 
 
 _BUILTINS = frozenset(dir(builtins))
+
+
+def _module_level_names(module: cst.Module) -> set[str]:
+    """The names bound at module scope: imports (and their aliases),
+    assignments, and defs/classes. Any of these is ambient for a function
+    placed at module level — the extracted helper needs no parameter for
+    them."""
+    names: set[str] = set()
+
+    def add_target(t) -> None:
+        if isinstance(t, cst.AssignTarget):
+            add_target(t.target)
+        elif isinstance(t, cst.Name):
+            names.add(t.value)
+        elif isinstance(t, cst.Tuple):
+            for el in t.elements:
+                add_target(el.value)
+        # obj.attr = ... binds nothing at module scope
+
+    for line_stmt in module.body:
+        collect_stmt_names(add_target, line_stmt, names)
+    return names
+def collect_stmt_names(add_target, line_stmt, names):
+    stmts = line_stmt.body if isinstance(line_stmt, cst.SimpleStatementLine) else [line_stmt]
+    for stmt in stmts:
+        if isinstance(stmt, cst.Import):
+            for a in stmt.names:
+                bound = a.asname.name.value if a.asname else a.name.value.split(".")[0]
+                names.add(bound)
+        elif isinstance(stmt, cst.ImportFrom):
+            for a in stmt.names:
+                if a.asname:
+                    names.add(a.asname.name.value)
+                elif a.name.value != "*":
+                    names.add(a.name.value)
+        elif isinstance(stmt, (cst.Assign, cst.AnnAssign)):
+            targets = stmt.targets if isinstance(stmt, cst.Assign) else [stmt.target]
+            for t in targets:
+                add_target(t)
+        elif isinstance(stmt, (cst.FunctionDef, cst.ClassDef)):
+            names.add(stmt.name.value)
 
 
 
@@ -684,24 +827,23 @@ def extract_method_proposal(
     seam exists. `max_decisions` bounds the seam so the extracted function
     does not inherit the original's complexity."""
     module, wrapper, state = _fn_seam_analysis(source, line)
-    if state.fn_node is None or len(state.stmt_ids) < 2:
+    if state.fn_node is None or len(state.flat) < 2:
         return None, None
     seam = state.best_seam(max_window_decisions=max_decisions)
     if seam is None:
         return None, None
-    block_indices, free_vars = seam
-    block_sids = [state.stmt_ids[i] for i in block_indices]
+    block_sids, free_vars = seam
     first_span = state.stmt_spans[block_sids[0]]
+    flat_entry = next(e for e in state.flat if e[0] == block_sids[0])
+    container_sid, insert_index = flat_entry[1], flat_entry[2]
     new_def = cst.FunctionDef(
         name=cst.Name(name),
         params=cst.Parameters(params=[cst.Param(cst.Name(v)) for v in free_vars]),
-        body=cst.IndentedBlock(
-            body=[s for s in state.fn_node.body.body if id(s) in set(block_sids)]
-        ),
+        body=cst.IndentedBlock(body=[state.nodes[sid] for sid in block_sids]),
         returns=None,
     )
     replaced = wrapper.visit(
-        _ExtractMethodRewrite(state.fn_node.name.value, line, set(block_indices), name, free_vars)
+        _ExtractMethodRewrite(set(block_sids), (container_sid, insert_index), name, free_vars)
     ).code
     inserted = cst.MetadataWrapper(cst.parse_module(replaced)).visit(
         _InsertExtractedFn(state.fn_node.name.value, line, new_def)
@@ -1149,6 +1291,10 @@ class _DecisionCount(cst.CSTVisitor):
     @override
     def visit_IfExp(self, node) -> None:
         self.n += 1
+
+    @override
+    def visit_ExceptHandler(self, node) -> None:
+        self.n += 1  # radon counts each except handler
 
 
 def _boolop_decisions(node) -> int:
