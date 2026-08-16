@@ -71,7 +71,10 @@ pub fn add_inner_blocks(blocks: Vec<Block>) -> Vec<Block> {
     while let Some(block) = stack.pop() {
         let name = block.name().to_string();
         new_blocks.push(block);
-        match &new_blocks.last().unwrap() {
+        let Some(top) = new_blocks.last() else {
+            return new_blocks;
+        };
+        match top {
             Block::Function(f) => {
                 for inner in &f.closures {
                     let mut inner = inner.clone();

@@ -169,17 +169,31 @@ pub fn suppressed(signal: &str, line: usize, supps: &Suppressions) -> bool {
     false
 }
 
+/// Suppressions the caller's own filtering paths already honored (the Rust
+/// cc-array retain removes complexity findings before this filter runs) —
+/// stale detection must not re-flag them.
+#[derive(Default)]
+pub struct PreUsedSuppressions {
+    pub lines: std::collections::HashSet<(usize, String)>,
+    pub files: std::collections::HashSet<String>,
+}
+
 /// Filter findings through the suppressions + emit the why-less suppression
 /// findings — the shared post-filter (Python `_scan_file`'s). `marker` is the
-/// comment token ('#' or "//") used in the why-less messages.
-pub fn apply_suppressions(
+/// comment token ('#' or "//") used in the why-less messages. `pre_used`
+/// carries the suppressions the caller's cc-array retain already honored so
+/// stale detection does not re-flag them (the Rust layer's cc path).
+pub fn apply_suppressions_impl(
     findings: Vec<crate::Finding>,
     comments: &[(usize, String)],
     file: &str,
     marker: &str,
+    pre_used: &PreUsedSuppressions,
 ) -> Vec<crate::Finding> {
     let supps = suppressions_from_comments(comments);
     let mut out = Vec::new();
+    let mut used_line: std::collections::HashSet<(usize, String)> = pre_used.lines.clone();
+    let mut used_file: std::collections::HashSet<String> = pre_used.files.clone();
     // the Python tool dedups suppressions by line (one per line)
     let mut seen_invalid: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (ln, (sig, why)) in &supps.line {
@@ -216,15 +230,114 @@ pub fn apply_suppressions(
         }
     }
     for f in findings {
-        if suppressed(&f.kind, f.line, &supps) {
+        if suppress_track_line(&mut used_line, &supps, &f) {
             continue;
         }
-        if let Some(why) = supps.file.get(&f.kind) {
-            if !why.is_empty() {
-                continue; // ignore-file with a why exempts; a why-less one does not
-            }
+        if suppress_track_file(&mut used_file, &supps, &f) {
+            continue; // ignore-file with a why exempts; a why-less one does not
         }
         out.push(f);
     }
+    let ctx = StaleCtx {
+        supps: &supps,
+        used_line: &used_line,
+        used_file: &used_file,
+        comments,
+        file,
+        marker,
+    };
+    out.extend(ctx.stale_suppression_findings());
     out
+}
+
+/// Was this finding exempted by an explained line suppression? Records the
+/// matched comment so the stale check does not re-flag it.
+fn suppress_track_line(
+    used_line: &mut std::collections::HashSet<(usize, String)>,
+    supps: &Suppressions,
+    f: &crate::Finding,
+) -> bool {
+    for ln in [f.line, f.line.saturating_sub(1)] {
+        if let Some((sig, why)) = supps.line.get(&ln) {
+            if sig == &f.kind && !why.is_empty() {
+                used_line.insert((ln, sig.clone()));
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Was this finding exempted by an explained file suppression?
+fn suppress_track_file(
+    used_file: &mut std::collections::HashSet<String>,
+    supps: &Suppressions,
+    f: &crate::Finding,
+) -> bool {
+    if let Some(why) = supps.file.get(&f.kind) {
+        if !why.is_empty() {
+            used_file.insert(f.kind.clone());
+            return true;
+        }
+    }
+    false
+}
+
+/// The stale-check context — the filter state + comment stream of one file.
+struct StaleCtx<'a> {
+    supps: &'a Suppressions,
+    used_line: &'a std::collections::HashSet<(usize, String)>,
+    used_file: &'a std::collections::HashSet<String>,
+    comments: &'a [(usize, String)],
+    file: &'a str,
+    marker: &'a str,
+}
+
+impl<'a> StaleCtx<'a> {
+    /// Stale suppressions: an explained suppression that matched nothing is
+    /// dead weight — the signal it names no longer fires on that line/file
+    /// (a family renamed, a finding fixed, a comment moved). Why-less ones
+    /// are already findings; they never match by design.
+    fn stale_suppression_findings(&self) -> Vec<crate::Finding> {
+        let mut out = Vec::new();
+        for (ln, (sig, why)) in &self.supps.line {
+            if why.is_empty() || self.used_line.contains(&(*ln, sig.clone())) {
+                continue;
+            }
+            out.push(crate::Finding {
+                file: self.file.to_string(),
+                line: *ln,
+                function: String::new(),
+                kind: "stale-suppression".into(),
+                severity: "fail".into(),
+                message: format!(
+                    "suppression '{} code-health: ignore {sig}' at line {ln} no longer fires — remove it",
+                    self.marker
+                ),
+            });
+        }
+        for (sig, why) in &self.supps.file {
+            if why.is_empty() || self.used_file.contains(sig) {
+                continue;
+            }
+            if let Some((ln, _)) = self
+                .comments
+                .iter()
+                .find(|(_, t)| t.contains(&format!("code-health: ignore-file {sig}")))
+            {
+                out.push(crate::Finding {
+                    file: self.file.to_string(),
+                    line: *ln,
+                    function: String::new(),
+                    kind: "stale-suppression".into(),
+                    severity: "fail".into(),
+                    message: format!(
+                        "file suppression '{} code-health: ignore-file {sig}' no longer fires — remove it",
+                        self.marker
+                    ),
+                });
+            }
+        }
+        out
+    }
 }

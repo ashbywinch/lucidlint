@@ -28,12 +28,12 @@ The bundle is self-contained: `code_health.py` finds its sibling `bin/lucidlint`
 
 | Group | What the gate flags |
 |---|---|
-| **Style & correctness** | Magic numbers, dead code, shadows builtins, broad excepts, inline imports, unused functions, circular imports, `# type: ignore` without a why, broken doc links |
-| **Complexity & size** | Cyclomatic CC ≥ 15, functions ≥ 120 lines, near-duplicate code |
-| **Architecture** | Import cycles, layer violations, folder community splits, hub files, high-risk untested functions, record-shaped structs, abstract classes with one subclass |
-| **Test discipline** | `monkeypatch` / `patch` instead of DI, `skipif` on environment, real filesystem I/O without `pyfakefs`, `#[ignore]`d tests |
-| **Suppressions** | Any `ignore` / `allow` / `type: ignore` without a written reason — the gate trusts your judgment once you explain it |
-| **&dagger; Controversial** | Vague role names (Manager/Handler), closures as missed classes, inline imports for performance, except-swallows, global state, file churn × CC hotspots, community-based folder mixing, similarity-based duplicates |
+| **Style & correctness** | Magic numbers, dead statements, unreachable code, `dbg!()`/`.unwrap()`/`breakpoint()` left in, boolean-literal arguments, shadowed builtins, broad excepts, swallowed errors, inline/private imports, unused functions, circular imports, broken doc links |
+| **Complexity & size** | Cyclomatic CC ≥ 15, functions ≥ 120 lines, > 5 parameters, near-duplicate code |
+| **Architecture** | Import cycles, layer violations, folder community splits, hub files, high-risk untested functions, record-shaped structs, strewing, latent classes, abstract classes with one subclass, churn without tests |
+| **Test discipline** | `monkeypatch` / `patch` instead of DI, `skipif`/`#[ignore]`/permanent skips, real filesystem I/O without `pyfakefs`, tests with no assertion |
+| **Suppressions** | Any `ignore` / `allow` / `type: ignore` / `noqa` without a written reason — plus suppressions that no longer fire (stale) |
+| **&dagger; Controversial** | Vague role names (Manager/Handler), closures as missed classes, inline imports for performance, swallowed errors, global state, file churn × CC hotspots, community-based folder mixing, similarity-based duplicates |
 
 &dagger; These rules can conflict with existing team conventions or framework idioms. Each is individually suppressible (see RULES.md). A rule that doesn't fit your project is acknowledged debt, not a blocker.
 

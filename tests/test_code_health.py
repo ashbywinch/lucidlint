@@ -10,6 +10,7 @@ real binary through a passthrough subprocess route.
 """
 
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -508,6 +509,91 @@ def test_rust_files_are_scanned(tmp_path, capsys):
     assert "magic number" in out
 
 
+# --------------------------------------------------------------------------- project config suppression
+def test_config_global_ignore_suppresses(tmp_path, capsys):
+    """A .lucidlint.toml global ignore suppresses the signal — and must not
+    crash (regression: Action lacked a signal field, so any ignore entry
+    raised AttributeError at the config filter)."""
+    repo = make_repo(tmp_path, app_src="def f():\n    return 60 * 24\n")
+    (repo / ".lucidlint.toml").write_text('[lucidlint]\nignore = ["magic-number"]\n')
+    rc = run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "magic number" not in out
+
+
+def test_config_group_ignore_suppresses(tmp_path, capsys):
+    """group:style suppresses magic-number (a style member)."""
+    repo = make_repo(tmp_path, app_src="def f():\n    return 60 * 24\n")
+    (repo / ".lucidlint.toml").write_text('[lucidlint]\nignore = ["group:style"]\n')
+    rc = run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "magic number" not in out
+
+
+def test_config_per_path_ignore_suppresses(tmp_path, capsys):
+    """A per-path ignore suppresses only under its glob."""
+    repo = make_repo(tmp_path, app_src="def f():\n    return 60 * 24\n")
+    (repo / ".lucidlint.toml").write_text('[lucidlint]\n[lucidlint."houses/**"]\nignore = ["magic-number"]\n')
+    rc = run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "magic number" not in out
+
+
+# --------------------------------------------------------------------------- family registration consistency
+def _family_kinds() -> set[str]:
+    """Every kind the scanner can emit — parsed from the Rust registry const
+    (the single source of truth; this test is the cross-language check that
+    RULE_GROUPS and RULES.md keep up with it)."""
+    src = Path(__file__).resolve().parent.parent / "scanner" / "src" / "main.rs"
+    text = src.read_text()
+    start = text.index("pub const FAMILY_KINDS")
+    end = text.index("];", start)
+    return set(re.findall(r'"([a-z-]+)"', text[start:end]))
+
+
+def _rules_md_names() -> set[str]:
+    rules = (Path(__file__).resolve().parent.parent / "RULES.md").read_text()
+    names = set()
+    for line in rules.splitlines():
+        line = line.strip()
+        if not line.startswith("| **"):
+            continue
+        name = line.split("|")[1].strip().split(" (")[0].split(" →")[0].strip("*").strip()
+        names.add(name)
+    return names
+
+
+def test_rule_groups_cover_every_family_kind():
+    """Every emitted kind belongs to exactly one RULE_GROUPS group (group
+    suppression would silently miss an unregistered family)."""
+    members = set().union(*ch.RULE_GROUPS.values())
+    for kind in sorted(_family_kinds()):
+        assert kind in members, f"kind '{kind}' is emitted but not in any RULE_GROUPS group"
+
+
+def test_rule_groups_have_no_dead_kinds():
+    """Every group member is an emitted kind — a stale member is dead config
+    (suppressing a signal the scanner never emits)."""
+    kinds = _family_kinds()
+    for group, members in ch.RULE_GROUPS.items():
+        for kind in members:
+            assert kind in kinds, f"'{kind}' is in group:{group} but the scanner never emits it"
+
+
+def test_rules_md_documents_every_family_kind():
+    """Every emitted kind has a RULES.md row (its own name or an alias)."""
+    documented = _rules_md_names()
+    # partition is the latent-class field-partition variant — the closures row
+    # documents the family; 'standard' (Group 6) is a display bucket, not a kind
+    aliases = {"partition": "closures"}
+    for kind in sorted(_family_kinds()):
+        assert kind in documented or aliases.get(kind) in documented, \
+            f"kind '{kind}' is emitted but has no RULES.md row"
+
+
 # --------------------------------------------------------------------------- utilities
 def test_numbits_to_lines():
     assert ch._numbits_to_lines(b"\x01") == {1}
@@ -640,7 +726,7 @@ def test_main_update_baseline(tmp_path):
     assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
     assert baseline.exists()
     keys = json.loads(baseline.read_text())["actions"]
-    assert keys and "standard:houses/app.py" in keys[0]
+    assert keys and "swallow:houses/app.py" in keys[0]  # swallow has its own display bucket
 
 
 def test_main_json_meta(tmp_path, capsys):

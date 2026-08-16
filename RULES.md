@@ -20,11 +20,42 @@ A suppression without a why is itself a finding. Every `# type: ignore` / `#[all
 
 The first two groups are the ones most likely to collide with existing codebase conventions. Each is individually suppressible.
 
+## Adding a finding family
+
+Every finding has two identifiers — don't conflate them:
+
+- **`signal`** — the raw family kind (e.g. `magic-number`). This is what
+  suppressions match on: `code-health: ignore <signal> <why>`, config
+  `ignore = ["<signal>"]`, `group:<name>` membership, and baseline
+  identity.
+- **`kind`** — the display kind in reports, `final_kind`'s output. Families
+  without a named bucket collapse to `standard` (the message explains the
+  rule).
+
+A new family must be registered in **four places**:
+
+1. **Scanner** — emit the finding at the right AST hook with
+   `finding("<kind>", "<fail|warn>", ...)`; the kind string is the signal.
+   (Python layer: `scanner/src/checks.rs`; Rust layer: `scanner/src/rustscan.rs`;
+   graph: `scanner/src/graph_families.rs`.)
+2. **`final_kind`** (`scanner/src/main.rs`) — a named display bucket, or
+   accept the `standard` collapse deliberately.
+3. **`RULE_GROUPS`** (`code_health.py`) — every kind belongs to exactly one
+   group so `ignore = ["group:<name>"]` works.
+4. **RULES.md** — a row here: severity and what it checks.
+
+Then: unit tests for the scanner path, an orchestrator test if the family
+changes gate behavior, a suppression test (`code-health: ignore` + config
+`ignore`), and `make self-check` — the tool scans its own repo, so the
+house code must be clean under the new family (or the finding baselined
+with a why).
+
 ## Group 1: Architecture & design &dagger;
 
 | Rule | Severity | What it checks |
 |---|---|---|
 | **complexity** | fail | Cyclomatic complexity ≥ 15 (radon-equivalent rules: `if`/`elif` count, `match` arms minus wildcard, `&&`/`||`, ternary, loops, `assert!`, closures +0 walked) |
+| **long-param-list** | fail | A function with > 5 parameters (receiver/`self` excluded) — introduce a parameter object |
 | **large-function** | fail | Function spans ≥ 120 lines — split it: one rule per function |
 | **closures → latent-class** | fail | A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line span) — the nested structure is a class waiting to be extracted |
 | **strewing** | fail | ≥3 free functions sharing the same leading parameter — they share data, they're a class |
@@ -40,12 +71,15 @@ The first two groups are the ones most likely to collide with existing codebase 
 | Rule | Severity | What it checks |
 |---|---|---|
 | **magic-number** | **warn** | Numeric literal (outside 0/1/2) used as an operand — name it as a constant |
+| **debug-artifact** | fail | `dbg!()` / `.unwrap()` / `.expect()` in production Rust; `breakpoint()` in production Python — debugging left in |
 | **noop-statement** | fail | Expression statement that discards its value (`x;`, `a + b;`) — dead statement |
 | **unreachable** | fail | Statement after an unconditional `return`/`break`/`continue`/`panic!` — dead code is deleted |
 | **vague-name** | fail | Type ending in Manager, Handler, Store, Repository, Controller, Utils, or Info with significant size/methods — the domain concept should name it |
 | **class-module** | fail | A Python module holding exactly one class whose name doesn't match the filename — rename the file to match |
-| **shadow** | fail | A variable/parameter that shadows a Python builtin (`list`, `dict`, `str`, `id`...) |
+| **builtin-shadow** | fail | A variable/parameter that shadows a Python builtin (`list`, `dict`, `str`, `id`...) |
 | **broad-except** | **warn** | Bare `except:` — catch specific exceptions |
+| **boolean-arg** | fail | A boolean literal passed as a call argument (`connect(host, True)`) — name the flag at the call site |
+| **swallow** | fail | A catch that neither re-raises nor exits with control flow (no return/break/continue); in Rust, a `Result`/`Option` discarded with `let _ =` — the error vanishes, re-raise or handle it |
 | **inline-import** | fail | `import` inside a function body (Python) — imports belong at module top |
 | **private-import** | fail | Importing an underscore-prefixed symbol from another module |
 | **global-state** | fail | Module-level mutable container mutated inside a function — put state in a class |
@@ -61,7 +95,8 @@ The first two groups are the ones most likely to collide with existing codebase 
 | **monkeypatch** | fail | `monkeypatch`/`unittest.mock.patch` — prefer dependency injection |
 | **skipif** | fail | `@pytest.mark.skipif` on environment presence (`os.environ`, `sys.platform`, etc.) — a skipped test rots; fake the dependency instead |
 | **fakefs** | fail | Real filesystem I/O (`open`, `pathlib.Path`) in a test without `pyfakefs` — tests fake the filesystem |
-| **ignored-test** | fail | `#[test] #[ignore]` — a parked test rots; fix it or delete it |
+| **skipif** | fail | `@pytest.mark.skipif` on environment presence, a bare `@pytest.mark.skip`, or `#[test] #[ignore]` — a skipped test rots; fake the dependency instead |
+| **no-assert-test** | fail | A test function with no assertion anywhere in its body — it can never fail |
 
 ## Group 4: Suppression discipline
 
@@ -70,6 +105,8 @@ The first two groups are the ones most likely to collide with existing codebase 
 | **suppression** | fail | `code-health: ignore <signal>` with no explanation — every exemption needs a why |
 | **type-ignore** | fail | `# type: ignore` with no comment — a suppression is itself a finding; explain why the checker is wrong |
 | **allow-reason** (Rust) | fail | `#[allow(...)]` / `#[expect(...)]` with no reason comment on the line or the line above |
+| **noqa** | fail | `# noqa` / `# pragma: no cover` with no explanation — a suppression is itself a finding |
+| **stale-suppression** | fail | A `code-health: ignore` / `ignore-file` that no longer suppresses anything — remove it |
 
 ## Group 5: Hotspot & risk (graph-based)
 
@@ -80,7 +117,8 @@ These rules require the optional `code-review-graph` tool (installed separately 
 | **hub-file** | fail | A file with ≥150 incoming or outgoing call/import edges — central module that may need splitting |
 | **high-risk** | fail | A function with >10 callers, no test coverage, and/or a security-related name (`auth`, `login`, `token`, `sql`...) |
 | **hotspot** | fail | A file in the top N% by churn with a function at ≥15 CC — volatile code that needs refactoring |
-| **abstraction** | fail | An abstract base class (Python ABC) with exactly one concrete subclass — the abstraction doesn't earn its keep |
+| **churn-untested** | fail | A file in the top N% by churn with no test coverage — volatile and unverified |
+| **over-abstraction** | fail | An abstract base class (Python ABC) with exactly one concrete subclass — the abstraction doesn't earn its keep |
 | **folder-mix** | fail | (listed above — graph community–driven) |
 
 ## Group 6: Cross-cutting

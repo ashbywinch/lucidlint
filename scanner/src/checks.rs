@@ -7,8 +7,8 @@
 
 use ruff_python_ast::token::{TokenKind, Tokens};
 use ruff_python_ast::{
-    AnyNodeRef, BoolOp, CmpOp, Decorator, Expr, ExprContext, Operator, Pattern, Stmt, StmtClassDef, StmtFunctionDef,
-    UnaryOp,
+    AnyNodeRef, BoolOp, CmpOp, Decorator, Expr, ExprAttribute, ExprContext, Operator, Pattern, Stmt, StmtClassDef,
+    StmtFunctionDef, UnaryOp,
 };
 use ruff_text_size::Ranged;
 use std::collections::HashSet;
@@ -103,9 +103,18 @@ pub fn parse_suppressions(source: &str, tokens: &Tokens) -> crate::common::Suppr
 
 /// Filter findings through the suppressions + emit the why-less suppression
 /// findings — shared logic over this language's comment lines (the parse
-/// itself lives in `common::suppressions_from_comments`).
-pub fn apply_suppressions(findings: Vec<Finding>, source: &str, file: &str, tokens: &Tokens) -> Vec<Finding> {
-    crate::common::apply_suppressions(findings, &comment_lines(source, tokens), file, "#")
+/// itself lives in `common::suppressions_from_comments`). `pre_used` carries
+/// the suppressions the cc-retain already honored (complexity suppressions
+/// are applied before the findings filter; stale detection must not re-flag
+/// them).
+pub fn apply_suppressions_impl(
+    findings: Vec<Finding>,
+    source: &str,
+    file: &str,
+    tokens: &Tokens,
+    pre_used: &crate::common::PreUsedSuppressions,
+) -> Vec<Finding> {
+    crate::common::apply_suppressions_impl(findings, &comment_lines(source, tokens), file, "#", pre_used)
 }
 
 /// `# type: ignore` without a why (a second comment on the line) is a finding.
@@ -126,6 +135,33 @@ pub fn type_ignore_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Fi
                 message: format!(
                     "# type: ignore at line {ln} without a why — a suppression is itself a finding: add a comment explaining why the checker is wrong"
                 ),
+            });
+        }
+    }
+    out
+}
+
+/// `# noqa` / `# pragma: no cover` without a why (a second comment on the
+/// line) is a finding — the same why-detection heuristic as
+/// `type_ignore_findings`, over the same comment-token stream.
+pub fn noqa_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (ln, text) in comment_lines(source, tokens) {
+        let rest = if text.contains("# noqa") {
+            text.split_once("# noqa").map(|(_, r)| r).unwrap_or("")
+        } else if text.contains("# pragma: no cover") {
+            text.split_once("# pragma: no cover").map(|(_, r)| r).unwrap_or("")
+        } else {
+            continue;
+        };
+        if !rest.contains('#') {
+            out.push(Finding {
+                file: file.to_string(),
+                line: ln,
+                function: String::new(),
+                kind: "noqa".into(),
+                severity: "fail".into(),
+                message: "# noqa without a why — explain what the checker gets wrong".to_string(),
             });
         }
     }
@@ -305,6 +341,52 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
     }
 }
 
+// =====================================================================
+// signature hygiene: positional boolean literals (boolean-arg) and
+// over-long parameter lists (long-param-list)
+// =====================================================================
+
+/// A positional call argument that is a literal True/False — the intent is
+/// unreadable at the call site; it should be a named keyword
+/// (f(..., retry=True)). Keyword arguments are self-documenting and exempt.
+pub fn boolean_arg_findings(state: &mut ScanState, args: &[Expr], source: &str) {
+    let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
+    for arg in args {
+        if let Expr::BooleanLiteral(_) = arg {
+            state.findings.push(Finding {
+                file: state.file.to_string(),
+                line: line_of(source, arg.range().start()),
+                function: fn_name.clone(),
+                kind: "boolean-arg".into(),
+                severity: "fail".into(),
+                message: "boolean literal argument — name it: f(..., retry=True)".to_string(),
+            });
+        }
+    }
+}
+
+/// A def with more than 5 parameters (a leading self/cls excluded — that is
+/// convention, not a parameter) — the signature is doing too much.
+pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, source: &str) {
+    let mut n = f.parameters.posonlyargs.len() + f.parameters.args.len() + f.parameters.kwonlyargs.len();
+    if let Some(first) = f.parameters.posonlyargs.first().or_else(|| f.parameters.args.first()) {
+        let name = first.parameter.name.as_str();
+        if name == "self" || name == "cls" {
+            n -= 1;
+        }
+    }
+    if n > 5 {
+        state.findings.push(Finding {
+            file: state.file.to_string(),
+            line: line_of(source, f.name.range().start()),
+            function: f.name.to_string(),
+            kind: "long-param-list".into(),
+            severity: "fail".into(),
+            message: format!("{n} parameters — introduce a parameter object"),
+        });
+    }
+}
+
 /// The except family: swallows (fail) and broad excepts (warn).
 pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
     let Stmt::Try(t) = stmt else { return };
@@ -331,10 +413,10 @@ pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
                 file: state.file.to_string(),
                 line,
                 function: fn_name.clone(),
-                kind: "except".into(),
+                kind: "swallow".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "{kind} at line {line} — the catch never raises, returns, or surfaces the error; re-raise or mark `# code-health: ignore except <why>`"
+                    "{kind} at line {line} — the catch never raises, returns, or surfaces the error; re-raise or mark `# code-health: ignore swallow <why>`"
                 ),
             });
         } else if let Some(ty) = type_opt {
@@ -2362,43 +2444,94 @@ fn mp_finding(state: &mut ScanState, desc: &str, line: usize) {
 
 const SKIPIF_NEEDLES: [&str; 5] = ["os.environ", "environ", "getenv", "os.path.exists", "sys.platform"];
 
-/// `_skipif_findings` — never skip a test for a missing environment.
+/// `pytest.mark.skip` — the parked-test decorator (attribute chain only, so
+/// unrelated `.skip` attributes are not flagged).
+fn is_pytest_mark_skip(a: &ExprAttribute) -> bool {
+    if a.attr.as_str() != "skip" {
+        return false;
+    }
+    match a.value.as_ref() {
+        Expr::Attribute(inner) => {
+            inner.attr.as_str() == "mark" && matches!(inner.value.as_ref(), Expr::Name(n) if n.id.as_str() == "pytest")
+        }
+        _ => false,
+    }
+}
+
+/// A parked-test finding — same family (kind `skipif`) and same message as
+/// the env-needle case.
+fn parked_skip_finding(state: &mut ScanState, source: &str, offset: ruff_text_size::TextSize) {
+    let line = line_of(source, offset);
+    state.findings.push(Finding {
+        file: state.file.to_string(),
+        line,
+        function: String::new(),
+        kind: "skipif".into(),
+        severity: "fail".into(),
+        message: format!("@pytest.mark.skip at line {line} — a permanently skipped test rots; fix it or delete it"),
+    });
+}
+
+/// `_skipif_findings` — never skip a test: not for a missing environment
+/// (`skipif` on an env needle) and not permanently (`@pytest.mark.skip` —
+/// a parked test rots).
 pub fn skipif_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
     let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
     let mut qi = 0usize;
+    // `@pytest.mark.skip()` is both an ExprCall and (its func) an
+    // ExprAttribute node — dedupe by decorator start so one decorator
+    // reports at most once.
+    let mut reported: HashSet<usize> = HashSet::new();
     while qi < queue.len() {
         if let Q::N(n) = queue[qi] {
-            if let AnyNodeRef::ExprCall(call) = n {
-                if let Expr::Attribute(a) = call.func.as_ref() {
-                    if a.attr.as_str() == "skipif" {
-                        let cond_parts: Vec<String> = call
-                            .arguments
-                            .args
-                            .iter()
-                            .map(|e| source[e.range()].to_string())
-                            .chain(
-                                call.arguments
-                                    .keywords
-                                    .iter()
-                                    .map(|k| source[k.value.range()].to_string()),
-                            )
-                            .collect();
-                        let cond = cond_parts.join(" ");
-                        if SKIPIF_NEEDLES.iter().any(|needle| cond.contains(needle)) {
-                            state.findings.push(Finding {
-                                file: state.file.to_string(),
-                                line: line_of(source, call.range().start()),
-                                function: String::new(),
-                                kind: "skipif".into(),
-                                severity: "fail".into(),
-                                message: format!(
-                                    "@pytest.mark.skipif on environment presence at line {} — never skip a test for a missing dependency: fake it (a fixture builds a stand-in) so it runs identically everywhere; only the E2E suite may skip",
-                                    line_of(source, call.range().start())
-                                ),
-                            });
+            match n {
+                AnyNodeRef::ExprCall(call) => {
+                    if let Expr::Attribute(a) = call.func.as_ref() {
+                        if a.attr.as_str() == "skipif" {
+                            let cond_parts: Vec<String> = call
+                                .arguments
+                                .args
+                                .iter()
+                                .map(|e| source[e.range()].to_string())
+                                .chain(
+                                    call.arguments
+                                        .keywords
+                                        .iter()
+                                        .map(|k| source[k.value.range()].to_string()),
+                                )
+                                .collect();
+                            let cond = cond_parts.join(" ");
+                            if SKIPIF_NEEDLES.iter().any(|needle| cond.contains(needle)) {
+                                state.findings.push(Finding {
+                                    file: state.file.to_string(),
+                                    line: line_of(source, call.range().start()),
+                                    function: String::new(),
+                                    kind: "skipif".into(),
+                                    severity: "fail".into(),
+                                    message: format!(
+                                        "@pytest.mark.skipif on environment presence at line {} — never skip a test for a missing dependency: fake it (a fixture builds a stand-in) so it runs identically everywhere; only the E2E suite may skip",
+                                        line_of(source, call.range().start())
+                                    ),
+                                });
+                            }
+                        } else if a.attr.as_str() == "skip"
+                            && is_pytest_mark_skip(a)
+                            && call.arguments.args.is_empty()
+                            && call.arguments.keywords.is_empty()
+                            && reported.insert(call.range().start().to_usize())
+                        {
+                            parked_skip_finding(state, source, call.range().start());
                         }
                     }
                 }
+                AnyNodeRef::ExprAttribute(a)
+                    if is_pytest_mark_skip(a) && reported.insert(a.range().start().to_usize()) =>
+                {
+                    // bare `@pytest.mark.skip` (no call parens) — the
+                    // decorator expression is the attribute itself
+                    parked_skip_finding(state, source, a.range().start());
+                }
+                _ => {}
             }
             skel_children(n, &mut queue);
         }
@@ -2560,6 +2693,59 @@ pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                             "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3) and comment why — or mark `# code-health: ignore-file fakefs <why>`",
                             f.name.as_str()
                         ),
+                    });
+                }
+            }
+            skel_children(n, &mut queue);
+        }
+        qi += 1;
+    }
+}
+
+/// Walk a test function's full body (nested functions included) for an
+/// assertion: an `assert` statement or a call to `pytest.raises` /
+/// `pytest.fail` / bare `fail(`.
+fn has_assertion(body: &[Stmt]) -> bool {
+    let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+    let mut qi = 0usize;
+    while qi < queue.len() {
+        if let Q::N(n) = queue[qi] {
+            match n {
+                AnyNodeRef::StmtAssert(_) => return true,
+                AnyNodeRef::ExprCall(call) => match call.func.as_ref() {
+                    Expr::Attribute(a) => {
+                        if a.attr.as_str() == "raises" || a.attr.as_str() == "fail" {
+                            return true;
+                        }
+                    }
+                    Expr::Name(nm) if nm.id.as_str() == "fail" => return true,
+                    _ => {}
+                },
+                _ => {}
+            }
+            skel_children(n, &mut queue);
+        }
+        qi += 1;
+    }
+    false
+}
+
+/// A function named `test_*` whose body contains no assertion can never
+/// fail — it is a test that tests nothing.
+pub fn no_assert_test_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+    let mut qi = 0usize;
+    while qi < queue.len() {
+        if let Q::N(n) = queue[qi] {
+            if let AnyNodeRef::StmtFunctionDef(f) = n {
+                if f.name.as_str().starts_with("test_") && !has_assertion(&f.body) {
+                    state.findings.push(Finding {
+                        file: state.file.to_string(),
+                        line: line_of(source, f.name.range().start()),
+                        function: f.name.to_string(),
+                        kind: "no-assert-test".into(),
+                        severity: "fail".into(),
+                        message: "test has no assertion — it can never fail".to_string(),
                     });
                 }
             }

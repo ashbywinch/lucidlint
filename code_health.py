@@ -82,6 +82,113 @@ ACTION_KINDS = (
 )
 
 @dataclass
+class _ScanFlags:
+    """The optional scan inputs — one object instead of a 4-parameter tail."""
+    graph: Path | None = None
+    churn_json: Path | None = None
+    include_tests: bool = False
+    docs_root: str | None = None
+
+
+@dataclass
+class _RenderCtx:
+    """The shared render context — one object instead of a 9-parameter tail."""
+    repo: Path
+    args: argparse.Namespace
+    branch: str
+    commit: str
+    coverage_source: str
+    graph_preferred: bool
+    diff: set[str]
+
+    def render_json(self, unique: list[Action]) -> None:
+        repo = self.repo
+        args = self.args
+        branch, commit = self.branch, self.commit
+        coverage_source = self.coverage_source
+        print(
+            json.dumps(
+                {
+                    "meta": {
+                        "repo": str(repo),
+                        "branch": branch,
+                        "commit": commit,
+                        "generated_at": datetime.date.today().isoformat(),
+                        "base_ref": args.base or "origin/main|main",
+                        "coverage_source": coverage_source,
+                        "thresholds": {
+                            "max_complexity": 15,
+                            "max_function_lines": 120,
+                            "max_file_edges": 150,
+                            "max_risk": 0.8,
+                            "hotspot_top_frac": 0.1,
+                            "hotspot_min_cc": 15.0,
+                        },
+                    },
+                    "baseline": str(args.baseline) if args.baseline else "",
+                    "actions": [asdict(a) for a in unique],
+                },
+                indent=2,
+            )
+        )
+
+    def render_summary(self, fails: list[Action], warns: list[Action], acks: list[Action]) -> None:
+        """Gate verdict, scope, and formula lines."""
+        args = self.args
+        diff = self.diff
+        coverage_source = self.coverage_source
+        graph_preferred = self.graph_preferred
+        top = fails[0]
+        mine = sum(1 for a in fails if a.in_diff)
+        mine_txt = f"; {mine} of {len(fails)} actions in files your diff touches" if diff else "; diff base unresolved"
+        if args.baseline is None:
+            mine_txt += " (no baseline — cannot tell what is new)"
+        targets = len({(a.file, a.function) for a in fails})
+        verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
+        print(
+            f"{verdict} — {len(fails)} action(s) across {targets} distinct targets "
+            f"(+{len(acks)} acknowledged in baseline, {len(warns)} warnings never-fail){mine_txt}, "
+            f"top P{top.priority} {top.file}:{top.line} ({top.function or top.kind})"
+        )
+        print(
+            "priority ranks change-cost (churn x fan-in), not brokenness — which item is worth "
+            "fixing first is a judgement call; the hotspot entries are the usual starting set"
+        )
+        if graph_preferred:
+            print(
+                "WARNING: coverage snapshot predates the repo's tests — hard 'untested' claims are suppressed; "
+                "run --refresh-coverage (make coverage) for definite test-status verdicts"
+            )
+        print(
+            "priority = percentile of raw risk (metric norm x (1 + churn/30) x (1 + callers/5)); "
+            "norms: CC/40, lines/200, edges/400, risk/1 "
+            "(norm capped at 1.0, churn factor at 1.5, callers factor at 1.0) "
+            "— the displayed thresholds are the fail bars, not the norms; "
+            "thresholds: CC>=15, fn>=120 lines, file>=150 edges, risk>=0.8, hotspot top 10% "
+            + f"by churn with CC>=15; coverage: {coverage_source}"
+        )
+
+    def render_text(self, unique: list[Action], fails: list[Action], warns: list[Action], acks: list[Action]) -> None:
+        repo, args = self.repo, self.args
+        if not unique:
+            print("GATE: PASS — clean, no actions")
+            return
+        if not fails:
+            warn_note = f" ({len(warns)} warnings reported, never fail)" if warns else ""
+            print(f"GATE: PASS — {len(acks)} action(s) acknowledged in baseline{warn_note}")
+            if warns:
+                print(f"by kind — warnings: {_kind_counts(warns)}")
+                _render_actions(repo, args, warns, [])
+            return
+        self.render_summary(fails, warns, acks)
+        print(f"by kind — fails: {_kind_counts(fails)}; warnings: {_kind_counts(warns)}")
+        _render_actions(repo, args, fails, acks)
+        if warns:
+            print(f"\nwarnings (reported, never fail) — {len(warns)}:")
+            _render_actions(repo, args, warns, [])
+
+
+@dataclass
 class Action:
     """One finding. Kind families: complexity/large-function merge per target;
     hotspot/hub-file/high-risk/record-shape are separate problems."""
@@ -96,6 +203,7 @@ class Action:
     churn: int
     last_modified: str
     tested: str
+    signal: str = ""  # suppression identity — the raw family kind from the scanner
     note: str = ""
     raw: float = 0.0
     priority: int = 0
@@ -189,8 +297,7 @@ def file_history(repo: Path) -> FileHistory:
                 churn[path] += 1
                 if date:
                     last[path] = date
-    except Exception:  # code-health: ignore except pygit2 unavailable degrades to empty history
-        # code-health: ignore except pygit2 unavailable degrades to empty history — the log is the surface
+    except Exception:  # code-health: ignore swallow pygit2 unavailable degrades to empty history
         log(f"pygit2 history unavailable in {repo} — history-based signals are skipped")
     return FileHistory(churn, last)
 
@@ -226,7 +333,7 @@ def _coverage_from_xml(repo: Path) -> CoverageResult:
             if int(ln.get("hits", "0") or 0) > 0:
                 try:
                     lines.add(int(ln.get("number")))
-                except (TypeError, ValueError):  # code-health: ignore except malformed <line> elements are skipped
+                except (TypeError, ValueError):  # code-health: ignore swallow malformed <line> elements are skipped
                     log(f"ignoring malformed <line> element in {repo / 'coverage.xml'}")
     return CoverageResult(covered or None, "coverage.xml")
 
@@ -325,7 +432,7 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
                     try:
                         if not r.path_is_ignored(rel):
                             untracked.add(rel)
-                    except ValueError:  # code-health: ignore except ambiguous path — treat as untracked
+                    except ValueError:  # code-health: ignore swallow ambiguous path — treat as untracked
                         untracked.add(rel)
         rels = sorted(tracked | untracked)
         return [SourceFile(repo / rel, rel) for rel in rels]
@@ -376,9 +483,6 @@ class _RustScan:
         self._cache: dict[tuple[Path, tuple[str, ...]], RustFindings | None] = {}
         self._binary_cache: dict[Path, Path | None] = {}
 
-    # code-health: ignore global-state the scanner cache is a per-run memo of subprocess
-    # output — a pure function of the repo + file set, not mutable state with behavior
-
     def binary(self, repo: Path) -> Path | None:
         """The scan binary: env override, then the repo's own build, then the
         tool checkout's build, then the distribution bundle's sibling binary
@@ -407,13 +511,10 @@ class _RustScan:
         self,
         repo: Path,
         files: list[SourceFile],
-        graph: Path | None = None,
-        churn_json: Path | None = None,
-        include_tests: bool = False,
-        docs_root: str | None = None,
+        flags: _ScanFlags | None = None,
     ) -> RustFindings | None:
-        if graph is None and churn_json is None and not include_tests and docs_root is None:
-            graph, churn_json, include_tests, docs_root = self._flags()
+        if flags is None:
+            flags = self._flags()
         """Findings per rel for one file set; None = Rust unavailable (Python path)."""
         rels = tuple(sf.rel for sf in files)
         key = (repo, rels)
@@ -432,14 +533,14 @@ class _RustScan:
             result = {}
             try:
                 cmd = [str(binary)]
-                if graph is not None:
-                    cmd += ["--graph", str(graph)]
-                if churn_json is not None:
-                    cmd += ["--churn", str(churn_json)]
-                if include_tests:
+                if flags.graph is not None:
+                    cmd += ["--graph", str(flags.graph)]
+                if flags.churn_json is not None:
+                    cmd += ["--churn", str(flags.churn_json)]
+                if flags.include_tests:
                     cmd.append("--include-tests")
-                if docs_root is not None:
-                    cmd += ["--docs", docs_root]
+                if flags.docs_root is not None:
+                    cmd += ["--docs", flags.docs_root]
                 cmd += [str(sf.py) for sf in files]
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
                 if proc.returncode == 0:
@@ -475,7 +576,7 @@ class _RustScan:
                         )
                 else:
                     result = None
-            except _SCANNER_FAILURES:  # code-health: ignore except degraded runs report nothing — visible
+            except _SCANNER_FAILURES:  # code-health: ignore swallow degraded runs report nothing — visible
                 result = None
         wrapped = (
             RustFindings(result, cc_result)
@@ -504,8 +605,8 @@ class _RustScan:
                 self._pending_churn = tmp
             self._pending_docs = str(repo)
 
-    def _flags(self):
-        return self._pending_graph, self._pending_churn, self._pending_tests, self._pending_docs
+    def _flags(self) -> _ScanFlags:
+        return _ScanFlags(self._pending_graph, self._pending_churn, self._pending_tests, self._pending_docs)
 
     def active(self, repo: Path) -> bool:
         """True when the Rust core is available (it is required)."""
@@ -519,7 +620,7 @@ def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
         return file_val
     try:
         rel = Path(file_val).resolve().relative_to(repo).as_posix()
-    except (ValueError, OSError):  # code-health: ignore except an unmappable path means the finding
+    except (ValueError, OSError):  # code-health: ignore swallow an unmappable path means the finding
         # is for a file outside this scan set — drop it, not a failure to surface
         rel = ""
     return rel if rel in rels else None
@@ -529,14 +630,15 @@ def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
 # to suppress whole groups across the codebase.
 # code-health: ignore record-shape wire-format dict — a class is ceremony for a rule-group map
 RULE_GROUPS = {
-    "architecture": {"complexity", "large-function", "closures", "strewing", "record-shape",
+    "architecture": {"complexity", "large-function", "closures", "partition", "strewing", "record-shape",
                      "duplicate", "layer-mix", "folder-mix", "hub-file", "high-risk",
-                     "hotspot", "abstraction"},
+                     "hotspot", "over-abstraction", "long-param-list", "churn-untested"},
     "style": {"magic-number", "noop-statement", "unreachable", "vague-name", "class-module",
-              "shadow", "broad-except", "inline-import", "private-import", "global-state",
-              "unused", "import-cycle", "docs-link", "docs-undiscoverable"},
-    "test-discipline": {"monkeypatch", "skipif", "fakefs", "ignored-test"},
-    "suppression": {"suppression", "type-ignore", "allow-reason"},
+              "builtin-shadow", "broad-except", "swallow", "inline-import", "private-import",
+              "global-state", "unused", "import-cycle", "docs-link", "docs-undiscoverable",
+              "boolean-arg", "debug-artifact"},
+    "test-discipline": {"monkeypatch", "skipif", "fakefs", "no-assert-test"},
+    "suppression": {"suppression", "type-ignore", "allow-reason", "noqa", "stale-suppression"},
 }
 
 # Cache for config loading
@@ -615,14 +717,14 @@ _SCANNER_FAILURES = (OSError, SubprocessError, json.JSONDecodeError, ValueError)
 try:
     from code_review_graph.graph import GraphStore as _GraphStore
     from code_review_graph.registry import Registry as _Registry
-except ImportError:  # code-health: ignore except code-review-graph is optional — degrades to non-graph families
+except ImportError:  # code-health: ignore swallow code-review-graph is optional — degrades to non-graph families
     _GraphStore = None
     _Registry = None
 
 try:
     import pygit2 as _pygit2
     from pygit2 import GIT_SORT_TIME, GIT_SORT_TOPOLOGICAL
-except ImportError:  # code-health: ignore except pygit2 is optional — degrades to gitless mode
+except ImportError:  # code-health: ignore swallow pygit2 is optional — degrades to gitless mode
     _pygit2 = None
 
 CONTRACT_VERSION = 1
@@ -687,7 +789,8 @@ class _GraphContract:
             tmp = Path(tempfile.mkstemp(prefix="code-health-graph-", suffix=".json")[1])
             tmp.write_text(json.dumps(contract, separators=(",", ":")), encoding="utf-8")
             result = tmp
-        # code-health: ignore except graph-export failures degrade to non-graph families — the log is the surface
+        # surfaces via `result = None` — the caller falls back to non-graph
+        # families; not a swallow
         except _SCANNER_FAILURES:
             log(f"graph contract export failed for {repo} — graph families skipped")
             result = None
@@ -747,7 +850,7 @@ def changed_files(repo: Path, base: str) -> set[str]:
             r = _pygit2.Repository(str(repo))
             try:
                 ref_oid = r.lookup_reference(f"refs/remotes/{ref}").target
-            except KeyError:  # code-health: ignore except ref missing — fall back to the local branch
+            except KeyError:  # code-health: ignore swallow ref missing — fall back to the local branch
                 ref_oid = r.lookup_reference(f"refs/heads/{ref}").target
             base_oid = r.merge_base(r.head.target, ref_oid)
             changed = set()
@@ -797,7 +900,7 @@ def _git_head(repo: Path) -> GitHead:
     try:
         r = _pygit2.Repository(str(repo))
         return GitHead(branch=r.head.shorthand or "", commit=str(r.head.target)[:7])
-    # code-health: ignore except git-absent is a supported mode — provenance is decorative
+    # git-absent is a supported mode — the handler returns the empty head
     except Exception:
         return GitHead(branch="", commit="")
 
@@ -881,78 +984,9 @@ def _load_baseline(path) -> set[str]:
     if path and path.exists():
         try:
             return set(json.loads(path.read_text()).get("actions", []))
-        except (json.JSONDecodeError, AttributeError):  # code-health: ignore except corrupt baseline; gate unbaselined
+        except (json.JSONDecodeError, AttributeError):  # code-health: ignore swallow corrupt baseline; gate unbaselined
             log(f"baseline {path} unreadable — ignoring")
     return set()
-
-
-def _render_json(repo: Path, args, unique: list[Action], branch: str, commit: str, coverage_source: str) -> None:
-    print(
-        json.dumps(
-            {
-                "meta": {
-                    "repo": str(repo),
-                    "branch": branch,
-                    "commit": commit,
-                    "generated_at": datetime.date.today().isoformat(),
-                    "base_ref": args.base or "origin/main|main",
-                    "coverage_source": coverage_source,
-                    "thresholds": {
-                        "max_complexity": 15,
-                        "max_function_lines": 120,
-                        "max_file_edges": 150,
-                        "max_risk": 0.8,
-                        "hotspot_top_frac": 0.1,
-                        "hotspot_min_cc": 15.0,
-                    },
-                },
-                "baseline": str(args.baseline) if args.baseline else "",
-                "actions": [asdict(a) for a in unique],
-            },
-            indent=2,
-        )
-    )
-
-
-def _render_summary(
-    repo: Path,
-    args,
-    fails: list[Action],
-    warns: list[Action],
-    acks: list[Action],
-    diff: set[str],
-    coverage_source: str,
-    graph_preferred: bool,
-) -> None:
-    """Gate verdict, scope, and formula lines."""
-    top = fails[0]
-    mine = sum(1 for a in fails if a.in_diff)
-    mine_txt = f"; {mine} of {len(fails)} actions in files your diff touches" if diff else "; diff base unresolved"
-    if args.baseline is None:
-        mine_txt += " (no baseline — cannot tell what is new)"
-    targets = len({(a.file, a.function) for a in fails})
-    verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
-    print(
-        f"{verdict} — {len(fails)} action(s) across {targets} distinct targets "
-        f"(+{len(acks)} acknowledged in baseline, {len(warns)} warnings never-fail){mine_txt}, "
-        f"top P{top.priority} {top.file}:{top.line} ({top.function or top.kind})"
-    )
-    print(
-        "priority ranks change-cost (churn x fan-in), not brokenness — which item is worth "
-        "fixing first is a judgement call; the hotspot entries are the usual starting set"
-    )
-    if graph_preferred:
-        print(
-            "WARNING: coverage snapshot predates the repo's tests — hard 'untested' claims are suppressed; "
-            "run --refresh-coverage (make coverage) for definite test-status verdicts"
-        )
-    print(
-        "priority = percentile of raw risk (metric norm x (1 + churn/30) x (1 + callers/5)); "
-        "norms: CC/40, lines/200, edges/400, risk/1 (norm capped at 1.0, churn factor at 1.5, callers factor at 1.0) "
-        "— the displayed thresholds are the fail bars, not the norms; "
-        "thresholds: CC>=15, fn>=120 lines, file>=150 edges, risk>=0.8, hotspot top 10% "
-        + f"by churn with CC>=15; coverage: {coverage_source}"
-    )
 
 
 def _render_file_group(file: str, items: list[Action]) -> None:
@@ -1000,35 +1034,6 @@ def _render_actions(repo: Path, args, fails: list[Action], acks: list[Action]) -
         "baseline: '--update-baseline --baseline code-health.json' acknowledges today's debt so the "
         "gate only fails on NEW actions; this report is a snapshot, not wired into CI"
     )
-
-
-def _render_text(
-    repo: Path,
-    args,
-    unique: list[Action],
-    fails: list[Action],
-    warns: list[Action],
-    acks: list[Action],
-    diff: set[str],
-    coverage_source: str,
-    graph_preferred: bool,
-) -> None:
-    if not unique:
-        print("GATE: PASS — clean, no actions")
-        return
-    if not fails:
-        warn_note = f" ({len(warns)} warnings reported, never fail)" if warns else ""
-        print(f"GATE: PASS — {len(acks)} action(s) acknowledged in baseline{warn_note}")
-        if warns:
-            print(f"by kind — warnings: {_kind_counts(warns)}")
-            _render_actions(repo, args, warns, [])
-        return
-    _render_summary(repo, args, fails, warns, acks, diff, coverage_source, graph_preferred)
-    print(f"by kind — fails: {_kind_counts(fails)}; warnings: {_kind_counts(warns)}")
-    _render_actions(repo, args, fails, acks)
-    if warns:
-        print(f"\nwarnings (reported, never fail) — {len(warns)}:")
-        _render_actions(repo, args, warns, [])
 
 
 def _write_baseline(args, unique: list[Action]) -> int:
@@ -1119,11 +1124,12 @@ def main() -> int:
     warns = [a for a in unique if a.severity == "warn"]
     acks = [a for a in unique if a.severity == "ack"]
     head = _git_head(repo)
+    rc = _RenderCtx(repo, args, head.branch, head.commit, cc.label, cc.graph_preferred, diff)
 
     if args.json:
-        _render_json(repo, args, unique, head.branch, head.commit, cc.label)
+        rc.render_json(unique)
     else:
-        _render_text(repo, args, unique, fails, warns, acks, diff, cc.label, cc.graph_preferred)
+        rc.render_text(unique, fails, warns, acks)
 
     return _gate_exit(stale, fails, args)
 
@@ -1168,6 +1174,7 @@ def _actions_from_rust(
                     function=f.function,
                     message=f.message,
                     metric=f.metric,
+                    signal=f.signal,
                     churn=churn,
                     last_modified=last_modified.get(rel, ""),
                     tested="",

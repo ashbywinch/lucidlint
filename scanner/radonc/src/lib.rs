@@ -9,5 +9,6 @@ pub use visitors::{code2ast, get_complexity, ComplexityVisitor};
 /// The scan core's radon-equivalent function CC — everything through the
 /// mirrored radon API (visitors::function_cc walks one function body).
 pub fn function_cc(f: &ruff_python_ast::StmtFunctionDef) -> i32 {
-    visitors::complex_counter(f, false)
+    let no_assert = false; // asserts count toward complexity (radon default)
+    visitors::complex_counter(f, no_assert)
 }

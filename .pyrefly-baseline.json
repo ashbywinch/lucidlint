@@ -1,9 +1,9 @@
 {
  "errors": [
   {
-   "line": 172,
+   "line": 280,
    "column": 13,
-   "stop_line": 172,
+   "stop_line": 280,
    "stop_column": 31,
    "path": "code_health.py",
    "code": -2,
@@ -13,9 +13,9 @@
    "severity": "error"
   },
   {
-   "line": 228,
+   "line": 335,
    "column": 35,
-   "stop_line": 228,
+   "stop_line": 335,
    "stop_column": 51,
    "path": "code_health.py",
    "code": -2,
@@ -25,9 +25,9 @@
    "severity": "error"
   },
   {
-   "line": 312,
+   "line": 419,
    "column": 13,
-   "stop_line": 312,
+   "stop_line": 419,
    "stop_column": 31,
    "path": "code_health.py",
    "code": -2,
@@ -37,9 +37,9 @@
    "severity": "error"
   },
   {
-   "line": 565,
+   "line": 667,
    "column": 21,
-   "stop_line": 565,
+   "stop_line": 667,
    "stop_column": 28,
    "path": "code_health.py",
    "code": -2,
@@ -49,9 +49,9 @@
    "severity": "error"
   },
   {
-   "line": 616,
+   "line": 718,
    "column": 5,
-   "stop_line": 616,
+   "stop_line": 718,
    "stop_column": 66,
    "path": "code_health.py",
    "code": -2,
@@ -61,9 +61,9 @@
    "severity": "error"
   },
   {
-   "line": 617,
+   "line": 719,
    "column": 5,
-   "stop_line": 617,
+   "stop_line": 719,
    "stop_column": 65,
    "path": "code_health.py",
    "code": -2,
@@ -73,9 +73,9 @@
    "severity": "error"
   },
   {
-   "line": 647,
+   "line": 749,
    "column": 24,
-   "stop_line": 647,
+   "stop_line": 749,
    "stop_column": 33,
    "path": "code_health.py",
    "code": -2,
@@ -85,39 +85,15 @@
    "severity": "error"
   },
   {
-   "line": 747,
+   "line": 850,
    "column": 17,
-   "stop_line": 747,
+   "stop_line": 850,
    "stop_column": 35,
    "path": "code_health.py",
    "code": -2,
    "name": "missing-attribute",
    "description": "Object of class `NoneType` has no attribute `Repository`",
    "concise_description": "Object of class `NoneType` has no attribute `Repository`",
-   "severity": "error"
-  },
-  {
-   "line": 1106,
-   "column": 42,
-   "stop_line": 1106,
-   "stop_column": 50,
-   "path": "code_health.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Object of class `Action` has no attribute `signal`",
-   "concise_description": "Object of class `Action` has no attribute `signal`",
-   "severity": "error"
-  },
-  {
-   "line": 1110,
-   "column": 52,
-   "stop_line": 1110,
-   "stop_column": 60,
-   "path": "code_health.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Object of class `Action` has no attribute `signal`",
-   "concise_description": "Object of class `Action` has no attribute `signal`",
    "severity": "error"
   },
   {
@@ -133,9 +109,9 @@
    "severity": "error"
   },
   {
-   "line": 91,
+   "line": 92,
    "column": 25,
-   "stop_line": 91,
+   "stop_line": 92,
    "stop_column": 34,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -145,9 +121,9 @@
    "severity": "error"
   },
   {
-   "line": 235,
+   "line": 236,
    "column": 21,
-   "stop_line": 235,
+   "stop_line": 236,
    "stop_column": 43,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -157,9 +133,9 @@
    "severity": "error"
   },
   {
-   "line": 261,
+   "line": 262,
    "column": 34,
-   "stop_line": 261,
+   "stop_line": 262,
    "stop_column": 58,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -169,9 +145,9 @@
    "severity": "error"
   },
   {
-   "line": 406,
+   "line": 407,
    "column": 21,
-   "stop_line": 406,
+   "stop_line": 407,
    "stop_column": 23,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -181,9 +157,9 @@
    "severity": "error"
   },
   {
-   "line": 552,
+   "line": 638,
    "column": 12,
-   "stop_line": 552,
+   "stop_line": 638,
    "stop_column": 24,
    "path": "tests/test_code_health.py",
    "code": -2,
@@ -193,9 +169,9 @@
    "severity": "error"
   },
   {
-   "line": 564,
+   "line": 650,
    "column": 12,
-   "stop_line": 564,
+   "stop_line": 650,
    "stop_column": 24,
    "path": "tests/test_code_health.py",
    "code": -2,

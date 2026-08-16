@@ -6,9 +6,13 @@
 //! Seam: the same `Finding`/`FnCc` model as the Python layer, the same shared
 //! logic from `common` (duplicate similarity, suppression matching, the CC
 //! rule table, vague-role names) — but the AST walk is genuinely Rust-shaped
-//! (`syn`), and the families that have no Rust analog (except-swallows,
-//! strewing, monkeypatch fixtures) do not exist here while Rust-only concerns
-//! (an `#[allow]` without a reason, `#[ignore]`d tests) do. `use`/`mod`
+//! (`syn`), and the families whose Rust analog is weak or compiler-owned
+//! (monkeypatch fixtures — Rust injects via traits; class-module naming —
+//! cargo owns module structure; builtin shadowing — clippy's restriction
+//! set) do not exist here while Rust-only concerns (an `#[allow]` without a
+//! reason, `#[ignore]`d tests) do. `swallow` here is `let _ = <value>;` —
+//! the catch-that-vanishes analog; `strewing` is free fns sharing a leading
+//! struct param. `use`/`mod`
 //! collection feeds the cross-file import-cycle family; the code-review-graph
 //! families (hub-file, high-risk, layer-mix, hotspot) degrade for Rust repos
 //! until the exporter speaks Rust, and `unused` is deliberately NOT re-
@@ -25,8 +29,8 @@ use std::collections::HashMap;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, BinOp, Block, Expr, ExprLit, File, FnArg, ImplItem, Item, ItemFn, ItemImpl, ItemUse, Lit, Pat, Path,
-    Signature, Stmt, Type, UseTree,
+    Attribute, BinOp, Block, Expr, ExprCall, ExprLit, ExprMacro, File, FnArg, Ident, ImplItem, Item, ItemFn, ItemImpl,
+    ItemUse, Lit, Pat, Path, Signature, Stmt, Type, UseTree,
 };
 
 /// One struct: name, declaration line, named-field count, line span.
@@ -91,6 +95,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         structs: Vec::new(),
         impls: Vec::new(),
         fn_params: Vec::new(),
+        strew_candidates: Vec::new(),
         fn_stack: Vec::new(),
         current_fn: None,
         expr_stack: Vec::new(),
@@ -101,6 +106,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     // the test-only rules run even inside #[cfg(test)] mods — a pre-pass over
     // the whole file, then the production walk skips test subtrees
     state.findings.extend(ignored_test_findings(&file, name));
+    state.findings.extend(no_assert_test_findings(&file, name));
     state.walk_file(&file);
     let mut scan = state.finish();
     // suppressions parse from the whole file, filtering every family — the
@@ -108,14 +114,28 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     let comments = rs_comment_lines(source);
     let supps = common::suppressions_from_comments(&comments);
     // complexity findings are generated from the cc array AFTER the per-file
-    // pass — honor complexity suppressions here so both paths agree
+    // pass — honor complexity suppressions here so both paths agree, and
+    // record which suppressions this retain honored so the stale check does
+    // not re-flag them
+    let mut pre_used = common::PreUsedSuppressions::default();
     if !scan.cc.is_empty() {
         scan.cc.retain(|e| {
-            !common::suppressed("complexity", e.line, &supps)
-                && !supps.file.get("complexity").is_some_and(|w| !w.is_empty())
+            for ln in [e.line, e.line.saturating_sub(1)] {
+                if let Some((sig, why)) = supps.line.get(&ln) {
+                    if sig == "complexity" && !why.is_empty() {
+                        pre_used.lines.insert((ln, sig.clone()));
+                    }
+                }
+            }
+            let line_suppressed = common::suppressed("complexity", e.line, &supps);
+            let file_suppressed = supps.file.get("complexity").is_some_and(|w| !w.is_empty());
+            if file_suppressed {
+                pre_used.files.insert("complexity".into());
+            }
+            !line_suppressed && !file_suppressed
         });
     }
-    scan.findings = common::apply_suppressions(scan.findings, &comments, name, "//");
+    scan.findings = common::apply_suppressions_impl(scan.findings, &comments, name, "//", &pre_used);
     scan
 }
 
@@ -137,6 +157,9 @@ struct RsState<'a> {
     impls: Vec<(String, usize)>,
     /// (fn name, line, param type idents) — the boundary record-shape check.
     fn_params: Vec<(String, usize, Vec<String>)>,
+    /// (fn name, line, first param type) of module-level free fns — the
+    /// strewing post-pass (3+ free fns sharing a leading struct param).
+    strew_candidates: Vec<(String, usize, String)>,
     fn_stack: Vec<RsFnScope>,
     current_fn: Option<(String, usize)>,
     /// Parent chain for the magic-number position rule.
@@ -215,6 +238,35 @@ impl<'a> RsState<'a> {
                     );
                 }
             }
+        }
+        // strewing: 3+ module-level free fns sharing a leading param that is
+        // a struct defined in this file — a missed class (the Python rule)
+        let strew = std::mem::take(&mut self.strew_candidates);
+        let struct_names: std::collections::HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
+        let mut by_param: std::collections::HashMap<&str, Vec<&(String, usize, String)>> =
+            std::collections::HashMap::new();
+        for c in &strew {
+            if struct_names.contains(&c.2) {
+                by_param.entry(c.2.as_str()).or_default().push(c);
+            }
+        }
+        let mut strew_groups: Vec<(usize, usize, String)> = by_param
+            .iter()
+            .filter(|(_, g)| g.len() >= 3)
+            .map(|(param, g)| {
+                let fns = g.iter().map(|c| c.0.as_str()).collect::<Vec<_>>().join("', '");
+                (g[0].1, g.len(), format!("'{}' shared by {fns}", param))
+            })
+            .collect();
+        strew_groups.sort();
+        for (line, count, detail) in strew_groups {
+            self.finding(
+                "strewing",
+                "fail",
+                line,
+                "",
+                format!("{count} free functions take the same leading parameter ({detail}) — they share data, extract a class"),
+            );
         }
         RustScan {
             file_name: self.file_name.clone(),
@@ -350,7 +402,9 @@ impl<'a> RsState<'a> {
         self.current_fn = Some((sig.ident.to_string(), line));
         self.fn_stack.push(RsFnScope { decisions: 0 });
         self.visit_block(block); // the override: unreachable check + nested walk
-        let scope = self.fn_stack.pop().unwrap();
+                                 // the push/pop invariant is per-function; a missing scope is a walker
+                                 // bug, not a crash — default to no decisions
+        let scope = self.fn_stack.pop().unwrap_or(RsFnScope { decisions: 0 });
         let cc = scope.decisions + 1;
         let span = span_lines(sig.span().start().line, block.span().end().line);
         if !self.in_test_code {
@@ -364,6 +418,19 @@ impl<'a> RsState<'a> {
                     &sig.ident.to_string(),
                     format!(
                         "'{}' defines {inner} nested fn definitions closing over its state — a class in disguise",
+                        sig.ident
+                    ),
+                );
+            }
+            let typed = sig.inputs.iter().filter(|i| matches!(i, FnArg::Typed(_))).count();
+            if typed > 5 {
+                self.finding(
+                    "long-param-list",
+                    "fail",
+                    line,
+                    &sig.ident.to_string(),
+                    format!(
+                        "'{}' takes {typed} parameters — introduce a parameter object",
                         sig.ident
                     ),
                 );
@@ -412,6 +479,19 @@ impl<'a> RsState<'a> {
             types.sort();
             types.dedup();
             self.fn_params.push((sig.ident.to_string(), line, types));
+            // strewing: module-level free fns (methods have a non-empty
+            // fn_stack; test fns already set in_test_code) — the leading
+            // param's bare type name, filtered against file-local structs
+            // in finish()
+            if module_level {
+                if let Some(FnArg::Typed(pt)) = sig.inputs.first() {
+                    let mut tids = Vec::new();
+                    collect_type_idents(&pt.ty, &mut tids);
+                    if let Some(t) = tids.first() {
+                        self.strew_candidates.push((sig.ident.to_string(), line, t.clone()));
+                    }
+                }
+            }
         }
         self.current_fn = prev_fn;
         self.in_test_code = prev_test;
@@ -450,6 +530,37 @@ impl<'a> Visit<'a> for RsState<'a> {
                         fields: named.named.len(),
                     });
                 }
+            }
+            Item::Static(s) => {
+                let ty_ident = static_type_ident(&s.ty);
+                let interior = [
+                    "Mutex",
+                    "RwLock",
+                    "RefCell",
+                    "UnsafeCell",
+                    "AtomicBool",
+                    "AtomicPtr",
+                    "AtomicUsize",
+                    "AtomicIsize",
+                    "AtomicU8",
+                    "AtomicU16",
+                    "AtomicU32",
+                    "AtomicU64",
+                    "AtomicI8",
+                    "AtomicI16",
+                    "AtomicI32",
+                    "AtomicI64",
+                ];
+                if matches!(s.mutability, syn::StaticMutability::Mut(_)) || interior.contains(&ty_ident.as_str()) {
+                    self.finding(
+                        "global-state",
+                        "fail",
+                        s.span().start().line,
+                        "",
+                        "static mutable state — put it in a struct owned by the caller".into(),
+                    );
+                }
+                visit::visit_item(self, item);
             }
             Item::Impl(i) => {
                 let self_name = impl_self_name(i);
@@ -490,6 +601,30 @@ impl<'a> Visit<'a> for RsState<'a> {
             }
         }
         if !self.in_test_code {
+            // swallow: `let _ = <value>;` discards a call/macro result — the
+            // catch-that-vanishes analog (a Result/Option dropped on the
+            // floor). Plain-path inits are excluded: moving a value into `_`
+            // is sometimes the only way to bind it.
+            if let Stmt::Local(l) = stmt {
+                if matches!(l.pat, Pat::Wild(_)) {
+                    if let Some(init) = &l.init {
+                        if matches!(
+                            init.expr.as_ref(),
+                            Expr::Call(_) | Expr::MethodCall(_) | Expr::Macro(_) | Expr::Await(_)
+                        ) {
+                            let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
+                            self.finding(
+                                "swallow",
+                                "fail",
+                                stmt.span().start().line,
+                                &fn_name,
+                                "`let _ =` discards a value — if it's a Result/Option the error vanishes; handle it (match / ? / if let)"
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+            }
             if let Stmt::Expr(e, Some(_)) = stmt {
                 self.noop_check(e);
             }
@@ -515,7 +650,61 @@ impl<'a> Visit<'a> for RsState<'a> {
                 Expr::Macro(m) if is_assert_macro(&m.mac.path) => {
                     self.decide(1); // assert!: +1, subtree not counted (visit_Assert)
                 }
+                Expr::Macro(m) if is_dbg_macro(&m.mac.path) => {
+                    let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
+                    self.finding(
+                        "debug-artifact",
+                        "fail",
+                        expr.span().start().line,
+                        &fn_name,
+                        "dbg!() left in production code — remove it (clippy's dbg_macro lint is pedantic-only)".into(),
+                    );
+                }
+                Expr::MethodCall(mc) if is_unwrap_expect(&mc.method) => {
+                    let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
+                    self.finding(
+                        "debug-artifact",
+                        "fail",
+                        expr.span().start().line,
+                        &fn_name,
+                        format!(
+                            ".{}() in production code panics on None/Err — handle the case or return a Result",
+                            mc.method
+                        ),
+                    );
+                }
+                Expr::Call(c) => {
+                    for arg in &c.args {
+                        if matches!(arg, Expr::Lit(l) if matches!(l.lit, Lit::Bool(_))) {
+                            let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
+                            self.finding(
+                                "boolean-arg",
+                                "fail",
+                                arg.span().start().line,
+                                &fn_name,
+                                "boolean literal argument — name it: f(..., retry=True)".into(),
+                            );
+                        }
+                    }
+                }
                 _ => {}
+            }
+        } else {
+            // test-only family: fakefs — fs I/O in a test with a literal
+            // path that is not a temp dir (tests fake the filesystem).
+            // Two shapes: `File::create("x")` / `fs::write("x", ..)` parse as
+            // Expr::Call on a Path callee; `x.write_all(b"..")` is a method
+            // call on a value (skipped — the receiver is not fs).
+            if fakefs_hit(expr) {
+                let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
+                self.finding(
+                    "fakefs",
+                    "fail",
+                    expr.span().start().line,
+                    &fn_name,
+                    "real filesystem I/O in a test — write to a temp dir (std::env::temp_dir, tempfile), not a literal path"
+                        .into(),
+                );
             }
         }
         self.expr_stack.push(expr);
@@ -639,6 +828,99 @@ fn is_compound_op(op: &BinOp) -> bool {
     )
 }
 
+fn is_dbg_macro(path: &Path) -> bool {
+    path.segments.last().is_some_and(|s| s.ident == "dbg")
+}
+
+fn is_unwrap_expect(method: &Ident) -> bool {
+    method == "unwrap" || method == "expect"
+}
+
+/// The bare type ident of a static's type (peels reference/paren wrappers).
+fn static_type_ident(ty: &Type) -> String {
+    match ty {
+        Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default(),
+        Type::Reference(r) => static_type_ident(&r.elem),
+        Type::Paren(p) => static_type_ident(&p.elem),
+        _ => String::new(),
+    }
+}
+
+/// std::fs::File / fs::* operations — the fake-filesystem test family.
+const FS_TEST_OPS: [&str; 14] = [
+    "create",
+    "open",
+    "write",
+    "append",
+    "read",
+    "read_to_string",
+    "read_dir",
+    "remove_file",
+    "remove_dir",
+    "remove_dir_all",
+    "rename",
+    "copy",
+    "create_dir",
+    "create_dir_all",
+];
+
+/// The op name + container of a path-call callee: (std::fs::write ->
+/// ("write", "fs")), (File::create -> ("create", "File")). Empty when the
+/// callee is not an fs-path call.
+fn fs_path_call(c: &ExprCall) -> Option<(String, String)> {
+    let Expr::Path(p) = c.func.as_ref() else {
+        return None;
+    };
+    let segs: Vec<syn::Ident> = p.path.segments.iter().map(|s| s.ident.clone()).collect();
+    let op = segs.last().map(|i| i.to_string()).unwrap_or_default();
+    if !FS_TEST_OPS.contains(&op.as_str()) {
+        return None;
+    }
+    let container = segs
+        .get(segs.len().saturating_sub(2))
+        .map(|i| i.to_string())
+        .unwrap_or_default();
+    if container == "fs" || container == "File" {
+        Some((op, container))
+    } else {
+        None
+    }
+}
+
+/// Any string-literal argument that is a relative non-temp path.
+fn lit_path_arg(args: &syn::punctuated::Punctuated<Expr, syn::token::Comma>) -> bool {
+    for arg in args {
+        if let Expr::Lit(l) = arg {
+            if let Lit::Str(s) = &l.lit {
+                let p = s.value();
+                if !p.starts_with('/') && !p.to_lowercase().contains("temp") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Does this expression touch the real filesystem with a literal path?
+/// (test-code branch only)
+fn fakefs_hit(expr: &Expr) -> bool {
+    match expr {
+        Expr::MethodCall(mc) => {
+            let op = mc.method.to_string();
+            if !FS_TEST_OPS.contains(&op.as_str()) {
+                return false;
+            }
+            matches!(
+                &*mc.receiver,
+                Expr::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "File" || s.ident == "fs")
+            ) && lit_path_arg(&mc.args)
+        }
+        Expr::Call(c) => fs_path_call(c).is_some() && lit_path_arg(&c.args),
+        _ => false,
+    }
+}
+
 fn is_assert_macro(path: &Path) -> bool {
     path.segments.last().is_some_and(|s| {
         matches!(
@@ -755,6 +1037,89 @@ fn use_paths(u: &ItemUse) -> Vec<String> {
 
 /// `#[test]` + `#[ignore]` — a skipped test rots, the skipif analog. Runs as a
 /// pre-pass so cfg(test) containment can't hide it.
+/// `#[test]` fn with no assertion anywhere in its body — a test that can
+/// never fail. Pre-pass (cfg(test) containment can't hide it); `#[ignore]`d
+/// tests are skipped (they are already skipif findings) and
+/// `#[should_panic]` is an assertion contract.
+fn no_assert_test_findings(file: &File, file_name: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for item in &file.items {
+        walk_test_fns(item, &mut out, file_name);
+    }
+    out
+}
+
+fn walk_test_fns(item: &Item, out: &mut Vec<Finding>, file_name: &str) {
+    match item {
+        Item::Fn(f) => {
+            if has_attr(&f.attrs, "test")
+                && !has_attr(&f.attrs, "ignore")
+                && !has_attr(&f.attrs, "should_panic")
+                && !block_asserts(&f.block)
+            {
+                out.push(Finding {
+                    file: file_name.to_string(),
+                    line: f.sig.span().start().line,
+                    function: f.sig.ident.to_string(),
+                    kind: "no-assert-test".into(),
+                    severity: "fail".into(),
+                    message: "test has no assertion — it can never fail".into(),
+                });
+            }
+        }
+        Item::Mod(m) => {
+            if let Some((_, items)) = &m.content {
+                for it in items {
+                    walk_test_fns(it, out, file_name);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Any assert!/assert_eq!/.../panic! macro in the block (nested included).
+fn is_assertion_macro(path: &Path) -> bool {
+    let last = path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+    matches!(
+        last.as_str(),
+        "assert"
+            | "assert_eq"
+            | "assert_ne"
+            | "assert_matches"
+            | "debug_assert"
+            | "debug_assert_eq"
+            | "panic"
+            | "unreachable"
+            | "todo"
+            | "unimplemented"
+    )
+}
+
+fn block_asserts(block: &Block) -> bool {
+    struct AssertProbe {
+        found: bool,
+    }
+    impl<'a> syn::visit::Visit<'a> for AssertProbe {
+        // statement-position macros (assert_eq!(..);) parse as Stmt::Macro
+        // and never reach visit_expr_macro — both hooks must be covered
+        fn visit_stmt_macro(&mut self, m: &'a syn::StmtMacro) {
+            if is_assertion_macro(&m.mac.path) {
+                self.found = true;
+            }
+        }
+        fn visit_expr_macro(&mut self, m: &'a ExprMacro) {
+            if is_assertion_macro(&m.mac.path) {
+                self.found = true;
+            }
+            syn::visit::visit_expr_macro(self, m);
+        }
+    }
+    let mut probe = AssertProbe { found: false };
+    syn::visit::visit_block(&mut probe, block);
+    probe.found
+}
+
 fn ignored_test_findings(file: &File, file_name: &str) -> Vec<Finding> {
     struct Collector {
         findings: Vec<Finding>,
@@ -1692,6 +2057,100 @@ mod tests {
         uses.insert("a.rs".into(), vec!["serde::Deserialize".into()]);
         let graph = module_graph(&files, &mods, &uses);
         assert!(graph.values().all(|v| v.is_empty())); // serde is not a local module — no edges
+    }
+
+    #[test]
+    fn swallow_let_underscore_discards_calls() {
+        let fs = scan("fn f() {\n    let _ = foo();\n}\n");
+        assert!(has_kind(&fs, "swallow"));
+        let fs2 = scan("fn f() {\n    let _ = x;\n}\n");
+        assert!(!has_kind(&fs2, "swallow")); // plain-path moves are not swallows
+    }
+
+    #[test]
+    fn swallow_skipped_in_test_code() {
+        let fs = scan("#[cfg(test)]\nmod t {\n    #[test]\n    fn f() {\n        let _ = foo();\n    }\n}\n");
+        assert!(!has_kind(&fs, "swallow"));
+    }
+
+    #[test]
+    fn debug_artifact_dbg_and_unwrap() {
+        let fs = scan("fn f() {\n    dbg!(x);\n    let y = foo().unwrap();\n}\n");
+        assert!(has_kind(&fs, "debug-artifact"));
+        let fs2 = scan("fn f() {\n    let y = foo();\n}\n");
+        assert!(!has_kind(&fs2, "debug-artifact"));
+    }
+
+    #[test]
+    fn debug_artifact_skipped_in_tests() {
+        let fs = scan("#[cfg(test)]\nmod t {\n    #[test]\n    fn f() {\n        dbg!(x);\n        let y = foo().unwrap();\n    }\n}\n");
+        assert!(!has_kind(&fs, "debug-artifact"));
+    }
+
+    #[test]
+    fn boolean_literal_argument_is_found() {
+        let fs = scan("fn f() {\n    connect(\"host\", true);\n}\n");
+        assert!(has_kind(&fs, "boolean-arg"));
+        let fs2 = scan("fn f() {\n    let retry = true;\n    connect(\"host\", retry);\n}\n");
+        assert!(!has_kind(&fs2, "boolean-arg"));
+    }
+
+    #[test]
+    fn long_parameter_list_over_five() {
+        let fs = scan("fn f(a: i32, b: i32, c: i32, d: i32, e: i32, g: i32) {}\n");
+        assert!(has_kind(&fs, "long-param-list"));
+        let fs2 = scan("fn f(a: i32, b: i32, c: i32, d: i32, e: i32) {}\n");
+        assert!(!has_kind(&fs2, "long-param-list"));
+    }
+
+    #[test]
+    fn no_assert_test_is_flagged() {
+        let fs = scan("fn helper() {}\n#[test]\nfn t() {}\n");
+        assert!(has_kind(&fs, "no-assert-test"));
+        let ok = scan("#[test]\nfn t() {\n    assert_eq!(1, 1);\n}\n");
+        assert!(!has_kind(&ok, "no-assert-test"));
+        let panic = scan("#[test]\n#[should_panic]\nfn t() {}\n");
+        assert!(!has_kind(&panic, "no-assert-test"));
+        let ignored = scan("#[test]\n#[ignore]\nfn t() {}\n");
+        assert!(!has_kind(&ignored, "no-assert-test"));
+    }
+
+    #[test]
+    fn strewing_free_fns_sharing_struct_param() {
+        let fs = scan("struct S {}\nfn a(s: S) {}\nfn b(s: S) {}\nfn c(s: S) {}\n");
+        assert!(has_kind(&fs, "strewing"));
+        let fs2 = scan("struct S {}\nfn a(s: S) {}\nfn b(s: S) {}\n");
+        assert!(!has_kind(&fs2, "strewing"));
+    }
+
+    #[test]
+    fn global_state_statics_flagged() {
+        let fs = scan("static mut X: i32 = 0;\n");
+        assert!(has_kind(&fs, "global-state"));
+        let fs2 = scan("static X: Mutex<i32> = Mutex::new(0);\n");
+        assert!(has_kind(&fs2, "global-state"));
+        let ok = scan("static X: i32 = 0;\n");
+        assert!(!has_kind(&ok, "global-state"));
+    }
+
+    #[test]
+    fn fakefs_literal_path_in_test() {
+        let fs = scan("#[test]\nfn t() {\n    std::fs::write(\"out.txt\", b\"x\");\n}\n");
+        assert!(has_kind(&fs, "fakefs"));
+        let ok = scan(
+            "#[test]\nfn t() {\n    let dir = std::env::temp_dir();\n    std::fs::write(dir.join(\"x\"), b\"x\");\n}\n",
+        );
+        assert!(!has_kind(&ok, "fakefs"));
+        let prod = scan("fn f() {\n    std::fs::write(\"out.txt\", b\"x\");\n}\n");
+        assert!(!has_kind(&prod, "fakefs")); // test-only family
+    }
+
+    #[test]
+    fn stale_suppression_flagged() {
+        let fs = scan("// code-health: ignore magic-number this line has nothing\nfn f() {}\n");
+        assert!(has_kind(&fs, "stale-suppression"));
+        let ok = scan("fn f() {\n    let x = 3 * 60; // code-health: ignore magic-number the gate threshold\n}\n");
+        assert!(!has_kind(&ok, "stale-suppression"));
     }
 
     #[test]

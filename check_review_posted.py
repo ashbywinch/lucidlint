@@ -63,6 +63,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     (401 InvalidAuthenticationInfo, 2026-08-11). Stop at the 302 and fetch
     the signed Location bare."""
 
+    # urllib's HTTPRedirectHandler.redirect_request override requires this
+    # exact signature — the framework defines the contract
+    # code-health: ignore long-param-list framework-mandated override signature
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
@@ -140,7 +143,8 @@ def main() -> int:
 
     try:
         commit = _get_json(f"https://api.github.com/repos/{repo}/commits/{sha}", token)
-    except HTTPError as e:  # code-health: ignore except an unknown commit means the review cannot cover it
+    except HTTPError as e:
+        # surfaces via the ::error line + the non-zero exit — not a swallow
         print(f"::error::commit {sha} is not fetchable ({e.code}) — the review cannot cover it.")
         return 1
     head_committed_at = commit["commit"]["committer"]["date"]

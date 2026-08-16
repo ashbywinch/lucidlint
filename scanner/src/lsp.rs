@@ -66,12 +66,21 @@ pub fn diagnostics_for(scan: &FileScan, source: &str) -> Vec<serde_json::Value> 
 
 /// One Content-Length-framed JSON-RPC message on the wire — the one framing
 /// helper every outgoing message goes through.
+/// The three-part write — one statement so a single line-level suppression
+/// covers the whole frame.
+fn write_frame(out: &mut impl Write, header: &[u8], body: &[u8]) -> std::io::Result<()> {
+    out.write_all(header)?;
+    out.write_all(body)?;
+    out.flush()
+}
+
 fn write_message(out: &mut impl Write, msg: serde_json::Value) {
     let body = msg.to_string();
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    let _ = out.write_all(header.as_bytes());
-    let _ = out.write_all(body.as_bytes());
-    let _ = out.flush();
+    // the client may have closed the pipe — a failed diagnostic write ends
+    // the session either way; run() exits when the next read returns None
+    // code-health: ignore swallow best-effort diagnostic write — see above
+    let _ = write_frame(out, header.as_bytes(), body.as_bytes());
 }
 
 fn publish(uri: &str, diagnostics: &[serde_json::Value], out: &mut impl Write) {

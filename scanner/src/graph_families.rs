@@ -4,7 +4,8 @@
 //! The repo-wide families computed from the code-review-graph contract
 //! (a versioned, schema-neutral JSON emitted by code_health_graph_export.py
 //! through the graph tool's own public API — the gate never touches the
-//! SQLite schema or the DB location). Plus hotspot (git churn + max CC).
+//! SQLite schema or the DB location). Plus hotspot (git churn + max CC) and
+//! churn-untested (top churn with no test coverage).
 //!
 //! Finding identity (kind/file/line/function) matches the Python reference
 //! exactly; the concern-mix wording in messages is the honest core fact.
@@ -275,8 +276,7 @@ fn strongly_connected_components(graph: &BTreeMap<String, Vec<String>>, nodes: &
             } else {
                 if low[&w] == indices[&w] {
                     let mut comp = Vec::new();
-                    loop {
-                        let x = stack.pop().unwrap();
+                    while let Some(x) = stack.pop() {
                         on_stack.remove(&x);
                         comp.push(x.clone());
                         if x == w {
@@ -298,7 +298,7 @@ fn strongly_connected_components(graph: &BTreeMap<String, Vec<String>>, nodes: &
 /// One concrete cycle in an SCC — `_find_cycle`.
 fn find_cycle(graph: &BTreeMap<String, Vec<String>>, comp: &[String]) -> Option<Vec<String>> {
     let members: HashSet<&String> = comp.iter().collect();
-    let start = comp.iter().min().cloned().unwrap();
+    let start = comp.iter().min().cloned()?;
     let mut stack = vec![(start.clone(), vec![start.clone()], HashSet::new())];
     while let Some((node, path, seen)) = stack.pop() {
         for w in graph.get(&node).cloned().unwrap_or_default() {
@@ -434,22 +434,25 @@ fn is_test_rel(rel: &str) -> bool {
     rel.contains("/test") || rel.starts_with("test")
 }
 
-/// Per-file coupling edge counts — `_hub_edge_counts` (builtin CALLS skipped).
-fn hub_edge_counts(contract: &GraphContract) -> HashMap<String, usize> {
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for e in &contract.edges {
-        if !matches!(e.kind.as_str(), "CALLS" | "IMPORTS_FROM" | "INHERITS" | "REFERENCES") {
-            continue;
+/// Per-file coupling edge counts — `_hub_edge_counts` (builtin CALLS
+/// skipped).
+impl GraphContract {
+    fn hub_edge_counts(&self) -> HashMap<String, usize> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for e in &self.edges {
+            if !matches!(e.kind.as_str(), "CALLS" | "IMPORTS_FROM" | "INHERITS" | "REFERENCES") {
+                continue;
+            }
+            if !e.file_path.ends_with(".py") {
+                continue;
+            }
+            if e.kind == "CALLS" && BUILTIN_NAMES.contains(&base_name(&e.target)) {
+                continue;
+            }
+            *counts.entry(e.file_path.clone()).or_default() += 1;
         }
-        if !e.file_path.ends_with(".py") {
-            continue;
-        }
-        if e.kind == "CALLS" && BUILTIN_NAMES.contains(&base_name(&e.target)) {
-            continue;
-        }
-        *counts.entry(e.file_path.clone()).or_default() += 1;
+        counts
     }
-    counts
 }
 
 /// Hub files: heavy coupling — `_hub_file_actions`.
@@ -460,7 +463,7 @@ pub fn hub_file_findings(
     include_tests: bool,
     max_cc_by_file: &HashMap<String, (usize, usize, String)>, // rel -> (line, cc, name) of the fattest
 ) -> Vec<Finding> {
-    let counts = hub_edge_counts(contract);
+    let counts = contract.hub_edge_counts();
     let mut out = Vec::new();
     let mut entries: Vec<(&String, &usize)> = counts.iter().collect();
     entries.sort_by_key(|(f, c)| (*c, (*f).clone()));
@@ -573,7 +576,7 @@ pub fn high_risk_findings(repo: &Path, contract: &GraphContract, max_risk: f64, 
         let tested = tested_counts.get(&n.qualified_name).copied().unwrap_or(0) > 0;
         scored.push((n, risk, caller_count, tested));
     }
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(50);
     let mut out = Vec::new();
     for (n, risk, caller_count, _tested) in scored {
@@ -590,50 +593,45 @@ pub fn high_risk_findings(repo: &Path, contract: &GraphContract, max_risk: f64, 
     out
 }
 
-// code-health: ignore record-shape node_by_qn is an index map for graph-wide lookups —
-// the map is the boundary, not the record; the function never consumes one GNode's shape
-/// The most-called external subsystem of a function — `_dominant_callee`.
-fn dominant_callee(
-    contract: &GraphContract,
-    repo: &Path,
-    qn: &str,
-    own_rel: &str,
-    node_by_qn: &HashMap<String, &GNode>,
-) -> Option<String> {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    let own_mod = module_key(repo, own_rel);
-    for e in &contract.edges {
-        if e.kind != "CALLS" || e.source != qn {
-            continue;
-        }
-        let callee_mod = resolve_callee_module(contract, repo, &e.target, node_by_qn);
-        if let Some(m) = callee_mod {
-            if m != own_mod {
-                *counts.entry(m).or_default() += 1;
+impl GraphContract {
+    /// The most-called external subsystem of a function — `_dominant_callee`.
+    fn dominant_callee(
+        &self,
+        repo: &Path,
+        qn: &str,
+        own_rel: &str,
+        node_by_qn: &HashMap<String, &GNode>,
+    ) -> Option<String> {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        let own_mod = module_key(repo, own_rel);
+        for e in &self.edges {
+            if e.kind != "CALLS" || e.source != qn {
+                continue;
+            }
+            let callee_mod = self.resolve_callee_module(repo, &e.target, node_by_qn);
+            if let Some(m) = callee_mod {
+                if m != own_mod {
+                    *counts.entry(m).or_default() += 1;
+                }
             }
         }
+        counts.into_iter().max_by_key(|(_, c)| *c).map(|(m, _)| m)
     }
-    counts.into_iter().max_by_key(|(_, c)| *c).map(|(m, _)| m)
-}
 
-// code-health: ignore record-shape same index-map boundary as dominant_callee — the
-// qualified-name map is the parameter, GNode only ever appears as its value type
-fn resolve_callee_module(
-    contract: &GraphContract,
-    repo: &Path,
-    target: &str,
-    node_by_qn: &HashMap<String, &GNode>,
-) -> Option<String> {
-    if let Some(n) = node_by_qn.get(target) {
-        return Some(module_key(repo, &n.file_path));
-    }
-    if target.contains("::") {
-        let name = base_name(target);
-        if let Some(n) = contract.nodes.iter().find(|n| n.name == name) {
+    /// A callee target's module — the qualified-name map is the boundary;
+    /// GNode only ever appears as its value type.
+    fn resolve_callee_module(&self, repo: &Path, target: &str, node_by_qn: &HashMap<String, &GNode>) -> Option<String> {
+        if let Some(n) = node_by_qn.get(target) {
             return Some(module_key(repo, &n.file_path));
         }
+        if target.contains("::") {
+            let name = base_name(target);
+            if let Some(n) = self.nodes.iter().find(|n| n.name == name) {
+                return Some(module_key(repo, &n.file_path));
+            }
+        }
+        None
     }
-    None
 }
 
 /// File mixes layers — `_layer_mix_actions` / `_layer_mix_for_file`.
@@ -655,7 +653,7 @@ pub fn layer_mix_findings(repo: &Path, contract: &GraphContract, files: &[String
         }
         let mut layers: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for n in fns {
-            if let Some(layer) = dominant_callee(contract, repo, &n.qualified_name, rel, &node_by_qn) {
+            if let Some(layer) = contract.dominant_callee(repo, &n.qualified_name, rel, &node_by_qn) {
                 layers
                     .entry(layer)
                     .or_default()
@@ -710,7 +708,12 @@ pub fn folder_mix_findings(repo: &Path, contract: &GraphContract) -> Vec<Finding
             None => {
                 best.insert(file, cid);
             }
-            Some(_) if *cnt > *per_cc.get(&(file.clone(), *best.get(&file).unwrap())).unwrap_or(&0) => {
+            Some(_)
+                if *cnt
+                    > *per_cc
+                        .get(&(file.clone(), best.get(&file).copied().unwrap_or_default()))
+                        .unwrap_or(&0) =>
+            {
                 best.insert(file, cid);
             }
             Some(_) => {}
@@ -723,9 +726,9 @@ pub fn folder_mix_findings(repo: &Path, contract: &GraphContract) -> Vec<Finding
             continue;
         }
         let dir = parts[..parts.len() - 1].join("/");
-        dirs.entry(dir)
-            .or_default()
-            .push((parts.last().unwrap().to_string(), cid));
+        if let Some(last) = parts.last() {
+            dirs.entry(dir).or_default().push((last.to_string(), cid));
+        }
     }
     let mut out = Vec::new();
     for (d, files) in dirs {
@@ -803,6 +806,56 @@ pub fn hotspot_findings(
             message: format!("changed {count}x (top {cutoff} by churn) — volatile part: max CC {max_cc} in {rel}"),
         });
         let _ = last_modified;
+    }
+    out
+}
+
+/// Churn-untested: files in the top fraction by churn with no test coverage —
+/// volatile AND unverified. Coverage is the contract's TESTED_BY edges (the
+/// same source the high-risk family uses): a file is covered when one of its
+/// nodes is the tested side of such an edge.
+pub fn churn_untested_findings(
+    repo: &Path,
+    churn: &HashMap<String, usize>,
+    contract: &GraphContract,
+    top_frac: f64,
+) -> Vec<Finding> {
+    let mut covered: HashSet<String> = HashSet::new();
+    for e in &contract.edges {
+        if e.kind != "TESTED_BY" {
+            continue;
+        }
+        if let Some(n) = contract
+            .nodes
+            .iter()
+            .find(|n| n.qualified_name == e.source || n.file_path == e.source)
+        {
+            covered.insert(repo_rel(repo, &n.file_path));
+        }
+    }
+
+    let cutoff = ((churn.len() as f64) * top_frac).max(1.0) as usize;
+    let mut entries: Vec<(&String, &usize)> = churn.iter().collect();
+    entries.sort_by_key(|(f, c)| (*c, (*f).clone()));
+    entries.reverse();
+    let mut out = Vec::new();
+    for (rel, count) in entries.into_iter().take(cutoff) {
+        if *count < 2 {
+            continue; // one change isn't volatile — same gate as hotspot
+        }
+        if covered.contains(rel.as_str()) {
+            continue;
+        }
+        out.push(Finding {
+            file: rel.clone(),
+            line: 1,
+            function: String::new(),
+            kind: "churn-untested".into(),
+            severity: "fail".into(),
+            message: format!(
+                "changed {count}x (top {cutoff} by churn) but has no test coverage — volatile and unverified"
+            ),
+        });
     }
     out
 }
@@ -950,6 +1003,54 @@ mod tests {
         let f = hotspot_findings(&churn, &cc, 0.5, 15, &HashMap::new());
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].file, "a.py");
+    }
+
+    #[test]
+    fn churn_untested_high_churn_without_coverage_is_found() {
+        let mut churn = HashMap::new();
+        churn.insert("a.py".to_string(), 11usize); // top churn -> the candidate
+        churn.insert("b.py".to_string(), 10usize);
+        // no TESTED_BY edge -> a.py has no test coverage
+        let c = contract(
+            vec![node("Function", "f", "/repo/a.py::f", "/repo/a.py", 1, 5, None)],
+            vec![],
+        );
+        let f = churn_untested_findings(Path::new("/repo"), &churn, &c, 0.5);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].file, "a.py");
+        assert_eq!(f[0].kind, "churn-untested");
+        assert_eq!(f[0].severity, "fail");
+        assert_eq!(
+            f[0].message,
+            "changed 11x (top 1 by churn) but has no test coverage — volatile and unverified"
+        );
+    }
+
+    #[test]
+    fn churn_untested_high_churn_covered_passes() {
+        let mut churn = HashMap::new();
+        churn.insert("a.py".to_string(), 11usize); // top churn -> the candidate
+        churn.insert("b.py".to_string(), 10usize);
+        // TESTED_BY source is the tested node (the code's TESTED_BY keying) -> a.py is covered
+        let c = contract(
+            vec![node("Function", "f", "/repo/a.py::f", "/repo/a.py", 1, 5, None)],
+            vec![edge(
+                "TESTED_BY",
+                "/repo/a.py::f",
+                "/repo/tests/test_a.py::test_f",
+                "/repo/tests/test_a.py",
+            )],
+        );
+        assert!(churn_untested_findings(Path::new("/repo"), &churn, &c, 0.5).is_empty());
+    }
+
+    #[test]
+    fn churn_untested_low_churn_without_coverage_passes() {
+        // changed once: in the top cutoff but below the volatile gate — and no coverage
+        let mut churn = HashMap::new();
+        churn.insert("a.py".to_string(), 1usize);
+        let c = contract(vec![], vec![]);
+        assert!(churn_untested_findings(Path::new("/repo"), &churn, &c, 0.5).is_empty());
     }
 
     #[test]

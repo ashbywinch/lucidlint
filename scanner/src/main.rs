@@ -32,9 +32,9 @@ use checks::Q;
 use checks::*;
 
 /// One open function scope: its decision count and the names it returns
-/// (for the except-swallow analysis).
+/// (for the swallow analysis).
 pub struct FnScope {
-    /// Names this function returns (for the except-swallow analysis).
+    /// Names this function returns (for the swallow analysis).
     pub returned: HashSet<String>,
 }
 
@@ -66,7 +66,7 @@ struct ScanState<'a> {
     /// (name, start line) of the innermost function — attribution.
     current_fn: Option<(String, usize)>,
     /// Open function scopes (innermost last): decisions + the enclosing
-    /// function's returned names (for the except-swallow analysis).
+    /// function's returned names (for the swallow analysis).
     fn_stack: Vec<FnScope>,
     /// Class nesting: class bodies contribute no decisions (radon sub-visitor).
     in_class: u32,
@@ -120,6 +120,8 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 });
                 self.unreachable_check(&f.body);
                 shadow_findings(self, stmt);
+                let source = self.source;
+                long_param_list_findings(self, f, source);
                 // signature exprs feed the reference scan (ast.walk covers
                 // decorators, parameter annotations/defaults, and returns)
                 for d in &f.decorator_list {
@@ -150,7 +152,11 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 for s in &f.body {
                     self.visit_stmt(s);
                 }
-                self.fn_stack.pop().unwrap();
+                // the push/pop invariant is per-function; a missing scope is a
+                // walker bug, not a crash — bail out of this function's checks
+                let Some(_scope) = self.fn_stack.pop() else {
+                    return;
+                };
                 // The radon-equivalent CC comes from the radonc crate (its rules
                 // match radon 6.0.1 exactly; the visitor still tracks decisions
                 // for the closures/latent-class gate).
@@ -206,7 +212,10 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 }
             }
             Stmt::Try(_) => except_findings(self, stmt),
-            Stmt::Global(_) => global_state_findings(self, stmt, false),
+            Stmt::Global(_) => {
+                let module_level = false; // globals inside a function
+                global_state_findings(self, stmt, module_level);
+            }
             Stmt::Assign(_) => {
                 global_state_findings(self, stmt, module_level);
                 shadow_findings(self, stmt);
@@ -239,6 +248,26 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
         // the generic walk would hand them the Call as parent, and the magic
         // position rule must match Python's (status_code=403 is NOT a finding).
         if let Expr::Call(call) = expr {
+            let source = self.source;
+            boolean_arg_findings(self, &call.arguments.args, source);
+            // debug-artifact (Python half): breakpoint() left in production —
+            // the dbg!/unwrap analog (Rust half lives in rustscan.rs)
+            if !self.is_test
+                && matches!(
+                    call.func.as_ref(),
+                    Expr::Name(n) if n.id.as_str() == "breakpoint"
+                )
+            {
+                let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
+                self.findings.push(Finding {
+                    file: self.file.to_string(),
+                    line: line_of(source, call.range().start()),
+                    function: fn_name,
+                    kind: "debug-artifact".into(),
+                    severity: "fail".into(),
+                    message: "breakpoint() left in production code — remove it".into(),
+                });
+            }
             self.parent_stack.push(ParentEntry::Expr(expr.clone()));
             self.visit_expr(&call.func);
             for arg in &call.arguments.args {
@@ -578,7 +607,8 @@ pub(crate) fn is_test_path(name: &str) -> bool {
 
 /// The full scan (CLI): per-file families + repo-wide collections.
 fn scan_source(source: &str, name: &str) -> FileScan {
-    scan_source_impl(source, name, true)
+    let repo_wide = true;
+    scan_source_impl(source, name, repo_wide)
 }
 
 /// The LSP scan: per-file families only — the duplicate-candidate BFS and
@@ -586,10 +616,12 @@ fn scan_source(source: &str, name: &str) -> FileScan {
 /// Dispatches on the buffer's extension: .rs -> the Rust layer, else Python.
 pub fn scan_source_lsp(source: &str, name: &str) -> FileScan {
     if name.ends_with(".rs") {
-        let rs = rustscan::scan_source(source, name, false);
+        let repo_wide = false; // LSP per-buffer scans are single-file
+        let rs = rustscan::scan_source(source, name, repo_wide);
         return rustscan_to_filescan_ref(&rs, name);
     }
-    scan_source_impl(source, name, false)
+    let repo_wide = false; // LSP per-buffer scans are single-file
+    scan_source_impl(source, name, repo_wide)
 }
 
 fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
@@ -634,6 +666,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         monkeypatch_findings(&mut state, &body, source);
         skipif_findings(&mut state, &body, source);
         fakefs_findings(&mut state, &body, source);
+        no_assert_test_findings(&mut state, &body, source);
     }
     // duplicate candidates in ast.walk BFS order — module-level functions
     // (any depth) come before class methods regardless of source line;
@@ -665,14 +698,27 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     // complexity findings are generated from the cc array after this pass —
     // honor complexity suppressions here so both paths agree (radon parity:
     // a fn whose complexity is suppressed must not resurface via cc)
+    let mut pre_used = common::PreUsedSuppressions::default();
     if !state.cc.is_empty() {
         state.cc.retain(|e| {
-            !common::suppressed("complexity", e.line, &supps)
-                && !supps.file.get("complexity").is_some_and(|w| !w.is_empty())
+            for ln in [e.line, e.line.saturating_sub(1)] {
+                if let Some((sig, why)) = supps.line.get(&ln) {
+                    if sig == "complexity" && !why.is_empty() {
+                        pre_used.lines.insert((ln, sig.clone()));
+                    }
+                }
+            }
+            let line_suppressed = common::suppressed("complexity", e.line, &supps);
+            let file_suppressed = supps.file.get("complexity").is_some_and(|w| !w.is_empty());
+            if file_suppressed {
+                pre_used.files.insert("complexity".into());
+            }
+            !line_suppressed && !file_suppressed
         });
     }
-    let findings = checks::apply_suppressions(state.findings, source, name, tokens);
+    let findings = checks::apply_suppressions_impl(state.findings, source, name, tokens, &pre_used);
     let mut all = type_ignore_findings(source, name, tokens);
+    all.extend(noqa_findings(source, name, tokens));
     all.extend(findings);
     let classes = collect_classes(&body, source);
     let imports = collect_imports(&body, source);
@@ -695,7 +741,8 @@ fn scan_file(path: &Path) -> FileScan {
     let source = std::fs::read_to_string(path).unwrap_or_default();
     let name = path.to_str().unwrap_or("<file>").to_string();
     if name.ends_with(".rs") {
-        let rs = rustscan::scan_source(&source, &name, true);
+        let repo_wide = true;
+        let rs = rustscan::scan_source(&source, &name, repo_wide);
         return rustscan_to_filescan_ref(&rs, &name);
     }
     let mut scan = scan_source(&source, &name);
@@ -723,9 +770,96 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
     }
 }
 
-/// The finding model's final action kind — the contract carries it so the
-/// Python orchestrator consumes findings verbatim (no re-mapping, no drift).
-/// Internal kinds (suppression signals) map once, here.
+/// EVERY family kind the scanner can emit — the registration registry.
+/// A new family MUST be added here, get a `final_kind` arm (or be listed in
+/// STANDARD_KINDS), be added to RULE_GROUPS (code_health.py), and get a
+/// RULES.md row (see RULES.md "Adding a finding family").
+///
+/// The consistency
+/// self-checks (main.rs `registry_is_complete` + the orchestrator's
+/// registration tests) fail when any of the four is missing.
+pub const FAMILY_KINDS: &[&str] = &[
+    // architecture
+    "complexity",
+    "large-function",
+    "closures",
+    "partition",
+    "strewing",
+    "record-shape",
+    "duplicate",
+    "layer-mix",
+    "folder-mix",
+    "hub-file",
+    "high-risk",
+    "hotspot",
+    "over-abstraction",
+    "churn-untested",
+    "long-param-list",
+    // style
+    "magic-number",
+    "noop-statement",
+    "unreachable",
+    "vague-name",
+    "class-module",
+    "builtin-shadow",
+    "broad-except",
+    "swallow",
+    "inline-import",
+    "private-import",
+    "global-state",
+    "unused",
+    "import-cycle",
+    "boolean-arg",
+    "debug-artifact",
+    // test discipline
+    "monkeypatch",
+    "skipif",
+    "fakefs",
+    "no-assert-test",
+    // suppression discipline
+    "suppression",
+    "type-ignore",
+    "allow-reason",
+    "noqa",
+    "stale-suppression",
+    // docs
+    "docs-link",
+    "docs-undiscoverable",
+];
+
+/// Kinds that deliberately collapse to the "standard" display bucket — their
+/// messages carry the rule; a named `final_kind` bucket is optional for them.
+pub const STANDARD_KINDS: &[&str] = &[
+    "broad-except",
+    "builtin-shadow",
+    "class-module",
+    "duplicate",
+    "global-state",
+    "import-cycle",
+    "inline-import",
+    "monkeypatch",
+    "fakefs",
+    "over-abstraction",
+    "private-import",
+    "suppression",
+    "type-ignore",
+    "unused",
+    "allow-reason",
+];
+
+/// The finding model's final action kind — the JSON contract carries it so
+/// the Python orchestrator consumes findings without further mapping.
+///
+/// Two identifiers per finding, don't conflate them:
+///
+/// - `kind` — display kind, `final_kind` output (named buckets; families
+///   without one collapse to "standard", the message explains the rest).
+/// - `signal` — the raw family kind; THIS is what suppressions match on
+///   (`code-health: ignore <signal>`, config `ignore = [<signal>]`,
+///   RULE_GROUPS membership, baseline identity).
+///
+/// A new family MUST be registered in both places (see RULES.md "Adding a
+/// finding family") plus the Python RULE_GROUPS for group suppression.
 pub fn final_kind(kind: &str) -> &'static str {
     match kind {
         "closures" | "partition" | "strewing" => "latent-class",
@@ -739,7 +873,19 @@ pub fn final_kind(kind: &str) -> &'static str {
         "folder-mix" => "folder-mix",
         "layer-mix" => "layer-mix",
         "complexity" => "complexity",
-        _ => "standard", // magic-number, except, imports, over-abstraction, cycles, duplicate, unused, ...
+        "swallow" => "swallow",
+        "skipif" => "skipif",
+        "noop-statement" => "noop-statement",
+        "unreachable" => "unreachable",
+        "magic-number" => "magic-number",
+        "boolean-arg" => "boolean-arg",
+        "debug-artifact" => "debug-artifact",
+        "long-param-list" => "long-param-list",
+        "no-assert-test" => "no-assert-test",
+        "noqa" => "noqa",
+        "stale-suppression" => "stale-suppression",
+        "churn-untested" => "churn-untested",
+        _ => "standard", // broad-except, imports, over-abstraction, cycles, duplicate, unused, ...
     }
 }
 
@@ -824,10 +970,15 @@ fn main() {
         if path.ends_with(".rs") {
             let source = std::fs::read_to_string(path).unwrap_or_default();
             let name = path.clone();
-            let rs = rustscan::scan_source(&source, &name, true);
+            let repo_wide = true;
+            let rs = rustscan::scan_source(&source, &name, repo_wide);
             let rel = name.clone();
             rust_scans.push(rs);
-            scans.push(rustscan_to_filescan_ref(rust_scans.last().unwrap(), &rel));
+            // a scan was just pushed — the pair stays in lockstep
+            let Some(scan) = rust_scans.last() else {
+                continue;
+            };
+            scans.push(rustscan_to_filescan_ref(scan, &rel));
         } else {
             scans.push(scan_file(Path::new(path)));
         }
@@ -990,6 +1141,16 @@ fn main() {
                     15,
                     &std::collections::HashMap::new(),
                 ));
+                // churn-untested: top-churn files with no coverage — needs the
+                // graph contract (TESTED_BY edges) alongside the churn map
+                if let Some(c) = &contract {
+                    all_findings.extend(graph_families::churn_untested_findings(
+                        Path::new(&root),
+                        &churn,
+                        c,
+                        0.1,
+                    ));
+                }
             }
         }
     }
@@ -1132,6 +1293,20 @@ mod tests {
     }
 
     #[test]
+    fn positional_boolean_literals_are_found_keyword_exempt() {
+        let f = scan_src("def f():\n    retry(g(True), h(retry=True), False)\n    return 1\n");
+        let b: Vec<&Finding> = f.iter().filter(|x| x.kind == "boolean-arg").collect();
+        assert_eq!(b.len(), 2); // g(True) positional and outer False; retry=True keyword exempt
+        assert!(b.iter().all(|x| x.message.contains("name it")));
+    }
+
+    #[test]
+    fn boolean_name_and_keyword_args_pass() {
+        let f = scan_src("def f(flag):\n    run(flag, retry=True, cache=False)\n    return 1\n");
+        assert!(!f.iter().any(|x| x.kind == "boolean-arg"));
+    }
+
+    #[test]
     fn magic_in_nested_function_attributes_to_innermost() {
         let f = scan_src("def outer():\n    def inner():\n        return rate * 60\n    return inner()\n");
         let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
@@ -1183,25 +1358,25 @@ mod tests {
     // ------------------------------------------------------------- suppressions
     #[test]
     fn suppression_with_why_exempts() {
-        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # code-health: ignore except this is safe, logged\n        log('x')\n");
-        assert!(!f.iter().any(|x| x.kind == "except"));
+        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # code-health: ignore swallow this is safe, logged\n        log('x')\n");
+        assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn suppression_without_why_is_a_finding() {
         let f = scan_src(
-            "def f():\n    try:\n        g()\n    except ValueError:  # code-health: ignore except\n        log('x')\n",
+            "def f():\n    try:\n        g()\n    except ValueError:  # code-health: ignore swallow\n        log('x')\n",
         );
         assert!(f.iter().any(|x| x.kind == "suppression"));
-        assert!(f.iter().any(|x| x.kind == "except")); // not actually exempted
+        assert!(f.iter().any(|x| x.kind == "swallow")); // not actually exempted
     }
 
     #[test]
     fn suppression_on_line_above_exempts() {
         // the comment must sit on the finding's line or line-1 — the except
         // handler is line 5, so line 4 (the try) is the line-1 position
-        let f = scan_src("def f():\n    try:\n        g()\n    # code-health: ignore except deliberate skip\n    except ValueError:\n        log('x')\n");
-        assert!(!f.iter().any(|x| x.kind == "except"));
+        let f = scan_src("def f():\n    try:\n        g()\n    # code-health: ignore swallow deliberate skip\n    except ValueError:\n        log('x')\n");
+        assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
@@ -1222,6 +1397,24 @@ mod tests {
     fn type_ignore_with_why_passes() {
         let f = scan_src("x: int = 1  # type: ignore # pyright cannot see the kwarg\n");
         assert!(!f.iter().any(|x| x.kind == "type-ignore"));
+    }
+
+    #[test]
+    fn noqa_without_why_is_a_finding() {
+        let f = scan_src("x = 1  # noqa\n");
+        assert!(f.iter().any(|x| x.kind == "noqa" && x.line == 1));
+    }
+
+    #[test]
+    fn pragma_no_cover_without_why_is_a_finding() {
+        let f = scan_src("x = 1  # pragma: no cover\n");
+        assert!(f.iter().any(|x| x.kind == "noqa"));
+    }
+
+    #[test]
+    fn noqa_with_why_passes() {
+        let f = scan_src("x = 1  # noqa # mypy cannot see the overload\n");
+        assert!(!f.iter().any(|x| x.kind == "noqa"));
     }
 
     // ------------------------------------------------------------- global-state
@@ -1253,29 +1446,54 @@ mod tests {
         assert_eq!(sh.len(), 3);
     }
 
+    // ------------------------------------------------------------- signature hygiene
+    #[test]
+    fn long_param_list_is_found() {
+        let f = scan_src("def f(a, b, c, d, e, g, h):\n    return a\n");
+        let lp: Vec<&Finding> = f.iter().filter(|x| x.kind == "long-param-list").collect();
+        assert_eq!(lp.len(), 1);
+        assert!(lp[0].message.contains("7 parameters"));
+    }
+
+    #[test]
+    fn long_param_list_counts_leading_self_out() {
+        let f = scan_src("class C:\n    def m(self, a, b, c, d, e, f):\n        return a\n");
+        let lp: Vec<&Finding> = f.iter().filter(|x| x.kind == "long-param-list").collect();
+        assert_eq!(lp.len(), 1);
+        assert!(lp[0].message.contains("6 parameters"));
+    }
+
+    #[test]
+    fn short_param_list_and_five_plus_self_pass() {
+        let f = scan_src(
+            "def f(a, b, c, d, e):\n    return a\n\nclass C:\n    def m(self, a, b, c, d, e):\n        return a\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "long-param-list"));
+    }
+
     // ------------------------------------------------------------- except family
     #[test]
     fn bare_and_log_only_swallows() {
         let f = scan_src("def f():\n    try:\n        g()\n    except:\n        pass\n    try:\n        h()\n    except ValueError:\n        log('x')\n");
-        assert_eq!(f.iter().filter(|x| x.kind == "except").count(), 2);
+        assert_eq!(f.iter().filter(|x| x.kind == "swallow").count(), 2);
     }
 
     #[test]
     fn surfaced_return_is_not_a_swallow() {
         let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:\n        return 'failed'\n");
-        assert!(!f.iter().any(|x| x.kind == "except"));
+        assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn accumulator_surfacing_via_returned_name() {
         let f = scan_src("def validate(rows):\n    issues = []\n    for s in rows:\n        try:\n            parse(s)\n        except ValueError as e:\n            issues.append(str(e))\n    return issues\n");
-        assert!(!f.iter().any(|x| x.kind == "except"));
+        assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn sys_exit_surfaces() {
         let f = scan_src("import sys\ndef f():\n    try:\n        data = parse()\n    except ValueError:\n        sys.stderr.write('bad')\n        sys.exit(2)\n    return data\n");
-        assert!(!f.iter().any(|x| x.kind == "except"));
+        assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
@@ -1309,7 +1527,7 @@ mod tests {
     fn subscript_store_on_returned_name_surfaces() {
         let f = scan_src("def to_json_value(self):\n    result = {}\n    try:\n        g()\n    except Exception:\n        logger.exception('x')\n        result['value'] = None\n    return result\n");
         assert!(
-            !f.iter().any(|x| x.kind == "except"),
+            !f.iter().any(|x| x.kind == "swallow"),
             "expected no swallow, got {:?}",
             f.iter().map(|x| (x.kind.as_str(), x.line)).collect::<Vec<_>>()
         );
@@ -1360,8 +1578,8 @@ mod tests {
     #[test]
     fn suppression_scoped_to_its_line() {
         // an explained ignore on one except does not exempt a second except
-        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # code-health: ignore except this one is safe, logged\n        log('a')\n    try:\n        h()\n    except ValueError:\n        log('b')\n");
-        let exc: Vec<&Finding> = f.iter().filter(|x| x.kind == "except").collect();
+        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # code-health: ignore swallow this one is safe, logged\n        log('a')\n    try:\n        h()\n    except ValueError:\n        log('b')\n");
+        let exc: Vec<&Finding> = f.iter().filter(|x| x.kind == "swallow").collect();
         assert_eq!(exc.len(), 1);
         assert_eq!(exc[0].line, 8); // the second handler (line 8) is not exempted
     }
@@ -1369,14 +1587,14 @@ mod tests {
     #[test]
     fn suppression_wrong_signal_does_not_exempt() {
         let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # code-health: ignore inline-import not the right signal\n        log('skipping')\n");
-        assert!(f.iter().any(|x| x.kind == "except")); // still a swallow; an explained mis-scoped ignore emits no suppression finding
+        assert!(f.iter().any(|x| x.kind == "swallow")); // still a swallow; an explained mis-scoped ignore emits no suppression finding
     }
 
     #[test]
     fn ignore_file_without_why_is_a_finding() {
         let src = "# code-health: ignore-file except\ndef f():\n    try:\n        g()\n    except ValueError:\n        log('x')\n";
         let f = scan_src(src);
-        assert!(f.iter().any(|x| x.kind == "except")); // not exempted
+        assert!(f.iter().any(|x| x.kind == "swallow")); // not exempted
         assert!(f.iter().any(|x| x.kind == "suppression"));
     }
 
@@ -1392,37 +1610,37 @@ mod tests {
     fn except_with_raise_is_not_a_swallow() {
         let f =
             scan_src("def f():\n    try:\n        g()\n    except ValueError:\n        log('bad')\n        raise\n");
-        assert!(!f.iter().any(|x| x.kind == "except"));
+        assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn except_returning_empty_dict_is_not_a_swallow() {
         let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:\n        return {}\n");
-        assert!(!f.iter().any(|x| x.kind == "except"));
+        assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn except_return_none_is_not_a_swallow() {
         let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:\n        return None\n");
-        assert!(!f.iter().any(|x| x.kind == "except"));
+        assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn except_continue_is_not_a_swallow() {
         let f = scan_src("def f(rows):\n    for r in rows:\n        try:\n            parse(r)\n        except ValueError:\n            continue\n    return 1\n");
-        assert!(!f.iter().any(|x| x.kind == "except"));
+        assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn empty_exception_catch_still_fails() {
         let f = scan_src("def f():\n    try:\n        g()\n    except Exception:\n        pass\n");
-        assert!(f.iter().any(|x| x.kind == "except"));
+        assert!(f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn accumulator_not_returned_still_swallows() {
         let f = scan_src("def f(rows):\n    issues = []\n    try:\n        parse(rows)\n    except ValueError as e:\n        issues.append(str(e))\n    return 'done'\n");
-        assert!(f.iter().any(|x| x.kind == "except")); // issues not returned → swallow
+        assert!(f.iter().any(|x| x.kind == "swallow")); // issues not returned → swallow
     }
 
     // ------------------------------------------------- global-state edges
@@ -1623,6 +1841,25 @@ mod tests {
     }
 
     #[test]
+    fn bare_pytest_mark_skip_is_found() {
+        let f = scan_src_test("import pytest\n\n@pytest.mark.skip\ndef test_x():\n    pass\n");
+        assert!(f.iter().any(|x| x.kind == "skipif"));
+    }
+
+    #[test]
+    fn pytest_mark_skip_with_parens_is_found_once() {
+        let f = scan_src_test("import pytest\n\n@pytest.mark.skip()\ndef test_x():\n    pass\n");
+        let s: Vec<&Finding> = f.iter().filter(|x| x.kind == "skipif").collect();
+        assert_eq!(s.len(), 1); // the Call node and its func Attribute node dedupe
+    }
+
+    #[test]
+    fn other_markers_and_env_free_skipif_pass() {
+        let f = scan_src_test("import pytest\n\n@pytest.mark.parametrize('x', [1, 2])\ndef test_x(x):\n    assert x\n\n@pytest.mark.skipif(True, reason='tmp')\ndef test_y():\n    pass\n");
+        assert!(!f.iter().any(|x| x.kind == "skipif"));
+    }
+
+    #[test]
     fn fakefs_real_fs_without_pyfakefs_is_found() {
         let f = scan_src_test("def test_x(tmp_path):\n    p = tmp_path / 'a'\n    p.write_text('hi')\n");
         assert!(f.iter().any(|x| x.kind == "fakefs"));
@@ -1632,6 +1869,40 @@ mod tests {
     fn fakefs_sanctioned_subprocess_need_passes() {
         let f = scan_src_test("import subprocess\n\ndef test_x(tmp_path):\n    subprocess.run(['ls'])\n");
         assert!(!f.iter().any(|x| x.kind == "fakefs"));
+    }
+
+    // ------------------------------------------------------------- no-assert-test
+    #[test]
+    fn test_with_assertion_passes() {
+        let f = scan_src_test("def test_x():\n    assert 1 == 1\n");
+        assert!(!f.iter().any(|x| x.kind == "no-assert-test"));
+    }
+
+    #[test]
+    fn test_with_pytest_raises_passes() {
+        let f = scan_src_test("import pytest\n\ndef test_x():\n    with pytest.raises(ValueError):\n        g()\n");
+        assert!(!f.iter().any(|x| x.kind == "no-assert-test"));
+    }
+
+    #[test]
+    fn test_with_fail_call_passes() {
+        let f = scan_src_test("import pytest\n\ndef test_x():\n    pytest.fail('nope')\n");
+        assert!(!f.iter().any(|x| x.kind == "no-assert-test"));
+    }
+
+    #[test]
+    fn test_with_assert_in_nested_function_passes() {
+        let f = scan_src_test("def test_x():\n    def check():\n        assert 1 == 1\n    check()\n");
+        assert!(!f.iter().any(|x| x.kind == "no-assert-test"));
+    }
+
+    #[test]
+    fn test_without_assertion_is_found() {
+        let f = scan_src_test("def test_x():\n    setup()\n    teardown()\n");
+        let na: Vec<&Finding> = f.iter().filter(|x| x.kind == "no-assert-test").collect();
+        assert_eq!(na.len(), 1);
+        assert_eq!(na[0].function, "test_x");
+        assert!(na[0].message.contains("can never fail"));
     }
 
     #[test]
@@ -1775,5 +2046,37 @@ mod tests {
         let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "unused").collect();
         assert_eq!(u.len(), 1);
         assert!(u[0].message.contains("referenced only from tests"));
+    }
+
+    #[test]
+    fn registry_is_complete() {
+        // every emitted kind has a final_kind arm OR is deliberately standard
+        for &k in crate::FAMILY_KINDS {
+            let display = crate::final_kind(k);
+            assert!(
+                display != "standard" || crate::STANDARD_KINDS.contains(&k),
+                "kind '{k}' has no final_kind arm and is not in STANDARD_KINDS — register it"
+            );
+        }
+        // the standard list is a strict subset of the family list
+        for &k in crate::STANDARD_KINDS {
+            assert!(
+                crate::FAMILY_KINDS.contains(&k),
+                "standard kind '{k}' is not in FAMILY_KINDS"
+            );
+        }
+        // no kind is both named and standard
+        let mut named = Vec::new();
+        for &k in crate::FAMILY_KINDS {
+            if crate::final_kind(k) != "standard" {
+                named.push(k);
+            }
+        }
+        for &k in crate::STANDARD_KINDS {
+            assert!(
+                !named.contains(&k),
+                "kind '{k}' has a final_kind arm and is also STANDARD_KINDS — pick one"
+            );
+        }
     }
 }
