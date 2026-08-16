@@ -218,7 +218,7 @@ impl<'a> RsState<'a> {
                     s.line,
                     "",
                     format!(
-                        "'{}' name carries a {}-line struct with {methods} methods — the domain noun should take the name",
+                        "'{}' name carries a {}-line struct with {methods} methods — the domain noun should take the name — fix: vague-name --fix-name <Name>",
                         suffix_of(&s.name).unwrap_or(""), s.span
                     ),
                 );

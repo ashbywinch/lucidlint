@@ -5,6 +5,7 @@
 formatting survive) and the re-scanned source no longer produces the finding."""
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -248,7 +249,7 @@ def test_parameter_object_introduced(tmp_path):
     assert "class BuildOptions:" in fixed
     assert "def build(options: BuildOptions):" in fixed
     assert "return options.a + options.b + options.c" in fixed
-    assert "BuildOptions.build(a=1, b=2, c=3, d=4, e=5, f=6)" in fixed
+    assert "build(BuildOptions(a=1, b=2, c=3, d=4, e=5, f=6))" in fixed
 
 
 def test_extract_class_renames_receiver_and_internal_calls(tmp_path):
@@ -445,6 +446,136 @@ def test_extract_class_previews_without_writing(tmp_path, capsys):
     assert rc == 0
     capsys.readouterr()
     assert "def a(self):" in p.read_text()
+
+
+# --------------------------------------------------------------------------- R27: follow the message's fix directive
+
+_INDEPENDENT_IFS = "".join(
+    f"    if c{i} > 0:\n        out.append({1 << i})\n" for i in range(14)
+)
+
+# (finding kind, fixture, before-expr, after-expr, expected, --fix-name)
+DIRECTIVE_CASES = [
+    (
+        "stale-suppression",
+        "# lucidlint: ignore magic-number nothing on this line\ndef g():\n    return 1\n",
+        "g()", "g()", "1", None,
+    ),
+    (
+        "noop-statement",
+        "def g():\n    x = 1\n    x + 1\n    return 2\n",
+        "g()", "g()", "2", None,
+    ),
+    (
+        "unreachable",
+        "def g():\n    return 1\n    x = 2\n",
+        "g()", "g()", "1", None,
+    ),
+    (
+        "positional-literals",
+        "def set_limits(min_v, max_v):\n    return min_v\n\ndef g():\n    return set_limits(10, 20)\n",
+        "g()", "g()", "10", None,
+    ),
+    (
+        "magic-number",
+        "def g():\n    return 60 * 2\n",
+        "g()", "g()", "120", "MAX_RETRIES",
+    ),
+    (
+        "vague-name",
+        (
+            "class DataManager:\n    def run(self):\n        return 1\n"
+            "    def stop(self):\n        return 2\n"
+            "    def reset(self):\n        return 3\n"
+            "    def start(self):\n        return 4\n"
+            "    def pause(self):\n        return 5\n"
+            "    def resume(self):\n        return 6\n"
+            "\ndef use():\n    return DataManager()\n"
+        ),
+        "use().run()", "use().run()", "1", "DataRegistry",
+    ),
+    (
+        "long-param-list",
+        (
+            "def build(a, b, c, d, e, f):\n"
+            "    return a + b + c + d + e + f\n"
+            "\ndef g():\n    return build(1, 2, 3, 4, 5, 6)\n"
+        ),
+        "g()", "g()", "21", "BuildOptions",
+    ),
+    (
+        "latent-class",
+        (
+            "class _FnBodyState:\n    def __init__(self, line):\n        self.line = line\n\n"
+            "def _window_score(state: _FnBodyState, i, j, min_lines):\n"
+            "    if state.line > 0:\n        return 1\n    return 0\n\n"
+            "def _window_has_outvars(state: _FnBodyState, j, writes_all):\n"
+            "    return state.line > 0\n\n"
+            "def _best_seam(state: _FnBodyState, min_lines=2):\n"
+            "    return _window_score(state, 0, 1, min_lines)\n"
+        ),
+        "_best_seam(_FnBodyState(1))", "_FnBodyState(1)._best_seam()", "1", None,
+    ),
+    (
+        "complexity",
+        (
+            "def score(" + ", ".join(f"c{i}" for i in range(14)) + "):\n"
+            "    out = []\n"
+            + _INDEPENDENT_IFS
+            + "    label = 's' + str(sum(out))\n    return label\n"
+        ),
+        "score(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0)",
+        "score(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0)",
+        "s5461", "sum_bonus",
+    ),
+]
+
+
+def test_every_fix_directive_clears_its_finding(tmp_path, capsys):
+    """R27 compliance: for every fixable family, the finding's message carries
+    a `fix: <command>` directive, and following it EXACTLY (substituting the
+    name, adding --confirm where the result is novel) clears the finding and
+    preserves behavior."""
+    for kind, src, before_expr, after_expr, expected, name_value in DIRECTIVE_CASES:
+        tmp = tmp_path / kind
+        repo = make_repo(tmp, app_src="def alpha(a):\n    return a\n")
+        p = repo / "houses" / "app.py"
+        p.write_text(src)
+        before = {}
+        exec(compile(src, "before.py", "exec"), before)
+        assert str(eval(before_expr, before)) == expected, f"{kind}: before-behavior"
+
+        run_main(repo, "--warn", "--json")
+        data = json.loads(capsys.readouterr().out)
+        finding = next((a for a in data["actions"] if a["kind"] == kind), None)
+        assert finding is not None, f"{kind}: no finding"
+        directive = re.search(r"fix: ([a-z-]+)(?: --fix-name <([^>]+)>)?", finding["message"])
+        assert directive, f"{kind}: message has no fix directive: {finding['message']}"
+        fix_kind = directive.group(1)
+        name = directive.group(2)
+
+        args = [
+            "--fix-kind", fix_kind,
+            "--fix-file", finding["file"],
+            "--fix-line", str(finding["line"]),
+        ]
+        if name and name_value:
+            args += ["--fix-name", name_value]
+        if fix_engine.KIND_ALIASES.get(fix_kind, fix_kind) in fix_engine.PREVIEW_KINDS:
+            args.append("--confirm")
+        rc = run_main(repo, *args)
+        assert rc == 0, f"{kind}: fix command failed"
+        capsys.readouterr()
+
+        run_main(repo, "--warn", "--json")
+        after = json.loads(capsys.readouterr().out)
+        assert not [a for a in after["actions"] if a["kind"] == kind], (
+            f"{kind}: finding remains after following the directive"
+        )
+
+        after_ns = {}
+        exec(compile(p.read_text(), "after.py", "exec"), after_ns)
+        assert str(eval(after_expr, after_ns)) == expected, f"{kind}: behavior changed"
 
 
 def test_message_to_fix_end_to_end(tmp_path, capsys):

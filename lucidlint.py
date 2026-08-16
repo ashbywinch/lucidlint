@@ -1155,7 +1155,7 @@ def main() -> int:
                     f"(lines {', '.join(map(str, lines))}) — pass --fix-line to pick one"
                 )
                 return 0
-        if fix_kind in fix_engine.STRUCTURAL_KINDS and not args.confirm:
+        if fix_kind in fix_engine.PREVIEW_KINDS and not args.confirm:
             # the preview surface: show the proposed refactoring as a diff;
             # the agent reviews it, then re-runs with --confirm to apply
             new_source, description = fix_engine.propose_finding(

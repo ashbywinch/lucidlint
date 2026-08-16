@@ -62,6 +62,11 @@ STRUCTURAL_KINDS = {
     "long-param-list": "Introduce Parameter Object: bundle the params into a dataclass",
 }
 
+# structural fixes whose result is genuinely novel (a class split, a new
+# function, a bundled signature) preview a diff before --confirm; the
+# obvious ones (a constant inserted, a rename) apply directly
+PREVIEW_KINDS = {"extract-method", "extract-class", "long-param-list"}
+
 # the gate reports DISPLAY kinds (final_kind output: strewing shows as
 # latent-class); the fix command accepts either and normalizes here — the
 # finding's message tees up the fix by name
@@ -522,6 +527,7 @@ class _FnBodyState:
         self.first_use: dict[int, dict[str, str]] = {}
         self.writes: dict[int, set[str]] = {}
         self.control_flow: dict[int, bool] = {}
+        self.decisions: dict[int, int] = {}
 
     def _window_score(self, i: int, j: int, min_lines: int):
         """Score one candidate window: (free_count, -span, start) when it is
@@ -562,7 +568,7 @@ class _FnBodyState:
                     after.add(name)
         return bool(writes_all & after)
 
-    def best_seam(self, min_lines: int = 2):
+    def best_seam(self, min_lines: int = 2, max_window_decisions: int | None = None):
         """The window whose free variables are the smallest subset of the
         function's variables (builtins excluded — they are available in any
         scope) and whose out-variables are empty. A name is free iff its
@@ -574,11 +580,23 @@ class _FnBodyState:
         for i in range(n):
             for j in range(i, n):
                 score = self._window_score(i, j, min_lines)
-                if score is not None and (best is None or score < best[0]):
+                if score is None:
+                    continue
+                if max_window_decisions is not None:
+                    window_decisions = sum(
+                        self.decisions[self.stmt_ids[k]] for k in range(i, j + 1)
+                    )
+                    if window_decisions > max_window_decisions:
+                        continue  # the extracted fn would still be complex
+                    # for a complexity finding the goal is to SPLIT the CC:
+                    # prefer the window that takes the most decisions (up to
+                    # the bound), then fewest free vars, then largest
+                    score = (-window_decisions, *score)
+                if best is None or score < best[0]:
                     best = (score, list(range(i, j + 1)))
         if best is None:
             return None
-        (_, _, _, free_vars), block_ids = best
+        (*_, free_vars), block_ids = best
         return list(block_ids), free_vars
 
 
@@ -610,6 +628,7 @@ class _Analyse(cst.CSTVisitor):
                 isinstance(st, (cst.Return, cst.Break, cst.Continue, cst.Raise, cst.Yield))
                 for st in s.body
             )
+            self.state.decisions[sid] = _stmt_decision_count(s)
 
     @override
     def visit_Name(self, node) -> None:
@@ -657,14 +676,17 @@ _BUILTINS = frozenset(dir(builtins))
 
 
 
-def extract_method_proposal(source: str, line: int, name: str):
+def extract_method_proposal(
+    source: str, line: int, name: str, max_decisions: int | None = None
+):
     """Compute the best extraction seam and the resulting source, WITHOUT
     writing. Returns (new_source, seam_text) or (None, None) when no safe
-    seam exists."""
+    seam exists. `max_decisions` bounds the seam so the extracted function
+    does not inherit the original's complexity."""
     module, wrapper, state = _fn_seam_analysis(source, line)
     if state.fn_node is None or len(state.stmt_ids) < 2:
         return None, None
-    seam = state.best_seam()
+    seam = state.best_seam(max_window_decisions=max_decisions)
     if seam is None:
         return None, None
     block_indices, free_vars = seam
@@ -690,8 +712,10 @@ def extract_method_proposal(source: str, line: int, name: str):
 
 def fix_extract_method(source: str, line: int, name: str) -> str | None:
     """Extract Function (applied): the best self-contained seam of the
-    function at `line` becomes a new function named `name`."""
-    new_source, _ = extract_method_proposal(source, line, name)
+    function at `line` becomes a new function named `name`. The seam is
+    bounded to <= 13 decisions so the extracted function lands under the
+    CC-15 gate — extraction SPLITS complexity, it does not move it."""
+    new_source, _ = extract_method_proposal(source, line, name, max_decisions=13)
     return new_source
 
 
@@ -838,12 +862,15 @@ class _CallSiteRewrite(cst.CSTTransformer):
             for p, a in zip(self.params, args, strict=True)
         ]
         return updated_node.with_changes(
-            func=cst.Attribute(
-                value=cst.Name(self.class_name),
-                attr=cst.Name(self.fn),
-                dot=cst.Dot(),
-            ),
-            args=new_args,
+            func=cst.Name(self.fn),
+            args=[
+                cst.Arg(
+                    cst.Call(
+                        func=cst.Name(self.class_name),
+                        args=new_args,
+                    )
+                )
+            ],
         )
 
 
@@ -1083,6 +1110,61 @@ def fix_rename(source: str, line: int, name: str) -> str | None:
         return None
     renamed = wrapper.visit(_RenameClass(line, old, name)).code
     return None if renamed == source else renamed
+
+
+class _DecisionCount(cst.CSTVisitor):
+    """Counts the radon-style decisions in one statement: ifs + elifs, and/or
+    BoolOps, loops, asserts, match arms — the same families the scanner's
+    complexity rule counts (extraction must SPLIT the CC, not move it)."""
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    @override
+    def visit_If(self, node) -> None:
+        # libcst models elifs as nested Ifs in orelse — the descent counts
+        # them; an else IndentedBlock adds nothing (radon: else is free)
+        self.n += 1 + _boolop_decisions(node.test)
+
+    @override
+    def visit_For(self, node) -> None:
+        self.n += 1
+
+    @override
+    def visit_While(self, node) -> None:
+        self.n += 1
+
+    @override
+    def visit_Match(self, node) -> None:
+        self.n += sum(1 for c in node.cases if not _wildcard(c.pattern))
+
+    @override
+    def visit_BoolOp(self, node) -> None:
+        self.n += _boolop_decisions(node)
+
+    @override
+    def visit_Assert(self, node) -> None:
+        self.n += 1
+
+    @override
+    def visit_IfExp(self, node) -> None:
+        self.n += 1
+
+
+def _boolop_decisions(node) -> int:
+    if isinstance(node, cst.BooleanOperation) and isinstance(node.operator, (cst.And, cst.Or)):
+        return 1
+    return 0
+
+
+def _wildcard(pattern) -> bool:
+    return isinstance(pattern, cst.MatchAs) and pattern.pattern is None and pattern.name is None
+
+
+def _stmt_decision_count(stmt) -> int:
+    probe = _DecisionCount()
+    stmt.visit(probe)
+    return probe.n
 
 
 # --------------------------------------------------------------------------- the fix surface

@@ -934,7 +934,7 @@ pub fn vague_name_findings(state: &mut ScanState, module_body: &[Stmt]) {
                 kind: "vague-name".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "'{suffix}' name carries a {span}-line class with {methods} methods — the domain noun should take the name"
+                    "'{suffix}' name carries a {span}-line class with {methods} methods — the domain noun should take the name — fix: vague-name --fix-name <Name>"
                 ),
             });
             break;
