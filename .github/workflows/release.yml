@@ -43,8 +43,6 @@ jobs:
         uses: taiki-e/setup-cross-toolchain-action@v1
         with:
           target: ${{ matrix.target }}
-      - name: Install the cross target std
-        run: rustup target add ${{ matrix.target }}
       - name: Build the binary (version-stamped)
         working-directory: scanner
         run: cargo build --release --manifest-path Cargo.toml --target ${{ matrix.target }}
