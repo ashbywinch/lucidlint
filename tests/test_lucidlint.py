@@ -620,6 +620,21 @@ def test_every_emitted_kind_is_registered():
         assert kind in registered, f"kind '{kind}' is emitted by {f.name} but missing from FAMILY_KINDS"
 
 
+def test_rules_md_is_generated():
+    """The RULES.md rule tables are generated from rule_metadata.py (`make
+    rules`) — a new family, a severity change, or a hand edit that leaves
+    the tables stale fails the gate. The generator also validates that
+    every emitted kind has metadata and that severities match the scanner
+    (this is what caught 'duplicate' being documented as fail while the
+    scanner emits warn)."""
+    import subprocess
+    import sys
+
+    gen = Path(__file__).resolve().parent.parent / "scripts" / "gen-rules.py"
+    rc = subprocess.run([sys.executable, str(gen), "--check"]).returncode
+    assert rc == 0, "RULES.md is stale — run `make rules` and commit the result"
+
+
 def test_rules_md_documents_every_family_kind():
     """Every emitted kind has a RULES.md row (its own name or an alias)."""
     documented = _rules_md_names()

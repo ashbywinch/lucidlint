@@ -85,6 +85,9 @@ scanner-check:
 	@cd scanner && cargo build --release 2>&1 | tail -1
 	@echo "${GREEN}✓ scanner built${NC}"
 
+rules:
+	@$(UV) run python scripts/gen-rules.py
+
 coverage: deps
 	@$(UV) run coverage run -m pytest tests/ -q --tb=short
 	@$(UV) run coverage report -m
