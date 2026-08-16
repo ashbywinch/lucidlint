@@ -14,6 +14,7 @@ ruff_text_size = "=0.0.9"
 radonc = { path = "radonc" }
 # PINNED-ish: syn 2.x is the stable external Rust AST (parse_file + visit);
 # bump deliberately (the rust scan layer is written against its shapes)
+quote = "1"
 syn = { version = "2", features = ["full", "visit"] }
 # span-locations enables Span::start()/end() -> LineColumn (1-based lines)
 proc-macro2 = { version = "1", features = ["span-locations"] }

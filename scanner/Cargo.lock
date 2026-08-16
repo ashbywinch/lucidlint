@@ -96,6 +96,7 @@ name = "code-health-scan"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
+ "quote",
  "radonc",
  "ruff_python_ast",
  "ruff_python_parser",

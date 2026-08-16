@@ -65,6 +65,7 @@ with a why).
 | **closures → latent-class** | fail | A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line span) — the nested structure is a class waiting to be extracted |
 | **strewing** | fail | ≥3 free functions sharing the same leading parameter — they share data, they're a class |
 | **record-shape** | fail | A function takes a struct/class with ≥5 fields and no methods — the struct's rules belong as methods on it |
+| **detached-method** | fail | A method that never touches its receiver — it doesn't use instance state; make it a `@staticmethod`/associated fn or move it out of the class |
 | **duplicate** | fail | Dice similarity ≥ 0.9 (structural skeleton bigrams) — copy-paste; extract the shared logic |
 | **layer-mix** | fail | A file calls into multiple architectural layers (determined via the code-review-graph contract) — files belong in one layer |
 | **folder-mix** | fail | Files in a directory are split across graph communities — they belong together |
@@ -84,6 +85,7 @@ with a why).
 | **builtin-shadow** | fail | A variable/parameter that shadows a Python builtin (`list`, `dict`, `str`, `id`...) |
 | **broad-except** | **warn** | Bare `except:` — catch specific exceptions |
 | **boolean-arg** | fail | A boolean literal passed as a call argument (`connect(host, True)`) — name the flag at the call site |
+| **positional-literals** | **warn** | A call passing ≥2 literals of the same kind positionally (`set_limits(10, 20)`) — a swapped argument is a silent bug; use keyword arguments |
 | **swallow** | fail | A catch that neither re-raises nor exits with control flow (no return/break/continue); in Rust, a `Result`/`Option` discarded with `let _ =` — the error vanishes, re-raise or handle it |
 | **inline-import** | fail | `import` inside a function body (Python) — imports belong at module top |
 | **private-import** | fail | Importing an underscore-prefixed symbol from another module |

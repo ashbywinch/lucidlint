@@ -64,8 +64,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     the signed Location bare."""
 
     # urllib's HTTPRedirectHandler.redirect_request override requires this
-    # exact signature — the framework defines the contract
-    # code-health: ignore long-param-list framework-mandated override signature
+    # exact signature and ignores its receiver — the framework defines the
+    # contract; it can be neither slimmed nor made an associated fn
+    # code-health: ignore long-param-list,detached-method framework-mandated override
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 

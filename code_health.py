@@ -632,11 +632,12 @@ def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
 RULE_GROUPS = {
     "architecture": {"complexity", "large-function", "closures", "partition", "strewing", "record-shape",
                      "duplicate", "layer-mix", "folder-mix", "hub-file", "high-risk",
-                     "hotspot", "over-abstraction", "long-param-list", "churn-untested"},
+                     "hotspot", "over-abstraction", "long-param-list", "churn-untested",
+                     "detached-method"},
     "style": {"magic-number", "noop-statement", "unreachable", "vague-name", "class-module",
               "builtin-shadow", "broad-except", "swallow", "inline-import", "private-import",
               "global-state", "unused", "import-cycle", "docs-link", "docs-undiscoverable",
-              "boolean-arg", "debug-artifact"},
+              "boolean-arg", "debug-artifact", "positional-literals"},
     "test-discipline": {"monkeypatch", "skipif", "fakefs", "no-assert-test"},
     "suppression": {"suppression", "type-ignore", "allow-reason", "noqa", "stale-suppression"},
 }
@@ -1082,8 +1083,8 @@ class BaselineIdentity(NamedTuple):
 def _baseline_identity(key: str) -> BaselineIdentity:
     parts = key.split(":", 3)
     if len(parts) == 4:
-        return BaselineIdentity(parts[0], parts[1], parts[3])
-    return BaselineIdentity(key, "", "")
+        return BaselineIdentity(kind=parts[0], file=parts[1], function=parts[3])
+    return BaselineIdentity(kind=key, file="", function="")
 
 
 def main() -> int:

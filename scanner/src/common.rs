@@ -121,7 +121,7 @@ pub fn dice_similarity(a: &[String], b: &[String]) -> f64 {
 /// Line suppressions exempt a finding on that line or the line before;
 /// file suppressions exempt the signal anywhere in the file (with a why).
 pub struct Suppressions {
-    pub line: HashMap<usize, (String, String)>,
+    pub line: HashMap<usize, Vec<(String, String)>>,
     pub file: HashMap<String, String>,
 }
 
@@ -130,7 +130,7 @@ pub struct Suppressions {
 /// layer extracts them its own way (ruff tokens for Python, a string-aware
 /// scan for Rust); the parse and the matching are shared.
 pub fn suppressions_from_comments(comments: &[(usize, String)]) -> Suppressions {
-    let mut line_map = HashMap::new();
+    let mut line_map: HashMap<usize, Vec<(String, String)>> = HashMap::new();
     let mut file_map = HashMap::new();
     for (ln, text) in comments {
         let trimmed = text.trim_start_matches(['#', '/']).trim_start();
@@ -143,10 +143,16 @@ pub fn suppressions_from_comments(comments: &[(usize, String)]) -> Suppressions 
             }
         } else if let Some(rest) = trimmed.strip_prefix("code-health: ignore ") {
             let mut it = rest.splitn(2, char::is_whitespace);
-            let signal = it.next().unwrap_or("").to_string();
+            let signals = it.next().unwrap_or("");
             let why = it.next().unwrap_or("").trim().to_string();
-            if !signal.is_empty() {
-                line_map.insert(*ln, (signal, why));
+            // comma-separated signals let one comment exempt several families
+            // (`ignore long-param-list,detached-method <why>`) — stacked
+            // comments only fit the line/line-1 window for the last one
+            for sig in signals.split(',') {
+                let sig = sig.trim();
+                if !sig.is_empty() {
+                    line_map.entry(*ln).or_default().push((sig.to_string(), why.clone()));
+                }
             }
         }
     }
@@ -160,9 +166,11 @@ pub fn suppressions_from_comments(comments: &[(usize, String)]) -> Suppressions 
 /// carries an explained suppression for that signal.
 pub fn suppressed(signal: &str, line: usize, supps: &Suppressions) -> bool {
     for ln in [line, line.saturating_sub(1)] {
-        if let Some((sig, why)) = supps.line.get(&ln) {
-            if sig == signal && !why.is_empty() {
-                return true;
+        if let Some(entries) = supps.line.get(&ln) {
+            for (sig, why) in entries {
+                if sig == signal && !why.is_empty() {
+                    return true;
+                }
             }
         }
     }
@@ -196,9 +204,10 @@ pub fn apply_suppressions_impl(
     let mut used_file: std::collections::HashSet<String> = pre_used.files.clone();
     // the Python tool dedups suppressions by line (one per line)
     let mut seen_invalid: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for (ln, (sig, why)) in &supps.line {
-        if why.is_empty() && seen_invalid.insert(*ln) {
-            out.push(crate::Finding {
+    for (ln, entries) in &supps.line {
+        for (sig, why) in entries {
+            if why.is_empty() && seen_invalid.insert(*ln) {
+                out.push(crate::Finding {
                 file: file.to_string(),
                 line: *ln,
                 function: String::new(),
@@ -208,6 +217,7 @@ pub fn apply_suppressions_impl(
                     "suppression '{marker} code-health: ignore {sig}' at line {ln} without a why — exemptions only apply with an explanation"
                 ),
             });
+            }
         }
     }
     for (sig, why) in &supps.file {
@@ -258,10 +268,12 @@ fn suppress_track_line(
     f: &crate::Finding,
 ) -> bool {
     for ln in [f.line, f.line.saturating_sub(1)] {
-        if let Some((sig, why)) = supps.line.get(&ln) {
-            if sig == &f.kind && !why.is_empty() {
-                used_line.insert((ln, sig.clone()));
-                return true;
+        if let Some(entries) = supps.line.get(&ln) {
+            for (sig, why) in entries {
+                if sig == &f.kind && !why.is_empty() {
+                    used_line.insert((ln, sig.clone()));
+                    return true;
+                }
             }
         }
     }
@@ -300,21 +312,23 @@ impl<'a> StaleCtx<'a> {
     /// are already findings; they never match by design.
     fn stale_suppression_findings(&self) -> Vec<crate::Finding> {
         let mut out = Vec::new();
-        for (ln, (sig, why)) in &self.supps.line {
-            if why.is_empty() || self.used_line.contains(&(*ln, sig.clone())) {
-                continue;
+        for (ln, entries) in &self.supps.line {
+            for (sig, why) in entries {
+                if why.is_empty() || self.used_line.contains(&(*ln, sig.clone())) {
+                    continue;
+                }
+                out.push(crate::Finding {
+                    file: self.file.to_string(),
+                    line: *ln,
+                    function: String::new(),
+                    kind: "stale-suppression".into(),
+                    severity: "fail".into(),
+                    message: format!(
+                        "suppression '{} code-health: ignore {sig}' at line {ln} no longer fires — remove it",
+                        self.marker
+                    ),
+                });
             }
-            out.push(crate::Finding {
-                file: self.file.to_string(),
-                line: *ln,
-                function: String::new(),
-                kind: "stale-suppression".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "suppression '{} code-health: ignore {sig}' at line {ln} no longer fires — remove it",
-                    self.marker
-                ),
-            });
         }
         for (sig, why) in &self.supps.file {
             if why.is_empty() || self.used_file.contains(sig) {

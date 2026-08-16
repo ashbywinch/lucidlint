@@ -583,6 +583,28 @@ def test_rule_groups_have_no_dead_kinds():
             assert kind in kinds, f"'{kind}' is in group:{group} but the scanner never emits it"
 
 
+def test_every_emitted_kind_is_registered():
+    """Every kind the scanner CODE emits appears in FAMILY_KINDS — the
+    registry is hand-maintained; this catches a family emitted but never
+    registered (the exact drift the 2026-08-16 batch hit when the final_kind
+    arm silently failed to land)."""
+    src_dir = Path(__file__).resolve().parent.parent / "scanner" / "src"
+    emitted = set()
+    for f in sorted(src_dir.glob("*.rs")):
+        text = f.read_text()
+        # test-fixture Finding structs live in #[cfg(test)] mods — their kind
+        # strings are data, not emissions
+        cut = text.find("#[cfg(test)]")
+        if cut != -1:
+            text = text[:cut]
+        emitted.update(re.findall(r'kind: "([a-z-]+)"', text))
+        emitted.update(re.findall(r'finding\("([a-z-]+)"', text))
+        emitted.update(re.findall(r'kind\([a-z_-]+, "([a-z-]+)"', text))
+    registered = _family_kinds()
+    for kind in sorted(emitted):
+        assert kind in registered, f"kind '{kind}' is emitted by {f.name} but missing from FAMILY_KINDS"
+
+
 def test_rules_md_documents_every_family_kind():
     """Every emitted kind has a RULES.md row (its own name or an alias)."""
     documented = _rules_md_names()

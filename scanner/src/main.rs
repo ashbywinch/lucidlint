@@ -176,6 +176,11 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 // holds module-level functions — methods/nested get cc = 0
                 let gate_cc = if module_level { cc } else { 0 };
                 closure_findings(self, stmt, gate_cc, span);
+                // a method that never touches its receiver does not belong in
+                // the class (the inverse of record-shape/strewing)
+                if self.in_class > 0 {
+                    detached_method_findings(self, f, source);
+                }
                 if module_level {
                     // the def line (name range), not the decorator — radon's
                     // fn.lineno; the parity test's decorated-line offset
@@ -250,6 +255,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
         if let Expr::Call(call) = expr {
             let source = self.source;
             boolean_arg_findings(self, &call.arguments.args, source);
+            positional_literals_findings(self, call, source);
             // debug-artifact (Python half): breakpoint() left in production —
             // the dbg!/unwrap analog (Rust half lives in rustscan.rs)
             if !self.is_test
@@ -702,9 +708,11 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     if !state.cc.is_empty() {
         state.cc.retain(|e| {
             for ln in [e.line, e.line.saturating_sub(1)] {
-                if let Some((sig, why)) = supps.line.get(&ln) {
-                    if sig == "complexity" && !why.is_empty() {
-                        pre_used.lines.insert((ln, sig.clone()));
+                if let Some(entries) = supps.line.get(&ln) {
+                    for (sig, why) in entries {
+                        if sig == "complexity" && !why.is_empty() {
+                            pre_used.lines.insert((ln, sig.clone()));
+                        }
                     }
                 }
             }
@@ -811,6 +819,9 @@ pub const FAMILY_KINDS: &[&str] = &[
     "import-cycle",
     "boolean-arg",
     "debug-artifact",
+    "positional-literals",
+    // architecture (inverse of record-shape)
+    "detached-method",
     // test discipline
     "monkeypatch",
     "skipif",
@@ -885,6 +896,8 @@ pub fn final_kind(kind: &str) -> &'static str {
         "noqa" => "noqa",
         "stale-suppression" => "stale-suppression",
         "churn-untested" => "churn-untested",
+        "positional-literals" => "positional-literals",
+        "detached-method" => "detached-method",
         _ => "standard", // broad-except, imports, over-abstraction, cycles, duplicate, unused, ...
     }
 }
@@ -2046,6 +2059,41 @@ mod tests {
         let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "unused").collect();
         assert_eq!(u.len(), 1);
         assert!(u[0].message.contains("referenced only from tests"));
+    }
+
+    #[test]
+    fn positional_literals_flagged() {
+        let f = scan_src("def f():\n    pass\ndef g():\n    set_limits(10, 20)\n");
+        assert!(f
+            .iter()
+            .any(|x| x.kind == "positional-literals" && x.severity == "warn"));
+        let ok = scan_src("def f():\n    pass\ndef g():\n    set_limits(max=10, min=20)\n");
+        assert!(!ok.iter().any(|x| x.kind == "positional-literals"));
+        let ok2 = scan_src("def g():\n    range(1, 10)\n");
+        assert!(!ok2.iter().any(|x| x.kind == "positional-literals")); // builtin exempt
+    }
+
+    #[test]
+    fn detached_method_flagged() {
+        let f = scan_src("class A:\n    def m(self, x):\n        return x + 1\n");
+        assert!(f.iter().any(|x| x.kind == "detached-method"));
+        let ok = scan_src("class A:\n    def m(self, x):\n        return self.x + x\n");
+        assert!(!ok.iter().any(|x| x.kind == "detached-method"));
+        let cm = scan_src("class A:\n    @classmethod\n    def m(cls, x):\n        return x\n");
+        assert!(!cm.iter().any(|x| x.kind == "detached-method")); // classmethod exempt
+        let st = scan_src("class A:\n    @staticmethod\n    def m(x):\n        return x\n");
+        assert!(!st.iter().any(|x| x.kind == "detached-method"));
+    }
+
+    #[test]
+    fn comma_signal_suppresses_both_families() {
+        // one comment, comma-separated signals — the only shape that fits the
+        // line/line-1 window for two families on one def
+        let src = "class X:\n    # code-health: ignore long-param-list,detached-method override signature\n    def m(self, a, b, c, d, e, f):\n        return 1\n";
+        let f = scan_src(src);
+        assert!(!f.iter().any(|x| x.kind == "long-param-list"));
+        assert!(!f.iter().any(|x| x.kind == "detached-method"));
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"));
     }
 
     #[test]

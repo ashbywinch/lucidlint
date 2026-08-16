@@ -90,6 +90,9 @@ pub struct Class {
 
 impl Class {
     /// radon's `Class.letter`: always 'C'.
+    // the mirror keeps letter as a method to match radon's property (R26) —
+    // structure over instance-state purity
+    // code-health: ignore detached-method radon mirror keeps letter a method
     pub fn letter(&self) -> char {
         'C'
     }

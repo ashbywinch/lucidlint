@@ -7,8 +7,8 @@
 
 use ruff_python_ast::token::{TokenKind, Tokens};
 use ruff_python_ast::{
-    AnyNodeRef, BoolOp, CmpOp, Decorator, Expr, ExprAttribute, ExprContext, Operator, Pattern, Stmt, StmtClassDef,
-    StmtFunctionDef, UnaryOp,
+    AnyNodeRef, BoolOp, CmpOp, Decorator, Expr, ExprAttribute, ExprCall, ExprContext, Operator, Pattern, Stmt,
+    StmtClassDef, StmtFunctionDef, UnaryOp,
 };
 use ruff_text_size::Ranged;
 use std::collections::HashSet;
@@ -363,6 +363,126 @@ pub fn boolean_arg_findings(state: &mut ScanState, args: &[Expr], source: &str) 
             });
         }
     }
+}
+
+/// Positional literals of the same kind — the classic argument-swapping bug
+/// (`set_limits(10, 20)` — which is min, which is max?). Warn tier: not every
+/// `f(1, 2)` is a defect (coordinates), but a keyword call eliminates the
+/// class entirely. Builtin callees are exempt — their arities are fixed and
+/// well-known (range, print, ...).
+pub fn positional_literals_findings(state: &mut ScanState, call: &ExprCall, source: &str) {
+    // Only PLAIN function calls (a Name callee, not a method): the builtin
+    // methods that dominate real code (dict.get, str.replace, os.environ.get)
+    // have canonical positional semantics — keywords are impossible or never
+    // swapped, and flagging them is pure noise. User-defined functions have
+    // no such convention, so a same-kind literal pair there is a real swap
+    // risk. Builtin NAMES (range/print/min/max) are fixed-arities — exempt.
+    let Expr::Name(n) = call.func.as_ref() else {
+        return;
+    };
+    if SHADOWED_BUILTINS.contains(&n.id.as_str()) {
+        return;
+    }
+    let mut ints = 0usize;
+    let mut floats = 0usize;
+    let mut strings = 0usize;
+    for arg in &call.arguments.args {
+        match arg {
+            Expr::NumberLiteral(n) => match n.value {
+                ruff_python_ast::Number::Int(_) => ints += 1,
+                ruff_python_ast::Number::Float(_) => floats += 1,
+                ruff_python_ast::Number::Complex { .. } => {}
+            },
+            Expr::StringLiteral(_) => strings += 1,
+            _ => {}
+        }
+    }
+    let (n, kind) = if ints >= 2 {
+        (ints, "numbers")
+    } else if floats >= 2 {
+        (floats, "floats")
+    } else if strings >= 2 {
+        (strings, "strings")
+    } else {
+        return;
+    };
+    let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
+    state.findings.push(Finding {
+        file: state.file.to_string(),
+        line: line_of(source, call.range().start()),
+        function: fn_name,
+        kind: "positional-literals".into(),
+        severity: "warn".into(),
+        message: format!(
+            "call passes {n} {kind} positionally — a swapped argument is a silent bug; use keyword arguments"
+        ),
+    });
+}
+
+/// A method whose body never references its receiver — it does not touch
+/// instance state, so it does not belong in the class (the inverse of
+/// record-shape/strewing). `@classmethod`/`@staticmethod` are explicit
+/// non-instance methods — exempt by design.
+pub fn detached_method_findings(state: &mut ScanState, f: &StmtFunctionDef, source: &str) {
+    let first = f.parameters.posonlyargs.first().or_else(|| f.parameters.args.first());
+    let Some(receiver) = first else {
+        return;
+    };
+    let recv = receiver.parameter.name.id.as_str();
+    let decorated_class_level = f.decorator_list.iter().any(
+        |d| matches!(&d.expression, Expr::Name(n) if n.id.as_str() == "classmethod" || n.id.as_str() == "staticmethod"),
+    );
+    if decorated_class_level {
+        return;
+    }
+    if body_refs_name(&f.body, recv) {
+        return;
+    }
+    let fn_name = f.name.to_string();
+    let line = line_of(source, f.name.range().start());
+    state.findings.push(Finding {
+        file: state.file.to_string(),
+        line,
+        function: fn_name.clone(),
+        kind: "detached-method".into(),
+        severity: "fail".into(),
+        message: format!(
+            "method '{fn_name}' never uses '{recv}' — it does not touch instance state; make it a @staticmethod or move it out of the class"
+        ),
+    });
+}
+
+/// Does any expression in the body reference the given name? A source-order
+/// walk — nested functions included (a closure capturing `self` still uses
+/// instance state).
+fn body_refs_name(body: &[Stmt], name: &str) -> bool {
+    use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
+    struct Probe<'a> {
+        name: &'a str,
+        found: bool,
+    }
+    impl<'a> SourceOrderVisitor<'a> for Probe<'a> {
+        fn visit_expr(&mut self, e: &'a Expr) {
+            if let Expr::Name(n) = e {
+                if n.id.as_str() == self.name {
+                    self.found = true;
+                }
+            }
+            walk_stmt_probe(self, e);
+        }
+    }
+    // walk_expr is the trait default; we must recurse manually
+    fn walk_stmt_probe<'a, V: SourceOrderVisitor<'a>>(v: &mut V, e: &'a Expr) {
+        ruff_python_ast::visitor::source_order::walk_expr(v, e);
+    }
+    let mut probe = Probe { name, found: false };
+    for s in body {
+        walk_stmt(&mut probe, s);
+        if probe.found {
+            break;
+        }
+    }
+    probe.found
 }
 
 /// A def with more than 5 parameters (a leading self/cls excluded — that is

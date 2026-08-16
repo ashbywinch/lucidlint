@@ -121,9 +121,11 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     if !scan.cc.is_empty() {
         scan.cc.retain(|e| {
             for ln in [e.line, e.line.saturating_sub(1)] {
-                if let Some((sig, why)) = supps.line.get(&ln) {
-                    if sig == "complexity" && !why.is_empty() {
-                        pre_used.lines.insert((ln, sig.clone()));
+                if let Some(entries) = supps.line.get(&ln) {
+                    for (sig, why) in entries {
+                        if sig == "complexity" && !why.is_empty() {
+                            pre_used.lines.insert((ln, sig.clone()));
+                        }
                     }
                 }
             }
@@ -587,6 +589,27 @@ impl<'a> Visit<'a> for RsState<'a> {
                         // needs the impl's fn shape
                         self.process_fn(&f.attrs, &f.sig, &f.block);
                         self.fn_stack = saved;
+                        // detached-method: a receiver that the body never uses
+                        // — the method does not touch instance state, so it
+                        // does not belong in the impl (the Python rule's
+                        // inverse direction, Rust-flavored)
+                        if f.sig.receiver().is_some()
+                            && !has_attr(&f.attrs, "test")
+                            && !self.in_test_code
+                            && !block_refs_self(&f.block)
+                        {
+                            let line = f.sig.span().start().line;
+                            self.finding(
+                                "detached-method",
+                                "fail",
+                                line,
+                                &f.sig.ident.to_string(),
+                                format!(
+                                    "method '{}' never uses its receiver — it does not touch instance state; make it an associated fn or move it out of the impl",
+                                    f.sig.ident
+                                ),
+                            );
+                        }
                     }
                 }
             }
@@ -1118,6 +1141,27 @@ fn block_asserts(block: &Block) -> bool {
     let mut probe = AssertProbe { found: false };
     syn::visit::visit_block(&mut probe, block);
     probe.found
+}
+
+/// Does the block reference `self` anywhere (nested included)?
+///
+/// Token-based, not AST-based: `self` inside a macro invocation (`write!`,
+/// `format!`) is invisible to the syn visitor — a Display::fmt that only
+/// touches self via `write!` would look detached. The token stream sees it.
+fn block_refs_self(block: &Block) -> bool {
+    use quote::ToTokens;
+    tokens_contain_self(block.to_token_stream())
+}
+
+/// Recursive: a macro invocation's tokens live in a nested group (`write!`,
+/// `format!`) — only a full descent sees `self` inside them.
+fn tokens_contain_self(stream: proc_macro2::TokenStream) -> bool {
+    use proc_macro2::TokenTree;
+    stream.into_iter().any(|tt| match tt {
+        TokenTree::Ident(id) => id == "self",
+        TokenTree::Group(g) => tokens_contain_self(g.stream()),
+        _ => false,
+    })
 }
 
 fn ignored_test_findings(file: &File, file_name: &str) -> Vec<Finding> {
@@ -2151,6 +2195,23 @@ mod tests {
         assert!(has_kind(&fs, "stale-suppression"));
         let ok = scan("fn f() {\n    let x = 3 * 60; // code-health: ignore magic-number the gate threshold\n}\n");
         assert!(!has_kind(&ok, "stale-suppression"));
+    }
+
+    #[test]
+    fn detached_method_rust_flagged() {
+        let fs = scan("struct S {}\nimpl S {\n    fn m(&self, x: i32) -> i32 {\n        x + 1\n    }\n}\n");
+        assert!(has_kind(&fs, "detached-method"));
+        let ok = scan("struct S {}\nimpl S {\n    fn m(&self, x: i32) -> i32 {\n        self.x + x\n    }\n}\n");
+        assert!(!has_kind(&ok, "detached-method"));
+        let assoc = scan("struct S {}\nimpl S {\n    fn m(x: i32) -> i32 {\n        x\n    }\n}\n");
+        assert!(!has_kind(&assoc, "detached-method")); // no receiver — associated fn
+    }
+
+    #[test]
+    fn detached_method_self_inside_macro_counts() {
+        // write! hides `self` in a macro token group — the probe must descend
+        let fs = scan("struct S { x: i32 }\nimpl std::fmt::Display for S {\n    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n        write!(f, \"{}\", self.x)\n    }\n}\n");
+        assert!(!has_kind(&fs, "detached-method"));
     }
 
     #[test]
