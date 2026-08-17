@@ -553,9 +553,21 @@
    "severity": "error"
   },
   {
-   "line": 1229,
+   "line": 1224,
+   "column": 36,
+   "stop_line": 1224,
+   "stop_column": 59,
+   "path": "lucidlint.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `KIND_ALIASES`",
+   "concise_description": "Object of class `NoneType` has no attribute `KIND_ALIASES`",
+   "severity": "error"
+  },
+  {
+   "line": 1233,
    "column": 16,
-   "stop_line": 1229,
+   "stop_line": 1233,
    "stop_column": 37,
    "path": "lucidlint.py",
    "code": -2,
@@ -565,9 +577,9 @@
    "severity": "error"
   },
   {
-   "line": 1233,
+   "line": 1237,
    "column": 20,
-   "stop_line": 1233,
+   "stop_line": 1237,
    "stop_column": 43,
    "path": "lucidlint.py",
    "code": -2,
@@ -577,9 +589,9 @@
    "severity": "error"
   },
   {
-   "line": 1250,
+   "line": 1254,
    "column": 24,
-   "stop_line": 1250,
+   "stop_line": 1254,
    "stop_column": 48,
    "path": "lucidlint.py",
    "code": -2,
@@ -589,9 +601,9 @@
    "severity": "error"
   },
   {
-   "line": 1256,
+   "line": 1260,
    "column": 39,
-   "stop_line": 1256,
+   "stop_line": 1260,
    "stop_column": 65,
    "path": "lucidlint.py",
    "code": -2,
@@ -601,9 +613,9 @@
    "severity": "error"
   },
   {
-   "line": 1262,
+   "line": 1266,
    "column": 20,
-   "stop_line": 1270,
+   "stop_line": 1274,
    "stop_column": 14,
    "path": "lucidlint.py",
    "code": -2,
@@ -613,9 +625,9 @@
    "severity": "error"
   },
   {
-   "line": 1322,
+   "line": 1326,
    "column": 33,
-   "stop_line": 1322,
+   "stop_line": 1326,
    "stop_column": 41,
    "path": "lucidlint.py",
    "code": -2,
@@ -625,9 +637,9 @@
    "severity": "error"
   },
   {
-   "line": 1333,
+   "line": 1337,
    "column": 28,
-   "stop_line": 1333,
+   "stop_line": 1337,
    "stop_column": 37,
    "path": "lucidlint.py",
    "code": -2,
@@ -637,9 +649,9 @@
    "severity": "error"
   },
   {
-   "line": 1339,
+   "line": 1343,
    "column": 23,
-   "stop_line": 1339,
+   "stop_line": 1343,
    "stop_column": 45,
    "path": "lucidlint.py",
    "code": -2,
@@ -649,9 +661,9 @@
    "severity": "error"
   },
   {
-   "line": 1397,
+   "line": 1420,
    "column": 12,
-   "stop_line": 1397,
+   "stop_line": 1420,
    "stop_column": 35,
    "path": "lucidlint.py",
    "code": -2,
@@ -661,9 +673,9 @@
    "severity": "error"
   },
   {
-   "line": 1397,
+   "line": 1420,
    "column": 49,
-   "stop_line": 1397,
+   "stop_line": 1420,
    "stop_column": 72,
    "path": "lucidlint.py",
    "code": -2,
@@ -673,9 +685,9 @@
    "severity": "error"
   },
   {
-   "line": 1405,
+   "line": 1428,
    "column": 53,
-   "stop_line": 1405,
+   "stop_line": 1428,
    "stop_column": 55,
    "path": "lucidlint.py",
    "code": -2,

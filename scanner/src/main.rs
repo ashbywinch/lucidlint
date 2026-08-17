@@ -26,6 +26,7 @@ use std::path::Path;
 mod checks;
 mod common;
 mod docs;
+mod fix;
 mod graph_families;
 mod lsp;
 mod rustscan;
@@ -1000,6 +1001,35 @@ fn main() {
         lsp::run();
         return;
     }
+    if args.first().map(String::as_str) == Some("--fix") {
+        // the Rust fix surface the orchestrator dispatches to for `.rs`
+        // targets: `--fix '{"kind":...,"file":...,"line":N,"name":...}'`.
+        // Reads the file, applies the fix IN PLACE, prints a status line.
+        if let Some(spec) = args.get(1) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(spec) {
+                let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                let file = v.get("file").and_then(|k| k.as_str()).unwrap_or("");
+                let line = v.get("line").and_then(|k| k.as_u64()).unwrap_or(0) as usize;
+                let name = v.get("name").and_then(|k| k.as_str()).unwrap_or("");
+                if kind == "extract-method" {
+                    if let Ok(src) = std::fs::read_to_string(file) {
+                        if let Some(out) = fix::fix_extract_method(&src, line, name) {
+                            if std::fs::write(file, out).is_err() {
+                                println!("fix: could not write the fixed file — {file}:{line}");
+                                return;
+                            }
+                            println!("fix: extracted seam into {name} — {file}:{line} (extract-method)");
+                            return;
+                        }
+                    }
+                    println!("fix: nothing to change for extract-method at {file}:{line}");
+                    return;
+                }
+            }
+        }
+        println!("fix: unknown or malformed --fix request");
+        std::process::exit(2);
+    }
     // flag parsing: --graph <json> --churn <json> --docs <root> --include-tests
     let mut graph_path: Option<String> = None;
     let mut churn_path: Option<String> = None;
@@ -1540,6 +1570,19 @@ mod tests {
     fn noqa_with_why_passes() {
         let f = scan_src("x = 1  # noqa # mypy cannot see the overload\n");
         assert!(!f.iter().any(|x| x.kind == "noqa"));
+    }
+
+    #[test]
+    fn noqa_reason_on_the_same_comment_line_passes() {
+        // the repo writes `# noqa: BLE001 — the callback must never 500` —
+        // one comment with a real reason. The rule's requirement of a SECOND
+        // `#` after the marker (`# noqa: X  # reason`) rejects that natural
+        // format: a reason is a reason whether or not it follows a `#`.
+        let f = scan_src("try:\n    pass\nexcept Exception:  # noqa: BLE001 — the callback must never 500\n    pass\n");
+        assert!(!f.iter().any(|x| x.kind == "noqa"), "{f:?}");
+        // and the no-reason form still fails
+        let g = scan_src("x = 1  # noqa: BLE001\n");
+        assert!(g.iter().any(|x| x.kind == "noqa"));
     }
 
     // ------------------------------------------------------------- global-state

@@ -1218,6 +1218,18 @@ def main() -> int:
 
     if args.command == "fix":
         # the agent-driven fix surface: `lucidlint fix --kind X --file F --line N`
+        rel = args.file or ""
+        if rel.endswith(".rs"):
+            # a Rust fix runs in the scan core (syn) — libcst is Python-only
+            return _fix_rust(repo, fix_engine.KIND_ALIASES.get(args.kind, args.kind), rel, args.line, args.name)
+        if not rel.endswith(".py"):
+            # the fix engine is Python-only (libcst) — a non-.py/.rs target
+            # cannot be auto-fixed; refuse clearly instead of a parse crash
+            print(
+                f"fix: the fix engine only supports Python files — '{rel}' "
+                f"is not a .py file; refactor it by hand"
+            )
+            return 1
         opts = fix_engine.FixOptions(
             params=args.params.split(",") if args.params else None,
             name=args.name,
@@ -1379,6 +1391,25 @@ def main() -> int:
         rc.render_text(unique, fails, warns, acks)
 
     return _gate_exit(stale, fails, args)
+
+
+def _fix_rust(repo: Path, kind: str, rel: str, line: int, name: str | None) -> int:
+    """A Rust fix runs in the scan core (syn), not the Python/libcst engine:
+    invoke the binary's --fix mode, which edits the file in place."""
+    binary = RUST_SCAN.binary(repo)
+    if binary is None:
+        print("fix: the Rust scan core is required — build it with `make scanner-check`")
+        return 1
+    spec = json.dumps(
+        {"kind": kind, "file": str(repo / rel), "line": line, "name": name or ""}
+    )
+    try:
+        proc = subprocess.run([str(binary), "--fix", spec], capture_output=True, text=True, timeout=120, cwd=str(repo))
+    except subprocess.SubprocessError:
+        print(f"fix: the Rust fix core failed for {rel}:{line}")
+        return 1
+    sys.stdout.write(proc.stdout)
+    return 0
 
 
 def _finding_lines(repo: Path, rel: str, kind: str) -> list[int]:
