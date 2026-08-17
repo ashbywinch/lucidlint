@@ -63,6 +63,12 @@ handle_push_trigger = true
 # the incremental flag makes each push review only the commits since the
 # previous review, so a 12-push PR costs 12 small reviews, not 12 full ones.
 push_commands = ["/review -i", "/improve"]
+# The omp harness pushes through its GitHub App token, so the synchronize
+# event's sender is a Bot — with the upstream default (ignore_bot_commits)
+# the review is skipped on every agent push and the fail-loud check-review
+# step fails the PR. The agent's commits ARE the developer's work here;
+# review them. (Dependabot PRs are already excluded at the job level.)
+push_trigger_ignore_bot_commits = false
 # A human posting "/skip" on the PR skips the AI review for that PR
 # (the check-review step passes on it). Deliberate opt-out only — the
 # default is that every PR gets reviewed. Do NOT use /skip on your own
