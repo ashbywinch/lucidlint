@@ -1309,13 +1309,12 @@ def main() -> int:
             # needed to see it). The agent reviews the seam, then re-runs
             # with --fix-name <name>; the name is the commitment, so the
             # named run applies — no --confirm dance
-            diag: list[str] = []
             new_source, description = fix_engine.propose_finding(
-                args.kind, args.file, repo, args.line, opts, diag
+                args.kind, args.file, repo, args.line, opts
             )
             if new_source is None:
-                why = f" — {diag[0]}" if diag else ""
-                print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}{why}")
+                # R28: never explain an absent fix — the silence is the signal
+                print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
                 return 0
             diff = list(
                 difflib.unified_diff(
@@ -1394,13 +1393,12 @@ def main() -> int:
                   f"apply it: lucidlint fix --kind {args.kind} --file {args.file} "
                   f"--line {args.line} --name <name>")
             return 0
-        diag: list[str] = []
         description = fix_engine.fix_finding(
-            args.kind, args.file, repo, args.line, opts, diag
+            args.kind, args.file, repo, args.line, opts
         )
         if description is None:
-            why = f" — {diag[0]}" if diag else ""
-            print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}{why}")
+            # R28: never explain an absent fix — the silence is the signal
+            print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
             return 0
         print(f"fix: {description} — {args.file}:{args.line} ({args.kind})")
         return 0

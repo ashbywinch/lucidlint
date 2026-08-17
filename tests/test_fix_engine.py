@@ -839,11 +839,10 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
     compile((repo / "houses" / "app.py").read_text(), "app.py", "exec")
 
 
-def test_extract_method_no_seam_explains_why(tmp_path, capsys):
-    """R1 (review log §7): the "nothing to change" path must explain WHY no
-    seam exists — the agent gets a diagnostic, not an opaque no-op. The
-    seam `x = 3 * t; return x` writes x and reads it after: an out-variable,
-    so the body is not extractable as written."""
+def test_extract_method_refusal_is_silent(tmp_path, capsys):
+    """R28: a fix that cannot apply refuses with NO explanation — the tool
+    never tells the user it could not figure out a fix (the silence is the
+    signal; the user sees the code and figures it out)."""
     repo = make_repo(tmp_path)
     (repo / "houses" / "app.py").write_text(
         "def price(t):\n    x = 3 * t\n    return x\n"
@@ -854,8 +853,8 @@ def test_extract_method_no_seam_explains_why(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "nothing to change" in out
-    assert "out-variable" in out or "not extractable" in out, out
-
+    assert "out-variable" not in out and "extractable" not in out, out
+    assert "no " not in out.replace("nothing to change", ""), out
 
 def test_dispatch_registry_preserves_behavior(tmp_path):
     """The dispatch-registry fix: an if/elif chain over a selector becomes a

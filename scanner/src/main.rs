@@ -1227,8 +1227,10 @@ fn main() {
                                 println!("fix: {what} — {file}:{line} ({kind})");
                                 return;
                             }
-                            Err(why) => {
-                                println!("fix: nothing to change for {kind} at {file}:{line} — {why}");
+                            Err(_) => {
+                                // R28: never explain an absent fix — the
+                                // silence is the signal
+                                println!("fix: nothing to change for {kind} at {file}:{line}");
                                 return;
                             }
                         }

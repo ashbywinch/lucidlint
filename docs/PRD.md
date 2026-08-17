@@ -232,6 +232,17 @@ rather than a number.
   I/O like sqlite3 — and `# lucidlint: ignore-file <signal> <why>`
   exempts a whole file with an explanation (a why-less ignore-file is
   itself a finding).
+- **R28 — Fix directives are truthful, and the tool is silent otherwise.**
+  A finding's message carries a `fix: <command>` directive if and only if
+  the tool knows a fix for that finding — and then the directive is the
+  exact command to run, with a name placeholder where the agent supplies
+  the semantic bit. When the tool has no good fix and is certain of that,
+  it says nothing about a fix; when a fix probably exists but the tool
+  cannot produce it, it lets the user figure it out. The tool never
+  explains that it could not figure out a fix, never explains why a
+  directive is absent (the absence is self-evident), and never offers a
+  fix it cannot apply. (Rationale: an offer that refuses wastes the
+  agent's turn; an explanation of inability is noise — 2026-08-17.)
 - **R27 — Agents never compute line numbers; the tool owns its own
   coordinates.** Findings are located for fixing by the finding's own
   output (the report line and the JSON `line` field are the source of

@@ -621,7 +621,6 @@ class _FnBodyState:
 
     def best_seam(self, min_lines: int = 2, max_window_decisions: int | None = None,
             min_window_decisions: int = 0, max_free_vars: int = 6,
-            diag: list[str] | None = None,
         ):
         """The window with the MOST decisions (real CC progress — extraction
         splits complexity, it does not move it) among those whose free
@@ -632,9 +631,6 @@ class _FnBodyState:
         self-contained; the whole body is not a seam."""
         n = len(self.flat)
         best = None  # (score, flat indices)
-        # the most promising window a budget rejected + why (the diagnostic
-        # the R27 fix path reports when no seam exists — review-log R1)
-        rejected: tuple | None = None
         for i in range(n):
             for j in range(i, n):
                 score = self._window_score(i, j, min_lines)
@@ -642,36 +638,14 @@ class _FnBodyState:
                     continue
                 free_count, _, _, free_vars = score
                 if free_count > max_free_vars:
-                    if rejected is None or score < rejected[0]:
-                        rejected = (
-                            score,
-                            f"the best seam needs {free_count} free variables ("
-                            f"{', '.join(v.name for v in free_vars)}) — over the "
-                            f"{max_free_vars}-variable interface budget",
-                        )
                     continue  # too-wide interface — not a cohesive seam
                 if max_window_decisions is not None:
                     window_decisions = sum(
                         self.decisions[self.flat[k][0]] for k in range(i, j + 1)
                     )
                     if window_decisions > max_window_decisions:
-                        if rejected is None or score < rejected[0]:
-                            rejected = (
-                                score,
-                                f"the best seam still has {window_decisions} "
-                                f"decisions — over the {max_window_decisions}-decision "
-                                f"extraction bound (extract-method splits complexity, "
-                                f"it does not move it)",
-                            )
                         continue  # the extracted fn would still be complex
                     if window_decisions < min_window_decisions:
-                        if rejected is None or score < rejected[0]:
-                            rejected = (
-                                score,
-                                f"no seam splits enough decisions (best "
-                                f"{window_decisions}, need >= {min_window_decisions}) "
-                                f"for both sides to land under the CC gate",
-                            )
                         continue  # the ORIGINAL would still be >= 15 — the
                         # seam must SPLIT enough for both sides to land clean
                     # decisions FIRST (CC progress), then interface width,
@@ -680,16 +654,6 @@ class _FnBodyState:
                 if best is None or score < best[0]:
                     best = (score, list(range(i, j + 1)))
         if best is None:
-            if diag is not None:
-                if rejected is not None:
-                    diag.append(rejected[1])
-                else:
-                    diag.append(
-                        f"no contiguous statement block in one container spans "
-                        f">= {min_lines} lines without control flow or a value "
-                        f"read after the window (out-variable) — the body is not "
-                        f"extractable as written"
-                    )
             return None
         (*_, free_vars), flat_indices = best
         block_sids = [self.flat[k][0] for k in flat_indices]
@@ -873,15 +837,6 @@ def collect_stmt_names(add_target, line_stmt, names):
 
 
 
-def _refusal(reason: str, diag: list[str] | None = None):
-    """A refused seam: record why (review-log R1) and report no source. The
-    one-place-any-branch helper keeps the early-exit diagnostics out of the
-    caller's decision budget when the caller is itself near the CC gate."""
-    if diag is not None:
-        diag.append(reason)
-    return None, None
-
-
 def _is_nested_target(wrapper: cst.MetadataWrapper, fn_node) -> bool:
     """Is the target function nested inside another function? The extracted
     helper is inserted at module/class level — a nested target would leave
@@ -908,7 +863,6 @@ def _min_seam_decisions(state) -> int:
 
 def extract_method_proposal(
     source: str, line: int, name: str | None = None, max_decisions: int | None = None,
-    diag: list[str] | None = None,
 ):
     """Compute the best extraction seam and the resulting source, WITHOUT
     writing. Returns (new_source, seam_text) or (None, None) when no safe
@@ -922,20 +876,15 @@ def extract_method_proposal(
         name = "_" + name
     module, wrapper, state = _fn_seam_analysis(source, line)
     if state.fn_node is None or len(state.flat) < 2:
-        return _refusal("no function starts at this line, or its body has fewer than two statements", diag)
+        return None, None
     # a nested-function target cannot host the extracted helper — the insert
     # lands at module/class level, so the rewritten call would NameError
     # (refuse rather than write a broken file)
     if _is_nested_target(wrapper, state.fn_node):
-        return _refusal(
-            "the target is a nested function — the helper would be inserted "
-            "at module level and the rewritten call would NameError",
-            diag,
-        )
+        return None, None
     seam = state.best_seam(
         max_window_decisions=max_decisions,
         min_window_decisions=_min_seam_decisions(state),
-        diag=diag,
     )
     if seam is None:
         return None, None
@@ -975,25 +924,21 @@ def _extraction_is_private() -> bool:
     return True
 
 
-def fix_extract_method(source: str, line: int, name: str | None, diag: list[str] | None = None) -> str | None:
+def fix_extract_method(source: str, line: int, name: str | None) -> str | None:
     """Extract Function (applied): the best self-contained seam of the
     function at `line` becomes a new function named `name`. The seam is
     bounded to <= 13 decisions so the extracted function lands under the
     CC-15 gate — extraction SPLITS complexity, it does not move it. The
     name is normalized: the extracted function is private by construction
     (see _extraction_is_private), so a public-looking name is underscored."""
-    new_source, _ = extract_method_proposal(source, line, name, max_decisions=13, diag=diag)
+    new_source, _ = extract_method_proposal(source, line, name, max_decisions=13)
     return new_source
 
 
-# lucidlint: ignore long-param-list diag tail is one optional diagnostic sink
-def propose_finding(kind: str, rel: str, repo: Path, line: int, opts: FixOptions | None = None,
-                    diag: list[str] | None = None):
+def propose_finding(kind: str, rel: str, repo: Path, line: int, opts: FixOptions | None = None):
     """Compute the fix WITHOUT writing — the preview surface for every
     structural kind. Returns (new_source, description) or (None, None) when
-    nothing changes or the agent's semantic bit is missing. `diag` (a
-    one-element list, when passed) receives why no seam exists — the R27
-    "nothing to change" path must explain itself (review-log R1)."""
+    nothing changes or the agent's semantic bit is missing."""
     opts = opts or FixOptions()
     kind = KIND_ALIASES.get(kind, kind)
     path = repo / rel
@@ -1003,7 +948,7 @@ def propose_finding(kind: str, rel: str, repo: Path, line: int, opts: FixOptions
     if kind == "extract-method":
         # name-free preview: the seam is shown with a placeholder name the
         # agent replaces — naming AFTER seeing the diff, not before
-        new_source, seam = extract_method_proposal(source, line, opts.name, max_decisions=13, diag=diag)
+        new_source, seam = extract_method_proposal(source, line, opts.name, max_decisions=13)
         if new_source is None or new_source == source:
             return None, None
         return new_source, seam  # "line N: <first seam line>" — what moves
@@ -1749,12 +1694,12 @@ def fix_reduction_pipeline(source: str, line: int, name: str) -> str | None:
     return cst.Module(body=out_body).code
 
 
-def _fix_structural(kind: str, source: str, line: int, opts, diag: list[str] | None = None) -> str | None:
+def _fix_structural(kind: str, source: str, line: int, opts) -> str | None:
     """The name-driven transforms — the agent supplies the semantic bit."""
     if kind == "extract-method":
         if opts.name is None:
             return None
-        return fix_extract_method(source, line, opts.name, diag=diag)
+        return fix_extract_method(source, line, opts.name)
     if kind == "extract-class":
         return fix_extract_class(source, line, opts.name)
     if kind == "magic-number":
@@ -1770,9 +1715,9 @@ def _fix_structural(kind: str, source: str, line: int, opts, diag: list[str] | N
             return None
         return fix_parameter_object(source, line, opts.name)
     if kind == "dispatch-registry":
-        return fix_dispatch_registry(source, line, diag=diag)
+        return fix_dispatch_registry(source, line)
     if kind == "rule-table":
-        return fix_rule_table(source, line, diag=diag)
+        return fix_rule_table(source, line)
     if kind == "pipeline":
         if opts.name is None:
             return None
@@ -1780,10 +1725,8 @@ def _fix_structural(kind: str, source: str, line: int, opts, diag: list[str] | N
     return None
 
 
-# lucidlint: ignore long-param-list diag tail is one optional diagnostic sink
 def fix_finding(
-    kind: str, rel: str, repo: Path, line: int, opts: FixOptions | None = None,
-    diag: list[str] | None = None,
+    kind: str, rel: str, repo: Path, line: int, opts: FixOptions | None = None
 ) -> str | None:
     """Apply the transform for one finding. Returns a human description of
     what changed, or None when the finding was already gone (no edit).
@@ -1791,8 +1734,6 @@ def fix_finding(
     `opts` carries the agent-supplied semantic bits (the callee's parameter
     names for external/unresolved callees; the class name for extract-class)
     — the tool does the mechanical edit; the agent reads the signature once.
-    `diag` (a one-element list, when passed) receives why a structural fix
-    could not find a seam (review-log R1).
     """
     opts = opts or FixOptions()
     kind = KIND_ALIASES.get(kind, kind)
@@ -1804,7 +1745,7 @@ def fix_finding(
         new_source = _fix_mechanical(kind, source, line, opts)
         description = MECHANICAL_KINDS[kind]
     elif kind in STRUCTURAL_KINDS:
-        new_source = _fix_structural(kind, source, line, opts, diag)
+        new_source = _fix_structural(kind, source, line, opts)
         description = STRUCTURAL_KINDS[kind]
     else:
         raise ValueError(f"kind '{kind}' has no fix (mechanical or structural)")
@@ -1954,34 +1895,27 @@ def _parse_dispatch_arm(stmt: cst.If) -> _DispatchArm | None:
     return left.value, comp.comparator.evaluated_value, list(body.body)
 
 
-def _dispatch_chain_shape(fn: cst.FunctionDef, body: list, diag: list[str] | None = None) -> _DispatchShape | None:
+def _dispatch_chain_shape(fn: cst.FunctionDef, body: list) -> _DispatchShape | None:
     """The dispatch-chain shape of a function: a PREAMBLE (locals computed
     before the chain), the >=3 arms over ONE selector, and a single trailing
-    `return <default>`. None when the body is not that shape — `diag`
-    receives why."""
+    `return <default>`. None when the body is not that shape."""
     first_if = next((i for i, s in enumerate(body) if isinstance(s, cst.If)), None)
     if first_if is None:
-        if diag is not None:
-            diag.append("the function has no if statements — a dispatch chain needs arms")
         return None
     preamble = body[:first_if]
-    chain, selector = _dispatch_arms(body[first_if:], diag)
+    chain, selector = _dispatch_arms(body[first_if:])
     if chain is None:
         return None
     if len(chain) < 3:
-        if diag is not None:
-            diag.append("fewer than 3 arms — not a dispatch table worth hoisting")
-        return None
+        return None  # >= 3 arms make a registry worth it
     tail = body[first_if + len(chain):]
     if len(tail) != 1 or not isinstance(tail[0], cst.SimpleStatementLine) \
             or not isinstance(tail[0].body[0], cst.Return):
-        if diag is not None:
-            diag.append("the no-match path is not a single trailing `return <default>`")
-        return None
+        return None  # v1: a single trailing `return <default>` is the no-match path
     return preamble, chain, selector or "", tail[0].body[0]
 
 
-def _dispatch_arms(stmts: list, diag: list[str] | None = None) -> _DispatchArms:
+def _dispatch_arms(stmts: list) -> _DispatchArms:
     """The contiguous dispatch arms over ONE selector from a statement run —
     (chain, selector) or (None, None) when an arm is not the table shape."""
     chain = []
@@ -1991,15 +1925,11 @@ def _dispatch_arms(stmts: list, diag: list[str] | None = None) -> _DispatchArms:
             break
         parsed = _parse_dispatch_arm(stmt)
         if parsed is None:
-            if diag is not None:
-                diag.append("an arm is not `if <sel> == \"lit\": <body>` — the table needs literal selectors")
             return None, None
         sel, lit, arm_body = parsed
         if selector is None:
             selector = sel
         elif sel != selector:
-            if diag is not None:
-                diag.append(f"the arms do not share one selector ('{sel}' vs '{selector}')")
             return None, None
         chain.append((lit, arm_body))
     return chain, selector
@@ -2175,7 +2105,7 @@ def _dispatch_call(selector: str, default, union: list[str]) -> list:
     ]
 
 
-def fix_dispatch_registry(source: str, line: int, diag: list[str] | None = None) -> str | None:
+def fix_dispatch_registry(source: str, line: int) -> str | None:
     """A dispatch chain (`if sel == "a": return f()  if sel == "b": ...`)
     is a handler REGISTRY in disguise — each arm is already a named handler.
     Rewrite it to a dict of selector -> handler functions and a one-line
@@ -2190,7 +2120,7 @@ def fix_dispatch_registry(source: str, line: int, diag: list[str] | None = None)
     if fn is None or not any(s is fn for s in wrapper.module.body):
         return None
     body = list(fn.body.body)
-    shaped = _dispatch_chain_shape(fn, body, diag)
+    shaped = _dispatch_chain_shape(fn, body)
     if shaped is None:
         return None
     preamble, chain, selector, default = shaped
@@ -2208,16 +2138,13 @@ def fix_dispatch_registry(source: str, line: int, diag: list[str] | None = None)
 # --------------------------------------------------------------------------- rule-checks
 
 
-def _rule_battery_shape(fn: cst.FunctionDef, body: list, diag: list[str] | None = None) -> _BatteryShape | None:
+def _rule_battery_shape(fn: cst.FunctionDef, body: list) -> _BatteryShape | None:
     """The rule-battery shape: `acc = []`, >= 3 `if <cond>: acc.append(<v>)`
     checks (each a single append, no else), then anything as the tail. The
     conditions may read ANY enclosing name — the hoisted lambdas capture the
-    scope. Returns (acc, [(cond, value), ...], preamble, tail). `diag`
-    receives why the body is not that shape."""
+    scope. Returns (acc, [(cond, value), ...], preamble, tail)."""
     probe = _acc_init(body)
     if probe is None:
-        if diag is not None:
-            diag.append("the function has no `acc = []` accumulator opener")
         return None
     acc, init_idx = probe
     preamble = list(body[:init_idx])  # locals computed before the init —
@@ -2227,20 +2154,14 @@ def _rule_battery_shape(fn: cst.FunctionDef, body: list, diag: list[str] | None 
     while idx < len(body) and isinstance(body[idx], cst.If):
         stmt = body[idx]
         if stmt.orelse:
-            if diag is not None:
-                diag.append("a check has an else — the battery must be independent ifs")
             return None
         value = _append_value(stmt.body, acc)
         if value is None:
-            if diag is not None:
-                diag.append(f"a check is not exactly `{acc}.append(<violation>)` — one append per check")
-            return None
+            return None  # v1: one append per check
         checks.append((stmt.test, value))
         idx += 1
     if len(checks) < 3:
-        if diag is not None:
-            diag.append("fewer than 3 checks — not a battery worth a table")
-        return None
+        return None  # fewer than 3 checks is not a battery
     # everything after the last check is the TAIL — kept verbatim (the
     # collector comprehension produces `acc`, then the tail uses it)
     return acc, checks, preamble, list(body[idx:])
@@ -2323,15 +2244,14 @@ def _rule_table_build(acc: str, checks: list) -> _RuleTableBuild:
     return table, collector
 
 
-def fix_rule_table(source: str, line: int, diag: list[str] | None = None) -> str | None:
+def fix_rule_table(source: str, line: int) -> str | None:
     """A rule battery (`if cond: violations.append(...)` repeated) is a
     LATENT DATA STRUCTURE — a table of (condition, violation) pairs. Hoist
     it: each check becomes a tuple `(lambda: <cond>, <violation>)`, the
     function collects the violations whose condition holds. The lambdas
     capture the enclosing scope (shared preamble locals need no plumbing)
     and need NO names — the naming problem dissolves. v1: each check is a
-    single `acc.append(<value>)` with no else. `diag` receives why the body
-    is not that shape."""
+    single `acc.append(<value>)` with no else."""
     module = cst.parse_module(source)
     wrapper = cst.MetadataWrapper(module)
     finder = _FindFnLine(line)
@@ -2340,7 +2260,7 @@ def fix_rule_table(source: str, line: int, diag: list[str] | None = None) -> str
     if fn is None or not any(s is fn for s in wrapper.module.body):
         return None
     body = list(fn.body.body)
-    shaped = _rule_battery_shape(fn, body, diag)
+    shaped = _rule_battery_shape(fn, body)
     if shaped is None:
         return None
     acc, checks, preamble, tail = shaped
