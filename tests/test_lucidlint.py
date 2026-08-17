@@ -363,7 +363,9 @@ def test_git_lsfiles_failure_falls_back_to_rglob(tmp_path, capsys):
     ]
     rc = run_main(repo, routes=routes)
     assert rc == 0  # .venv excluded by _excluded_part; the clean repo passes
-    assert "falling back to rglob" in capsys.readouterr().err
+    # R28: a certain-unfixable gap (no git) is silent — no "falling back"
+    # announcement; the rglob fallback just happens
+    assert "rglob" not in capsys.readouterr().err
     assert ".venv" not in capsys.readouterr().out
 
 

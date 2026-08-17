@@ -493,33 +493,45 @@
    "severity": "error"
   },
   {
-   "line": 312,
-   "column": 13,
-   "stop_line": 312,
-   "stop_column": 31,
+   "line": 338,
+   "column": 61,
+   "stop_line": 338,
+   "stop_column": 74,
    "path": "lucidlint.py",
    "code": -2,
-   "name": "missing-attribute",
-   "description": "Object of class `NoneType` has no attribute `Repository`",
-   "concise_description": "Object of class `NoneType` has no attribute `Repository`",
+   "name": "bad-argument-type",
+   "description": "Argument `int` is not assignable to parameter `sort_mode` with type `SortMode` in function `pygit2._pygit2.Repository.walk`",
+   "concise_description": "Argument `int` is not assignable to parameter `sort_mode` with type `SortMode` in function `pygit2._pygit2.Repository.walk`",
    "severity": "error"
   },
   {
-   "line": 329,
-   "column": 13,
-   "stop_line": 329,
-   "stop_column": 31,
+   "line": 346,
+   "column": 28,
+   "stop_line": 346,
+   "stop_column": 39,
    "path": "lucidlint.py",
    "code": -2,
    "name": "missing-attribute",
-   "description": "Object of class `NoneType` has no attribute `Repository`",
-   "concise_description": "Object of class `NoneType` has no attribute `Repository`",
+   "description": "Object of class `NoneType` has no attribute `delta`",
+   "concise_description": "Object of class `NoneType` has no attribute `delta`",
    "severity": "error"
   },
   {
-   "line": 396,
+   "line": 352,
+   "column": 28,
+   "stop_line": 352,
+   "stop_column": 39,
+   "path": "lucidlint.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `delta`",
+   "concise_description": "Object of class `NoneType` has no attribute `delta`",
+   "severity": "error"
+  },
+  {
+   "line": 404,
    "column": 35,
-   "stop_line": 396,
+   "stop_line": 404,
    "stop_column": 51,
    "path": "lucidlint.py",
    "code": -2,
@@ -529,21 +541,9 @@
    "severity": "error"
   },
   {
-   "line": 510,
-   "column": 13,
-   "stop_line": 510,
-   "stop_column": 31,
-   "path": "lucidlint.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Object of class `NoneType` has no attribute `Repository`",
-   "concise_description": "Object of class `NoneType` has no attribute `Repository`",
-   "severity": "error"
-  },
-  {
-   "line": 786,
+   "line": 806,
    "column": 21,
-   "stop_line": 786,
+   "stop_line": 806,
    "stop_column": 28,
    "path": "lucidlint.py",
    "code": -2,
@@ -553,9 +553,9 @@
    "severity": "error"
   },
   {
-   "line": 868,
+   "line": 888,
    "column": 24,
-   "stop_line": 868,
+   "stop_line": 888,
    "stop_column": 33,
    "path": "lucidlint.py",
    "code": -2,
@@ -565,21 +565,33 @@
    "severity": "error"
   },
   {
-   "line": 1026,
-   "column": 17,
-   "stop_line": 1026,
-   "stop_column": 35,
+   "line": 1055,
+   "column": 39,
+   "stop_line": 1055,
+   "stop_column": 59,
    "path": "lucidlint.py",
    "code": -2,
-   "name": "missing-attribute",
-   "description": "Object of class `NoneType` has no attribute `Repository`",
-   "concise_description": "Object of class `NoneType` has no attribute `Repository`",
+   "name": "bad-argument-type",
+   "description": "Argument `int` is not assignable to parameter `sort_mode` with type `SortMode` in function `pygit2._pygit2.Repository.walk`",
+   "concise_description": "Argument `int` is not assignable to parameter `sort_mode` with type `SortMode` in function `pygit2._pygit2.Repository.walk`",
    "severity": "error"
   },
   {
-   "line": 1276,
+   "line": 1061,
+   "column": 37,
+   "stop_line": 1061,
+   "stop_column": 48,
+   "path": "lucidlint.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `delta`",
+   "concise_description": "Object of class `NoneType` has no attribute `delta`",
+   "severity": "error"
+  },
+  {
+   "line": 1300,
    "column": 36,
-   "stop_line": 1276,
+   "stop_line": 1300,
    "stop_column": 59,
    "path": "lucidlint.py",
    "code": -2,
@@ -589,9 +601,9 @@
    "severity": "error"
   },
   {
-   "line": 1285,
+   "line": 1309,
    "column": 16,
-   "stop_line": 1285,
+   "stop_line": 1309,
    "stop_column": 37,
    "path": "lucidlint.py",
    "code": -2,
@@ -601,9 +613,9 @@
    "severity": "error"
   },
   {
-   "line": 1289,
+   "line": 1313,
    "column": 20,
-   "stop_line": 1289,
+   "stop_line": 1313,
    "stop_column": 43,
    "path": "lucidlint.py",
    "code": -2,
@@ -613,9 +625,9 @@
    "severity": "error"
   },
   {
-   "line": 1306,
+   "line": 1330,
    "column": 24,
-   "stop_line": 1306,
+   "stop_line": 1330,
    "stop_column": 48,
    "path": "lucidlint.py",
    "code": -2,
@@ -625,9 +637,9 @@
    "severity": "error"
   },
   {
-   "line": 1312,
+   "line": 1336,
    "column": 39,
-   "stop_line": 1312,
+   "stop_line": 1336,
    "stop_column": 65,
    "path": "lucidlint.py",
    "code": -2,
@@ -637,9 +649,9 @@
    "severity": "error"
   },
   {
-   "line": 1319,
+   "line": 1343,
    "column": 20,
-   "stop_line": 1327,
+   "stop_line": 1351,
    "stop_column": 14,
    "path": "lucidlint.py",
    "code": -2,
@@ -649,9 +661,9 @@
    "severity": "error"
   },
   {
-   "line": 1379,
+   "line": 1403,
    "column": 33,
-   "stop_line": 1379,
+   "stop_line": 1403,
    "stop_column": 41,
    "path": "lucidlint.py",
    "code": -2,
@@ -661,9 +673,9 @@
    "severity": "error"
   },
   {
-   "line": 1390,
+   "line": 1414,
    "column": 28,
-   "stop_line": 1390,
+   "stop_line": 1414,
    "stop_column": 37,
    "path": "lucidlint.py",
    "code": -2,
@@ -673,9 +685,9 @@
    "severity": "error"
   },
   {
-   "line": 1396,
+   "line": 1420,
    "column": 23,
-   "stop_line": 1396,
+   "stop_line": 1420,
    "stop_column": 45,
    "path": "lucidlint.py",
    "code": -2,
@@ -685,9 +697,9 @@
    "severity": "error"
   },
   {
-   "line": 1474,
+   "line": 1498,
    "column": 12,
-   "stop_line": 1474,
+   "stop_line": 1498,
    "stop_column": 35,
    "path": "lucidlint.py",
    "code": -2,
@@ -697,9 +709,9 @@
    "severity": "error"
   },
   {
-   "line": 1474,
+   "line": 1498,
    "column": 49,
-   "stop_line": 1474,
+   "stop_line": 1498,
    "stop_column": 72,
    "path": "lucidlint.py",
    "code": -2,
@@ -709,9 +721,9 @@
    "severity": "error"
   },
   {
-   "line": 1482,
+   "line": 1506,
    "column": 53,
-   "stop_line": 1482,
+   "stop_line": 1506,
    "stop_column": 55,
    "path": "lucidlint.py",
    "code": -2,
@@ -997,9 +1009,9 @@
    "severity": "error"
   },
   {
-   "line": 422,
+   "line": 424,
    "column": 21,
-   "stop_line": 422,
+   "stop_line": 424,
    "stop_column": 23,
    "path": "tests/test_lucidlint.py",
    "code": -2,
@@ -1009,9 +1021,9 @@
    "severity": "error"
   },
   {
-   "line": 739,
+   "line": 741,
    "column": 12,
-   "stop_line": 739,
+   "stop_line": 741,
    "stop_column": 24,
    "path": "tests/test_lucidlint.py",
    "code": -2,
@@ -1021,9 +1033,9 @@
    "severity": "error"
   },
   {
-   "line": 751,
+   "line": 753,
    "column": 12,
-   "stop_line": 751,
+   "stop_line": 753,
    "stop_column": 24,
    "path": "tests/test_lucidlint.py",
    "code": -2,

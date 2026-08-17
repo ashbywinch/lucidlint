@@ -306,6 +306,10 @@ def file_history(repo: Path) -> FileHistory:
     the walk entirely. `last_modified` is the NEWEST touch (the walk is
     newest-first; first-seen-wins).
     """
+    if _pygit2 is None or not (repo / ".git").exists():
+        # no pygit2 or not a git repo — the absence is certain and nothing
+        # can fix it in this run: silent (never announce an unfixable gap)
+        return FileHistory(Counter(), {})
     head = ""
     cache_key = ""
     try:
@@ -320,8 +324,11 @@ def file_history(repo: Path) -> FileHistory:
             return FileHistory(Counter(data["churn"]), data["last_modified"])
         except (OSError, ValueError, KeyError):  # lucidlint: ignore swallow a missing/corrupt cache just walks
             pass  # no cache yet — walk
-    except Exception:  # lucidlint: ignore swallow pygit2 unavailable degrades to empty history
-        head = ""  # no git — walk without caching
+    except KeyError:
+        return FileHistory(Counter(), {})  # not a git repo — certain: silent
+    except Exception as e:
+        log(f"churn: {e}")  # unexpected — show the actual error
+        return FileHistory(Counter(), {})
 
     churn: Counter[str] = Counter()
     last: dict[str, str] = {}
@@ -349,8 +356,9 @@ def file_history(repo: Path) -> FileHistory:
                 churn[path] += 1
                 if date and path not in last:
                     last[path] = date  # first-seen = newest in a newest-first walk
-    except Exception:  # lucidlint: ignore swallow pygit2 unavailable degrades to empty history
-        log(f"pygit2 history unavailable in {repo} — history-based signals are skipped")
+    except Exception as e:
+        log(f"churn walk: {e}")  # unexpected — show the actual error
+        return FileHistory(churn, last)  # partial/empty history, surfaced
 
     if cache_key:
         try:
@@ -506,6 +514,12 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
     if only_rel is not None:
         py = repo / only_rel
         return [SourceFile(py, only_rel)] if py.is_file() and py.suffix in (".py", ".rs", ".md") else []
+    if _pygit2 is None or not (repo / ".git").exists():
+        return [
+            SourceFile(py, py.relative_to(repo).as_posix())
+            for py in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.rs")) + sorted(repo.rglob("*.md"))
+            if not any(_excluded_part(part) for part in py.parts)
+        ]  # no git — certain: silent fallback
     try:
         r = _pygit2.Repository(str(repo))
         tracked = {e.path for e in r.index if e.path.endswith((".py", ".rs", ".md"))}
@@ -527,8 +541,14 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
                         untracked.add(rel)
         rels = sorted(tracked | untracked)
         return [SourceFile(repo / rel, rel) for rel in rels]
-    except Exception:
-        log("pygit2 unavailable or no .git — falling back to rglob for the file list")
+    except KeyError:
+        return [
+            SourceFile(py, py.relative_to(repo).as_posix())
+            for py in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.rs")) + sorted(repo.rglob("*.md"))
+            if not any(_excluded_part(part) for part in py.parts)
+        ]  # not a git repo — certain: silent fallback
+    except Exception as e:
+        log(f"file list: {e}")  # unexpected — show the actual error
         return [
             SourceFile(py, py.relative_to(repo).as_posix())
             for py in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.rs")) + sorted(repo.rglob("*.md"))
@@ -913,8 +933,8 @@ class _GraphContract:
         # sqlite3.Error (corrupt/older graph.db), KeyError (rows without the
         # expected columns), or TypeError/AttributeError (version mismatch) —
         # all must degrade, not crash the scan (PRD R21)
-        except (*_SCANNER_FAILURES, sqlite3.Error, KeyError, TypeError, AttributeError):
-            log(f"graph contract export failed for {repo} — graph families skipped")
+        except (*_SCANNER_FAILURES, sqlite3.Error, KeyError, TypeError, AttributeError) as e:
+            log(f"graph contract export failed for {repo}: {e}")
             result = None
         self._cache[repo] = result
         return result
@@ -1020,6 +1040,8 @@ def action_key(a: Action) -> str:
 
 def changed_files(repo: Path, base: str) -> set[str]:
     """Files touched by the current branch vs base ref (best-effort)."""
+    if _pygit2 is None or not (repo / ".git").exists():
+        return set()  # no git — certain: silent
     refs = [base] if base else ["origin/main", "main"]
     for ref in refs:
         try:
@@ -1042,8 +1064,10 @@ def changed_files(repo: Path, base: str) -> set[str]:
                         changed.add(entry.name)
             if changed:
                 return changed
-        except Exception:
-            log(f"diff against {ref} unavailable — diff awareness skipped")
+        except KeyError:
+            continue  # the ref does not exist here — certain: silent
+        except Exception as e:
+            log(f"diff against {ref}: {e}")  # unexpected — show the actual error
             continue
     return set()
 

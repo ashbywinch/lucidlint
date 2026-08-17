@@ -232,6 +232,14 @@ rather than a number.
   I/O like sqlite3 — and `# lucidlint: ignore-file <signal> <why>`
   exempts a whole file with an explanation (a why-less ignore-file is
   itself a finding).
+- **R29 — The analysis pass never announces an unfixable gap; unexpected
+  errors surface.** When the tool detects an absence or error it is certain
+  nothing can fix in this context (no git history, no diff base, no
+  coverage), it prints nothing about it — the gap is silent. When the tool
+  hits an error it does not understand, it shows the actual error rather
+  than a "skipped/unavailable" wrapper, and lets the user figure it out.
+  (Rationale: "we can't compute X" is noise the user cannot act on; a
+  fabricated explanation hides the real failure — 2026-08-17.)
 - **R28 — Fix directives are truthful, and the tool is silent otherwise.**
   A finding's message carries a `fix: <command>` directive if and only if
   the tool knows a fix for that finding — and then the directive is the
