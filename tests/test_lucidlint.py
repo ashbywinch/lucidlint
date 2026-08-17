@@ -908,3 +908,19 @@ def test_baseline_gone_function_is_stale(tmp_path, capsys):
     (repo / "houses" / "app.py").write_text(APP_SRC)
     assert run_main(repo, "--baseline", str(baseline)) == 1
     assert "stale baseline" in capsys.readouterr().err
+
+
+def test_rust_rule_groups_match_python():
+    """The Rust core's rule_groups() (scanner/src/config.rs) must match
+    lucidlint.py's RULE_GROUPS: the LSP and the gate expand `group:` config
+    ignores identically. Drift here silently breaks the LSP/gate silencing
+    agreement — the exact trust failure this feature fixes."""
+    import re
+    rust_src = (Path(__file__).parent.parent / "scanner" / "src" / "config.rs").read_text()
+    rust_groups = {}
+    for m in re.finditer(r'\(\s*"([\w-]+)",\s*&\[\s*((?:"[a-z-]+",?\s*)+)', rust_src):
+        rust_groups[m.group(1)] = set(re.findall(r'"([a-z-]+)"', m.group(2)))
+    from lucidlint import RULE_GROUPS
+    assert set(rust_groups) == set(RULE_GROUPS), "group names drifted"
+    for name, kinds in RULE_GROUPS.items():
+        assert rust_groups[name] == set(kinds), f"group '{name}' drifted"

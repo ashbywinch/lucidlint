@@ -25,6 +25,7 @@ use std::path::Path;
 
 mod checks;
 mod common;
+mod config;
 mod docs;
 mod fix;
 mod graph_families;

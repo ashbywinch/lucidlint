@@ -8,9 +8,11 @@
 //!
 //! Editors point at: `lucidlint --lsp`
 
+use crate::config::{load_lucidlint_config, LucidConfig};
 use crate::{scan_source_lsp, FileScan, Finding};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 
 /// LSP DiagnosticSeverity: 1 Error, 2 Warning.
 fn severity_of(f: &Finding) -> i64 {
@@ -23,14 +25,14 @@ fn severity_of(f: &Finding) -> i64 {
 
 /// Per-file findings for one buffer: all per-file kinds minus the
 /// repo-wide families (duplicate/unused need the whole repo), plus a
-/// complexity diagnostic for functions at/above the gate threshold.
-pub fn diagnostics_for(scan: &FileScan, source: &str) -> Vec<serde_json::Value> {
+/// complexity diagnostic for functions at/above the gate threshold. The
+/// repo config's silencing rules (global + per-path ignores) are applied
+/// here so the LSP agrees with the gate.
+pub fn diagnostics_for(scan: &FileScan, source: &str, filter: Option<(&LucidConfig, &str)>) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
-    for f in scan
-        .findings
-        .iter()
-        .filter(|f| f.kind != "duplicate" && f.kind != "unused")
-    {
+    for f in scan.findings.iter().filter(|f| {
+        f.kind != "duplicate" && f.kind != "unused" && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored(&f.kind, rel))
+    }) {
         let line = f.line.saturating_sub(1); // LSP lines are 0-based
         let line_len = source.lines().nth(line).map(str::len).unwrap_or(0);
         out.push(serde_json::json!({
@@ -44,7 +46,7 @@ pub fn diagnostics_for(scan: &FileScan, source: &str) -> Vec<serde_json::Value> 
         }));
     }
     for e in &scan.cc {
-        if e.cc >= 15 {
+        if e.cc >= 15 && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored("complexity", rel)) {
             let line = e.line.saturating_sub(1);
             let line_len = source.lines().nth(line).map(str::len).unwrap_or(0);
             out.push(serde_json::json!({
@@ -141,12 +143,75 @@ fn send_response(id: &serde_json::Value, result: serde_json::Value, out: &mut im
     write_message(out, serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}));
 }
 
-pub fn dispatch(documents: &mut HashMap<String, String>, msg: &serde_json::Value, out: &mut impl Write) -> bool {
+/// The server's per-workspace state: open buffers, the workspace root, and
+/// the loaded repo config (the LSP must apply the SAME silencing rules as
+/// the gate — a config-ignored finding shown by the LSP while the gate hides
+/// it is exactly what broke the agent's trust in the LSP).
+pub struct LspState {
+    pub documents: HashMap<String, String>,
+    root: Option<PathBuf>,
+    config: Option<LucidConfig>,
+}
+
+impl LspState {
+    pub fn new() -> Self {
+        LspState {
+            documents: HashMap::new(),
+            root: None,
+            config: None,
+        }
+    }
+
+    /// The nearest repo root for a file — walk up to `.lucidlint.toml` or
+    /// `.git` (the editor may not send a workspace root).
+    fn derive_root(file: &Path) -> Option<PathBuf> {
+        let mut dir = file.parent()?;
+        loop {
+            if dir.join(".lucidlint.toml").is_file() || dir.join(".git").exists() {
+                return Some(dir.to_path_buf());
+            }
+            dir = dir.parent()?;
+        }
+    }
+
+    /// The (repo-relative path, config) for a uri — None until a root is
+    /// known. The config is small; a per-scan load keeps it fresh when the
+    /// repo's .lucidlint.toml changes while the server runs.
+    fn filtering_for(&mut self, uri: &str) -> Option<(String, LucidConfig)> {
+        let path = PathBuf::from(uri_to_path(uri));
+        if self.root.is_none() {
+            self.root = Self::derive_root(&path);
+            self.config = self.root.as_ref().map(|r| load_lucidlint_config(r));
+        }
+        let root = self.root.as_ref()?;
+        let cfg = self.config.get_or_insert_with(|| load_lucidlint_config(root));
+        let rel = path.strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/");
+        Some((rel, cfg.clone()))
+    }
+}
+
+pub fn dispatch(state: &mut LspState, msg: &serde_json::Value, out: &mut impl Write) -> bool {
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(serde_json::Value::Null);
     match method {
         "initialize" => {
             let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            // capture the workspace root so config-ignores apply from the
+            // first scan (rootUri, then workspaceFolders[0])
+            let root_uri = params["rootUri"]
+                .as_str()
+                .or_else(|| {
+                    params["workspaceFolders"]
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|w| w["uri"].as_str())
+                })
+                .map(|u| uri_to_path(u).to_string());
+            if let Some(r) = root_uri {
+                let root = PathBuf::from(r);
+                state.config = Some(load_lucidlint_config(&root));
+                state.root = Some(root);
+            }
             send_response(
                 &id,
                 serde_json::json!({
@@ -168,9 +233,10 @@ pub fn dispatch(documents: &mut HashMap<String, String>, msg: &serde_json::Value
             let uri = doc["uri"].as_str().unwrap_or("").to_string();
             let text = doc["text"].as_str().unwrap_or("").to_string();
             let scan = scan_buffer(&uri, &text);
-            let diags = diagnostics_for(&scan, &text);
+            let ctx = state.filtering_for(&uri);
+            let diags = diagnostics_for(&scan, &text, ctx.as_ref().map(|(r, c)| (c, r.as_str())));
             publish(&uri, &diags, out);
-            documents.insert(uri.clone(), text);
+            state.documents.insert(uri.clone(), text);
         }
         "textDocument/didChange" => {
             let doc = &params["textDocument"];
@@ -183,16 +249,18 @@ pub fn dispatch(documents: &mut HashMap<String, String>, msg: &serde_json::Value
                 .unwrap_or("")
                 .to_string();
             let scan = scan_buffer(&uri, &text);
-            let diags = diagnostics_for(&scan, &text);
+            let ctx = state.filtering_for(&uri);
+            let diags = diagnostics_for(&scan, &text, ctx.as_ref().map(|(r, c)| (c, r.as_str())));
             publish(&uri, &diags, out);
-            documents.insert(uri, text);
+            state.documents.insert(uri, text);
         }
         "textDocument/didSave" => {
             let doc = &params["textDocument"];
             let uri = doc["uri"].as_str().unwrap_or("").to_string();
-            if let Some(text) = documents.get(&uri) {
-                let scan = scan_buffer(&uri, text);
-                let diags = diagnostics_for(&scan, text);
+            if let Some(text) = state.documents.get(&uri).cloned() {
+                let scan = scan_buffer(&uri, &text);
+                let ctx = state.filtering_for(&uri);
+                let diags = diagnostics_for(&scan, &text, ctx.as_ref().map(|(r, c)| (c, r.as_str())));
                 publish(&uri, &diags, out);
             }
         }
@@ -200,7 +268,7 @@ pub fn dispatch(documents: &mut HashMap<String, String>, msg: &serde_json::Value
             let doc = &params["textDocument"];
             let uri = doc["uri"].as_str().unwrap_or("").to_string();
             publish(&uri, &[], out); // clear the gutter on close
-            documents.remove(&uri);
+            state.documents.remove(&uri);
         }
         _ => {} // unknown methods and notifications are ignored
     }
@@ -208,13 +276,13 @@ pub fn dispatch(documents: &mut HashMap<String, String>, msg: &serde_json::Value
 }
 
 pub fn run() {
-    let mut documents: HashMap<String, String> = HashMap::new();
+    let mut state = LspState::new();
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     while let Some(msg) = read_message(&mut input) {
-        if !dispatch(&mut documents, &msg, &mut out) {
+        if !dispatch(&mut state, &msg, &mut out) {
             return; // exit request
         }
     }
@@ -253,7 +321,7 @@ mod tests {
         // never appear (they materialize in the CLI's repo-wide merge), so
         // the magic number is the surviving family; lines map 0-based
         let scan = scan_buffer("file:///tmp/buf.py", "def f():\n    return a * 60\n");
-        let diags = diagnostics_for(&scan, "def f():\n    return a * 60\n");
+        let diags = diagnostics_for(&scan, "def f():\n    return a * 60\n", None);
         let kinds: Vec<&str> = diags
             .iter()
             .filter_map(|d| d["message"].as_str())
@@ -289,7 +357,7 @@ mod tests {
 
     #[test]
     fn dispatch_initialize_responds_with_capabilities() {
-        let mut docs = HashMap::new();
+        let mut docs = LspState::new();
         let mut out = Vec::new();
         let msg = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
         assert!(dispatch(&mut docs, &msg, &mut out));
@@ -300,7 +368,7 @@ mod tests {
 
     #[test]
     fn dispatch_didopen_publishes_findings_and_caches_text() {
-        let mut docs = HashMap::new();
+        let mut docs = LspState::new();
         let mut out = Vec::new();
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
@@ -311,13 +379,13 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("publishDiagnostics"));
         assert!(text.contains("magic number"));
-        assert!(docs.contains_key("file:///tmp/buf.py"));
+        assert!(docs.documents.contains_key("file:///tmp/buf.py"));
     }
 
     #[test]
     fn dispatch_didsave_republishes_cached_document() {
-        let mut docs = HashMap::new();
-        docs.insert(
+        let mut docs = LspState::new();
+        docs.documents.insert(
             "file:///tmp/buf.py".to_string(),
             "def f():\n    return a * 60\n".to_string(),
         );
@@ -333,7 +401,7 @@ mod tests {
 
     #[test]
     fn dispatch_didsave_unknown_doc_publishes_nothing() {
-        let mut docs = HashMap::new();
+        let mut docs = LspState::new();
         let mut out = Vec::new();
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
@@ -346,7 +414,7 @@ mod tests {
 
     #[test]
     fn dispatch_didchange_full_sync_republishes() {
-        let mut docs = HashMap::new();
+        let mut docs = LspState::new();
         let mut out = Vec::new();
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
@@ -358,13 +426,13 @@ mod tests {
         });
         assert!(dispatch(&mut docs, &msg, &mut out));
         assert!(String::from_utf8(out).unwrap().contains("magic number"));
-        assert!(docs.contains_key("file:///tmp/buf.py"));
+        assert!(docs.documents.contains_key("file:///tmp/buf.py"));
     }
 
     #[test]
     fn dispatch_didclose_clears_gutter_and_doc() {
-        let mut docs = HashMap::new();
-        docs.insert("file:///tmp/buf.py".to_string(), "x".to_string());
+        let mut docs = LspState::new();
+        docs.documents.insert("file:///tmp/buf.py".to_string(), "x".to_string());
         let mut out = Vec::new();
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
@@ -374,12 +442,12 @@ mod tests {
         assert!(dispatch(&mut docs, &msg, &mut out));
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("\"diagnostics\":[]"));
-        assert!(!docs.contains_key("file:///tmp/buf.py"));
+        assert!(!docs.documents.contains_key("file:///tmp/buf.py"));
     }
 
     #[test]
     fn dispatch_exit_and_shutdown() {
-        let mut docs = HashMap::new();
+        let mut docs = LspState::new();
         let mut out = Vec::new();
         let msg = serde_json::json!({"jsonrpc": "2.0", "method": "exit"});
         assert!(!dispatch(&mut docs, &msg, &mut out));
@@ -390,7 +458,7 @@ mod tests {
 
     #[test]
     fn dispatch_unknown_method_is_ignored() {
-        let mut docs = HashMap::new();
+        let mut docs = LspState::new();
         let mut out = Vec::new();
         let msg = serde_json::json!({"jsonrpc": "2.0", "method": "$/someThing"});
         assert!(dispatch(&mut docs, &msg, &mut out));
@@ -406,4 +474,36 @@ mod tests {
         let msg = read_message(&mut cursor).unwrap();
         assert_eq!(msg["method"], "exit");
     }
+}
+
+#[test]
+fn dispatch_honors_config_ignores() {
+    // the trust fix: a config-ignored family must NOT appear as an LSP
+    // diagnostic — the gate silences it, and the LSP must agree
+    let dir = std::env::temp_dir().join(format!("lsp_cfg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // lucidlint: ignore fakefs a temp .lucidlint.toml config exercises the config loader — the content string is not a path
+    std::fs::write(
+        dir.join(".lucidlint.toml"),
+        "[lucidlint]\nignore = [\"magic-number\"]\n",
+    )
+    .unwrap();
+    let root_uri = format!("file://{}", dir.display());
+    let mut state = LspState::new();
+    let mut out = Vec::new();
+    let init = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": root_uri}});
+    assert!(dispatch(&mut state, &init, &mut out));
+    out.clear();
+    let uri = format!("file://{}/app.py", dir.display());
+    let open = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": uri, "text": "def f():\n    return a * 60\n"}}
+    });
+    assert!(dispatch(&mut state, &open, &mut out));
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("publishDiagnostics"));
+    assert!(!text.contains("magic number"), "{text}"); // config-ignored
+    let _ = std::fs::remove_dir_all(&dir);
 }
