@@ -568,6 +568,21 @@ def test_raw_score_uses_the_metric():
     assert ch._raw_score("complexity", 20, 30) > ch._raw_score("complexity", 20, 5)
 
 
+def test_fix_refuses_rust_targets_cleanly(tmp_path, capsys):
+    """The fix engine is Python/libcst — a .rs target must refuse with a clear
+    message, NOT crash on a libcst ParseSyntaxError traceback (the fix:
+    directive in a Rust finding's message was a landmine)."""
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "lib.rs").write_text(
+        "pub fn f(x: i32) -> i32 {\n    if x > 10 { x * 2 } else { x }\n}\n"
+    )
+    run_main(repo, "fix", "--kind", "extract-method", "--file", "houses/lib.rs", "--line", "1")
+    out = capsys.readouterr().out
+    assert "Traceback" not in out, "a .rs fix target crashed — it must refuse cleanly"
+    assert "libcst" not in out, f"libcst parse error leaked into the CLI: {out}"
+    assert "Python" in out or "not" in out, f"expected a clear refusal message: {out}"
+
+
 def test_scanner_candidates_carry_the_exe_suffix():
     """Every candidate path must use the platform exe suffix — a Windows
     build produces lucidlint.exe; a suffixless candidate silently falls back

@@ -60,12 +60,13 @@ STRUCTURAL_KINDS = {
     "magic-number": "Replace Magic Literal: introduce the named constant",
     "vague-name": "Rename the type and its references (same-file)",
     "long-param-list": "Introduce Parameter Object: bundle the params into a dataclass",
+    "pipeline": "turn the pure reduction loop into a sum() over a named per-item contributor",
 }
 
 # structural fixes whose result is genuinely novel (a class split, a new
 # function, a bundled signature) preview a diff before --confirm; the
 # obvious ones (a constant inserted, a rename) apply directly
-PREVIEW_KINDS = {"extract-method", "extract-class", "long-param-list"}
+PREVIEW_KINDS = {"extract-method", "extract-class", "long-param-list", "pipeline"}
 
 # the gate reports DISPLAY kinds (final_kind output: strewing shows as
 # latent-class); the fix command accepts either and normalizes here — the
@@ -74,6 +75,7 @@ KIND_ALIASES = {
     "latent-class": "extract-class",
     "complexity": "extract-method",
     "large-function": "extract-method",
+    "loop-pipeline": "pipeline",
 }
 
 
@@ -1510,6 +1512,186 @@ def _fix_mechanical(kind: str, source: str, line: int, opts) -> str | None:
     return None
 
 
+class _FindFnLine(cst.CSTVisitor):
+    """Locate the first FunctionDef whose def line equals the target — its
+    node comes from the wrapper's (metadata-resolvable) tree."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, line: int) -> None:
+        self.line = line
+        self.found: cst.FunctionDef | None = None
+
+    @override
+    def visit_FunctionDef(self, node) -> None:
+        if self.found is None and self.get_metadata(PositionProvider, node).start.line == self.line:
+            self.found = node
+
+
+# the (condition, added-expr) pairs of a reduction loop plus the no-match
+# default — a named alias so the signature is not a bare tuple collection
+_ReductionBranches = tuple[list[tuple[object, object]], object]
+
+
+def _walk_if_chain(stmt: cst.If) -> _ReductionBranches | None:
+    """Walk an if/elif/else chain, collecting (condition, added-expr) per
+    branch and the final else expression. The branches must be mutually
+    exclusive for the ternary rewrite to be correct."""
+    pairs: list[tuple[object, object]] = []
+    default = cst.Integer("0")
+    on: object = stmt
+    while isinstance(on, cst.If):
+        if not (isinstance(on.body, cst.IndentedBlock) and len(on.body.body) == 1
+                and isinstance(on.body.body[0], cst.SimpleStatementLine)
+                and isinstance(on.body.body[0].body[0], cst.AugAssign)):
+            return None
+        pairs.append((on.test, on.body.body[0].body[0].value))
+        if isinstance(on.orelse, cst.IndentedBlock):
+            if len(on.orelse.body) == 1 and isinstance(on.orelse.body[0], cst.SimpleStatementLine) \
+                    and isinstance(on.orelse.body[0].body[0], cst.AugAssign):
+                default = on.orelse.body[0].body[0].value
+            else:
+                return None
+            break
+        if on.orelse is None:
+            break
+        on = on.orelse  # elif is a nested If in the orelse
+    return pairs, default
+
+
+def _reduction_branches(body: cst.IndentedBlock) -> _ReductionBranches | None:
+    """The (condition, added-expr) pairs of a reduction loop body plus the
+    default (0 when no else). Only a bare `acc += expr` or an if/elif chain
+    (mutually exclusive branches, each a single `acc += expr`) is supported."""
+    pairs: list[tuple[object, object]] = []
+    default = cst.Integer("0")
+    for stmt in body.body:
+        if isinstance(stmt, cst.SimpleStatementLine):
+            st = stmt.body[0]
+            if not isinstance(st, cst.AugAssign):
+                return None  # an unexpected simple statement in the reducer
+            pairs.append((cst.Name("True"), st.value))
+            continue
+        if not isinstance(stmt, cst.If):
+            return None
+        walked = _walk_if_chain(stmt)
+        if walked is None:
+            return None
+        pairs.extend(walked[0])
+        default = walked[1]
+    return pairs, default
+
+
+def _free_names(nodes, excluded: set[str]) -> list[str]:
+    """Distinct Name values read in `nodes`, excluding the loop var and the
+    accumulator — the contributor's parameters beyond the loop variable."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def walk(n) -> None:
+        if isinstance(n, cst.Name):
+            if n.value not in excluded and n.value not in seen:
+                seen.add(n.value)
+                out.append(n.value)
+        else:
+            for ch in getattr(n, "children", []):
+                walk(ch)
+
+    for n in nodes:
+        walk(n)
+    return out
+
+
+# the reduction fn's (accumulator, loop) — named so the signature is not a bare tuple
+_ReductionShape = tuple[cst.Name, cst.For]
+
+
+def _reduction_shape(fn: cst.FunctionDef) -> _ReductionShape | None:
+    """Validate a reduction fn's opening statements: `acc = 0` ; `for var in
+    iterable:` ; `return acc`. Returns (acc, loop) or None."""
+    if len(fn.body.body) < 3:
+        return None
+    init, loop, ret = fn.body.body[0], fn.body.body[1], fn.body.body[2]
+    if not (isinstance(init, cst.SimpleStatementLine) and isinstance(init.body[0], cst.Assign)
+            and isinstance(init.body[0].value, cst.Integer) and init.body[0].value.value == "0"
+            and isinstance(init.body[0].targets[0].target, cst.Name)):
+        return None
+    if not isinstance(loop, cst.For) or not isinstance(loop.target, cst.Name):
+        return None
+    acc = init.body[0].targets[0].target
+    if not (isinstance(ret, cst.SimpleStatementLine) and isinstance(ret.body[0], cst.Return)
+            and isinstance(ret.body[0].value, cst.Name) and ret.body[0].value.value == acc.value):
+        return None
+    return acc, loop
+
+
+def _contribution_ternary(pairs, default) -> object:
+    """The nested IfExp: e1 if c1 else e2 if c2 else ... else default."""
+    node: object = default
+    for cond, expr in reversed(pairs):
+        node = cst.IfExp(test=cond, body=expr, orelse=node)
+    return node
+
+
+# the (contributor def, sum pipeline) pair the rewrite inserts
+_PipelinePair = tuple[cst.FunctionDef, cst.SimpleStatementLine]
+
+
+def _pipeline_def_and_sum(name: str, var: str, free: list[str], ternary, loop: cst.For) -> _PipelinePair:
+    """The named contributor function + the `return sum(...)` pipeline."""
+    cname = "_" + name
+    new_def = cst.FunctionDef(
+        name=cst.Name(cname),
+        params=cst.Parameters(params=[cst.Param(cst.Name(var))] + [cst.Param(cst.Name(v)) for v in free]),
+        body=cst.IndentedBlock(body=[cst.SimpleStatementLine(body=[cst.Return(ternary)])]),
+    )
+    gen = cst.GeneratorExp(
+        elt=cst.Call(func=cst.Name(cname), args=[cst.Arg(cst.Name(var))] + [cst.Arg(cst.Name(v)) for v in free]),
+        for_in=cst.CompFor(target=loop.target, iter=loop.iter, ifs=[]),
+    )
+    pipeline = cst.SimpleStatementLine(body=[cst.Return(cst.Call(func=cst.Name("sum"), args=[cst.Arg(gen)]))])
+    return new_def, pipeline
+
+
+def fix_reduction_pipeline(source: str, line: int, name: str) -> str | None:
+    """A pure reduction loop (accumulate into a local over an iterable and
+    return it) is a PIPELINE, not an extract-method seam. Rewrite it to
+    `return sum(<name>(x, ...) for x in iterable)` and extract the per-item
+    contribution as a named pure function `def <name>(x, ...): return ...`."""
+    module = cst.parse_module(source)
+    wrapper = cst.MetadataWrapper(module)
+    finder = _FindFnLine(line)
+    wrapper.visit(finder)
+    fn = finder.found
+    if fn is None:
+        return None
+    # only top-level targets are rewritable (the contributor def inserts at
+    # module scope) — mirror extract-method's nested refusal
+    if not any(s is fn for s in wrapper.module.body):
+        return None
+    shaped = _reduction_shape(fn)
+    if shaped is None:
+        return None
+    acc, loop = shaped
+    parsed = _reduction_branches(loop.body)
+    if parsed is None:
+        return None
+    pairs, default = parsed
+    var = loop.target.value
+    free = _free_names([c for c, _ in pairs] + [e for _, e in pairs], {var, acc.value})
+    ternary = _contribution_ternary(pairs, default)
+    new_def, pipeline = _pipeline_def_and_sum(name, var, free, ternary, loop)
+    new_fn = fn.with_changes(body=fn.body.with_changes(body=[pipeline] + list(fn.body.body[3:])))
+    out_body: list = []
+    for stmt in wrapper.module.body:
+        if stmt is fn:
+            out_body.append(new_fn)
+            out_body.append(new_def)
+        else:
+            out_body.append(stmt)
+    return cst.Module(body=out_body).code
+
+
 def _fix_structural(kind: str, source: str, line: int, opts) -> str | None:
     """The name-driven transforms — the agent supplies the semantic bit."""
     if kind == "extract-method":
@@ -1530,6 +1712,10 @@ def _fix_structural(kind: str, source: str, line: int, opts) -> str | None:
         if opts.name is None:
             return None
         return fix_parameter_object(source, line, opts.name)
+    if kind == "pipeline":
+        if opts.name is None:
+            return None
+        return fix_reduction_pipeline(source, line, opts.name)
     return None
 
 

@@ -448,6 +448,40 @@ def test_extract_method_min_bound_refuses_insufficient_splits(tmp_path):
 
 
 
+def test_reduction_loop_becomes_pipeline_with_named_contributor(tmp_path):
+    """A pure reduction loop (accumulate into a local over an iterable, return
+    it) is a PIPELINE, not an extract-method seam — extract-method correctly
+    refuses it (the accumulator is an out-var). The lucid fix: name the per-
+    item contribution and `sum` it. Behavior is preserved."""
+    src = (
+        "def process(items, factor):\n"
+        "    total = 0\n"
+        "    for item in items:\n"
+        "        if item > 10:\n"
+        "            total += item * factor\n"
+        "        elif item > 5:\n"
+        "            total += item\n"
+        "    return total\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    out = fix_engine.fix_finding(
+        "pipeline", "houses/app.py", repo, 1, fix_engine.FixOptions(name="contribution")
+    )
+    assert out is not None, "a reduction loop should auto-fix as a pipeline"
+    fixed = p.read_text()
+    assert "def _contribution(item, factor):" in fixed
+    assert "sum(" in fixed and "_contribution(item, factor) for item in items" in fixed
+    assert "for item in items" in fixed
+    assert "total" not in fixed.replace("_contribution", "")
+    ns = {}
+    exec(compile(fixed, "app.py", "exec"), ns)
+    # item 6 takes the >5 branch (+6), item 12 the >10 branch (+12*2) = 30
+    assert ns["process"]([1, 3, 6, 12], 2) == 30
+    assert ns["process"]([20, 1, 7], 2) == (20 * 2 + 0 + 7)
+
+
 def test_extract_method_cli_preview_confirm_flow(tmp_path, capsys):
     """The S3 CLI protocol: NO name previews (the seam with a placeholder
     name, nothing written); a name applies DIRECTLY — the name IS the
