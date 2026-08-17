@@ -206,13 +206,18 @@ fn seam_analysis(stmts: &[&Stmt], after: &[&Stmt], params: &[Ident]) -> Option<V
 }
 
 /// Extract a param-only, no-out-var seam of `line`'s fn into `name`.
-/// Returns the rewritten source, or None when no safe seam exists.
-pub fn fix_extract_method(source: &str, line: usize, name: &str) -> Option<String> {
-    let file = syn::parse_file(source).ok()?;
-    let target = file.items.iter().find_map(|item| match item {
-        Item::Fn(f) if f.sig.ident.span().start().line == line => Some(f),
-        _ => None,
-    })?;
+/// Returns Ok(rewritten source) or Err(why no seam exists) — the "nothing to
+/// change" path must explain itself (review-log R1).
+pub fn fix_extract_method(source: &str, line: usize, name: &str) -> Result<String, String> {
+    let file = syn::parse_file(source).map_err(|_| "the file does not parse".to_string())?;
+    let target = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Fn(f) if f.sig.ident.span().start().line == line => Some(f),
+            _ => None,
+        })
+        .ok_or_else(|| format!("no function starts at line {line}"))?;
     let params: Vec<Ident> = target
         .sig
         .inputs
@@ -227,7 +232,7 @@ pub fn fix_extract_method(source: &str, line: usize, name: &str) -> Option<Strin
         .collect();
     let stmts: Vec<&Stmt> = target.block.stmts.iter().collect();
     if stmts.len() < 2 {
-        return None;
+        return Err("the function's body has fewer than two statements".to_string());
     }
     // longest seam first (refuse nested — a multi-statement contiguous block)
     for len in (1..stmts.len()).rev() {
@@ -241,11 +246,13 @@ pub fn fix_extract_method(source: &str, line: usize, name: &str) -> Option<Strin
             }
             let after: Vec<&Stmt> = stmts[start + len..].to_vec();
             if let Some(free) = seam_analysis(seam, &after, &params) {
-                return apply(source, target, seam, &free, name);
+                return apply(source, target, seam, &free, name).ok_or_else(|| {
+                    "the seam's free variables are not a subset of the function's parameters".to_string()
+                });
             }
         }
     }
-    None
+    Err("no self-contained seam exists: every candidate has control flow, reads a value written in the seam (out-variable), or calls a method/`self`".to_string())
 }
 
 fn apply(source: &str, target: &ItemFn, seam: &[&Stmt], free: &[Ident], name: &str) -> Option<String> {

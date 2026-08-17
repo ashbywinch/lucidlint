@@ -50,3 +50,9 @@ lucidlint-cache
 
 # churn cache — regenerated per HEAD, never committed
 .lucidlint-cache/
+lucidlint_bin/bin/lucidlint*
+
+# python build artifacts from the wheel/sdist assembly (uv build / setup.py)
+build/
+dist/
+*.egg-info/

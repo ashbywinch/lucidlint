@@ -102,11 +102,12 @@ ACTION_KINDS = (
 
 @dataclass
 class _ScanFlags:
-    """The optional scan inputs — one object instead of a 4-parameter tail."""
+    """The optional scan inputs — one object instead of a parameter tail."""
     graph: Path | None = None
     churn_json: Path | None = None
     include_tests: bool = False
     docs_root: str | None = None
+    gitignored: tuple[str, ...] = ()
 
 
 @dataclass
@@ -463,6 +464,36 @@ class SourceFile:
     rel: str
 
 
+def _gitignored_docs(repo: Path) -> tuple[str, ...]:
+    """Repo-relative .md paths the repo's own .gitignore excludes — private
+    docs (review-log R3). The docs-reachability scan must treat them as
+    intentionally absent: they are not shipped, so a link to one is not a
+    broken link and an orphan one is not an undiscoverable doc. Requires
+    pygit2's path_is_ignored; the no-git rglob fallback cannot know ignore
+    status and keeps the previous behavior (gitignored private docs stay
+    visible as documented findings)."""
+    if _pygit2 is None:
+        return ()
+    try:
+        r = _pygit2.Repository(str(repo))
+    except Exception:  # not a git repo — nothing is gitignored
+        return ()
+    ignored: list[str] = []
+    for root, dirs, files in os.walk(repo):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        for fname in files:
+            if not fname.endswith(".md"):
+                continue
+            rel = Path(root).joinpath(fname).relative_to(repo).as_posix()
+            try:
+                if r.path_is_ignored(rel):
+                    ignored.append(rel)
+            except ValueError:  # lucidlint: ignore swallow ambiguous path — keep it visible
+                pass
+    return tuple(sorted(ignored))
+
+
 def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
     """The repo's own .py and .rs files — git's answer, not an invented list.
 
@@ -544,6 +575,10 @@ def _scanner_candidates(repo: Path, exe: str) -> list[Path]:
     candidates.append(Path(__file__).resolve().parent / "scanner" / "target" / "release" / f"lucidlint{exe}")
     bundle_dir = Path(__file__).resolve().parent / "bin"
     candidates.append(bundle_dir / f"lucidlint{exe}")
+    # a pip install ships the scan core as package-data at
+    # lucidlint_bin/bin/lucidlint (setup.py builds it into the wheel) — the
+    # self-contained pip channel, sibling of the module like the bundle bin
+    candidates.append(Path(__file__).resolve().parent / "lucidlint_bin" / "bin" / f"lucidlint{exe}")
     return candidates
 
 
@@ -558,6 +593,7 @@ class _RustScan:
     def __init__(self) -> None:
         self._cache: dict[tuple[Path, tuple[str, ...]], RustFindings | None] = {}
         self._binary_cache: dict[Path, Path | None] = {}
+        self._pending_gitignored: tuple[str, ...] = ()
 
     def binary(self, repo: Path) -> Path | None:
         """The scan binary: env override, then the repo's own build, then the
@@ -609,6 +645,8 @@ class _RustScan:
                     cmd.append("--include-tests")
                 if flags.docs_root is not None:
                     cmd += ["--docs", flags.docs_root]
+                if flags.gitignored:
+                    cmd += ["--gitignored", json.dumps(list(flags.gitignored))]
                 # pass REPO-RELATIVE paths (the binary runs with the repo as
                 # its cwd): findings — and the fix: directives they carry —
                 # stay repo-relative, matching the Action model
@@ -668,6 +706,7 @@ class _RustScan:
         self._pending_churn = None
         self._pending_tests = include_tests
         self._pending_docs = None
+        self._pending_gitignored = ()
         if only_rel is None:
             self._pending_graph = GRAPH_CONTRACT.contract(repo)
             if file_churn:
@@ -675,9 +714,13 @@ class _RustScan:
                 tmp.write_text(json.dumps(dict(file_churn)), encoding="utf-8")
                 self._pending_churn = tmp
             self._pending_docs = str(repo)
+            self._pending_gitignored = _gitignored_docs(repo)
 
     def _flags(self) -> _ScanFlags:
-        return _ScanFlags(self._pending_graph, self._pending_churn, self._pending_tests, self._pending_docs)
+        return _ScanFlags(
+            self._pending_graph, self._pending_churn, self._pending_tests,
+            self._pending_docs, self._pending_gitignored,
+        )
 
     def active(self, repo: Path) -> bool:
         """True when the Rust core is available (it is required)."""
@@ -1266,11 +1309,13 @@ def main() -> int:
             # needed to see it). The agent reviews the seam, then re-runs
             # with --fix-name <name>; the name is the commitment, so the
             # named run applies — no --confirm dance
+            diag: list[str] = []
             new_source, description = fix_engine.propose_finding(
-                args.kind, args.file, repo, args.line, opts
+                args.kind, args.file, repo, args.line, opts, diag
             )
             if new_source is None:
-                print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
+                why = f" — {diag[0]}" if diag else ""
+                print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}{why}")
                 return 0
             diff = list(
                 difflib.unified_diff(
@@ -1349,11 +1394,13 @@ def main() -> int:
                   f"apply it: lucidlint fix --kind {args.kind} --file {args.file} "
                   f"--line {args.line} --name <name>")
             return 0
+        diag: list[str] = []
         description = fix_engine.fix_finding(
-            args.kind, args.file, repo, args.line, opts
+            args.kind, args.file, repo, args.line, opts, diag
         )
         if description is None:
-            print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
+            why = f" — {diag[0]}" if diag else ""
+            print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}{why}")
             return 0
         print(f"fix: {description} — {args.file}:{args.line} ({args.kind})")
         return 0

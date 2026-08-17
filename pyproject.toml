@@ -9,9 +9,10 @@
 #   constraint there, not a general practice).
 # - Dev deps live in PEP 735 [dependency-groups] dev, never split across
 #   optional-dependencies too.
-# - Runtime deps stay EMPTY: the tools are single-file scripts that must
-#   run in any repo's environment (houses invokes them via
-#   run in any repo's environment; the scan engine is the Rust binary.
+# - Runtime deps stay MINIMAL: the scan core is the Rust binary shipped in
+#   the wheel (setup.py builds it into lucidlint_bin/); libcst (the fix
+#   engine's parser) is declared so a plain `pip install lucidlint` can fix —
+#   the release bundle self-contains it instead (deps/ vendored).
 
 [project]
 name = "lucidlint"
@@ -19,7 +20,7 @@ version = "0.1.0"
 description = "Deterministic lucidlint tooling: a Rust scan core under a thin Python orchestrator"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["libcst>=1.9.0"]
 
 [project.scripts]
 # `pip install` gives a `lucidlint` command — no .py, no fix- prefixes
@@ -31,7 +32,6 @@ lucidlint = "lucidlint:main"
 # runtime dependency (a consuming repo would pay for libgit2 unused)
 git = ["pygit2>=1.20.0"]
 graph = ["code-review-graph>=2.3.7"]
-fix = ["libcst>=1.9.0"]
 
 [dependency-groups]
 dev = [
@@ -42,11 +42,17 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=64.0"]
+requires = ["setuptools>=64.0", "wheel>=0.40"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+py-modules = ["lucidlint", "fix_engine", "rule_metadata"]
+
 [tool.setuptools.packages.find]
-include = ["build_tools*"]
+include = ["lucidlint_bin*"]
+
+[tool.setuptools.package-data]
+lucidlint_bin = ["bin/*"]
 
 [tool.ruff]
 target-version = "py312"  # the RUNTIME FLOOR: houses invokes the tools on 3.12 (see README);
@@ -55,7 +61,7 @@ target-version = "py312"  # the RUNTIME FLOOR: houses invokes the tools on 3.12 
 line-length = 120
 # tests/fixtures/ is intentionally non-compliant test input (standalone
 # snippets without imports) — excluded from lint for that reason.
-extend-exclude = ["tests/fixtures"]
+extend-exclude = ["tests/fixtures", "build", "dist", "*.egg-info"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "N"]

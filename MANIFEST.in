@@ -1,0 +1,14 @@
+# The sdist must carry the Rust crate: the wheel is built from the sdist,
+# and setup.py's build_py compiles scanner/ with cargo — a source install
+# (`pip install <sdist>` / `uv build`) needs the manifest + sources.
+include scanner/Cargo.toml
+include scanner/Cargo.lock
+recursive-include scanner/src *.rs
+include scanner/rust-toolchain.toml
+# scanner/radonc is a local path dependency of the crate — the sdist build
+# needs its manifest + sources too
+include scanner/radonc/Cargo.toml
+include scanner/radonc/Cargo.lock
+recursive-include scanner/radonc/src *.rs
+# the empty bin dir that setup.py fills with the compiled binary
+include lucidlint_bin/bin/.gitkeep

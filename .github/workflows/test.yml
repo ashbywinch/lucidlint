@@ -58,3 +58,24 @@ jobs:
         with:
           recreate: true
           path: code-coverage-results.md
+
+  # The two distribution channels must stay self-contained: the pip wheel
+  # (Rust core built INTO it by setup.py) and the Rust-native cargo install.
+  # Each installs into a clean environment and exercises the real surface.
+  verify-pip-wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: make setup
+      - run: make wheel-check
+
+  verify-cargo-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: make setup
+      - run: make cargo-install-check

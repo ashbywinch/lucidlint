@@ -619,6 +619,7 @@ class _FnBodyState:
 
     def best_seam(self, min_lines: int = 2, max_window_decisions: int | None = None,
             min_window_decisions: int = 0, max_free_vars: int = 6,
+            diag: list[str] | None = None,
         ):
         """The window with the MOST decisions (real CC progress — extraction
         splits complexity, it does not move it) among those whose free
@@ -629,6 +630,9 @@ class _FnBodyState:
         self-contained; the whole body is not a seam."""
         n = len(self.flat)
         best = None  # (score, flat indices)
+        # the most promising window a budget rejected + why (the diagnostic
+        # the R27 fix path reports when no seam exists — review-log R1)
+        rejected: tuple | None = None
         for i in range(n):
             for j in range(i, n):
                 score = self._window_score(i, j, min_lines)
@@ -636,14 +640,36 @@ class _FnBodyState:
                     continue
                 free_count, _, _, free_vars = score
                 if free_count > max_free_vars:
+                    if rejected is None or score < rejected[0]:
+                        rejected = (
+                            score,
+                            f"the best seam needs {free_count} free variables ("
+                            f"{', '.join(v.name for v in free_vars)}) — over the "
+                            f"{max_free_vars}-variable interface budget",
+                        )
                     continue  # too-wide interface — not a cohesive seam
                 if max_window_decisions is not None:
                     window_decisions = sum(
                         self.decisions[self.flat[k][0]] for k in range(i, j + 1)
                     )
                     if window_decisions > max_window_decisions:
+                        if rejected is None or score < rejected[0]:
+                            rejected = (
+                                score,
+                                f"the best seam still has {window_decisions} "
+                                f"decisions — over the {max_window_decisions}-decision "
+                                f"extraction bound (extract-method splits complexity, "
+                                f"it does not move it)",
+                            )
                         continue  # the extracted fn would still be complex
                     if window_decisions < min_window_decisions:
+                        if rejected is None or score < rejected[0]:
+                            rejected = (
+                                score,
+                                f"no seam splits enough decisions (best "
+                                f"{window_decisions}, need >= {min_window_decisions}) "
+                                f"for both sides to land under the CC gate",
+                            )
                         continue  # the ORIGINAL would still be >= 15 — the
                         # seam must SPLIT enough for both sides to land clean
                     # decisions FIRST (CC progress), then interface width,
@@ -652,6 +678,16 @@ class _FnBodyState:
                 if best is None or score < best[0]:
                     best = (score, list(range(i, j + 1)))
         if best is None:
+            if diag is not None:
+                if rejected is not None:
+                    diag.append(rejected[1])
+                else:
+                    diag.append(
+                        f"no contiguous statement block in one container spans "
+                        f">= {min_lines} lines without control flow or a value "
+                        f"read after the window (out-variable) — the body is not "
+                        f"extractable as written"
+                    )
             return None
         (*_, free_vars), flat_indices = best
         block_sids = [self.flat[k][0] for k in flat_indices]
@@ -835,6 +871,15 @@ def collect_stmt_names(add_target, line_stmt, names):
 
 
 
+def _refusal(reason: str, diag: list[str] | None = None):
+    """A refused seam: record why (review-log R1) and report no source. The
+    one-place-any-branch helper keeps the early-exit diagnostics out of the
+    caller's decision budget when the caller is itself near the CC gate."""
+    if diag is not None:
+        diag.append(reason)
+    return None, None
+
+
 def _is_nested_target(wrapper: cst.MetadataWrapper, fn_node) -> bool:
     """Is the target function nested inside another function? The extracted
     helper is inserted at module/class level — a nested target would leave
@@ -860,7 +905,8 @@ def _min_seam_decisions(state) -> int:
 
 
 def extract_method_proposal(
-    source: str, line: int, name: str | None = None, max_decisions: int | None = None
+    source: str, line: int, name: str | None = None, max_decisions: int | None = None,
+    diag: list[str] | None = None,
 ):
     """Compute the best extraction seam and the resulting source, WITHOUT
     writing. Returns (new_source, seam_text) or (None, None) when no safe
@@ -874,15 +920,20 @@ def extract_method_proposal(
         name = "_" + name
     module, wrapper, state = _fn_seam_analysis(source, line)
     if state.fn_node is None or len(state.flat) < 2:
-        return None, None
+        return _refusal("no function starts at this line, or its body has fewer than two statements", diag)
     # a nested-function target cannot host the extracted helper — the insert
     # lands at module/class level, so the rewritten call would NameError
     # (refuse rather than write a broken file)
     if _is_nested_target(wrapper, state.fn_node):
-        return None, None
+        return _refusal(
+            "the target is a nested function — the helper would be inserted "
+            "at module level and the rewritten call would NameError",
+            diag,
+        )
     seam = state.best_seam(
         max_window_decisions=max_decisions,
         min_window_decisions=_min_seam_decisions(state),
+        diag=diag,
     )
     if seam is None:
         return None, None
@@ -922,21 +973,25 @@ def _extraction_is_private() -> bool:
     return True
 
 
-def fix_extract_method(source: str, line: int, name: str | None) -> str | None:
+def fix_extract_method(source: str, line: int, name: str | None, diag: list[str] | None = None) -> str | None:
     """Extract Function (applied): the best self-contained seam of the
     function at `line` becomes a new function named `name`. The seam is
     bounded to <= 13 decisions so the extracted function lands under the
     CC-15 gate — extraction SPLITS complexity, it does not move it. The
     name is normalized: the extracted function is private by construction
     (see _extraction_is_private), so a public-looking name is underscored."""
-    new_source, _ = extract_method_proposal(source, line, name, max_decisions=13)
+    new_source, _ = extract_method_proposal(source, line, name, max_decisions=13, diag=diag)
     return new_source
 
 
-def propose_finding(kind: str, rel: str, repo: Path, line: int, opts: FixOptions | None = None):
+# lucidlint: ignore long-param-list diag tail is one optional diagnostic sink
+def propose_finding(kind: str, rel: str, repo: Path, line: int, opts: FixOptions | None = None,
+                    diag: list[str] | None = None):
     """Compute the fix WITHOUT writing — the preview surface for every
     structural kind. Returns (new_source, description) or (None, None) when
-    nothing changes or the agent's semantic bit is missing."""
+    nothing changes or the agent's semantic bit is missing. `diag` (a
+    one-element list, when passed) receives why no seam exists — the R27
+    "nothing to change" path must explain itself (review-log R1)."""
     opts = opts or FixOptions()
     kind = KIND_ALIASES.get(kind, kind)
     path = repo / rel
@@ -946,7 +1001,7 @@ def propose_finding(kind: str, rel: str, repo: Path, line: int, opts: FixOptions
     if kind == "extract-method":
         # name-free preview: the seam is shown with a placeholder name the
         # agent replaces — naming AFTER seeing the diff, not before
-        new_source, seam = extract_method_proposal(source, line, opts.name, max_decisions=13)
+        new_source, seam = extract_method_proposal(source, line, opts.name, max_decisions=13, diag=diag)
         if new_source is None or new_source == source:
             return None, None
         return new_source, seam  # "line N: <first seam line>" — what moves
@@ -1692,12 +1747,12 @@ def fix_reduction_pipeline(source: str, line: int, name: str) -> str | None:
     return cst.Module(body=out_body).code
 
 
-def _fix_structural(kind: str, source: str, line: int, opts) -> str | None:
+def _fix_structural(kind: str, source: str, line: int, opts, diag: list[str] | None = None) -> str | None:
     """The name-driven transforms — the agent supplies the semantic bit."""
     if kind == "extract-method":
         if opts.name is None:
             return None
-        return fix_extract_method(source, line, opts.name)
+        return fix_extract_method(source, line, opts.name, diag=diag)
     if kind == "extract-class":
         return fix_extract_class(source, line, opts.name)
     if kind == "magic-number":
@@ -1719,8 +1774,10 @@ def _fix_structural(kind: str, source: str, line: int, opts) -> str | None:
     return None
 
 
+# lucidlint: ignore long-param-list diag tail is one optional diagnostic sink
 def fix_finding(
-    kind: str, rel: str, repo: Path, line: int, opts: FixOptions | None = None
+    kind: str, rel: str, repo: Path, line: int, opts: FixOptions | None = None,
+    diag: list[str] | None = None,
 ) -> str | None:
     """Apply the transform for one finding. Returns a human description of
     what changed, or None when the finding was already gone (no edit).
@@ -1728,6 +1785,8 @@ def fix_finding(
     `opts` carries the agent-supplied semantic bits (the callee's parameter
     names for external/unresolved callees; the class name for extract-class)
     — the tool does the mechanical edit; the agent reads the signature once.
+    `diag` (a one-element list, when passed) receives why a structural fix
+    could not find a seam (review-log R1).
     """
     opts = opts or FixOptions()
     kind = KIND_ALIASES.get(kind, kind)
@@ -1739,7 +1798,7 @@ def fix_finding(
         new_source = _fix_mechanical(kind, source, line, opts)
         description = MECHANICAL_KINDS[kind]
     elif kind in STRUCTURAL_KINDS:
-        new_source = _fix_structural(kind, source, line, opts)
+        new_source = _fix_structural(kind, source, line, opts, diag)
         description = STRUCTURAL_KINDS[kind]
     else:
         raise ValueError(f"kind '{kind}' has no fix (mechanical or structural)")

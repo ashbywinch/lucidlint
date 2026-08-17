@@ -770,11 +770,11 @@ wheels = [
 name = "lucidlint"
 version = "0.1.0"
 source = { editable = "." }
-
-[package.optional-dependencies]
-fix = [
+dependencies = [
     { name = "libcst" },
 ]
+
+[package.optional-dependencies]
 git = [
     { name = "pygit2" },
 ]
@@ -793,10 +793,10 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "code-review-graph", marker = "extra == 'graph'", specifier = ">=2.3.7" },
-    { name = "libcst", marker = "extra == 'fix'", specifier = ">=1.9.0" },
+    { name = "libcst", specifier = ">=1.9.0" },
     { name = "pygit2", marker = "extra == 'git'", specifier = ">=1.20.0" },
 ]
-provides-extras = ["git", "graph", "fix"]
+provides-extras = ["git", "graph"]
 
 [package.metadata.requires-dev]
 dev = [

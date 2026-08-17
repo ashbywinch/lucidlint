@@ -1004,6 +1004,7 @@ fn sig_of_stale(msg: &str) -> String {
 /// the file's suppressions for those repo-wide findings (family-aware, widened
 /// window) and drop the stale-suppression findings the consumed comments
 /// caused (review-log B3). The survivors are appended to `all` in place.
+// lucidlint: ignore record-shape Finding is the core finding type consumed repo-wide — one more consumer is not a new record
 fn reconcile_repo_wide(
     all: &mut Vec<Finding>,
     repo_wide: Vec<Finding>,
@@ -1069,13 +1070,19 @@ fn main() {
                 let name = v.get("name").and_then(|k| k.as_str()).unwrap_or("");
                 if kind == "extract-method" {
                     if let Ok(src) = std::fs::read_to_string(file) {
-                        if let Some(out) = fix::fix_extract_method(&src, line, name) {
-                            if std::fs::write(file, out).is_err() {
-                                println!("fix: could not write the fixed file — {file}:{line}");
+                        match fix::fix_extract_method(&src, line, name) {
+                            Ok(out) => {
+                                if std::fs::write(file, out).is_err() {
+                                    println!("fix: could not write the fixed file — {file}:{line}");
+                                    return;
+                                }
+                                println!("fix: extracted seam into {name} — {file}:{line} (extract-method)");
                                 return;
                             }
-                            println!("fix: extracted seam into {name} — {file}:{line} (extract-method)");
-                            return;
+                            Err(why) => {
+                                println!("fix: nothing to change for extract-method at {file}:{line} — {why}");
+                                return;
+                            }
                         }
                     }
                     println!("fix: nothing to change for extract-method at {file}:{line}");
@@ -1090,6 +1097,7 @@ fn main() {
     let mut graph_path: Option<String> = None;
     let mut churn_path: Option<String> = None;
     let mut docs_root: Option<String> = None;
+    let mut gitignored_json: Option<String> = None;
     let mut include_tests = false;
     let mut i = 0usize;
     let mut paths: Vec<String> = Vec::new();
@@ -1106,6 +1114,10 @@ fn main() {
             "--docs" => {
                 i += 1;
                 docs_root = args.get(i).cloned();
+            }
+            "--gitignored" => {
+                i += 1;
+                gitignored_json = args.get(i).cloned();
             }
             "--include-tests" => include_tests = true,
             _ => paths.push(args[i].clone()),
@@ -1285,7 +1297,12 @@ fn main() {
         all_findings.extend(graph_families::folder_mix_findings(repo_root, c));
     }
     if let Some(d) = &docs_root {
-        all_findings.extend(docs::docs_findings(Path::new(d)));
+        let gitignored: std::collections::HashSet<String> = gitignored_json
+            .as_ref()
+            .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
+            .map(|v| v.into_iter().collect())
+            .unwrap_or_default();
+        all_findings.extend(docs::docs_findings(Path::new(d), &gitignored));
     }
     all_findings.extend(abstraction_findings(&class_scans));
     if let Some(p) = &churn_path {
@@ -1926,7 +1943,7 @@ mod tests {
 ",
         )
         .unwrap();
-        let f = docs::docs_findings(&dir);
+        let f = docs::docs_findings(&dir, &std::collections::HashSet::new());
         assert!(f.iter().any(|x| x.kind == "docs-link" && x.message.contains("nope.md")));
         let _ = std::fs::remove_dir_all(&dir);
     }

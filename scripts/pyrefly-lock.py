@@ -112,7 +112,12 @@ def current_errors(extra_args: list[str]) -> list[Diagnostic]:
     except json.JSONDecodeError:
         sys.stderr.write(f"pyrefly returned non-JSON output:\n{proc.stdout}\n{proc.stderr}\n")
         sys.exit(2)
-    return [e for e in data.get("errors", []) if "tests/fixtures" not in (e.get("path") or "")]
+    build_parts = ("build/", "dist/", ".egg-info/")
+    return [
+        e for e in data.get("errors", [])
+        if "tests/fixtures" not in (e.get("path") or "")
+        and not any(p in (e.get("path") or "") for p in build_parts)
+    ]
 
 
 def load_baseline(path: Path) -> list[Diagnostic]:

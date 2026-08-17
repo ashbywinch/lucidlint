@@ -96,12 +96,59 @@ fn _backtick_base<'a>(repo: &'a Path, parent: &'a Path, path: &str) -> &'a Path 
     }
 }
 
+/// A path's repo-relative form ("/"-joined), for the gitignored membership
+/// check — the orchestrator passes git-ignored rels (review-log R3).
+fn repo_rel<'a>(repo: &'a Path, p: &'a Path) -> Option<String> {
+    p.strip_prefix(repo)
+        .ok()
+        .map(|r| r.to_string_lossy().replace('\\', "/"))
+}
+
+/// Is a link/backtick target one git deliberately keeps out of the repo (a
+/// private doc)? Such a target is intentionally absent — not a broken link.
+fn is_gitignored_target(repo: &Path, abs: &Path, gitignored: &HashSet<String>) -> bool {
+    repo_rel(repo, abs)
+        .map(|rel| gitignored.contains(&rel))
+        .unwrap_or(false)
+}
+
+/// A link/backtick target is a finding when it does not resolve — unless git
+/// deliberately excludes it (a private doc). One place for both spellings so
+/// docs_findings stays under the CC gate (review-log R1 self-discipline).
+// lucidlint: ignore long-param-list one shared link checker — a ctx object for loose values is ceremony
+fn check_target(
+    repo: &Path,
+    gitignored: &HashSet<String>,
+    out: &mut Vec<Finding>,
+    abs: &Path,
+    target: &str,
+    rel: &str,
+    what: &str,
+) {
+    if is_gitignored_target(repo, abs, gitignored) {
+        return; // intentionally private — not a broken link
+    }
+    if !abs.exists() {
+        out.push(Finding {
+            file: rel.to_string(),
+            line: 0,
+            function: String::new(),
+            kind: "docs-link".into(),
+            severity: "fail".into(),
+            message: format!("{what} '{target}' from {rel} does not resolve — a doc that links nowhere is a finding"),
+        });
+    }
+}
+
 /// `_docs_actions`: links resolve + docs reachable from AGENTS.md.
-pub fn docs_findings(repo: &Path) -> Vec<Finding> {
+/// `gitignored` carries the repo-relative paths git ignores — a gitignored
+/// doc is intentionally private (not shipped), so it neither breaks a link
+/// nor counts as an undiscoverable doc.
+pub fn docs_findings(repo: &Path, gitignored: &HashSet<String>) -> Vec<Finding> {
     let mut mds: Vec<PathBuf> = Vec::new();
     if repo.join("docs").exists() {
         let mut all: Vec<PathBuf> = Vec::new();
-        collect_md(repo.join("docs").as_path(), &mut all);
+        collect_md(repo.join("docs").as_path(), &mut all, repo, gitignored);
         all.sort();
         mds.extend(all);
     }
@@ -119,18 +166,15 @@ pub fn docs_findings(repo: &Path) -> Vec<Finding> {
         let rel = md.strip_prefix(repo).unwrap_or(md).to_string_lossy().replace('\\', "/");
         let parent = md.parent().unwrap_or(repo);
         for target in md_link_targets(&text) {
-            if !parent.join(&target).exists() {
-                out.push(Finding {
-                    file: rel.clone(),
-                    line: 0,
-                    function: String::new(),
-                    kind: "docs-link".into(),
-                    severity: "fail".into(),
-                    message: format!(
-                        "link to '{target}' from {rel} does not resolve — a doc that links nowhere is a finding"
-                    ),
-                });
-            }
+            check_target(
+                repo,
+                gitignored,
+                &mut out,
+                &parent.join(&target),
+                &target,
+                &rel,
+                "link to",
+            );
         }
         for path in md_backtick_paths(&text) {
             // backtick paths resolve like markdown links: `docs/`- and
@@ -144,46 +188,48 @@ pub fn docs_findings(repo: &Path) -> Vec<Finding> {
             {
                 continue;
             }
-            if !_backtick_base(repo, parent, &path).join(&path).exists() {
-                out.push(Finding {
-                    file: rel.clone(),
-                    line: 0,
-                    function: String::new(),
-                    kind: "docs-link".into(),
-                    severity: "fail".into(),
-                    message: format!(
-                        "backtick path '{path}' from {rel} does not resolve — a doc that links nowhere is a finding"
-                    ),
-                });
-            }
+            check_target(
+                repo,
+                gitignored,
+                &mut out,
+                &_backtick_base(repo, parent, &path).join(&path),
+                &path,
+                &rel,
+                "backtick path",
+            );
         }
     }
-    out.extend(docs_reachability(repo));
+    out.extend(docs_reachability(repo, gitignored));
     out
 }
 
-fn collect_md(dir: &Path, out: &mut Vec<PathBuf>) {
+/// Recursively collect the .md files under `dir`, skipping files git ignores
+/// (private docs are not part of the shipped doc set).
+fn collect_md(dir: &Path, out: &mut Vec<PathBuf>, repo: &Path, gitignored: &HashSet<String>) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
-                collect_md(&p, out);
+                collect_md(&p, out, repo, gitignored);
             } else if p.extension().is_some_and(|x| x == "md") {
-                out.push(p);
+                let skip = repo_rel(repo, &p).map(|rel| gitignored.contains(&rel)).unwrap_or(false);
+                if !skip {
+                    out.push(p);
+                }
             }
         }
     }
 }
 
 /// `_docs_reachability_actions`: docs/ files reachable from AGENTS.md.
-fn docs_reachability(repo: &Path) -> Vec<Finding> {
+fn docs_reachability(repo: &Path, gitignored: &HashSet<String>) -> Vec<Finding> {
     let agents = repo.join("AGENTS.md");
     if !agents.exists() || !repo.join("docs").exists() {
         return Vec::new();
     }
     let mut doc_set: HashSet<String> = HashSet::new();
     let mut docs: Vec<PathBuf> = Vec::new();
-    collect_md(&repo.join("docs"), &mut docs);
+    collect_md(&repo.join("docs"), &mut docs, repo, gitignored);
     docs.sort();
     for d in &docs {
         doc_set.insert(d.strip_prefix(repo).unwrap_or(d).to_string_lossy().replace('\\', "/"));
@@ -274,8 +320,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("docs")).unwrap();
         std::fs::write(dir.join("docs/guide.md"), "see [missing](nope.md)\n").unwrap();
-        let f = docs_findings(&dir);
+        let f = docs_findings(&dir, &std::collections::HashSet::new());
         assert!(f.iter().any(|x| x.kind == "docs-link" && x.message.contains("nope.md")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gitignored_link_target_is_intentionally_absent() {
+        // R3 (review log §3.6): a doc target git ignores is intentionally
+        // private — a link to it is NOT a broken-link finding.
+        let dir = std::env::temp_dir().join(format!("docs_test_{}_link", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("guide.md"), "see [private](docs/PRIVATE.md)\n").unwrap();
+        let ignored: std::collections::HashSet<String> =
+            std::collections::HashSet::from(["docs/PRIVATE.md".to_string()]);
+        let f = docs_findings(&dir, &ignored);
+        assert!(!f.iter().any(|x| x.kind == "docs-link"), "{f:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gitignored_private_doc_is_not_undiscoverable() {
+        // R3: a gitignored doc present on disk but unreachable from AGENTS.md
+        // is private material — it must not be flagged as an undiscoverable
+        // shipped doc (without the gitignored set it IS, which was the bug).
+        let dir = std::env::temp_dir().join(format!("docs_test_{}_priv", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "# agents\n").unwrap();
+        std::fs::write(dir.join("docs/PRIVATE.md"), "private\n").unwrap();
+        let ignored: std::collections::HashSet<String> =
+            std::collections::HashSet::from(["docs/PRIVATE.md".to_string()]);
+        let f = docs_findings(&dir, &ignored);
+        assert!(!f.iter().any(|x| x.kind == "docs-undiscoverable"), "{f:?}");
+        // control: without the gitignore knowledge the finding fires
+        let f2 = docs_findings(&dir, &std::collections::HashSet::new());
+        assert!(f2.iter().any(|x| x.kind == "docs-undiscoverable"), "{f2:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -287,7 +368,7 @@ mod tests {
         std::fs::write(dir.join("docs/PRD.md"), "").unwrap();
         // docs/guide.md backticks docs/PRD.md — resolves at the REPO root
         std::fs::write(dir.join("docs/guide.md"), "see `docs/PRD.md`\n").unwrap();
-        let f = docs_findings(&dir);
+        let f = docs_findings(&dir, &std::collections::HashSet::new());
         assert!(!f.iter().any(|x| x.kind == "docs-link"), "{f:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -305,7 +386,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("docs/prd")).unwrap();
         std::fs::write(dir.join("docs/prd/PRD.md"), "").unwrap();
         std::fs::write(dir.join("docs/plans/guide.md"), "see `../prd/PRD.md`\n").unwrap();
-        let f = docs_findings(&dir);
+        let f = docs_findings(&dir, &std::collections::HashSet::new());
         assert!(
             !f.iter().any(|x| x.kind == "docs-link"),
             "parent-relative backtick path must resolve: {f:?}"
@@ -321,7 +402,7 @@ mod tests {
         // AGENTS.md exists but links nothing; the doc is unreachable
         std::fs::write(dir.join("AGENTS.md"), "# agent\n").unwrap();
         std::fs::write(dir.join("docs/lost.md"), "orphan\n").unwrap();
-        let f = docs_findings(&dir);
+        let f = docs_findings(&dir, &std::collections::HashSet::new());
         assert!(f
             .iter()
             .any(|x| x.kind == "docs-undiscoverable" && x.message.contains("lost.md")));
@@ -336,7 +417,7 @@ mod tests {
         std::fs::write(dir.join("AGENTS.md"), "see [index](docs/index.md)\n").unwrap();
         std::fs::write(dir.join("docs/index.md"), "see [guide](guide.md)\n").unwrap();
         std::fs::write(dir.join("docs/guide.md"), "reachable\n").unwrap();
-        let f = docs_findings(&dir);
+        let f = docs_findings(&dir, &std::collections::HashSet::new());
         assert!(!f.iter().any(|x| x.kind == "docs-undiscoverable"), "{f:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
