@@ -16,7 +16,7 @@
 
 use rayon::prelude::*;
 use ruff_python_ast::visitor::source_order::{walk_expr, walk_stmt, SourceOrderVisitor};
-use ruff_python_ast::{AnyNodeRef, Expr, ModModule, Stmt};
+use ruff_python_ast::{AnyNodeRef, Expr, ModModule, Stmt, StmtIf};
 use ruff_python_parser::{parse_module, Parsed};
 use ruff_text_size::Ranged;
 use serde::Serialize;
@@ -57,6 +57,11 @@ pub struct FnCc {
     function: String,
     line: usize,
     cc: u32,
+    /// The body's SHAPE for the complexity message routing: "dispatch",
+    /// "rules", or "plain" (see python_fn_shape / rust_fn_shape).
+    pub shape: &'static str,
+    /// The dispatch selector or rule-battery accumulator name.
+    pub shape_detail: String,
 }
 
 #[derive(Default)]
@@ -191,11 +196,14 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                     // the def line (name range), not the decorator — radon's
                     // fn.lineno; the parity test's decorated-line offset
                     // normalization existed because of this difference
+                    let (shape, shape_detail) = python_fn_shape(&f.body);
                     self.cc.push(FnCc {
                         file: self.file.to_string(),
                         function: f.name.to_string(),
                         line: def_line,
                         cc,
+                        shape,
+                        shape_detail,
                     });
                 }
                 self.current_fn = was_fn;
@@ -309,6 +317,87 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
         self.parent_stack.push(ParentEntry::Expr(expr.clone()));
         walk_expr(self, expr);
         self.parent_stack.pop();
+    }
+}
+
+/// Classify a Python function body's shape for the complexity message: a
+/// dispatch chain (>= 3 top-level ifs comparing the SAME selector to string
+/// literals) or a rule battery (>= 3 top-level ifs appending to the SAME
+/// list) get shape-specific lucid guidance; anything else is "plain". The
+/// scan sees the body once — the message must not re-parse (review: run_tool
+/// is a dispatch chain, _deterministic_violations a rule battery).
+fn python_fn_shape(body: &[Stmt]) -> (&'static str, String) {
+    let ifs: Vec<&StmtIf> = body
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::If(i) => Some(i),
+            _ => None,
+        })
+        .collect();
+    if ifs.len() >= 3 {
+        let mut selectors: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for i in &ifs {
+            if let Expr::Compare(c) = i.test.as_ref() {
+                if let Expr::Name(n) = c.left.as_ref() {
+                    let literal_comp = c.comparators.iter().any(|co| matches!(co, Expr::StringLiteral(_)));
+                    if literal_comp {
+                        *selectors.entry(n.id.as_str()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        if let Some((sel, n)) = selectors.iter().max_by_key(|(_, n)| **n) {
+            if *n >= 3 {
+                return ("dispatch", (*sel).to_string());
+            }
+        }
+        let mut appends: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for i in &ifs {
+            collect_append_targets(&i.body, &mut appends);
+        }
+        if let Some((acc, n)) = appends.iter().max_by_key(|(_, n)| **n) {
+            if *n >= 3 {
+                return ("rules", (*acc).to_string());
+            }
+        }
+    }
+    ("plain", String::new())
+}
+
+/// Names `.append(...)`-ed inside a statement set (recursing into compounds)
+/// — the rule-battery accumulator candidates.
+fn collect_append_targets<'a>(stmts: &'a [Stmt], out: &mut std::collections::HashMap<&'a str, usize>) {
+    for s in stmts {
+        match s {
+            Stmt::Expr(e) => {
+                if let Expr::Call(call) = e.value.as_ref() {
+                    if let Expr::Attribute(a) = call.func.as_ref() {
+                        if a.attr.as_str() == "append" {
+                            if let Expr::Name(n) = a.value.as_ref() {
+                                *out.entry(n.id.as_str()).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            Stmt::If(i) => {
+                collect_append_targets(&i.body, out);
+                for cl in &i.elif_else_clauses {
+                    collect_append_targets(&cl.body, out);
+                }
+            }
+            Stmt::For(f) => collect_append_targets(&f.body, out),
+            Stmt::While(w) => collect_append_targets(&w.body, out),
+            Stmt::With(w) => collect_append_targets(&w.body, out),
+            Stmt::Try(t) => {
+                collect_append_targets(&t.body, out);
+                for h in &t.handlers {
+                    let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                    collect_append_targets(&eh.body, out);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1349,10 +1438,7 @@ fn main() {
                 "message": common::full_fix_command(
                     &e.file,
                     e.line,
-                    &format!(
-                        "cyclomatic complexity {} (>= 15) — extract part of this function into a named method (the preview shows the block) — fix: extract-method (preview without --fix-name; apply with --fix-name <name>)",
-                        e.cc
-                    ),
+                    &common::complexity_message(e.cc, e.shape, &e.shape_detail),
                 ),
             }));
         }
@@ -1436,6 +1522,16 @@ mod tests {
 
     fn scan_src(src: &str) -> Vec<Finding> {
         scan_corpus(&[("prod_mod.py", src)])
+    }
+
+    /// The first top-level function's body — for shape-classifier tests.
+    fn first_py_fn_body(src: &str) -> Vec<Stmt> {
+        let parsed = parse_module(src).unwrap();
+        let module = parsed.syntax();
+        match module.body.first().unwrap() {
+            Stmt::FunctionDef(f) => f.body.iter().cloned().collect(),
+            _ => panic!("the first statement is not a function"),
+        }
     }
 
     /// The test-only families (monkeypatch/skipif/fakefs) run for test paths.
@@ -2479,6 +2575,58 @@ mod tests {
             "def f(x, y):\n    if x == 1:\n        return 'a'\n    elif y == 2:\n        return 'b'\n    return '?'\n",
         );
         assert!(!ok.iter().any(|x| x.kind == "conditional-polymorphism")); // mixed keys
+    }
+
+    #[test]
+    fn special_case_skips_fail_fast_raise_guards() {
+        // review log §2.6: `person is None -> raise KeyError` guards are NOT
+        // special-case candidates — the absence is an error, no object can
+        // replace it (the fix suggestion would mask the error)
+        let f = scan_src(
+            "def g(person):\n    if person is None:\n        raise KeyError('x')\n    if person is None:\n        raise KeyError('y')\n    if person is None:\n        raise KeyError('z')\n    return person\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "special-case"), "{:?}", f);
+        // control: repeated VALUE-style null handling still fires
+        let ok = scan_src(
+            "def f(a):\n    if a is None:\n        return 1\n    if a is None:\n        return 2\n    if a is None:\n        return 3\n    return 0\n",
+        );
+        assert!(ok.iter().any(|x| x.kind == "special-case"));
+        // an ERROR-return guard (mine is None -> 401 JSONResponse) is a
+        // boundary, not a special case — a NullObject would hide the 401
+        let guard = scan_src(
+            "def g(mine):\n    if mine is None:\n        return JSONResponse({'error': 'x'}, status_code=401)\n    if mine is None:\n        return JSONResponse({'error': 'y'}, status_code=401)\n    if mine is None:\n        return JSONResponse({'error': 'z'}, status_code=401)\n    return mine\n",
+        );
+        assert!(!guard.iter().any(|x| x.kind == "special-case"), "{:?}", guard);
+    }
+
+    #[test]
+    fn long_param_list_skips_trivial_framework_stub() {
+        // review: urllib's redirect_request override — 6 protocol params, a
+        // one-statement stub; a parameter object would BREAK the override.
+        // A trivial stub is a protocol placeholder, not a param-list smell.
+        let f = scan_src(
+            "class _NoRedirect:\n    def redirect_request(self, req, fp, code, msg, headers, newurl):\n        return None\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "long-param-list"), "{:?}", f);
+        // control: a real 6-param fn with a body still fires
+        let ok = scan_src("def f(a, b, c, d, e, g):\n    return a + b + c + d + e + g\n");
+        assert!(ok.iter().any(|x| x.kind == "long-param-list"), "{:?}", ok);
+    }
+
+    #[test]
+    fn python_fn_shape_classifies_dispatch_and_rules() {
+        // the shape classifier behind the complexity message: a chain of
+        // ifs over the same selector is a dispatch chain; a battery of ifs
+        // appending to the same list is a rules battery
+        let dispatch = "def route(sel):\n    if sel == \"a\":\n        return 1\n    if sel == \"b\":\n        return 2\n    if sel == \"c\":\n        return 3\n    return -1\n";
+        let (shape, detail) = python_fn_shape(&first_py_fn_body(dispatch));
+        assert_eq!((shape, detail.as_str()), ("dispatch", "sel"));
+        let rules = "def check(a):\n    out = []\n    if a.get(1):\n        out.append('x')\n    if a.get(2):\n        out.append('y')\n    if a.get(3):\n        out.append('z')\n    return out\n";
+        let (shape, detail) = python_fn_shape(&first_py_fn_body(rules));
+        assert_eq!((shape, detail.as_str()), ("rules", "out"));
+        let plain = "def f(a):\n    x = a + 1\n    return x\n";
+        let (shape, _) = python_fn_shape(&first_py_fn_body(plain));
+        assert_eq!(shape, "plain");
     }
 
     #[test]

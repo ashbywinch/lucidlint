@@ -510,7 +510,11 @@ fn body_refs_name(body: &[Stmt], name: &str) -> bool {
 }
 
 /// A def with more than 5 parameters (a leading self/cls excluded — that is
-/// convention, not a parameter) — the signature is doing too much.
+/// convention, not a parameter) — the signature is doing too much. A trivial
+/// stub is exempt: a one-statement body (empty, `pass`, `return None`) is a
+/// framework override placeholder — the arity is the protocol's, and a
+/// parameter object would BREAK the override (review: urllib's
+/// redirect_request).
 pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, source: &str) {
     let mut n = f.parameters.posonlyargs.len() + f.parameters.args.len() + f.parameters.kwonlyargs.len();
     if let Some(first) = f.parameters.posonlyargs.first().or_else(|| f.parameters.args.first()) {
@@ -519,7 +523,7 @@ pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
             n -= 1;
         }
     }
-    if n > 5 {
+    if n > 5 && !is_trivial_stub(&f.body) {
         state.findings.push(Finding {
             file: state.file.to_string(),
             line: line_of(source, f.name.range().start()),
@@ -530,6 +534,25 @@ pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
                 "{n} parameters — introduce a parameter object — fix: long-param-list --fix-name <Options>"
             ),
         });
+    }
+}
+
+/// A one-statement placeholder body: `pass`, a bare expression, or a `return`
+/// of nothing / None. A 6-param function that does nothing is a protocol
+/// stub, not a param-list smell.
+fn is_trivial_stub(body: &[Stmt]) -> bool {
+    if body.len() > 1 {
+        return false;
+    }
+    match body.first() {
+        None => true,
+        Some(Stmt::Pass(_)) => true,
+        Some(Stmt::Expr(_)) => true,
+        Some(Stmt::Return(r)) => match r.value.as_ref() {
+            None => true,
+            Some(e) => matches!(e.as_ref(), Expr::NoneLiteral(_)),
+        },
+        _ => false,
     }
 }
 
@@ -1502,9 +1525,16 @@ fn scan_stmts(stmts: &[Stmt], counts: &mut std::collections::HashMap<String, (us
                         && matches!(c.ops[0], ruff_python_ast::CmpOp::Eq)
                         && is_empty_literal(&c.comparators[0]);
                     if none_check || empty_check {
-                        let e = counts.entry(n.id.to_string()).or_insert((0, usize::MAX));
-                        e.0 += 1;
-                        e.1 = e.1.min(line_of(source, i.range().start()));
+                        // a fail-fast GUARD (the guarded branch raises) is not
+                        // a special-case candidate: the absence IS an error, so
+                        // no object can replace the repeated handling — the
+                        // "give the absent case an object" refactoring would
+                        // mask it (review log §2.6: person is None -> KeyError)
+                        if !branch_guards(&i.body) {
+                            let e = counts.entry(n.id.to_string()).or_insert((0, usize::MAX));
+                            e.0 += 1;
+                            e.1 = e.1.min(line_of(source, i.range().start()));
+                        }
                     }
                 }
             }
@@ -1528,6 +1558,84 @@ fn scan_stmts(stmts: &[Stmt], counts: &mut std::collections::HashMap<String, (us
                 _ => {}
             }
         }
+    }
+}
+
+/// Is the guarded branch of a None/empty check a FAIL-FAST GUARD — it raises
+/// or returns an error shape (an HTTPException, a *Response, a dict with an
+/// "error" key)? A guard is not a special-case candidate: the absence IS an
+/// error, so no object can replace the repeated handling — the "give the
+/// absent case an object" refactoring would mask it (review log §2.6: person
+/// is None -> KeyError, mine is None -> 401).
+fn branch_guards(stmts: &[Stmt]) -> bool {
+    for s in stmts {
+        match s {
+            Stmt::Raise(_) => return true,
+            Stmt::Return(r) => {
+                if let Some(e) = r.value.as_deref() {
+                    if return_is_error(e) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::If(i) => {
+                if branch_guards(&i.body) || i.elif_else_clauses.iter().any(|cl| branch_guards(&cl.body)) {
+                    return true;
+                }
+            }
+            Stmt::For(f) => {
+                if branch_guards(&f.body) || f.orelse.iter().any(|s| branch_guards(std::slice::from_ref(s))) {
+                    return true;
+                }
+            }
+            Stmt::While(w) => {
+                if branch_guards(&w.body) || w.orelse.iter().any(|s| branch_guards(std::slice::from_ref(s))) {
+                    return true;
+                }
+            }
+            Stmt::With(w) => {
+                if branch_guards(&w.body) {
+                    return true;
+                }
+            }
+            Stmt::Try(t) => {
+                if branch_guards(&t.body) {
+                    return true;
+                }
+                for h in &t.handlers {
+                    let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                    if branch_guards(&eh.body) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// An ERROR-shaped return value: an HTTPException, any *Response object, or a
+/// dict literal carrying an "error" key. A plain value (an int, a default
+/// object) is a special-case candidate, not a guard.
+fn return_is_error(e: &Expr) -> bool {
+    match e {
+        Expr::Call(c) => match c.func.as_ref() {
+            Expr::Name(n) => {
+                let name = n.id.as_str();
+                name == "HTTPException" || name.ends_with("Response")
+            }
+            Expr::Attribute(a) => {
+                let attr = a.attr.as_str();
+                attr == "HTTPException" || attr.ends_with("Response")
+            }
+            _ => false,
+        },
+        Expr::Dict(d) => d
+            .items
+            .iter()
+            .any(|item| matches!(&item.key, Some(Expr::StringLiteral(s)) if s.value.to_str() == "error")),
+        _ => false,
     }
 }
 /// Latent Visitor: >= 2 functions dispatch over the SAME element family

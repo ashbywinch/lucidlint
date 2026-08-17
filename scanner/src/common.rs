@@ -94,6 +94,27 @@ pub fn full_fix_command(file: &str, line: usize, message: &str) -> String {
     format!("{head}— fix: lucidlint fix --kind {fix_kind} --file {file} --line {line}{name_slot}")
 }
 
+/// The complexity finding message, routed by the function's SHAPE: a
+/// dispatch chain or rule battery gets the lucid refactoring for ITS shape
+/// (a handler registry / named checkers), anything else gets extract-method.
+/// The `fix:` directive stays extract-method — it is the real auto-fix that
+/// splits the CC — while the prose names the more lucid shape (review-log
+/// R1: "is extract-method the most lucid refactoring?").
+pub fn complexity_message(cc: u32, shape: &str, detail: &str) -> String {
+    let head = match shape {
+        "dispatch" => format!(
+            "cyclomatic complexity {cc} (>= 15) — the function is a dispatch chain over '{detail}': every arm is a named handler — the lucid refactoring is a handler registry (a dict of {detail} → handler functions; the chain collapses to registry[{detail}](args))"
+        ),
+        "rules" => format!(
+            "cyclomatic complexity {cc} (>= 15) — the function is a battery of independent checks each appending to '{detail}' — extract each check into a named predicate returning its violation, composed as a list of checks, instead of one if-stack"
+        ),
+        _ => format!(
+            "cyclomatic complexity {cc} (>= 15) — extract part of this function into a named method (the preview shows the block)"
+        ),
+    };
+    format!("{head} — fix: extract-method (preview without --fix-name; apply with --fix-name <name>)")
+}
+
 /// A function is a duplicate candidate when it has real body substance:
 /// at least 2 non-doc statements and a skeleton of at least 12 tokens.
 /// Pure; each layer supplies its own statement count (docstring filtering
@@ -503,6 +524,26 @@ impl<'a> StaleCtx<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complexity_message_routes_by_shape() {
+        // review: a dispatch chain's complexity suggestion must name the
+        // registry, a rule battery the named checks — not a blind
+        // extract-method (the directive stays extract-method: it is the real
+        // auto-fix; the prose names the more lucid shape)
+        let dispatch = complexity_message(36, "dispatch", "tool");
+        assert!(dispatch.contains("dispatch chain over 'tool'"), "{dispatch}");
+        assert!(dispatch.contains("handler registry"), "{dispatch}");
+        assert!(dispatch.contains("fix: extract-method"), "{dispatch}");
+        let rules = complexity_message(42, "rules", "violations");
+        assert!(rules.contains("battery of independent checks"), "{rules}");
+        assert!(rules.contains("named predicate"), "{rules}");
+        let plain = complexity_message(20, "plain", "");
+        assert!(
+            plain.contains("extract part of this function into a named method"),
+            "{plain}"
+        );
+    }
     use crate::Finding;
 
     fn finding(kind: &str, line: usize) -> Finding {

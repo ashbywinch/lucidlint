@@ -54,10 +54,7 @@ pub fn diagnostics_for(scan: &FileScan, source: &str) -> Vec<serde_json::Value> 
                 },
                 "severity": 1,
                 "source": "lucidlint",
-                "message": format!(
-                    "cyclomatic complexity {} (>= 15) — extract part of this function into a named method — fix: extract-method (preview without --fix-name; apply with --fix-name <name>)",
-                    e.cc
-                ),
+                "message": crate::common::complexity_message(e.cc, e.shape, &e.shape_detail),
             }));
         }
     }

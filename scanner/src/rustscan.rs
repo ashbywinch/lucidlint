@@ -433,7 +433,7 @@ impl<'a> RsState<'a> {
                 );
             }
             let typed = sig.inputs.iter().filter(|i| matches!(i, FnArg::Typed(_))).count();
-            if typed > 5 {
+            if typed > 5 && !is_trivial_rust_stub(&block.stmts) {
                 self.finding(
                     "long-param-list",
                     "fail",
@@ -472,11 +472,14 @@ impl<'a> RsState<'a> {
         if module_level && !self.in_test_code {
             // the gate reads cc from the scan's own array — module-level fns
             // only, mirroring radon's fn_map (methods/nested get cc = 0)
+            let (shape, shape_detail) = rust_fn_shape(&block.stmts);
             self.cc.push(FnCc {
                 file: self.file.to_string(),
                 function: sig.ident.to_string(),
                 line,
                 cc,
+                shape,
+                shape_detail,
             });
         }
         if !self.in_test_code {
@@ -1846,6 +1849,95 @@ fn file_module_path(file: &str, module_map: &HashMap<String, String>) -> Option<
     module_map.iter().find(|(_, f)| *f == file).map(|(p, _)| p.clone())
 }
 
+/// A one-statement placeholder body: empty, `return`, `return None`, `()` or
+/// a `let _ = ...` discard — a framework override stub, not a param-list
+/// smell (parity with the Python rule; review: urllib's redirect_request).
+fn is_trivial_rust_stub(stmts: &[syn::Stmt]) -> bool {
+    if stmts.len() > 1 {
+        return false;
+    }
+    match stmts.first() {
+        None => true,
+        Some(syn::Stmt::Expr(syn::Expr::Return(r), _)) => match r.expr.as_deref() {
+            None => true,
+            Some(syn::Expr::Path(p)) => p.path.is_ident("None"),
+            _ => false,
+        },
+        Some(syn::Stmt::Local(l)) => matches!(&l.pat, syn::Pat::Wild(_)),
+        _ => false,
+    }
+}
+
+/// Classify a Rust function body's shape for the complexity message — parity
+/// with python_fn_shape: a dispatch chain (>= 3 if-expressions comparing the
+/// SAME selector to string literals) or a rule battery (>= 3 if-expressions
+/// pushing onto the SAME Vec) get shape-specific lucid guidance.
+fn rust_fn_shape(body: &[syn::Stmt]) -> (&'static str, String) {
+    use syn::Expr;
+    let ifs: Vec<&syn::ExprIf> = body
+        .iter()
+        .filter_map(|s| match s {
+            syn::Stmt::Expr(syn::Expr::If(i), _) => Some(i),
+            _ => None,
+        })
+        .collect();
+    if ifs.len() >= 3 {
+        let mut selectors: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for i in &ifs {
+            if let Expr::Binary(b) = i.cond.as_ref() {
+                if let Expr::Path(p) = b.left.as_ref() {
+                    if p.path.segments.len() == 1 {
+                        let name = p.path.segments[0].ident.to_string();
+                        let lit = matches!(b.right.as_ref(), Expr::Lit(_));
+                        if lit {
+                            *selectors.entry(name).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((sel, n)) = selectors.iter().max_by_key(|(_, n)| **n) {
+            if *n >= 3 {
+                return ("dispatch", sel.clone());
+            }
+        }
+        let mut pushes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for i in &ifs {
+            collect_push_targets(&i.then_branch.stmts, &mut pushes);
+        }
+        if let Some((acc, n)) = pushes.iter().max_by_key(|(_, n)| **n) {
+            if *n >= 3 {
+                return ("rules", acc.clone());
+            }
+        }
+    }
+    ("plain", String::new())
+}
+
+/// Names `.push(...)`-ed inside a statement set (recursing into blocks) —
+/// the rule-battery accumulator candidates (Rust side).
+fn collect_push_targets(stmts: &[syn::Stmt], out: &mut std::collections::HashMap<String, usize>) {
+    use syn::Expr;
+    for s in stmts {
+        if let syn::Stmt::Expr(e, _) = s {
+            match e {
+                Expr::MethodCall(m) => {
+                    if m.method == "push" {
+                        if let Expr::Path(p) = m.receiver.as_ref() {
+                            if p.path.segments.len() == 1 {
+                                let name = p.path.segments[0].ident.to_string();
+                                *out.entry(name).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                }
+                Expr::If(i) => collect_push_targets(&i.then_branch.stmts, out),
+                _ => {}
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2180,10 +2272,56 @@ mod tests {
 
     #[test]
     fn long_parameter_list_over_five() {
-        let fs = scan("fn f(a: i32, b: i32, c: i32, d: i32, e: i32, g: i32) {}\n");
+        // a REAL body — an empty/trivial stub is a protocol placeholder,
+        // not a param-list smell (review: redirect_request override)
+        let fs = scan("fn f(a: i32, b: i32, c: i32, d: i32, e: i32, g: i32) -> i32 { a + g }\n");
         assert!(has_kind(&fs, "long-param-list"));
-        let fs2 = scan("fn f(a: i32, b: i32, c: i32, d: i32, e: i32) {}\n");
+        let fs2 = scan("fn f(a: i32, b: i32, c: i32, d: i32, e: i32) -> i32 { a }\n");
         assert!(!has_kind(&fs2, "long-param-list"));
+    }
+
+    #[test]
+    fn long_parameter_list_skips_trivial_stub() {
+        // parity with the Python rule: a 6-param override stub (like
+        // urllib's redirect_request) must not be flagged — a parameter
+        // object would break the framework protocol
+        let stub = scan(
+            "fn redirect_request(self_: &S, req: u32, fp: u32, code: u32, msg: &str, headers: &str, newurl: &str) {}\n",
+        );
+        assert!(!has_kind(&stub, "long-param-list"), "{:?}", stub);
+        let pass = scan("fn stub(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) { let _ = a; }\n");
+        assert!(!has_kind(&pass, "long-param-list"), "{:?}", pass);
+    }
+
+    #[test]
+    fn rust_fn_shape_classifies_dispatch_and_rules() {
+        // parity with python_fn_shape: the complexity message routes by the
+        // body's shape — dispatch chains and rule batteries get the lucid
+        // refactoring for their shape
+        let dispatch = "fn route(sel: &str) -> i32 {\n    if sel == \"a\" { return 1; }\n    if sel == \"b\" { return 2; }\n    if sel == \"c\" { return 3; }\n    -1\n}\n";
+        let file = syn::parse_file(dispatch).unwrap();
+        let body = match &file.items[0] {
+            syn::Item::Fn(f) => f.block.stmts.clone(),
+            _ => panic!("not a fn"),
+        };
+        let (shape, detail) = rust_fn_shape(&body);
+        assert_eq!((shape, detail.as_str()), ("dispatch", "sel"));
+        let rules = "fn check(a: &M) -> Vec<&str> {\n    let mut out = vec![];\n    if a.get(1) { out.push(\"x\"); }\n    if a.get(2) { out.push(\"y\"); }\n    if a.get(3) { out.push(\"z\"); }\n    out\n}\n";
+        let file = syn::parse_file(rules).unwrap();
+        let body = match &file.items[0] {
+            syn::Item::Fn(f) => f.block.stmts.clone(),
+            _ => panic!("not a fn"),
+        };
+        let (shape, detail) = rust_fn_shape(&body);
+        assert_eq!((shape, detail.as_str()), ("rules", "out"));
+        let plain = "fn f(a: i32) -> i32 { a + 1 }\n";
+        let file = syn::parse_file(plain).unwrap();
+        let body = match &file.items[0] {
+            syn::Item::Fn(f) => f.block.stmts.clone(),
+            _ => panic!("not a fn"),
+        };
+        let (shape, _) = rust_fn_shape(&body);
+        assert_eq!(shape, "plain");
     }
 
     #[test]
