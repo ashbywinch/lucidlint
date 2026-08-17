@@ -145,17 +145,40 @@ pub fn type_ignore_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Fi
 /// `# noqa` / `# pragma: no cover` without a why (a second comment on the
 /// line) is a finding — the same why-detection heuristic as
 /// `type_ignore_findings`, over the same comment-token stream.
+/// Does an `# noqa` / `# pragma: no cover` comment carry a reason?
+/// `rest` is everything after the marker. Accepts the house format — a
+/// reason on the SAME comment line (``# noqa: BLE001 — reason``, a second
+/// `#` comment, or bare prose) — and still rejects the code-only form
+/// (``# noqa: BLE001`` with nothing after the code).
+fn noqa_reason(rest: &str) -> bool {
+    let rest = rest.trim_start();
+    let rest = match rest.strip_prefix(':') {
+        Some(r) => {
+            // `: CODE [reason]` — the code is the first token; a reason must
+            // follow it. `# noqa: BLE001` (no reason) leaves nothing.
+            let r = r.trim_start();
+            match r.find(char::is_whitespace) {
+                Some(i) => r[i..].trim(),
+                None => "",
+            }
+        }
+        None => rest, // bare `# noqa` / prose — accept a prose reason as-is
+    };
+    !rest.is_empty()
+}
+
 pub fn noqa_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Finding> {
     let mut out = Vec::new();
     for (ln, text) in comment_lines(source, tokens) {
-        let rest = if text.contains("# noqa") {
-            text.split_once("# noqa").map(|(_, r)| r).unwrap_or("")
+        let marker = if text.contains("# noqa") {
+            "# noqa"
         } else if text.contains("# pragma: no cover") {
-            text.split_once("# pragma: no cover").map(|(_, r)| r).unwrap_or("")
+            "# pragma: no cover"
         } else {
             continue;
         };
-        if !rest.contains('#') {
+        let rest = text.split_once(marker).map(|(_, r)| r).unwrap_or("");
+        if !noqa_reason(rest) {
             out.push(Finding {
                 file: file.to_string(),
                 line: ln,

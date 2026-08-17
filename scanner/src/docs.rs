@@ -85,6 +85,17 @@ fn all_targets(text: &str) -> Vec<String> {
     out
 }
 
+/// The base a backticked path resolves against: `docs/`/`standards/`
+/// absolute forms against the repo root, a parent-relative (`../`, `./`)
+/// form against the doc's own directory — mirroring markdown links.
+fn _backtick_base<'a>(repo: &'a Path, parent: &'a Path, path: &str) -> &'a Path {
+    if path.starts_with("../") || path.starts_with("./") {
+        parent
+    } else {
+        repo
+    }
+}
+
 /// `_docs_actions`: links resolve + docs reachable from AGENTS.md.
 pub fn docs_findings(repo: &Path) -> Vec<Finding> {
     let mut mds: Vec<PathBuf> = Vec::new();
@@ -122,8 +133,10 @@ pub fn docs_findings(repo: &Path) -> Vec<Finding> {
             }
         }
         for path in md_backtick_paths(&text) {
-            // backtick paths resolve against the REPO root; a bare name
-            // (coding-standards.md) is a reference, not a path
+            // backtick paths resolve like markdown links: `docs/`- and
+            // `standards/`-prefixed paths against the REPO root, a parent-
+            // relative (`../`, `./`) path against the DOC'S OWN directory.
+            // A bare name (coding-standards.md) is a reference, not a path.
             if !path.starts_with("docs/")
                 && !path.starts_with("standards/")
                 && !path.starts_with("./")
@@ -131,7 +144,7 @@ pub fn docs_findings(repo: &Path) -> Vec<Finding> {
             {
                 continue;
             }
-            if !repo.join(&path).exists() {
+            if !_backtick_base(repo, parent, &path).join(&path).exists() {
                 out.push(Finding {
                     file: rel.clone(),
                     line: 0,
@@ -276,6 +289,27 @@ mod tests {
         std::fs::write(dir.join("docs/guide.md"), "see `docs/PRD.md`\n").unwrap();
         let f = docs_findings(&dir);
         assert!(!f.iter().any(|x| x.kind == "docs-link"), "{f:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parent_relative_backtick_resolves_against_doc_parent() {
+        // a doc at docs/plans/guide.md backticks `../prd/PRD.md` — the
+        // parent-relative path must resolve against docs/plans/.. (== docs/),
+        // exactly like a markdown link. The current code resolves backtick
+        // paths against the REPO root, so `repo/../prd/PRD.md` misses the
+        // existing docs/prd/PRD.md and fires a false positive.
+        let dir = std::env::temp_dir().join(format!("docs_paren_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs/plans")).unwrap();
+        std::fs::create_dir_all(dir.join("docs/prd")).unwrap();
+        std::fs::write(dir.join("docs/prd/PRD.md"), "").unwrap();
+        std::fs::write(dir.join("docs/plans/guide.md"), "see `../prd/PRD.md`\n").unwrap();
+        let f = docs_findings(&dir);
+        assert!(
+            !f.iter().any(|x| x.kind == "docs-link"),
+            "parent-relative backtick path must resolve: {f:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
