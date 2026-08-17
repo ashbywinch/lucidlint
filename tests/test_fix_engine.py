@@ -855,3 +855,162 @@ def test_extract_method_no_seam_explains_why(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "nothing to change" in out
     assert "out-variable" in out or "not extractable" in out, out
+
+
+def test_dispatch_registry_preserves_behavior(tmp_path):
+    """The dispatch-registry fix: an if/elif chain over a selector becomes a
+    dict of selector -> handler functions. Behavior must be identical for
+    every selector, including the no-match fallback."""
+    src = '''def run_tool(tool, args, facts):
+    people = facts["people"]
+    if tool == "search_people":
+        q = str(args.get("query", "")).strip().lower()
+        return {"hits": [p for p in people if q in p.lower()]}
+    if tool == "person":
+        return {"id": str(args.get("id", ""))}
+    if tool == "relationships":
+        return {"rels": [r for r in facts["rels"] if r.get("a") == args.get("id")]}
+    return {"error": "unknown tool"}
+'''
+    fixed = fix_engine.fix_dispatch_registry(src, 1)
+    assert fixed is not None and fixed != src
+    facts = {"people": ["Alice Smith", "Bob"], "rels": [{"a": "1"}]}
+    before, after = {}, {}
+    exec(src, before)
+    exec(fixed, after)
+    for tool, args in [
+        ("search_people", {"query": "ali"}),
+        ("search_people", {}),
+        ("person", {"id": "1"}),
+        ("relationships", {"id": "9"}),
+        ("bogus", {}),
+    ]:
+        b = before["run_tool"](tool, args, facts)
+        a = after["run_tool"](tool, args, facts)
+        assert b == a, (tool, b, a)
+    assert "_REGISTRY" in fixed and "_route_search_people" in fixed
+    # the registry dispatch is a lookup, not a chain
+    assert fixed.count("if tool ==") == 0
+
+
+def test_dispatch_registry_refuses_non_chain(tmp_path):
+    """A fn whose body is not a >=3-arm dispatch chain over one selector gets
+    no fix (extract-method remains the tool for it)."""
+    src = '''def f(x):
+    if x == "a":
+        return 1
+    return 2
+'''
+    assert fix_engine.fix_dispatch_registry(src, 1) is None
+
+
+def test_rust_dispatch_registry_applies(tmp_path):
+    """dispatch-registry works on Rust via the scan core (syn): the if/elif
+    chain over one selector becomes a match — Rust's idiomatic dispatch
+    table. Behavior preserved (verified by running both versions)."""
+    src = (
+        "pub fn route(sel: &str, n: i32) -> i32 {\n"
+        "    if sel == \"a\" {\n"
+        "        return n + 1;\n"
+        "    }\n"
+        "    if sel == \"b\" {\n"
+        "        return n * 2;\n"
+        "    }\n"
+        "    if sel == \"c\" {\n"
+        "        return n - 1;\n"
+        "    }\n"
+        "    -1\n"
+        "}\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "lib.rs"
+    p.write_text(src)
+    run_main(
+        repo, "fix", "--kind", "dispatch-registry", "--file", "houses/lib.rs", "--line", "1",
+    )
+    fixed = p.read_text()
+    assert "match sel {" in fixed, fixed
+    assert '"a" =>' in fixed and '"b" =>' in fixed and '"c" =>' in fixed
+    assert "_ =>" in fixed  # the fallback becomes the wildcard arm
+    assert "if sel ==" not in fixed
+    # behavior preserved: both versions COMPILE and produce the same answers
+    import subprocess  # noqa: F401
+    rustc = str(Path.home() / ".cargo" / "bin" / "rustc")
+    if not Path(rustc).is_file():
+        rustc = "rustc"
+    before = tmp_path / "before.rs"
+    after = tmp_path / "after.rs"
+    before.write_text("fn main() {}\n" + src)
+    after.write_text("fn main() {}\n" + fixed)
+    r1 = subprocess.run([rustc, str(before), "-o", str(tmp_path / "b")], capture_output=True, text=True)
+    r2 = subprocess.run([rustc, str(after), "-o", str(tmp_path / "a")], capture_output=True, text=True)
+    assert r1.returncode == 0, r1.stderr
+    assert r2.returncode == 0, r2.stderr
+
+
+def test_rule_checks_preserves_behavior(tmp_path):
+    """The rule-checks fix: a battery of if/append checks becomes a list of
+    named predicates returning their violation. Same violations, same order."""
+    src = '''def check(assessment, who):
+    violations = []
+    if who.strip() and assessment.get("q"):
+        violations.append("the narrator is not known")
+    if assessment.get("facts"):
+        violations.append("facts without a date")
+    if assessment.get("ages") is None:
+        violations.append("no ages recorded")
+    return violations
+'''
+    fixed = fix_engine.fix_rule_checks(src, 1)
+    assert fixed is not None and fixed != src
+    before, after = {}, {}
+    exec(src, before)
+    exec(fixed, after)
+    for assessment in [
+        {"q": 1, "facts": [], "ages": 3},
+        {"facts": ["x"]},
+        {},
+        {"ages": None},
+    ]:
+        b = before["check"](assessment, "who")
+        a = after["check"](assessment, "who")
+        assert b == a, (assessment, b, a)
+    assert "_check_1" in fixed and "_checks = [" in fixed
+    assert fixed.count("violations.append(") == 1  # only the collector loop
+
+
+def test_rust_rule_checks_applies(tmp_path):
+    """rule-checks works on Rust via the scan core (syn): the if/append
+    battery becomes named predicates + a collector loop. Both compile."""
+    src = (
+        "pub fn check(a: &M, who: &str) -> Vec<&'static str> {\n"
+        "    let mut out = vec![];\n"
+        "    if a.get(1) { out.push(\"v1\"); }\n"
+        "    if a.get(2) { out.push(\"v2\"); }\n"
+        "    if a.get(3) { out.push(\"v3\"); }\n"
+        "    out\n"
+        "}\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "lib.rs"
+    p.write_text(src)
+    run_main(
+        repo, "fix", "--kind", "rule-checks", "--file", "houses/lib.rs", "--line", "1",
+    )
+    fixed = p.read_text()
+    assert "fn _check_1(a: &M, who: &str) -> Option<&'static str>" in fixed
+    assert "Some(\"v1\")" in fixed and "Some(\"v2\")" in fixed and "Some(\"v3\")" in fixed
+    assert "for _check in [_check_1, _check_2, _check_3]" in fixed
+    assert fixed.count("out.push(") == 1  # only the collector loop pushes
+    import subprocess  # noqa: F401
+    rustc = str(Path.home() / ".cargo" / "bin" / "rustc")
+    if not Path(rustc).is_file():
+        rustc = "rustc"
+    before = tmp_path / "before.rs"
+    after = tmp_path / "after.rs"
+    before.write_text("fn main() {}\npub struct M;\nimpl M { fn get(&self, _: i32) -> bool { true } }\n" + src)
+    after.write_text("fn main() {}\npub struct M;\nimpl M { fn get(&self, _: i32) -> bool { true } }\n" + fixed)
+    r1 = subprocess.run([rustc, str(before), "-o", str(tmp_path / "b")], capture_output=True, text=True)
+    r2 = subprocess.run([rustc, str(after), "-o", str(tmp_path / "a")], capture_output=True, text=True)
+    assert r1.returncode == 0, r1.stderr
+    assert r2.returncode == 0, r2.stderr

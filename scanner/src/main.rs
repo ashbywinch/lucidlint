@@ -1157,24 +1157,38 @@ fn main() {
                 let file = v.get("file").and_then(|k| k.as_str()).unwrap_or("");
                 let line = v.get("line").and_then(|k| k.as_u64()).unwrap_or(0) as usize;
                 let name = v.get("name").and_then(|k| k.as_str()).unwrap_or("");
-                if kind == "extract-method" {
+                if kind == "extract-method" || kind == "dispatch-registry" || kind == "rule-checks" {
                     if let Ok(src) = std::fs::read_to_string(file) {
-                        match fix::fix_extract_method(&src, line, name) {
+                        let result = if kind == "dispatch-registry" {
+                            fix::fix_dispatch_registry(&src, line)
+                        } else if kind == "rule-checks" {
+                            fix::fix_rule_checks(&src, line)
+                        } else {
+                            fix::fix_extract_method(&src, line, name)
+                        };
+                        match result {
                             Ok(out) => {
                                 if std::fs::write(file, out).is_err() {
                                     println!("fix: could not write the fixed file — {file}:{line}");
                                     return;
                                 }
-                                println!("fix: extracted seam into {name} — {file}:{line} (extract-method)");
+                                let what = if kind == "dispatch-registry" {
+                                    "converted the dispatch chain into a match"
+                                } else if kind == "rule-checks" {
+                                    "extracted the if/append checks into named predicates"
+                                } else {
+                                    "extracted seam into a named function"
+                                };
+                                println!("fix: {what} — {file}:{line} ({kind})");
                                 return;
                             }
                             Err(why) => {
-                                println!("fix: nothing to change for extract-method at {file}:{line} — {why}");
+                                println!("fix: nothing to change for {kind} at {file}:{line} — {why}");
                                 return;
                             }
                         }
                     }
-                    println!("fix: nothing to change for extract-method at {file}:{line}");
+                    println!("fix: nothing to change for {kind} at {file}:{line}");
                     return;
                 }
             }

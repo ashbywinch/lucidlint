@@ -61,12 +61,14 @@ STRUCTURAL_KINDS = {
     "vague-name": "Rename the type and its references (same-file)",
     "long-param-list": "Introduce Parameter Object: bundle the params into a dataclass",
     "pipeline": "turn the pure reduction loop into a sum() over a named per-item contributor",
+    "dispatch-registry": "convert the if/elif dispatch chain into a dict of selector -> handler functions",
+    "rule-checks": "convert the battery of if/append checks into a list of named check predicates",
 }
 
 # structural fixes whose result is genuinely novel (a class split, a new
 # function, a bundled signature) preview a diff before --confirm; the
 # obvious ones (a constant inserted, a rename) apply directly
-PREVIEW_KINDS = {"extract-method", "extract-class", "long-param-list", "pipeline"}
+PREVIEW_KINDS = {"extract-method", "extract-class", "long-param-list", "pipeline", "dispatch-registry", "rule-checks"}
 
 # the gate reports DISPLAY kinds (final_kind output: strewing shows as
 # latent-class); the fix command accepts either and normalizes here — the
@@ -1767,6 +1769,10 @@ def _fix_structural(kind: str, source: str, line: int, opts, diag: list[str] | N
         if opts.name is None:
             return None
         return fix_parameter_object(source, line, opts.name)
+    if kind == "dispatch-registry":
+        return fix_dispatch_registry(source, line)
+    if kind == "rule-checks":
+        return fix_rule_checks(source, line)
     if kind == "pipeline":
         if opts.name is None:
             return None
@@ -1832,3 +1838,422 @@ def _callee_params_for_call(repo: Path, rel: str, source: str, line: int) -> lis
     if callee is None:
         return None
     return _repo_params(repo, rel, callee)
+
+
+# --------------------------------------------------------------------------- dispatch-registry
+
+
+class _BoundNames(cst.CSTVisitor):
+    """Names ASSIGNED inside a node — the arm's locals (not free vars)."""
+
+    def __init__(self) -> None:
+        self.bound: set[str] = set()
+
+    @override
+    def visit_Assign(self, node: cst.Assign) -> None:
+        for t in node.targets:
+            self.bound.update(_target_names(t.target))
+
+    @override
+    def visit_AnnAssign(self, node: cst.AnnAssign) -> None:
+        if node.target:
+            self.bound.update(_target_names(node.target))
+
+    @override
+    def visit_For(self, node: cst.For) -> None:
+        self.bound.update(_target_names(node.target))
+
+    @override
+    def visit_CompFor(self, node: cst.CompFor) -> None:
+        self.bound.update(_target_names(node.target))
+
+    @override
+    def visit_With(self, node: cst.With) -> None:
+        for item in node.items:
+            if item.optional_vars:
+                self.bound.update(_target_names(item.optional_vars))
+
+
+def _target_names(target) -> set[str]:
+    """The names a (possibly tuple) assignment target binds."""
+    if isinstance(target, cst.Name):
+        return {target.value}
+    if isinstance(target, (cst.Tuple, cst.List)):
+        return {n for elt in target.elements if isinstance(elt, cst.Element) for n in _target_names(elt.value)}
+    return set()
+
+
+# ambient names a dispatch arm may read without a handler parameter: the
+# builtins + underscore dunders (the module's imports are a hand-apply case)
+_AMBIENT = frozenset({
+    "str", "int", "float", "bool", "list", "dict", "set", "tuple", "bytes", "bytearray",
+    "len", "sorted", "min", "max", "sum", "any", "all", "range", "enumerate", "zip",
+    "map", "filter", "next", "iter", "print", "isinstance", "issubclass", "repr",
+    "abs", "round", "format", "hash", "id", "type", "object", "getattr", "setattr",
+    "hasattr", "callable", "chr", "ord", "bin", "hex", "oct", "reversed", "slice",
+    "Exception", "ValueError", "KeyError", "TypeError", "NotImplementedError",
+    "RuntimeError", "None", "True", "False", "open", "staticmethod", "classmethod",
+    "property", "super", "self",
+})
+
+
+def _read_names(nodes) -> list[str]:
+    """The Names READ in `nodes` — the arm's free-var candidates. Attribute
+    names (`args.get` -> the `get`) and their base-members are NOT reads of
+    standalone names: only the BASE (`args`) is. Builtins are ambient."""
+    reads: list[str] = []
+    seen: set[str] = set()
+
+    def walk(n) -> None:
+        if isinstance(n, cst.Name):
+            if n.value not in seen and n.value not in _AMBIENT:
+                seen.add(n.value)
+                reads.append(n.value)
+        elif isinstance(n, cst.Attribute):
+            walk(n.value)  # the base only — the attr name is not a free var
+        else:
+            for ch in getattr(n, "children", []):
+                walk(ch)
+
+    for n in nodes:
+        walk(n)
+    return reads
+
+
+# the dispatch-chain collections — named so the signatures are not bare
+# record collections (the record-shape rule's escape hatch)
+_DispatchArm = tuple[str, str, list[cst.BaseStatement]]
+_DispatchChain = list[tuple[str, list[cst.BaseStatement]]]
+_DispatchShape = tuple[list[cst.BaseStatement], _DispatchChain, str, cst.Return]
+_BatteryCheck = tuple[cst.BaseExpression, cst.BaseExpression]
+_BatteryShape = tuple[str, list[_BatteryCheck], list]
+_RuleBuild = tuple[list[cst.FunctionDef], list]
+_DispatchBuild = tuple[list[cst.FunctionDef], cst.SimpleStatementLine]
+_AccInit = tuple[str, int]
+
+
+def _parse_dispatch_arm(stmt: cst.If) -> _DispatchArm | None:
+    """Validate one dispatch arm: `if sel == "lit":` with an IndentedBlock
+    body. Returns (selector, literal, body statements)."""
+    test = stmt.test
+    if not isinstance(test, cst.Comparison) or len(test.comparisons) != 1:
+        return None
+    left = test.left
+    comp = test.comparisons[0]
+    if not isinstance(comp.operator, cst.Equal) or not isinstance(comp.comparator, cst.SimpleString):
+        return None
+    if not isinstance(left, cst.Name):
+        return None
+    if stmt.orelse:
+        return None
+    body = stmt.body
+    if not isinstance(body, cst.IndentedBlock) or not body.body:
+        return None
+    return left.value, comp.comparator.evaluated_value, list(body.body)
+
+
+def _dispatch_chain_shape(fn: cst.FunctionDef, body: list) -> _DispatchShape | None:
+    """The dispatch-chain shape of a function: a PREAMBLE (locals computed
+    before the chain), the >=3 arms over ONE selector, and a single trailing
+    `return <default>`. None when the body is not that shape."""
+    first_if = next((i for i, s in enumerate(body) if isinstance(s, cst.If)), None)
+    if first_if is None:
+        return None
+    preamble = body[:first_if]
+    chain = []
+    selector: str | None = None
+    for stmt in body[first_if:]:
+        if not isinstance(stmt, cst.If):
+            break
+        parsed = _parse_dispatch_arm(stmt)
+        if parsed is None:
+            return None
+        sel, lit, arm_body = parsed
+        if selector is None:
+            selector = sel
+        elif sel != selector:
+            return None
+        chain.append((lit, arm_body))
+    if len(chain) < 3:
+        return None  # >= 3 arms make a registry worth it
+    tail = body[first_if + len(chain):]
+    if len(tail) != 1 or not isinstance(tail[0], cst.SimpleStatementLine) \
+            or not isinstance(tail[0].body[0], cst.Return):
+        return None  # v1: a single trailing `return <default>` is the no-match path
+    return preamble, chain, selector or "", tail[0].body[0]
+
+
+def _dispatch_build(chain: _DispatchChain, union: list[str]) -> _DispatchBuild:
+    """The handler functions (_route_<slug> taking the free-var union) and
+    the registry dict. The handlers are defined before the registry — the
+    dict evaluates their names at module load."""
+    handlers: list[cst.FunctionDef] = []
+    registry_entries: list[cst.DictElement] = []
+    used_slugs: set[str] = set()
+    for i, (lit, arm_body) in enumerate(chain):
+        slug = "".join(ch if ch.isalnum() else "_" for ch in str(lit).lower()).strip("_")
+        slug = slug or f"arm{i}"
+        base, n = slug, 1
+        while base in used_slugs:
+            base, n = f"{slug}_{n}", n + 1
+        used_slugs.add(base)
+        name = f"_route_{base}"
+        handlers.append(
+            cst.FunctionDef(
+                name=cst.Name(name),
+                params=cst.Parameters(params=[cst.Param(cst.Name(v)) for v in union]),
+                body=cst.IndentedBlock(body=arm_body),
+            )
+        )
+        registry_entries.append(cst.DictElement(key=cst.SimpleString(repr(str(lit))), value=cst.Name(name)))
+    registry = cst.SimpleStatementLine(
+        body=[cst.Assign(targets=[cst.AssignTarget(cst.Name("_REGISTRY"))], value=cst.Dict(elements=registry_entries))]
+    )
+    return handlers, registry
+
+
+def _dispatch_call(selector: str, default, union: list[str]) -> list:
+    """The rewritten dispatch: registry lookup, the no-match default, the
+    uniform handler call."""
+    return [
+        cst.SimpleStatementLine(
+            body=[
+                cst.Assign(
+                    targets=[cst.AssignTarget(cst.Name("handler"))],
+                    value=cst.Call(
+                        func=cst.Attribute(value=cst.Name("_REGISTRY"), attr=cst.Name("get")),
+                        args=[cst.Arg(cst.Name(selector))],
+                    ),
+                )
+            ]
+        ),
+        cst.If(
+            test=cst.Comparison(
+                left=cst.Name("handler"),
+                comparisons=[cst.ComparisonTarget(cst.Is(), cst.Name("None"))],
+            ),
+            body=cst.IndentedBlock(body=[cst.SimpleStatementLine(body=[default])]),
+            orelse=None,
+        ),
+        cst.SimpleStatementLine(
+            body=[
+                cst.Return(
+                    cst.Call(func=cst.Name("handler"), args=[cst.Arg(cst.Name(v)) for v in union])
+                )
+            ]
+        ),
+    ]
+
+
+def fix_dispatch_registry(source: str, line: int) -> str | None:
+    """A dispatch chain (`if sel == "a": return f()  if sel == "b": ...`)
+    is a handler REGISTRY in disguise — each arm is already a named handler.
+    Rewrite it to a dict of selector -> handler functions and a one-line
+    dispatch, extracting every arm's body as a private function named from
+    its literal. The handler signature is the UNION of the arms' free
+    variables (minus the selector) so the dispatch call is uniform."""
+    module = cst.parse_module(source)
+    wrapper = cst.MetadataWrapper(module)
+    finder = _FindFnLine(line)
+    wrapper.visit(finder)
+    fn = finder.found
+    if fn is None or not any(s is fn for s in wrapper.module.body):
+        return None
+    body = list(fn.body.body)
+    shaped = _dispatch_chain_shape(fn, body)
+    if shaped is None:
+        return None
+    preamble, chain, selector, default = shaped
+
+    # per-arm free vars (names read, not bound in the arm, not the selector)
+    arm_free: list[list[str]] = []
+    union: list[str] = []
+    for _lit, arm_body in chain:
+        bound = _BoundNames()
+        for st in arm_body:
+            st.visit(bound)
+        bound.bound.add(selector)
+        free = [n for n in _read_names(arm_body) if n not in bound.bound and n not in union]
+        union.extend(free)
+        arm_free.append(free)
+
+    handlers, registry = _dispatch_build(chain, union)
+    dispatch = _dispatch_call(selector, default, union)
+    new_fn = fn.with_changes(body=fn.body.with_changes(body=preamble + dispatch))
+
+    out_body: list = []
+    for stmt in wrapper.module.body:
+        if stmt is fn:
+            out_body.append(new_fn)
+            out_body.extend(handlers)  # the registry names them — define first
+            out_body.append(registry)
+        else:
+            out_body.append(stmt)
+    return cst.Module(body=out_body).code
+
+
+# --------------------------------------------------------------------------- rule-checks
+
+
+def _rule_battery_shape(fn: cst.FunctionDef, body: list, params: list[str]) -> _BatteryShape | None:
+    """The rule-battery shape: `acc = []`, >= 3 `if <cond>: acc.append(<v>)`
+    checks (each a single append reading only the fn's params), and a
+    trailing `return acc`. Returns (acc, [(cond, value), ...])."""
+    probe = _acc_init(body)
+    if probe is None:
+        return None
+    acc, start = probe
+    checks: list = []
+    idx = start
+    while idx < len(body) and isinstance(body[idx], cst.If):
+        stmt = body[idx]
+        if stmt.orelse:
+            return None
+        value = _append_value(stmt.body, acc)
+        if value is None:
+            return None  # v1: one append per check
+        if not set(_read_names([stmt.test, value])) <= set(params):
+            return None
+        checks.append((stmt.test, value))
+        idx += 1
+    if len(checks) < 3:
+        return None  # fewer than 3 checks is not a battery
+    # everything after the last check is the TAIL — kept verbatim (the
+    # collector loop produces `acc`, then the tail uses it)
+    return acc, checks, list(body[idx:])
+
+
+def _acc_init(body: list) -> _AccInit | None:
+    """The `acc = []` opener — (acc name, index after it) or None."""
+    if not body or not isinstance(body[0], cst.SimpleStatementLine) \
+            or not isinstance(body[0].body[0], cst.Assign) \
+            or not isinstance(body[0].body[0].value, cst.List) \
+            or len(body[0].body[0].value.elements) != 0 \
+            or not isinstance(body[0].body[0].targets[0].target, cst.Name):
+        return None
+    return body[0].body[0].targets[0].target.value, 1
+
+
+def _append_value(branch, acc: str):
+    """The value of a single `acc.append(<value>)` statement, or None when
+    the branch is not exactly that."""
+    if not isinstance(branch, cst.IndentedBlock) or len(branch.body) != 1:
+        return None
+    app = branch.body[0]
+    if not isinstance(app, cst.SimpleStatementLine) or len(app.body) != 1:
+        return None
+    app_stmt = app.body[0]
+    if not isinstance(app_stmt, cst.Expr) or not isinstance(app_stmt.value, cst.Call):
+        return None
+    call = app_stmt.value
+    if not isinstance(call.func, cst.Attribute) \
+            or call.func.attr.value != "append" \
+            or not isinstance(call.func.value, cst.Name) \
+            or call.func.value.value != acc or len(call.args) != 1:
+        return None
+    return call.args[0].value
+
+
+def _rule_build(params: list[str], acc: str, checks: list) -> _RuleBuild:
+    """The named predicates (each returns its violation or None) and the
+    collector loop that replaces the if-stack."""
+    check_defs: list[cst.FunctionDef] = []
+    check_names: list[cst.Element] = []
+    for i, (cond, value) in enumerate(checks):
+        cname = f"_check_{i + 1}"
+        check_defs.append(
+            cst.FunctionDef(
+                name=cst.Name(cname),
+                params=cst.Parameters(params=[cst.Param(cst.Name(p)) for p in params]),
+                body=cst.IndentedBlock(
+                    body=[
+                        cst.If(
+                            test=cond,
+                            body=cst.IndentedBlock(body=[cst.SimpleStatementLine(body=[cst.Return(value)])]),
+                            orelse=None,
+                        ),
+                        cst.SimpleStatementLine(body=[cst.Return(cst.Name("None"))]),
+                    ]
+                ),
+            )
+        )
+        check_names.append(cst.Element(value=cst.Name(cname)))
+    loop = [
+        cst.SimpleStatementLine(
+            body=[cst.Assign(targets=[cst.AssignTarget(cst.Name("_checks"))], value=cst.List(elements=check_names))]
+        ),
+        cst.SimpleStatementLine(
+            body=[cst.Assign(targets=[cst.AssignTarget(cst.Name(acc))], value=cst.List(elements=[]))]
+        ),
+        cst.For(
+            target=cst.Name("_check"),
+            iter=cst.Name("_checks"),
+            body=cst.IndentedBlock(
+                body=[
+                    cst.SimpleStatementLine(
+                        body=[
+                            cst.Assign(
+                                targets=[cst.AssignTarget(cst.Name("_v"))],
+                                value=cst.Call(func=cst.Name("_check"), args=[cst.Arg(cst.Name(p)) for p in params]),
+                            )
+                        ]
+                    ),
+                    cst.If(
+                        test=cst.Comparison(
+                            left=cst.Name("_v"),
+                            comparisons=[cst.ComparisonTarget(cst.IsNot(), cst.Name("None"))],
+                        ),
+                        body=cst.IndentedBlock(
+                            body=[
+                                cst.SimpleStatementLine(
+                                    body=[
+                                        cst.Expr(
+                                            value=cst.Call(
+                                                func=cst.Attribute(value=cst.Name(acc), attr=cst.Name("append")),
+                                                args=[cst.Arg(cst.Name("_v"))],
+                                            )
+                                        )
+                                    ]
+                                )
+                            ]
+                        ),
+                        orelse=None,
+                    ),
+                ]
+            ),
+            orelse=None,
+        ),
+    ]
+    return check_defs, loop
+
+
+def fix_rule_checks(source: str, line: int) -> str | None:
+    """A rule battery (`if cond: violations.append(...)` repeated, then
+    `return violations`) is a LIST of named checks, not an if-stack. Extract
+    each check into a private predicate returning its violation (or None),
+    and the function becomes a loop over the check list. v1: each check is a
+    single `acc.append(<value>)` with no else; the checks read only the
+    function's own parameters."""
+    module = cst.parse_module(source)
+    wrapper = cst.MetadataWrapper(module)
+    finder = _FindFnLine(line)
+    wrapper.visit(finder)
+    fn = finder.found
+    if fn is None or not any(s is fn for s in wrapper.module.body):
+        return None
+    params = [p.name.value for p in fn.params.params if p.name is not None]
+    body = list(fn.body.body)
+    shaped = _rule_battery_shape(fn, body, params)
+    if shaped is None:
+        return None
+    acc, checks, tail = shaped
+    check_defs, loop = _rule_build(params, acc, checks)
+    new_fn = fn.with_changes(body=fn.body.with_changes(body=loop + tail))
+    out_body: list = []
+    for stmt in wrapper.module.body:
+        if stmt is fn:
+            out_body.extend(check_defs)  # define the predicates first
+            out_body.append(new_fn)
+        else:
+            out_body.append(stmt)
+    return cst.Module(body=out_body).code

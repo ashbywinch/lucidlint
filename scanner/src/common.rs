@@ -101,18 +101,19 @@ pub fn full_fix_command(file: &str, line: usize, message: &str) -> String {
 /// splits the CC — while the prose names the more lucid shape (review-log
 /// R1: "is extract-method the most lucid refactoring?").
 pub fn complexity_message(cc: u32, shape: &str, detail: &str) -> String {
-    let head = match shape {
+    // each shape carries ITS OWN fix directive — the shared extract-method
+    // tail would append a second, wrong directive to the shape-routed ones
+    match shape {
         "dispatch" => format!(
-            "cyclomatic complexity {cc} (>= 15) — the function is a dispatch chain over '{detail}': every arm is a named handler — the lucid refactoring is a handler registry (a dict of {detail} → handler functions; the chain collapses to registry[{detail}](args))"
+            "cyclomatic complexity {cc} (>= 15) — the function is a dispatch chain over '{detail}': every arm is a named handler — the lucid refactoring is a dispatch table (a dict of {detail} → handler functions in Python; a match in Rust) — fix: dispatch-registry (previews the table; apply with --confirm)"
         ),
         "rules" => format!(
-            "cyclomatic complexity {cc} (>= 15) — the function is a battery of independent checks each appending to '{detail}' — extract each check into a named predicate returning its violation, composed as a list of checks, instead of one if-stack"
+            "cyclomatic complexity {cc} (>= 15) — the function is a battery of independent checks each appending to '{detail}' — extract each check into a named predicate returning its violation, composed as a list of checks, instead of one if-stack — fix: rule-checks (previews the check list; apply with --confirm)"
         ),
         _ => format!(
-            "cyclomatic complexity {cc} (>= 15) — extract part of this function into a named method (the preview shows the block)"
+            "cyclomatic complexity {cc} (>= 15) — extract part of this function into a named method (the preview shows the block) — fix: extract-method (preview without --fix-name; apply with --fix-name <name>)"
         ),
-    };
-    format!("{head} — fix: extract-method (preview without --fix-name; apply with --fix-name <name>)")
+    }
 }
 
 /// A function is a duplicate candidate when it has real body substance:
@@ -533,8 +534,8 @@ mod tests {
         // auto-fix; the prose names the more lucid shape)
         let dispatch = complexity_message(36, "dispatch", "tool");
         assert!(dispatch.contains("dispatch chain over 'tool'"), "{dispatch}");
-        assert!(dispatch.contains("handler registry"), "{dispatch}");
-        assert!(dispatch.contains("fix: extract-method"), "{dispatch}");
+        assert!(dispatch.contains("dispatch table"), "{dispatch}");
+        assert!(dispatch.contains("fix: dispatch-registry"), "{dispatch}");
         let rules = complexity_message(42, "rules", "violations");
         assert!(rules.contains("battery of independent checks"), "{rules}");
         assert!(rules.contains("named predicate"), "{rules}");
