@@ -199,13 +199,111 @@ pub fn suppressions_from_comments(comments: &[(usize, String)]) -> Suppressions 
     }
 }
 
-/// The Python `_suppressed`: a finding is exempt when its line or line-1
-/// carries an explained suppression for that signal.
+/// Suppression keywords that name a FAMILY rather than one raw kind —
+/// the reverse of rule_metadata.py's `display_name "X → <family>"` aliases
+/// (closures → latent-class, partition → latent-class). A suppression naming
+/// the family also exempts its variant kinds, so `ignore latent-class <why>`
+/// is not silently stale against a `closures`/`partition` finding (RUST-CORE
+/// B6: the alias map must match rule_metadata's `→` convention — keep in sync).
+const FAMILY_VARIANTS: &[(&str, &[&str])] = &[("latent-class", &["closures", "partition"])];
+
+fn alias_variants(sig: &str) -> &'static [&'static str] {
+    for (fam, vars) in FAMILY_VARIANTS {
+        if *fam == sig {
+            return vars;
+        }
+    }
+    &[]
+}
+
+/// Does a suppression signal match a finding's raw `kind`? Raw-equal, or the
+/// signal names the family that contains the kind.
+fn signal_matches(sig: &str, finding_kind: &str) -> bool {
+    sig == finding_kind || alias_variants(sig).contains(&finding_kind)
+}
+
+/// How far above a finding a suppression comment may sit. A suppression sits
+/// "directly above" its code, but a decorator line (`@final`) or a stacked
+/// comment/blank line intervenes — a fixed line/line-1 window breaks that
+/// (RUST-CORE B7). A 3-line window clears one intervening line while staying
+/// "adjacent" — far enough that a deliberate comment is never orphaned, close
+/// enough that it cannot drift onto an unrelated statement.
+const SUPPRESSION_WINDOW: usize = 3;
+
+/// The `SUPPRESSION_WINDOW` lines ending at `line` (descending), never below 1.
+fn window_lines(line: usize) -> impl Iterator<Item = usize> {
+    (line.max(SUPPRESSION_WINDOW) + 1 - SUPPRESSION_WINDOW..=line).rev()
+}
+
+/// A finding is exempt when an explained file suppression covers it.
+pub fn file_suppressed(signal: &str, supps: &Suppressions) -> bool {
+    supps
+        .file
+        .iter()
+        .any(|(sig, why)| signal_matches(sig, signal) && !why.is_empty())
+}
+
+/// Repo-wide findings (duplicate, unused) are computed AFTER the per-file
+/// suppression pass, so a comment naming them was never consumed and got
+/// flagged stale (review-log B3). Re-honor their suppressions here with the
+/// same family-aware, widened window the per-file pass uses, and report the
+/// (line, signal) / file-signal pairs consumed so the caller can drop the
+/// stale-suppression findings those comments caused. Line 0 in a used pair
+/// means a FILE suppression (the `(0, sig)` sentinel).
+pub fn filter_repo_wide(
+    findings: Vec<crate::Finding>,
+    supps: &Suppressions,
+    used_line: &mut std::collections::HashSet<(usize, String)>,
+    used_file: &mut std::collections::HashSet<String>,
+) -> Vec<crate::Finding> {
+    let mut kept = Vec::new();
+    for f in findings {
+        if file_suppressed(&f.kind, supps) {
+            for (sig, why) in &supps.file {
+                if why.is_empty() {
+                    continue;
+                }
+                let _ = why;
+                if signal_matches(sig, &f.kind) {
+                    used_file.insert(sig.clone());
+                    break;
+                }
+            }
+            continue;
+        }
+        let mut line_hit = false;
+        for ln in window_lines(f.line) {
+            if let Some(entries) = supps.line.get(&ln) {
+                for (sig, why) in entries {
+                    if why.is_empty() {
+                        continue;
+                    }
+                    if signal_matches(sig, &f.kind) {
+                        used_line.insert((ln, sig.clone()));
+                        line_hit = true;
+                        break;
+                    }
+                }
+            }
+            if line_hit {
+                break;
+            }
+        }
+        if line_hit {
+            continue;
+        }
+        kept.push(f);
+    }
+    kept
+}
+
+/// The Python `_suppressed`: a finding is exempt when any of the lines directly
+/// above it carry an explained suppression for that signal.
 pub fn suppressed(signal: &str, line: usize, supps: &Suppressions) -> bool {
-    for ln in [line, line.saturating_sub(1)] {
+    for ln in window_lines(line) {
         if let Some(entries) = supps.line.get(&ln) {
             for (sig, why) in entries {
-                if sig == signal && !why.is_empty() {
+                if signal_matches(sig, signal) && !why.is_empty() {
                     return true;
                 }
             }
@@ -305,10 +403,10 @@ fn suppress_track_line(
     supps: &Suppressions,
     f: &crate::Finding,
 ) -> bool {
-    for ln in [f.line, f.line.saturating_sub(1)] {
+    for ln in window_lines(f.line) {
         if let Some(entries) = supps.line.get(&ln) {
             for (sig, why) in entries {
-                if sig == &f.kind && !why.is_empty() {
+                if signal_matches(sig, &f.kind) && !why.is_empty() {
                     used_line.insert((ln, sig.clone()));
                     return true;
                 }
@@ -327,6 +425,14 @@ fn suppress_track_file(
     if let Some(why) = supps.file.get(&f.kind) {
         if !why.is_empty() {
             used_file.insert(f.kind.clone());
+            return true;
+        }
+    }
+    // the file suppression may name a FAMILY (latent-class) — then it covers
+    // the variant raw kinds (closures/partition), not just one exact kind
+    for (sig, why) in &supps.file {
+        if sig != &f.kind && signal_matches(sig, &f.kind) && !why.is_empty() {
+            used_file.insert(sig.clone());
             return true;
         }
     }
@@ -391,5 +497,101 @@ impl<'a> StaleCtx<'a> {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Finding;
+
+    fn finding(kind: &str, line: usize) -> Finding {
+        Finding {
+            file: "x.rs".into(),
+            line,
+            function: "f".into(),
+            kind: kind.into(),
+            severity: "fail".into(),
+            message: "m".into(),
+        }
+    }
+
+    #[test]
+    fn family_suppression_matches_variant_kind_not_stale() {
+        // B6: `ignore latent-class` suppresses a `closures` finding — the
+        // suppression names the FAMILY, the finding carries the RAW kind —
+        // and must not be reported stale.
+        let comments = vec![(
+            1,
+            "// lucidlint: ignore latent-class route closures are the idiom".to_string(),
+        )];
+        let fs = apply_suppressions_impl(
+            vec![finding("closures", 2)],
+            &comments,
+            "x.rs",
+            "//",
+            &PreUsedSuppressions::default(),
+        );
+        assert!(!fs.iter().any(|f| f.kind == "closures"), "{:?}", fs);
+        assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
+    }
+
+    #[test]
+    fn family_suppression_against_no_variant_is_stale() {
+        // B6 control: the same family suppression with no closures/partition
+        // finding is dead weight → stale-suppression.
+        let comments = vec![(1, "// lucidlint: ignore latent-class nothing here".to_string())];
+        let fs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &PreUsedSuppressions::default());
+        assert!(fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
+    }
+
+    #[test]
+    fn file_family_suppression_matches_variant() {
+        // B6 file path: `ignore-file latent-class` covers closures/partition.
+        let comments = vec![(
+            1,
+            "// lucidlint: ignore-file latent-class the whole file's closures are idiom".to_string(),
+        )];
+        let fs = apply_suppressions_impl(
+            vec![finding("partition", 9)],
+            &comments,
+            "x.rs",
+            "//",
+            &PreUsedSuppressions::default(),
+        );
+        assert!(!fs.iter().any(|f| f.kind == "partition"), "{:?}", fs);
+        assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
+    }
+
+    #[test]
+    fn decorator_line_does_not_break_suppression_window() {
+        // B7: a comment two lines above the finding (a decorator line
+        // intervenes) still suppresses — the window is 3 lines, not
+        // line/line-1.
+        let comments = vec![(1, "// lucidlint: ignore magic-number the gate threshold".to_string())];
+        let fs = apply_suppressions_impl(
+            vec![finding("magic-number", 3)],
+            &comments,
+            "x.rs",
+            "//",
+            &PreUsedSuppressions::default(),
+        );
+        assert!(!fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
+        assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
+    }
+
+    #[test]
+    fn window_is_bounded_far_comment_does_not_suppress() {
+        // B7 guard: the window stays adjacent — a comment 4+ lines above is
+        // NOT a suppression of the finding.
+        let comments = vec![(1, "// lucidlint: ignore magic-number far away".to_string())];
+        let fs = apply_suppressions_impl(
+            vec![finding("magic-number", 5)],
+            &comments,
+            "x.rs",
+            "//",
+            &PreUsedSuppressions::default(),
+        );
+        assert!(fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
     }
 }

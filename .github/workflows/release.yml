@@ -60,8 +60,15 @@ jobs:
           mkdir -p "dist/${dir}/bin"
           cp "scanner/target/${target}/release/lucidlint${exe}" "dist/${dir}/bin/lucidlint${exe}"
           cp lucidlint.py "dist/${dir}/"
+          cp fix_engine.py "dist/${dir}/"
           cp release/Makefile "dist/${dir}/Makefile"
           printf '%s\n' "$ver" > "dist/${dir}/version.txt"
+          # self-contain the fix engine's libcst in deps/ so the fix path
+          # works from the bundle with no pip step (review-log B8). lucidlint.py
+          # prepends this sibling deps/ to sys.path when present. libcst +
+          # pyyaml fall back to their pure-Python implementations, so the
+          # wheel built for this runner's python imports on the user's.
+          python3 -m pip install --quiet --target "dist/${dir}/deps" "libcst>=1.9.0"
           tar -C dist -czf "dist/${dir}.tar.gz" "${dir}"
       - uses: actions/upload-artifact@v4
         with:

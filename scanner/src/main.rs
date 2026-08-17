@@ -976,6 +976,62 @@ fn repo_root(paths: &[String]) -> String {
     prefix
 }
 
+/// The signal a stale-suppression message names, for matching a stale finding
+/// against the (line, signal) a repo-wide pass consumed.
+fn sig_of_stale(msg: &str) -> String {
+    // line form: "suppression '// lucidlint: ignore <sig>' at line N no longer fires"
+    if let Some(i) = msg.find("ignore ") {
+        return msg[i + 7..]
+            .split(|c: char| c.is_whitespace() || c == '\'' || c == '>')
+            .next()
+            .unwrap_or("")
+            .to_string();
+    }
+    // file form: "file suppression '... ignore-file <sig>' no longer fires"
+    if let Some(i) = msg.find("ignore-file ") {
+        return msg[i + 12..]
+            .split(|c: char| c.is_whitespace() || c == '\'')
+            .next()
+            .unwrap_or("")
+            .to_string();
+    }
+    String::new()
+}
+
+/// Repo-wide findings (unused, duplicate) are computed after the per-file
+/// suppression pass, so an `# lucidlint: ignore <sig>` comment for one was
+/// never consumed and got flagged stale — and the finding stayed. Re-honor
+/// the file's suppressions for those repo-wide findings (family-aware, widened
+/// window) and drop the stale-suppression findings the consumed comments
+/// caused (review-log B3). The survivors are appended to `all` in place.
+fn reconcile_repo_wide(
+    all: &mut Vec<Finding>,
+    repo_wide: Vec<Finding>,
+    supps_by_rel: &std::collections::HashMap<String, common::Suppressions>,
+) {
+    let mut used_line: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+    let mut used_file: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for f in repo_wide {
+        match supps_by_rel.get(&f.file) {
+            Some(supps) => {
+                let kept = common::filter_repo_wide(vec![f], supps, &mut used_line, &mut used_file);
+                all.extend(kept);
+            }
+            None => all.push(f),
+        }
+    }
+    if used_line.is_empty() && used_file.is_empty() {
+        return;
+    }
+    all.retain(|g| {
+        if g.kind != "stale-suppression" {
+            return true;
+        }
+        let sig = sig_of_stale(&g.message);
+        !used_file.contains(&sig) && !used_line.contains(&(g.line, sig))
+    });
+}
+
 fn rel_of(path: &str, root: &str) -> String {
     if let Some(rel) = path.strip_prefix(root).and_then(|r| r.strip_prefix('/')) {
         return rel.to_string();
@@ -1145,7 +1201,11 @@ fn main() {
     }
     all_findings.extend(duplicate_findings(&py_skeletons));
     all_findings.extend(duplicate_findings(&rs_skeletons));
-    all_findings.extend(unused_findings(&definitions, &prod_refs, &test_refs, &strings));
+    // unused is a repo-wide family computed AFTER the per-file suppression
+    // pass — reconcile it through those suppressions so an `ignore unused <why>`
+    // comment suppresses the finding and is not reported stale (review-log B3)
+    let repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+    reconcile_repo_wide(&mut all_findings, repo_wide_unused, &supps_by_rel);
     // import cycles for Rust crates: the local mod/use graph (the
     // code-review-graph contract is Python-only; Rust resolves itself)
     if !rust_scans.is_empty() {
@@ -2127,7 +2187,8 @@ mod tests {
             prod_refs.extend(scan.decorated.iter().cloned());
         }
         all.extend(duplicate_findings(&skeletons));
-        all.extend(unused_findings(&definitions, &prod_refs, &test_refs, &strings));
+        let repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+        reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel);
         // mirror the production finalize: repo-wide findings honor per-file
         // suppressions too, and a suppression the retain uses is not stale
         let mut used_supps: std::collections::HashSet<(String, usize, String)> = std::collections::HashSet::new();
@@ -2320,6 +2381,31 @@ mod tests {
         let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "unused").collect();
         assert_eq!(u.len(), 1);
         assert!(u[0].message.contains("referenced only from tests"));
+    }
+
+    #[test]
+    fn unused_in_module_helper_used_later_is_not_flagged() {
+        // B2 (review log §1.2): a helper defined and CALLED within the same
+        // module is referenced — never a false "unused". (The v0.1.0 bundle
+        // counted only cross-file refs and flagged in-module helpers.)
+        let f = scan_corpus(&[(
+            "m.py",
+            "def main():\n    return f()\n\ndef _slug(s):\n    return s\n\ndef f():\n    return _slug('x')\n",
+        )]);
+        assert!(!f.iter().any(|x| x.kind == "unused"), "{:?}", f);
+    }
+
+    #[test]
+    fn unused_ignore_comment_is_not_self_defeating() {
+        // B3 (review log §5.1): `# lucidlint: ignore unused <why>` must
+        // suppress the unused finding AND not be reported stale — a
+        // suppression that names a real finding is used, never dead weight.
+        let f = scan_corpus(&[(
+            "m.py",
+            "# lucidlint: ignore unused deliberate helper\n\ndef _helper():\n    return 1\n",
+        )]);
+        assert!(!f.iter().any(|x| x.kind == "unused"), "{:?}", f);
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{:?}", f);
     }
 
     #[test]

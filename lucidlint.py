@@ -35,21 +35,30 @@ import sys
 import tempfile
 import time
 import tomllib
+import xml.etree.ElementTree as ET
+from collections import Counter
+from dataclasses import asdict, dataclass, field
 from importlib import metadata
+from pathlib import Path
+from subprocess import SubprocessError
+from typing import NamedTuple
 
 # the fix engine is optional — the fix command degrades to a clear error
 # when the `fix` extra is not installed
+#
+# The release bundle self-contains the fix engine's libcst in a sibling
+# `deps/` dir (review-log B8): when a `deps/` sits next to this file (the
+# bundle, not a wheel install), prefer it so the fix path works with no pip
+# step. A wheel/source install has no `deps/` and uses site-packages libcst.
+_here = os.path.dirname(os.path.abspath(__file__))
+_vendor = os.path.join(_here, "deps")
+if os.path.isdir(_vendor) and _vendor not in sys.path:
+    sys.path.insert(0, _vendor)
 try:
     import fix_engine
     # lucidlint: ignore swallow optional extra — fix degrades to a clear error
 except ImportError:
     fix_engine = None
-import xml.etree.ElementTree as ET
-from collections import Counter
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from subprocess import SubprocessError
-from typing import NamedTuple
 
 # Role/pattern suffixes from coding-standards.md: communicative for a thin
 # framework-role class (MVC controller, event handler) that delegates; a smell
