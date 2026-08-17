@@ -132,7 +132,9 @@ coverage: deps
 	@$(UV) run coverage xml
 	@$(UV) run coverage html
 	@cd scanner && cargo llvm-cov --lcov --output-path ../lcov.info 2>&1 | tail -30
-	@echo "${GREEN}Coverage reports: htmlcov/index.html + lcov.info${NC}"
+	# the CI summary action reads Cobertura XML — lcov is for local tooling only
+	@cd scanner && cargo llvm-cov --cobertura --output-path ../coverage-rust.xml 2>&1 | tail -5
+	@echo "${GREEN}Coverage reports: htmlcov/index.html + lcov.info + coverage-rust.xml${NC}"
 
 lint: deps lint-check
 
