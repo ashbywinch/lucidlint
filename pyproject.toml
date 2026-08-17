@@ -76,6 +76,13 @@ quote-style = "double"
 testpaths = ["tests"]
 
 [tool.coverage.run]
+# the tool's own code is the subject — the fix-engine tests exec fixtures
+# under synthetic filenames ("after.py", "app.py"...) that coverage cannot
+# measure at report time; scoping the source set keeps them out entirely
+# the shipped Python is the subject (lucidlint.py + the fix engine);
+# rule_metadata.py feeds RULES.md generation and scripts/ is dev tooling —
+# neither ships, so neither is measured
+source = ["lucidlint", "fix_engine"]
 omit = ["*/__main__.py"]
 
 [tool.pyrefly]

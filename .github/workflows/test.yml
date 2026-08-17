@@ -40,7 +40,7 @@ jobs:
           filename: coverage.xml
           badge: true
           fail_below_min: true
-          thresholds: '80 90'  # measured 95% — floor below the measured number, goal above
+          thresholds: '80 90'  # measured 86% (scoped to the shipped Python) — floor below, goal above
           format: markdown
           output: both
       - name: Coverage summary (Rust)
