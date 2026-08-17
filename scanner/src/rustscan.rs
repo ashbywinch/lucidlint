@@ -472,7 +472,7 @@ impl<'a> RsState<'a> {
         if module_level && !self.in_test_code {
             // the gate reads cc from the scan's own array — module-level fns
             // only, mirroring radon's fn_map (methods/nested get cc = 0)
-            let (shape, shape_detail) = rust_fn_shape(&block.stmts);
+            let (shape, shape_detail) = rust_fn_shape(&block.stmts, &param_names(sig));
             self.cc.push(FnCc {
                 file: self.file.to_string(),
                 function: sig.ident.to_string(),
@@ -1872,70 +1872,166 @@ fn is_trivial_rust_stub(stmts: &[syn::Stmt]) -> bool {
 /// with python_fn_shape: a dispatch chain (>= 3 if-expressions comparing the
 /// SAME selector to string literals) or a rule battery (>= 3 if-expressions
 /// pushing onto the SAME Vec) get shape-specific lucid guidance.
-fn rust_fn_shape(body: &[syn::Stmt]) -> (&'static str, String) {
-    use syn::Expr;
-    let ifs: Vec<&syn::ExprIf> = body
+/// The fn's typed-parameter names — the rule-battery classifier's
+/// fn-pointer capture boundary.
+fn param_names(sig: &Signature) -> std::collections::HashSet<String> {
+    sig.inputs
         .iter()
-        .filter_map(|s| match s {
-            syn::Stmt::Expr(syn::Expr::If(i), _) => Some(i),
+        .filter_map(|a| match a {
+            FnArg::Typed(t) => match t.pat.as_ref() {
+                Pat::Ident(pi) => Some(pi.ident.to_string()),
+                _ => None,
+            },
             _ => None,
         })
-        .collect();
-    if ifs.len() >= 3 {
-        let mut selectors: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        for i in &ifs {
-            if let Expr::Binary(b) = i.cond.as_ref() {
-                if let Expr::Path(p) = b.left.as_ref() {
-                    if p.path.segments.len() == 1 {
-                        let name = p.path.segments[0].ident.to_string();
-                        let lit = matches!(b.right.as_ref(), Expr::Lit(_));
-                        if lit {
-                            *selectors.entry(name).or_insert(0) += 1;
-                        }
-                    }
-                }
-            }
-        }
-        if let Some((sel, n)) = selectors.iter().max_by_key(|(_, n)| **n) {
-            if *n >= 3 {
-                return ("dispatch", sel.clone());
-            }
-        }
-        let mut pushes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        for i in &ifs {
-            collect_push_targets(&i.then_branch.stmts, &mut pushes);
-        }
-        if let Some((acc, n)) = pushes.iter().max_by_key(|(_, n)| **n) {
-            if *n >= 3 {
-                return ("rules", acc.clone());
-            }
-        }
+        .collect()
+}
+
+fn rust_fn_shape(body: &[syn::Stmt], params: &std::collections::HashSet<String>) -> (&'static str, String) {
+    // the OFFER must equal the FIX: a shape is only "dispatch"/"rules" when
+    // the fix's own shape checks pass (parity with python_fn_shape)
+    if let Some(sel) = rust_dispatch_shape(body) {
+        return ("dispatch", sel);
+    }
+    if let Some(acc) = rust_rule_battery_shape(body, params) {
+        return ("rules", acc);
     }
     ("plain", String::new())
 }
 
-/// Names `.push(...)`-ed inside a statement set (recursing into blocks) —
-/// the rule-battery accumulator candidates (Rust side).
-fn collect_push_targets(stmts: &[syn::Stmt], out: &mut std::collections::HashMap<String, usize>) {
+/// One Rust dispatch arm's selector when the condition is `sel == "lit"`.
+fn rust_arm_selector(i: &syn::ExprIf) -> Option<String> {
     use syn::Expr;
-    for s in stmts {
-        if let syn::Stmt::Expr(e, _) = s {
-            match e {
-                Expr::MethodCall(m) => {
-                    if m.method == "push" {
-                        if let Expr::Path(p) = m.receiver.as_ref() {
-                            if p.path.segments.len() == 1 {
-                                let name = p.path.segments[0].ident.to_string();
-                                *out.entry(name).or_insert(0) += 1;
-                            }
-                        }
-                    }
+    let Expr::Binary(b) = i.cond.as_ref() else { return None };
+    if !matches!(b.op, BinOp::Eq(_)) {
+        return None;
+    }
+    let Expr::Path(p) = b.left.as_ref() else { return None };
+    if p.path.segments.len() != 1 {
+        return None;
+    }
+    if !matches!(
+        b.right.as_ref(),
+        Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(_),
+            ..
+        })
+    ) {
+        return None;
+    }
+    Some(p.path.segments[0].ident.to_string())
+}
+
+/// The FIXABLE Rust dispatch shape: >= 3 contiguous leading
+/// `if <sel> == "lit" { ... }` arms over ONE selector (the fix converts to a
+/// match; the tail, if any, becomes the `_` arm). Mirrors fix.rs.
+fn rust_dispatch_shape(body: &[syn::Stmt]) -> Option<String> {
+    use syn::Expr;
+    let first_if = body
+        .iter()
+        .position(|s| matches!(s, syn::Stmt::Expr(e, _) if matches!(e, Expr::If(_))))?;
+    let mut selector: Option<String> = None;
+    let mut n = 0usize;
+    for stmt in &body[first_if..] {
+        let syn::Stmt::Expr(e, _) = stmt else { break };
+        let Expr::If(i) = e else { break };
+        let sel = rust_arm_selector(i)?;
+        match &selector {
+            None => selector = Some(sel),
+            Some(s) if *s == sel => {}
+            _ => return None,
+        }
+        n += 1;
+    }
+    if n < 3 {
+        return None;
+    }
+    selector
+}
+
+/// The bare identifiers referenced in an expression (Rust side).
+fn rust_expr_idents(e: &syn::Expr) -> Vec<String> {
+    struct Idents(Vec<String>);
+    impl syn::visit::Visit<'_> for Idents {
+        fn visit_expr_path(&mut self, node: &syn::ExprPath) {
+            if node.path.segments.len() == 1 {
+                let n = node.path.segments[0].ident.to_string();
+                if !self.0.contains(&n) {
+                    self.0.push(n);
                 }
-                Expr::If(i) => collect_push_targets(&i.then_branch.stmts, out),
-                _ => {}
             }
         }
     }
+    let mut v = Idents(Vec::new());
+    v.visit_expr(e);
+    v.0
+}
+
+/// Is the block exactly one `acc.push(<lit>);` statement?
+fn rust_is_single_push(stmts: &[syn::Stmt], acc: &str) -> bool {
+    use syn::Expr;
+    if stmts.len() != 1 {
+        return false;
+    }
+    let syn::Stmt::Expr(e, Some(_)) = &stmts[0] else {
+        return false;
+    };
+    let Expr::MethodCall(m) = e else {
+        return false;
+    };
+    m.method == "push"
+        && matches!(m.receiver.as_ref(), Expr::Path(p)
+            if p.path.segments.len() == 1 && p.path.segments[0].ident == acc)
+        && m.args.len() == 1
+        && matches!(
+            &m.args[0],
+            Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(_),
+                ..
+            })
+        )
+}
+
+/// The FIXABLE Rust rule battery: `let mut <acc> = vec![];`, then >= 3
+/// contiguous `if <cond> { <acc>.push("msg"); }` arms (the block is exactly
+/// the push; the cond reads only the fn's params — fn-pointer conditions
+/// cannot capture), and the tail is the <acc> expression. Mirrors fix.rs.
+fn rust_rule_battery_shape(body: &[syn::Stmt], params: &std::collections::HashSet<String>) -> Option<String> {
+    use syn::Expr;
+    let Some(syn::Stmt::Local(init)) = body.first() else {
+        return None;
+    };
+    let syn::Pat::Ident(acc_pat) = &init.pat else {
+        return None;
+    };
+    let acc = acc_pat.ident.to_string();
+    let mut n = 0usize;
+    for stmt in &body[1..] {
+        let syn::Stmt::Expr(e, _) = stmt else { break };
+        let Expr::If(i) = e else { break };
+        if !rust_is_single_push(&i.then_branch.stmts, &acc) {
+            return None;
+        }
+        for name in rust_expr_idents(&i.cond) {
+            if !params.contains(&name) {
+                return None;
+            }
+        }
+        n += 1;
+    }
+    if n < 3 {
+        return None;
+    }
+    let syn::Stmt::Expr(te, _) = body.last()? else {
+        return None;
+    };
+    let Expr::Path(tp) = te else {
+        return None;
+    };
+    if tp.path.segments.len() != 1 || tp.path.segments[0].ident != acc {
+        return None;
+    }
+    Some(acc)
 }
 
 #[cfg(test)]
@@ -2304,7 +2400,7 @@ mod tests {
             syn::Item::Fn(f) => f.block.stmts.clone(),
             _ => panic!("not a fn"),
         };
-        let (shape, detail) = rust_fn_shape(&body);
+        let (shape, detail) = rust_fn_shape(&body, &std::collections::HashSet::new());
         assert_eq!((shape, detail.as_str()), ("dispatch", "sel"));
         let rules = "fn check(a: &M) -> Vec<&str> {\n    let mut out = vec![];\n    if a.get(1) { out.push(\"x\"); }\n    if a.get(2) { out.push(\"y\"); }\n    if a.get(3) { out.push(\"z\"); }\n    out\n}\n";
         let file = syn::parse_file(rules).unwrap();
@@ -2312,7 +2408,8 @@ mod tests {
             syn::Item::Fn(f) => f.block.stmts.clone(),
             _ => panic!("not a fn"),
         };
-        let (shape, detail) = rust_fn_shape(&body);
+        let params: std::collections::HashSet<String> = std::collections::HashSet::from(["a".to_string()]);
+        let (shape, detail) = rust_fn_shape(&body, &params);
         assert_eq!((shape, detail.as_str()), ("rules", "out"));
         let plain = "fn f(a: i32) -> i32 { a + 1 }\n";
         let file = syn::parse_file(plain).unwrap();
@@ -2320,7 +2417,7 @@ mod tests {
             syn::Item::Fn(f) => f.block.stmts.clone(),
             _ => panic!("not a fn"),
         };
-        let (shape, _) = rust_fn_shape(&body);
+        let (shape, _) = rust_fn_shape(&body, &std::collections::HashSet::new());
         assert_eq!(shape, "plain");
     }
 

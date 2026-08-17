@@ -1770,9 +1770,9 @@ def _fix_structural(kind: str, source: str, line: int, opts, diag: list[str] | N
             return None
         return fix_parameter_object(source, line, opts.name)
     if kind == "dispatch-registry":
-        return fix_dispatch_registry(source, line)
+        return fix_dispatch_registry(source, line, diag=diag)
     if kind == "rule-table":
-        return fix_rule_table(source, line)
+        return fix_rule_table(source, line, diag=diag)
     if kind == "pipeline":
         if opts.name is None:
             return None
@@ -1925,6 +1925,7 @@ def _read_names(nodes) -> list[str]:
 _DispatchArm = tuple[str, str, list[cst.BaseStatement]]
 _DispatchChain = list[tuple[str, list[cst.BaseStatement]]]
 _DispatchShape = tuple[list[cst.BaseStatement], _DispatchChain, str, cst.Return]
+_DispatchArms = tuple[list | None, str | None]
 _BatteryCheck = tuple[cst.BaseExpression, cst.BaseExpression]
 _BatteryShape = tuple[str, list[_BatteryCheck], list, list]
 _RuleBuild = tuple[list[cst.FunctionDef], list]
@@ -1953,35 +1954,55 @@ def _parse_dispatch_arm(stmt: cst.If) -> _DispatchArm | None:
     return left.value, comp.comparator.evaluated_value, list(body.body)
 
 
-def _dispatch_chain_shape(fn: cst.FunctionDef, body: list) -> _DispatchShape | None:
+def _dispatch_chain_shape(fn: cst.FunctionDef, body: list, diag: list[str] | None = None) -> _DispatchShape | None:
     """The dispatch-chain shape of a function: a PREAMBLE (locals computed
     before the chain), the >=3 arms over ONE selector, and a single trailing
-    `return <default>`. None when the body is not that shape."""
+    `return <default>`. None when the body is not that shape — `diag`
+    receives why."""
     first_if = next((i for i, s in enumerate(body) if isinstance(s, cst.If)), None)
     if first_if is None:
+        if diag is not None:
+            diag.append("the function has no if statements — a dispatch chain needs arms")
         return None
     preamble = body[:first_if]
+    chain, selector = _dispatch_arms(body[first_if:], diag)
+    if chain is None:
+        return None
+    if len(chain) < 3:
+        if diag is not None:
+            diag.append("fewer than 3 arms — not a dispatch table worth hoisting")
+        return None
+    tail = body[first_if + len(chain):]
+    if len(tail) != 1 or not isinstance(tail[0], cst.SimpleStatementLine) \
+            or not isinstance(tail[0].body[0], cst.Return):
+        if diag is not None:
+            diag.append("the no-match path is not a single trailing `return <default>`")
+        return None
+    return preamble, chain, selector or "", tail[0].body[0]
+
+
+def _dispatch_arms(stmts: list, diag: list[str] | None = None) -> _DispatchArms:
+    """The contiguous dispatch arms over ONE selector from a statement run —
+    (chain, selector) or (None, None) when an arm is not the table shape."""
     chain = []
     selector: str | None = None
-    for stmt in body[first_if:]:
+    for stmt in stmts:
         if not isinstance(stmt, cst.If):
             break
         parsed = _parse_dispatch_arm(stmt)
         if parsed is None:
-            return None
+            if diag is not None:
+                diag.append("an arm is not `if <sel> == \"lit\": <body>` — the table needs literal selectors")
+            return None, None
         sel, lit, arm_body = parsed
         if selector is None:
             selector = sel
         elif sel != selector:
-            return None
+            if diag is not None:
+                diag.append(f"the arms do not share one selector ('{sel}' vs '{selector}')")
+            return None, None
         chain.append((lit, arm_body))
-    if len(chain) < 3:
-        return None  # >= 3 arms make a registry worth it
-    tail = body[first_if + len(chain):]
-    if len(tail) != 1 or not isinstance(tail[0], cst.SimpleStatementLine) \
-            or not isinstance(tail[0].body[0], cst.Return):
-        return None  # v1: a single trailing `return <default>` is the no-match path
-    return preamble, chain, selector or "", tail[0].body[0]
+    return chain, selector
 
 
 def _arm_single_expression(arm_body: list):
@@ -2154,7 +2175,7 @@ def _dispatch_call(selector: str, default, union: list[str]) -> list:
     ]
 
 
-def fix_dispatch_registry(source: str, line: int) -> str | None:
+def fix_dispatch_registry(source: str, line: int, diag: list[str] | None = None) -> str | None:
     """A dispatch chain (`if sel == "a": return f()  if sel == "b": ...`)
     is a handler REGISTRY in disguise — each arm is already a named handler.
     Rewrite it to a dict of selector -> handler functions and a one-line
@@ -2169,7 +2190,7 @@ def fix_dispatch_registry(source: str, line: int) -> str | None:
     if fn is None or not any(s is fn for s in wrapper.module.body):
         return None
     body = list(fn.body.body)
-    shaped = _dispatch_chain_shape(fn, body)
+    shaped = _dispatch_chain_shape(fn, body, diag)
     if shaped is None:
         return None
     preamble, chain, selector, default = shaped
@@ -2187,13 +2208,16 @@ def fix_dispatch_registry(source: str, line: int) -> str | None:
 # --------------------------------------------------------------------------- rule-checks
 
 
-def _rule_battery_shape(fn: cst.FunctionDef, body: list) -> _BatteryShape | None:
+def _rule_battery_shape(fn: cst.FunctionDef, body: list, diag: list[str] | None = None) -> _BatteryShape | None:
     """The rule-battery shape: `acc = []`, >= 3 `if <cond>: acc.append(<v>)`
     checks (each a single append, no else), then anything as the tail. The
     conditions may read ANY enclosing name — the hoisted lambdas capture the
-    scope. Returns (acc, [(cond, value), ...], tail)."""
+    scope. Returns (acc, [(cond, value), ...], preamble, tail). `diag`
+    receives why the body is not that shape."""
     probe = _acc_init(body)
     if probe is None:
+        if diag is not None:
+            diag.append("the function has no `acc = []` accumulator opener")
         return None
     acc, init_idx = probe
     preamble = list(body[:init_idx])  # locals computed before the init —
@@ -2203,22 +2227,29 @@ def _rule_battery_shape(fn: cst.FunctionDef, body: list) -> _BatteryShape | None
     while idx < len(body) and isinstance(body[idx], cst.If):
         stmt = body[idx]
         if stmt.orelse:
+            if diag is not None:
+                diag.append("a check has an else — the battery must be independent ifs")
             return None
         value = _append_value(stmt.body, acc)
         if value is None:
-            return None  # v1: one append per check
+            if diag is not None:
+                diag.append(f"a check is not exactly `{acc}.append(<violation>)` — one append per check")
+            return None
         checks.append((stmt.test, value))
         idx += 1
     if len(checks) < 3:
-        return None  # fewer than 3 checks is not a battery
+        if diag is not None:
+            diag.append("fewer than 3 checks — not a battery worth a table")
+        return None
     # everything after the last check is the TAIL — kept verbatim (the
     # collector comprehension produces `acc`, then the tail uses it)
     return acc, checks, preamble, list(body[idx:])
 
 
 def _acc_init(body: list) -> _AccInit | None:
-    """The `acc = []` opener — (acc name, its index) or None. Preamble
-    statements may precede it (the hoisted lambdas capture them)."""
+    """The `acc = []` opener (plain or annotated `acc: list = []`) — (acc
+    name, its index) or None. Preamble statements may precede it (the hoisted
+    lambdas capture them)."""
     for i, stmt in enumerate(body):
         if not isinstance(stmt, cst.SimpleStatementLine) or len(stmt.body) != 1:
             continue
@@ -2227,6 +2258,10 @@ def _acc_init(body: list) -> _AccInit | None:
                 and len(a.value.elements) == 0 \
                 and isinstance(a.targets[0].target, cst.Name):
             return a.targets[0].target.value, i
+        if isinstance(a, cst.AnnAssign) and isinstance(a.value, cst.List) \
+                and len(a.value.elements) == 0 \
+                and isinstance(a.target, cst.Name):
+            return a.target.value, i
     return None
 
 
@@ -2288,14 +2323,15 @@ def _rule_table_build(acc: str, checks: list) -> _RuleTableBuild:
     return table, collector
 
 
-def fix_rule_table(source: str, line: int) -> str | None:
+def fix_rule_table(source: str, line: int, diag: list[str] | None = None) -> str | None:
     """A rule battery (`if cond: violations.append(...)` repeated) is a
     LATENT DATA STRUCTURE — a table of (condition, violation) pairs. Hoist
     it: each check becomes a tuple `(lambda: <cond>, <violation>)`, the
     function collects the violations whose condition holds. The lambdas
     capture the enclosing scope (shared preamble locals need no plumbing)
     and need NO names — the naming problem dissolves. v1: each check is a
-    single `acc.append(<value>)` with no else."""
+    single `acc.append(<value>)` with no else. `diag` receives why the body
+    is not that shape."""
     module = cst.parse_module(source)
     wrapper = cst.MetadataWrapper(module)
     finder = _FindFnLine(line)
@@ -2304,7 +2340,7 @@ def fix_rule_table(source: str, line: int) -> str | None:
     if fn is None or not any(s is fn for s in wrapper.module.body):
         return None
     body = list(fn.body.body)
-    shaped = _rule_battery_shape(fn, body)
+    shaped = _rule_battery_shape(fn, body, diag)
     if shaped is None:
         return None
     acc, checks, preamble, tail = shaped

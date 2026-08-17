@@ -327,78 +327,123 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
 /// scan sees the body once — the message must not re-parse (review: run_tool
 /// is a dispatch chain, _deterministic_violations a rule battery).
 fn python_fn_shape(body: &[Stmt]) -> (&'static str, String) {
-    let ifs: Vec<&StmtIf> = body
-        .iter()
-        .filter_map(|s| match s {
-            Stmt::If(i) => Some(i),
-            _ => None,
-        })
-        .collect();
-    if ifs.len() >= 3 {
-        let mut selectors: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for i in &ifs {
-            if let Expr::Compare(c) = i.test.as_ref() {
-                if let Expr::Name(n) = c.left.as_ref() {
-                    let literal_comp = c.comparators.iter().any(|co| matches!(co, Expr::StringLiteral(_)));
-                    if literal_comp {
-                        *selectors.entry(n.id.as_str()).or_insert(0) += 1;
-                    }
-                }
-            }
-        }
-        if let Some((sel, n)) = selectors.iter().max_by_key(|(_, n)| **n) {
-            if *n >= 3 {
-                return ("dispatch", (*sel).to_string());
-            }
-        }
-        let mut appends: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for i in &ifs {
-            collect_append_targets(&i.body, &mut appends);
-        }
-        if let Some((acc, n)) = appends.iter().max_by_key(|(_, n)| **n) {
-            if *n >= 3 {
-                return ("rules", (*acc).to_string());
-            }
-        }
+    // the OFFER must equal the FIX: a shape is only "dispatch"/"rules" when
+    // the fix's own shape checks pass — otherwise the directive would offer
+    // something that refuses (the fix-engine v1 boundaries are strict)
+    if let Some(sel) = dispatch_chain_shape(body) {
+        return ("dispatch", sel);
+    }
+    if let Some(acc) = rule_battery_shape(body) {
+        return ("rules", acc);
     }
     ("plain", String::new())
 }
 
-/// Names `.append(...)`-ed inside a statement set (recursing into compounds)
-/// — the rule-battery accumulator candidates.
-fn collect_append_targets<'a>(stmts: &'a [Stmt], out: &mut std::collections::HashMap<&'a str, usize>) {
-    for s in stmts {
-        match s {
-            Stmt::Expr(e) => {
-                if let Expr::Call(call) = e.value.as_ref() {
-                    if let Expr::Attribute(a) = call.func.as_ref() {
-                        if a.attr.as_str() == "append" {
-                            if let Expr::Name(n) = a.value.as_ref() {
-                                *out.entry(n.id.as_str()).or_insert(0) += 1;
-                            }
-                        }
-                    }
+/// One dispatch arm's selector when the test is `sel == "lit"`.
+fn dispatch_arm_selector(i: &StmtIf) -> Option<(&str, &str)> {
+    let Expr::Compare(c) = i.test.as_ref() else { return None };
+    if c.ops.len() != 1 || !matches!(c.ops[0], ruff_python_ast::CmpOp::Eq) {
+        return None;
+    }
+    let Expr::Name(n) = c.left.as_ref() else { return None };
+    let Expr::StringLiteral(_) = &c.comparators[0] else {
+        return None;
+    };
+    Some((n.id.as_str(), "lit"))
+}
+
+/// The FIXABLE dispatch shape: a preamble, >= 3 contiguous `if <sel> ==
+/// "lit": <body>` arms over ONE selector, then exactly one trailing
+/// `return <default>`. This mirrors fix_engine's _dispatch_chain_shape — the
+/// offer is only made when the fix applies.
+fn dispatch_chain_shape(body: &[Stmt]) -> Option<String> {
+    let first_if = body.iter().position(|s| matches!(s, Stmt::If(_)))?;
+    let mut selector: Option<&str> = None;
+    let mut n = 0usize;
+    for stmt in &body[first_if..] {
+        let Stmt::If(i) = stmt else { break };
+        let (sel, _lit) = dispatch_arm_selector(i)?;
+        if !i.elif_else_clauses.is_empty() {
+            return None; // an arm with elif/else is not the fixable shape
+        }
+        match selector {
+            None => selector = Some(sel),
+            Some(s) if s == sel => {}
+            _ => return None,
+        }
+        n += 1;
+    }
+    if n < 3 {
+        return None;
+    }
+    // the no-match path: a single trailing `return <default>`
+    let tail = &body[first_if + n..];
+    if tail.len() != 1 || !matches!(tail[0], Stmt::Return(_)) {
+        return None;
+    }
+    selector.map(str::to_string)
+}
+
+/// The `acc = []` opener (plain or annotated) — (acc name, index).
+fn empty_list_init(body: &[Stmt]) -> Option<(String, usize)> {
+    for (i, stmt) in body.iter().enumerate() {
+        match stmt {
+            Stmt::Assign(a) => {
+                if matches!(a.value.as_ref(), Expr::List(l) if l.elts.is_empty())
+                    && a.targets.len() == 1
+                    && matches!(a.targets[0], Expr::Name(_))
+                {
+                    let Expr::Name(n) = &a.targets[0] else { unreachable!() };
+                    return Some((n.id.to_string(), i));
                 }
             }
-            Stmt::If(i) => {
-                collect_append_targets(&i.body, out);
-                for cl in &i.elif_else_clauses {
-                    collect_append_targets(&cl.body, out);
+            Stmt::AnnAssign(a) => match (a.value.as_deref(), a.target.as_ref()) {
+                (Some(Expr::List(l)), Expr::Name(n)) if l.elts.is_empty() => {
+                    return Some((n.id.to_string(), i));
                 }
-            }
-            Stmt::For(f) => collect_append_targets(&f.body, out),
-            Stmt::While(w) => collect_append_targets(&w.body, out),
-            Stmt::With(w) => collect_append_targets(&w.body, out),
-            Stmt::Try(t) => {
-                collect_append_targets(&t.body, out);
-                for h in &t.handlers {
-                    let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
-                    collect_append_targets(&eh.body, out);
-                }
-            }
+                _ => {}
+            },
             _ => {}
         }
     }
+    None
+}
+
+/// Is the statement exactly one `acc.append(<value>)` call?
+fn is_single_append(stmts: &[Stmt], acc: &str) -> bool {
+    if stmts.len() != 1 {
+        return false;
+    }
+    let Stmt::Expr(e) = &stmts[0] else { return false };
+    let Expr::Call(call) = e.value.as_ref() else {
+        return false;
+    };
+    let Expr::Attribute(a) = call.func.as_ref() else {
+        return false;
+    };
+    a.attr.as_str() == "append"
+        && matches!(a.value.as_ref(), Expr::Name(n) if n.id.as_str() == acc)
+        && call.arguments.args.len() == 1
+}
+
+/// The FIXABLE rule-battery shape: an `acc = []` opener, then >= 3
+/// CONTIGUOUS `if <cond>: acc.append(<v>)` checks (no else, one append
+/// each). Mirrors fix_engine's _rule_battery_shape — the offer equals the
+/// fix.
+fn rule_battery_shape(body: &[Stmt]) -> Option<String> {
+    let (acc, init_idx) = empty_list_init(body)?;
+    let mut n = 0usize;
+    for stmt in &body[init_idx + 1..] {
+        let Stmt::If(i) = stmt else { break };
+        if !i.elif_else_clauses.is_empty() || !is_single_append(&i.body, &acc) {
+            return None;
+        }
+        n += 1;
+    }
+    if n < 3 {
+        return None;
+    }
+    Some(acc)
 }
 
 impl<'a> ScanState<'a> {
@@ -2641,6 +2686,17 @@ mod tests {
         let plain = "def f(a):\n    x = a + 1\n    return x\n";
         let (shape, _) = python_fn_shape(&first_py_fn_body(plain));
         assert_eq!(shape, "plain");
+        // the OFFER equals the FIX: a battery the rule-table fix cannot
+        // apply to (a check with a nested if — not a single append) is NOT
+        // routed to rule-table; it is "plain" so the message offers
+        // extract-method instead (no false directive)
+        let unfixable = "def check(a):\n    out = []\n    if a.get(1):\n        if a.get(2):\n            out.append('x')\n    if a.get(3):\n        out.append('y')\n    if a.get(4):\n        out.append('z')\n    return out\n";
+        let (shape, _) = python_fn_shape(&first_py_fn_body(unfixable));
+        assert_eq!(shape, "plain", "an unhoistable battery must not be offered rule-table");
+        // a dispatch with an elif is not the fixable shape
+        let unfixable_d = "def route(sel):\n    if sel == \"a\":\n        return 1\n    elif sel == \"b\":\n        return 2\n    if sel == \"c\":\n        return 3\n    return -1\n";
+        let (shape, _) = python_fn_shape(&first_py_fn_body(unfixable_d));
+        assert_eq!(shape, "plain", "an elif dispatch must not be offered dispatch-registry");
     }
 
     #[test]
