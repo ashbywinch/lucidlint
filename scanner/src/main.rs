@@ -1157,12 +1157,12 @@ fn main() {
                 let file = v.get("file").and_then(|k| k.as_str()).unwrap_or("");
                 let line = v.get("line").and_then(|k| k.as_u64()).unwrap_or(0) as usize;
                 let name = v.get("name").and_then(|k| k.as_str()).unwrap_or("");
-                if kind == "extract-method" || kind == "dispatch-registry" || kind == "rule-checks" {
+                if kind == "extract-method" || kind == "dispatch-registry" || kind == "rule-table" {
                     if let Ok(src) = std::fs::read_to_string(file) {
                         let result = if kind == "dispatch-registry" {
                             fix::fix_dispatch_registry(&src, line)
-                        } else if kind == "rule-checks" {
-                            fix::fix_rule_checks(&src, line)
+                        } else if kind == "rule-table" {
+                            fix::fix_rule_table(&src, line)
                         } else {
                             fix::fix_extract_method(&src, line, name)
                         };
@@ -1174,8 +1174,8 @@ fn main() {
                                 }
                                 let what = if kind == "dispatch-registry" {
                                     "converted the dispatch chain into a match"
-                                } else if kind == "rule-checks" {
-                                    "extracted the if/append checks into named predicates"
+                                } else if kind == "rule-table" {
+                                    "hoisted the if/append checks into a (condition, violation) table"
                                 } else {
                                     "extracted seam into a named function"
                                 };

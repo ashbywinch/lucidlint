@@ -948,20 +948,22 @@ def test_rust_dispatch_registry_applies(tmp_path):
     assert r2.returncode == 0, r2.stderr
 
 
-def test_rule_checks_preserves_behavior(tmp_path):
-    """The rule-checks fix: a battery of if/append checks becomes a list of
-    named predicates returning their violation. Same violations, same order."""
-    src = '''def check(assessment, who):
-    violations = []
-    if who.strip() and assessment.get("q"):
-        violations.append("the narrator is not known")
-    if assessment.get("facts"):
-        violations.append("facts without a date")
-    if assessment.get("ages") is None:
-        violations.append("no ages recorded")
-    return violations
-'''
-    fixed = fix_engine.fix_rule_checks(src, 1)
+def test_rule_table_preserves_behavior(tmp_path):
+    """The rule-table fix (hoist the latent data structure): the battery of
+    if/append checks becomes a list of (lambda condition, violation) tuples.
+    Same violations, same order; the lambdas capture shared preamble locals."""
+    src = (
+        "def check(assessment, who):\n"
+        "    violations = []\n"
+        '    if who.strip() and assessment.get("q"):\n'
+        '        violations.append("the narrator is not known")\n'
+        '    if assessment.get("facts"):\n'
+        '        violations.append("facts without a date")\n'
+        '    if assessment.get("ages") is None:\n'
+        '        violations.append("no ages recorded")\n'
+        "    return violations\n"
+    )
+    fixed = fix_engine.fix_rule_table(src, 1)
     assert fixed is not None and fixed != src
     before, after = {}, {}
     exec(src, before)
@@ -975,13 +977,41 @@ def test_rule_checks_preserves_behavior(tmp_path):
         b = before["check"](assessment, "who")
         a = after["check"](assessment, "who")
         assert b == a, (assessment, b, a)
-    assert "_check_1" in fixed and "_checks = [" in fixed
-    assert fixed.count("violations.append(") == 1  # only the collector loop
+    assert "lambda:" in fixed and "if _cond()" in fixed
+    assert fixed.count("violations.append(") == 0  # the if-stack is gone
 
 
-def test_rust_rule_checks_applies(tmp_path):
-    """rule-checks works on Rust via the scan core (syn): the if/append
-    battery becomes named predicates + a collector loop. Both compile."""
+def test_rule_table_captures_preamble_locals(tmp_path):
+    """The hoisted lambdas capture the fn's shared computed locals — no
+    param plumbing, unlike a named-function hoist (v1 refused these)."""
+    src = (
+        "def check(assessment, who):\n"
+        '    facts = assessment.get("facts", [])\n'
+        "    violations = []\n"
+        "    if facts and who.strip():\n"
+        '        violations.append("facts without a narrator")\n'
+        "    if not facts:\n"
+        '        violations.append("no facts at all")\n'
+        "    if who.strip() and len(facts) > 3:\n"
+        '        violations.append("too many facts")\n'
+        "    return violations\n"
+    )
+    fixed = fix_engine.fix_rule_table(src, 1)
+    assert fixed is not None
+    before, after = {}, {}
+    exec(src, before)
+    exec(fixed, after)
+    for assessment in [{"facts": ["a"]}, {"facts": ["a", "b", "c", "d"]}, {}]:
+        b = before["check"](assessment, "who")
+        a = after["check"](assessment, "who")
+        assert b == a, (assessment, b, a)
+
+
+def test_rust_rule_table_applies(tmp_path):
+    """rule-table works on Rust via the scan core (syn): the if/append
+    battery becomes a (fn-pointer condition, violation) table — parity with
+    the Python lambda-table (Rust closures cannot form a homogeneous table).
+    Both compile."""
     src = (
         "pub fn check(a: &M, who: &str) -> Vec<&'static str> {\n"
         "    let mut out = vec![];\n"
@@ -995,12 +1025,13 @@ def test_rust_rule_checks_applies(tmp_path):
     p = repo / "houses" / "lib.rs"
     p.write_text(src)
     run_main(
-        repo, "fix", "--kind", "rule-checks", "--file", "houses/lib.rs", "--line", "1",
+        repo, "fix", "--kind", "rule-table", "--file", "houses/lib.rs", "--line", "1",
     )
     fixed = p.read_text()
-    assert "fn _check_1(a: &M, who: &str) -> Option<&'static str>" in fixed
-    assert "Some(\"v1\")" in fixed and "Some(\"v2\")" in fixed and "Some(\"v3\")" in fixed
-    assert "for _check in [_check_1, _check_2, _check_3]" in fixed
+    assert "fn _rule_1(a: &M, who: &str) -> bool" in fixed
+    assert "(_rule_1, \"v1\")" in fixed and "(_rule_2, \"v2\")" in fixed and "(_rule_3, \"v3\")" in fixed
+    assert "for (_cond, _msg) in rules" in fixed
+    assert "fn(&M, &str) -> bool" in fixed  # the fn-pointer table type
     assert fixed.count("out.push(") == 1  # only the collector loop pushes
     import subprocess  # noqa: F401
     rustc = str(Path.home() / ".cargo" / "bin" / "rustc")

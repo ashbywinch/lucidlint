@@ -62,13 +62,13 @@ STRUCTURAL_KINDS = {
     "long-param-list": "Introduce Parameter Object: bundle the params into a dataclass",
     "pipeline": "turn the pure reduction loop into a sum() over a named per-item contributor",
     "dispatch-registry": "convert the if/elif dispatch chain into a dict of selector -> handler functions",
-    "rule-checks": "convert the battery of if/append checks into a list of named check predicates",
+    "rule-table": "hoist the latent data structure: the if/append battery becomes a (condition, violation) table",
 }
 
 # structural fixes whose result is genuinely novel (a class split, a new
 # function, a bundled signature) preview a diff before --confirm; the
 # obvious ones (a constant inserted, a rename) apply directly
-PREVIEW_KINDS = {"extract-method", "extract-class", "long-param-list", "pipeline", "dispatch-registry", "rule-checks"}
+PREVIEW_KINDS = {"extract-method", "extract-class", "long-param-list", "pipeline", "dispatch-registry", "rule-table"}
 
 # the gate reports DISPLAY kinds (final_kind output: strewing shows as
 # latent-class); the fix command accepts either and normalizes here — the
@@ -1771,8 +1771,8 @@ def _fix_structural(kind: str, source: str, line: int, opts, diag: list[str] | N
         return fix_parameter_object(source, line, opts.name)
     if kind == "dispatch-registry":
         return fix_dispatch_registry(source, line)
-    if kind == "rule-checks":
-        return fix_rule_checks(source, line)
+    if kind == "rule-table":
+        return fix_rule_table(source, line)
     if kind == "pipeline":
         if opts.name is None:
             return None
@@ -1926,10 +1926,11 @@ _DispatchArm = tuple[str, str, list[cst.BaseStatement]]
 _DispatchChain = list[tuple[str, list[cst.BaseStatement]]]
 _DispatchShape = tuple[list[cst.BaseStatement], _DispatchChain, str, cst.Return]
 _BatteryCheck = tuple[cst.BaseExpression, cst.BaseExpression]
-_BatteryShape = tuple[str, list[_BatteryCheck], list]
+_BatteryShape = tuple[str, list[_BatteryCheck], list, list]
 _RuleBuild = tuple[list[cst.FunctionDef], list]
 _DispatchBuild = tuple[list[cst.FunctionDef], cst.SimpleStatementLine]
 _AccInit = tuple[str, int]
+_RuleTableBuild = tuple[cst.SimpleStatementLine, cst.SimpleStatementLine]
 
 
 def _parse_dispatch_arm(stmt: cst.If) -> _DispatchArm | None:
@@ -2095,16 +2096,19 @@ def fix_dispatch_registry(source: str, line: int) -> str | None:
 # --------------------------------------------------------------------------- rule-checks
 
 
-def _rule_battery_shape(fn: cst.FunctionDef, body: list, params: list[str]) -> _BatteryShape | None:
+def _rule_battery_shape(fn: cst.FunctionDef, body: list) -> _BatteryShape | None:
     """The rule-battery shape: `acc = []`, >= 3 `if <cond>: acc.append(<v>)`
-    checks (each a single append reading only the fn's params), and a
-    trailing `return acc`. Returns (acc, [(cond, value), ...])."""
+    checks (each a single append, no else), then anything as the tail. The
+    conditions may read ANY enclosing name — the hoisted lambdas capture the
+    scope. Returns (acc, [(cond, value), ...], tail)."""
     probe = _acc_init(body)
     if probe is None:
         return None
-    acc, start = probe
+    acc, init_idx = probe
+    preamble = list(body[:init_idx])  # locals computed before the init —
+    # the hoisted lambdas CAPTURE them, so they need no plumbing
     checks: list = []
-    idx = start
+    idx = init_idx + 1
     while idx < len(body) and isinstance(body[idx], cst.If):
         stmt = body[idx]
         if stmt.orelse:
@@ -2112,26 +2116,27 @@ def _rule_battery_shape(fn: cst.FunctionDef, body: list, params: list[str]) -> _
         value = _append_value(stmt.body, acc)
         if value is None:
             return None  # v1: one append per check
-        if not set(_read_names([stmt.test, value])) <= set(params):
-            return None
         checks.append((stmt.test, value))
         idx += 1
     if len(checks) < 3:
         return None  # fewer than 3 checks is not a battery
     # everything after the last check is the TAIL — kept verbatim (the
-    # collector loop produces `acc`, then the tail uses it)
-    return acc, checks, list(body[idx:])
+    # collector comprehension produces `acc`, then the tail uses it)
+    return acc, checks, preamble, list(body[idx:])
 
 
 def _acc_init(body: list) -> _AccInit | None:
-    """The `acc = []` opener — (acc name, index after it) or None."""
-    if not body or not isinstance(body[0], cst.SimpleStatementLine) \
-            or not isinstance(body[0].body[0], cst.Assign) \
-            or not isinstance(body[0].body[0].value, cst.List) \
-            or len(body[0].body[0].value.elements) != 0 \
-            or not isinstance(body[0].body[0].targets[0].target, cst.Name):
-        return None
-    return body[0].body[0].targets[0].target.value, 1
+    """The `acc = []` opener — (acc name, its index) or None. Preamble
+    statements may precede it (the hoisted lambdas capture them)."""
+    for i, stmt in enumerate(body):
+        if not isinstance(stmt, cst.SimpleStatementLine) or len(stmt.body) != 1:
+            continue
+        a = stmt.body[0]
+        if isinstance(a, cst.Assign) and isinstance(a.value, cst.List) \
+                and len(a.value.elements) == 0 \
+                and isinstance(a.targets[0].target, cst.Name):
+            return a.targets[0].target.value, i
+    return None
 
 
 def _append_value(branch, acc: str):
@@ -2154,86 +2159,52 @@ def _append_value(branch, acc: str):
     return call.args[0].value
 
 
-def _rule_build(params: list[str], acc: str, checks: list) -> _RuleBuild:
-    """The named predicates (each returns its violation or None) and the
-    collector loop that replaces the if-stack."""
-    check_defs: list[cst.FunctionDef] = []
-    check_names: list[cst.Element] = []
-    for i, (cond, value) in enumerate(checks):
-        cname = f"_check_{i + 1}"
-        check_defs.append(
-            cst.FunctionDef(
-                name=cst.Name(cname),
-                params=cst.Parameters(params=[cst.Param(cst.Name(p)) for p in params]),
-                body=cst.IndentedBlock(
-                    body=[
-                        cst.If(
-                            test=cond,
-                            body=cst.IndentedBlock(body=[cst.SimpleStatementLine(body=[cst.Return(value)])]),
-                            orelse=None,
-                        ),
-                        cst.SimpleStatementLine(body=[cst.Return(cst.Name("None"))]),
+def _rule_table_build(acc: str, checks: list) -> _RuleTableBuild:
+    """The hoisted table — `rules = [(lambda: <cond>, <violation>), ...]` —
+    and the collector comprehension `acc = [v for _cond, v in rules if _cond()]`.
+    The lambdas close over the enclosing scope: shared preamble locals are
+    captured, and no condition needs a name."""
+    entries = []
+    for cond, value in checks:
+        entries.append(
+            cst.Element(
+                value=cst.Tuple(
+                    elements=[
+                        cst.Element(value=cst.Lambda(params=cst.Parameters(), body=cond)),
+                        cst.Element(value=value),
                     ]
-                ),
+                )
             )
         )
-        check_names.append(cst.Element(value=cst.Name(cname)))
-    loop = [
-        cst.SimpleStatementLine(
-            body=[cst.Assign(targets=[cst.AssignTarget(cst.Name("_checks"))], value=cst.List(elements=check_names))]
-        ),
-        cst.SimpleStatementLine(
-            body=[cst.Assign(targets=[cst.AssignTarget(cst.Name(acc))], value=cst.List(elements=[]))]
-        ),
-        cst.For(
-            target=cst.Name("_check"),
-            iter=cst.Name("_checks"),
-            body=cst.IndentedBlock(
-                body=[
-                    cst.SimpleStatementLine(
-                        body=[
-                            cst.Assign(
-                                targets=[cst.AssignTarget(cst.Name("_v"))],
-                                value=cst.Call(func=cst.Name("_check"), args=[cst.Arg(cst.Name(p)) for p in params]),
-                            )
-                        ]
+    table = cst.SimpleStatementLine(
+        body=[cst.Assign(targets=[cst.AssignTarget(cst.Name("rules"))], value=cst.List(elements=entries))]
+    )
+    collector = cst.SimpleStatementLine(
+        body=[
+            cst.Assign(
+                targets=[cst.AssignTarget(cst.Name(acc))],
+                value=cst.ListComp(
+                    elt=cst.Name("v"),
+                    for_in=cst.CompFor(
+                        target=cst.Tuple(elements=[cst.Element(cst.Name("_cond")), cst.Element(cst.Name("v"))]),
+                        iter=cst.Name("rules"),
+                        ifs=[cst.CompIf(test=cst.Call(func=cst.Name("_cond"), args=[]))],
                     ),
-                    cst.If(
-                        test=cst.Comparison(
-                            left=cst.Name("_v"),
-                            comparisons=[cst.ComparisonTarget(cst.IsNot(), cst.Name("None"))],
-                        ),
-                        body=cst.IndentedBlock(
-                            body=[
-                                cst.SimpleStatementLine(
-                                    body=[
-                                        cst.Expr(
-                                            value=cst.Call(
-                                                func=cst.Attribute(value=cst.Name(acc), attr=cst.Name("append")),
-                                                args=[cst.Arg(cst.Name("_v"))],
-                                            )
-                                        )
-                                    ]
-                                )
-                            ]
-                        ),
-                        orelse=None,
-                    ),
-                ]
-            ),
-            orelse=None,
-        ),
-    ]
-    return check_defs, loop
+                ),
+            )
+        ]
+    )
+    return table, collector
 
 
-def fix_rule_checks(source: str, line: int) -> str | None:
-    """A rule battery (`if cond: violations.append(...)` repeated, then
-    `return violations`) is a LIST of named checks, not an if-stack. Extract
-    each check into a private predicate returning its violation (or None),
-    and the function becomes a loop over the check list. v1: each check is a
-    single `acc.append(<value>)` with no else; the checks read only the
-    function's own parameters."""
+def fix_rule_table(source: str, line: int) -> str | None:
+    """A rule battery (`if cond: violations.append(...)` repeated) is a
+    LATENT DATA STRUCTURE — a table of (condition, violation) pairs. Hoist
+    it: each check becomes a tuple `(lambda: <cond>, <violation>)`, the
+    function collects the violations whose condition holds. The lambdas
+    capture the enclosing scope (shared preamble locals need no plumbing)
+    and need NO names — the naming problem dissolves. v1: each check is a
+    single `acc.append(<value>)` with no else."""
     module = cst.parse_module(source)
     wrapper = cst.MetadataWrapper(module)
     finder = _FindFnLine(line)
@@ -2241,19 +2212,13 @@ def fix_rule_checks(source: str, line: int) -> str | None:
     fn = finder.found
     if fn is None or not any(s is fn for s in wrapper.module.body):
         return None
-    params = [p.name.value for p in fn.params.params if p.name is not None]
     body = list(fn.body.body)
-    shaped = _rule_battery_shape(fn, body, params)
+    shaped = _rule_battery_shape(fn, body)
     if shaped is None:
         return None
-    acc, checks, tail = shaped
-    check_defs, loop = _rule_build(params, acc, checks)
-    new_fn = fn.with_changes(body=fn.body.with_changes(body=loop + tail))
-    out_body: list = []
-    for stmt in wrapper.module.body:
-        if stmt is fn:
-            out_body.extend(check_defs)  # define the predicates first
-            out_body.append(new_fn)
-        else:
-            out_body.append(stmt)
+    acc, checks, preamble, tail = shaped
+    table, collector = _rule_table_build(acc, checks)
+    new_fn = fn.with_changes(body=fn.body.with_changes(body=preamble + [table, collector] + tail))
+    # the lambdas live IN the fn — no module-level additions
+    out_body: list = [new_fn if stmt is fn else stmt for stmt in wrapper.module.body]
     return cst.Module(body=out_body).code

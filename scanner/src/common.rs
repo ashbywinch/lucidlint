@@ -108,7 +108,7 @@ pub fn complexity_message(cc: u32, shape: &str, detail: &str) -> String {
             "cyclomatic complexity {cc} (>= 15) — the function is a dispatch chain over '{detail}': every arm is a named handler — the lucid refactoring is a dispatch table (a dict of {detail} → handler functions in Python; a match in Rust) — fix: dispatch-registry (previews the table; apply with --confirm)"
         ),
         "rules" => format!(
-            "cyclomatic complexity {cc} (>= 15) — the function is a battery of independent checks each appending to '{detail}' — extract each check into a named predicate returning its violation, composed as a list of checks, instead of one if-stack — fix: rule-checks (previews the check list; apply with --confirm)"
+            "cyclomatic complexity {cc} (>= 15) — the function is a battery of independent checks each appending to '{detail}' — HOIST THE LATENT DATA STRUCTURE: the if/append chain IS a (condition, violation) table — collapse it into a list of such pairs whose conditions are lambdas (Python) or fn pointers (Rust), and collect the violations whose condition holds — fix: rule-table (previews the table; apply with --confirm)"
         ),
         _ => format!(
             "cyclomatic complexity {cc} (>= 15) — extract part of this function into a named method (the preview shows the block) — fix: extract-method (preview without --fix-name; apply with --fix-name <name>)"
@@ -537,8 +537,9 @@ mod tests {
         assert!(dispatch.contains("dispatch table"), "{dispatch}");
         assert!(dispatch.contains("fix: dispatch-registry"), "{dispatch}");
         let rules = complexity_message(42, "rules", "violations");
-        assert!(rules.contains("battery of independent checks"), "{rules}");
-        assert!(rules.contains("named predicate"), "{rules}");
+        assert!(rules.contains("HOIST THE LATENT DATA STRUCTURE"), "{rules}");
+        assert!(rules.contains("(condition, violation) table"), "{rules}");
+        assert!(rules.contains("fix: rule-table"), "{rules}");
         let plain = complexity_message(20, "plain", "");
         assert!(
             plain.contains("extract part of this function into a named method"),

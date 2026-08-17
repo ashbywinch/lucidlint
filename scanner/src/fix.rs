@@ -390,22 +390,19 @@ fn span_text(source: &str, span: proc_macro2::Span) -> Result<String, String> {
     Ok(source[start..end].to_string())
 }
 
-/// A Rust rule battery (`if cond { out.push("v"); }` repeated, then `out`)
-/// is a list of named checks, not an if-stack (parity with fix_rule_checks).
-/// Each if becomes a `fn _check_N(<params>) -> Option<&'static str>`
-/// returning the pushed literal; the fn collects over the check list. v1:
-/// each check is a single push and reads only the fn's own parameters.
-pub fn fix_rule_checks(source: &str, line: usize) -> Result<String, String> {
-    let file = syn::parse_file(source).map_err(|_| "the file does not parse".to_string())?;
-    let target = file
-        .items
-        .iter()
-        .find_map(|item| match item {
-            Item::Fn(f) if f.sig.ident.span().start().line == line => Some(f),
-            _ => None,
-        })
-        .ok_or_else(|| format!("no function starts at line {line}"))?;
-    // (name, type-text) for each typed param
+/// One rule battery's analyzed shape: the typed params, the accumulator name,
+/// and the (condition, message) arms — the latent data structure to hoist.
+struct RuleBattery {
+    params: Vec<(String, String)>,
+    acc: String,
+    arms: Vec<(String, String)>,
+}
+
+/// The shape analysis of a rule battery: `let mut <acc> = vec![];`, >= 3
+/// `if <cond> { <acc>.push("msg"); }` checks (conditions read only the fn's
+/// params — fn-pointer conditions cannot capture), and a trailing
+/// `<acc>` expression. Err(why) when the body is not that shape.
+fn rule_battery_shape(source: &str, target: &ItemFn) -> Result<RuleBattery, String> {
     let params: Vec<(String, String)> = target
         .sig
         .inputs
@@ -424,7 +421,6 @@ pub fn fix_rule_checks(source: &str, line: usize) -> Result<String, String> {
         .collect();
     let pset: std::collections::HashSet<String> = params.iter().map(|(n, _)| n.clone()).collect();
     let stmts = &target.block.stmts;
-    // the accumulator binding: `let mut out = vec![];` as the first statement
     let Stmt::Local(init) = &stmts[0] else {
         return Err("the function does not open with an accumulator binding".to_string());
     };
@@ -432,8 +428,7 @@ pub fn fix_rule_checks(source: &str, line: usize) -> Result<String, String> {
         return Err("the accumulator binding is not a plain name".to_string());
     };
     let acc = acc_pat.ident.to_string();
-    // the ifs in the middle, each `if <cond> { acc.push(<lit>); }`
-    let mut arms: Vec<(String, String)> = Vec::new(); // (cond-source, lit-source)
+    let mut arms: Vec<(String, String)> = Vec::new();
     let mut idx = 1usize;
     while idx < stmts.len() - 1 {
         let Stmt::Expr(e, _) = &stmts[idx] else { break };
@@ -451,11 +446,12 @@ pub fn fix_rule_checks(source: &str, line: usize) -> Result<String, String> {
         let Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. }) = &mc.args[0] else {
             return Err("an arm pushes a non-string literal".to_string());
         };
-        // the check reads only the fn's own parameters
         let cond_text = span_text(source, i.cond.span())?;
         for name in idents_in_expr(&i.cond) {
             if !pset.contains(&name) {
-                return Err(format!("check reads '{name}' — not a parameter (v1 refuses)"));
+                return Err(format!(
+                    "check reads '{name}' — not a parameter (fn-pointer conditions cannot capture)"
+                ));
             }
         }
         arms.push((cond_text, s.token().to_string()));
@@ -464,7 +460,6 @@ pub fn fix_rule_checks(source: &str, line: usize) -> Result<String, String> {
     if arms.len() < 3 {
         return Err("fewer than 3 checks — not a battery".to_string());
     }
-    // the tail must be the accumulator expression
     let tail = &stmts[stmts.len() - 1];
     let Stmt::Expr(te, _) = tail else {
         return Err("the function does not end with the accumulator expression".to_string());
@@ -475,33 +470,62 @@ pub fn fix_rule_checks(source: &str, line: usize) -> Result<String, String> {
     if tp.path.segments.len() != 1 || tp.path.segments[0].ident != acc {
         return Err("the function does not end with the accumulator expression".to_string());
     }
+    Ok(RuleBattery { params, acc, arms })
+}
+
+pub fn fix_rule_table(source: &str, line: usize) -> Result<String, String> {
+    let file = syn::parse_file(source).map_err(|_| "the file does not parse".to_string())?;
+    let target = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Fn(f) if f.sig.ident.span().start().line == line => Some(f),
+            _ => None,
+        })
+        .ok_or_else(|| format!("no function starts at line {line}"))?;
+    let battery = rule_battery_shape(source, target)?;
+    let params = &battery.params;
+    let arms = &battery.arms;
+    let acc = &battery.acc;
     let param_sig: Vec<String> = params.iter().map(|(n, t)| format!("{n}: {t}")).collect();
     let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
     let args = param_names.join(", ");
     let mut out = String::new();
-    // the check fns BEFORE the fn
-    for (i, (cond, lit)) in arms.iter().enumerate() {
+    // the condition predicates BEFORE the fn — `fn _rule_N(<params>) -> bool`
+    // (fn-pointer conditions: Rust closures cannot form a homogeneous table,
+    // so the conditions stay pure and the table pairs them with the messages)
+    for (i, (cond, _)) in arms.iter().enumerate() {
         out.push_str(&format!(
-            "fn _check_{}({}) -> Option<&'static str> {{\n    if {cond} {{ Some({lit}) }} else {{ None }}\n}}\n\n",
+            "fn _rule_{}({}) -> bool {{\n    {cond}\n}}\n\n",
             i + 1,
             param_sig.join(", ")
         ));
     }
-    // the rewritten fn: the collector loop replaces [init, ifs..., tail]
+    // the hoisted (condition, violation) table + the collector — parity with
+    // the Python lambda-table (the table IS the latent data structure)
     let fn_start = byte_offset(source, target.span().start());
     let _ = fn_start;
     let body_start = byte_offset(source, target.block.brace_token.span.open().start()) + 1;
     let body_end = byte_offset(source, target.block.brace_token.span.close().end()) - 1;
     let mut new_body = String::from("\n");
+    let type_only: Vec<String> = params.iter().map(|(_, t)| t.clone()).collect();
+    let fn_type = format!("fn({}) -> bool", type_only.join(", "));
+    new_body.push_str(&format!(
+        "    let rules: [({fn_type}, &'static str); {}] = [\n",
+        arms.len()
+    ));
+    for (i, (_, lit)) in arms.iter().enumerate() {
+        new_body.push_str(&format!("        (_rule_{i}, {lit}),\n", i = i + 1));
+    }
+    new_body.push_str(
+        "    ];
+",
+    );
     new_body.push_str(&format!("    let mut {acc} = vec![];\n"));
     new_body.push_str(&format!(
-        "for _check in [{}] {{\n    if let Some(_v) = _check({args}) {{\n        {acc}.push(_v);\n    }}\n}}\n",
-        (1..=arms.len())
-            .map(|i| format!("_check_{i}"))
-            .collect::<Vec<_>>()
-            .join(", ")
+        "    for (_cond, _msg) in rules {{\n        if _cond({args}) {{\n            {acc}.push(_msg);\n        }}\n    }}\n"
     ));
-    new_body.push_str(&acc);
+    new_body.push_str(acc);
     out.push_str(&source[..fn_start]);
     out.push_str(&source[byte_offset(source, target.sig.span().start())..body_start]);
     out.push_str(&new_body);
