@@ -1984,21 +1984,129 @@ def _dispatch_chain_shape(fn: cst.FunctionDef, body: list) -> _DispatchShape | N
     return preamble, chain, selector or "", tail[0].body[0]
 
 
-def _dispatch_build(chain: _DispatchChain, union: list[str]) -> _DispatchBuild:
-    """The handler functions (_route_<slug> taking the free-var union) and
-    the registry dict. The handlers are defined before the registry — the
-    dict evaluates their names at module load."""
+def _arm_single_expression(arm_body: list):
+    """The returned expression when the arm is exactly `return <expr>`, else
+    None — the lambda-table eligibility test."""
+    if len(arm_body) != 1:
+        return None
+    st = arm_body[0]
+    if not isinstance(st, cst.SimpleStatementLine) or len(st.body) != 1:
+        return None
+    r = st.body[0]
+    if isinstance(r, cst.Return) and r.value is not None:
+        return r.value
+    return None
+
+
+def _dispatch_lambda_mode(fn, wrapper, shaped: _DispatchShape, exprs) -> str:
+    """The lambda-table rewrite of a single-expression dispatch: `_tools =
+    {"lit": lambda: <expr>, ...}` inside the fn (the closures capture the
+    scope) + a lookup dispatch. The fn is replaced in place — the table
+    needs no module-level additions."""
+    preamble, chain, selector, default = shaped
+    table = _dispatch_lambda_table(chain, exprs)
+    dispatch = _dispatch_lambda_call(selector, default)
+    new_fn = fn.with_changes(body=fn.body.with_changes(body=preamble + [table] + dispatch))
+    return cst.Module(body=[new_fn if s is fn else s for s in wrapper.module.body]).code
+
+
+def _dispatch_named_mode(fn, wrapper, shaped: _DispatchShape) -> str:
+    """The named-handler rewrite of a multi-statement dispatch: module-level
+    `_<slug>` handlers (literal-derived, collision-guarded) + the registry
+    dict + a lookup dispatch."""
+    preamble, chain, selector, default = shaped
+    union: list[str] = []
+    for _lit, arm_body in chain:
+        bound = _BoundNames()
+        for st in arm_body:
+            st.visit(bound)
+        bound.bound.add(selector)
+        free = [n for n in _read_names(arm_body) if n not in bound.bound and n not in union]
+        union.extend(free)
+    handlers, registry = _dispatch_build(chain, union, _module_names(wrapper))
+    dispatch = _dispatch_call(selector, default, union)
+    new_fn = fn.with_changes(body=fn.body.with_changes(body=preamble + dispatch))
+    out_body: list = []
+    for stmt in wrapper.module.body:
+        if stmt is fn:
+            out_body.append(new_fn)
+            out_body.extend(handlers)  # the registry names them — define first
+            out_body.append(registry)
+        else:
+            out_body.append(stmt)
+    return cst.Module(body=out_body).code
+
+
+def _dispatch_lambda_table(chain: _DispatchChain, exprs: list) -> cst.SimpleStatementLine:
+    """`_tools = {"lit": lambda: <expr>, ...}` — the hoisted latent data
+    structure. The lambdas capture the enclosing scope: no free-var analysis,
+    no names, no param plumbing."""
+    entries = [
+        cst.DictElement(
+            key=cst.SimpleString(repr(str(lit))),
+            value=cst.Lambda(params=cst.Parameters(), body=expr),
+        )
+        for (lit, _), expr in zip(chain, exprs, strict=True)
+    ]
+    return cst.SimpleStatementLine(
+        body=[cst.Assign(targets=[cst.AssignTarget(cst.Name("_tools"))], value=cst.Dict(elements=entries))]
+    )
+
+
+def _dispatch_lambda_call(selector: str, default) -> list:
+    """The dispatch: `_handler = _tools.get(sel)`; the no-match default; the
+    zero-arg lambda call."""
+    return [
+        cst.SimpleStatementLine(
+            body=[
+                cst.Assign(
+                    targets=[cst.AssignTarget(cst.Name("_handler"))],
+                    value=cst.Call(
+                        func=cst.Attribute(value=cst.Name("_tools"), attr=cst.Name("get")),
+                        args=[cst.Arg(cst.Name(selector))],
+                    ),
+                )
+            ]
+        ),
+        cst.If(
+            test=cst.Comparison(
+                left=cst.Name("_handler"),
+                comparisons=[cst.ComparisonTarget(cst.Is(), cst.Name("None"))],
+            ),
+            body=cst.IndentedBlock(body=[cst.SimpleStatementLine(body=[default])]),
+            orelse=None,
+        ),
+        cst.SimpleStatementLine(body=[cst.Return(cst.Call(func=cst.Name("_handler"), args=[]))]),
+    ]
+
+
+def _module_names(wrapper: cst.MetadataWrapper) -> set[str]:
+    """The top-level def/class names — the collision guard's existing-name
+    set for generated handler names."""
+    names = set()
+    for s in wrapper.module.body:
+        if isinstance(s, (cst.FunctionDef, cst.ClassDef)):
+            names.add(s.name.value)
+    return names
+
+
+def _dispatch_build(chain: _DispatchChain, union: list[str], existing: set[str]) -> _DispatchBuild:
+    """The handler functions (_<slug> taking the free-var union) and the
+    registry dict. The handlers are defined before the registry — the dict
+    evaluates their names at module load. The literal IS the handler's name
+    (the selector value is the domain vocabulary) — no "route" prefix; a
+    collision with an existing module name gets a numeric suffix."""
     handlers: list[cst.FunctionDef] = []
     registry_entries: list[cst.DictElement] = []
-    used_slugs: set[str] = set()
+    used: set[str] = set(existing)  # never shadow an existing module name
     for i, (lit, arm_body) in enumerate(chain):
         slug = "".join(ch if ch.isalnum() else "_" for ch in str(lit).lower()).strip("_")
         slug = slug or f"arm{i}"
         base, n = slug, 1
-        while base in used_slugs:
+        while f"_{base}" in used:
             base, n = f"{slug}_{n}", n + 1
-        used_slugs.add(base)
-        name = f"_route_{base}"
+        used.add(f"_{base}")
+        name = f"_{base}"
         handlers.append(
             cst.FunctionDef(
                 name=cst.Name(name),
@@ -2066,31 +2174,14 @@ def fix_dispatch_registry(source: str, line: int) -> str | None:
         return None
     preamble, chain, selector, default = shaped
 
-    # per-arm free vars (names read, not bound in the arm, not the selector)
-    arm_free: list[list[str]] = []
-    union: list[str] = []
-    for _lit, arm_body in chain:
-        bound = _BoundNames()
-        for st in arm_body:
-            st.visit(bound)
-        bound.bound.add(selector)
-        free = [n for n in _read_names(arm_body) if n not in bound.bound and n not in union]
-        union.extend(free)
-        arm_free.append(free)
-
-    handlers, registry = _dispatch_build(chain, union)
-    dispatch = _dispatch_call(selector, default, union)
-    new_fn = fn.with_changes(body=fn.body.with_changes(body=preamble + dispatch))
-
-    out_body: list = []
-    for stmt in wrapper.module.body:
-        if stmt is fn:
-            out_body.append(new_fn)
-            out_body.extend(handlers)  # the registry names them — define first
-            out_body.append(registry)
-        else:
-            out_body.append(stmt)
-    return cst.Module(body=out_body).code
+    # the LAMBDA TABLE when every arm is a single expression — the pure data
+    # form (selector adjacent to its expression, closures capture the scope,
+    # no names, no plumbing — the rule-table principle). Multi-statement arms
+    # fall back to named handlers (a lambda cannot hold a body).
+    exprs = [_arm_single_expression(arm_body) for _lit, arm_body in chain]
+    if all(e is not None for e in exprs):
+        return _dispatch_lambda_mode(fn, wrapper, shaped, exprs)
+    return _dispatch_named_mode(fn, wrapper, shaped)
 
 
 # --------------------------------------------------------------------------- rule-checks

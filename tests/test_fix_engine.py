@@ -888,7 +888,8 @@ def test_dispatch_registry_preserves_behavior(tmp_path):
         b = before["run_tool"](tool, args, facts)
         a = after["run_tool"](tool, args, facts)
         assert b == a, (tool, b, a)
-    assert "_REGISTRY" in fixed and "_route_search_people" in fixed
+    assert "_REGISTRY" in fixed and "_search_people" in fixed
+    assert "_route_" not in fixed  # the literal names the handler, no prefix
     # the registry dispatch is a lookup, not a chain
     assert fixed.count("if tool ==") == 0
 
@@ -1045,3 +1046,52 @@ def test_rust_rule_table_applies(tmp_path):
     r2 = subprocess.run([rustc, str(after), "-o", str(tmp_path / "a")], capture_output=True, text=True)
     assert r1.returncode == 0, r1.stderr
     assert r2.returncode == 0, r2.stderr
+
+
+def test_dispatch_registry_lambda_table(tmp_path):
+    """Single-expression arms collapse into a pure data table — a dict of
+    selector -> lambda, capturing the scope: no names, no param plumbing
+    (the rule-table principle applied to dispatch)."""
+    src = '''def route(sel, n):
+    if sel == "a":
+        return n + 1
+    if sel == "b":
+        return n * 2
+    if sel == "c":
+        return n - 1
+    return -1
+'''
+    fixed = fix_engine.fix_dispatch_registry(src, 1)
+    assert fixed is not None and fixed != src
+    assert "_tools = {'a': lambda: n + 1" in fixed
+    assert "def _" not in fixed  # no named handlers
+    before, after = {}, {}
+    exec(src, before)
+    exec(fixed, after)
+    for sel, n in [("a", 2), ("b", 3), ("c", 5), ("z", 10)]:
+        b = before["route"](sel, n)
+        a = after["route"](sel, n)
+        assert b == a, (sel, n, b, a)
+
+
+def test_dispatch_registry_collision_guard(tmp_path):
+    """A literal-derived handler name must never shadow an existing module
+    function — the collision guard suffixes it."""
+    src = '''def _search_people(args):
+    return "existing"
+
+def run_tool(tool, args):
+    if tool == "search_people":
+        q = args.get("query", "")
+        return {"hits": [q]}
+    if tool == "person":
+        return {"id": "x"}
+    if tool == "relationships":
+        return {"rels": []}
+    return {"error": "unknown tool"}
+'''
+    fixed = fix_engine.fix_dispatch_registry(src, 4)  # the multi-statement arm forces named mode
+    assert fixed is not None
+    assert "def _search_people(args):\n    return \"existing\"" in fixed  # untouched
+    assert "def _search_people_1(" in fixed  # the colliding handler is suffixed
+    assert "_search_people_1" in fixed
