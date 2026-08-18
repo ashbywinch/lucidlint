@@ -23,7 +23,6 @@
 //!   base +1 for the function itself.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 /// The vague role-suffix names hiding load-bearing code — one table for both
 /// languages; the case differs (Python `Manager`, Rust `Manager` — same
@@ -86,7 +85,11 @@ pub fn full_fix_command(file: &str, line: usize, message: &str) -> String {
     };
     let rest: Vec<&str> = parts.collect();
     let mut name_slot = String::new();
-    if let Some(i) = rest.iter().position(|p| p.starts_with("--fix-name")) {
+    // an EXACT --fix-name token — a prose token that merely STARTS with
+    // "--fix-name" (a parenthetical like "--fix-name;") would otherwise be
+    // mistaken for the machine slot and fabricate "--name <prose>" (R28:
+    // the directive must be the exact command)
+    if let Some(i) = rest.iter().position(|p| *p == "--fix-name") {
         if let Some(slot) = rest.get(i + 1) {
             name_slot = format!(" --name {slot}");
         }
@@ -111,7 +114,7 @@ pub fn complexity_message(cc: u32, shape: &str, detail: &str) -> String {
             "cyclomatic complexity {cc} (>= 15) — the function is a battery of independent checks each appending to '{detail}' — HOIST THE LATENT DATA STRUCTURE: the if/append chain IS a (condition, violation) table — collapse it into a list of such pairs whose conditions are lambdas (Python) or fn pointers (Rust), and collect the violations whose condition holds — fix: rule-table (previews the table; apply with --confirm)"
         ),
         _ => format!(
-            "cyclomatic complexity {cc} (>= 15) — extract part of this function into a named method (the preview shows the block) — fix: extract-method (preview without --fix-name; apply with --fix-name <name>)"
+            "cyclomatic complexity {cc} (>= 15) — extract part of this function into a named method (the preview shows the block) — fix: extract-method"
         ),
     }
 }
@@ -122,30 +125,6 @@ pub fn complexity_message(cc: u32, shape: &str, detail: &str) -> String {
 /// is Python-shaped).
 pub fn is_duplicate_size(skeleton_len: usize, non_doc_stmts: usize) -> bool {
     non_doc_stmts >= 2 && skeleton_len >= 12
-}
-
-/// Order-independent content hash of a skeleton's bigram set — identical
-/// sets collide, so the hash IS the dice=1.0 test. XOR keeps it order-free;
-/// DefaultHasher::new() has fixed keys, so the value is deterministic.
-pub fn bigram_set_hash(t: &[String]) -> u64 {
-    // hash the UNIQUE bigram set: under XOR, a repeated bigram cancels
-    // itself out, so two skeletons with different unique sets could collide
-    // and be reported as exact copies without a dice computation
-    let mut h = 0u64;
-    if t.len() >= 2 {
-        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-        for w in t.windows(2) {
-            let pair = (w[0].clone(), w[1].clone());
-            if !seen.insert(pair) {
-                continue;
-            }
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            w[0].hash(&mut hasher);
-            w[1].hash(&mut hasher);
-            h ^= hasher.finish();
-        }
-    }
-    h
 }
 
 /// Dice coefficient over bigram sets — the language-neutral similarity.
@@ -240,7 +219,7 @@ fn alias_variants(sig: &str) -> &'static [&'static str] {
 
 /// Does a suppression signal match a finding's raw `kind`? Raw-equal, or the
 /// signal names the family that contains the kind.
-fn signal_matches(sig: &str, finding_kind: &str) -> bool {
+pub fn signal_matches(sig: &str, finding_kind: &str) -> bool {
     sig == finding_kind || alias_variants(sig).contains(&finding_kind)
 }
 
@@ -253,7 +232,7 @@ fn signal_matches(sig: &str, finding_kind: &str) -> bool {
 const SUPPRESSION_WINDOW: usize = 3;
 
 /// The `SUPPRESSION_WINDOW` lines ending at `line` (descending), never below 1.
-fn window_lines(line: usize) -> impl Iterator<Item = usize> {
+pub fn window_lines(line: usize) -> impl Iterator<Item = usize> {
     (line.max(SUPPRESSION_WINDOW) + 1 - SUPPRESSION_WINDOW..=line).rev()
 }
 

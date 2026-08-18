@@ -65,10 +65,15 @@ jobs:
           printf '%s\n' "$ver" > "dist/${dir}/version.txt"
           # self-contain the fix engine's libcst in deps/ so the fix path
           # works from the bundle with no pip step (review-log B8). lucidlint.py
-          # prepends this sibling deps/ to sys.path when present. libcst +
-          # pyyaml fall back to their pure-Python implementations, so the
-          # wheel built for this runner's python imports on the user's.
-          python3 -m pip install --quiet --target "dist/${dir}/deps" "libcst>=1.9.0"
+          # prepends this sibling deps/ to sys.path when present. libcst >= 1.0
+          # has NO pure-Python parser — the compiled libcst.native extension is
+          # ABI-locked to the CPython/glibc that built it, so a runner-built
+          # wheel only imports under the SAME ABI. The x86_64-musl bundle serves
+          # static/Alpine hosts where a glibc libcst cannot load — it keeps no
+          # deps/ and the fix path reports its requirement there.
+          if [ "$target" != "x86_64-unknown-linux-musl" ]; then
+            python3 -m pip install --quiet --target "dist/${dir}/deps" "libcst>=1.9.0"
+          fi
           tar -C dist -czf "dist/${dir}.tar.gz" "${dir}"
       - uses: actions/upload-artifact@v4
         with:

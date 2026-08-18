@@ -125,10 +125,14 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     let mut pre_used = common::PreUsedSuppressions::default();
     if !scan.cc.is_empty() {
         scan.cc.retain(|e| {
-            for ln in [e.line, e.line.saturating_sub(1)] {
+            // record what the retention's own decision honors — the SAME
+            // widened window and family-aware matching that suppressed()
+            // uses (a suppression used by the cc path must not be re-flagged
+            // stale by apply_suppressions_impl)
+            for ln in common::window_lines(e.line) {
                 if let Some(entries) = supps.line.get(&ln) {
                     for (sig, why) in entries {
-                        if sig == "complexity" && !why.is_empty() {
+                        if common::signal_matches(sig, "complexity") && !why.is_empty() {
                             pre_used.lines.insert((ln, sig.clone()));
                         }
                     }
@@ -472,7 +476,7 @@ impl<'a> RsState<'a> {
         if module_level && !self.in_test_code {
             // the gate reads cc from the scan's own array — module-level fns
             // only, mirroring radon's fn_map (methods/nested get cc = 0)
-            let (shape, shape_detail) = rust_fn_shape(&block.stmts, &param_names(sig));
+            let (shape, shape_detail) = rust_fn_shape(&block.stmts, sig);
             self.cc.push(FnCc {
                 file: self.file.to_string(),
                 function: sig.ident.to_string(),
@@ -1887,13 +1891,13 @@ fn param_names(sig: &Signature) -> std::collections::HashSet<String> {
         .collect()
 }
 
-fn rust_fn_shape(body: &[syn::Stmt], params: &std::collections::HashSet<String>) -> (&'static str, String) {
+fn rust_fn_shape(body: &[syn::Stmt], sig: &syn::Signature) -> (&'static str, String) {
     // the OFFER must equal the FIX: a shape is only "dispatch"/"rules" when
     // the fix's own shape checks pass (parity with python_fn_shape)
-    if let Some(sel) = rust_dispatch_shape(body) {
+    if let Some(sel) = rust_dispatch_shape(body, sig) {
         return ("dispatch", sel);
     }
-    if let Some(acc) = rust_rule_battery_shape(body, params) {
+    if let Some(acc) = rust_rule_battery_shape(body, &param_names(sig)) {
         return ("rules", acc);
     }
     ("plain", String::new())
@@ -1923,19 +1927,45 @@ fn rust_arm_selector(i: &syn::ExprIf) -> Option<String> {
 }
 
 /// The FIXABLE Rust dispatch shape: >= 3 contiguous leading
-/// `if <sel> == "lit" { ... }` arms over ONE selector (the fix converts to a
-/// match; the tail, if any, becomes the `_` arm). Mirrors fix.rs.
-fn rust_dispatch_shape(body: &[syn::Stmt]) -> Option<String> {
+/// `if <sel> == "lit" { ... }` arms over ONE selector, each arm ending in a
+/// `return`, no else/else-if, unique literals, and a `&str` selector — the
+/// exact shape fix.rs's match rewrite compiles blind (offer equals fix).
+fn rust_dispatch_shape(body: &[syn::Stmt], sig: &syn::Signature) -> Option<String> {
     use syn::Expr;
     let first_if = body
         .iter()
         .position(|s| matches!(s, syn::Stmt::Expr(e, _) if matches!(e, Expr::If(_))))?;
     let mut selector: Option<String> = None;
     let mut n = 0usize;
+    let mut lits: Vec<String> = Vec::new();
     for stmt in &body[first_if..] {
         let syn::Stmt::Expr(e, _) = stmt else { break };
         let Expr::If(i) = e else { break };
         let sel = rust_arm_selector(i)?;
+        if i.else_branch.is_some() {
+            return None; // an else/else-if would be deleted by the rewrite
+        }
+        // every arm must diverge — the match arms need no matching types
+        let ends_in_return = matches!(
+            i.then_branch.stmts.last(),
+            Some(syn::Stmt::Expr(syn::Expr::Return(_), Some(_)))
+        );
+        if !ends_in_return {
+            return None;
+        }
+        // duplicate literals -> unreachable-pattern compile error
+        let Expr::Binary(b) = i.cond.as_ref() else { return None };
+        let Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(s), ..
+        }) = b.right.as_ref()
+        else {
+            return None;
+        };
+        let lit = s.token().to_string();
+        if lits.contains(&lit) {
+            return None;
+        }
+        lits.push(lit);
         match &selector {
             None => selector = Some(sel),
             Some(s) if *s == sel => {}
@@ -1946,7 +1976,31 @@ fn rust_dispatch_shape(body: &[syn::Stmt]) -> Option<String> {
     if n < 3 {
         return None;
     }
-    selector
+    let sel = selector?;
+    if !param_is_str(sig, &sel) {
+        return None; // the match rewrite only compiles for `&str` selectors
+    }
+    Some(sel)
+}
+
+/// Is `name` a parameter declared `&str` (no lifetime)?
+fn param_is_str(sig: &syn::Signature, name: &str) -> bool {
+    sig.inputs.iter().any(|a| match a {
+        syn::FnArg::Typed(pt) => {
+            matches!(&*pt.pat, syn::Pat::Ident(pi) if pi.ident == name)
+                && matches!(
+                    pt.ty.as_ref(),
+                    syn::Type::Reference(r)
+                        if r.lifetime.is_none()
+                            && matches!(
+                                r.elem.as_ref(),
+                                syn::Type::Path(tp)
+                                    if tp.qself.is_none() && tp.path.is_ident("str")
+                            )
+                )
+        }
+        _ => false,
+    })
 }
 
 /// The bare identifiers referenced in an expression (Rust side).
@@ -2396,28 +2450,27 @@ mod tests {
         // refactoring for their shape
         let dispatch = "fn route(sel: &str) -> i32 {\n    if sel == \"a\" { return 1; }\n    if sel == \"b\" { return 2; }\n    if sel == \"c\" { return 3; }\n    -1\n}\n";
         let file = syn::parse_file(dispatch).unwrap();
-        let body = match &file.items[0] {
-            syn::Item::Fn(f) => f.block.stmts.clone(),
+        let (body, sig) = match &file.items[0] {
+            syn::Item::Fn(f) => (f.block.stmts.clone(), f.sig.clone()),
             _ => panic!("not a fn"),
         };
-        let (shape, detail) = rust_fn_shape(&body, &std::collections::HashSet::new());
+        let (shape, detail) = rust_fn_shape(&body, &sig);
         assert_eq!((shape, detail.as_str()), ("dispatch", "sel"));
         let rules = "fn check(a: &M) -> Vec<&str> {\n    let mut out = vec![];\n    if a.get(1) { out.push(\"x\"); }\n    if a.get(2) { out.push(\"y\"); }\n    if a.get(3) { out.push(\"z\"); }\n    out\n}\n";
         let file = syn::parse_file(rules).unwrap();
-        let body = match &file.items[0] {
-            syn::Item::Fn(f) => f.block.stmts.clone(),
+        let (body, sig2) = match &file.items[0] {
+            syn::Item::Fn(f) => (f.block.stmts.clone(), f.sig.clone()),
             _ => panic!("not a fn"),
         };
-        let params: std::collections::HashSet<String> = std::collections::HashSet::from(["a".to_string()]);
-        let (shape, detail) = rust_fn_shape(&body, &params);
+        let (shape, detail) = rust_fn_shape(&body, &sig2);
         assert_eq!((shape, detail.as_str()), ("rules", "out"));
         let plain = "fn f(a: i32) -> i32 { a + 1 }\n";
         let file = syn::parse_file(plain).unwrap();
-        let body = match &file.items[0] {
-            syn::Item::Fn(f) => f.block.stmts.clone(),
+        let (body, sig3) = match &file.items[0] {
+            syn::Item::Fn(f) => (f.block.stmts.clone(), f.sig.clone()),
             _ => panic!("not a fn"),
         };
-        let (shape, _) = rust_fn_shape(&body, &std::collections::HashSet::new());
+        let (shape, _) = rust_fn_shape(&body, &sig3);
         assert_eq!(shape, "plain");
     }
 

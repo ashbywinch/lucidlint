@@ -202,7 +202,66 @@ fn seam_analysis(stmts: &[&Stmt], after: &[&Stmt], params: &[Ident]) -> Option<V
     if out {
         return None;
     }
+    // a free PARAM read in the after-statements would be MOVED into the
+    // helper by value — the after-read becomes use-of-moved-value; refuse
+    let free_set: std::collections::HashSet<String> = free.iter().map(|i| i.to_string()).collect();
+    if !free_set.is_empty() {
+        let mut after_read = false;
+        for s in after {
+            AfterReadCollector {
+                names: &free_set,
+                out: &mut after_read,
+            }
+            .visit_stmt(s);
+        }
+        if after_read {
+            return None;
+        }
+    }
+    // a param SHADOWED by a seam-local binding that the seam also READS:
+    // the read may be of the param (before the shadow) — the binding set is
+    // order-insensitive, so the helper would get no argument and reference
+    // an undefined name; refuse (conservative, offer-equals-fix)
+    let seam_reads = seam_read_names(stmts);
+    for name in &bound {
+        if pset.contains(name) && seam_reads.contains(name) {
+            return None;
+        }
+    }
     Some(free)
+}
+
+/// All bare identifiers read in a statement run.
+fn seam_read_names(stmts: &[&Stmt]) -> std::collections::HashSet<String> {
+    struct ReadNames(std::collections::HashSet<String>);
+    impl<'ast> syn::visit::Visit<'ast> for ReadNames {
+        fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+            if node.path.segments.len() == 1 {
+                self.0.insert(node.path.segments[0].ident.to_string());
+            }
+        }
+    }
+    let mut v = ReadNames(std::collections::HashSet::new());
+    for s in stmts {
+        v.visit_stmt(s);
+    }
+    v.0
+}
+
+/// Does any statement READ one of `names`?
+struct AfterReadCollector<'a> {
+    names: &'a std::collections::HashSet<String>,
+    out: &'a mut bool,
+}
+impl<'ast> syn::visit::Visit<'ast> for AfterReadCollector<'_> {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if node.path.segments.len() == 1 {
+            let n = node.path.segments[0].ident.to_string();
+            if self.names.contains(&n) {
+                *self.out = true;
+            }
+        }
+    }
 }
 
 /// Extract a param-only, no-out-var seam of `line`'s fn into `name`.
@@ -278,10 +337,20 @@ fn apply(source: &str, target: &ItemFn, seam: &[&Stmt], free: &[Ident], name: &s
     }
     let params: Vec<String> = sig.iter().map(|(n, t)| format!("{n}: {t}")).collect();
     let args: Vec<String> = free.iter().map(|i| i.to_string()).collect();
+    // the fn's generic parameters (`<T: Ord>` / lifetimes) must be carried
+    // into the helper — a free param of type T would otherwise reference an
+    // undefined T at the helper's definition (review-log M14)
+    let generics = if target.sig.generics.params.is_empty() {
+        String::new()
+    } else {
+        let gs = byte_offset(source, target.sig.generics.span().start());
+        let ge = byte_offset(source, target.sig.generics.span().end());
+        source[gs..ge].to_string()
+    };
     // the helper, with the seam body spliced in losslessly (indent preserved
     // as written; rustfmt normalizes)
     let helper = format!(
-        "fn {name}({})\n{{\n{}\n}}\n\n",
+        "fn {name}{generics}({})\n{{\n{}\n}}\n\n",
         params.join(", "),
         String::from(&source[seam_start..seam_end])
     );
@@ -318,10 +387,22 @@ pub fn fix_dispatch_registry(source: &str, line: usize) -> Result<String, String
         .ok_or_else(|| "the function has no if statements to convert".to_string())?;
     let mut selector: Option<String> = None;
     let mut arms: Vec<String> = Vec::new();
+    let mut lits: Vec<String> = Vec::new();
     let mut idx = first_if;
     while idx < stmts.len() {
         let Stmt::Expr(e, _) = &stmts[idx] else { break };
         let Expr::If(i) = e else { break };
+        if i.else_branch.is_some() {
+            // an else/else-if arm would be silently DELETED by the splice —
+            // refuse (offer-equals-fix: the classifier rejects it too)
+            return Err("an arm has an else branch — the match rewrite would delete it".to_string());
+        }
+        if !block_ends_with_return(&i.then_branch) {
+            // arms that don't diverge need matching arm types in the match —
+            // refuse unless every arm returns (the only shape the rewrite
+            // can compile blind)
+            return Err("an arm does not end in `return` — the match arms would need matching types".to_string());
+        }
         let Expr::Binary(b) = i.cond.as_ref() else {
             return Err("an arm's condition is not `sel == \"lit\"`".to_string());
         };
@@ -343,14 +424,25 @@ pub fn fix_dispatch_registry(source: &str, line: usize) -> Result<String, String
         let Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. }) = b.right.as_ref() else {
             return Err("an arm's comparison is not against a string literal".to_string());
         };
+        let lit = s.token().to_string();
+        if lits.contains(&lit) {
+            // duplicate literals -> unreachable-pattern compile error
+            return Err("two arms dispatch on the same literal".to_string());
+        }
+        lits.push(lit.clone());
         let block = span_text(source, i.then_branch.span())?;
-        arms.push(format!("{} => {block}", s.token()));
+        arms.push(format!("{lit} => {block}"));
         idx += 1;
     }
     if arms.len() < 3 {
         return Err("fewer than 3 dispatch arms — a registry is not worth it".to_string());
     }
     let sel = selector.ok_or_else(|| "no selector found".to_string())?;
+    if !param_is_str(&target.sig, &sel) {
+        // `match sel { "lit" => ... }` only compiles for a `&str` selector —
+        // a String selector would E0308 (expected String, found &str)
+        return Err("the selector must be declared `&str` for the match rewrite".to_string());
+    }
     // the fallback (statements after the chain) becomes the `_` arm
     let tail_text = if idx < stmts.len() {
         let start = byte_offset(source, stmts[idx].span().start());
@@ -390,6 +482,33 @@ fn span_text(source: &str, span: proc_macro2::Span) -> Result<String, String> {
     Ok(source[start..end].to_string())
 }
 
+/// Does the block end with a `return ...;` statement? Only such arms are
+/// match-rewritable blind: diverging arms need no matching types.
+fn block_ends_with_return(block: &syn::Block) -> bool {
+    matches!(block.stmts.last(), Some(syn::Stmt::Expr(syn::Expr::Return(_), Some(_))))
+}
+
+/// Is `name` a parameter declared `&str` (no lifetime)? The match rewrite
+/// only compiles for a `&str` selector.
+fn param_is_str(sig: &syn::Signature, name: &str) -> bool {
+    sig.inputs.iter().any(|a| match a {
+        syn::FnArg::Typed(pt) => {
+            matches!(&*pt.pat, syn::Pat::Ident(pi) if pi.ident == name)
+                && matches!(
+                    pt.ty.as_ref(),
+                    syn::Type::Reference(r)
+                        if r.lifetime.is_none()
+                            && matches!(
+                                r.elem.as_ref(),
+                                syn::Type::Path(tp)
+                                    if tp.qself.is_none() && tp.path.is_ident("str")
+                            )
+                )
+        }
+        _ => false,
+    })
+}
+
 /// One rule battery's analyzed shape: the typed params, the accumulator name,
 /// and the (condition, message) arms — the latent data structure to hoist.
 struct RuleBattery {
@@ -421,6 +540,10 @@ fn rule_battery_shape(source: &str, target: &ItemFn) -> Result<RuleBattery, Stri
         .collect();
     let pset: std::collections::HashSet<String> = params.iter().map(|(n, _)| n.clone()).collect();
     let stmts = &target.block.stmts;
+    if stmts.len() < 2 {
+        // an empty body would panic on stmts[0] — refuse cleanly
+        return Err("the function body is empty".to_string());
+    }
     let Stmt::Local(init) = &stmts[0] else {
         return Err("the function does not open with an accumulator binding".to_string());
     };
@@ -460,6 +583,12 @@ fn rule_battery_shape(source: &str, target: &ItemFn) -> Result<RuleBattery, Stri
     if arms.len() < 3 {
         return Err("fewer than 3 checks — not a battery".to_string());
     }
+    if idx != stmts.len() - 1 {
+        // the rewrite replaces the WHOLE body (the table + collector) — any
+        // statement between the checks and the trailing accumulator would be
+        // silently deleted; refuse instead
+        return Err("statements between the checks and the accumulator — not a pure battery".to_string());
+    }
     let tail = &stmts[stmts.len() - 1];
     let Stmt::Expr(te, _) = tail else {
         return Err("the function does not end with the accumulator expression".to_string());
@@ -490,21 +619,23 @@ pub fn fix_rule_table(source: &str, line: usize) -> Result<String, String> {
     let param_sig: Vec<String> = params.iter().map(|(n, t)| format!("{n}: {t}")).collect();
     let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
     let args = param_names.join(", ");
-    let mut out = String::new();
     // the condition predicates BEFORE the fn — `fn _rule_N(<params>) -> bool`
     // (fn-pointer conditions: Rust closures cannot form a homogeneous table,
     // so the conditions stay pure and the table pairs them with the messages)
+    let mut helpers = String::new();
     for (i, (cond, _)) in arms.iter().enumerate() {
-        out.push_str(&format!(
+        helpers.push_str(&format!(
             "fn _rule_{}({}) -> bool {{\n    {cond}\n}}\n\n",
             i + 1,
             param_sig.join(", ")
         ));
     }
     // the hoisted (condition, violation) table + the collector — parity with
-    // the Python lambda-table (the table IS the latent data structure)
+    // the Python lambda-table (the table IS the latent data structure).
+    // The header slice runs from the ITEM start (attrs + visibility + fn
+    // keyword) — slicing from the signature start dropped #[cfg]/#[allow]
+    // attrs and `pub` (review-log H3).
     let fn_start = byte_offset(source, target.span().start());
-    let _ = fn_start;
     let body_start = byte_offset(source, target.block.brace_token.span.open().start()) + 1;
     let body_end = byte_offset(source, target.block.brace_token.span.close().end()) - 1;
     let mut new_body = String::from("\n");
@@ -526,8 +657,18 @@ pub fn fix_rule_table(source: &str, line: usize) -> Result<String, String> {
         "    for (_cond, _msg) in rules {{\n        if _cond({args}) {{\n            {acc}.push(_msg);\n        }}\n    }}\n"
     ));
     new_body.push_str(acc);
-    out.push_str(&source[..fn_start]);
-    out.push_str(&source[byte_offset(source, target.sig.span().start())..body_start]);
+    // the helpers go AFTER any file-level inner attributes (`#![...]`,
+    // `//!` docs) — prepending before them would break the file
+    let inner_end = file.attrs.iter().map(|a| a.span().end()).max();
+    let insert_at = match inner_end {
+        Some(e) => byte_offset(source, e),
+        None => 0,
+    };
+    let mut out = String::new();
+    out.push_str(&source[..insert_at]);
+    out.push_str(&helpers);
+    out.push_str(&source[insert_at..fn_start]);
+    out.push_str(&source[fn_start..body_start]);
     out.push_str(&new_body);
     out.push_str(&source[body_end..]);
     Ok(out)

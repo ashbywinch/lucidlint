@@ -353,10 +353,161 @@ fn dispatch_arm_selector(i: &StmtIf) -> Option<(&str, &str)> {
     Some((n.id.as_str(), "lit"))
 }
 
+/// The names BOUND (assigned) in a statement run — arm-local bindings.
+/// Mirrors fix_engine's _BoundNames (Assign/AnnAssign/For/With targets and
+/// walrus/import bindings): a name bound in one dispatch arm and READ in a
+/// sibling cannot be a uniform handler parameter.
+struct DispatchArmNames<'a> {
+    bound: HashSet<&'a str>,
+    read: HashSet<&'a str>,
+}
+
+fn collect_dispatch_arm_names(body: &[Stmt]) -> DispatchArmNames<'_> {
+    use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
+    struct Collect<'a> {
+        bound: HashSet<&'a str>,
+        read: HashSet<&'a str>,
+    }
+    impl<'a> SourceOrderVisitor<'a> for Collect<'a> {
+        fn visit_expr(&mut self, e: &'a Expr) {
+            match e {
+                Expr::Name(n) => {
+                    self.read.insert(n.id.as_str());
+                }
+                Expr::Named(n) => {
+                    if let Expr::Name(t) = n.target.as_ref() {
+                        self.bound.insert(t.id.as_str());
+                    }
+                }
+                _ => {}
+            }
+            ruff_python_ast::visitor::source_order::walk_expr(self, e);
+        }
+        fn visit_stmt(&mut self, s: &'a Stmt) {
+            match s {
+                Stmt::Assign(a) => {
+                    for t in &a.targets {
+                        if let Expr::Name(t) = t {
+                            self.bound.insert(t.id.as_str());
+                        }
+                    }
+                }
+                Stmt::AnnAssign(a) => {
+                    if let Expr::Name(n) = a.target.as_ref() {
+                        self.bound.insert(n.id.as_str());
+                    }
+                }
+                Stmt::AugAssign(a) => {
+                    if let Expr::Name(n) = a.target.as_ref() {
+                        self.bound.insert(n.id.as_str());
+                    }
+                }
+                Stmt::For(f) => {
+                    if let Expr::Name(n) = f.target.as_ref() {
+                        self.bound.insert(n.id.as_str());
+                    }
+                }
+                Stmt::With(w) => {
+                    for item in &w.items {
+                        if let Some(v) = &item.optional_vars {
+                            if let Expr::Name(n) = v.as_ref() {
+                                self.bound.insert(n.id.as_str());
+                            }
+                        }
+                    }
+                }
+                Stmt::Import(imp) => {
+                    for a in &imp.names {
+                        self.bound.insert(a.name.as_str());
+                    }
+                }
+                Stmt::ImportFrom(imp) => {
+                    for a in &imp.names {
+                        self.bound.insert(a.name.as_str());
+                    }
+                }
+                _ => {}
+            }
+            // comprehension targets bind arm-locally (mirrors fix_engine's
+            // visit_CompFor)
+            for gen in stmt_comprehension_generators(s) {
+                if let Expr::Name(n) = &gen.target {
+                    self.bound.insert(n.id.as_str());
+                }
+            }
+            walk_stmt(self, s);
+        }
+    }
+    let mut c = Collect {
+        bound: HashSet::new(),
+        read: HashSet::new(),
+    };
+    for s in body {
+        walk_stmt(&mut c, s);
+    }
+    DispatchArmNames {
+        bound: c.bound,
+        read: c.read,
+    }
+}
+
+/// The comprehension generators of a statement's expressions — their targets
+/// bind arm-locally (mirrors fix_engine's visit_CompFor).
+fn stmt_comprehension_generators(s: &Stmt) -> Vec<&ruff_python_ast::Comprehension> {
+    fn collect_expr<'a>(e: &'a Expr, out: &mut Vec<&'a ruff_python_ast::Comprehension>) {
+        match e {
+            Expr::ListComp(c) => {
+                out.extend(c.generators.iter());
+                collect_expr(&c.elt, out);
+            }
+            Expr::SetComp(c) => {
+                out.extend(c.generators.iter());
+                collect_expr(&c.elt, out);
+            }
+            Expr::DictComp(c) => {
+                out.extend(c.generators.iter());
+                if let Some(k) = &c.key {
+                    collect_expr(k, out);
+                }
+                collect_expr(&c.value, out);
+            }
+            Expr::Generator(g) => {
+                out.extend(g.generators.iter());
+                collect_expr(&g.elt, out);
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    match s {
+        Stmt::Assign(a) => collect_expr(a.value.as_ref(), &mut out),
+        Stmt::AnnAssign(a) => {
+            if let Some(v) = &a.value {
+                collect_expr(v.as_ref(), &mut out);
+            }
+        }
+        Stmt::Expr(e) => collect_expr(e.value.as_ref(), &mut out),
+        Stmt::Return(r) => {
+            if let Some(v) = &r.value {
+                collect_expr(v.as_ref(), &mut out);
+            }
+        }
+        Stmt::If(i) => {
+            for b in &i.body {
+                out.extend(stmt_comprehension_generators(b));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// The FIXABLE dispatch shape: a preamble, >= 3 contiguous `if <sel> ==
 /// "lit": <body>` arms over ONE selector, then exactly one trailing
 /// `return <default>`. This mirrors fix_engine's _dispatch_chain_shape — the
-/// offer is only made when the fix applies.
+/// offer is only made when the fix applies. Arms whose body reads a name
+/// BOUND IN A SIBLING ARM are refused (the named-handler rewrite cannot
+/// preserve them — see _dispatch_named_mode).
 fn dispatch_chain_shape(body: &[Stmt]) -> Option<String> {
     let first_if = body.iter().position(|s| matches!(s, Stmt::If(_)))?;
     let mut selector: Option<&str> = None;
@@ -381,6 +532,24 @@ fn dispatch_chain_shape(body: &[Stmt]) -> Option<String> {
     let tail = &body[first_if + n..];
     if tail.len() != 1 || !matches!(tail[0], Stmt::Return(_)) {
         return None;
+    }
+    // sibling-bound reads: an arm reading a name another arm binds cannot be
+    // rewritten to uniform module-level handlers (the value does not exist
+    // at the call site) — parity with the fix's refusal
+    let arms: Vec<&[Stmt]> = body[first_if..first_if + n]
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::If(i) => Some(i.body.as_slice()),
+            _ => None,
+        })
+        .collect();
+    let names: Vec<DispatchArmNames> = arms.iter().map(|b| collect_dispatch_arm_names(b)).collect();
+    for (i, arm) in names.iter().enumerate() {
+        for (j, other) in names.iter().enumerate() {
+            if i != j && arm.read.intersection(&other.bound).next().is_some() {
+                return None;
+            }
+        }
     }
     selector.map(str::to_string)
 }
@@ -875,10 +1044,14 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     let mut pre_used = common::PreUsedSuppressions::default();
     if !state.cc.is_empty() {
         state.cc.retain(|e| {
-            for ln in [e.line, e.line.saturating_sub(1)] {
+            // record what the retention's own decision honors — the SAME
+            // widened window and family-aware matching that suppressed()
+            // uses (a suppression used by the cc path must not be re-flagged
+            // stale by apply_suppressions_impl)
+            for ln in common::window_lines(e.line) {
                 if let Some(entries) = supps.line.get(&ln) {
                     for (sig, why) in entries {
-                        if sig == "complexity" && !why.is_empty() {
+                        if common::signal_matches(sig, "complexity") && !why.is_empty() {
                             pre_used.lines.insert((ln, sig.clone()));
                         }
                     }
@@ -1204,40 +1377,47 @@ fn main() {
                 let line = v.get("line").and_then(|k| k.as_u64()).unwrap_or(0) as usize;
                 let name = v.get("name").and_then(|k| k.as_str()).unwrap_or("");
                 if kind == "extract-method" || kind == "dispatch-registry" || kind == "rule-table" {
-                    if let Ok(src) = std::fs::read_to_string(file) {
-                        let result = if kind == "dispatch-registry" {
-                            fix::fix_dispatch_registry(&src, line)
-                        } else if kind == "rule-table" {
-                            fix::fix_rule_table(&src, line)
-                        } else {
-                            fix::fix_extract_method(&src, line, name)
-                        };
-                        match result {
-                            Ok(out) => {
-                                if std::fs::write(file, out).is_err() {
-                                    println!("fix: could not write the fixed file — {file}:{line}");
-                                    return;
-                                }
-                                let what = if kind == "dispatch-registry" {
-                                    "converted the dispatch chain into a match"
-                                } else if kind == "rule-table" {
-                                    "hoisted the if/append checks into a (condition, violation) table"
-                                } else {
-                                    "extracted seam into a named function"
-                                };
-                                println!("fix: {what} — {file}:{line} ({kind})");
+                    let src = match std::fs::read_to_string(file) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            // R29: an unexpected error surfaces the ACTUAL
+                            // error — a missing/unreadable file is NOT
+                            // "nothing to change" (which would fabricate a
+                            // silent success for a finding that may exist)
+                            eprintln!("fix: cannot read {file}: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    let result = if kind == "dispatch-registry" {
+                        fix::fix_dispatch_registry(&src, line)
+                    } else if kind == "rule-table" {
+                        fix::fix_rule_table(&src, line)
+                    } else {
+                        fix::fix_extract_method(&src, line, name)
+                    };
+                    match result {
+                        Ok(out) => {
+                            if std::fs::write(file, out).is_err() {
+                                println!("fix: could not write the fixed file — {file}:{line}");
                                 return;
                             }
-                            Err(_) => {
-                                // R28: never explain an absent fix — the
-                                // silence is the signal
-                                println!("fix: nothing to change for {kind} at {file}:{line}");
-                                return;
-                            }
+                            let what = if kind == "dispatch-registry" {
+                                "converted the dispatch chain into a match"
+                            } else if kind == "rule-table" {
+                                "hoisted the if/append checks into a (condition, violation) table"
+                            } else {
+                                "extracted seam into a named function"
+                            };
+                            println!("fix: {what} — {file}:{line} ({kind})");
+                            return;
+                        }
+                        Err(_) => {
+                            // R28: never explain an absent fix — the
+                            // silence is the signal
+                            println!("fix: nothing to change for {kind} at {file}:{line}");
+                            return;
                         }
                     }
-                    println!("fix: nothing to change for {kind} at {file}:{line}");
-                    return;
                 }
             }
         }
@@ -1512,46 +1692,36 @@ fn main() {
     // exempts them too (PRD R18)
     // which (file, line, signal) suppressions the repo-wide retain actually
     // used — a stale-suppression finding for one of those is wrong (the
-    // suppression IS used; the per-file pass just ran before this filter)
-    let mut used_supps: std::collections::HashSet<(String, usize, String)> = std::collections::HashSet::new();
-    all_findings.retain(|f| {
-        let Some(supps) = supps_by_rel.get(&f.file) else {
-            return true;
-        };
-        if let Some(why) = supps.file.get(&f.kind) {
-            if !why.is_empty() {
-                return false; // ignore-file <signal> <why> suppresses the whole file
+    // suppression IS used; the per-file pass just ran before this filter).
+    // The same family-aware, widened-window rules as the per-file pass
+    // (filter_repo_wide): `ignore duplicate <why>` two lines above a
+    // duplicate exempts it AND the stale finding it caused is dropped
+    // (review-log B3 wired for ALL repo-wide families, not just unused).
+    let mut used_ln: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+    let mut used_fl: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let retained: Vec<Finding> = all_findings
+        .into_iter()
+        .filter(|f| match supps_by_rel.get(&f.file) {
+            Some(supps) => {
+                let kept = common::filter_repo_wide(vec![f.clone()], supps, &mut used_ln, &mut used_fl);
+                !kept.is_empty() // false = suppressed (recorded) + dropped; true = keep
             }
-        }
-        for ln in [f.line, f.line.saturating_sub(1)] {
-            if let Some(entries) = supps.line.get(&ln) {
-                for (sig, why) in entries {
-                    if sig == &f.kind && !why.is_empty() {
-                        used_supps.insert((f.file.clone(), ln, sig.clone()));
-                        return false;
-                    }
-                }
-            }
-        }
-        true
-    });
+            None => true,
+        })
+        .collect();
     // drop stale-suppression findings for suppressions the retain just used
-    all_findings.retain(|f| {
-        if f.kind != "stale-suppression" {
-            return true;
-        }
-        // message shape: "suppression 'lucidlint: ignore <sig>' at line <ln> ..."
-        let msg = &f.message;
-        let Some(sig_start) = msg.find("ignore ") else {
-            return true;
-        };
-        let sig = msg[sig_start + 7..]
-            .split(|c: char| c.is_whitespace() || c == '\'')
-            .next()
-            .unwrap_or("")
-            .to_string();
-        !used_supps.contains(&(f.file.clone(), f.line, sig))
-    });
+    let filtered: Vec<Finding> = retained
+        .into_iter()
+        .filter(|f| {
+            if f.kind != "stale-suppression" {
+                return true;
+            }
+            let sig = sig_of_stale(&f.message);
+            let used = used_ln.contains(&(f.line, sig.clone())) || used_fl.contains(&sig);
+            !used
+        })
+        .collect();
+    all_findings = filtered;
 
     let contract_findings: Vec<serde_json::Value> = all_findings
         .iter()
@@ -1581,6 +1751,34 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_fix_command_never_fabricates_name_from_prose() {
+        // the plain complexity directive is machine form (kind only) — the
+        // rewritten command must carry NO fabricated --name (the regression:
+        // the prose "--fix-name <name>" slot started a token with a
+        // semicolon and produced "--name apply" for every plain-shape
+        // complexity finding)
+        let msg = common::complexity_message(16, "plain", "x");
+        let cmd = common::full_fix_command("src/a.py", 5, &msg);
+        assert!(cmd.contains("--kind extract-method"), "{cmd}");
+        assert!(!cmd.contains("--name"), "{cmd}");
+        assert!(!cmd.contains("apply"), "{cmd}");
+        // name-bearing directives keep their exact placeholder slot
+        let m2 = common::full_fix_command(
+            "src/a.py",
+            5,
+            "magic number 3 \u{2014} name it as a constant \u{2014} fix: magic-number --fix-name <CONST>",
+        );
+        assert!(m2.contains("--name <CONST>"), "{m2}");
+        // a prose token merely STARTING with --fix-name is ignored (exact match)
+        let m3 = common::full_fix_command(
+            "src/a.py",
+            5,
+            "x \u{2014} fix: extract-method (preview; --fix-name; prose)",
+        );
+        assert!(!m3.contains("--name"), "{m3}");
+    }
 
     fn scan_src(src: &str) -> Vec<Finding> {
         scan_corpus(&[("prod_mod.py", src)])
@@ -2365,45 +2563,32 @@ mod tests {
         let repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
         reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel);
         // mirror the production finalize: repo-wide findings honor per-file
-        // suppressions too, and a suppression the retain uses is not stale
-        let mut used_supps: std::collections::HashSet<(String, usize, String)> = std::collections::HashSet::new();
+        // suppressions too (family-aware, widened window), and a suppression
+        // the retain uses is not stale
+        let mut used_ln: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+        let mut used_fl: std::collections::HashSet<String> = std::collections::HashSet::new();
         let _ = root;
-        all.retain(|f| {
-            let Some(supps) = supps_by_rel.get(&f.file) else {
-                return true;
-            };
-            if let Some(why) = supps.file.get(&f.kind) {
-                if !why.is_empty() {
-                    return false;
+        let retained: Vec<Finding> = all
+            .into_iter()
+            .filter(|f| match supps_by_rel.get(&f.file) {
+                Some(supps) => {
+                    let kept = common::filter_repo_wide(vec![f.clone()], supps, &mut used_ln, &mut used_fl);
+                    !kept.is_empty() // false = suppressed (recorded) + dropped; true = keep
                 }
-            }
-            for ln in [f.line, f.line.saturating_sub(1)] {
-                if let Some(entries) = supps.line.get(&ln) {
-                    for (sig, why) in entries {
-                        if sig == &f.kind && !why.is_empty() {
-                            used_supps.insert((f.file.clone(), ln, sig.clone()));
-                            return false;
-                        }
-                    }
+                None => true,
+            })
+            .collect();
+        let filtered: Vec<Finding> = retained
+            .into_iter()
+            .filter(|f| {
+                if f.kind != "stale-suppression" {
+                    return true;
                 }
-            }
-            true
-        });
-        all.retain(|f| {
-            if f.kind != "stale-suppression" {
-                return true;
-            }
-            let msg = &f.message;
-            let Some(sig_start) = msg.find("ignore ") else {
-                return true;
-            };
-            let sig = msg[sig_start + 7..]
-                .split(|c: char| c.is_whitespace() || c == '\'')
-                .next()
-                .unwrap_or("")
-                .to_string();
-            !used_supps.contains(&(f.file.clone(), f.line, sig))
-        });
+                let sig = sig_of_stale(&f.message);
+                !used_ln.contains(&(f.line, sig.clone())) && !used_fl.contains(&sig)
+            })
+            .collect();
+        all = filtered;
         all
     }
 
@@ -2476,18 +2661,23 @@ mod tests {
     }
 
     #[test]
-    fn bigram_hash_dedups_repeated_bigrams() {
-        // [ab, ba, ab] and [ab, ba] share the unique set — equal hashes;
-        // [ab, ba] and [ba] differ (the pre-fix XOR cancelled repeats and
-        // collided the two)
-        use common::bigram_set_hash;
+    fn duplicate_dice_contract_no_set_hash_shortcut() {
+        // The Dice contract: >= 0.9 by MULTISET bigrams. Equal unique bigram
+        // sets with different multiplicities hash equal under a set hash but
+        // score Dice < 0.9 — the set-hash shortcut reported these as 100%
+        // similar (2026-08-17 review-log). There is no hash shortcut; the
+        // pair must NOT be flagged.
+        use common::dice_similarity;
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        // [a, b, a, b] -> windows (a,b),(b,a),(a,b) — the (a,b) pair repeats
-        let rep = bigram_set_hash(&s(&["a", "b", "a", "b"]));
-        let uniq = bigram_set_hash(&s(&["a", "b", "a"])); // windows (a,b),(b,a)
-        let single = bigram_set_hash(&s(&["b"])); // no windows at all
-        assert_eq!(rep, uniq, "repeated bigrams cancel under dedup");
-        assert_ne!(uniq, single, "different unique sets must not collide");
+        // [a,b,a,b] has multiset bigrams (a,b),(b,a),(a,b) — the (a,b) repeats
+        let rep = s(&["a", "b", "a", "b"]);
+        // [a,b,a] has (a,b),(b,a) — same unique set, one fewer (a,b)
+        let uniq = s(&["a", "b", "a"]);
+        let sim = dice_similarity(&rep, &uniq);
+        // 2*2 / (3+2) = 0.8 < 0.9 — NOT a duplicate despite equal unique sets
+        assert!(sim < 0.9, "dice must count bigram multiplicities: {sim}");
+        // sanity: the exact multiset is 1.0
+        assert_eq!(dice_similarity(&rep, &s(&["a", "b", "a", "b"])), 1.0);
     }
 
     #[test]
@@ -2605,6 +2795,60 @@ mod tests {
         assert!(!cm.iter().any(|x| x.kind == "detached-method")); // classmethod exempt
         let st = scan_src("class A:\n    @staticmethod\n    def m(x):\n        return x\n");
         assert!(!st.iter().any(|x| x.kind == "detached-method"));
+    }
+
+    #[test]
+    fn ignore_duplicate_suppresses_repo_wide_pair_without_stale() {
+        // an `ignore duplicate <why>` comment must exempt the repo-wide
+        // duplicate finding AND not be flagged stale (B3 wired for every
+        // repo-wide family, not just unused — the per-file pass runs before
+        // the duplicate pass)
+        let pair = |suffix: &str| {
+            format!(
+                "def span{a}(grid, row, c0, c1):\n    lat_min = max(grid.a, grid.a + row * grid.d)\n    lat_max = min(grid.b, grid.a + (row + 1) * grid.d)\n    lon_min = max(grid.c, grid.c + c0 * grid.e)\n    lon_max = min(grid.d, grid.c + (c1 + 1) * grid.e)\n    return Rect(lat_min, lat_max, lon_min, lon_max)\n",
+                a = suffix
+            )
+        };
+        let src = format!(
+            "class Rect:\n    def __init__(self, a, b, c, d):\n        self.a = a\n        self.b = b\n        self.c = c\n        self.d = d\n\n{pair1}{pair2}",
+            pair1 = pair("1"),
+            pair2 = "# lucidlint: ignore duplicate known copy-paste grid math\n".to_owned() + &pair("2"),
+        );
+        let f = scan_corpus(&[("prod_mod.py", &src)]);
+        assert!(
+            !f.iter().any(|x| x.kind == "duplicate"),
+            "the ignore must suppress the duplicate"
+        );
+        assert!(
+            !f.iter().any(|x| x.kind == "stale-suppression"),
+            "the used suppression must not be stale"
+        );
+    }
+
+    #[test]
+    fn complexity_suppression_three_lines_above_not_stale() {
+        // B7: a decorator line may intervene between the suppression comment
+        // and the def. With a 3-line window the comment directly above the
+        // decorator still suppresses the cc finding, and the used suppression
+        // is not flagged stale (the cc retain records the SAME window).
+        let mut body = String::new();
+        for i in 0..16 {
+            body.push_str(&format!("    if c{i}:\n        x{i} = {i}\n"));
+        }
+        let src = format!(
+            "# lucidlint: ignore complexity calibrated\n@deco\ndef f({c0}, {c1}, {c2}, {c3}, {c4}, {c5}, {c6}, {c7}, {c8}, {c9}, {c10}, {c11}, {c12}, {c13}, {c14}, {c15}):\n{body}    return 0\n",
+            c0 = "a", c1 = "b", c2 = "c", c3 = "d", c4 = "e", c5 = "f", c6 = "g", c7 = "h",
+            c8 = "i", c9 = "j", c10 = "k", c11 = "l", c12 = "m", c13 = "n", c14 = "o", c15 = "p",
+        );
+        let f = scan_src(&src);
+        assert!(
+            !f.iter().any(|x| x.kind == "complexity"),
+            "the windowed suppression must hold"
+        );
+        assert!(
+            !f.iter().any(|x| x.kind == "stale-suppression"),
+            "a used suppression is not stale"
+        );
     }
 
     #[test]

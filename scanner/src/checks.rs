@@ -2473,8 +2473,6 @@ pub fn is_duplicate_candidate(f: &StmtFunctionDef, skeleton_len: usize) -> bool 
     stmts.len() >= 2 && skeleton_len >= 12
 }
 
-pub use crate::common::bigram_set_hash;
-
 /// Cross-file copy-paste findings (`_duplicate_actions`).
 ///
 /// Not O(n²): the tolerance guard (`|len_a - len_b| <= max(2, len/5)`) means
@@ -2485,17 +2483,15 @@ pub use crate::common::bigram_set_hash;
 /// `_first_duplicate` semantics are preserved exactly: the earliest LATER
 /// candidate (list order) at >= 90% Dice.
 ///
-/// Exact matches need no similarity math: dice is 1.0 iff the bigram SETS
-/// are equal (identical sets have equal cardinality), so a content-addressed
-/// set hash — XOR of per-bigram hashes, order-independent — is an O(1)
-/// collision test. Same-hash pairs skip the Dice computation entirely; the
-/// length guard still applies (identical bigram sets can arise from periodic
-/// sequences of different lengths, which the rule rejects).
+/// Dice is computed for every pair: a content hash of the unique bigram SET
+/// cannot shortcut the decision — equal unique sets with different
+/// multiplicities (a repeated bigram) score Dice < 0.9 while hashing equal,
+/// and differing sets can still score >= 0.9. The set hash is neither
+/// necessary nor sufficient, so it is not a valid collision test
+/// (2026-08-17 review-log: set-vs-multiset 100%-similar false positive).
 pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
     use std::collections::HashMap;
     let mut out = Vec::new();
-    // precomputed set hashes — one O(len) pass per candidate, O(1) per pair
-    let hashes: Vec<u64> = fns.iter().map(|fr| bigram_set_hash(&fr.skeleton)).collect();
     let mut buckets: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, fr) in fns.iter().enumerate() {
         buckets.entry(fr.skeleton.len()).or_default().push(i);
@@ -2518,12 +2514,7 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
                 let bucket = &buckets[&len];
                 let start = bucket.partition_point(|&j| j <= i);
                 for &j in &bucket[start..] {
-                    // identical bigram sets -> dice is exactly 1.0, no computation
-                    let sim = if hashes[j] == hashes[i] {
-                        1.0
-                    } else {
-                        dice_similarity(&fr.skeleton, &fns[j].skeleton)
-                    };
+                    let sim = dice_similarity(&fr.skeleton, &fns[j].skeleton);
                     if sim >= 0.9 {
                         if best.is_none_or(|(b, _)| j < b) {
                             best = Some((j, sim));

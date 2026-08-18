@@ -165,9 +165,9 @@ lucidlint --repo .
 ```
 
 The pip install gives the `lucidlint` command (no `.py`, no flags with
-`fix-` prefixes). It needs the scan binary — install one of the release
-bundles and the orchestrator finds it, or build it once with
-`make scanner-check`.
+`fix-` prefixes). The wheel is self-contained: setup.py compiles the Rust
+scan core INTO the wheel, so scan, fix, and the LSP all work with no
+release bundle, no PATH setup, and no `make`.
 
 ### Option 3 — as an LSP (checks what you type, on save)
 

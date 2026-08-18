@@ -56,7 +56,11 @@ pub fn diagnostics_for(scan: &FileScan, source: &str, filter: Option<(&LucidConf
                 },
                 "severity": 1,
                 "source": "lucidlint",
-                "message": crate::common::complexity_message(e.cc, e.shape, &e.shape_detail),
+                "message": crate::common::full_fix_command(
+                    &e.file,
+                    e.line,
+                    &crate::common::complexity_message(e.cc, e.shape, &e.shape_detail),
+                ),
             }));
         }
     }

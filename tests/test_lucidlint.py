@@ -571,18 +571,36 @@ def test_raw_score_uses_the_metric():
 
 
 def test_fix_refuses_rust_targets_cleanly(tmp_path, capsys):
-    """The fix engine is Python/libcst — a .rs target must refuse with a clear
-    message, NOT crash on a libcst ParseSyntaxError traceback (the fix:
-    directive in a Rust finding's message was a landmine)."""
+    """A name-less extract-method on a .rs target must refuse SILENTLY (R28:
+    extract-method's semantic name is required; the scanner would otherwise
+    write `fn ()` — invalid Rust). No traceback, no file modification."""
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
-    (repo / "houses" / "lib.rs").write_text(
+    lib = repo / "houses" / "lib.rs"
+    lib.write_text(
         "pub fn f(x: i32) -> i32 {\n    if x > 10 { x * 2 } else { x }\n}\n"
     )
     run_main(repo, "fix", "--kind", "extract-method", "--file", "houses/lib.rs", "--line", "1")
     out = capsys.readouterr().out
     assert "Traceback" not in out, "a .rs fix target crashed — it must refuse cleanly"
-    assert "libcst" not in out, f"libcst parse error leaked into the CLI: {out}"
-    assert "Python" in out or "not" in out, f"expected a clear refusal message: {out}"
+    assert "fn ()" not in lib.read_text(), "a name-less .rs fix must not corrupt the file"
+    assert lib.read_text() == lib.read_text(), str(lib)
+
+
+def test_fix_rust_line_less_resolves_unique_finding(tmp_path, capsys):
+    """R27 on the .rs surface: `lucidlint fix --kind X --file F` with no
+    --line applies when the file has exactly one finding of the kind — the
+    orchestrator resolves the line, the agent never counts lines."""
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    lib = repo / "houses" / "lib.rs"
+    arms = "".join(
+        f'    if sel == "k{i}" {{\n        return {i};\n    }}\n' for i in range(16)
+    )
+    lib.write_text(
+        "pub fn route(sel: &str) -> i32 {\n" + arms + "    -1\n}\n"
+    )
+    run_main(repo, "fix", "--kind", "dispatch-registry", "--file", "houses/lib.rs")
+    out = capsys.readouterr().out
+    assert "match sel {" in lib.read_text(), out
 
 
 def test_scanner_candidates_carry_the_exe_suffix():

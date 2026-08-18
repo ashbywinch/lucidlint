@@ -15,6 +15,29 @@ from test_lucidlint import make_repo, run_main
 import fix_engine
 
 
+def _rust_run_compare(tmp_path, before: str, after: str, main_body: str) -> None:
+    """Compile AND RUN both versions with the same `main`, asserting equal
+    stdout — the behavior-preservation contract for Rust fixes (a compile-
+    only check cannot catch arm reordering, dropped branches, or a wrong
+    fallback)."""
+    import subprocess
+    rustc = str(Path.home() / ".cargo" / "bin" / "rustc")
+    if not Path(rustc).is_file():
+        rustc = "rustc"
+
+    def run(src: str) -> str:
+        f = tmp_path / "prog.rs"
+        f.write_text(src + "\n" + main_body)
+        exe = tmp_path / "prog"
+        r = subprocess.run([rustc, str(f), "-o", str(exe)], capture_output=True, text=True)
+        assert r.returncode == 0, f"compile failed:\n{r.stderr}\n{src}"
+        r2 = subprocess.run([str(exe)], capture_output=True, text=True)
+        assert r2.returncode == 0, f"run failed:\n{r2.stderr}"
+        return r2.stdout
+
+    assert run(before) == run(after), "the fix changed observable behavior"
+
+
 def _fix(tmp_path, kind, rel, src, line):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     (repo / rel).write_text(src)
@@ -286,6 +309,45 @@ def test_extract_class_renames_receiver_and_internal_calls(tmp_path):
     assert ns["_FnBodyState"](1)._best_seam() == 1  # behavior preserved
 
 
+def test_extract_class_renames_after_nested_function(tmp_path):
+    """A nested def inside a moved fn must not clobber the receiver-rename
+    context: everything AFTER the nested def is still inside the strewing
+    fn, so its receiver references must be renamed to self. The regression:
+    leave_FunctionDef reset the visitor's current fn to None, leaving the
+    post-nested-def receiver references unrenamed and the moved method
+    referencing a param that no longer exists."""
+    src = (
+        "class _FnBodyState:\n"
+        "    def __init__(self, line):\n"
+        "        self.line = line\n"
+        "\n"
+        "def _score(state: _FnBodyState, i, j):\n"
+        "    def helper(v):\n"
+        "        return v * 2\n"
+        "    if state.line > 0:\n"
+        "        return helper(state.line) + i\n"
+        "    return 0\n"
+        "\n"
+        "def _other(state: _FnBodyState, n):\n"
+        "    return state.line + n\n"
+        "\n"
+        "def _run(state: _FnBodyState):\n"
+        "    return _score(state, 1, 2)\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    out = fix_engine.fix_finding("extract-class", "houses/app.py", repo, 5)
+    assert out is not None
+    fixed = p.read_text()
+    assert "def _score(self, i, j):" in fixed
+    assert "self.line" in fixed  # the post-nested-def reference renamed
+    assert "def _other(self, n):" in fixed and "self.line" in fixed
+    ns = {}
+    exec(compile(fixed, "app.py", "exec"), ns)
+    assert ns["_FnBodyState"](3)._run() == 7  # helper(3) + 1 == 7, behavior preserved
+
+
 def test_extract_method_preview_and_confirm(tmp_path):
     src = (
         "def process(data, factor):\n"
@@ -447,6 +509,27 @@ def test_extract_method_min_bound_refuses_insufficient_splits(tmp_path):
     assert desc is None  # every same-container window is a single if — no split
 
 
+def test_decision_count_matches_radon_for_nested_and_or():
+    """radon counts len(BoolOp values) - 1. A parenthesized nested chain
+    `(a and b) and (c and d)` is ONE radon BoolOp with 4 values -> 3
+    decisions. The regression: a shared single _in_boolop flag double-
+    counted nested nodes (4 instead of 3), skewing the extract-method
+    decision bounds (<=13 seam gate, CC-split min)."""
+    import libcst as cst
+
+    import fix_engine as fe
+
+    # three operands -> 2 decisions; a parenthesized 4-operand chain -> 3
+    for src, expected in [
+        ("def f(a, b, c):\n    return a and b and c\n", 2),
+        ("def f(a, b, c, d):\n    return (a and b) and (c and d)\n", 3),
+        ("def f(a, b, c, d):\n    return a and (b and (c and d))\n", 3),
+    ]:
+        stmt = cst.parse_module(src).body[0].body.body[0]
+        n = fe._stmt_decision_count(stmt)
+        assert n == expected, (src, n)
+
+
 
 def test_rust_extract_method_applies(tmp_path):
     """extract-method works on Rust via the scan core (syn) — a seam whose
@@ -466,6 +549,7 @@ def test_rust_extract_method_applies(tmp_path):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     p = repo / "houses" / "lib.rs"
     p.write_text(src)
+    before = p.read_text()
     run_main(
         repo, "fix", "--kind", "extract-method", "--file", "houses/lib.rs",
         "--line", "1", "--name", "_apply_enrich",
@@ -474,44 +558,15 @@ def test_rust_extract_method_applies(tmp_path):
     assert "fn _apply_enrich(items: &mut Vec<i32>, factor: i32)" in fixed
     assert "_apply_enrich(items, factor);" in fixed
     assert "fn enrich(" in fixed  # the original survives, now delegating
-    # behavior preserved
-    import subprocess  # noqa: F401
-    ns = {}
-    exec(compile("", "x", "exec"), ns)
-
-
-def test_reduction_loop_becomes_pipeline_with_named_contributor(tmp_path):
-    """A pure reduction loop (accumulate into a local over an iterable, return
-    it) is a PIPELINE, not an extract-method seam — extract-method correctly
-    refuses it (the accumulator is an out-var). The lucid fix: name the per-
-    item contribution and `sum` it. Behavior is preserved."""
-    src = (
-        "def process(items, factor):\n"
-        "    total = 0\n"
-        "    for item in items:\n"
-        "        if item > 10:\n"
-        "            total += item * factor\n"
-        "        elif item > 5:\n"
-        "            total += item\n"
-        "    return total\n"
+    # behavior preserved: compile AND run both versions, compare the output
+    main = (
+        "fn main() {\n"
+        "    let mut v = vec![1, 2, 3, 4];\n"
+        "    enrich(&mut v, 3);\n"
+        "    println!(\"out: {}\", v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(\",\"));\n"
+        "}\n"
     )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
-    p = repo / "houses" / "app.py"
-    p.write_text(src)
-    out = fix_engine.fix_finding(
-        "pipeline", "houses/app.py", repo, 1, fix_engine.FixOptions(name="contribution")
-    )
-    assert out is not None, "a reduction loop should auto-fix as a pipeline"
-    fixed = p.read_text()
-    assert "def _contribution(item, factor):" in fixed
-    assert "sum(" in fixed and "_contribution(item, factor) for item in items" in fixed
-    assert "for item in items" in fixed
-    assert "total" not in fixed.replace("_contribution", "")
-    ns = {}
-    exec(compile(fixed, "app.py", "exec"), ns)
-    # item 6 takes the >5 branch (+6), item 12 the >10 branch (+12*2) = 30
-    assert ns["process"]([1, 3, 6, 12], 2) == 30
-    assert ns["process"]([20, 1, 7], 2) == (20 * 2 + 0 + 7)
+    _rust_run_compare(tmp_path, before, fixed, main)
 
 
 def test_extract_method_cli_preview_confirm_flow(tmp_path, capsys):
@@ -904,6 +959,54 @@ def test_dispatch_registry_refuses_non_chain(tmp_path):
     assert fix_engine.fix_dispatch_registry(src, 1) is None
 
 
+def test_dispatch_registry_passes_selector_to_selector_reading_arms(tmp_path):
+    """A multi-statement arm body that READS the selector (module-level named
+    handlers cannot capture the fn's locals) gets the selector passed as the
+    first handler parameter — behavior preserved, not a NameError."""
+    src = '''def run_tool(tool, args):
+    if tool == "search":
+        q = args.get("q", "")
+        return {"tool": tool, "q": q}
+    if tool == "person":
+        i = args.get("id", "")
+        return {"tool": tool, "id": i}
+    if tool == "rels":
+        ids = args.get("ids", [])
+        return {"tool": tool, "n": len(ids)}
+    return {"error": "unknown"}
+'''
+    fixed = fix_engine.fix_dispatch_registry(src, 1)
+    assert fixed is not None and fixed != src
+    before, after = {}, {}
+    exec(src, before)
+    exec(fixed, after)
+    for tool, args in [("search", {"q": "x"}), ("person", {"id": "7"}), ("rels", {"ids": [1, 2]}), ("bogus", {})]:
+        b = before["run_tool"](tool, args)
+        a = after["run_tool"](tool, args)
+        assert b == a, (tool, b, a)
+    # the named handlers take the selector as their first parameter
+    assert "_REGISTRY" in fixed
+    assert fixed.count("if tool ==") == 0
+
+
+def test_dispatch_registry_refuses_sibling_bound_reads(tmp_path):
+    """An arm that reads a name BOUND IN A SIBLING ARM is refused: the
+    original if/elif runs one arm, so the value may not exist at the uniform
+    call site, and the rewrite would crash every selector. The fix must not
+    be offered (the classifier refuses the same shape)."""
+    src = '''def run_tool(tool, args):
+    if tool == "a":
+        q = args.get("q", "")
+        return {"a": q}
+    if tool == "b":
+        return {"b": q}
+    if tool == "c":
+        return {"c": args.get("id", "")}
+    return {"error": "unknown"}
+'''
+    assert fix_engine.fix_dispatch_registry(src, 1) is None
+
+
 def test_rust_dispatch_registry_applies(tmp_path):
     """dispatch-registry works on Rust via the scan core (syn): the if/elif
     chain over one selector becomes a match — Rust's idiomatic dispatch
@@ -925,6 +1028,7 @@ def test_rust_dispatch_registry_applies(tmp_path):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     p = repo / "houses" / "lib.rs"
     p.write_text(src)
+    before = p.read_text()
     run_main(
         repo, "fix", "--kind", "dispatch-registry", "--file", "houses/lib.rs", "--line", "1",
     )
@@ -933,19 +1037,75 @@ def test_rust_dispatch_registry_applies(tmp_path):
     assert '"a" =>' in fixed and '"b" =>' in fixed and '"c" =>' in fixed
     assert "_ =>" in fixed  # the fallback becomes the wildcard arm
     assert "if sel ==" not in fixed
-    # behavior preserved: both versions COMPILE and produce the same answers
-    import subprocess  # noqa: F401
-    rustc = str(Path.home() / ".cargo" / "bin" / "rustc")
-    if not Path(rustc).is_file():
-        rustc = "rustc"
-    before = tmp_path / "before.rs"
-    after = tmp_path / "after.rs"
-    before.write_text("fn main() {}\n" + src)
-    after.write_text("fn main() {}\n" + fixed)
-    r1 = subprocess.run([rustc, str(before), "-o", str(tmp_path / "b")], capture_output=True, text=True)
-    r2 = subprocess.run([rustc, str(after), "-o", str(tmp_path / "a")], capture_output=True, text=True)
-    assert r1.returncode == 0, r1.stderr
-    assert r2.returncode == 0, r2.stderr
+    # behavior preserved: compile AND RUN both versions, compare the output
+    # (a compile-only check cannot catch a dropped arm or a wrong fallback)
+    main = (
+        "fn main() {\n"
+        "    for sel in [\"a\", \"b\", \"c\", \"zz\"] {\n"
+        "        println!(\"{} -> {}\", sel, route(sel, 5));\n"
+        "    }\n"
+        "}\n"
+    )
+    _rust_run_compare(tmp_path, before, fixed, main)
+
+
+def test_rust_dispatch_registry_refuses_else_arms(tmp_path):
+    """An arm with an else would be SILENTLY DELETED by the match splice —
+    the fix must refuse (and the classifier must not offer the directive).
+    The original file stays untouched."""
+    src = (
+        "pub fn route(sel: &str) -> i32 {\n"
+        "    if sel == \"a\" {\n        return 1;\n    } else {\n        return 9;\n    }\n"
+        "    if sel == \"b\" {\n        return 2;\n    }\n"
+        "    if sel == \"c\" {\n        return 3;\n    }\n"
+        "    -1\n"
+        "}\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "lib.rs"
+    p.write_text(src)
+    before = p.read_text()
+    rc = run_main(repo, "fix", "--kind", "dispatch-registry", "--file", "houses/lib.rs", "--line", "1")
+    assert p.read_text() == before, "an else-bearing dispatch must not be rewritten"
+    assert rc == 0  # silent R28 refusal, not an error
+
+
+def test_rust_dispatch_registry_refuses_string_selector(tmp_path):
+    """`match sel { \"lit\" => ... }` only compiles for &str — a String
+    selector must be refused (no directive, no broken rewrite)."""
+    src = (
+        "pub fn route(sel: String) -> i32 {\n"
+        "    if sel == \"a\" {\n        return 1;\n    }\n"
+        "    if sel == \"b\" {\n        return 2;\n    }\n"
+        "    if sel == \"c\" {\n        return 3;\n    }\n"
+        "    -1\n"
+        "}\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "lib.rs"
+    p.write_text(src)
+    before = p.read_text()
+    run_main(repo, "fix", "--kind", "dispatch-registry", "--file", "houses/lib.rs", "--line", "1")
+    assert p.read_text() == before, "a String selector must not be match-rewritten"
+
+
+def test_rust_dispatch_registry_refuses_duplicate_literals(tmp_path):
+    """Two arms on the same literal -> unreachable-pattern compile error —
+    refuse."""
+    src = (
+        "pub fn route(sel: &str) -> i32 {\n"
+        "    if sel == \"a\" {\n        return 1;\n    }\n"
+        "    if sel == \"a\" {\n        return 2;\n    }\n"
+        "    if sel == \"c\" {\n        return 3;\n    }\n"
+        "    -1\n"
+        "}\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "lib.rs"
+    p.write_text(src)
+    before = p.read_text()
+    run_main(repo, "fix", "--kind", "dispatch-registry", "--file", "houses/lib.rs", "--line", "1")
+    assert p.read_text() == before, "duplicate dispatch literals must not be rewritten"
 
 
 def test_rule_table_preserves_behavior(tmp_path):
@@ -979,6 +1139,35 @@ def test_rule_table_preserves_behavior(tmp_path):
         assert b == a, (assessment, b, a)
     assert "lambda:" in fixed and "if _cond()" in fixed
     assert fixed.count("violations.append(") == 0  # the if-stack is gone
+
+
+def test_rule_table_defers_value_evaluation(tmp_path):
+    """The value expression must evaluate ONLY when its condition holds —
+    a guard-then-use `if d.get("k"): violations.append(d["k"])` must not
+    KeyError at table-construction time. The regression: the value sat in
+    the tuple directly and ran eagerly, breaking every guard whose value
+    reads the guarded key."""
+    src = (
+        "def check(d):\n"
+        "    violations = []\n"
+        '    if d.get("k"):\n'
+        '        violations.append(d["k"])\n'
+        '    if d.get("m"):\n'
+        '        violations.append(d["m"] + 1)\n'
+        '    if "n" in d:\n'
+        '        violations.append(d["n"])\n'
+        "    return violations\n"
+    )
+    fixed = fix_engine.fix_rule_table(src, 1)
+    assert fixed is not None
+    before, after = {}, {}
+    exec(src, before)
+    exec(fixed, after)
+    for d in [{"k": "x"}, {"m": 2, "n": 0}, {}, {"k": "", "n": 5}]:
+        b = before["check"](d)
+        a = after["check"](d)
+        assert b == a, (d, b, a)
+    assert "_val()" in fixed  # the value lambda is called, not evaluated
 
 
 def test_rule_table_captures_preamble_locals(tmp_path):
@@ -1024,6 +1213,7 @@ def test_rust_rule_table_applies(tmp_path):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     p = repo / "houses" / "lib.rs"
     p.write_text(src)
+    before = p.read_text()
     run_main(
         repo, "fix", "--kind", "rule-table", "--file", "houses/lib.rs", "--line", "1",
     )
@@ -1033,18 +1223,18 @@ def test_rust_rule_table_applies(tmp_path):
     assert "for (_cond, _msg) in rules" in fixed
     assert "fn(&M, &str) -> bool" in fixed  # the fn-pointer table type
     assert fixed.count("out.push(") == 1  # only the collector loop pushes
-    import subprocess  # noqa: F401
-    rustc = str(Path.home() / ".cargo" / "bin" / "rustc")
-    if not Path(rustc).is_file():
-        rustc = "rustc"
-    before = tmp_path / "before.rs"
-    after = tmp_path / "after.rs"
-    before.write_text("fn main() {}\npub struct M;\nimpl M { fn get(&self, _: i32) -> bool { true } }\n" + src)
-    after.write_text("fn main() {}\npub struct M;\nimpl M { fn get(&self, _: i32) -> bool { true } }\n" + fixed)
-    r1 = subprocess.run([rustc, str(before), "-o", str(tmp_path / "b")], capture_output=True, text=True)
-    r2 = subprocess.run([rustc, str(after), "-o", str(tmp_path / "a")], capture_output=True, text=True)
-    assert r1.returncode == 0, r1.stderr
-    assert r2.returncode == 0, r2.stderr
+    # behavior preserved: compile AND RUN both versions, compare the output
+    main = (
+        "pub struct M { bits: i32 }\n"
+        "impl M { fn get(&self, i: i32) -> bool { (self.bits >> i) & 1 == 1 } }\n"
+        "fn main() {\n"
+        "    for bits in [0b111, 0b101, 0b000] {\n"
+        "        let m = M { bits };\n"
+        "        println!(\"{}\", check(&m, \"w\").join(\",\"));\n"
+        "    }\n"
+        "}\n"
+    )
+    _rust_run_compare(tmp_path, before, fixed, main)
 
 
 def test_dispatch_registry_lambda_table(tmp_path):

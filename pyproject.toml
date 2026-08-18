@@ -76,12 +76,14 @@ quote-style = "double"
 testpaths = ["tests"]
 
 [tool.coverage.run]
-# the tool's own code is the subject — the fix-engine tests exec fixtures
-# under synthetic filenames ("after.py", "app.py"...) that coverage cannot
-# measure at report time; scoping the source set keeps them out entirely
-# the shipped Python is the subject (lucidlint.py + the fix engine);
-# rule_metadata.py feeds RULES.md generation and scripts/ is dev tooling —
-# neither ships, so neither is measured
+# the fix-engine tests exec fixtures under synthetic filenames ("after.py",
+# "app.py"...) that coverage cannot measure at report time — scoping the
+# source set keeps them out entirely. The subject is the shipped PYTHON
+# logic (lucidlint.py + fix_engine.py). rule_metadata.py also ships in the
+# wheel but is exercised only via the RULES.md drift gate (a gen-rules
+# subprocess — invisible to in-process coverage), so it is excluded here
+# and guarded by its own `make rules --check` gate in CI; scripts/ is dev
+# tooling, not shipped.
 source = ["lucidlint", "fix_engine"]
 omit = ["*/__main__.py"]
 

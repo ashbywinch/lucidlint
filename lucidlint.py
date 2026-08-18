@@ -29,6 +29,7 @@ import datetime
 import difflib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -1288,6 +1289,18 @@ def _baseline_identity(key: str) -> BaselineIdentity:
     return BaselineIdentity(kind=key, file="", function="")
 
 
+# the gate reports DISPLAY kinds (final_kind output: strewing shows as
+# latent-class); the fix surfaces (Python + Rust) accept either and normalize
+# here. Kept in the orchestrator so the .rs fix path (and the R27 line
+# resolution) work even when fix_engine is None (libcst missing) — the Rust
+# fix surface does not need libcst.
+_FIX_ALIASES = {
+    "latent-class": "extract-class",
+    "complexity": "extract-method",
+    "large-function": "extract-method",
+}
+
+
 def main() -> int:
     args = parse_args()
     repo = args.repo.resolve()
@@ -1295,26 +1308,19 @@ def main() -> int:
     if args.command == "fix":
         # the agent-driven fix surface: `lucidlint fix --kind X --file F --line N`
         rel = args.file or ""
-        if rel.endswith(".rs"):
-            # a Rust fix runs in the scan core (syn) — libcst is Python-only
-            return _fix_rust(repo, fix_engine.KIND_ALIASES.get(args.kind, args.kind), rel, args.line, args.name)
-        if not rel.endswith(".py"):
-            # the fix engine is Python-only (libcst) — a non-.py/.rs target
-            # cannot be auto-fixed; refuse clearly instead of a parse crash
+        if not rel.endswith((".py", ".rs")):
+            # the fix engines (libcst for Python, syn for Rust) cannot touch a
+            # non-Python/Rust target; refuse clearly instead of a parse crash
             print(
-                f"fix: the fix engine only supports Python files — '{rel}' "
-                f"is not a .py file; refactor it by hand"
+                f"fix: the fix engine only supports Python and Rust files — '{rel}' "
+                f"is neither; refactor it by hand"
             )
             return 1
-        opts = fix_engine.FixOptions(
-            params=args.params.split(",") if args.params else None,
-            name=args.name,
-        )
-        fix_kind = fix_engine.KIND_ALIASES.get(args.kind, args.kind)
+        fix_kind = _FIX_ALIASES.get(args.kind, args.kind)
         if args.line == 0:
             # R27: agents never compute line numbers — the tool owns its own
             # coordinates; when the file has exactly one finding of the kind,
-            # no --line is needed
+            # no --line is needed (both the .py and .rs fix surfaces)
             lines = _finding_lines(repo, args.file, args.kind)
             if len(lines) == 1:
                 args.line = lines[0]
@@ -1327,6 +1333,28 @@ def main() -> int:
                     f"(lines {', '.join(map(str, lines))}) — pass --line to pick one"
                 )
                 return 0
+        if rel.endswith(".rs"):
+            # a Rust fix runs in the scan core (syn) — libcst is Python-only
+            if fix_kind == "extract-method" and args.name is None and not args.confirm:
+                # H4: extract-method's semantic name is REQUIRED. A name-less
+                # request forwarded to the scanner would serialize "" and write
+                # `fn ()` — invalid Rust — so refuse silently (R28; the
+                # directive prose already told the agent to pass --name). There
+                # is no Rust preview surface yet.
+                print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
+                return 0
+            return _fix_rust(repo, fix_kind, rel, args.line, args.name)
+        # Python: the libcst fix engine is a mandatory dependency
+        if fix_engine is None:
+            print(
+                "fix: the Python fix engine requires libcst (a mandatory "
+                "dependency) — `uv sync` installs it"
+            )
+            return 1
+        opts = fix_engine.FixOptions(
+            params=args.params.split(",") if args.params else None,
+            name=args.name,
+        )
         if fix_kind in fix_engine.PREVIEW_KINDS and not args.name and not args.confirm:
             # the name-free preview surface: show the proposed refactoring
             # as a diff (the seam with a placeholder name — no --fix-name
@@ -1487,29 +1515,64 @@ def _fix_rust(repo: Path, kind: str, rel: str, line: int, name: str | None) -> i
         print(f"fix: the Rust fix core failed for {rel}:{line}")
         return 1
     sys.stdout.write(proc.stdout)
+    if proc.returncode != 0:
+        # the scanner exits non-zero on an unknown/malformed request — an
+        # unexpected error must surface (R29), not masquerade as a success
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)
+        return 1
     return 0
 
 
 def _finding_lines(repo: Path, rel: str, kind: str) -> list[int]:
     """The lines of every finding of `kind` in one file — the R27 line
-    resolution: the tool scans, the agent never counts lines."""
+    resolution: the tool scans, the agent never counts lines.
+
+    `kind` is the FIX kind (the directive's `fix: <kind>` tail — what the
+    agent's command names): a dispatch-shaped complexity finding carries the
+    kind `complexity` but its message directive says `fix: dispatch-registry`,
+    so the match is against the message's directive, not the raw kind."""
+    wanted = _FIX_ALIASES.get(kind, kind)
     found = []
-    for line, k in _scan_single_file(repo, rel):
-        if fix_engine.KIND_ALIASES.get(k, k) == fix_engine.KIND_ALIASES.get(kind, kind):
-            found.append(line)
+    for f in _scan_single_file(repo, rel):
+        directive = _fix_directive_kind(f.message)
+        if directive is None:
+            # a finding with no directive has no fix — it never matches
+            continue
+        if _FIX_ALIASES.get(directive, directive) == wanted:
+            found.append(f.line)
     return sorted(found)
 
 
 def _scan_single_file(repo: Path, rel: str):
-    """Scan one file, yielding (line, kind) per finding."""
+    """Scan one file, yielding its findings."""
     let_include_tests = False  # the fix resolves one file's findings
     RUST_SCAN.prepare(repo, rel, let_include_tests, {})
     files = _py_files(repo, rel)
     rust = RUST_SCAN.load(repo, files)
     if rust is None:
         return
-    for f in rust.by_rel.get(rel, []):
-        yield f.line, f.kind
+    yield from rust.by_rel.get(rel, [])
+
+
+def _fix_directive_kind(message: str) -> str | None:
+    """The fix kind a finding's directive announces — what the agent's
+    `--kind` names. The directive tail is the full command
+    (`— fix: lucidlint fix --kind <kind> --file F --line N ...`); the
+    pre-command form (`— fix: <kind> <prose>`) appears on message paths
+    that have not been rewritten. None when the finding has no directive
+    (R28: no fix exists — it never matches a fix request)."""
+    idx = message.rfind("— fix: ")
+    if idx == -1:
+        return None
+    tail = message[idx + len("— fix: "):]
+    m = re.search(r"--kind\s+([a-z-]+)", tail)
+    if m:
+        return m.group(1)
+    first = tail.split()[0].strip()
+    if first and first != "lucidlint":
+        return first
+    return None
 
 
 def _gate_exit(stale: list[str], fails: list[Action], args) -> int:

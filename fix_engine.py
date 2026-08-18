@@ -60,7 +60,6 @@ STRUCTURAL_KINDS = {
     "magic-number": "Replace Magic Literal: introduce the named constant",
     "vague-name": "Rename the type and its references (same-file)",
     "long-param-list": "Introduce Parameter Object: bundle the params into a dataclass",
-    "pipeline": "turn the pure reduction loop into a sum() over a named per-item contributor",
     "dispatch-registry": "convert the if/elif dispatch chain into a dict of selector -> handler functions",
     "rule-table": "hoist the latent data structure: the if/append battery becomes a (condition, violation) table",
 }
@@ -68,7 +67,7 @@ STRUCTURAL_KINDS = {
 # structural fixes whose result is genuinely novel (a class split, a new
 # function, a bundled signature) preview a diff before --confirm; the
 # obvious ones (a constant inserted, a rename) apply directly
-PREVIEW_KINDS = {"extract-method", "extract-class", "long-param-list", "pipeline", "dispatch-registry", "rule-table"}
+PREVIEW_KINDS = {"extract-method", "extract-class", "long-param-list", "dispatch-registry", "rule-table"}
 
 # the gate reports DISPLAY kinds (final_kind output: strewing shows as
 # latent-class); the fix command accepts either and normalizes here — the
@@ -77,7 +76,6 @@ KIND_ALIASES = {
     "latent-class": "extract-class",
     "complexity": "extract-method",
     "large-function": "extract-method",
-    "loop-pipeline": "pipeline",
 }
 
 
@@ -970,15 +968,19 @@ class _CollectStores(cst.CSTVisitor):
         self.per_fn: dict[str, set[str]] = {}
         self._current: str | None = None
         self._in_param = False
+        self._fn_stack: list[str | None] = []
 
     @override
     def visit_FunctionDef(self, node) -> None:
+        # remember the enclosing fn so leave_FunctionDef can restore it —
+        # a nested def must not clobber the strewing fn's attribution
+        self._fn_stack.append(self._current)
         self._current = node.name.value
         self.per_fn.setdefault(self._current, set())
 
     @override
     def leave_FunctionDef(self, original_node) -> None:
-        self._current = None
+        self._current = self._fn_stack.pop()
 
     @override
     def visit_Param(self, node) -> None:
@@ -1019,14 +1021,16 @@ class _ReceiverToSelf(cst.CSTTransformer):
         self.receivers = receivers  # fn name -> its receiver param name
         self.shadowed = shadowed  # fn name -> names stored in its body
         self._current: str | None = None
+        self._fn_stack: list[str | None] = []
 
     @override
     def visit_FunctionDef(self, node) -> None:
+        self._fn_stack.append(self._current)
         self._current = node.name.value
 
     @override
     def leave_FunctionDef(self, original_node, updated_node):
-        self._current = None
+        self._current = self._fn_stack.pop()
         return updated_node
 
     @override
@@ -1427,7 +1431,8 @@ class _DecisionCount(cst.CSTVisitor):
 
     def __init__(self) -> None:
         self.n = 0
-        self._in_boolop = False
+        self._boolop_depth = 0
+        self._boolop_root: cst.BooleanOperation | None = None
 
     @override
     def visit_If(self, node) -> None:
@@ -1455,16 +1460,23 @@ class _DecisionCount(cst.CSTVisitor):
 
     @override
     def visit_BooleanOperation(self, node) -> None:
-        # libcst's and/or node (the old visit_BoolOp never fired). A chain
-        # is left-nested; radon counts len(values) - 1 — count once at the
-        # chain's root only (the _in_boolop guard skips the nested nodes)
-        if isinstance(node.operator, (cst.And, cst.Or)) and not self._in_boolop:
-            self.n += _chain_operands(node) - 1
-        self._in_boolop = True
+        # libcst's and/or node (the old visit_BoolOp never fired). radon
+        # counts one decision per `and`/`or` OPERATOR in a BoolOp tree —
+        # _chain_operands counts the full left-nested chain. A chain may be
+        # parenthesized into several roots overlapping one operand
+        # (`(a and b) and (c and d)` is ONE radon BoolOp with 4 values):
+        # count each OUTERMOST and/or node once, so a nested chain inside a
+        # parenthesized operand is not double-counted. Depth-tracking
+        # distinguishes the roots from the nested nodes (a single shared
+        # flag cannot: the inner node's leave resets it for the outer).
+        if isinstance(node.operator, (cst.And, cst.Or)):
+            if self._boolop_depth == 0:
+                self.n += _chain_operands(node) - 1
+            self._boolop_depth += 1
 
     @override
     def leave_BooleanOperation(self, original_node) -> None:
-        self._in_boolop = False
+        self._boolop_depth = max(0, self._boolop_depth - 1)
 
     @override
     def visit_Assert(self, node) -> None:
@@ -1530,169 +1542,6 @@ class _FindFnLine(cst.CSTVisitor):
             self.found = node
 
 
-# the (condition, added-expr) pairs of a reduction loop plus the no-match
-# default — a named alias so the signature is not a bare tuple collection
-_ReductionBranches = tuple[list[tuple[object, object]], object]
-
-
-def _walk_if_chain(stmt: cst.If) -> _ReductionBranches | None:
-    """Walk an if/elif/else chain, collecting (condition, added-expr) per
-    branch and the final else expression. The branches must be mutually
-    exclusive for the ternary rewrite to be correct."""
-    pairs: list[tuple[object, object]] = []
-    default = cst.Integer("0")
-    on: object = stmt
-    while isinstance(on, cst.If):
-        if not (isinstance(on.body, cst.IndentedBlock) and len(on.body.body) == 1
-                and isinstance(on.body.body[0], cst.SimpleStatementLine)
-                and isinstance(on.body.body[0].body[0], cst.AugAssign)):
-            return None
-        pairs.append((on.test, on.body.body[0].body[0].value))
-        if isinstance(on.orelse, cst.IndentedBlock):
-            if len(on.orelse.body) == 1 and isinstance(on.orelse.body[0], cst.SimpleStatementLine) \
-                    and isinstance(on.orelse.body[0].body[0], cst.AugAssign):
-                default = on.orelse.body[0].body[0].value
-            else:
-                return None
-            break
-        if on.orelse is None:
-            break
-        on = on.orelse  # elif is a nested If in the orelse
-    return pairs, default
-
-
-def _reduction_branches(body: cst.IndentedBlock) -> _ReductionBranches | None:
-    """The (condition, added-expr) pairs of a reduction loop body plus the
-    default (0 when no else). Only a bare `acc += expr` or an if/elif chain
-    (mutually exclusive branches, each a single `acc += expr`) is supported."""
-    pairs: list[tuple[object, object]] = []
-    default = cst.Integer("0")
-    for stmt in body.body:
-        if isinstance(stmt, cst.SimpleStatementLine):
-            st = stmt.body[0]
-            if not isinstance(st, cst.AugAssign):
-                return None  # an unexpected simple statement in the reducer
-            pairs.append((cst.Name("True"), st.value))
-            continue
-        if not isinstance(stmt, cst.If):
-            return None
-        walked = _walk_if_chain(stmt)
-        if walked is None:
-            return None
-        pairs.extend(walked[0])
-        default = walked[1]
-    return pairs, default
-
-
-def _free_names(nodes, excluded: set[str]) -> list[str]:
-    """Distinct Name values read in `nodes`, excluding the loop var and the
-    accumulator — the contributor's parameters beyond the loop variable."""
-    out: list[str] = []
-    seen: set[str] = set()
-
-    def walk(n) -> None:
-        if isinstance(n, cst.Name):
-            if n.value not in excluded and n.value not in seen:
-                seen.add(n.value)
-                out.append(n.value)
-        else:
-            for ch in getattr(n, "children", []):
-                walk(ch)
-
-    for n in nodes:
-        walk(n)
-    return out
-
-
-# the reduction fn's (accumulator, loop) — named so the signature is not a bare tuple
-_ReductionShape = tuple[cst.Name, cst.For]
-
-
-def _reduction_shape(fn: cst.FunctionDef) -> _ReductionShape | None:
-    """Validate a reduction fn's opening statements: `acc = 0` ; `for var in
-    iterable:` ; `return acc`. Returns (acc, loop) or None."""
-    if len(fn.body.body) < 3:
-        return None
-    init, loop, ret = fn.body.body[0], fn.body.body[1], fn.body.body[2]
-    if not (isinstance(init, cst.SimpleStatementLine) and isinstance(init.body[0], cst.Assign)
-            and isinstance(init.body[0].value, cst.Integer) and init.body[0].value.value == "0"
-            and isinstance(init.body[0].targets[0].target, cst.Name)):
-        return None
-    if not isinstance(loop, cst.For) or not isinstance(loop.target, cst.Name):
-        return None
-    acc = init.body[0].targets[0].target
-    if not (isinstance(ret, cst.SimpleStatementLine) and isinstance(ret.body[0], cst.Return)
-            and isinstance(ret.body[0].value, cst.Name) and ret.body[0].value.value == acc.value):
-        return None
-    return acc, loop
-
-
-def _contribution_ternary(pairs, default) -> object:
-    """The nested IfExp: e1 if c1 else e2 if c2 else ... else default."""
-    node: object = default
-    for cond, expr in reversed(pairs):
-        node = cst.IfExp(test=cond, body=expr, orelse=node)
-    return node
-
-
-# the (contributor def, sum pipeline) pair the rewrite inserts
-_PipelinePair = tuple[cst.FunctionDef, cst.SimpleStatementLine]
-
-
-def _pipeline_def_and_sum(name: str, var: str, free: list[str], ternary, loop: cst.For) -> _PipelinePair:
-    """The named contributor function + the `return sum(...)` pipeline."""
-    cname = "_" + name
-    new_def = cst.FunctionDef(
-        name=cst.Name(cname),
-        params=cst.Parameters(params=[cst.Param(cst.Name(var))] + [cst.Param(cst.Name(v)) for v in free]),
-        body=cst.IndentedBlock(body=[cst.SimpleStatementLine(body=[cst.Return(ternary)])]),
-    )
-    gen = cst.GeneratorExp(
-        elt=cst.Call(func=cst.Name(cname), args=[cst.Arg(cst.Name(var))] + [cst.Arg(cst.Name(v)) for v in free]),
-        for_in=cst.CompFor(target=loop.target, iter=loop.iter, ifs=[]),
-    )
-    pipeline = cst.SimpleStatementLine(body=[cst.Return(cst.Call(func=cst.Name("sum"), args=[cst.Arg(gen)]))])
-    return new_def, pipeline
-
-
-def fix_reduction_pipeline(source: str, line: int, name: str) -> str | None:
-    """A pure reduction loop (accumulate into a local over an iterable and
-    return it) is a PIPELINE, not an extract-method seam. Rewrite it to
-    `return sum(<name>(x, ...) for x in iterable)` and extract the per-item
-    contribution as a named pure function `def <name>(x, ...): return ...`."""
-    module = cst.parse_module(source)
-    wrapper = cst.MetadataWrapper(module)
-    finder = _FindFnLine(line)
-    wrapper.visit(finder)
-    fn = finder.found
-    if fn is None:
-        return None
-    # only top-level targets are rewritable (the contributor def inserts at
-    # module scope) — mirror extract-method's nested refusal
-    if not any(s is fn for s in wrapper.module.body):
-        return None
-    shaped = _reduction_shape(fn)
-    if shaped is None:
-        return None
-    acc, loop = shaped
-    parsed = _reduction_branches(loop.body)
-    if parsed is None:
-        return None
-    pairs, default = parsed
-    var = loop.target.value
-    free = _free_names([c for c, _ in pairs] + [e for _, e in pairs], {var, acc.value})
-    ternary = _contribution_ternary(pairs, default)
-    new_def, pipeline = _pipeline_def_and_sum(name, var, free, ternary, loop)
-    new_fn = fn.with_changes(body=fn.body.with_changes(body=[pipeline] + list(fn.body.body[3:])))
-    out_body: list = []
-    for stmt in wrapper.module.body:
-        if stmt is fn:
-            out_body.append(new_fn)
-            out_body.append(new_def)
-        else:
-            out_body.append(stmt)
-    return cst.Module(body=out_body).code
-
 
 def _fix_structural(kind: str, source: str, line: int, opts) -> str | None:
     """The name-driven transforms — the agent supplies the semantic bit."""
@@ -1718,10 +1567,6 @@ def _fix_structural(kind: str, source: str, line: int, opts) -> str | None:
         return fix_dispatch_registry(source, line)
     if kind == "rule-table":
         return fix_rule_table(source, line)
-    if kind == "pipeline":
-        if opts.name is None:
-            return None
-        return fix_reduction_pipeline(source, line, opts.name)
     return None
 
 
@@ -1961,19 +1806,37 @@ def _dispatch_lambda_mode(fn, wrapper, shaped: _DispatchShape, exprs) -> str:
     return cst.Module(body=[new_fn if s is fn else s for s in wrapper.module.body]).code
 
 
-def _dispatch_named_mode(fn, wrapper, shaped: _DispatchShape) -> str:
+def _dispatch_named_mode(fn, wrapper, shaped: _DispatchShape) -> str | None:
     """The named-handler rewrite of a multi-statement dispatch: module-level
     `_<slug>` handlers (literal-derived, collision-guarded) + the registry
-    dict + a lookup dispatch."""
+    dict + a lookup dispatch.
+
+    Two scope cases the extraction must not break: an arm that READS the
+    SELECTOR gets it passed as the first handler parameter (module-level
+    handlers cannot capture the fn's locals); an arm that reads a name
+    BOUND IN A SIBLING arm is refused — the original if/elif runs one arm,
+    so the value may not exist at the uniform call site, and the rewrite
+    would crash every selector instead of only the broken one."""
     preamble, chain, selector, default = shaped
-    union: list[str] = []
+    bounds: list[set[str]] = []
+    reads: list[set[str]] = []
     for _lit, arm_body in chain:
         bound = _BoundNames()
         for st in arm_body:
             st.visit(bound)
-        bound.bound.add(selector)
-        free = [n for n in _read_names(arm_body) if n not in bound.bound and n not in union]
+        bounds.append(bound.bound)
+        reads.append(set(_read_names(arm_body)))
+    for i in range(len(chain)):
+        for j, b in enumerate(bounds):
+            if i != j and reads[i] & b:
+                return None  # sibling-bound read: not preservable — refuse
+    selector_read = any(selector in r for r in reads)
+    union: list[str] = []
+    for i, _unused in enumerate(chain):
+        free = [n for n in reads[i] if n not in bounds[i] and n not in union]
         union.extend(free)
+    if selector_read:
+        union = [selector] + [v for v in union if v != selector]
     handlers, registry = _dispatch_build(chain, union, _module_names(wrapper))
     dispatch = _dispatch_call(selector, default, union)
     new_fn = fn.with_changes(body=fn.body.with_changes(body=preamble + dispatch))
@@ -2213,12 +2076,16 @@ def _rule_table_build(acc: str, checks: list) -> _RuleTableBuild:
     captured, and no condition needs a name."""
     entries = []
     for cond, value in checks:
+        # BOTH the condition and the value are lambdas: the original
+        # semantics evaluate the value ONLY when its condition holds (a
+        # guard-then-use `if d.get("k"): violations.append(d["k"])` must not
+        # KeyError at table-construction time), and in source order
         entries.append(
             cst.Element(
                 value=cst.Tuple(
                     elements=[
                         cst.Element(value=cst.Lambda(params=cst.Parameters(), body=cond)),
-                        cst.Element(value=value),
+                        cst.Element(value=cst.Lambda(params=cst.Parameters(), body=value)),
                     ]
                 )
             )
@@ -2231,9 +2098,9 @@ def _rule_table_build(acc: str, checks: list) -> _RuleTableBuild:
             cst.Assign(
                 targets=[cst.AssignTarget(cst.Name(acc))],
                 value=cst.ListComp(
-                    elt=cst.Name("v"),
+                    elt=cst.Call(func=cst.Name("_val"), args=[]),
                     for_in=cst.CompFor(
-                        target=cst.Tuple(elements=[cst.Element(cst.Name("_cond")), cst.Element(cst.Name("v"))]),
+                        target=cst.Tuple(elements=[cst.Element(cst.Name("_cond")), cst.Element(cst.Name("_val"))]),
                         iter=cst.Name("rules"),
                         ifs=[cst.CompIf(test=cst.Call(func=cst.Name("_cond"), args=[]))],
                     ),

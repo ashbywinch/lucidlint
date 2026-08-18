@@ -79,11 +79,20 @@ pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {
     ]
 }
 
-/// Expand a config table's `ignore`/`ignored_signals` list (with `group:`
-/// prefix expansion) into the set of silenced signals.
-fn expand_ignores(raw: &toml::Value) -> HashSet<String> {
+/// Expand a config table's `ignore` list (with `group:` prefix expansion)
+/// into the set of silenced signals. `accept_ignored_signals` mirrors the
+/// gate's GLOBAL read (`raw.get("ignore", raw.get("ignored_signals", []))`).
+/// The per-path read takes ONLY `ignore` (lucidlint.py's `"ignore" in val`
+/// and `val["ignore"]` — a per-path table with only `ignored_signals` is
+/// silently skipped by the gate, so the LSP must skip it too).
+fn expand_ignores(raw: &toml::Value, accept_ignored_signals: bool) -> HashSet<String> {
     let mut out = HashSet::new();
-    let Some(list) = raw.get("ignore").or_else(|| raw.get("ignored_signals")) else {
+    let list = if accept_ignored_signals {
+        raw.get("ignore").or_else(|| raw.get("ignored_signals"))
+    } else {
+        raw.get("ignore")
+    };
+    let Some(list) = list else {
         return out;
     };
     let Some(items) = list.as_array() else {
@@ -93,6 +102,9 @@ fn expand_ignores(raw: &toml::Value) -> HashSet<String> {
         let Some(name) = item.as_str() else {
             continue;
         };
+        // the gate strips each item BEFORE the group: check — a
+        // " group:style" entry expands, "group:style " expands too
+        let name = name.trim();
         if let Some(group) = name.strip_prefix("group:") {
             for (gname, kinds) in rule_groups() {
                 if *gname == group {
@@ -100,7 +112,7 @@ fn expand_ignores(raw: &toml::Value) -> HashSet<String> {
                 }
             }
         } else {
-            out.insert(name.trim().to_string());
+            out.insert(name.to_string());
         }
     }
     out
@@ -152,7 +164,7 @@ pub fn load_lucidlint_config(root: &Path) -> LucidConfig {
         };
         current = next;
     }
-    config.global = expand_ignores(current);
+    config.global = expand_ignores(current, true);
     let Some(table) = current.as_table() else {
         return config;
     };
@@ -163,7 +175,7 @@ pub fn load_lucidlint_config(root: &Path) -> LucidConfig {
         let Some(inner) = val.as_table() else {
             continue;
         };
-        let ignored = expand_ignores(&toml::Value::Table(inner.clone()));
+        let ignored = expand_ignores(&toml::Value::Table(inner.clone()), false);
         if !ignored.is_empty() {
             config.per_path.push((key.clone(), ignored));
         }
@@ -176,6 +188,14 @@ pub fn load_lucidlint_config(root: &Path) -> LucidConfig {
 /// path parts are ignored. Replicated bug-for-bug so the LSP agrees with the
 /// gate (the semantics are pinned by tests/test_config_parity.py).
 fn pure_path_match(rel: &str, pattern: &str) -> bool {
+    // Python's PurePath.match on a RELATIVE path never matches an absolute
+    // pattern (a leading '/') and RAISES ValueError on an empty pattern —
+    // the Rust mirror must not silently match everything for either
+    // (config parity: a config that crashes the gate must not over-suppress
+    // in the LSP)
+    if pattern.starts_with('/') || pattern.trim().is_empty() {
+        return false;
+    }
     let rel_parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
     let pat_parts: Vec<&str> = pattern.split('/').filter(|p| !p.is_empty()).collect();
     if pat_parts.len() > rel_parts.len() {
@@ -217,7 +237,11 @@ fn fnmatch_part(text: &str, pattern: &str) -> bool {
 /// Returns (matched, remaining pattern, remaining text).
 fn match_class<'a>(t: &'a [char], p: &'a [char]) -> (bool, &'a [char], &'a [char]) {
     let mut i = 1usize;
-    let negate = p.get(i).is_some_and(|c| *c == '!' || *c == '^');
+    // Python's fnmatch negates a class ONLY with `!` — `^` is an ordinary
+    // member (`[^a-z]` = the set {^, a..z}, matching 'x' or '^'). The
+    // previous `! || ^` diverged from the gate's Path.match (config parity:
+    // the same per-path pattern silenced different file sets in LSP vs gate)
+    let negate = p.get(i).is_some_and(|c| *c == '!');
     if negate {
         i += 1;
     }
@@ -261,12 +285,51 @@ mod tests {
         assert!(!pure_path_match("tests/sub/test_y.py", "tests/**"));
         assert!(pure_path_match("x/y.py", "*.py"));
         assert!(!pure_path_match("z.txt", "*.py"));
+        // Python's PurePath.match on a RELATIVE path never matches an
+        // absolute pattern, and raises ValueError on an empty one — the Rust
+        // mirror must not silently match everything for either
+        assert!(!pure_path_match("tests/a.py", "/tests/**"));
+        assert!(!pure_path_match("a.py", ""));
+    }
+
+    #[test]
+    fn class_negation_matches_python_fnmatch() {
+        // Python fnmatch negates a class ONLY with `!`; `^` is a literal
+        // member — `Path('x.py').match('[^a-z].py')` is True (class {^,a..z}).
+        // The previous `! || ^` negation diverged (LSP vs gate).
+        assert!(pure_path_match("x.py", "[^a-z].py"));
+        assert!(pure_path_match("^.py", "[^a-z].py")); // ^ itself is a member
+        assert!(!pure_path_match("x.py", "[!a-z].py"));
+        assert!(pure_path_match("1.py", "[!a-z].py"));
+    }
+
+    #[test]
+    fn per_path_ignored_signals_only_table_is_skipped() {
+        // the gate's per-path read requires an "ignore" key and reads ONLY
+        // it — a per-path table with just `ignored_signals` is silently
+        // skipped by the gate, so the LSP must skip it too
+        let raw: toml::Value =
+            toml::from_str("ignore = [\"a\"]\n[t.\"tests/**\"]\nignored_signals = [\"magic-number\"]\n").unwrap();
+        let set = expand_ignores(raw.get("t").unwrap(), false);
+        assert!(set.is_empty(), "per-path ignored_signals-only must be skipped");
+        let global = expand_ignores(&raw, true);
+        assert!(global.contains("a"));
+    }
+
+    #[test]
+    fn group_prefix_tolerates_whitespace() {
+        // the gate strips each item before the group: check — a leading or
+        // trailing space must not turn "group:style" into a literal signal
+        let raw: toml::Value = toml::from_str("ignore = [\" group:style\", \"group:style \"]").unwrap();
+        let set = expand_ignores(&raw, true);
+        assert!(set.contains("magic-number"));
+        assert!(!set.contains("group:style"));
     }
 
     #[test]
     fn group_expansion_matches_rule_groups() {
         let raw: toml::Value = toml::from_str("ignore = [\"group:test-discipline\"]").unwrap();
-        let set = expand_ignores(&raw);
+        let set = expand_ignores(&raw, true);
         assert!(set.contains("monkeypatch"));
         assert!(set.contains("skipif"));
         assert!(!set.contains("complexity"));
