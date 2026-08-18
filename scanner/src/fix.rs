@@ -370,11 +370,10 @@ fn apply(source: &str, target: &ItemFn, seam: &[&Stmt], free: &[Ident], name: &s
 /// splice: the if-conditions become match arms, the trailing fallback the
 /// `_` arm (review: run_tool's Rust analog). Returns Err(why) when the shape
 /// is not a clean chain.
-
 /// Parse contiguous dispatch arms from a statement list, starting at `first_if`.
 /// Returns (selector, arms_text, lits, next_idx) or Err(why).
-fn parse_dispatch_arms<'a>(
-    stmts: &'a [syn::Stmt],
+fn parse_dispatch_arms(
+    stmts: &[syn::Stmt],
     first_if: usize,
     source: &str,
 ) -> Result<(String, Vec<String>, Vec<String>, usize), String> {
