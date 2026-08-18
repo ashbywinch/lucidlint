@@ -323,3 +323,4 @@ in [docs/PLAN.md](docs/PLAN.md).
 ## License
 
 MIT. Issues and PRs at [github.com/ashbywinch/lucidlint](https://github.com/ashbywinch/lucidlint).
+
