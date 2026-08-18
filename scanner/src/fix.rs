@@ -13,7 +13,7 @@
 use proc_macro2::LineColumn;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
-use syn::{ Expr, FnArg, Ident, Item, ItemFn, Lit, Pat, Stmt};
+use syn::{Expr, FnArg, Ident, Item, ItemFn, Lit, Pat, Stmt};
 
 /// A file byte offset from a proc-macro2 LineColumn (1-based line, byte col).
 fn byte_offset(source: &str, lc: LineColumn) -> usize {
@@ -373,7 +373,11 @@ fn apply(source: &str, target: &ItemFn, seam: &[&Stmt], free: &[Ident], name: &s
 
 /// Parse contiguous dispatch arms from a statement list, starting at `first_if`.
 /// Returns (selector, arms_text, lits, next_idx) or Err(why).
-fn parse_dispatch_arms<'a>(stmts: &'a [syn::Stmt], first_if: usize, source: &str) -> Result<(String, Vec<String>, Vec<String>, usize), String> {
+fn parse_dispatch_arms<'a>(
+    stmts: &'a [syn::Stmt],
+    first_if: usize,
+    source: &str,
+) -> Result<(String, Vec<String>, Vec<String>, usize), String> {
     let mut selector: Option<String> = None;
     let mut arms: Vec<String> = Vec::new();
     let mut lits: Vec<String> = Vec::new();
@@ -405,7 +409,10 @@ fn parse_dispatch_arms<'a>(stmts: &'a [syn::Stmt], first_if: usize, source: &str
             Some(s) if *s == sel => {}
             _ => return Err("the arms do not share one selector".to_string()),
         }
-        let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = b.right.as_ref() else {
+        let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(s), ..
+        }) = b.right.as_ref()
+        else {
             return Err("an arm's comparison is not against a string literal".to_string());
         };
         let lit = s.token().to_string();
