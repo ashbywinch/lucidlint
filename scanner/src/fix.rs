@@ -13,7 +13,7 @@
 use proc_macro2::LineColumn;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
-use syn::{BinOp, Expr, FnArg, Ident, Item, ItemFn, Lit, Pat, Stmt};
+use syn::{ Expr, FnArg, Ident, Item, ItemFn, Lit, Pat, Stmt};
 
 /// A file byte offset from a proc-macro2 LineColumn (1-based line, byte col).
 fn byte_offset(source: &str, lc: LineColumn) -> usize {
@@ -370,6 +370,57 @@ fn apply(source: &str, target: &ItemFn, seam: &[&Stmt], free: &[Ident], name: &s
 /// splice: the if-conditions become match arms, the trailing fallback the
 /// `_` arm (review: run_tool's Rust analog). Returns Err(why) when the shape
 /// is not a clean chain.
+
+/// Parse contiguous dispatch arms from a statement list, starting at `first_if`.
+/// Returns (selector, arms_text, lits, next_idx) or Err(why).
+fn parse_dispatch_arms<'a>(stmts: &'a [syn::Stmt], first_if: usize, source: &str) -> Result<(String, Vec<String>, Vec<String>, usize), String> {
+    let mut selector: Option<String> = None;
+    let mut arms: Vec<String> = Vec::new();
+    let mut lits: Vec<String> = Vec::new();
+    let mut idx = first_if;
+    while idx < stmts.len() {
+        let syn::Stmt::Expr(e, _) = &stmts[idx] else { break };
+        let syn::Expr::If(i) = e else { break };
+        if i.else_branch.is_some() {
+            return Err("an arm has an else branch -- the match rewrite would delete it".to_string());
+        }
+        if !block_ends_with_return(&i.then_branch) {
+            return Err("an arm does not end in `return` -- the match arms would need matching types".to_string());
+        }
+        let syn::Expr::Binary(b) = i.cond.as_ref() else {
+            return Err("an arm's condition is not `sel == \"lit\"`".to_string());
+        };
+        if !matches!(b.op, syn::BinOp::Eq(_)) {
+            return Err("an arm's condition is not `sel == \"lit\"`".to_string());
+        }
+        let syn::Expr::Path(p) = b.left.as_ref() else {
+            return Err("an arm's condition is not `sel == \"lit\"`".to_string());
+        };
+        if p.path.segments.len() != 1 {
+            return Err("an arm's selector is not a plain name".to_string());
+        }
+        let sel = p.path.segments[0].ident.to_string();
+        match &selector {
+            None => selector = Some(sel),
+            Some(s) if *s == sel => {}
+            _ => return Err("the arms do not share one selector".to_string()),
+        }
+        let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = b.right.as_ref() else {
+            return Err("an arm's comparison is not against a string literal".to_string());
+        };
+        let lit = s.token().to_string();
+        if lits.contains(&lit) {
+            return Err("two arms dispatch on the same literal".to_string());
+        }
+        lits.push(lit.clone());
+        let block = span_text(source, i.then_branch.span())?;
+        arms.push(format!("{lit} => {block}"));
+        idx += 1;
+    }
+    let sel = selector.ok_or_else(|| "no selector found".to_string())?;
+    Ok((sel, arms, lits, idx))
+}
+
 pub fn fix_dispatch_registry(source: &str, line: usize) -> Result<String, String> {
     let file = syn::parse_file(source).map_err(|_| "the file does not parse".to_string())?;
     let target = file
@@ -385,62 +436,11 @@ pub fn fix_dispatch_registry(source: &str, line: usize) -> Result<String, String
         .iter()
         .position(|s| matches!(s, Stmt::Expr(e, _) if matches!(e, Expr::If(_))))
         .ok_or_else(|| "the function has no if statements to convert".to_string())?;
-    let mut selector: Option<String> = None;
-    let mut arms: Vec<String> = Vec::new();
-    let mut lits: Vec<String> = Vec::new();
-    let mut idx = first_if;
-    while idx < stmts.len() {
-        let Stmt::Expr(e, _) = &stmts[idx] else { break };
-        let Expr::If(i) = e else { break };
-        if i.else_branch.is_some() {
-            // an else/else-if arm would be silently DELETED by the splice —
-            // refuse (offer-equals-fix: the classifier rejects it too)
-            return Err("an arm has an else branch — the match rewrite would delete it".to_string());
-        }
-        if !block_ends_with_return(&i.then_branch) {
-            // arms that don't diverge need matching arm types in the match —
-            // refuse unless every arm returns (the only shape the rewrite
-            // can compile blind)
-            return Err("an arm does not end in `return` — the match arms would need matching types".to_string());
-        }
-        let Expr::Binary(b) = i.cond.as_ref() else {
-            return Err("an arm's condition is not `sel == \"lit\"`".to_string());
-        };
-        if !matches!(b.op, BinOp::Eq(_)) {
-            return Err("an arm's condition is not `sel == \"lit\"`".to_string());
-        }
-        let Expr::Path(p) = b.left.as_ref() else {
-            return Err("an arm's condition is not `sel == \"lit\"`".to_string());
-        };
-        if p.path.segments.len() != 1 {
-            return Err("an arm's selector is not a plain name".to_string());
-        }
-        let sel = p.path.segments[0].ident.to_string();
-        match &selector {
-            None => selector = Some(sel),
-            Some(s) if *s == sel => {}
-            _ => return Err("the arms do not share one selector".to_string()),
-        }
-        let Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. }) = b.right.as_ref() else {
-            return Err("an arm's comparison is not against a string literal".to_string());
-        };
-        let lit = s.token().to_string();
-        if lits.contains(&lit) {
-            // duplicate literals -> unreachable-pattern compile error
-            return Err("two arms dispatch on the same literal".to_string());
-        }
-        lits.push(lit.clone());
-        let block = span_text(source, i.then_branch.span())?;
-        arms.push(format!("{lit} => {block}"));
-        idx += 1;
-    }
+    let (sel, arms, _lits, idx) = parse_dispatch_arms(stmts, first_if, source)?;
     if arms.len() < 3 {
         return Err("fewer than 3 dispatch arms — a registry is not worth it".to_string());
     }
-    let sel = selector.ok_or_else(|| "no selector found".to_string())?;
     if !param_is_str(&target.sig, &sel) {
-        // `match sel { "lit" => ... }` only compiles for a `&str` selector —
-        // a String selector would E0308 (expected String, found &str)
         return Err("the selector must be declared `&str` for the match rewrite".to_string());
     }
     // the fallback (statements after the chain) becomes the `_` arm

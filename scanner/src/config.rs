@@ -164,7 +164,8 @@ pub fn load_lucidlint_config(root: &Path) -> LucidConfig {
         };
         current = next;
     }
-    config.global = expand_ignores(current, true);
+    let accept_ignored_signals = true;
+    config.global = expand_ignores(current, accept_ignored_signals);
     let Some(table) = current.as_table() else {
         return config;
     };
@@ -175,7 +176,8 @@ pub fn load_lucidlint_config(root: &Path) -> LucidConfig {
         let Some(inner) = val.as_table() else {
             continue;
         };
-        let ignored = expand_ignores(&toml::Value::Table(inner.clone()), false);
+        let per_path = false;
+        let ignored = expand_ignores(&toml::Value::Table(inner.clone()), per_path);
         if !ignored.is_empty() {
             config.per_path.push((key.clone(), ignored));
         }

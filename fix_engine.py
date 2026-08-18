@@ -1818,19 +1818,10 @@ def _dispatch_named_mode(fn, wrapper, shaped: _DispatchShape) -> str | None:
     so the value may not exist at the uniform call site, and the rewrite
     would crash every selector instead of only the broken one."""
     preamble, chain, selector, default = shaped
-    bounds: list[set[str]] = []
-    reads: list[set[str]] = []
-    for _lit, arm_body in chain:
-        bound = _BoundNames()
-        for st in arm_body:
-            st.visit(bound)
-        bounds.append(bound.bound)
-        reads.append(set(_read_names(arm_body)))
-    for i in range(len(chain)):
-        for j, b in enumerate(bounds):
-            if i != j and reads[i] & b:
-                return None  # sibling-bound read: not preservable — refuse
-    selector_read = any(selector in r for r in reads)
+    scope = _dispatch_scope_analysis(chain, selector)
+    if scope is None:
+        return None  # sibling-bound read: not preservable — refuse
+    bounds, reads, selector_read = scope
     union: list[str] = []
     for i, _unused in enumerate(chain):
         free = [n for n in reads[i] if n not in bounds[i] and n not in union]
@@ -1844,11 +1835,36 @@ def _dispatch_named_mode(fn, wrapper, shaped: _DispatchShape) -> str | None:
     for stmt in wrapper.module.body:
         if stmt is fn:
             out_body.append(new_fn)
-            out_body.extend(handlers)  # the registry names them — define first
+            out_body.extend(handlers)
             out_body.append(registry)
         else:
             out_body.append(stmt)
     return cst.Module(body=out_body).code
+
+
+# per-arm bound + read name analysis result — the fix's scope check
+# (refused when sibling-bound reads are detected)
+_DispatchScope = tuple[list[set[str]], list[set[str]], bool] | None
+
+
+def _dispatch_scope_analysis(chain, selector) -> _DispatchScope:
+    """Per-arm bound + read name analysis. Returns (bounds, reads, selector_read)
+    or None when an arm reads a name bound in a sibling arm (the value does
+    not exist at the uniform call site — the rewrite would crash every
+    selector instead of only the broken one)."""
+    bounds: list[set[str]] = []
+    reads: list[set[str]] = []
+    for _lit, arm_body in chain:
+        bound = _BoundNames()
+        for st in arm_body:
+            st.visit(bound)
+        bounds.append(bound.bound)
+        reads.append(set(_read_names(arm_body)))
+    for i in range(len(chain)):
+        for j, b in enumerate(bounds):
+            if i != j and reads[i] & b:
+                return None
+    return bounds, reads, any(selector in r for r in reads)
 
 
 def _dispatch_lambda_table(chain: _DispatchChain, exprs: list) -> cst.SimpleStatementLine:
