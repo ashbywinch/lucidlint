@@ -1,4 +1,4 @@
-# Makefile for build-tools — single dev entry point
+# Makefile for lucidlint — single dev entry point
 #
 # CHANGE: none expected — this repo is the tools themselves; add new tool
 # targets below `clean` (keep them behind `deps`, never `install-hooks`).
@@ -14,7 +14,7 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-.PHONY: help setup deps uv-sync install-hooks check lint lint-check lint-github typecheck typecheck-update-baseline format test coverage self-check code-health clean
+.PHONY: help setup deps uv-sync install-hooks check lint lint-check lint-github typecheck typecheck-update-baseline format test scanner-check coverage self-check lucidlint wheel wheel-check cargo-install-check clean
 
 # Tool paths. uv is the package manager (installs itself if missing).
 PYTHON := .venv/bin/python
@@ -29,13 +29,13 @@ RED := \033[0;31m
 NC := \033[0m
 
 help:
-	@echo "build-tools — available commands:"
+	@echo "lucidlint — available commands:"
 	@echo "  ${GREEN}make setup${NC}        Create venv, install deps + pre-commit hooks"
 	@echo "  ${GREEN}make check${NC}        Lint + typecheck — the gate CI and the pre-push hook run"
 	@echo "  ${GREEN}make test${NC}         Run tests (lint + typecheck gate)"
-	@echo "  ${GREEN}make self-check${NC}   The tool's own gate: code_health on this repo + record check"
+	@echo "  ${GREEN}make self-check${NC}   The tool's own gate: lucidlint on this repo + record check"
 	@echo "  ${GREEN}make coverage${NC}     Run tests with coverage report"
-	@echo "  ${GREEN}make code-health${NC}  Run code_health.py on REPO (default: ..)"
+	@echo "  ${GREEN}make lucidlint${NC}  Run lucidlint.py on REPO (default: ..)"
 	@echo "  ${GREEN}make format${NC}       Auto-fix lint + formatting issues"
 	@echo "  ${GREEN}make clean${NC}        Remove .venv and generated files"
 
@@ -49,7 +49,7 @@ deps: uv-sync
 
 uv-sync:
 	@$(UV) --version >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
-	@$(UV) sync
+	@$(UV) sync --all-extras
 
 install-hooks:
 	@mkdir -p .git/hooks
@@ -67,27 +67,93 @@ install-hooks:
 # `make test` already includes these).
 check: deps lint-check typecheck
 
-test: deps lint-check typecheck
+# The Rust scan core must be freshly built before pytest — the orchestrator
+# tests drive the real binary, and a stale binary would test nothing.
+test-fixture:
+	@$(PYTHON) scripts/build-test-repo.py
+
+test: deps lint-check typecheck scanner-check scanner-test
 	@$(PYTEST) tests/ -q --tb=short
+
+# The Rust suite is part of the gate — a change to the core must pass its
+# own tests, not just build.
+scanner-test:
+	@cd scanner && cargo test --release 2>&1 | tail -30
+	@echo "${GREEN}✓ scanner tests passed${NC}"
+
+scanner-check:
+	@cd scanner && cargo build --release 2>&1 | tail -30
+	@echo "${GREEN}✓ scanner built${NC}"
+
+rules:
+	@$(UV) run python scripts/gen-rules.py
+
+# The pip distribution must be self-contained: `uv build` compiles the Rust
+# core INTO the wheel (setup.py's build_py), so a clean-venv install scans
+# and fixes with no bundle, no PATH, no make.
+wheel: scanner-check
+	@$(UV) build
+
+# The deployment check: install the freshly built wheel into a CLEAN venv and
+# exercise version + scan + fix from that install (what a real pip user gets).
+# The fixture intentionally carries a FAIL finding: the scan is asserted by
+# JSON-parse success (the gate verdict exit 1 is not a crash).
+wheel-check: wheel
+	@tmp=$$(mktemp -d); \
+	$(UV) venv $$tmp/venv >/dev/null; \
+	$(UV) pip install --python $$tmp/venv dist/*.whl >/dev/null; \
+	$$tmp/venv/bin/lucidlint --version | grep -q "^lucidlint"; \
+	mkdir -p $$tmp/repo; \
+	printf '# lucidlint: ignore magic-number nothing on this line\n\ndef f():\n    return 1 + 1\n' > $$tmp/repo/a.py; \
+	$$tmp/venv/bin/lucidlint --repo $$tmp/repo --json 2>/dev/null > $$tmp/out.json || true; \
+	$(PYTHON) -c "import json,sys; json.load(open('$$tmp/out.json'))"; \
+	line=$$($(PYTHON) -c "import json;d=json.load(open('$$tmp/out.json'));print(next((a['line'] for a in d.get('actions',[]) if a['kind']=='stale-suppression'),''))"); \
+	[ -n "$$line" ]; \
+	$$tmp/venv/bin/lucidlint fix --kind stale-suppression --file $$tmp/repo/a.py --line $$line >/dev/null; \
+	! grep -q "lucidlint: ignore" $$tmp/repo/a.py; \
+	rm -rf $$tmp; \
+	echo "${GREEN}✓ pip wheel: clean-venv install scans + fixes${NC}"
+
+# The Rust-native channel: `cargo install` of the scanner crate must give a
+# working lucidlint binary (version + scan + fix).
+cargo-install-check: deps
+	@tmp=$$(mktemp -d); \
+	cd scanner && cargo install --path . --root $$tmp/install >/dev/null 2>&1; \
+	$$tmp/install/bin/lucidlint --version | grep -q "^lucidlint"; \
+	mkdir -p $$tmp/repo; \
+	printf 'fn main() {\n    let x = 3 * 60;\n}\n' > $$tmp/repo/a.rs; \
+	cd $$tmp/repo && $$tmp/install/bin/lucidlint . >/dev/null; \
+	rm -rf $$tmp; \
+	echo "${GREEN}✓ cargo install: binary scans${NC}"
 
 coverage: deps
 	@$(UV) run coverage run -m pytest tests/ -q --tb=short
 	@$(UV) run coverage report -m
 	@$(UV) run coverage xml
 	@$(UV) run coverage html
-	@echo "${GREEN}Coverage report: htmlcov/index.html${NC}"
+	@cd scanner && cargo llvm-cov --lcov --output-path ../lcov.info 2>&1 | tail -30
+	# the CI summary action reads Cobertura XML — lcov is for local tooling only
+	@cd scanner && cargo llvm-cov --cobertura --output-path ../coverage-rust.xml 2>&1 | tail -5
+	@echo "${GREEN}Coverage reports: htmlcov/index.html + lcov.info + coverage-rust.xml${NC}"
 
 lint: deps lint-check
 
 lint-check: deps  # Shared with the pre-commit hook — single source of truth for the lint scope
 	@$(RUFF) check *.py tests/ scripts/
+	@cd scanner && cargo fmt -- --check
+	@cd scanner && cargo clippy --all-targets -- -D warnings
 
 lint-github: deps   # CI only: findings surface as PR annotations
 	@$(RUFF) check *.py tests/ scripts/ --output-format=github
+	@cd scanner && cargo fmt -- --check
+	@cd scanner && cargo clippy --all-targets --message-format json -- -D warnings
 
-# pyrefly + BOTH-direction baseline lock (new errors AND stale entries fail)
+# pyrefly + BOTH-direction baseline lock (new errors AND stale entries fail);
+# the Rust borrow checker (cargo check) is deterministic under the
+# rust-toolchain.toml pin, so it needs no baseline.
 typecheck: deps
 	@$(PYTHON) scripts/pyrefly-lock.py check --pyrefly-config pyrefly.toml
+	@cd scanner && cargo check --all-targets 2>&1 | tail -30
 
 # After a deliberate diagnostic change, commit the refresh
 typecheck-update-baseline: deps
@@ -97,16 +163,15 @@ format: setup
 	@$(RUFF) check --fix *.py tests/ scripts/
 	@$(RUFF) format *.py tests/ scripts/
 
-# The repo's defining gate: the tool must pass on itself, and the record
-# check must stay clean on the tools' own signatures.
+# The repo's defining gate: the tool must pass on itself — every finding
+# family (record-shape included) computes in the Rust core.
 self-check:
-	@$(PYTHON) code_health.py --repo .
-	@$(PYTHON) check_records.py code_health.py check_records.py
+	@$(PYTHON) lucidlint.py --repo .
 	@echo "ok — the tool passes its own gate"
 
 # Run the health tool on another repo (default: the parent directory).
-code-health: deps
-	@$(PYTHON) code_health.py --repo $(REPO)
+lucidlint: deps scanner-check
+	@$(PYTHON) lucidlint.py --repo $(REPO)
 
 clean:
 	@rm -rf .venv htmlcov/

@@ -1,11 +1,16 @@
-# PLAN — code_health: the deterministic code-health gate
+# PLAN — lucidlint: the deterministic lucidlint gate
 
 Phases in delivery order; each ships the app working at its gate. Phases
 never depend on a later phase.
 
 ## Phase 1 — deterministic gate core
 
-- **Inputs:** repo path; radon; code-review-graph SQLite; git log.
+> **Status: shipped, and re-architected.** The scan engine is the Rust
+> binary (`scanner/`, ruff parser pinned `=0.0.9`); `lucidlint.py` is the
+> orchestrator (fail-fast when the binary is missing). See TECHSPEC D8.
+
+- **Inputs:** repo path; the Rust binary's findings JSON (schema 2);
+  code-review-graph contract export; git log via pygit2 (optional).
 - **Outputs:** a prioritized action list: complexity, large functions,
   hub files, hotspots (volatile functions named, with per-function churn),
   graph-risk (callers resolved).
@@ -47,7 +52,7 @@ never depend on a later phase.
   AGENTS.md).
 - **Quality gate:** the tool passes its own gate (self-run GATE: PASS,
   max CC < 15, record check clean); lint-style exemptions
-  (`# code-health: ignore <signal> <why>`) tested thoroughly; suppression
+  (`# lucidlint: ignore <signal> <why>`) tested thoroughly; suppression
   without a why is itself a finding.
 
 ## Phase 5 — Deployment readiness

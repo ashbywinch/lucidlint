@@ -1,0 +1,5 @@
+# One formatter per artifact: rustfmt owns hand-written Rust. Generated
+# code (none here) would be excluded via `ignore` or owned by its
+# generator, never re-formatted. max_width matches the house .editorconfig
+# 120 (the "max_line_length must match the formatter" rule).
+max_width = 120

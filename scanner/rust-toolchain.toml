@@ -1,0 +1,20 @@
+# Toolchain pin — the CI+local pin (dtolnay/rust-toolchain reads this file;
+# local rustup uses the same channel). The exact pin makes clippy
+# deterministic, so the lint gate (-D warnings) needs no baseline.
+#
+# CHANGE: bump to the current stable deliberately (rustc --version); a
+# toolchain bump can alter the clippy diagnostic set — re-run make lint
+# after bumping.
+
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt", "llvm-tools"]
+# the release matrix targets — dtolnay/rust-toolchain installs these for the
+# pinned channel (a bare `rustup target add` under the default toolchain
+# leaves the pinned one without the cross std)
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]

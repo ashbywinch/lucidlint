@@ -1,6 +1,6 @@
-# PRD — code_health: the deterministic code-health gate
+# PRD — lucidlint: the deterministic lucidlint gate
 
-A deterministic, gate-shaped code-health scanner that turns
+A deterministic, gate-shaped lucidlint scanner that turns
 the maintainability requirements into a prioritized, actionable list of fix
 actions — cheap to run, machine-readable, testable as a failing gate, and
 honest about what it can and cannot know.
@@ -107,7 +107,7 @@ rather than a number.
 - **Longevity.** The tool passes its own checks (self-run, record gate,
   regression tests); its messages carry the house dialect so agents and
   humans converge on the same fixes.
-- **Hosting.** build-tools repo; fetched by consuming workflows at run time
+- **Hosting.** lucidlint repo; fetched by consuming workflows at run time
   (pin to a tag, never main). No runtime services.
 
 ## Requirements learned this session (2026-08-14)
@@ -195,7 +195,7 @@ rather than a number.
   alone is not fail-fast. The only sanctioned swallow is an explicitly
   safe-to-ignore error, and it must be marked and explained.
 - **R18 — Lint-style suppressions carry a why.** A finding is exempted by
-  `# code-health: ignore <signal> <why>` on its line or the line above;
+  `# lucidlint: ignore <signal> <why>` on its line or the line above;
   a suppression without an explanation is itself a finding (the tool is
   only skipped when the reader knows why the tool is wrong). Only real
   comments count — marker text inside a string never suppresses.
@@ -229,9 +229,49 @@ rather than a number.
   (tmp_path/open/Path) without pyfakefs is a finding; the `fs` fixture and
   fake_filesystem_unittest pass. Real FS is sanctioned only when the code
   under test needs real semantics — subprocess interop, symlinks, C-level
-  I/O like sqlite3 — and `# code-health: ignore-file <signal> <why>`
+  I/O like sqlite3 — and `# lucidlint: ignore-file <signal> <why>`
   exempts a whole file with an explanation (a why-less ignore-file is
   itself a finding).
+- **R29 — The analysis pass never announces an unfixable gap; unexpected
+  errors surface.** When the tool detects an absence or error it is certain
+  nothing can fix in this context (no git history, no diff base, no
+  coverage), it prints nothing about it — the gap is silent. When the tool
+  hits an error it does not understand, it shows the actual error rather
+  than a "skipped/unavailable" wrapper, and lets the user figure it out.
+  (Rationale: "we can't compute X" is noise the user cannot act on; a
+  fabricated explanation hides the real failure — 2026-08-17.)
+- **R28 — Fix directives are truthful, and the tool is silent otherwise.**
+  A finding's message carries a `fix: <command>` directive if and only if
+  the tool knows a fix for that finding — and then the directive is the
+  exact command to run, with a name placeholder where the agent supplies
+  the semantic bit. When the tool has no good fix and is certain of that,
+  it says nothing about a fix; when a fix probably exists but the tool
+  cannot produce it, it lets the user figure it out. The tool never
+  explains that it could not figure out a fix, never explains why a
+  directive is absent (the absence is self-evident), and never offers a
+  fix it cannot apply. (Rationale: an offer that refuses wastes the
+  agent's turn; an explanation of inability is noise — 2026-08-17.)
+- **R27 — Agents never compute line numbers; the tool owns its own
+  coordinates.** Findings are located for fixing by the finding's own
+  output (the report line and the JSON `line` field are the source of
+  truth — agents copy, never estimate). The fix command therefore accepts
+  a finding WITHOUT a line when the file has exactly one finding of that
+  kind, and every fixable finding's message carries a machine-parseable
+  `fix: <command>` directive so the agent is told the tool exists and how
+  to invoke it — the agent should never have to know the tool's fix
+  catalog, the kind-to-fix mapping, or a line number to apply a fix
+  (rationale: agents are bad at line numbers; the 2026-08-16 missed-class
+  hand-fix fumbled twice because the message never said the fix existed).
+- **R26 — The radonc crate mirrors upstream radon structurally.** The
+  cyclomatic-complexity rules that power the complexity finding are a
+  port of the Python radon library, kept in a standalone crate
+  (`radonc`) whose module layout, public function names, and test cases
+  mirror `radon/visitors.py`, `radon/complexity.py`, and
+  `tests/test_complexity_visitor.py` as closely as the language boundary
+  allows. The intent: diffing the crate against upstream radon is
+  mechanical, updating it when radon changes is findable, and handing it
+  to the original maintainers would require only a rename. radon's MIT
+  license is preserved verbatim in the crate's NOTICE.
 - **R25 — A swallow must fail fast; a surfaced handler is not one.** A
   catch that neither re-raises nor exits with control flow (no return,
   no break/continue) is invisible — bare, empty, and log-only handlers

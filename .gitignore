@@ -26,6 +26,7 @@ __pycache__/
 .coverage
 htmlcov/
 coverage.xml
+lcov.info
 
 # build artifacts
 *.egg-info/
@@ -41,3 +42,16 @@ coverage.xml
 .idea/
 .DS_Store
 *.log
+target/
+
+# leaf library crate — its lock is regenerated; scanner/Cargo.lock governs
+scanner/radonc/Cargo.lock
+
+# churn cache — regenerated per HEAD, never committed
+.lucidlint-cache/
+lucidlint_bin/bin/lucidlint*
+
+# python build artifacts from the wheel/sdist assembly (uv build / setup.py)
+build/
+dist/
+*.egg-info/
