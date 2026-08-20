@@ -89,6 +89,7 @@ jobs:
             python3 -m pip install --quiet --target "dist/${dir}/deps" "libcst>=1.9.0"
           fi
           tar -C dist -czf "dist/${dir}.tar.gz" "${dir}"
+      - uses: astral-sh/setup-uv@v5
       - name: Build the pip wheel (host-target Rust core)
         # The cross action on the musl row exports CARGO_BUILD_TARGET=...musl;
         # setup.py's build_py runs `cargo build --release` (host) and copies
