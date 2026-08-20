@@ -3,6 +3,8 @@ name = "lucidlint"
 version = "0.2.0"
 edition = "2021"
 description = "Rust scan core for the deterministic lucidlint gate — ruff parser, parity-gated against the Python implementation"
+license = "MIT"
+repository = "https://github.com/ashbywinch/lucidlint"
 
 [dependencies]
 rayon = "1.10"
@@ -11,8 +13,7 @@ rayon = "1.10"
 ruff_python_parser = "=0.0.9"
 ruff_python_ast = "=0.0.9"
 ruff_text_size = "=0.0.9"
-
-radonc = { path = "radonc" }
+radonc = { version = "0.1.0", path = "radonc" }
 # PINNED-ish: syn 2.x is the stable external Rust AST (parse_file + visit);
 # bump deliberately (the rust scan layer is written against its shapes)
 quote = "1"

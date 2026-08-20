@@ -158,3 +158,42 @@ fixed, plus the deferred category roll-up:
   record-shape=260, ...; warnings: ...`) — the usability ask.
 - Validation: 171 tests green; self-check ok (_all_constant decomposed
   under its own CC gate); houses fails 537→535, warns 165→158.
+
+## Phase 8 — Pip-only distribution (delivered 2026-08-20)
+
+Decision: the Rust core is NOT distributed standalone. The cargo/crates.io
+channel was evaluated and dropped — the standalone binary is a scan-core
+subset (no gate verdict, no baselines, no fix engine; its `lucidlint <dir>`
+form silently scans nothing), and crates.io cannot ship the Python
+orchestrator that completes it. The Rust code stays internal: built into
+the pip wheel by setup.py, and the only user-facing channel is the Python
+package (pip install from PyPI/git/a downloaded wheel, or the release
+bundle). Porting the missing gate/fix surface into Rust is out of scope
+until the pip channel proves the product.
+
+- **Pip packaging fixes:** `make wheel` empties `dist/` first — `uv build`
+  never deletes previous artifacts, and wheel-check's `dist/*.whl` glob
+  collided with the stale 0.1.0 + 0.2.0 wheels ("conflicting URLs"). The
+  wheel carries PEP 639 license metadata (`License-Expression: MIT`); the
+  sdist installs anywhere but builds the Rust core at install time (needs
+  cargo), the wheel needs none.
+- **CI deployment check:** `make wheel-check` now installs the freshly
+  built wheel into a clean venv via uv and runs `scripts/deploy-check.py`:
+  a generated mini project (stale-suppression, unreachable, noop-statement,
+  positional-literals, magic-number) is scanned, every fix directive the
+  report carries is applied by the INSTALLED command, and the re-scan must
+  pass. Each step depends on a different part of the wheel (the embedded
+  binary, the shipped modules, the declared libcst dependency), so a
+  packaging error fails loudly. Runs in CI as the `verify-pip-deployment`
+  job; `verify-cargo-install` and the `cargo-install-check` target were
+  removed with the Rust channel.
+- **Names verified free** (PyPI 404): `lucidlint` on PyPI. The prose
+  linter a web search surfaced is `lucid-lint` (hyphenated) on crates.io —
+  a different name and a different registry; the crates are internal-only
+  and never published, so neither is a conflict.
+- **Releases:** release.yml attaches a per-platform pip wheel + the sdist
+  to every tag's release page, so a consumer can download and
+  `pip install <file>` with no registry.
+- **Quality gate:** wheel-check green (the deployment check); the check
+  script passes the repo's own gate; download→pip-install→scan→fix verified
+  from a copied artifact directory.

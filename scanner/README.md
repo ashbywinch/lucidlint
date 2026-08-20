@@ -7,6 +7,12 @@ Python engine exists only as the parity-test reference). Every per-file
 family and the two repo-wide families (duplicate, unused) compute here at
 exact Python parity.
 
+Not a standalone distribution: the crate is internal-only. The pip wheel
+embeds it (setup.py builds it into the package) and the Python orchestrator
+invokes it; nothing is published to crates.io, and the binary is not a
+user-facing CLI on its own (its directory-scan form is an orchestrator
+input, not a product surface).
+
 ## CLI contract
 
 ```

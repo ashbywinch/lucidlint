@@ -8,10 +8,18 @@
 # - The bundle layout: <prefix>/bin/lucidlint + lucidlint.py next to it —
 #   the orchestrator resolves its sibling binary, so the bundle is
 #   self-contained (no PATH, no env).
+# - The pip package: every runner also ships its platform wheel (host-target
+#   Rust core — the bundle cross-build above stays separate), the linux
+#   runner adds the platform-independent sdist. Both attach to the release
+#   page so consumers can download and `pip install <file>` locally — no
+#   registry involved. (The bundle step's CODE_HEALTH_VERSION env is
+#   repeated on the wheel build: option_env! is compile-time and cargo
+#   caches by source, so a cache-hit wheel reuses the stamped binary, and a
+#   fresh host build stamps the same tag.)
 #
 # Trigger: push a tag v* (e.g. v0.1.0). The version cadence is 0.x toward the
-# full release; each capability (fleet wiring, wheels, the library split)
-# bumps the minor.
+# full release; each capability (fleet wiring, the library split) bumps the
+# minor.
 
 name: release
 on:
@@ -75,6 +83,22 @@ jobs:
             python3 -m pip install --quiet --target "dist/${dir}/deps" "libcst>=1.9.0"
           fi
           tar -C dist -czf "dist/${dir}.tar.gz" "${dir}"
+      - uses: astral-sh/setup-uv@v5
+      - name: Build the pip wheel (host-target Rust core)
+        run: uv build --wheel --out-dir pip-dist
+        env:
+          CODE_HEALTH_VERSION: ${{ github.ref_name }}
+          # widen the pip tag beyond the runner's OS: 11.0 is the arm64
+          # floor (Rust's aarch64-apple-darwin minimum), 10.13 for x64
+          MACOSX_DEPLOYMENT_TARGET: ${{ startsWith(matrix.os, 'macos-14') && '11.0' || startsWith(matrix.os, 'macos-15') && '10.13' || '' }}
+      - if: matrix.cross
+        name: Build the source distribution
+        run: uv build --sdist --out-dir pip-dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pip-${{ matrix.target }}
+          path: pip-dist/*
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: bundle-${{ matrix.target }}
@@ -91,6 +115,10 @@ jobs:
         with:
           path: bundles
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          path: wheels
+          merge-multiple: true
       - name: Checksums over every bundle
         run: |
           cd bundles
@@ -106,4 +134,6 @@ jobs:
           files: |
             bundles/*.tar.gz
             bundles/SHA256SUMS
+            wheels/*.whl
+            wheels/*.tar.gz
           generate_release_notes: true

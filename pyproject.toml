@@ -19,8 +19,12 @@ name = "lucidlint"
 version = "0.2.0"
 description = "Deterministic lucidlint tooling: a Rust scan core under a thin Python orchestrator"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = ["libcst>=1.9.0"]
+
+[project.urls]
+Repository = "https://github.com/ashbywinch/lucidlint"
 
 [project.scripts]
 # `pip install` gives a `lucidlint` command — no .py, no fix- prefixes
@@ -42,7 +46,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=64.0", "wheel>=0.40"]
+requires = ["setuptools>=77.0", "wheel>=0.40"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]

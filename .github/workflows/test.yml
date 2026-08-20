@@ -59,10 +59,12 @@ jobs:
           recreate: true
           path: code-coverage-results.md
 
-  # The two distribution channels must stay self-contained: the pip wheel
-  # (Rust core built INTO it by setup.py) and the Rust-native cargo install.
-  # Each installs into a clean environment and exercises the real surface.
-  verify-pip-wheel:
+  # The one distribution channel: the pip wheel (the Rust core is built INTO
+  # it by setup.py). wheel-check installs the freshly built wheel into a
+  # clean venv and drives scan -> fix -> re-scan PASS on a mini project — a
+  # packaging error (missing embedded binary, missing module, undeclared
+  # dependency) fails one of those steps loudly.
+  verify-pip-deployment:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,12 +72,3 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: make setup
       - run: make wheel-check
-
-  verify-cargo-install:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - run: make setup
-      - run: make cargo-install-check
