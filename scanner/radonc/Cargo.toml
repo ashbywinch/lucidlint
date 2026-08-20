@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Radon-equivalent cyclomatic complexity for Python — the exact counting rules (if/elif, match minus wildcard, assert non-recursive, lambda +0 body walked, comprehension generators+ifs) ported from the Python radon library. Depends on ruff_python_ast for the AST types."
 license = "MIT"
+repository = "https://github.com/ashbywinch/lucidlint"
 
 [dependencies]
 ruff_python_ast = "=0.0.9"

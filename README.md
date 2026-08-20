@@ -161,13 +161,18 @@ make, no cargo.
 pip install lucidlint            # once published to PyPI
 # or directly from GitHub today:
 pip install "git+https://github.com/ashbywinch/lucidlint.git"
+# or from a downloaded artifact (the releases page, a CI copy):
+pip install ./lucidlint-0.2.0-py3-none-linux_x86_64.whl
 lucidlint --repo .
 ```
 
 The pip install gives the `lucidlint` command (no `.py`, no flags with
 `fix-` prefixes). The wheel is self-contained: setup.py compiles the Rust
 scan core INTO the wheel, so scan, fix, and the LSP all work with no
-release bundle, no PATH setup, and no `make`.
+release bundle, no PATH setup, and no `make`. The wheel is per-platform
+(`py3-none-<platform>` — a linux wheel will not install on macOS); the
+platform-independent sdist (`lucidlint-X.Y.Z.tar.gz`) installs anywhere,
+but it builds the Rust core at install time, so it needs `cargo`.
 
 ### Option 3 — as an LSP (checks what you type, on save)
 

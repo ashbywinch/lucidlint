@@ -5,10 +5,11 @@
 # DO NOT CHANGE:
 # - api_base points at the house provider. Never let a PR branch override
 #   it (the workflow has no checkout for exactly this reason).
-# - model stays "openai/deepseek-v4-flash": the action's handler strips the
-#   openai/ (and azure/) prefix and sends the bare name to api_base. Any
-#   OTHER prefix goes to the endpoint verbatim and 401s with "Model ... is
-#   not supported" — silently, every run.
+# - model stays "openai/dynamic/fallback2": the action's handler strips the
+#   openai/ (and azure/) prefix and sends the bare name to api_base — the
+#   Cloudflare AI Gateway resolves "dynamic/fallback2" via its dynamic
+#   fallback (OpenCode -> DeepSeek). Any OTHER prefix goes to the endpoint
+#   verbatim and 401s with "Model ... is not supported" — silently, every run.
 # - This file applies ONLY when the workflow pins PR_AGENT_CONFIG_BRANCH to
 #   a branch holding it: the action gates repo .pr_agent.toml keys by
 #   per-host allowed-keys, so without the pin the image defaults run
@@ -22,14 +23,15 @@
 
 [openai]
 custom_llm_provider = "openai"
-api_base = "https://opencode.ai/zen/go/v1"
+api_base = "https://gateway.ai.cloudflare.com/v1/e21a5be58ac1e8f7d5619539feb2dc3d/default/compat"
 
 [config]
-model = "openai/deepseek-v4-flash"
+model = "openai/dynamic/fallback2"
 custom_model_max_tokens = 128000
 max_model_tokens = 128000
 ai_timeout = 1800  # reviews on large diffs take minutes; the upstream default is too low
 fallback_models = []
+
 repo_context_from_default_branch = false
 repo_context_files = [
     "docs/PRD.md",
@@ -41,6 +43,12 @@ repo_context_files = [
     "docs/writing-documentation.md",
     "docs/documentation-structure.md",
 ]
+
+[litellm]
+# Cloudflare AI Gateway request options — same transport as omp-config:
+# long timeout for large reviews, no gateway-side retries (a push re-runs
+# the review), exponential backoff, and per-request metadata for analytics.
+extra_headers = '{"cf-aig-request-timeout": "1800000", "cf-aig-max-attempts": "0", "cf-aig-backoff": "exponential", "cf-aig-metadata": "{\"source\":\"review\",\"repo\":\"lucidlint\"}"}'
 
 [pr_reviewer]
 # Incremental reviews must post FRESH comments: the commit range anchors on

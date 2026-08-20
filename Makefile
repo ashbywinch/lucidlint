@@ -14,7 +14,7 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-.PHONY: help setup deps uv-sync install-hooks check lint lint-check lint-github typecheck typecheck-update-baseline format test scanner-check coverage self-check lucidlint wheel wheel-check cargo-install-check clean
+.PHONY: help setup deps uv-sync install-hooks check lint lint-check lint-github typecheck typecheck-update-baseline format test scanner-check coverage self-check lucidlint wheel wheel-check clean
 
 # Tool paths. uv is the package manager (installs itself if missing).
 PYTHON := .venv/bin/python
@@ -90,41 +90,28 @@ rules:
 
 # The pip distribution must be self-contained: `uv build` compiles the Rust
 # core INTO the wheel (setup.py's build_py), so a clean-venv install scans
-# and fixes with no bundle, no PATH, no make.
+# and fixes with no bundle, no PATH, no make. dist/ must be emptied first:
+# `uv build` never deletes previous artifacts, and wheel-check installs
+# `dist/*.whl` — two wheels of different versions in dist/ collide with a
+# "conflicting URLs" resolution error (0.1.0 + 0.2.0 both matched the glob).
 wheel: scanner-check
+	@rm -rf dist build *.egg-info
 	@$(UV) build
-
 # The deployment check: install the freshly built wheel into a CLEAN venv and
-# exercise version + scan + fix from that install (what a real pip user gets).
-# The fixture intentionally carries a FAIL finding: the scan is asserted by
-# JSON-parse success (the gate verdict exit 1 is not a crash).
+# exercise the installed package end to end on a mini project (what a real
+# pip user gets). scripts/deploy-check.py runs scan -> fix -> re-scan PASS
+# against the INSTALLED binary; each step depends on a different part of the
+# wheel (the embedded Rust core, the shipped modules, the libcst dependency),
+# so a packaging error fails loudly instead of silently passing.
 wheel-check: wheel
 	@tmp=$$(mktemp -d); \
 	$(UV) venv $$tmp/venv >/dev/null; \
 	$(UV) pip install --python $$tmp/venv dist/*.whl >/dev/null; \
 	$$tmp/venv/bin/lucidlint --version | grep -q "^lucidlint"; \
-	mkdir -p $$tmp/repo; \
-	printf '# lucidlint: ignore magic-number nothing on this line\n\ndef f():\n    return 1 + 1\n' > $$tmp/repo/a.py; \
-	$$tmp/venv/bin/lucidlint --repo $$tmp/repo --json 2>/dev/null > $$tmp/out.json || true; \
-	$(PYTHON) -c "import json,sys; json.load(open('$$tmp/out.json'))"; \
-	line=$$($(PYTHON) -c "import json;d=json.load(open('$$tmp/out.json'));print(next((a['line'] for a in d.get('actions',[]) if a['kind']=='stale-suppression'),''))"); \
-	[ -n "$$line" ]; \
-	$$tmp/venv/bin/lucidlint fix --kind stale-suppression --file $$tmp/repo/a.py --line $$line >/dev/null; \
-	! grep -q "lucidlint: ignore" $$tmp/repo/a.py; \
+	$(PYTHON) scripts/deploy-check.py --lucidlint $$tmp/venv/bin/lucidlint --project $$tmp/project; \
 	rm -rf $$tmp; \
-	echo "${GREEN}✓ pip wheel: clean-venv install scans + fixes${NC}"
+	echo "${GREEN}✓ pip wheel: clean-venv install scans + fixes a mini project${NC}"
 
-# The Rust-native channel: `cargo install` of the scanner crate must give a
-# working lucidlint binary (version + scan + fix).
-cargo-install-check: deps
-	@tmp=$$(mktemp -d); \
-	cd scanner && cargo install --path . --root $$tmp/install >/dev/null 2>&1; \
-	$$tmp/install/bin/lucidlint --version | grep -q "^lucidlint"; \
-	mkdir -p $$tmp/repo; \
-	printf 'fn main() {\n    let x = 3 * 60;\n}\n' > $$tmp/repo/a.rs; \
-	cd $$tmp/repo && $$tmp/install/bin/lucidlint . >/dev/null; \
-	rm -rf $$tmp; \
-	echo "${GREEN}✓ cargo install: binary scans${NC}"
 
 coverage: deps
 	@$(UV) run coverage run -m pytest tests/ -q --tb=short
