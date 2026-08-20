@@ -17,14 +17,20 @@
 #   caches by source, so a cache-hit wheel reuses the stamped binary, and a
 #   fresh host build stamps the same tag.)
 #
-# Trigger: push a tag v* (e.g. v0.1.0). The version cadence is 0.x toward the
-# full release; each capability (fleet wiring, the library split) bumps the
-# minor.
+# Trigger: a tag push (v*) publishes the bundles; the build job ALSO runs on
+# every pull_request — the protect-main ruleset requires the build (...) 
+# checks, and running the full release pipeline on a PR catches release
+# breakage before the tag. The release job (publishing) stays tag-only.
+# On PR runs CODE_HEALTH_VERSION is empty, so the binary reports the crate
+# version instead of the branch ref; the bundle dir names use "dev".
+# The version cadence is 0.x toward the full release; each capability
+# (fleet wiring, the library split) bumps the minor.
 
 name: release
 on:
   push:
     tags: ["v*"]
+  pull_request:
 permissions:
   contents: read
 
@@ -55,12 +61,12 @@ jobs:
         working-directory: scanner
         run: cargo build --release --manifest-path Cargo.toml --target ${{ matrix.target }}
         env:
-          CODE_HEALTH_VERSION: ${{ github.ref_name }}
+          CODE_HEALTH_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
       - name: Assemble the bundle
         shell: bash
         run: |
           set -euo pipefail
-          ver="${{ github.ref_name }}"
+          ver="${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}"
           target="${{ matrix.target }}"
           exe=""
           if [ "$target" = "x86_64-pc-windows-msvc" ]; then exe=".exe"; fi
@@ -87,7 +93,7 @@ jobs:
       - name: Build the pip wheel (host-target Rust core)
         run: uv build --wheel --out-dir pip-dist
         env:
-          CODE_HEALTH_VERSION: ${{ github.ref_name }}
+          CODE_HEALTH_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
           # widen the pip tag beyond the runner's OS: 11.0 is the arm64
           # floor (Rust's aarch64-apple-darwin minimum), 10.13 for x64
           MACOSX_DEPLOYMENT_TARGET: ${{ startsWith(matrix.os, 'macos-14') && '11.0' || startsWith(matrix.os, 'macos-15') && '10.13' || '' }}
@@ -106,6 +112,7 @@ jobs:
           if-no-files-found: error
 
   release:
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
     permissions:
