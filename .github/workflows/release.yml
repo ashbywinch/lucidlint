@@ -95,7 +95,9 @@ jobs:
         # setup.py's build_py runs `cargo build --release` (host) and copies
         # target/release/lucidlint — the leaked default target would build the
         # musl target instead and the copy would fail. Unset it so the wheel
-        # gets the genuine host binary.
+        # gets the genuine host binary. shell: bash — unset is a bash builtin
+        # and the windows runner's default shell is PowerShell.
+        shell: bash
         run: unset CARGO_BUILD_TARGET && uv build --wheel --out-dir pip-dist
         env:
           CODE_HEALTH_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
