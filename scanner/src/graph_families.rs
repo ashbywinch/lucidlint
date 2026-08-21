@@ -776,6 +776,85 @@ pub fn folder_mix_findings(repo: &Path, contract: &GraphContract) -> Vec<Finding
     out
 }
 
+/// Module cohesion — `_module_cohesion_actions` (review-log §11.1, fail).
+/// A file whose nodes split across >= 2 graph communities (each >= 2 nodes)
+/// holds several sub-domains — a module-split candidate. The community
+/// detection is the domain grouping (the same signal folder-mix uses, at
+/// file granularity), so the finding names the exact seam the extract-module
+/// fix moves: the communities and their members. The edge bar (the hub-file
+/// threshold) keeps small or lightly-coupled modules out of the gate.
+pub fn module_cohesion_findings(repo: &Path, contract: &GraphContract, max_edges: usize) -> Vec<Finding> {
+    // edge count per REPO-RELATIVE file (hub_edge_counts keys by abs path)
+    let mut edge_counts: HashMap<String, usize> = HashMap::new();
+    for e in &contract.edges {
+        if !matches!(e.kind.as_str(), "CALLS" | "IMPORTS_FROM" | "INHERITS" | "REFERENCES") {
+            continue;
+        }
+        if !e.file_path.ends_with(".py") {
+            continue;
+        }
+        *edge_counts.entry(repo_rel(repo, &e.file_path)).or_default() += 1;
+    }
+    let mut per_file: BTreeMap<String, BTreeMap<i64, Vec<String>>> = BTreeMap::new();
+    for n in &contract.nodes {
+        let Some(cid) = n.community_id else { continue };
+        if !n.file_path.ends_with(".py") {
+            continue;
+        }
+        per_file
+            .entry(repo_rel(repo, &n.file_path))
+            .or_default()
+            .entry(cid)
+            .or_default()
+            .push(n.name.clone());
+    }
+    let mut out = Vec::new();
+    for (rel, communities) in per_file {
+        if rel.is_empty() || is_test_rel(&rel) {
+            continue;
+        }
+        let edge_count = edge_counts.get(&rel).copied().unwrap_or(0);
+        if edge_count < max_edges {
+            continue;
+        }
+        let domains: Vec<(i64, Vec<String>)> = communities
+            .into_iter()
+            .filter(|(_, members)| members.len() >= 2)
+            .collect();
+        if domains.len() < 2 {
+            continue;
+        }
+        let groups = domains
+            .iter()
+            .take(3)
+            .map(|(cid, members)| {
+                let name = contract
+                    .communities
+                    .get(&cid.to_string())
+                    .cloned()
+                    .unwrap_or_else(|| cid.to_string());
+                format!(
+                    "{name} ({})",
+                    members.iter().take(4).cloned().collect::<Vec<_>>().join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push(Finding {
+            file: rel.clone(),
+            line: 0,
+            function: String::new(),
+            kind: "module-cohesion".into(),
+            severity: "fail".into(),
+            message: format!(
+                "module '{rel}' holds {} domains of >= 2 nodes ({edge_count} edges): {groups} — split the module at the domain seams — fix: extract-module --fix-name <module> --params <members of one domain>",
+                domains.len()
+            ),
+        });
+    }
+    out
+}
+
 /// Hotspot: files that change often AND are complex (churn + max CC).
 pub fn hotspot_findings(
     churn: &HashMap<String, usize>,
@@ -1185,6 +1264,104 @@ mod tests {
         let f = folder_mix_findings(Path::new("/repo"), &c);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].file, "pkg");
+    }
+
+    #[test]
+    fn module_cohesion_two_domains_in_one_file_is_found() {
+        // a.py holds 4 nodes in community 1 and 4 in community 2 — two
+        // sub-domains in one module, over the edge bar: split candidate.
+        let mut nodes = Vec::new();
+        for i in 0..4 {
+            nodes.push(node(
+                "Function",
+                &format!("tok{i}"),
+                &format!("/repo/layout.py::tok{i}"),
+                "/repo/layout.py",
+                1,
+                2,
+                Some(1),
+            ));
+            nodes.push(node(
+                "Function",
+                &format!("box{i}"),
+                &format!("/repo/layout.py::box{i}"),
+                "/repo/layout.py",
+                1,
+                2,
+                Some(2),
+            ));
+        }
+        let mut c = contract(
+            nodes,
+            vec![
+                edge(
+                    "CALLS",
+                    "/repo/layout.py::tok0",
+                    "/repo/layout.py::tok1",
+                    "/repo/layout.py",
+                ),
+                edge(
+                    "CALLS",
+                    "/repo/layout.py::box0",
+                    "/repo/layout.py::box1",
+                    "/repo/layout.py",
+                ),
+            ],
+        );
+        c.communities.insert("1".into(), "tokenization".into());
+        c.communities.insert("2".into(), "box math".into());
+        let f = module_cohesion_findings(Path::new("/repo"), &c, 2);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].kind, "module-cohesion");
+        assert!(f[0].message.contains("tokenization"), "{:?}", f[0].message);
+        assert!(f[0].message.contains("box math"), "{:?}", f[0].message);
+    }
+
+    #[test]
+    fn module_cohesion_single_domain_passes() {
+        // one community = one sub-domain — not a split candidate
+        let mut nodes = Vec::new();
+        for i in 0..8 {
+            nodes.push(node(
+                "Function",
+                &format!("f{i}"),
+                &format!("/repo/layout.py::f{i}"),
+                "/repo/layout.py",
+                1,
+                2,
+                Some(1),
+            ));
+        }
+        let c = contract(nodes, vec![]);
+        assert!(module_cohesion_findings(Path::new("/repo"), &c, 2).is_empty());
+    }
+
+    #[test]
+    fn module_cohesion_below_edge_bar_passes() {
+        // two domains but the module is small — the edge bar is the guard
+        let mut nodes = Vec::new();
+        for i in 0..2 {
+            nodes.push(node(
+                "Function",
+                &format!("a{i}"),
+                &format!("/repo/small.py::a{i}"),
+                "/repo/small.py",
+                1,
+                2,
+                Some(1),
+            ));
+            nodes.push(node(
+                "Function",
+                &format!("b{i}"),
+                &format!("/repo/small.py::b{i}"),
+                "/repo/small.py",
+                1,
+                2,
+                Some(2),
+            ));
+        }
+        let c = contract(nodes, vec![]);
+        assert!(module_cohesion_findings(Path::new("/repo"), &c, 8).is_empty());
     }
 
     #[test]

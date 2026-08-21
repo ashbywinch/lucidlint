@@ -30,6 +30,9 @@ MECHANICAL_KINDS = {
     "noop-statement": "delete the dead statement",
     "unreachable": "delete the unreachable statement",
     "positional-literals": "keyword the literal arguments (same-file callee)",
+    "duplicate-def": "delete the unreferenced shadowing module-scope def (renames stay with the agent)",
+    "restating-docstring": "delete the docstring that restates the body",
+    "duplicate-block": "delete the second copy of the repeated statement block",
 }
 
 @dataclass
@@ -57,6 +60,10 @@ class StrewingGroup:
 STRUCTURAL_KINDS = {
     "extract-method": "extract the seam into a private function (preview without a name, apply with --fix-name)",
     "extract-class": "move the strewing free functions into a class, rewriting call sites",
+    "extract-module": (
+        "move the named module-scope defs (--params) into a new module "
+        "(--name), re-exported from the origin"
+    ),
     "magic-number": "Replace Magic Literal: introduce the named constant",
     "vague-name": "Rename the type and its references (same-file)",
     "long-param-list": "Introduce Parameter Object: bundle the params into a dataclass",
@@ -67,7 +74,10 @@ STRUCTURAL_KINDS = {
 # structural fixes whose result is genuinely novel (a class split, a new
 # function, a bundled signature) preview a diff before --confirm; the
 # obvious ones (a constant inserted, a rename) apply directly
-PREVIEW_KINDS = {"extract-method", "extract-class", "long-param-list", "dispatch-registry", "rule-table"}
+PREVIEW_KINDS = {
+    "extract-method", "extract-class", "extract-module", "long-param-list",
+    "dispatch-registry", "rule-table",
+}
 
 # the gate reports DISPLAY kinds (final_kind output: strewing shows as
 # latent-class); the fix command accepts either and normalizes here — the
@@ -950,6 +960,28 @@ def propose_finding(kind: str, rel: str, repo: Path, line: int, opts: FixOptions
         if new_source is None or new_source == source:
             return None, None
         return new_source, seam  # "line N: <first seam line>" — what moves
+
+    if kind == "extract-module":
+        # the preview shows the origin diff; the description names the seam
+        # (the members moving and the new module) so the agent can judge.
+        # Name-free: the reexport line uses a placeholder the agent replaces
+        # (naming AFTER seeing the diff); the apply path requires the real
+        # module name.
+        if not opts.params:
+            return None, None
+        preview_opts = FixOptions(
+            params=opts.params,
+            name=opts.name or "_extracted",
+            repo=opts.repo,
+            rel=opts.rel,
+        )
+        result = _extract_module_proposal(source, preview_opts)
+        if result is None or result[0] == source:
+            return None, None
+        return result[0], (
+            f"extract-module: moves {', '.join(opts.params)} into a new module "
+            "(name the module to apply)"
+        )
     new_source = _fix_structural(kind, source, line, opts)
     if new_source is None or new_source == source:
         return None, None
@@ -1105,18 +1137,6 @@ class _InsertClass(cst.CSTTransformer):
         return updated_node.with_changes(body=body)
 
 
-def _collect_defs(module: cst.Module, fns: set[str]) -> list[cst.FunctionDef]:
-    """The group's def nodes, in source order."""
-    methods: list[cst.FunctionDef] = []
-
-    class _Collect(cst.CSTVisitor):
-        @override
-        def visit_FunctionDef(self, node) -> None:
-            if node.name.value in fns:
-                methods.append(node)
-
-    module.visit(_Collect())
-    return methods
 
 
 class _BodyParamRewrite(cst.CSTTransformer):
@@ -1523,7 +1543,374 @@ def _fix_mechanical(kind: str, source: str, line: int, opts) -> str | None:
         if params is None:
             return None
         return cst.MetadataWrapper(cst.parse_module(source)).visit(_KeywordArgs(line, params)).code
+    if kind == "duplicate-def":
+        return fix_duplicate_def(source, line, opts)
+    if kind == "restating-docstring":
+        return fix_restating_docstring(source, line)
+    if kind == "duplicate-block":
+        return fix_duplicate_block(source, line)
     return None
+
+# --------------------------------------------------------------------------- review-log fixes
+# duplicate-def (delete the unreferenced shadow), restating-docstring (delete
+# the docstring), duplicate-block (delete the second copy), extract-module
+# (move a domain's defs to a new module) — the family-album review log §10/§11.
+
+_REPO_SKIP_DIRS = {
+    ".git", ".venv", "venv", "node_modules", "__pycache__", ".lucidlint-cache", ".ruff_cache",
+    ".pytest_cache", ".mypy_cache", ".pyrefly-cache", "htmlcov", "dist", "build", "target",
+    ".code-review-graph", ".tox", ".eggs",
+}
+
+
+def _py_files(repo: Path) -> list[Path]:
+    """Every .py file under the repo, skipping venvs/caches/build output."""
+    out: list[Path] = []
+    stack = [repo]
+    while stack:
+        d = stack.pop()
+        try:
+            entries = list(d.iterdir())
+        except OSError:
+            continue
+        for p in entries:
+            if p.is_dir():
+                if p.name not in _REPO_SKIP_DIRS:
+                    stack.append(p)
+            elif p.suffix == ".py":
+                out.append(p)
+    return sorted(out)
+
+
+class _NameCount(cst.CSTVisitor):
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.n = 0
+
+    @override
+    def visit_Name(self, node) -> None:
+        if node.value == self.name:
+            self.n += 1
+
+
+def _name_occurrences(repo: Path, name: str) -> int:
+    """Name-node occurrences of `name` across the repo's .py files — the
+    duplicate-def safety check: a delete is only offered when the shadowing
+    def is provably unreferenced (the two def sites are the only hits)."""
+    total = 0
+    for p in _py_files(repo):
+        try:
+            module = cst.parse_module(p.read_text(encoding="utf-8"))
+        except Exception:  # parse errors in other files are their own findings
+            continue
+
+        probe = _NameCount(name)
+        module.visit(probe)
+        total += probe.n
+    return total
+
+
+class _FindModuleDef(cst.CSTVisitor):
+    """The module-scope def (depth 0) whose def line equals the target — the
+    duplicate-def finding's second binding."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, line: int) -> None:
+        self.line = line
+        self.depth = 0
+        self.found: cst.CSTNode | None = None
+        self.name: str | None = None
+
+    @override
+    def visit_FunctionDef(self, node) -> None:
+        if self.depth == 0 and self.found is None and self.get_metadata(PositionProvider, node).start.line == self.line:
+            self.found, self.name = node, node.name.value
+        self.depth += 1
+
+    @override
+    def leave_FunctionDef(self, node) -> None:
+        self.depth -= 1
+
+    @override
+    def visit_ClassDef(self, node) -> None:
+        if self.depth == 0 and self.found is None and self.get_metadata(PositionProvider, node).start.line == self.line:
+            self.found, self.name = node, node.name.value
+        self.depth += 1
+
+    @override
+    def leave_ClassDef(self, node) -> None:
+        self.depth -= 1
+
+
+class _RemoveNodes(cst.CSTTransformer):
+    """Remove exactly the given nodes from the tree (identity)."""
+
+    def __init__(self, targets) -> None:
+        self.targets = set(targets)
+
+    @override
+    def on_leave(self, original_node, updated_node):
+        if original_node in self.targets:
+            return cst.RemoveFromParent()
+        return updated_node
+
+
+def fix_duplicate_def(source: str, line: int, opts) -> str | None:
+    """Delete the shadowing (second) module-scope binding when nothing
+    references it — proven by a repo-wide Name count (only the two def sites
+    hit). Referenced shadows are renamed by the agent, never auto-deleted."""
+    wrapper = cst.MetadataWrapper(cst.parse_module(source))
+    probe = _FindModuleDef(line)
+    wrapper.visit(probe)
+    if probe.found is None or probe.name is None:
+        return None
+    if _name_occurrences(opts.repo, probe.name) > 2:
+        return None  # something references the name — a delete would break it
+    return wrapper.module.visit(_RemoveNodes([probe.found])).code
+
+
+def _strip_first_docstring(updated, original) -> object:
+    body = updated.body.body
+    if body and len(body[0].body) == 1:
+        stmt = body[0].body[0]
+        if isinstance(stmt, cst.Expr) and isinstance(stmt.value, cst.SimpleString):
+            return updated.with_changes(body=updated.body.with_changes(body=list(body[1:])))
+    return updated
+
+
+class _StripDocstring(cst.CSTTransformer):
+    """Delete the first body statement of the def at `line` when it is a
+    string-literal expression — the restating docstring (the rule proved it
+    adds nothing beyond the body tokens)."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, line: int) -> None:
+        self.line = line
+        self.done = False
+
+    @override
+    def leave_FunctionDef(self, original_node, updated_node):
+        if self.done:
+            return updated_node
+        if self.get_metadata(PositionProvider, original_node).start.line == self.line:
+            self.done = True
+            return _strip_first_docstring(updated_node, original_node)
+        return updated_node
+
+    @override
+    def leave_ClassDef(self, original_node, updated_node):
+        if self.done:
+            return updated_node
+        if self.get_metadata(PositionProvider, original_node).start.line == self.line:
+            self.done = True
+            return _strip_first_docstring(updated_node, original_node)
+        return updated_node
+
+
+def fix_restating_docstring(source: str, line: int) -> str | None:
+    return cst.MetadataWrapper(cst.parse_module(source)).visit(_StripDocstring(line)).code
+
+
+    # lucidlint: ignore complexity the flatten dispatches over statement kinds — a dispatch table, not branching
+def _flatten_stmts(stmts, out: list) -> None:
+    """Source-ordered statement flatten: nested block bodies included, so a
+    loop body repeated after the loop is one sequence (the Rust rule's
+    mirror)."""
+    for s in stmts:
+        out.append(s)
+        if isinstance(s, cst.If):
+            _flatten_stmts(list(s.body.body), out)
+            if s.orelse is not None:
+                for cl in s.orelse:
+                    if isinstance(cl.body, cst.IndentedBlock):
+                        _flatten_stmts(list(cl.body.body), out)
+        elif isinstance(s, (cst.For, cst.While)):
+            _flatten_stmts(list(s.body.body), out)
+            if s.orelse is not None:
+                _flatten_stmts(list(s.orelse.body), out)
+        elif isinstance(s, cst.Try):
+            _flatten_stmts(list(s.body.body), out)
+            for h in s.handlers:
+                _flatten_stmts(list(h.body.body), out)
+            if s.orelse is not None:
+                _flatten_stmts(list(s.orelse.body), out)
+            if s.finalbody is not None:
+                _flatten_stmts(list(s.finalbody.body), out)
+        elif isinstance(s, cst.With):
+            _flatten_stmts(list(s.body.body), out)
+        elif isinstance(s, cst.Match):
+            for case in s.cases:
+                _flatten_stmts(list(case.body.body), out)
+
+
+    # the visitor classes ARE the libcst walk idiom — a class would scatter
+    # one pass
+    # lucidlint: ignore complexity,latent-class the visitor classes are the walk idiom
+def fix_duplicate_block(source: str, line: int) -> str | None:
+    """Delete the second copy of a repeated 3-statement block. Refuses when
+    the removal would empty a block (an emptied body needs `pass` — the
+    agent's call)."""
+    wrapper = cst.MetadataWrapper(cst.parse_module(source))
+
+    class _FindFn(cst.CSTVisitor):
+        METADATA_DEPENDENCIES = (PositionProvider,)
+
+        def __init__(self, target: int) -> None:
+            self.target = target
+            self.fn: cst.FunctionDef | None = None
+
+        @override
+        def visit_FunctionDef(self, node) -> None:
+            pos = self.get_metadata(PositionProvider, node)
+            if pos.start.line <= self.target <= pos.end.line:
+                self.fn = node  # last (innermost) containing function wins
+
+    finder = _FindFn(line)
+    wrapper.visit(finder)
+    if finder.fn is None:
+        return None
+    flat: list = []
+    _flatten_stmts(list(finder.fn.body.body), flat)
+    if len(flat) < 6:
+        return None
+    targets: list | None = None
+    for i in range(len(flat) - 5):
+        for j in range(i + 3, len(flat) - 2):
+            if all(flat[i + k].deep_equals(flat[j + k]) for k in range(3)):
+                pos = wrapper.resolve(PositionProvider)[flat[j]]
+                if pos.start.line == line:
+                    targets = flat[j : j + 3]
+                    break
+        if targets is not None:
+            break
+
+    if targets is None:
+        return None
+    # a removal that empties a block leaves invalid Python (`pass` required) —
+    # refuse when every statement of a block is a target (the agent places
+    # the pass by hand)
+    target_set = set(targets)
+    for t in targets:
+        parent = wrapper.resolve(ParentNodeProvider)[t]
+        if isinstance(parent, cst.IndentedBlock):
+            block_stmts = list(parent.body)
+            if block_stmts and all(s in target_set for s in block_stmts):
+                return None
+    return wrapper.module.visit(_RemoveNodes(targets)).code
+
+
+def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
+    """The origin's module-level imports binding a referenced name — what the
+    new module needs (libcst wraps imports in SimpleStatementLine)."""
+    moved: list = []
+    for stmt in module.body:
+        if not (isinstance(stmt, cst.SimpleStatementLine) and len(stmt.body) == 1):
+            continue
+        inner = stmt.body[0]
+        if isinstance(inner, cst.Import):
+            for alias in inner.names:
+                bound = alias.asname.name.value if alias.asname else alias.name.value.split(".")[0]
+                if bound in referenced:
+                    moved.append(stmt)
+                    break
+        elif isinstance(inner, cst.ImportFrom):
+            for alias in inner.names:
+                bound = alias.asname.name.value if alias.asname else alias.name.value
+                if bound in referenced:
+                    moved.append(stmt)
+                    break
+    return moved
+
+
+def _origin_after_move(module: cst.Module, move: set[str], opts) -> list:
+    """The origin's body after the split: the moved defs dropped, the
+    re-export import inserted after the last import — every other file's
+    `from origin import x` keeps working (the origin re-exports)."""
+    remaining = [
+        s
+        for s in module.body
+        if not (isinstance(s, (cst.FunctionDef, cst.ClassDef)) and s.name.value in move)
+    ]
+    reexport = cst.SimpleStatementLine(
+        body=[
+            cst.ImportFrom(
+                module=cst.Name(opts.name),
+                names=[cst.ImportAlias(name=cst.Name(n)) for n in opts.params],
+                lpar=None,
+                rpar=None,
+            )
+        ]
+    )
+    insert_at = 0
+    for i, s in enumerate(remaining):
+        if isinstance(s, cst.SimpleStatementLine) and len(s.body) == 1 and isinstance(
+            s.body[0], (cst.Import, cst.ImportFrom)
+        ):
+            insert_at = i + 1
+    remaining.insert(insert_at, reexport)
+    return remaining
+
+
+    # lucidlint: ignore record-shape the two-source result is a wire seam — a class is ceremony for one return
+def _extract_module_proposal(source: str, opts) -> tuple[str, str] | None:
+    """(new origin source, new module source) for the extract-module split, or
+    None when the split is not safe. Pure — no writes; the apply path writes
+    both files. The moved defs are the --params names; the module is --name
+    (same directory as the origin). Refuses when the moved code needs a
+    non-moved origin def (a from-origin import in the new module would create
+    the very cycle the review log §3.4 fixed) or a decorated def (registration
+    semantics)."""
+    if not opts.name or not opts.params:
+        return None
+    module = cst.parse_module(source)
+    move = set(opts.params)
+    top_defs = {
+        stmt.name.value: stmt
+        for stmt in module.body
+        if isinstance(stmt, (cst.FunctionDef, cst.ClassDef))
+    }
+    if not move <= set(top_defs):
+        return None  # a named member is not module-scope here
+    for name in move:
+        if top_defs[name].decorators:
+            return None
+    referenced: set[str] = set()
+    for name in move:
+        probe = _NameSet()
+        top_defs[name].visit(probe)
+        referenced |= probe.names
+    if referenced & (set(top_defs) - move):
+        return None  # the moved code needs an origin def — cycle risk
+    new_module = cst.Module(
+        body=[*_moved_imports(module, referenced), *(top_defs[n] for n in opts.params)]
+    )
+    return cst.Module(body=_origin_after_move(module, move, opts)).code, new_module.code
+
+
+class _NameSet(cst.CSTVisitor):
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    @override
+    def visit_Name(self, node) -> None:
+        self.names.add(node.value)
+
+
+def fix_extract_module(source: str, opts) -> str | None:
+    """The apply side of extract-module — writes the new module and returns
+    the origin's new source (fix_finding writes the origin)."""
+    result = _extract_module_proposal(source, opts)
+    if result is None:
+        return None
+    origin_source, new_module_source = result
+    new_path = opts.repo / (opts.rel.rsplit("/", 1)[0] if "/" in opts.rel else "") / f"{opts.name}.py"
+    if new_path.exists():
+        return None  # never clobber an existing module
+    new_path.parent.mkdir(parents=True, exist_ok=True)
+    new_path.write_text(new_module_source, encoding="utf-8")
+    return origin_source
 
 
 class _FindFnLine(cst.CSTVisitor):
@@ -1589,6 +1976,11 @@ def fix_finding(
     if kind in MECHANICAL_KINDS:
         new_source = _fix_mechanical(kind, source, line, opts)
         description = MECHANICAL_KINDS[kind]
+    elif kind == "extract-module":
+        # two files change: the new module is created, the origin re-exports
+        # the moved defs. Never clobbers an existing module.
+        new_source = fix_extract_module(source, opts)
+        description = STRUCTURAL_KINDS[kind]
     elif kind in STRUCTURAL_KINDS:
         new_source = _fix_structural(kind, source, line, opts)
         description = STRUCTURAL_KINDS[kind]

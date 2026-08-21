@@ -78,13 +78,6 @@ fn md_backtick_paths(text: &str) -> Vec<String> {
     out
 }
 
-/// All references (links + backticks) — the reachability BFS uses both.
-fn all_targets(text: &str) -> Vec<String> {
-    let mut out = md_link_targets(text);
-    out.extend(md_backtick_paths(text));
-    out
-}
-
 /// The base a backticked path resolves against: `docs/`/`standards/`
 /// absolute forms against the repo root, a parent-relative (`../`, `./`)
 /// form against the doc's own directory — mirroring markdown links.
@@ -221,6 +214,24 @@ fn collect_md(dir: &Path, out: &mut Vec<PathBuf>, repo: &Path, gitignored: &Hash
     }
 }
 
+/// Resolve one target string against its base and add it to `targets` when
+/// it names a doc in the set — the reachability edge.
+fn reachability_edge(
+    repo: &Path,
+    doc_set: &HashSet<String>,
+    targets: &mut HashSet<String>,
+    cand_abs: std::path::PathBuf,
+) {
+    if let Ok(rel) = cand_abs.canonicalize() {
+        if let Ok(rel) = rel.strip_prefix(repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf())) {
+            let cand = rel.to_string_lossy().replace('\\', "/");
+            if doc_set.contains(&cand) {
+                targets.insert(cand);
+            }
+        }
+    }
+}
+
 /// `_docs_reachability_actions`: docs/ files reachable from AGENTS.md.
 fn docs_reachability(repo: &Path, gitignored: &HashSet<String>) -> Vec<Finding> {
     let agents = repo.join("AGENTS.md");
@@ -247,19 +258,26 @@ fn docs_reachability(repo: &Path, gitignored: &HashSet<String>) -> Vec<Finding> 
         let src = md.strip_prefix(repo).unwrap_or(md).to_string_lossy().replace('\\', "/");
         let parent = md.parent().unwrap_or(repo);
         let mut targets = HashSet::new();
-        for target in all_targets(&text) {
-            let cand_abs = parent.join(&target);
-            if let Ok(rel) = cand_abs.canonicalize() {
-                if let Ok(rel) = rel.strip_prefix(repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf())) {
-                    let cand = rel.to_string_lossy().replace('\\', "/");
-                    if doc_set.contains(&cand) {
-                        targets.insert(cand);
-                    }
-                }
-            }
+        for target in md_link_targets(&text) {
+            reachability_edge(repo, &doc_set, &mut targets, parent.join(&target));
+        }
+        for path in md_backtick_paths(&text) {
+            // backtick targets resolve like docs_findings: a `docs/`/
+            // `standards/` form against the REPO root, anything else (a
+            // parent-relative or bare name) against the doc's own directory.
+            // The bare-name case is a prose reference — the doc it names is
+            // discoverable from here even though docs_findings does not
+            // link-check it.
+            let cand_abs = if path.starts_with("docs/") || path.starts_with("standards/") {
+                repo.join(&path)
+            } else {
+                parent.join(&path)
+            };
+            reachability_edge(repo, &doc_set, &mut targets, cand_abs);
         }
         links.insert(src, targets);
     }
+
     let mut reachable: HashSet<String> = HashSet::from([agents_rel]);
     loop {
         let frontier: HashSet<String> = reachable
@@ -377,9 +395,9 @@ mod tests {
     fn parent_relative_backtick_resolves_against_doc_parent() {
         // a doc at docs/plans/guide.md backticks `../prd/PRD.md` — the
         // parent-relative path must resolve against docs/plans/.. (== docs/),
-        // exactly like a markdown link. The current code resolves backtick
-        // paths against the REPO root, so `repo/../prd/PRD.md` misses the
-        // existing docs/prd/PRD.md and fires a false positive.
+        // exactly like a markdown link. A repo-root-relative resolution
+        // (`repo/../prd/PRD.md`) misses the existing docs/prd/PRD.md and
+        // fires a false positive.
         let dir = std::env::temp_dir().join(format!("docs_paren_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("docs/plans")).unwrap();
@@ -390,6 +408,29 @@ mod tests {
         assert!(
             !f.iter().any(|x| x.kind == "docs-link"),
             "parent-relative backtick path must resolve: {f:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backtick_edge_reaches_doc_from_nested_dir() {
+        // B1 residual: the reachability BFS used parent.join for EVERY target,
+        // so a `docs/`-prefixed backtick from a nested doc resolved against
+        // the doc's dir (docs/plans/docs/prd/PRD.md), the edge was dropped,
+        // and a doc referenced by a RESOLVING backtick was flagged
+        // undiscoverable. The backtick edge must use the same base as
+        // docs_findings: `docs/`-prefixed -> repo root.
+        let dir = std::env::temp_dir().join(format!("docs_bt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs/plans")).unwrap();
+        std::fs::create_dir_all(dir.join("docs/prd")).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "# agent\n- [guide](docs/guide.md)\n").unwrap();
+        std::fs::write(dir.join("docs/guide.md"), "see `docs/prd/PRD.md`\n").unwrap();
+        std::fs::write(dir.join("docs/prd/PRD.md"), "prd\n").unwrap();
+        let f = docs_findings(&dir, &std::collections::HashSet::new());
+        assert!(
+            !f.iter().any(|x| x.kind == "docs-undiscoverable"),
+            "backtick edge must reach PRD.md: {f:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

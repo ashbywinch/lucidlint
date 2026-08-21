@@ -121,6 +121,17 @@ class _RenderCtx:
     coverage_source: str
     graph_preferred: bool
     diff: set[str]
+    ignored_by_signal: Counter | None = None
+
+    def _config_ignored_note(self) -> str:
+        """The §9 debt ledger: config-ignored findings are filtered BEFORE the
+        verdict — without a count they vanish entirely, and the ignore can
+        grow without the gate ever showing it."""
+        if not self.ignored_by_signal:
+            return ""
+        top = ", ".join(f"{sig}={n}" for sig, n in self.ignored_by_signal.most_common(4))
+        total = sum(self.ignored_by_signal.values())
+        return f", {total} config-ignored ({top})"
 
     def render_json(self, unique: list[Action]) -> None:
         repo = self.repo
@@ -147,6 +158,7 @@ class _RenderCtx:
                         },
                     },
                     "baseline": str(args.baseline) if args.baseline else "",
+                    "config_ignored": dict(self.ignored_by_signal) if self.ignored_by_signal else {},
                     "actions": [asdict(a) for a in unique],
                 },
                 indent=2,
@@ -168,7 +180,8 @@ class _RenderCtx:
         verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
         print(
             f"{verdict} — {len(fails)} action(s) across {targets} distinct targets "
-            f"(+{len(acks)} acknowledged in baseline, {len(warns)} warnings never-fail){mine_txt}, "
+            f"(+{len(acks)} acknowledged in baseline, {len(warns)} warnings never-fail"
+            f"{self._config_ignored_note()}){mine_txt}, "
             f"top P{top.priority} {top.file}:{top.line} ({top.function or top.kind})"
         )
         print(
@@ -196,7 +209,11 @@ class _RenderCtx:
             return
         if not fails:
             warn_note = f" ({len(warns)} warnings reported, never fail)" if warns else ""
-            print(f"GATE: PASS — {len(acks)} action(s) acknowledged in baseline{warn_note}")
+            ignored_note = self._config_ignored_note()
+            print(
+                f"GATE: PASS — {len(acks)} action(s) acknowledged in baseline"
+                f"{warn_note}{ignored_note}"
+            )
             if warns:
                 print(f"by kind — warnings: {_kind_counts(warns)}")
                 _render_actions(repo, args, warns, [])
@@ -500,7 +517,44 @@ def _gitignored_docs(repo: Path) -> tuple[str, ...]:
                     ignored.append(rel)
             except ValueError:  # lucidlint: ignore swallow ambiguous path — keep it visible
                 pass
-    return tuple(sorted(ignored))
+    # referenced-but-absent targets: an ignored private doc may never have
+    # been committed, so the walk cannot see it — `git check-ignore` answers
+    # for any path. Query the .md references the docs actually make (a loose
+    # over-approximation is fine — extra ignored paths only suppress more).
+    refs: set[str] = set()
+    # docs never live in venvs/caches/build output — pruning the WALK keeps
+    # it off node_modules (rglob would descend tens of thousands of files)
+    skip_dirs = {
+        ".git", ".venv", "venv", "node_modules", "__pycache__", ".lucidlint-cache",
+        ".ruff_cache", ".pytest_cache", ".mypy_cache", ".pyrefly-cache", "htmlcov",
+        "dist", "build", "target", ".code-review-graph", ".tox", ".eggs",
+    }
+    for root, dirs, files in os.walk(repo):
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for fname in files:
+            if not fname.endswith(".md"):
+                continue
+            text = Path(root).joinpath(fname).read_text(encoding="utf-8", errors="replace")
+            for hit in re.findall(r"`([^`]+\.md)`|\[[^\]]*\]\(([^)]+\.md)\)", text):
+                refs.add(hit[0] or hit[1])
+
+    if refs:
+        # a parent-relative or absolute reference lies OUTSIDE the repo —
+        # `git check-ignore` aborts the whole batch on one (rc 128, no
+        # output); those are never repo-ignored anyway
+        queryable = sorted(r for r in refs if not r.startswith("../") and not r.startswith("/"))
+        if queryable:
+            proc = subprocess.run(
+                ["git", "-C", str(repo), "check-ignore", "--stdin"],
+                input="\n".join(queryable),
+                capture_output=True,
+                text=True,
+            )
+            for line in proc.stdout.splitlines():
+                line = line.strip()
+                if line.endswith(".md"):
+                    ignored.append(line.replace(os.sep, "/"))
+    return tuple(sorted(set(ignored)))
 
 
 def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
@@ -770,13 +824,14 @@ RULE_GROUPS = {
     "architecture": {"complexity", "large-function", "closures", "partition", "strewing", "record-shape",
                      "duplicate", "layer-mix", "folder-mix", "hub-file", "high-risk",
                      "hotspot", "over-abstraction", "long-param-list", "churn-untested",
-                     "detached-method"},
+                     "detached-method", "module-cohesion"},
     "style": {"magic-number", "noop-statement", "unreachable", "vague-name", "class-module",
               "builtin-shadow", "broad-except", "swallow", "inline-import", "private-import",
               "global-state", "unused", "import-cycle", "docs-link", "docs-undiscoverable",
               "boolean-arg", "debug-artifact", "positional-literals",
               "guard-clauses", "latent-visitor", "conditional-polymorphism", "special-case",
-              "middle-man", "unused-setter", "loop-pipeline"},
+              "middle-man", "unused-setter", "loop-pipeline", "duplicate-def",
+              "restating-docstring", "duplicate-block"},
     "test-discipline": {"monkeypatch", "skipif", "fakefs", "no-assert-test"},
     "suppression": {"suppression", "type-ignore", "allow-reason", "noqa", "stale-suppression"},
 }
@@ -1181,15 +1236,22 @@ def _dedupe_merge(actions: list[Action], diff: set[str]) -> list[Action]:
     _lifecycle_notes(unique)
     return unique
 
+    # lucidlint: ignore record-shape the baseline file's two sections are a wire-format seam; a class is ceremony
+def _load_baseline(path) -> tuple[set[str], dict[str, int]]:
+    """Acknowledged action keys + the config-ignored counts (the §9 growth
+    ledger) from the baseline file (best-effort)."""
 
-def _load_baseline(path) -> set[str]:
-    """Acknowledged action keys from the baseline file (best-effort)."""
+
     if path and path.exists():
         try:
-            return set(json.loads(path.read_text()).get("actions", []))
-        except (json.JSONDecodeError, AttributeError):  # lucidlint: ignore swallow corrupt baseline; gate unbaselined
+            data = json.loads(path.read_text())
+            keys = set(data.get("actions", []))
+            ignored = dict(data.get("config_ignored", {}))
+            return keys, {k: int(v) for k, v in ignored.items()}
+        # lucidlint: ignore swallow corrupt baseline; gate unbaselined
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
             log(f"baseline {path} unreadable — ignoring")
-    return set()
+    return set(), {}
 
 
 def _render_file_group(file: str, items: list[Action]) -> None:
@@ -1239,13 +1301,16 @@ def _render_actions(repo: Path, args, fails: list[Action], acks: list[Action]) -
     )
 
 
-def _write_baseline(args, unique: list[Action]) -> int:
+def _write_baseline(args, unique: list[Action], ignored_by_signal: Counter | None = None) -> int:
     """--update-baseline: lock all current action keys and exit clean."""
     if not args.baseline:
         log("--update-baseline requires --baseline PATH")
         return 2
     keys = [action_key(a) for a in unique if a.severity != "warn"]
-    args.baseline.write_text(json.dumps({"actions": keys}, indent=2))
+    baseline: dict = {"actions": keys}
+    if ignored_by_signal:
+        baseline["config_ignored"] = dict(ignored_by_signal)
+    args.baseline.write_text(json.dumps(baseline, indent=2))
     print(f"lucidlint: baseline written — {len(keys)} action(s) locked to {args.baseline}")
     return 0
 
@@ -1470,26 +1535,53 @@ def main() -> int:
         cc = _coverage_context(repo, cr.lines, cr.source)
         diff = changed_files(repo, args.base)
     actions = _collect_actions(repo, args, fh.churn, fh.last_modified, only_rel=args.file)
-    # Apply project-wide config (global ignore / per-path ignore)
+    # Apply project-wide config (global ignore / per-path ignore), COUNTING
+    # what the config hides — the §9 debt ledger: config-ignored findings are
+    # filtered BEFORE the verdict, so without a count the ignore can grow
+    # invisibly ("nothing is ever wrong").
     ignored_config = _load_lucidlint_config(repo)
+    ignored_by_signal: Counter[str] = Counter()
     if ignored_config["global_ignore"] or ignored_config["per_path_ignore"]:
-        actions = [a for a in actions if a.signal not in ignored_config["global_ignore"]]
-        # Per-path removals
-        for a in list(actions):
+        kept: list[Action] = []
+        for a in actions:
+            if a.signal in ignored_config["global_ignore"]:
+                ignored_by_signal[a.signal] += 1
+                continue
+            removed = False
             for pattern, path_ignored in ignored_config["per_path_ignore"]:
                 if Path(a.file).match(pattern) and a.signal in path_ignored:
-                    actions.remove(a)
+                    ignored_by_signal[a.signal] += 1
+                    removed = True
                     break
+            if not removed:
+                kept.append(a)
+        actions = kept
     unique = _dedupe_merge(actions, diff)
 
     if args.update_baseline:
-        return _write_baseline(args, unique)
-    stale = _apply_baseline(unique, _load_baseline(args.baseline))
+        return _write_baseline(args, unique, ignored_by_signal)
+    baseline_keys, baseline_ignored = _load_baseline(args.baseline)
+    stale = _apply_baseline(unique, baseline_keys)
+    # the §9 growth signal: a config-ignored family whose count GREW since
+    # the baseline is debt being added to, not held — the ignore's scope is
+    # wrong. A warning, never a gate failure (growing repos legitimately
+    # grow): --update-baseline re-locks the new counts. Only meaningful when
+    # a baseline exists to compare against.
+    if args.baseline:
+        for sig, n in ignored_by_signal.items():
+            if baseline_ignored.get(sig, 0) < n:
+                log(
+                    f"config-ignored '{sig}' grew {baseline_ignored.get(sig, 0)} -> {n} since the baseline — "
+                    "the ignore's scope is being added to; re-scope it or re-lock with --update-baseline"
+                )
     fails = [a for a in unique if a.severity == "fail"]
     warns = [a for a in unique if a.severity == "warn"]
     acks = [a for a in unique if a.severity == "ack"]
     head = _git_head(repo)
-    rc = _RenderCtx(repo, args, head.branch, head.commit, cc.label, cc.graph_preferred, diff)
+    rc = _RenderCtx(
+        repo, args, head.branch, head.commit, cc.label, cc.graph_preferred, diff,
+        ignored_by_signal=ignored_by_signal,
+    )
 
     if args.json:
         rc.render_json(unique)
@@ -1497,6 +1589,7 @@ def main() -> int:
         rc.render_text(unique, fails, warns, acks)
 
     return _gate_exit(stale, fails, args)
+
 
 
 def _fix_rust(repo: Path, kind: str, rel: str, line: int, name: str | None) -> int:
