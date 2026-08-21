@@ -9,21 +9,25 @@ Every finding is one of two severities:
 
 ## Suppression
 
-Any finding can be silenced with a `lucidlint: ignore` comment on its line or the line above, provided you write a *reason*:
+Any finding can be silenced with a `lucidlint: ignore` comment on its line
+or within a few lines above it (a 3-line window — one decorator or stacked
+comment may intervene), provided you write a *reason*:
 
 ```python
 # lucidlint: ignore magic-number the gate threshold — this literal is the defined limit
 MAX_RETRIES = 3
 ```
 
-A suppression without a why is itself a finding. Every `# type: ignore` / `#[allow(...)]` / `#[ignore]` follows the same rule — the gate checks that a reason accompanies it.
+A suppression without a why is itself a finding. Every `# type: ignore` /
+`#[allow(...)]` / `#[ignore]` follows the same rule — the gate checks that a
+reason accompanies it. A suppression naming a FAMILY also covers its variant
+kinds (`ignore latent-class <why>` exempts `closures`, `partition`, and
+`strewing` findings — the family collapse is `final_kind`'s, mirrored by
+`FAMILY_VARIANTS` in common.rs).
 
-A multi-line suppression comment must put its `lucidlint: ignore` marker
-on the **last** line, directly above the code — the gate matches the marker's
-line against the finding's line (or the one above it); a marker on the first
-comment line never matches and is reported stale.
-
-The first two groups are the ones most likely to collide with existing codebase conventions. Each is individually suppressible.
+A multi-line suppression comment must put its `lucidlint: ignore` marker on
+the **last** line, within the window above the code; a marker farther up
+never matches and is reported stale.
 
 ## Adding a finding family
 
@@ -37,7 +41,7 @@ Every finding has two identifiers — don't conflate them:
   without a named bucket collapse to `standard` (the message explains the
   rule).
 
-A new family must be registered in **four places**:
+A new family must be registered in **five places**:
 
 1. **Scanner** — emit the finding at the right AST hook with
    `finding("<kind>", "<fail|warn>", ...)`; the kind string is the signal.
@@ -51,11 +55,20 @@ A new family must be registered in **four places**:
 2. **`final_kind`** (`scanner/src/main.rs`) — a named display bucket, or
    accept the `standard` collapse deliberately.
 3. **`RULE_GROUPS`** (`lucidlint.py`) — every kind belongs to exactly one
-   group so `ignore = ["group:<name>"]` works.
+   group so `ignore = ["group:<name>"]` works. The Rust mirror lives in
+   `scanner/src/config.rs` (`rule_groups()`), pinned by
+   `tests/test_config_parity.py`.
 4. **`rule_metadata.py`** — an entry here (kind, severity, language,
    description); the RULES.md tables are **generated** from it
    (`make rules`), and the gate fails if a family lacks an entry or the
    generated tables are stale — the list cannot drift from the code.
+5. **`FAMILY_VARIANTS`** (`scanner/src/common.rs`) — ONLY when the family
+   collapses variant kinds under one display bucket (`latent-class` covers
+   `closures`/`partition`/`strewing`). This is the map the review log's B6
+   warning is about: a variant missing from the alias list makes
+   `ignore <family> <why>` silently stale against it. Must match
+   rule_metadata's `display_name "X → <family>"` aliases AND `final_kind`'s
+   collapse.
 
 Then: unit tests for the scanner path, an orchestrator test if the family
 changes gate behavior, a suppression test (`lucidlint: ignore` + config
@@ -76,7 +89,8 @@ with a why).
 | **large-function** | fail | Both | Function spans ≥ 120 lines — split it: one rule per function. |
 | **closures → latent-class** | fail | Both | A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line span) — the nested structure is a class waiting to be extracted. |
 | **partition → latent-class** | fail | Python | The field-partition variant of latent-class: free functions partition a struct's fields (each touches a disjoint subset) — the fields and their functions belong together as a class. |
-| **strewing** | fail | Both | ≥3 free functions sharing the same leading parameter — they share data, they're a class. |
+| **strewing → latent-class** | fail | Both | ≥3 free functions sharing the same leading parameter — they share data, they're a class. |
+| **module-cohesion** | fail | Graph | A file whose nodes split across ≥2 graph communities (each ≥2 nodes) holds several sub-domains — split the module at the domain seams. |
 | **record-shape** | fail | Both | A function takes a struct/class with ≥5 fields and no methods — the struct's rules belong as methods on it. |
 | **detached-method** | **warn** | Both | A method that never touches its receiver — a classmethod should always use `cls`; a plain method should use `self` or move out — it doesn't use instance state; make it a `@staticmethod`/associated fn or move it out of the class. |
 | **duplicate** | **warn** | Both | Dice similarity ≥ 0.9 (structural skeleton bigrams) — copy-paste; extract the shared logic. |
@@ -101,7 +115,10 @@ with a why).
 | **inline-import** | fail | Python | `import` inside a function body (Python) — imports belong at module top. |
 | **private-import** | fail | Both | Importing an underscore-prefixed symbol from another module. |
 | **global-state** | fail | Both | Module-level mutable container mutated inside a function — put state in a class. |
-| **unused** | fail | Python | A function defined in production code that's never referenced from any other prod file (Python only). |
+| **unused** | fail | Python | A function defined in production code that's never referenced anywhere in the repo (same-file references count — Python only). |
+| **duplicate-def** | fail | Both | A module-scope def/class/import that shadows an earlier module-scope binding of the same name — the later definition wins legally, but it is a shadowing hazard (dispatch or edit mistake); rename one. |
+| **restating-docstring** | **warn** | Both | A docstring whose content words all appear in the body's own tokens — it restates the code; name the concept instead. |
+| **duplicate-block** | **warn** | Both | An identical statement block (≥3 statements) appearing twice in one function — duplicated work (an edit mistake?); delete the second copy. |
 | **import-cycle** | fail | Both | Circular imports — restructure modules. |
 | **docs-link** | fail | Both | An internal MD link or backticked path does not resolve to an existing file. |
 | **docs-undiscoverable** | fail | Both | A doc file is not reachable from `AGENTS.md` (the repo's doc index) via the link graph. |

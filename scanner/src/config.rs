@@ -30,6 +30,7 @@ pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {
                 "long-param-list",
                 "churn-untested",
                 "detached-method",
+                "module-cohesion",
             ],
         ),
         (
@@ -60,6 +61,9 @@ pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {
                 "middle-man",
                 "unused-setter",
                 "loop-pipeline",
+                "duplicate-def",
+                "restating-docstring",
+                "duplicate-block",
             ],
         ),
         (
