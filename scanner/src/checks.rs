@@ -1057,6 +1057,20 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
 /// neither ruff nor pyrefly flags it, and the name-based ref graph cannot see
 /// it either.
 pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
+    // the @overload idiom legally binds one name several times (stubs +
+    // implementation) — those names are exempt from the shadow check
+    let mut overloaded: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in module_body {
+        if let Stmt::FunctionDef(f) = s {
+            let is_overload = f.decorator_list.iter().any(|d| {
+                matches!(&d.expression, Expr::Name(n) if n.id.as_str() == "overload")
+                    || matches!(&d.expression, Expr::Attribute(a) if a.attr.as_str() == "overload")
+            });
+            if is_overload {
+                overloaded.insert(f.name.to_string());
+            }
+        }
+    }
     let mut seen: Vec<(String, usize)> = Vec::new();
     for s in module_body {
         let line = stmt_line(state.source, s);
@@ -1097,7 +1111,7 @@ pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
             if name.is_empty() {
                 continue;
             }
-            if is_def {
+            if is_def && !overloaded.contains(&name) {
                 if let Some((_, first_line)) = seen.iter().find(|(n, _)| *n == name) {
                     state.findings.push(Finding {
                         file: state.file.to_string(),

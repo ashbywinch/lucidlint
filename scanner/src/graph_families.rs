@@ -847,7 +847,7 @@ pub fn module_cohesion_findings(repo: &Path, contract: &GraphContract, max_edges
             kind: "module-cohesion".into(),
             severity: "fail".into(),
             message: format!(
-                "module '{rel}' holds {} domains of >= 2 nodes ({edge_count} edges): {groups} — split the module at the domain seams — fix: extract-module --fix-name <module> --params <members of one domain>",
+                "module '{rel}' holds {} domains of >= 2 nodes ({edge_count} edges): {groups} — split the module at the domain seams — fix: extract-module --fix-name <module> --params <members>",
                 domains.len()
             ),
         });

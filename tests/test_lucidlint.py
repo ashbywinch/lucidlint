@@ -559,6 +559,19 @@ def test_config_per_path_ignore_suppresses(tmp_path, capsys):
     assert "magic number" not in out
 
 
+def test_config_ignored_ledger_shows_when_all_actions_ignored(tmp_path, capsys):
+    """The debt ledger must print even when the config-ignores ate every
+    action — "clean" while debt is hidden is the invisibility the ledger
+    exists to remove (review finding)."""
+    repo = make_repo(tmp_path, app_src="def f():\n    return 60 * 24\n")
+    (repo / ".lucidlint.toml").write_text('[lucidlint]\nignore = ["magic-number"]\n')
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "config-ignored" in out
+    assert "magic-number=" in out
+
+
+
 # --------------------------------------------------------------------------- fix + scan contracts
 def test_raw_score_uses_the_metric():
     """R8: priority ranks churn x complexity x fan-in — a higher metric must
