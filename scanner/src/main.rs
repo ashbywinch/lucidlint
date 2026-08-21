@@ -2388,6 +2388,16 @@ mod tests {
         );
         assert!(!f.iter().any(|x| x.kind == "duplicate-def"), "{f:?}");
     }
+
+    #[test]
+    fn duplicate_def_overload_battery_exempt() {
+        // the @overload idiom legally binds one name several times — the
+        // stubs plus the implementation; "rename one" is unfollowable there
+        let f = scan_src(
+            "from typing import overload\n\n@overload\ndef f(x: int) -> int:\n    ...\n\n@overload\ndef f(x: str) -> str:\n    ...\n\ndef f(x):\n    return x\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "duplicate-def"), "{f:?}");
+    }
     #[test]
     fn restating_docstring_is_found() {
         // the log's example: "the line's orientation must be consistent with

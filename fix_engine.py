@@ -1816,7 +1816,11 @@ def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
                     moved.append(stmt)
                     break
         elif isinstance(inner, cst.ImportFrom):
+            if isinstance(inner.names, cst.ImportStar):
+                continue  # `from x import *` binds no importable name
             for alias in inner.names:
+                if not isinstance(alias.name, cst.Name):
+                    continue
                 bound = alias.asname.name.value if alias.asname else alias.name.value
                 if bound in referenced:
                     moved.append(stmt)
@@ -1827,17 +1831,21 @@ def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
 def _origin_after_move(module: cst.Module, move: set[str], opts) -> list:
     """The origin's body after the split: the moved defs dropped, the
     re-export import inserted after the last import — every other file's
-    `from origin import x` keeps working (the origin re-exports)."""
+    `from origin import x` keeps working (the origin re-exports). The
+    re-export is RELATIVE when the origin sits in a package (`houses/text.py`
+    is not on sys.path as a top-level module) — review finding."""
     remaining = [
         s
         for s in module.body
         if not (isinstance(s, (cst.FunctionDef, cst.ClassDef)) and s.name.value in move)
     ]
+    in_package = "/" in (opts.rel or "")
     reexport = cst.SimpleStatementLine(
         body=[
             cst.ImportFrom(
                 module=cst.Name(opts.name),
                 names=[cst.ImportAlias(name=cst.Name(n)) for n in opts.params],
+                relative=[cst.Dot()] if in_package else (),
                 lpar=None,
                 rpar=None,
             )
@@ -1883,10 +1891,32 @@ def _extract_module_proposal(source: str, opts) -> tuple[str, str] | None:
         referenced |= probe.names
     if referenced & (set(top_defs) - move):
         return None  # the moved code needs an origin def — cycle risk
+    # module-level assignments/constants the moved code reads would be
+    # missing from the new module (a runtime NameError) — refuse; moving
+    # them would break the origin's remaining code (review finding)
+    if referenced & _module_bindings(module):
+        return None
     new_module = cst.Module(
         body=[*_moved_imports(module, referenced), *(top_defs[n] for n in opts.params)]
     )
     return cst.Module(body=_origin_after_move(module, move, opts)).code, new_module.code
+
+
+def _module_bindings(module: cst.Module) -> set[str]:
+    """The names module-level assignments/constants bind — the extract-module
+    split refuses when moved code reads one (the new module would NameError;
+    moving the binding would break the origin)."""
+    bound: set[str] = set()
+    for stmt in module.body:
+        if not (isinstance(stmt, cst.SimpleStatementLine) and len(stmt.body) == 1):
+            continue
+        inner = stmt.body[0]
+        if isinstance(inner, cst.Assign):
+            for t in inner.targets:
+                bound |= _target_names(t.target)
+        elif isinstance(inner, cst.AnnAssign) and inner.target is not None:
+            bound |= _target_names(inner.target)
+    return bound
 
 
 class _NameSet(cst.CSTVisitor):

@@ -205,7 +205,11 @@ class _RenderCtx:
     def render_text(self, unique: list[Action], fails: list[Action], warns: list[Action], acks: list[Action]) -> None:
         repo, args = self.repo, self.args
         if not unique:
-            print("GATE: PASS — clean, no actions")
+            # the ledger must show even when the config-ignores ate every
+            # action — "clean" while debt is hidden is the invisibility the
+            # ledger exists to remove (review finding)
+            ignored_note = self._config_ignored_note()
+            print(f"GATE: PASS — clean, no actions{ignored_note}")
             return
         if not fails:
             warn_note = f" ({len(warns)} warnings reported, never fail)" if warns else ""

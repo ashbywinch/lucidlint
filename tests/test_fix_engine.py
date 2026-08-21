@@ -1400,7 +1400,7 @@ def test_extract_module_moves_domain_and_reexports(tmp_path):
     assert "def tokenize(s):" in new_mod
     assert "def words(s):" in new_mod
     assert "from math import sqrt" in new_mod  # the needed import moved with them
-    assert "from text import tokenize, words" in fixed  # the origin re-exports
+    assert "from .text import tokenize, words" in fixed  # the origin re-exports (relative — houses/ is a package)
     assert "def tokenize" not in fixed
 
 
@@ -1443,3 +1443,64 @@ def test_extract_module_name_free_preview_does_not_write(tmp_path):
     assert "def tokenize" not in new_source
     assert not (repo / "houses" / "_extracted.py").exists()  # preview writes nothing
     assert (repo / rel).read_text().count("def tokenize") == 1  # origin untouched
+
+
+def test_extract_module_refuses_module_level_constant(tmp_path):
+    # the moved code reads a module-level constant — the new module would
+    # NameError at runtime; the split must refuse (review finding)
+    src = (
+        "LIMIT = 10\n"
+        "\n"
+        "def tokenize(s):\n"
+        "    return s.split()[:LIMIT]\n"
+        "\n"
+        "def words(s):\n"
+        "    return tokenize(s)\n"
+    )
+    out, fixed = _fix_opts(
+        tmp_path, "extract-module", "houses/layout.py", src, 1,
+        name="text", params=["tokenize", "words"],
+    )
+    assert out is None
+    assert fixed == src
+    assert not (tmp_path / "repo" / "houses" / "text.py").exists()
+
+
+def test_extract_module_package_reexport_is_relative(tmp_path):
+    # houses/layout.py is inside a package — the re-export must be
+    # `from .text import ...`, not the top-level `from text import ...`
+    # (review finding: a sibling module is not on sys.path)
+    src = (
+        "def tokenize(s):\n"
+        "    return s.split()\n"
+        "\n"
+        "def words(s):\n"
+        "    return tokenize(s)\n"
+    )
+    out, fixed = _fix_opts(
+        tmp_path, "extract-module", "houses/layout.py", src, 1,
+        name="text", params=["tokenize", "words"],
+    )
+    assert out is not None
+    assert "from .text import tokenize, words" in fixed
+    assert "from text import" not in fixed
+
+
+def test_extract_module_star_import_does_not_crash(tmp_path):
+    # `from x import *` in the origin — ImportStar has no .value; the fix
+    # must skip it, not raise (review finding)
+    src = (
+        "from math import *\n"
+        "\n"
+        "def tokenize(s):\n"
+        "    return s.split()\n"
+        "\n"
+        "def words(s):\n"
+        "    return tokenize(s)\n"
+    )
+    out, fixed = _fix_opts(
+        tmp_path, "extract-module", "houses/layout.py", src, 1,
+        name="text", params=["tokenize", "words"],
+    )
+    assert out is not None
+    assert "def tokenize(s):" in (tmp_path / "repo" / "houses" / "text.py").read_text()
