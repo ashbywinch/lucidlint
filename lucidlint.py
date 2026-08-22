@@ -289,13 +289,6 @@ class GitHead:
     commit: str
 
 
-def rel_path(repo: Path, p: str) -> str:
-    """Graph stores absolute paths; radon/git use repo-relative. Normalize."""
-    p = p.replace("\\", "/")
-    root = str(repo.resolve()).replace("\\", "/") + "/"
-    if p.startswith(root):
-        p = p[len(root) :]
-    return p
 
 
 def is_test_path(rel: str) -> bool:
@@ -320,135 +313,12 @@ _CHURN_MAX_COMMITS = 200
 _CHURN_MAX_AGE_DAYS = 730
 
 
-def file_history(repo: Path) -> FileHistory:
-    """The recent git history: per-file change counts and last-modified date.
-
-    The walk is bounded (the last 200 commits or 730 days, whichever stops
-    first) — old churn dilutes the CURRENT hotspot signal, so limiting the
-    window is more signal, not less. The walk is deterministic for a given
-    HEAD, so the result is cached per (HEAD, window) — repeat gate runs skip
-    the walk entirely. `last_modified` is the NEWEST touch (the walk is
-    newest-first; first-seen-wins).
-    """
-    if _pygit2 is None or not (repo / ".git").exists():
-        # no pygit2 or not a git repo — the absence is certain and nothing
-        # can fix it in this run: silent (never announce an unfixable gap)
-        return FileHistory(Counter(), {})
-    head = ""
-    cache_key = ""
-    try:
-        r = _pygit2.Repository(str(repo))
-        head = str(r.head.target)
-        cutoff = int(time.time()) - _CHURN_MAX_AGE_DAYS * 86400
-        cutoff_day = time.strftime("%Y-%m-%d", time.localtime(cutoff))
-        cache_key = f"churn-{head}-{_CHURN_MAX_COMMITS}-{cutoff_day}.json"
-        cache_path = repo / ".lucidlint-cache" / cache_key
-        try:
-            data = json.loads(cache_path.read_text())
-            return FileHistory(Counter(data["churn"]), data["last_modified"])
-        except (OSError, ValueError, KeyError):  # lucidlint: ignore swallow a missing/corrupt cache just walks
-            pass  # no cache yet — walk
-    except KeyError:
-        return FileHistory(Counter(), {})  # not a git repo — certain: silent
-    except Exception as e:
-        log(f"churn: {e}")  # unexpected — show the actual error
-        return FileHistory(Counter(), {})
-
-    churn: Counter[str] = Counter()
-    last: dict[str, str] = {}
-    try:
-        r = _pygit2.Repository(str(repo))
-        cutoff = int(time.time()) - _CHURN_MAX_AGE_DAYS * 86400
-        for seen, commit in enumerate(r.walk(r.head.target, GIT_SORT_TIME)):
-            if seen >= _CHURN_MAX_COMMITS or commit.commit_time < cutoff:
-                break
-            date = str(commit.commit_time)
-            changed = set()
-            if commit.parents:
-                diff = commit.tree.diff_to_tree(commit.parents[0].tree)
-                for patch in diff:
-                    path = patch.delta.new_file.path
-                    if path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/")):
-                        changed.add(path)
-            else:
-                # initial commit — diff against the empty tree gives every file
-                for patch in commit.tree.diff_to_tree():
-                    path = patch.delta.new_file.path
-                    if path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/")):
-                        changed.add(path)
-            for path in changed:
-                churn[path] += 1
-                if date and path not in last:
-                    last[path] = date  # first-seen = newest in a newest-first walk
-    except Exception as e:
-        log(f"churn walk: {e}")  # unexpected — show the actual error
-        return FileHistory(churn, last)  # partial/empty history, surfaced
-
-    if cache_key:
-        try:
-            (repo / ".lucidlint-cache").mkdir(exist_ok=True)
-            (repo / ".lucidlint-cache" / cache_key).write_text(
-                json.dumps({"churn": dict(churn), "last_modified": last})
-            )
-        except OSError:  # lucidlint: ignore swallow the cache is best-effort — a read-only repo still works
-            pass  # the cache is best-effort — a read-only repo still works
-    return FileHistory(churn, last)
 
 
-def load_coverage(repo: Path) -> CoverageResult:
-    """Per-file covered line sets, preferring the repo's own coverage data.
-
-    Sources, in order: coverage.xml (Cobertura, what CI gates on), then
-    .coverage (coverage.py SQLite, line_bits format). The graph's TESTED_BY
-    edges miss tests that import inside the test body — real coverage data
-    does not. lines is None when neither source exists.
-    """
-    if (repo / "coverage.xml").exists():
-        return _coverage_from_xml(repo)
-    if (repo / ".coverage").exists():
-        return _coverage_from_sqlite(repo)
-    return CoverageResult(None, "no coverage data (no coverage.xml, no .coverage)")
 
 
-def _coverage_from_xml(repo: Path) -> CoverageResult:
-    """Cobertura coverage.xml: class line elements with hits > 0."""
-    try:
-        root = ET.parse(repo / "coverage.xml").getroot()
-    except ET.ParseError:
-        return CoverageResult(None, "coverage.xml unparseable")
-    covered: dict[str, set[int]] = {}
-    for cls in root.iter("class"):
-        filename = (cls.get("filename") or "").replace("\\", "/")
-        if not filename.endswith(".py"):
-            continue
-        lines = covered.setdefault(rel_path(repo, filename), set())
-        for ln in cls.iter("line"):
-            if int(ln.get("hits", "0") or 0) > 0:
-                try:
-                    lines.add(int(ln.get("number")))
-                except (TypeError, ValueError):  # lucidlint: ignore swallow malformed <line> elements are skipped
-                    log(f"ignoring malformed <line> element in {repo / 'coverage.xml'}")
-    return CoverageResult(covered or None, "coverage.xml")
 
 
-def _coverage_from_sqlite(repo: Path) -> CoverageResult:
-    """coverage.py .coverage SQLite: line_bits rows per file."""
-    try:
-        db = sqlite3.connect(repo / ".coverage")
-        files = dict(db.execute("SELECT id, path FROM file"))
-        covered: dict[str, set[int]] = {}
-        for fid, numbits in db.execute("SELECT file_id, numbits FROM line_bits"):
-            path = files.get(fid)
-            if not path:
-                continue
-            rel = rel_path(repo, path)
-            if not rel.endswith(".py"):
-                continue
-            covered.setdefault(rel, set()).update(_numbits_to_lines(numbits))
-        db.close()
-        return CoverageResult(covered or None, ".coverage")
-    except sqlite3.Error:
-        return CoverageResult(None, ".coverage unreadable")
 
 
 def _numbits_to_lines(numbits: bytes) -> set[int]:
@@ -850,66 +720,7 @@ RULE_GROUPS = rule_metadata.CATALOG.groups()
 _CONFIG_CACHE: dict[Path, dict] = {}
 
 
-# lucidlint: ignore record-shape wire-format envelope for the config — a class is ceremony
-def _load_lucidlint_config(repo: Path) -> dict:
-    """Load the project-wide lucidlint config, looking for (in order):
-    1. .lucidlint.toml in the repo root
-    2. [tool.lucidlint] in pyproject.toml
-    Returns a dict with 'global_ignore' (set of signal names) and
-    'per_path_ignore' (list of (glob_pattern, set)) or empty defaults.
-    The config lets a team suppress entire rule groups or specific signals
-    without per-file suppression comments."""
-    if repo in _CONFIG_CACHE and _CONFIG_CACHE.get(repo) is not None:
-        return _CONFIG_CACHE[repo]
 
-    # lucidlint: ignore record-shape wire-format envelope for the config
-    result = {"global_ignore": set(), "per_path_ignore": []}
-
-    # lucidlint: ignore record-shape wire-format envelope for the config
-    def _merge_config(raw: dict) -> None:
-        ignores = raw.get("ignore", raw.get("ignored_signals", []))
-        for item in ignores:
-            item = item.strip()
-            if item.startswith("group:"):
-                group_name = item[6:]
-                group_signals = RULE_GROUPS.get(group_name)
-                if group_signals:
-                    result["global_ignore"].update(group_signals)
-            else:
-                result["global_ignore"].add(item)
-        # Per-path overrides: keys that are glob patterns
-        for key, val in raw.items():
-            if key in ("ignore", "ignored_signals"):
-                continue
-            if isinstance(val, dict) and "ignore" in val:
-                path_ignores = set()
-                for item in val["ignore"]:
-                    item = item.strip()
-                    if item.startswith("group:"):
-                        gs = RULE_GROUPS.get(item[6:])
-                        if gs:
-                            path_ignores.update(gs)
-                    else:
-                        path_ignores.add(item)
-                result["per_path_ignore"].append((key, path_ignores))
-
-    # Try .lucidlint.toml first (standalone, for Rust projects)
-    toml_path = repo / ".lucidlint.toml"
-    if toml_path.is_file():
-        with open(toml_path, "rb") as f:
-            _merge_config(tomllib.load(f).get("lucidlint", {}))
-    else:
-        # Fall back to pyproject.toml [tool.lucidlint]
-        pyproject = repo / "pyproject.toml"
-        if pyproject.is_file():
-            with open(pyproject, "rb") as f:
-                data = tomllib.load(f)
-            tool_config = data.get("tool", {}).get("lucidlint", {})
-            if tool_config:
-                _merge_config(tool_config)
-
-    _CONFIG_CACHE[repo] = result
-    return result
 
 
 RUST_SCAN = _RustScan()
@@ -1157,37 +968,10 @@ def _coverage_context(repo: Path, covered, coverage_source: str) -> CoverageCont
     return CoverageContext(label=coverage_source, graph_preferred=graph_preferred, stale_note=stale_note)
 
 
-def _git_head(repo: Path) -> GitHead:
-    """Current branch and short commit for report provenance, via pygit2.
-    Returns empty strings when git or pygit2 is unavailable."""
-    if _pygit2 is None:
-        return GitHead(branch="", commit="")
-    try:
-        r = _pygit2.Repository(str(repo))
-        return GitHead(branch=r.head.shorthand or "", commit=str(r.head.target)[:7])
-    # git-absent is a supported mode — the handler returns the empty head
-    except Exception:
-        return GitHead(branch="", commit="")
 
 
-def _dedupe(actions: list[Action]) -> list[Action]:
-    """Same kind+file+line+function fires once (graph and radon can both flag a function)."""
-    seen: dict[tuple, Action] = {}
-    for a in actions:
-        key = (a.kind, a.file, a.line, a.function)
-        if key not in seen or a.raw > seen[key].raw:
-            seen[key] = a
-    return list(seen.values())
 
 
-def _percentile_rank(unique: list[Action], diff: set[str]) -> None:
-    """Rank raw risk 1-99 (percentile) so the list spreads; tag in-diff actions."""
-    if not unique:
-        return
-    lo, hi = min(a.raw for a in unique), max(a.raw for a in unique)
-    for a in unique:
-        a.priority = 99 if hi <= lo else max(1, round(1 + 98 * (a.raw - lo) / (hi - lo)))
-        a.in_diff = a.file in diff
 
 
 def _merge_key(a: Action) -> tuple:
@@ -1200,53 +984,19 @@ def _merge_key(a: Action) -> tuple:
     return (a.file, a.function, a.line, a.kind)
 
 
-def _merge_targets(unique: list[Action]) -> list[Action]:
-    """Per-target merge: complexity + large-function on the same function is one fix."""
-    merged: dict[tuple, Action] = {}
-    for a in sorted(unique, key=lambda a: (-a.raw, a.file, a.line)):
-        key = _merge_key(a)
-        if key not in merged:
-            merged[key] = a
-        else:
-            prev = merged[key]
-            prev.kinds = sorted({prev.kind, a.kind})
-            prev.raw = max(prev.raw, a.raw)
-            if a.note and a.note not in prev.note:
-                prev.note = (prev.note + " " + a.note).strip()
-            prev.line = min(prev.line, a.line)
-            if a.severity == "fail":
-                prev.severity = "fail"  # a warn merged into a fail target must not clear the gate
-            if a.message != prev.message:
-                extra = f"{a.severity.upper()}: {a.message}"
-                if extra not in prev.note:
-                    prev.note = (prev.note + " " + extra).strip()
-    return list(merged.values())
 
 
-def _lifecycle_notes(unique: list[Action]) -> None:
-    """Facts only — low-churn scripts/tools. Delete-vs-refactor is the agent's call."""
-    for a in unique:
-        if a.file.startswith(("scripts/", "tools/")) and a.churn <= 2 and a.last_modified:
-            a.note = (
-                a.note + f" Lifecycle: {a.churn}x churn, last touched {a.last_modified} — "
-                f"low-change file under scripts/tools."
-            ).strip()
 
 
-def _dedupe_merge(actions: list[Action], diff: set[str]) -> list[Action]:
-    """Dedupe, rank, merge per-target kinds, then lifecycle notes."""
-    unique = _dedupe(actions)
-    _percentile_rank(unique, diff)
-    unique = _merge_targets(unique)
-    # Re-rank on the merged raw values, but KEEP the diff marking — the
-    # merged actions must still show "[in your diff]" (PRD R10).
-    _percentile_rank(unique, diff)
-    unique.sort(key=lambda a: (-a.priority, a.file, a.line))
-    _lifecycle_notes(unique)
-    return unique
+class _Baseline(NamedTuple):
+    """The acknowledged-action keys + config-ignored counts from the baseline
+    file — a named record instead of a bare tuple."""
 
-    # lucidlint: ignore record-shape the baseline file's two sections are a wire-format seam; a class is ceremony
-def _load_baseline(path) -> tuple[set[str], dict[str, int]]:
+    keys: set[str]
+    ignored: dict[str, int]
+
+
+def _load_baseline(path) -> _Baseline:
     """Acknowledged action keys + the config-ignored counts (the §9 growth
     ledger) from the baseline file (best-effort)."""
 
@@ -1256,11 +1006,11 @@ def _load_baseline(path) -> tuple[set[str], dict[str, int]]:
             data = json.loads(path.read_text())
             keys = set(data.get("actions", []))
             ignored = dict(data.get("config_ignored", {}))
-            return keys, {k: int(v) for k, v in ignored.items()}
+            return _Baseline(keys, {k: int(v) for k, v in ignored.items()})
         # lucidlint: ignore swallow corrupt baseline; gate unbaselined
         except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
             log(f"baseline {path} unreadable — ignoring")
-    return set(), {}
+    return _Baseline(set(), {})
 
 
 def _render_file_group(file: str, items: list[Action]) -> None:
@@ -1310,18 +1060,6 @@ def _render_actions(repo: Path, args, fails: list[Action], acks: list[Action]) -
     )
 
 
-def _write_baseline(args, unique: list[Action], ignored_by_signal: Counter | None = None) -> int:
-    """--update-baseline: lock all current action keys and exit clean."""
-    if not args.baseline:
-        log("--update-baseline requires --baseline PATH")
-        return 2
-    keys = [action_key(a) for a in unique if a.severity != "warn"]
-    baseline: dict = {"actions": keys}
-    if ignored_by_signal:
-        baseline["config_ignored"] = dict(ignored_by_signal)
-    args.baseline.write_text(json.dumps(baseline, indent=2))
-    print(f"lucidlint: baseline written — {len(keys)} action(s) locked to {args.baseline}")
-    return 0
 
 
 def _apply_baseline(unique: list[Action], baseline_keys: set[str]) -> list[str]:
@@ -1373,6 +1111,429 @@ _FIX_ALIASES = {
     "complexity": "extract-method",
     "large-function": "extract-method",
 }
+
+
+# the raw TOML payload handed to _merge_config — a wire-format blob, not a
+# domain record (record-shape exempts the deserializer boundary by naming it)
+_RawConfig = dict
+
+
+@dataclass
+class _LucidlintConfig:
+    """The project-wide config: global ignore set + per-path ignore list."""
+
+    global_ignore: set
+    per_path_ignore: list
+
+
+class _GateRunner:
+    """The repo-scan gate flow. The pipeline state (history, coverage,
+    actions, baselines) lives on the runner instead of threading through
+    main() as parameters — the shape the assembly-class rule flags as a
+    class in waiting."""
+
+    def __init__(self, repo: Path, args):
+        self.repo = repo
+        self.args = args
+        self.fh: FileHistory | None = None
+        self.cr: CoverageResult | None = None
+        self.cc = None
+        self.diff: set[str] = set()
+        self.actions: list[Action] = []
+        self.ignored_config: dict = {}
+        self.ignored_by_signal: Counter[str] = Counter()
+        self.unique: list[Action] = []
+        self.stale: list[str] = []
+        self.baseline_ignored: Counter[str] = Counter()
+        self.head = None
+        self.rc = None
+
+    def gather(self) -> None:
+        """History/coverage/diff context (per-file mode skips the git work)."""
+        if self.args.file:
+            # Single-file / LSP mode: no git history, coverage, or diff — the
+            # per-file findings are what an editor shows on save.
+            self.fh = FileHistory(Counter(), {})
+            self.cr = CoverageResult(None, "")
+            self.cc = _coverage_context(self.repo, None, "")
+            self.diff = set()
+            return
+        if self.args.refresh_coverage:
+            self._refresh_coverage(self.repo)
+        self.fh = self.file_history(self.repo)
+        self.cr = self.load_coverage(self.repo)
+        self.cc = _coverage_context(self.repo, self.cr.lines, self.cr.source)
+        self.diff = changed_files(self.repo, self.args.base)
+
+    def collect(self) -> None:
+        """The finding actions for the repo."""
+        self.actions = _collect_actions(
+            self.repo, self.args, self.fh.churn, self.fh.last_modified, only_rel=self.args.file
+        )
+
+    def apply_config(self) -> None:
+        """Project-wide config (global ignore / per-path ignore), COUNTING
+        what the config hides — the §9 debt ledger: config-ignored findings
+        are filtered BEFORE the verdict, so without a count the ignore can
+        grow invisibly ("nothing is ever wrong")."""
+        self.ignored_config = self._load_lucidlint_config(self.repo)
+        self.ignored_by_signal = Counter()
+        if not self.ignored_config.global_ignore and not self.ignored_config.per_path_ignore:
+            return
+        kept: list[Action] = []
+        for a in self.actions:
+            if a.signal in self.ignored_config.global_ignore:
+                self.ignored_by_signal[a.signal] += 1
+                continue
+            removed = False
+            for pattern, path_ignored in self.ignored_config.per_path_ignore:
+                if Path(a.file).match(pattern) and a.signal in path_ignored:
+                    self.ignored_by_signal[a.signal] += 1
+                    removed = True
+                    break
+            if not removed:
+                kept.append(a)
+        self.actions = kept
+
+    @staticmethod
+    def file_history(repo: Path) -> FileHistory:
+        """The recent git history: per-file change counts and last-modified date.
+
+        The walk is bounded (the last 200 commits or 730 days, whichever stops
+        first) — old churn dilutes the CURRENT hotspot signal, so limiting the
+        window is more signal, not less. The walk is deterministic for a given
+        HEAD, so the result is cached per (HEAD, window) — repeat gate runs skip
+        the walk entirely. `last_modified` is the NEWEST touch (the walk is
+        newest-first; first-seen-wins).
+        """
+        if _pygit2 is None or not (repo / ".git").exists():
+            # no pygit2 or not a git repo — the absence is certain and nothing
+            # can fix it in this run: silent (never announce an unfixable gap)
+            return FileHistory(Counter(), {})
+        head = ""
+        cache_key = ""
+        try:
+            r = _pygit2.Repository(str(repo))
+            head = str(r.head.target)
+            cutoff = int(time.time()) - _CHURN_MAX_AGE_DAYS * 86400
+            cutoff_day = time.strftime("%Y-%m-%d", time.localtime(cutoff))
+            cache_key = f"churn-{head}-{_CHURN_MAX_COMMITS}-{cutoff_day}.json"
+            cache_path = repo / ".lucidlint-cache" / cache_key
+            try:
+                data = json.loads(cache_path.read_text())
+                return FileHistory(Counter(data["churn"]), data["last_modified"])
+            except (OSError, ValueError, KeyError):  # lucidlint: ignore swallow a missing/corrupt cache just walks
+                pass  # no cache yet — walk
+        except KeyError:
+            return FileHistory(Counter(), {})  # not a git repo — certain: silent
+        except Exception as e:
+            log(f"churn: {e}")  # unexpected — show the actual error
+            return FileHistory(Counter(), {})
+
+        churn: Counter[str] = Counter()
+        last: dict[str, str] = {}
+        try:
+            r = _pygit2.Repository(str(repo))
+            cutoff = int(time.time()) - _CHURN_MAX_AGE_DAYS * 86400
+            for seen, commit in enumerate(r.walk(r.head.target, GIT_SORT_TIME)):
+                if seen >= _CHURN_MAX_COMMITS or commit.commit_time < cutoff:
+                    break
+                date = str(commit.commit_time)
+                changed = set()
+                if commit.parents:
+                    diff = commit.tree.diff_to_tree(commit.parents[0].tree)
+                    for patch in diff:
+                        path = patch.delta.new_file.path
+                        if path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/")):
+                            changed.add(path)
+                else:
+                    # initial commit — diff against the empty tree gives every file
+                    for patch in commit.tree.diff_to_tree():
+                        path = patch.delta.new_file.path
+                        if path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/")):
+                            changed.add(path)
+                for path in changed:
+                    churn[path] += 1
+                    if date and path not in last:
+                        last[path] = date  # first-seen = newest in a newest-first walk
+        except Exception as e:
+            log(f"churn walk: {e}")  # unexpected — show the actual error
+            return FileHistory(churn, last)  # partial/empty history, surfaced
+
+        if cache_key:
+            try:
+                (repo / ".lucidlint-cache").mkdir(exist_ok=True)
+                (repo / ".lucidlint-cache" / cache_key).write_text(
+                    json.dumps({"churn": dict(churn), "last_modified": last})
+                )
+            except OSError:  # lucidlint: ignore swallow the cache is best-effort — a read-only repo still works
+                pass  # the cache is best-effort — a read-only repo still works
+        return FileHistory(churn, last)
+
+    @staticmethod
+    def load_coverage(repo: Path) -> CoverageResult:
+        """Per-file covered line sets, preferring the repo's own coverage data.
+
+        Sources, in order: coverage.xml (Cobertura, what CI gates on), then
+        .coverage (coverage.py SQLite, line_bits format). The graph's TESTED_BY
+        edges miss tests that import inside the test body — real coverage data
+        does not. lines is None when neither source exists.
+        """
+        if (repo / "coverage.xml").exists():
+            return _GateRunner._coverage_from_xml(repo)
+        if (repo / ".coverage").exists():
+            return _GateRunner._coverage_from_sqlite(repo)
+        return CoverageResult(None, "no coverage data (no coverage.xml, no .coverage)")
+
+    @staticmethod
+    def _coverage_from_xml(repo: Path) -> CoverageResult:
+        """Cobertura coverage.xml: class line elements with hits > 0."""
+        try:
+            root = ET.parse(repo / "coverage.xml").getroot()
+        except ET.ParseError:
+            return CoverageResult(None, "coverage.xml unparseable")
+        covered: dict[str, set[int]] = {}
+        for cls in root.iter("class"):
+            filename = (cls.get("filename") or "").replace("\\", "/")
+            if not filename.endswith(".py"):
+                continue
+            lines = covered.setdefault(_GateRunner.rel_path(repo, filename), set())
+            for ln in cls.iter("line"):
+                if int(ln.get("hits", "0") or 0) > 0:
+                    try:
+                        lines.add(int(ln.get("number")))
+                    except (TypeError, ValueError):  # lucidlint: ignore swallow malformed <line> elements are skipped
+                        log(f"ignoring malformed <line> element in {repo / 'coverage.xml'}")
+        return CoverageResult(covered or None, "coverage.xml")
+
+    @staticmethod
+    def _coverage_from_sqlite(repo: Path) -> CoverageResult:
+        """coverage.py .coverage SQLite: line_bits rows per file."""
+        try:
+            db = sqlite3.connect(repo / ".coverage")
+            files = dict(db.execute("SELECT id, path FROM file"))
+            covered: dict[str, set[int]] = {}
+            for fid, numbits in db.execute("SELECT file_id, numbits FROM line_bits"):
+                path = files.get(fid)
+                if not path:
+                    continue
+                rel = _GateRunner.rel_path(repo, path)
+                if not rel.endswith(".py"):
+                    continue
+                covered.setdefault(rel, set()).update(_numbits_to_lines(numbits))
+            db.close()
+            return CoverageResult(covered or None, ".coverage")
+        except sqlite3.Error:
+            return CoverageResult(None, ".coverage unreadable")
+
+    @staticmethod
+    def rel_path(repo: Path, p: str) -> str:
+        """Graph stores absolute paths; radon/git use repo-relative. Normalize."""
+        p = p.replace("\\", "/")
+        root = str(repo.resolve()).replace("\\", "/") + "/"
+        if p.startswith(root):
+            p = p[len(root) :]
+        return p
+
+    @staticmethod
+    def _refresh_coverage(repo: Path) -> None:
+        """Run the repo's coverage suite so verdicts are fresh."""
+        subprocess.run(["make", "-C", str(repo), "coverage"], capture_output=True, text=True, timeout=1800)
+
+    @staticmethod
+    def _load_lucidlint_config(repo: Path) -> _LucidlintConfig:
+        """Load the project-wide lucidlint config, looking for (in order):
+        1. .lucidlint.toml in the repo root
+        2. [tool.lucidlint] in pyproject.toml
+        Returns a dict with 'global_ignore' (set of signal names) and
+        'per_path_ignore' (list of (glob_pattern, set)) or empty defaults.
+        The config lets a team suppress entire rule groups or specific signals
+        without per-file suppression comments."""
+        if repo in _CONFIG_CACHE and _CONFIG_CACHE.get(repo) is not None:
+            return _CONFIG_CACHE[repo]
+
+
+        result = _LucidlintConfig(set(), [])
+
+        def _merge_config(raw: _RawConfig) -> None:
+            ignores = raw.get("ignore", raw.get("ignored_signals", []))
+            for item in ignores:
+                item = item.strip()
+                if item.startswith("group:"):
+                    group_name = item[6:]
+                    group_signals = RULE_GROUPS.get(group_name)
+                    if group_signals:
+                        result.global_ignore.update(group_signals)
+                else:
+                    result.global_ignore.add(item)
+            # Per-path overrides: keys that are glob patterns
+            for key, val in raw.items():
+                if key in ("ignore", "ignored_signals"):
+                    continue
+                if isinstance(val, dict) and "ignore" in val:
+                    path_ignores = set()
+                    for item in val["ignore"]:
+                        item = item.strip()
+                        if item.startswith("group:"):
+                            gs = RULE_GROUPS.get(item[6:])
+                            if gs:
+                                path_ignores.update(gs)
+                        else:
+                            path_ignores.add(item)
+                    result.per_path_ignore.append((key, path_ignores))
+
+        # Try .lucidlint.toml first (standalone, for Rust projects)
+        toml_path = repo / ".lucidlint.toml"
+        if toml_path.is_file():
+            with open(toml_path, "rb") as f:
+                _merge_config(tomllib.load(f).get("lucidlint", {}))
+        else:
+            # Fall back to pyproject.toml [tool.lucidlint]
+            pyproject = repo / "pyproject.toml"
+            if pyproject.is_file():
+                with open(pyproject, "rb") as f:
+                    data = tomllib.load(f)
+                tool_config = data.get("tool", {}).get("lucidlint", {})
+                if tool_config:
+                    _merge_config(tool_config)
+
+        _CONFIG_CACHE[repo] = result
+        return result
+
+    @staticmethod
+    def _git_head(repo: Path) -> GitHead:
+        """Current branch and short commit for report provenance, via pygit2.
+        Returns empty strings when git or pygit2 is unavailable."""
+        if _pygit2 is None:
+            return GitHead(branch="", commit="")
+        try:
+            r = _pygit2.Repository(str(repo))
+            return GitHead(branch=r.head.shorthand or "", commit=str(r.head.target)[:7])
+        # git-absent is a supported mode — the handler returns the empty head
+        except Exception:
+            return GitHead(branch="", commit="")
+
+    @staticmethod
+    def _dedupe_merge(actions: list[Action], diff: set[str]) -> list[Action]:
+        """Dedupe, rank, merge per-target kinds, then lifecycle notes."""
+        unique = _GateRunner._dedupe(actions)
+        _GateRunner._percentile_rank(unique, diff)
+        unique = _GateRunner._merge_targets(unique)
+        # Re-rank on the merged raw values, but KEEP the diff marking — the
+        # merged actions must still show "[in your diff]" (PRD R10).
+        _GateRunner._percentile_rank(unique, diff)
+        unique.sort(key=lambda a: (-a.priority, a.file, a.line))
+        _GateRunner._lifecycle_notes(unique)
+        return unique
+
+
+    @staticmethod
+    def _write_baseline(args, unique: list[Action], ignored_by_signal: Counter | None = None) -> int:
+        """--update-baseline: lock all current action keys and exit clean."""
+        if not args.baseline:
+            log("--update-baseline requires --baseline PATH")
+            return 2
+        keys = [action_key(a) for a in unique if a.severity != "warn"]
+        baseline: dict = {"actions": keys}
+        if ignored_by_signal:
+            baseline["config_ignored"] = dict(ignored_by_signal)
+        args.baseline.write_text(json.dumps(baseline, indent=2))
+        print(f"lucidlint: baseline written — {len(keys)} action(s) locked to {args.baseline}")
+        return 0
+
+    @staticmethod
+    def _dedupe(actions: list[Action]) -> list[Action]:
+        """Same kind+file+line+function fires once (graph and radon can both flag a function)."""
+        seen: dict[tuple, Action] = {}
+        for a in actions:
+            key = (a.kind, a.file, a.line, a.function)
+            if key not in seen or a.raw > seen[key].raw:
+                seen[key] = a
+        return list(seen.values())
+
+    @staticmethod
+    def _percentile_rank(unique: list[Action], diff: set[str]) -> None:
+        """Rank raw risk 1-99 (percentile) so the list spreads; tag in-diff actions."""
+        if not unique:
+            return
+        lo, hi = min(a.raw for a in unique), max(a.raw for a in unique)
+        for a in unique:
+            a.priority = 99 if hi <= lo else max(1, round(1 + 98 * (a.raw - lo) / (hi - lo)))
+            a.in_diff = a.file in diff
+
+    @staticmethod
+    def _merge_targets(unique: list[Action]) -> list[Action]:
+        """Per-target merge: complexity + large-function on the same function is one fix."""
+        merged: dict[tuple, Action] = {}
+        for a in sorted(unique, key=lambda a: (-a.raw, a.file, a.line)):
+            key = _merge_key(a)
+            if key not in merged:
+                merged[key] = a
+            else:
+                prev = merged[key]
+                prev.kinds = sorted({prev.kind, a.kind})
+                prev.raw = max(prev.raw, a.raw)
+                if a.note and a.note not in prev.note:
+                    prev.note = (prev.note + " " + a.note).strip()
+                prev.line = min(prev.line, a.line)
+                if a.severity == "fail":
+                    prev.severity = "fail"  # a warn merged into a fail target must not clear the gate
+                if a.message != prev.message:
+                    extra = f"{a.severity.upper()}: {a.message}"
+                    if extra not in prev.note:
+                        prev.note = (prev.note + " " + extra).strip()
+        return list(merged.values())
+
+    @staticmethod
+    def _lifecycle_notes(unique: list[Action]) -> None:
+        """Facts only — low-churn scripts/tools. Delete-vs-refactor is the agent's call."""
+        for a in unique:
+            if a.file.startswith(("scripts/", "tools/")) and a.churn <= 2 and a.last_modified:
+                a.note = (
+                    a.note + f" Lifecycle: {a.churn}x churn, last touched {a.last_modified} — "
+                    f"low-change file under scripts/tools."
+                ).strip()
+
+    def run(self) -> int:
+        """The gate verdict for the repo."""
+        self.gather()
+        self.collect()
+        self.apply_config()
+        self.unique = self._dedupe_merge(self.actions, self.diff)
+
+        if self.args.update_baseline:
+            return self._write_baseline(self.args, self.unique, self.ignored_by_signal)
+        baseline_keys, self.baseline_ignored = _load_baseline(self.args.baseline)
+        self.stale = _apply_baseline(self.unique, baseline_keys)
+        # the §9 growth signal: a config-ignored family whose count GREW since
+        # the baseline is debt being added to, not held — the ignore's scope is
+        # wrong. A warning, never a gate failure (growing repos legitimately
+        # grow): --update-baseline re-locks the new counts. Only meaningful when
+        # a baseline exists to compare against.
+        if self.args.baseline:
+            for sig, n in self.ignored_by_signal.items():
+                if self.baseline_ignored.get(sig, 0) < n:
+                    log(
+                        f"config-ignored '{sig}' grew {self.baseline_ignored.get(sig, 0)} -> {n} since the baseline — "
+                        "the ignore's scope is being added to; re-scope it or re-lock with --update-baseline"
+                    )
+        fails = [a for a in self.unique if a.severity == "fail"]
+        warns = [a for a in self.unique if a.severity == "warn"]
+        acks = [a for a in self.unique if a.severity == "ack"]
+        self.head = self._git_head(self.repo)
+        self.rc = _RenderCtx(
+            self.repo, self.args, self.head.branch, self.head.commit, self.cc.label,
+            self.cc.graph_preferred, self.diff, ignored_by_signal=self.ignored_by_signal,
+        )
+
+        if self.args.json:
+            self.rc.render_json(self.unique)
+        else:
+            self.rc.render_text(self.unique, fails, warns, acks)
+
+        return _gate_exit(self.stale, fails, self.args)
+
+
 
 
 def main() -> int:
@@ -1529,75 +1690,7 @@ def main() -> int:
         print(f"fix: {description} — {args.file}:{args.line} ({args.kind})")
         return 0
 
-    if args.file:
-        # Single-file / LSP mode: no git history, coverage, or diff — the
-        # per-file findings are what an editor shows on save.
-        fh = FileHistory(Counter(), {})
-        cr = CoverageResult(None, "")
-        cc = _coverage_context(repo, None, "")
-        diff: set[str] = set()
-    else:
-        fh = file_history(repo)
-        if args.refresh_coverage:
-            _refresh_coverage(repo)
-        cr = load_coverage(repo)
-        cc = _coverage_context(repo, cr.lines, cr.source)
-        diff = changed_files(repo, args.base)
-    actions = _collect_actions(repo, args, fh.churn, fh.last_modified, only_rel=args.file)
-    # Apply project-wide config (global ignore / per-path ignore), COUNTING
-    # what the config hides — the §9 debt ledger: config-ignored findings are
-    # filtered BEFORE the verdict, so without a count the ignore can grow
-    # invisibly ("nothing is ever wrong").
-    ignored_config = _load_lucidlint_config(repo)
-    ignored_by_signal: Counter[str] = Counter()
-    if ignored_config["global_ignore"] or ignored_config["per_path_ignore"]:
-        kept: list[Action] = []
-        for a in actions:
-            if a.signal in ignored_config["global_ignore"]:
-                ignored_by_signal[a.signal] += 1
-                continue
-            removed = False
-            for pattern, path_ignored in ignored_config["per_path_ignore"]:
-                if Path(a.file).match(pattern) and a.signal in path_ignored:
-                    ignored_by_signal[a.signal] += 1
-                    removed = True
-                    break
-            if not removed:
-                kept.append(a)
-        actions = kept
-    unique = _dedupe_merge(actions, diff)
-
-    if args.update_baseline:
-        return _write_baseline(args, unique, ignored_by_signal)
-    baseline_keys, baseline_ignored = _load_baseline(args.baseline)
-    stale = _apply_baseline(unique, baseline_keys)
-    # the §9 growth signal: a config-ignored family whose count GREW since
-    # the baseline is debt being added to, not held — the ignore's scope is
-    # wrong. A warning, never a gate failure (growing repos legitimately
-    # grow): --update-baseline re-locks the new counts. Only meaningful when
-    # a baseline exists to compare against.
-    if args.baseline:
-        for sig, n in ignored_by_signal.items():
-            if baseline_ignored.get(sig, 0) < n:
-                log(
-                    f"config-ignored '{sig}' grew {baseline_ignored.get(sig, 0)} -> {n} since the baseline — "
-                    "the ignore's scope is being added to; re-scope it or re-lock with --update-baseline"
-                )
-    fails = [a for a in unique if a.severity == "fail"]
-    warns = [a for a in unique if a.severity == "warn"]
-    acks = [a for a in unique if a.severity == "ack"]
-    head = _git_head(repo)
-    rc = _RenderCtx(
-        repo, args, head.branch, head.commit, cc.label, cc.graph_preferred, diff,
-        ignored_by_signal=ignored_by_signal,
-    )
-
-    if args.json:
-        rc.render_json(unique)
-    else:
-        rc.render_text(unique, fails, warns, acks)
-
-    return _gate_exit(stale, fails, args)
+    return _GateRunner(repo, args).run()
 
 
 
@@ -1748,9 +1841,6 @@ def _collect_actions(repo: Path, args, file_churn: Counter[str], last_modified: 
     return _actions_from_rust(rust, args.include_tests, file_churn, last_modified)
 
 
-def _refresh_coverage(repo: Path) -> None:
-    """Run the repo's coverage suite so verdicts are fresh."""
-    subprocess.run(["make", "-C", str(repo), "coverage"], capture_output=True, text=True, timeout=1800)
 
 if __name__ == "__main__":
     sys.exit(main())

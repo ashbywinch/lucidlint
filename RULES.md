@@ -86,6 +86,9 @@ with a why).
 | **closures → latent-class** | fail | Both | A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line span) — the nested structure is a class waiting to be extracted. |
 | **partition → latent-class** | fail | Python | The field-partition variant of latent-class: free functions partition a struct's fields (each touches a disjoint subset) — the fields and their functions belong together as a class. |
 | **strewing → latent-class** | fail | Both | ≥3 free functions sharing the same leading parameter — they share data, they're a class. |
+| **misplaced-method → latent-class** | fail | Python | A module-level function called from a method with `self.<attr>` arguments matching every parameter — the class already holds the data, so the function is that class's method in exile; move it onto the class. |
+| **assembly-class → latent-class** | fail | Python | A function assembles >=3 structures by threading the same data through module-level functions whose outputs feed each other's inputs — a class in waiting: the threaded state belongs on an object, the module functions are its methods. |
+| **tuple-record → record-shape** | fail | Python | A dict whose values are same-arity tuples read with constant integer indexes — an anonymous record; name it as a NamedTuple. |
 | **module-cohesion** | fail | Graph | A file whose nodes split across ≥2 graph communities (each ≥2 nodes) holds several sub-domains — split the module at the domain seams. |
 | **record-shape** | fail | Both | A function takes a struct/class with ≥5 fields and no methods — the struct's rules belong as methods on it. |
 | **detached-method** | **warn** | Both | A method that never touches its receiver — a classmethod should always use `cls`; a plain method should use `self` or move out — it doesn't use instance state; make it a `@staticmethod`/associated fn or move it out of the class. |

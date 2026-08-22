@@ -958,6 +958,9 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     class_module_findings(state, body, name);
     vague_name_findings(state, body);
     strewing_findings(state, body);
+    misplaced_method_findings(state, body);
+    tuple_record_findings(state, body);
+    assembly_class_findings(state, body);
     record_shape_findings(state, body, source);
     partition_findings(state, body, source);
     // review-log rules: shadowing hazards + duplicated work (all per-file)
@@ -2254,6 +2257,69 @@ mod tests {
         assert_eq!(r.len(), 1, "{f:?}");
     }
 
+    // ------------------------------------ misplaced-method / tuple-record / assembly
+    #[test]
+    fn misplaced_method_fires_when_class_state_is_passed() {
+        // _superseded_lines(em, vm) called from a method holding em/vm as
+        // instance state — the function is the class's method in exile
+        let f = scan_src(
+            "def _superseded_lines(em, vm):\n    return len(em) + len(vm)\n\nclass R:\n    def __init__(self, em, vm):\n        self.em = em\n        self.vm = vm\n    def render(self):\n        em, vm = self.em, self.vm\n        return _superseded_lines(em, vm)\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "misplaced-method").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("R.render"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn misplaced_method_ignores_helper_called_with_plain_locals() {
+        // a helper called with locals that are NOT class attributes — no
+        // instance state in exile
+        let f = scan_src(
+            "def format_line(text, width):\n    return text[:width]\n\nclass R:\n    def render(self, text):\n        width = 80\n        return format_line(text, width)\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "misplaced-method"), "{f:?}");
+    }
+
+    #[test]
+    fn tuple_record_fires_on_positional_reads() {
+        // (props, name) tuples built into dicts, read by constant index and
+        // destructure — an anonymous record
+        let f = scan_src(
+            "em = {r[\"id\"]: (p, n) for r in []}\ndef f(em):\n    return em[x][1]\ndef g(em):\n    a, b = em[x]\ndef h(em):\n    return em[x][0]\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "tuple-record").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("em"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn tuple_record_ignores_single_read() {
+        // a dict of tuples read once is not a record-shaped pattern yet
+        let f = scan_src("em = {r[\"id\"]: (p, n) for r in []}\ndef f(em):\n    return em[x][1]\n");
+        assert!(!f.iter().any(|x| x.kind == "tuple-record"), "{f:?}");
+    }
+
+    #[test]
+    fn assembly_class_fires_on_threaded_build() {
+        // __init__ threading em/vm through functions whose outputs feed each
+        // other, storing every result — a class in waiting
+        let f = scan_src(
+            "def _epic_relations(em):\n    return {\"a\": 1}, {\"b\": 2}\ndef _vs_relations(vm, epic_vs, em):\n    return 1, 2, 3\nclass R:\n    def __init__(self, em, vm):\n        self.em = em\n        self.vm = vm\n        epic_vs, kids = _epic_relations(em)\n        vs_parent, vs_kids, vs_epics = _vs_relations(vm, epic_vs, em)\n        self.epic_vs = epic_vs\n        self.kids = kids\n        self.vs_parent = vs_parent\n        self.vs_kids = vs_kids\n        self.vs_epics = vs_epics\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "assembly-class").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+    }
+
+    #[test]
+    fn assembly_class_ignores_plain_pipeline() {
+        // a linear a = f(x); b = g(a) chain has no shared base — the
+        // functional style is not a class in waiting
+        let f = scan_src(
+            "def f(x):\n    return x + 1\ndef g(a):\n    return a * 2\ndef h(b):\n    return b - 1\ndef main(x):\n    a = f(x)\n    b = g(a)\n    c = h(b)\n    return c\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "assembly-class"), "{f:?}");
+    }
+
     // ------------------------------------------------------------- class-module
     #[test]
     fn class_module_name_mismatch() {
@@ -2278,6 +2344,16 @@ mod tests {
         assert_eq!(d[0].line, 4, "the SECOND binding is the finding");
     }
 
+    #[test]
+    fn tuple_record_counts_reads_inside_comprehensions() {
+        // em[x][0] in a comprehension if, em[k][1] in a dictcomp value, and
+        // a lambda sort key all count — the reads hidden inside expressions
+        let f = scan_src(
+            "em = {r[\"id\"]: (p, n) for r in []}\ndef f(em):\n    return [x for x in em if em[x][0]]\ndef g(em):\n    return {k: em[k][1] for k in em}\ndef h(em):\n    return sorted(em, key=lambda k: em[k][1])\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "tuple-record").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+    }
     #[test]
     fn duplicate_class_and_function_name_is_found() {
         // def shadowing a class of the same name is the same hazard

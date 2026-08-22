@@ -161,7 +161,7 @@ def run_main(repo, *extra, routes=None):
 def test_coverage_xml_unparseable(tmp_path):
     repo = make_repo(tmp_path)
     (repo / "coverage.xml").write_text("not xml at all")
-    cr = ch.load_coverage(repo)
+    cr = ch._GateRunner.load_coverage(repo)
     assert cr.source == "coverage.xml unparseable"
     assert cr.lines is None
 
@@ -176,7 +176,7 @@ def test_coverage_xml_malformed_line_skipped(tmp_path, capsys):
         "<class filename=\"notes.txt\"><line hits=\"1\" number=\"1\"/></class>"
         "</coverage>"
     )
-    cr = ch.load_coverage(repo)
+    cr = ch._GateRunner.load_coverage(repo)
     # the malformed <line> is skipped with a log; the valid one survives; the .txt class is skipped
     assert cr.lines == {"houses/app.py": {2}}
     assert "malformed <line>" in capsys.readouterr().err
@@ -191,7 +191,7 @@ def test_coverage_sqlite_skips_unknown_and_nonpy(tmp_path):
     db.execute("INSERT INTO line_bits VALUES (1, X'05'), (2, X'05'), (3, X'05')")
     db.commit()
     db.close()
-    cr = ch.load_coverage(repo)
+    cr = ch._GateRunner.load_coverage(repo)
     # file_id 2 has no file row (skipped); notes.txt is not .py (skipped); app.py lines 1,3 covered
     assert cr.lines == {"houses/app.py": {1, 3}}
 
@@ -199,7 +199,7 @@ def test_coverage_sqlite_skips_unknown_and_nonpy(tmp_path):
 def test_coverage_sqlite_unreadable(tmp_path):
     repo = make_repo(tmp_path)
     (repo / ".coverage").write_bytes(b"this is not a sqlite database at all, definitely")
-    cr = ch.load_coverage(repo)
+    cr = ch._GateRunner.load_coverage(repo)
     assert cr.source == ".coverage unreadable"
 
 
@@ -225,7 +225,7 @@ def test_file_history_parser_edges(tmp_path):
     # fixture: houses/app.py touched in c1+c2 (churn 2), Makefile never
     # exists (not .py — must be skipped), oneoff.py in c3
     repo = materialize_test_repo(tmp_path)
-    fh = ch.file_history(repo)
+    fh = ch._GateRunner.file_history(repo)
     assert fh.churn["houses/app.py"] == 2
     assert "Makefile" not in fh.churn  # not .py — skipped
     assert fh.last_modified["houses/app.py"]  # commit-timestamp present
@@ -235,7 +235,7 @@ def _file_history_with(routes, repo):
     saved = ch.subprocess
     ch.subprocess = FakeSubprocess(routes)
     try:
-        return ch.file_history(repo)
+        return ch._GateRunner.file_history(repo)
     finally:
         ch.subprocess = saved
 
@@ -301,7 +301,7 @@ def test_merge_warn_into_fail_target():
     # same target (file+function+kind-group) but a different line — distinct dedupe keys,
     # same merge key: the merge path (not the dedupe path) must handle the warn
     warn = ch.Action("complexity", "warn", "houses/app.py", 5, "alpha", "m2", 1, 0, "", "", note="n2", raw=1)
-    out = ch._dedupe_merge([fail, warn], set())
+    out = ch._GateRunner._dedupe_merge([fail, warn], set())
     assert len(out) == 1
     assert out[0].severity == "fail"  # a warn merged into a fail target keeps the gate
     assert "n2" in out[0].note
@@ -775,9 +775,9 @@ def test_numbits_roundtrip():
 
 
 def test_rel_path():
-    assert ch.rel_path(Path("/repo"), "/repo/a/b.py") == "a/b.py"
-    assert ch.rel_path(Path("/repo"), "a/b.py") == "a/b.py"
-    assert ch.rel_path(Path("/repo"), "/elsewhere/x.py") == "/elsewhere/x.py"
+    assert ch._GateRunner.rel_path(Path("/repo"), "/repo/a/b.py") == "a/b.py"
+    assert ch._GateRunner.rel_path(Path("/repo"), "a/b.py") == "a/b.py"
+    assert ch._GateRunner.rel_path(Path("/repo"), "/elsewhere/x.py") == "/elsewhere/x.py"
 
 
 def test_is_test_path():
@@ -790,7 +790,7 @@ def test_is_test_path():
 # --------------------------------------------------------------------------- coverage
 def test_load_coverage_none(tmp_path):
     repo = make_repo(tmp_path)
-    cr = ch.load_coverage(repo)
+    cr = ch._GateRunner.load_coverage(repo)
     assert cr.lines is None
 
 
@@ -801,7 +801,7 @@ def test_load_coverage_xml(tmp_path):
         '<lines><line number="1" hits="1"/><line number="2" hits="0"/></lines>'
         "</class></classes></package></packages></coverage>"
     )
-    cr = ch.load_coverage(repo)
+    cr = ch._GateRunner.load_coverage(repo)
     assert cr.lines.get("houses/app.py") == {1}
 
 
@@ -813,7 +813,7 @@ def test_load_coverage_dot(tmp_path):
     db.execute("INSERT INTO file (path) VALUES ('houses/app.py')")
     db.execute("INSERT INTO line_bits VALUES (1, ?)", (b"\x01",))
     db.commit()
-    cr = ch.load_coverage(repo)
+    cr = ch._GateRunner.load_coverage(repo)
     assert cr.lines.get("houses/app.py") == {1}
 
 
@@ -823,14 +823,14 @@ def test_load_coverage_prefers_xml(tmp_path):
         '<coverage><packages><package><classes><class filename="houses/app.py">'
         '<lines><line number="1" hits="1"/></lines></class></classes></package></packages></coverage>'
     )
-    cr = ch.load_coverage(repo)
+    cr = ch._GateRunner.load_coverage(repo)
     assert "coverage.xml" in cr.source
 
 
 # --------------------------------------------------------------------------- git
 def test_file_history(tmp_path):
     repo = materialize_test_repo(tmp_path)
-    fh = ch.file_history(repo)
+    fh = ch._GateRunner.file_history(repo)
     assert fh.churn["houses/app.py"] == 2  # base + modify
     assert fh.churn["scripts/oneoff.py"] == 1
     assert fh.churn["tests/unit/test_app.py"] == 1

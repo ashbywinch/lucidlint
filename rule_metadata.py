@@ -191,6 +191,22 @@ CATALOG = RuleCatalog([
          "≥3 free functions sharing the same leading parameter — they share "
          "data, they're a class.",
          display_name="strewing → latent-class", display="latent-class"),
+    Rule("misplaced-method", "fail", "architecture", "Python",
+         "A module-level function called from a method with `self.<attr>` "
+         "arguments matching every parameter — the class already holds the "
+         "data, so the function is that class's method in exile; move it "
+         "onto the class.",
+         display_name="misplaced-method → latent-class", display="latent-class"),
+    Rule("assembly-class", "fail", "architecture", "Python",
+         "A function assembles >=3 structures by threading the same data "
+         "through module-level functions whose outputs feed each other's "
+         "inputs — a class in waiting: the threaded state belongs on an "
+         "object, the module functions are its methods.",
+         display_name="assembly-class → latent-class", display="latent-class"),
+    Rule("tuple-record", "fail", "architecture", "Python",
+         "A dict whose values are same-arity tuples read with constant "
+         "integer indexes — an anonymous record; name it as a NamedTuple.",
+         display_name="tuple-record → record-shape", display="record-shape"),
     Rule("module-cohesion", "fail", "architecture", "Graph",
          "A file whose nodes split across ≥2 graph communities (each ≥2 nodes) "
          "holds several sub-domains — split the module at the domain seams."),

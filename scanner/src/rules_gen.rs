@@ -15,6 +15,9 @@ pub const FAMILY_KINDS: &[&str] = &[
     "closures",
     "partition",
     "strewing",
+    "misplaced-method",
+    "assembly-class",
+    "tuple-record",
     "module-cohesion",
     "record-shape",
     "detached-method",
@@ -91,7 +94,16 @@ pub const STANDARD_KINDS: &[&str] = &[
 /// catalog's `display` buckets — a variant missing here is a
 /// registration drift, not a judgment call (review-log B6).
 pub const FAMILY_VARIANTS: &[(&str, &[&str])] = &[
-    ("latent-class", &["closures", "partition", "strewing"]),
+    (
+        "latent-class",
+        &[
+            "closures",
+            "partition",
+            "strewing",
+            "misplaced-method",
+            "assembly-class",
+        ],
+    ),
     ("docs", &["docs-link", "docs-undiscoverable"]),
 ];
 
@@ -105,6 +117,9 @@ pub const DISPLAY_BUCKETS: &[(&str, &str)] = &[
     ("closures", "latent-class"),
     ("partition", "latent-class"),
     ("strewing", "latent-class"),
+    ("misplaced-method", "latent-class"),
+    ("assembly-class", "latent-class"),
+    ("tuple-record", "record-shape"),
     ("module-cohesion", "module-cohesion"),
     ("record-shape", "record-shape"),
     ("detached-method", "detached-method"),
@@ -172,6 +187,7 @@ pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {
         (
             "architecture",
             &[
+                "assembly-class",
                 "churn-untested",
                 "closures",
                 "complexity",
@@ -184,11 +200,13 @@ pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {
                 "large-function",
                 "layer-mix",
                 "long-param-list",
+                "misplaced-method",
                 "module-cohesion",
                 "over-abstraction",
                 "partition",
                 "record-shape",
                 "strewing",
+                "tuple-record",
             ],
         ),
         (
