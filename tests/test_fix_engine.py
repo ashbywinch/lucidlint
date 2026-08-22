@@ -1504,3 +1504,24 @@ def test_extract_module_star_import_does_not_crash(tmp_path):
     )
     assert out is not None
     assert "def tokenize(s):" in (tmp_path / "repo" / "houses" / "text.py").read_text()
+
+
+def test_extract_module_param_named_like_constant_not_refused(tmp_path):
+    # a parameter named like a module-level constant is a LOCAL binding, not
+    # a module read — the split must not refuse it (review finding)
+    src = (
+        "config = {}\n"
+        "\n"
+        "def tokenize(s, config=None):\n"
+        "    return s.split()\n"
+        "\n"
+        "def words(s):\n"
+        "    return tokenize(s)\n"
+    )
+    out, fixed = _fix_opts(
+        tmp_path, "extract-module", "houses/layout.py", src, 1,
+        name="text", params=["tokenize", "words"],
+    )
+    assert out is not None
+    new_mod = (tmp_path / "repo" / "houses" / "text.py").read_text()
+    assert "def tokenize(s, config=None):" in new_mod
