@@ -3232,7 +3232,37 @@ fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<usize>) {
             record_literal_scan(&c.value, source, found);
         }
         Expr::Lambda(l) => record_literal_scan(&l.body, source, found),
-        _ => {} // NOT Call — inline arguments (headers={...}) are maps
+        Expr::Call(c) => {
+            // dict(a=1, b=x) is the literal's call-form twin: the same
+            // record shape built through a call, so the literal-only scan
+            // could be dodged with dict(...) — a record that is not a
+            // literal. A bare dict() call with >= 2 keyword args and >= 1
+            // dynamic value is a record being built.
+            let is_dict = match c.func.as_ref() {
+                Expr::Name(n) => n.id.as_str() == "dict",
+                Expr::Attribute(a) => a.attr.as_str() == "dict",
+                _ => false,
+            };
+            if is_dict {
+                let kwargs = &c.arguments.keywords;
+                let has_dynamic = kwargs.iter().any(|k| !is_constant_value(&k.value));
+                if kwargs.len() >= 2 && has_dynamic {
+                    found.push(line_of(source, c.range().start()));
+                }
+                // dict()'s args ARE the data — descend (unlike other calls,
+                // whose inline arguments are maps): dict({"a": 1, "b": x})
+                // is a record built from a literal, and a kwarg value may
+                // hold one too
+                for a in &c.arguments.args {
+                    record_literal_scan(a, source, found);
+                }
+                for k in kwargs {
+                    record_literal_scan(&k.value, source, found);
+                }
+            }
+            // other calls: inline arguments are maps — not descended into
+        }
+        _ => {}
     }
 }
 
@@ -3333,7 +3363,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
             function: String::new(),
             kind: "record-shape".into(),
             severity: "fail".into(),
-            message: format!("dict literal with constant keys is a record — make a class (line {ln})"),
+            message: format!("dict with constant keys is a record — make a class (line {ln})"),
         });
     }
 }

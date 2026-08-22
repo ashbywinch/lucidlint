@@ -2533,7 +2533,7 @@ mod tests {
         let f = scan_src("def f(x):\n    return {\"kind\": \"tool_call\", \"value\": x}\n");
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1);
-        assert!(r[0].message.contains("dict literal"));
+        assert!(r[0].message.contains("dict with constant keys"));
         assert_eq!(r[0].line, 2);
     }
 
@@ -2547,6 +2547,38 @@ mod tests {
     fn record_spread_merge_is_not_a_record() {
         let f = scan_src("def f(session, x):\n    return {**session, \"x\": x}\n");
         assert!(!f.iter().any(|x| x.kind == "record-shape"));
+    }
+
+    #[test]
+    fn record_dict_call_in_return_is_found() {
+        // dict(a=1, b=x) is the literal's call-form twin — the bypass a
+        // literal-only scan left open
+        let f = scan_src("def f(x):\n    return dict(kind=\"tool_call\", value=x)\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert_eq!(r[0].line, 2);
+    }
+
+    #[test]
+    fn record_dict_call_all_constant_passes() {
+        // a lookup, not a record — same exemption as the literal form
+        let f = scan_src("def f():\n    return dict(a=1, b=2)\n");
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+    }
+
+    #[test]
+    fn record_dict_call_as_inline_argument_passes() {
+        // inline call arguments are maps — not record positions
+        let f = scan_src("def f(x):\n    client.post(dict(a=1, b=x))\n");
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+    }
+
+    #[test]
+    fn record_dict_call_wrapping_literal_is_found() {
+        // dict({"a": 1, "b": x}) — the inner literal is the record
+        let f = scan_src("def f(x):\n    return dict({\"a\": 1, \"b\": x})\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
     }
 
     // ------------------------------------------- partition + test families
