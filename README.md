@@ -1,16 +1,19 @@
-# lucidlint — deterministic code health for humans and agents
+# lucidlint — deterministic Python maintainability for agents
 
-Lucidlint is a code-health gate for Python and Rust that tells you — and
-your coding agent — *exactly* what to fix and how, with zero guesswork.
-It scans for architecture-level problems: complexity, duplicate code,
-swallowed errors, test quality, layering. Same code, same report, every
-run — there is no model judgment anywhere in the scan, and every fix it
-offers is a deterministic refactoring the tool can apply itself.
+Lucidlint is a code maintainability gate for Python, intended to assist agents in writing highly readable, well structured code that is visibly correct and anchored in the user's domain. It sits a level up from a linter like Ruff or type checker like Pyrefly, looking at design concerns at the function or class level, rather than line by line stylistic issues.
 
-Built for the era when much of the code being written is written by
-agents. A lucid codebase is one an agent — or you, six months later — can
-modify safely, because the invariants are visible and every exception is
-documented.
+Lucidlint packages fast deterministic auto fixes for many of its errors, reducing token spend on refactoring and rework. Agents can be quite bad at keeping track of line numbers to do repeated surgical edits - Lucidlint gets it right the first time, every time, fast and without spending tokens.
+
+Lucidlint is highly opinionated, and produces errors for many things that human developers might consider stylistic choices. We find that human and agents alike do better work in less complex code that makes heavy use of nouns and verbs from the domain as variable, function and class names. In a codebase predominantly consumed by agents, it's reasonable and effective to be extremely strict about complexity minimisation and about separation of concerns, forcing agents to introduce more domain nouns and verbs as names in the code. This makes the code much more readable and in turn exposes bugs and makes changes less risky.
+
+Lucidlint enforces that all rule exceptions (including exceptions for other lint or type products) have a reason provided. This allows you to check during code review that the provided reason is adequate and not covering up problems.
+
+Lucidlint can run as an [LSP](https://microsoft.github.io/language-server-protocol/overviews/lsp/overview/), so that agents keep their work tidy as they go. It can process a single file in well under a second and an entire medium sized repo in three to four seconds.
+
+Lucidlint is **not**:
+
+- An LLM or AI agent. All findings and fixes are 100% deterministic.
+- A style linter or type checker.
 
 ```
 $ lucidlint --repo .
@@ -21,69 +24,8 @@ GATE: FAIL — 2 action(s) ... top P99 houses/app.py:149 (parse_netex_fares)
 
 ---
 
-## Decide if this is what you need
-
-**You want lucidlint if you write (or generate) Python or Rust and care
-that the code stays explainable:**
-
-- your functions stay under ~15 decision points and fit on a screen — and
-  complexity is *split*, not hidden in a helper that is just as big;
-- every non-trivial number is a named constant, not a magic literal;
-- every error is handled, re-raised, or explicitly surfaced — never
-  swallowed;
-- a test can actually fail — it has an assertion, doesn't skip on the
-  environment, doesn't touch the real filesystem;
-- types and classes are named for the domain they model, not their role;
-- nothing is suppressed without a written reason — and suppressions that
-  stop firing are deleted.
-
-**Why it matters for agent-created code.** Agents write code fast and in
-volume, and two failure modes compound in their output: *latent
-complexity* (each individual change looks reasonable; the function creeps
-past the budget one commit at a time) and *borrowed patterns* (an agent
-copying a shape from another file propagates its problems). Unlucid code
-is where agents confidently make the wrong change, because the hidden
-state and swallowed errors are invisible to them too.
-
-**What it is not:**
-
-- not a formatter or a style linter — it finds *structural* problems with
-  real consequences (a swallowed error, a function past its complexity
-  budget, a test that can never fail);
-- not a code reviewer — it makes no judgment calls, ever; the same input
-  always produces the same report;
-- not a model — the scan is a compiled binary. Deterministic checks beat
-  model judgment.
-
-**What it finds** — the full, generated rule reference is in
-[RULES.md](RULES.md). A quick map:
-
-| Area | Examples |
-|---|---|
-| Correctness | swallowed errors, debug artifacts (`dbg!`, `breakpoint`, `.unwrap()`), dead statements, unreachable code, boolean-literal args, shadowed builtins |
-| Complexity | cyclomatic CC ≥ 15, functions ≥ 120 lines, > 5 parameters, near-duplicate code |
-| Architecture | import cycles, layer violations, record-shaped structs, strewing, latent classes, churn without tests |
-| Tests | monkeypatch, skipped tests, real filesystem I/O, tests with no assertion |
-| Suppressions | every `ignore`/`allow`/`noqa` needs a written reason — and stale ones are deleted |
-
-## Designed for agents
-
-The tool is built around how agents actually work — nothing about using it
-burns tokens:
-
-- **They always understand what they should change and why.** Every
-  finding names the rule, the evidence (the exact number, function,
-  line), and the full command to run. The message ends with a
-  machine-parseable `fix:` directive.
-- **They learn about a problem as soon as they create it.** Run as an LSP
-  (see below), the tool checks every file on save — the finding appears
-  the moment the complexity creeps past the threshold, not at review time
-  when the context is gone.
-- **They spend minimum tokens fixing it.** The fix surface is one command
-  in, one diff out: the tool previews the exact seam it will move, the
-  agent supplies the one thing the tool cannot invent — a name — and the
-  refactoring lands, verified. No trial-and-error, no counting lines (the
-  tool owns its coordinates), no re-scanning to see if it worked.
+**What it finds** — the generated rule reference is in
+[RULES.md](RULES.md). 
 
 ### The agent loop, end to end
 
@@ -119,18 +61,14 @@ burns tokens:
 
 5. The extraction lands: a private helper (the underscore is automatic —
    a fresh extraction has no external callers), the original function
-   drops under the gate, and the next run is clean. The tool verifies its
-   own work: if the seam can't actually split the complexity, it refuses
-   rather than proposing a broken refactoring.
+   drops under the gate, and the next run is clean. 
 ```
 
 ---
 
 ## Install
 
-**Requirements:** Python ≥ 3.12, 64-bit Linux / macOS / Windows. The scan
-engine ships as a compiled binary — the bundle is self-contained, no
-`cargo`, no `PATH` fiddling.
+**Requirements:** Python ≥ 3.12, 64-bit Linux / macOS / Windows. 
 
 ### Option 1 — the release bundle (recommended, self-contained)
 
@@ -152,9 +90,6 @@ cd lucidlint-vX.Y.Z-<platform>/
 python3 lucidlint.py --repo .    # GATE: PASS / FAIL
 ```
 
-The orchestrator finds its sibling `bin/lucidlint` by itself — no PATH, no
-make, no cargo.
-
 ### Option 2 — pip (the `lucidlint` command)
 
 ```bash
@@ -167,12 +102,8 @@ lucidlint --repo .
 ```
 
 The pip install gives the `lucidlint` command (no `.py`, no flags with
-`fix-` prefixes). The wheel is self-contained: setup.py compiles the Rust
-scan core INTO the wheel, so scan, fix, and the LSP all work with no
-release bundle, no PATH setup, and no `make`. The wheel is per-platform
-(`py3-none-<platform>` — a linux wheel will not install on macOS); the
-platform-independent sdist (`lucidlint-X.Y.Z.tar.gz`) installs anywhere,
-but it builds the Rust core at install time, so it needs `cargo`.
+`fix-` prefixes). 
+The platform-independent sdist (`lucidlint-X.Y.Z.tar.gz`) installs anywhere, but it builds the Rust core at install time, so it needs `cargo`.
 
 ### Option 3 — as an LSP (checks what you type, on save)
 
@@ -204,10 +135,9 @@ python3 lucidlint.py --repo . --baseline lucidlint.json || exit 1
 ```
 
 `--json` emits the full action model (kind, severity, file, line,
-function, message, metric, churn, priority) for other tooling. The scan
-never needs a network or a remote — it reads the working tree.
+function, message, metric, churn, priority) for other tooling.
 
-### First run and the baseline
+### First run and a baseline
 
 ```bash
 lucidlint --repo .                 # see today's debt
@@ -215,9 +145,7 @@ lucidlint --repo . --update-baseline --baseline lucidlint.json   # acknowledge i
 lucidlint --repo . --baseline lucidlint.json   # now fails only on NEW findings
 ```
 
-Baselines lock today's debt so the gate blocks only what is new — and a
-baseline entry whose finding disappeared is itself a FAIL (your debt
-shrinks, the baseline shrinks with it).
+Baselines lock today's debt so the gate blocks only what is new. Lucidlint will raise an error if the baseline can be lowered.
 
 ---
 
@@ -243,16 +171,6 @@ it. The `fix` subcommand:
 lucidlint fix --kind <family> --file <file> [--line <line>] [--name <name>] [--params a,b] [--confirm]
 ```
 
-- **Mechanical** families (stale-suppression, noop-statement, unreachable,
-  positional-literals) apply directly — the tool edits the one node,
-  losslessly, and the next run confirms the finding is gone.
-- **Structural** families (extract-method, extract-class, long-param-list,
-  magic-number, vague-name) preview first — the tool shows the diff, the
-  seam, the new signature, and the exact apply command; the name IS the
-  commitment. `--line` is optional when the file has exactly one finding
-  of the kind (R27: the tool owns its coordinates — agents never count
-  lines).
-
 ### Configuration
 
 A `.lucidlint.toml` (or `[tool.lucidlint]` in `pyproject.toml`) silences
@@ -265,16 +183,11 @@ ignore = ["vague-name"]
 ignore = ["group:architecture"]
 ```
 
-Every rule is individually suppressible — a rule that doesn't fit your
-project is acknowledged debt, not a blocker.
+Every rule is individually suppressible.
 
 ---
 
 ## Contribute
-
-Everything is deterministic and tested, and the tool gates its own repo —
-`make self-check` must pass before a change lands (the house code is the
-exemplar of every rule it enforces).
 
 **Repo layout**
 
