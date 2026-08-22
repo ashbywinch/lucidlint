@@ -1944,9 +1944,12 @@ class _FreeNames(cst.CSTVisitor):
         self.bound.add(node.name.value)
         self._add_params(node.params.params)
         self._add_params(node.params.kwonly_params)
-        if node.params.star_arg is not None and isinstance(node.params.star_arg.name, cst.Name):
+        # a bare `*` keyword-only separator is ParamStar — no name; the
+        # guard must check the NODE type before touching `.name` (review
+        # finding: the isinstance on `.name` crashed first)
+        if isinstance(node.params.star_arg, cst.Param):
             self.bound.add(node.params.star_arg.name.value)
-        if node.params.star_kwarg is not None and isinstance(node.params.star_kwarg.name, cst.Name):
+        if isinstance(node.params.star_kwarg, cst.Param):
             self.bound.add(node.params.star_kwarg.name.value)
 
     @override
@@ -1984,8 +1987,10 @@ class _FreeNames(cst.CSTVisitor):
 
     @override
     def visit_ExceptHandler(self, node) -> None:
+        # libcst's ExceptHandler.name is an AsName — the alias is `.name`,
+        # not `.value` (review finding: a crash on any `except ... as e:`)
         if node.name is not None:
-            self.bound.add(node.name.value)
+            self.bound.add(node.name.name.value)
 
 
 
