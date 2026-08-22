@@ -589,8 +589,8 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
                 if proc.returncode == 0:
                     rels = [p for p in proc.stdout.split("\0") if p.endswith((".py", ".rs", ".md"))]
                     return [SourceFile(repo / rel, rel) for rel in sorted(rels)]
+            # lucidlint: ignore swallow git missing or unrunnable — degrade to the rglob walk rather than crash
             except Exception as e:
-                # lucidlint: ignore swallow git missing or unrunnable — degrade to the rglob walk rather than crash
                 log(f"git ls-files: {e}")
         return [
             SourceFile(py, py.relative_to(repo).as_posix())
