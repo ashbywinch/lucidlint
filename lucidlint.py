@@ -1077,7 +1077,7 @@ def _version() -> str:
     try:
         return metadata.version("lucidlint")
     except Exception:
-        return "0.2.0"
+        return "0.3.0"
 
 
 _VERSION = _version()

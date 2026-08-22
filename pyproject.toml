@@ -16,7 +16,7 @@
 
 [project]
 name = "lucidlint"
-version = "0.2.0"
+version = "0.3.0"
 description = "Deterministic lucidlint tooling: a Rust scan core under a thin Python orchestrator"
 readme = "README.md"
 license = "MIT"
