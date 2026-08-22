@@ -369,6 +369,38 @@ def test_git_lsfiles_failure_falls_back_to_rglob(tmp_path, capsys):
     assert ".venv" not in capsys.readouterr().out
 
 
+def test_no_pygit2_file_list_uses_git_and_honors_gitignore(tmp_path):
+    # CI runners have no pygit2: the file list must come from `git ls-files`
+    # (which honors .gitignore) — an ignored dir like a repo's own .tools/
+    # bundle must NOT be scanned. Regression: the rglob walk scanned it, and
+    # a would-be-fail file inside .tools/ failed a clean repo.
+    repo = materialize_test_repo(tmp_path)
+    (repo / ".gitignore").write_text(".tools/\n")
+    (repo / ".tools").mkdir()
+    (repo / ".tools" / "self.py").write_text("def f():\n    return 60\n")  # would fail the gate if scanned
+
+    def is_git(args):
+        return args[:2] == ["git", "-C"]
+
+    routes = [
+        (lambda a: is_git(a) and a[3] == "ls-files", PASSTHROUGH, 0),  # REAL git honors .gitignore
+        (lambda a: is_git(a) and a[3:5] == ["log", "--name-only"], "", 0),
+        (lambda a: is_git(a) and "-L" in a[3:], "abc1234 fix\n", 0),
+        (lambda a: is_git(a) and a[3] == "diff", "", 0),
+        (lambda a: is_git(a) and a[3] == "branch", "test-branch", 0),
+        (lambda a: is_git(a) and a[3] == "rev-parse", "abc1234", 0),
+        (lambda a: str(a[0]).endswith("lucidlint"), PASSTHROUGH, 0),
+        (lambda a: a[0] == "make" and "coverage" in a, "", 0),
+    ]
+    saved = ch._pygit2
+    ch._pygit2 = None  # the no-pygit2 consumer path
+    try:
+        rc = run_main(repo, routes=routes)
+    finally:
+        ch._pygit2 = saved
+    assert rc == 0  # .tools/self.py would fail (CC 60) — its exclusion IS the check
+
+
 def test_refresh_coverage_runs_make(tmp_path):
     repo = make_repo(tmp_path)
     with Env(routes=git_routes()) as env:
