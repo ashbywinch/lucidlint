@@ -96,6 +96,8 @@ jobs:
           dir="lucidlint-${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}-${{ matrix.target }}"
           python3 "dist/${dir}/lucidlint.py" --version
           python3 "dist/${dir}/lucidlint.py" --repo .
+      - uses: astral-sh/setup-uv@v5
+      - name: Build the pip wheel (host-target Rust core)
         # The cross action on the musl row exports CARGO_BUILD_TARGET=...musl;
         # setup.py's build_py runs `cargo build --release` (host) and copies
         # target/release/lucidlint — the leaked default target would build the
