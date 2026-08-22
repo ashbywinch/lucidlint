@@ -576,6 +576,21 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
         py = repo / only_rel
         return [SourceFile(py, only_rel)] if py.is_file() and py.suffix in (".py", ".rs", ".md") else []
     if _pygit2 is None or not (repo / ".git").exists():
+        # no pygit2 (CI runners, bare pythons): ask git itself — the answer
+        # honors .gitignore, so an ignored dir (a repo's own .tools/lucidlint
+        # bundle, a venv) is never scanned. rglob only when git is also
+        # unavailable — a git-less repo has nothing ignored to respect.
+        if (repo / ".git").exists():
+            try:
+                proc = subprocess.run(
+                    ["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if proc.returncode == 0:
+                    rels = [p for p in proc.stdout.split("\0") if p.endswith((".py", ".rs", ".md"))]
+                    return [SourceFile(repo / rel, rel) for rel in sorted(rels)]
+            except Exception as e:
+                log(f"git ls-files: {e}")
         return [
             SourceFile(py, py.relative_to(repo).as_posix())
             for py in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.rs")) + sorted(repo.rglob("*.md"))

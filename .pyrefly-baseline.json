@@ -745,9 +745,9 @@
    "severity": "error"
   },
   {
-   "line": 855,
+   "line": 870,
    "column": 21,
-   "stop_line": 855,
+   "stop_line": 870,
    "stop_column": 28,
    "path": "lucidlint.py",
    "code": -2,
@@ -757,9 +757,9 @@
    "severity": "error"
   },
   {
-   "line": 937,
+   "line": 952,
    "column": 24,
-   "stop_line": 937,
+   "stop_line": 952,
    "stop_column": 33,
    "path": "lucidlint.py",
    "code": -2,
@@ -769,9 +769,9 @@
    "severity": "error"
   },
   {
-   "line": 1104,
+   "line": 1119,
    "column": 39,
-   "stop_line": 1104,
+   "stop_line": 1119,
    "stop_column": 59,
    "path": "lucidlint.py",
    "code": -2,
@@ -781,9 +781,9 @@
    "severity": "error"
   },
   {
-   "line": 1110,
+   "line": 1125,
    "column": 37,
-   "stop_line": 1110,
+   "stop_line": 1125,
    "stop_column": 48,
    "path": "lucidlint.py",
    "code": -2,
@@ -793,9 +793,9 @@
    "severity": "error"
   },
   {
-   "line": 1429,
+   "line": 1444,
    "column": 20,
-   "stop_line": 1437,
+   "stop_line": 1452,
    "stop_column": 14,
    "path": "lucidlint.py",
    "code": -2,
@@ -805,9 +805,9 @@
    "severity": "error"
   },
   {
-   "line": 1489,
+   "line": 1504,
    "column": 33,
-   "stop_line": 1489,
+   "stop_line": 1504,
    "stop_column": 41,
    "path": "lucidlint.py",
    "code": -2,
@@ -817,9 +817,9 @@
    "severity": "error"
   },
   {
-   "line": 1500,
+   "line": 1515,
    "column": 28,
-   "stop_line": 1500,
+   "stop_line": 1515,
    "stop_column": 37,
    "path": "lucidlint.py",
    "code": -2,
@@ -829,9 +829,9 @@
    "severity": "error"
   },
   {
-   "line": 1636,
+   "line": 1651,
    "column": 53,
-   "stop_line": 1636,
+   "stop_line": 1651,
    "stop_column": 55,
    "path": "lucidlint.py",
    "code": -2,
@@ -860,7 +860,7 @@
    "path": "setup.py",
    "code": -2,
    "name": "missing-import",
-   "description": "Cannot find module `setuptools`\n  Looked in these locations (from config in `/home/ashby/Documents/code/build-tools/pyrefly.toml`):\n  Import root (inferred from project layout): \"/home/ashby/Documents/code/build-tools\"\n  Site package path queried from interpreter: [\"/home/ashby/Documents/code/build-tools/.venv/lib/python3.14/site-packages\", \"__editable__.lucidlint-0.2.0.finder.__path_hook__\"]",
+   "description": "Cannot find module `setuptools`\n  Looked in these locations (from config in `/home/ashby/Documents/code/build-tools/pyrefly.toml`):\n  Import root (inferred from project layout): \"/home/ashby/Documents/code/build-tools\"\n  Site package path queried from interpreter: [\"/home/ashby/Documents/code/build-tools/.venv/lib/python3.14/site-packages\", \"__editable__.lucidlint-0.3.0.finder.__path_hook__\"]",
    "concise_description": "Cannot find module `setuptools`",
    "severity": "error"
   },
@@ -872,7 +872,7 @@
    "path": "setup.py",
    "code": -2,
    "name": "missing-import",
-   "description": "Cannot find module `setuptools.command.build_py`\n  Looked in these locations (from config in `/home/ashby/Documents/code/build-tools/pyrefly.toml`):\n  Import root (inferred from project layout): \"/home/ashby/Documents/code/build-tools\"\n  Site package path queried from interpreter: [\"/home/ashby/Documents/code/build-tools/.venv/lib/python3.14/site-packages\", \"__editable__.lucidlint-0.2.0.finder.__path_hook__\"]",
+   "description": "Cannot find module `setuptools.command.build_py`\n  Looked in these locations (from config in `/home/ashby/Documents/code/build-tools/pyrefly.toml`):\n  Import root (inferred from project layout): \"/home/ashby/Documents/code/build-tools\"\n  Site package path queried from interpreter: [\"/home/ashby/Documents/code/build-tools/.venv/lib/python3.14/site-packages\", \"__editable__.lucidlint-0.3.0.finder.__path_hook__\"]",
    "concise_description": "Cannot find module `setuptools.command.build_py`",
    "severity": "error"
   },
@@ -884,7 +884,7 @@
    "path": "setup.py",
    "code": -2,
    "name": "missing-import",
-   "description": "Cannot find module `wheel.bdist_wheel`\n  Looked in these locations (from config in `/home/ashby/Documents/code/build-tools/pyrefly.toml`):\n  Import root (inferred from project layout): \"/home/ashby/Documents/code/build-tools\"\n  Site package path queried from interpreter: [\"/home/ashby/Documents/code/build-tools/.venv/lib/python3.14/site-packages\", \"__editable__.lucidlint-0.2.0.finder.__path_hook__\"]",
+   "description": "Cannot find module `wheel.bdist_wheel`\n  Looked in these locations (from config in `/home/ashby/Documents/code/build-tools/pyrefly.toml`):\n  Import root (inferred from project layout): \"/home/ashby/Documents/code/build-tools\"\n  Site package path queried from interpreter: [\"/home/ashby/Documents/code/build-tools/.venv/lib/python3.14/site-packages\", \"__editable__.lucidlint-0.3.0.finder.__path_hook__\"]",
    "concise_description": "Cannot find module `wheel.bdist_wheel`",
    "severity": "error"
   },
@@ -896,7 +896,7 @@
    "path": "tests/test_fix_engine.py",
    "code": -2,
    "name": "missing-import",
-   "description": "Cannot find module `test_lucidlint`\n  Looked in these locations (from config in `/home/ashby/Documents/code/build-tools/pyrefly.toml`):\n  Import root (inferred from project layout): \"/home/ashby/Documents/code/build-tools\"\n  Site package path queried from interpreter: [\"/home/ashby/Documents/code/build-tools/.venv/lib/python3.14/site-packages\", \"__editable__.lucidlint-0.2.0.finder.__path_hook__\"]",
+   "description": "Cannot find module `test_lucidlint`\n  Looked in these locations (from config in `/home/ashby/Documents/code/build-tools/pyrefly.toml`):\n  Import root (inferred from project layout): \"/home/ashby/Documents/code/build-tools\"\n  Site package path queried from interpreter: [\"/home/ashby/Documents/code/build-tools/.venv/lib/python3.14/site-packages\", \"__editable__.lucidlint-0.3.0.finder.__path_hook__\"]",
    "concise_description": "Cannot find module `test_lucidlint`",
    "severity": "error"
   },
@@ -1129,9 +1129,9 @@
    "severity": "error"
   },
   {
-   "line": 424,
+   "line": 456,
    "column": 21,
-   "stop_line": 424,
+   "stop_line": 456,
    "stop_column": 23,
    "path": "tests/test_lucidlint.py",
    "code": -2,
@@ -1141,9 +1141,9 @@
    "severity": "error"
   },
   {
-   "line": 773,
+   "line": 805,
    "column": 12,
-   "stop_line": 773,
+   "stop_line": 805,
    "stop_column": 24,
    "path": "tests/test_lucidlint.py",
    "code": -2,
@@ -1153,9 +1153,9 @@
    "severity": "error"
   },
   {
-   "line": 785,
+   "line": 817,
    "column": 12,
-   "stop_line": 785,
+   "stop_line": 817,
    "stop_column": 24,
    "path": "tests/test_lucidlint.py",
    "code": -2,
