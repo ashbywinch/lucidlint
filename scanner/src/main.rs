@@ -2398,6 +2398,26 @@ mod tests {
         );
         assert!(!f.iter().any(|x| x.kind == "duplicate-def"), "{f:?}");
     }
+
+    #[test]
+    fn duplicate_def_overload_aliased_decorator_exempt() {
+        // the exemption resolves the BOUND name: `overload as ov` binds ov,
+        // and @ov stubs + impl are the legal idiom (review finding)
+        let f = scan_src(
+            "from typing import overload as ov\n\n@ov\ndef f(x: int) -> int:\n    ...\n\n@ov\ndef f(x: str) -> str:\n    ...\n\ndef f(x):\n    return x\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "duplicate-def"), "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_def_overload_impl_duplicate_still_flagged() {
+        // stubs + impl are exempt — a FOURTH def of the same name after the
+        // impl is a genuine duplicate and must still fire (review finding)
+        let f = scan_src(
+            "from typing import overload\n\n@overload\ndef f(x: int) -> int:\n    ...\n\ndef f(x):\n    return x\n\ndef f(x):\n    return x + 1\n",
+        );
+        assert!(f.iter().any(|x| x.kind == "duplicate-def"), "{f:?}");
+    }
     #[test]
     fn restating_docstring_is_found() {
         // the log's example: "the line's orientation must be consistent with
