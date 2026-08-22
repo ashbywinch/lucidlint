@@ -641,10 +641,11 @@ def test_graph_contract_corrupt_db_degrades(tmp_path):
 
 # --------------------------------------------------------------------------- family registration consistency
 def _family_kinds() -> set[str]:
-    """Every kind the scanner can emit — parsed from the Rust registry const
-    (the single source of truth; this test is the cross-language check that
-    RULE_GROUPS and RULES.md keep up with it)."""
-    src = Path(__file__).resolve().parent.parent / "scanner" / "src" / "main.rs"
+    """Every kind the scanner can emit — parsed from the GENERATED registry
+    const (rules_gen.rs, derived from rule_metadata.py's catalog; this test
+    is the cross-language check that RULE_GROUPS and RULES.md keep up with
+    it, and that the generated file is current)."""
+    src = Path(__file__).resolve().parent.parent / "scanner" / "src" / "rules_gen.rs"
     text = src.read_text()
     start = text.index("pub const FAMILY_KINDS")
     end = text.index("];", start)
@@ -942,12 +943,17 @@ def test_baseline_gone_function_is_stale(tmp_path, capsys):
 
 
 def test_rust_rule_groups_match_python():
-    """The Rust core's rule_groups() (scanner/src/config.rs) must match
-    lucidlint.py's RULE_GROUPS: the LSP and the gate expand `group:` config
-    ignores identically. Drift here silently breaks the LSP/gate silencing
-    agreement — the exact trust failure this feature fixes."""
+    """The Rust core's rule_groups() (GENERATED from the catalog into
+    scanner/src/rules_gen.rs) must match lucidlint.py's RULE_GROUPS (derived
+    from the same catalog): the LSP and the gate expand `group:` config
+    ignores identically. This test pins the generated file being current —
+    both sides deriving from one source makes drift structurally impossible
+    otherwise."""
     import re
-    rust_src = (Path(__file__).parent.parent / "scanner" / "src" / "config.rs").read_text()
+    rust_src = (Path(__file__).parent.parent / "scanner" / "src" / "rules_gen.rs").read_text()
+    # scope to the rule_groups function — the same (\"name\", &[...) shape
+    # appears in FAMILY_VARIANTS and must not leak into the group map
+    rust_src = rust_src[rust_src.index("pub fn rule_groups"):]
     rust_groups = {}
     for m in re.finditer(r'\(\s*"([\w-]+)",\s*&\[\s*((?:"[a-z-]+",?\s*)+)', rust_src):
         rust_groups[m.group(1)] = set(re.findall(r'"([a-z-]+)"', m.group(2)))

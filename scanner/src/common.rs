@@ -209,14 +209,13 @@ pub fn suppressions_from_comments(comments: &[(usize, String)]) -> Suppressions 
     }
 }
 
-/// the reverse of rule_metadata.py's `display_name "X → <family>"` aliases
-/// (closures → latent-class, partition → latent-class, strewing → latent-class).
-/// A suppression naming
-/// the family also exempts its variant kinds, so `ignore latent-class <why>`
-/// is not silently stale against a `closures`/`partition`/`strewing` finding
-/// (RUST-CORE B6: the alias map must match rule_metadata's `→` convention —
-/// keep in sync; final_kind in main.rs collapses the same three).
-const FAMILY_VARIANTS: &[(&str, &[&str])] = &[("latent-class", &["closures", "partition", "strewing"])];
+/// Family -> variant kinds, for family suppressions (`ignore latent-class
+/// <why>` exempts every variant). GENERATED from the rule catalog
+/// (rule_metadata.py) by `make rules` — a variant missing here is a
+/// registration drift, not a judgment call (review-log B6: strewing was
+/// missing from the hand-written map and `ignore latent-class` was silently
+/// stale against it).
+pub use crate::rules_gen::FAMILY_VARIANTS;
 
 fn alias_variants(sig: &str) -> &'static [&'static str] {
     for (fam, vars) in FAMILY_VARIANTS {

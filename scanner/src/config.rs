@@ -8,80 +8,11 @@ use std::collections::HashSet;
 use std::path::Path;
 
 /// The rule groups the config's `group:` prefix expands — the mirror of
-/// lucidlint.py's RULE_GROUPS (drift is pinned by tests/test_config_parity.py).
-pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {
-    &[
-        (
-            "architecture",
-            &[
-                "complexity",
-                "large-function",
-                "closures",
-                "partition",
-                "strewing",
-                "record-shape",
-                "duplicate",
-                "layer-mix",
-                "folder-mix",
-                "hub-file",
-                "high-risk",
-                "hotspot",
-                "over-abstraction",
-                "long-param-list",
-                "churn-untested",
-                "detached-method",
-                "module-cohesion",
-            ],
-        ),
-        (
-            "style",
-            &[
-                "magic-number",
-                "noop-statement",
-                "unreachable",
-                "vague-name",
-                "class-module",
-                "builtin-shadow",
-                "broad-except",
-                "swallow",
-                "inline-import",
-                "private-import",
-                "global-state",
-                "unused",
-                "import-cycle",
-                "docs-link",
-                "docs-undiscoverable",
-                "boolean-arg",
-                "debug-artifact",
-                "positional-literals",
-                "guard-clauses",
-                "latent-visitor",
-                "conditional-polymorphism",
-                "special-case",
-                "middle-man",
-                "unused-setter",
-                "loop-pipeline",
-                "duplicate-def",
-                "restating-docstring",
-                "duplicate-block",
-            ],
-        ),
-        (
-            "test-discipline",
-            &["monkeypatch", "skipif", "fakefs", "no-assert-test"],
-        ),
-        (
-            "suppression",
-            &[
-                "suppression",
-                "type-ignore",
-                "allow-reason",
-                "noqa",
-                "stale-suppression",
-            ],
-        ),
-    ]
-}
+/// lucidlint.py's RULE_GROUPS. GENERATED from the rule catalog
+/// (rule_metadata.py) by `make rules`, so the LSP and the gate cannot
+/// drift: both derive from the same source (the parity test pins the
+/// generated file being current).
+pub use crate::rules_gen::rule_groups;
 
 /// Expand a config table's `ignore` list (with `group:` prefix expansion)
 /// into the set of silenced signals. `accept_ignored_signals` mirrors the
