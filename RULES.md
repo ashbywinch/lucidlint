@@ -41,34 +41,30 @@ Every finding has two identifiers — don't conflate them:
   without a named bucket collapse to `standard` (the message explains the
   rule).
 
-A new family must be registered in **five places**:
+A new family is registered in **one place**: a `Rule` in
+`rule_metadata.py`'s `CATALOG` (kind, severity, config/display group,
+languages, description, the display bucket — `None` for the kind's own
+bucket, `"standard"` to collapse, or a family name shared with its
+variants). Then:
 
-1. **Scanner** — emit the finding at the right AST hook with
-   `finding("<kind>", "<fail|warn>", ...)`; the kind string is the signal.
-   If the family has a fix (mechanical or structural), the MESSAGE ends
-   with the machine-parseable directive `— fix: <kind> [--name <N>]`; the
-   output layer rewrites it into the FULL command
-   (`lucidlint fix --kind <kind> --file <file> --line <line> [--name <N>]`)
-   so the agent is told the exact invocation (R27).
-   (Python layer: `scanner/src/checks.rs`; Rust layer: `scanner/src/rustscan.rs`;
-   graph: `scanner/src/graph_families.rs`.)
-2. **`final_kind`** (`scanner/src/main.rs`) — a named display bucket, or
-   accept the `standard` collapse deliberately.
-3. **`RULE_GROUPS`** (`lucidlint.py`) — every kind belongs to exactly one
-   group so `ignore = ["group:<name>"]` works. The Rust mirror lives in
-   `scanner/src/config.rs` (`rule_groups()`), pinned by
-   `tests/test_config_parity.py`.
-4. **`rule_metadata.py`** — an entry here (kind, severity, language,
-   description); the RULES.md tables are **generated** from it
-   (`make rules`), and the gate fails if a family lacks an entry or the
-   generated tables are stale — the list cannot drift from the code.
-5. **`FAMILY_VARIANTS`** (`scanner/src/common.rs`) — ONLY when the family
-   collapses variant kinds under one display bucket (`latent-class` covers
-   `closures`/`partition`/`strewing`). This is the map the review log's B6
-   warning is about: a variant missing from the alias list makes
-   `ignore <family> <why>` silently stale against it. Must match
-   rule_metadata's `display_name "X → <family>"` aliases AND `final_kind`'s
-   collapse.
+1. Emit the finding in the scanner (`finding("<kind>", "<severity>", ...)`
+   or the rustscan `finding` helper) — the drift gate fails if the catalog
+   entry has no emission or the severities disagree, so the emission is the
+   one thing that lives with the rule logic, not the metadata.
+2. Run `make rules` — it regenerates RULES.md AND
+   `scanner/src/rules_gen.rs` (FAMILY_KINDS, STANDARD_KINDS,
+   FAMILY_VARIANTS, `final_kind`, `rule_groups`), and the Python
+   `RULE_GROUPS` derives from the same catalog at import. Every derived
+   artifact shares the catalog as its source — there is no second
+   registration point to forget (this is the review-log B6 lesson: the
+   family/variant map was a hand-maintained second list and `strewing`
+   drifted out of it).
+
+If the family has a fix (mechanical or structural), the finding MESSAGE
+ends with the machine-parseable directive `— fix: <kind> [--name <N>]`;
+the output layer rewrites it into the FULL command
+(`lucidlint fix --kind <kind> --file <file> --line <line> [--name <N>]`)
+so the agent is told the exact invocation (R27).
 
 Then: unit tests for the scanner path, an orchestrator test if the family
 changes gate behavior, a suppression test (`lucidlint: ignore` + config
@@ -115,7 +111,7 @@ with a why).
 | **inline-import** | fail | Python | `import` inside a function body (Python) — imports belong at module top. |
 | **private-import** | fail | Both | Importing an underscore-prefixed symbol from another module. |
 | **global-state** | fail | Both | Module-level mutable container mutated inside a function — put state in a class. |
-| **unused** | fail | Python | A function defined in production code that's never referenced anywhere in the repo (same-file references count — Python only). |
+| **unused** | **warn** | Python | A function defined in production code that's never referenced anywhere in the repo (same-file references count — Python only). |
 | **duplicate-def** | fail | Both | A module-scope def/class/import that shadows an earlier module-scope binding of the same name — the later definition wins legally, but it is a shadowing hazard (dispatch or edit mistake); rename one. |
 | **restating-docstring** | **warn** | Both | A docstring whose content words all appear in the body's own tokens — it restates the code; name the concept instead. |
 | **duplicate-block** | **warn** | Both | An identical statement block (≥3 statements) appearing twice in one function — duplicated work (an edit mistake?); delete the second copy. |

@@ -30,6 +30,7 @@ mod docs;
 mod fix;
 mod graph_families;
 mod lsp;
+mod rules_gen;
 mod rustscan;
 use checks::Q;
 use checks::*;
@@ -1215,99 +1216,7 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
     }
 }
 
-/// EVERY family kind the scanner can emit — the registration registry.
-/// A new family MUST be added here, get a `final_kind` arm (or be listed in
-/// STANDARD_KINDS), be added to RULE_GROUPS (lucidlint.py), and get a
-/// RULES.md row (see RULES.md "Adding a finding family").
 ///
-/// The consistency
-/// self-checks (main.rs `registry_is_complete` + the orchestrator's
-/// registration tests) fail when any of the four is missing.
-pub const FAMILY_KINDS: &[&str] = &[
-    // architecture
-    "complexity",
-    "large-function",
-    "closures",
-    "partition",
-    "strewing",
-    "record-shape",
-    "duplicate",
-    "layer-mix",
-    "folder-mix",
-    "hub-file",
-    "high-risk",
-    "hotspot",
-    "over-abstraction",
-    "churn-untested",
-    "long-param-list",
-    // style
-    "magic-number",
-    "noop-statement",
-    "unreachable",
-    "vague-name",
-    "class-module",
-    "builtin-shadow",
-    "broad-except",
-    "swallow",
-    "inline-import",
-    "private-import",
-    "global-state",
-    "unused",
-    "import-cycle",
-    "boolean-arg",
-    "debug-artifact",
-    "positional-literals",
-    // architecture (inverse of record-shape)
-    "detached-method",
-    // refactoring advice (warn, detection-only)
-    "guard-clauses",
-    "latent-visitor",
-    "conditional-polymorphism",
-    "special-case",
-    "middle-man",
-    "unused-setter",
-    "loop-pipeline",
-    // review-log rules (family-album log §10/§11)
-    "duplicate-def",
-    "module-cohesion",
-    "restating-docstring",
-    "duplicate-block",
-    // test discipline
-    "monkeypatch",
-    "skipif",
-    "fakefs",
-    "no-assert-test",
-    // suppression discipline
-    "suppression",
-    "type-ignore",
-    "allow-reason",
-    "noqa",
-    "stale-suppression",
-    // docs
-    "docs-link",
-    "docs-undiscoverable",
-];
-
-/// Kinds that deliberately collapse to the "standard" display bucket — their
-/// messages carry the rule; a named `final_kind` bucket is optional for them.
-pub const STANDARD_KINDS: &[&str] = &[
-    "broad-except",
-    "builtin-shadow",
-    "class-module",
-    "duplicate",
-    "global-state",
-    "import-cycle",
-    "inline-import",
-    "monkeypatch",
-    "fakefs",
-    "over-abstraction",
-    "private-import",
-    "suppression",
-    "type-ignore",
-    "unused",
-    "allow-reason",
-];
-
 /// The finding model's final action kind — the JSON contract carries it so
 /// the Python orchestrator consumes findings without further mapping.
 ///
@@ -1319,49 +1228,11 @@ pub const STANDARD_KINDS: &[&str] = &[
 ///   (`lucidlint: ignore <signal>`, config `ignore = [<signal>]`,
 ///   RULE_GROUPS membership, baseline identity).
 ///
-/// A new family MUST be registered in both places (see RULES.md "Adding a
-/// finding family") plus the Python RULE_GROUPS for group suppression.
-pub fn final_kind(kind: &str) -> &'static str {
-    match kind {
-        "closures" | "partition" | "strewing" => "latent-class",
-        "vague-name" => "vague-name",
-        "record-shape" => "record-shape",
-        "docs-link" | "docs-undiscoverable" => "docs",
-        "large-function" => "large-function",
-        "hub-file" => "hub-file",
-        "high-risk" => "high-risk",
-        "hotspot" => "hotspot",
-        "folder-mix" => "folder-mix",
-        "layer-mix" => "layer-mix",
-        "complexity" => "complexity",
-        "swallow" => "swallow",
-        "skipif" => "skipif",
-        "noop-statement" => "noop-statement",
-        "unreachable" => "unreachable",
-        "magic-number" => "magic-number",
-        "boolean-arg" => "boolean-arg",
-        "debug-artifact" => "debug-artifact",
-        "long-param-list" => "long-param-list",
-        "no-assert-test" => "no-assert-test",
-        "noqa" => "noqa",
-        "stale-suppression" => "stale-suppression",
-        "churn-untested" => "churn-untested",
-        "positional-literals" => "positional-literals",
-        "detached-method" => "detached-method",
-        "guard-clauses" => "guard-clauses",
-        "latent-visitor" => "latent-visitor",
-        "conditional-polymorphism" => "conditional-polymorphism",
-        "special-case" => "special-case",
-        "middle-man" => "middle-man",
-        "unused-setter" => "unused-setter",
-        "loop-pipeline" => "loop-pipeline",
-        "duplicate-def" => "duplicate-def",
-        "module-cohesion" => "module-cohesion",
-        "restating-docstring" => "restating-docstring",
-        "duplicate-block" => "duplicate-block",
-        _ => "standard", // broad-except, imports, over-abstraction, cycles, duplicate, unused, ...
-    }
-}
+/// FAMILY_KINDS, STANDARD_KINDS, `final_kind`, and `rule_groups` are
+/// GENERATED from the rule catalog (rule_metadata.py) by `make rules` — see
+/// rules_gen.rs. Registering a rule is ONE edit in the catalog; everything
+/// here follows from it and the drift gate pins the generated file.
+pub use rules_gen::{final_kind, FAMILY_KINDS, STANDARD_KINDS};
 
 /// Longest common prefix of the passed paths — the repo root for a
 /// full-repo run; the file itself in per-file mode.
