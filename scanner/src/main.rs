@@ -2243,6 +2243,17 @@ mod tests {
         assert!(!f.iter().any(|x| x.kind == "closures"), "{f:?}");
     }
 
+    #[test]
+    fn closures_attribute_chain_mutation_fires() {
+        // the accumulator reached through an attribute of a captured name
+        // (writer.lines.append) — the same latent class, a harder receiver
+        let f = scan_src(
+            "def build(writer):\n    def add_header():\n        writer.lines.append(\"h\")\n    def add_footer():\n        writer.lines.append(\"f\")\n    add_header()\n    add_footer()\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "closures").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+    }
+
     // ------------------------------------------------------------- class-module
     #[test]
     fn class_module_name_mismatch() {

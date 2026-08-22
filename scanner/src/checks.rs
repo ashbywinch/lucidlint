@@ -1030,9 +1030,22 @@ fn expr_writes(e: &Expr, candidates: &HashSet<&str>) -> bool {
     match e {
         Expr::Call(c) => {
             if let Expr::Attribute(a) = c.func.as_ref() {
-                if let Expr::Name(n) = a.value.as_ref() {
-                    if MUTATING_METHODS.contains(&a.attr.as_str()) && candidates.contains(n.id.as_str()) {
-                        return true;
+                // receiver mutation: L.append(...) or writer.lines.append(...)
+                // — peel attribute chains to the base name before the
+                // candidates check
+                if MUTATING_METHODS.contains(&a.attr.as_str()) {
+                    let mut receiver = a.value.as_ref();
+                    loop {
+                        match receiver {
+                            Expr::Attribute(inner) => receiver = inner.value.as_ref(),
+                            Expr::Name(n) => {
+                                if candidates.contains(n.id.as_str()) {
+                                    return true;
+                                }
+                                break;
+                            }
+                            _ => break,
+                        }
                     }
                 }
             }
