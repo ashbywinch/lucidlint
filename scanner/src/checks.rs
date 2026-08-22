@@ -8,8 +8,8 @@
 use rayon::prelude::*;
 use ruff_python_ast::token::{TokenKind, Tokens};
 use ruff_python_ast::{
-    AnyNodeRef, BoolOp, CmpOp, Decorator, Expr, ExprAttribute, ExprCall, ExprContext, Operator, Pattern, Stmt,
-    StmtClassDef, StmtFunctionDef, UnaryOp,
+    AnyNodeRef, BoolOp, CmpOp, Decorator, Expr, ExprAttribute, ExprCall, ExprContext, Operator, Parameters, Pattern,
+    Stmt, StmtClassDef, StmtFunctionDef, UnaryOp,
 };
 use ruff_text_size::Ranged;
 use std::collections::HashSet;
@@ -863,17 +863,29 @@ pub fn annotation_base_name(e: &Expr) -> Option<String> {
     }
 }
 
-/// Closures: >= 2 inner functions/lambdas with cc >= 15 or span >= 60.
+/// Closures: >= 2 inner functions/lambdas with cc >= 15, span >= 60, OR
+/// shared-state mutation (the accumulator pattern — closures that WRITE to
+/// the enclosing function's locals are a class in disguise even when small).
 pub fn closure_findings(state: &mut ScanState, stmt: &Stmt, cc: u32, span: u32) {
     let Stmt::FunctionDef(f) = stmt else { return };
     let inner = inner_function_count(stmt);
     if inner < 2 {
         return;
     }
-    if cc < 15 && span < 60 {
+    let mutated = closures_mutate_shared_state(f);
+    if cc < 15 && span < 60 && mutated.is_empty() {
         return;
     }
     let line = stmt_line(state.source, stmt);
+    let why = if mutated.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " — its closures write to {} captured local{} (the accumulator pattern)",
+            mutated.len(),
+            if mutated.len() == 1 { "" } else { "s" }
+        )
+    };
     state.findings.push(Finding {
         file: state.file.to_string(),
         line,
@@ -881,10 +893,292 @@ pub fn closure_findings(state: &mut ScanState, stmt: &Stmt, cc: u32, span: u32) 
         kind: "closures".into(),
         severity: "fail".into(),
         message: format!(
-            "'{}' defines {inner} inner functions closing over its state — a class in disguise",
+            "'{}' defines {inner} inner functions closing over its state{why} — a class in disguise",
             f.name.as_str()
         ),
     });
+}
+
+/// Method calls that mutate the receiver in place — the writes that turn a
+/// captured enclosing-scope local into shared instance state.
+const MUTATING_METHODS: &[&str] = &[
+    "append",
+    "extend",
+    "insert",
+    "pop",
+    "remove",
+    "clear",
+    "sort",
+    "reverse",
+    "add",
+    "discard",
+    "update",
+    "setdefault",
+    "appendleft",
+    "appendright",
+    "put",
+    "push",
+    "enqueue",
+    "__setitem__",
+    "__iadd__",
+];
+
+/// The distinct enclosing-scope locals that the direct inner functions WRITE
+/// to (mutating method calls, subscript/attribute stores, nonlocal rebinds).
+/// Empty = the closures only read the enclosing state (a factory of handlers
+/// is the legit idiom; a class in disguise is not). Only DIRECT inner
+/// functions are scanned — a deeper nesting is judged by its own
+/// `closure_findings` run when its enclosing function is scanned.
+pub fn closures_mutate_shared_state(f: &StmtFunctionDef) -> Vec<String> {
+    let (inners, outer_bound) = scope_fns_and_bindings(&f.body);
+    let mut params = HashSet::new();
+    function_param_names(&f.parameters, &mut params);
+    let mut mutated: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for inner in inners {
+        let mut inner_bound = HashSet::new();
+        function_param_names(&inner.parameters, &mut inner_bound);
+        let (_, deeper) = scope_fns_and_bindings(&inner.body);
+        inner_bound.extend(deeper);
+        let candidates: HashSet<&str> = outer_bound
+            .union(&params)
+            .filter(|n| !inner_bound.contains(*n))
+            .map(|s| s.as_str())
+            .collect();
+        for name in &candidates {
+            if !seen.contains(*name) && scope_mutates(&inner.body, &HashSet::from([*name])) {
+                seen.insert(name.to_string());
+                mutated.push(name.to_string());
+            }
+        }
+    }
+    mutated
+}
+
+/// Does any statement in *body* (control-flow descend, not nested def/class
+/// scopes) WRITE to one of *candidates*?
+fn scope_mutates(body: &[Stmt], candidates: &HashSet<&str>) -> bool {
+    let mut stack: Vec<&Stmt> = Vec::new();
+    for s in body {
+        stack.push(s);
+    }
+    while let Some(s) = stack.pop() {
+        if stmt_writes(s, candidates) {
+            return true;
+        }
+        if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            continue; // a new scope — its bodies belong to a deeper run
+        }
+        push_stmt_children(s, &mut stack);
+    }
+    false
+}
+
+fn stmt_writes(s: &Stmt, candidates: &HashSet<&str>) -> bool {
+    match s {
+        Stmt::Assign(a) => a.targets.iter().any(|t| store_target_writes(t, candidates)),
+        Stmt::AnnAssign(a) => store_target_writes(&a.target, candidates),
+        Stmt::AugAssign(a) => store_target_writes(&a.target, candidates),
+        Stmt::Delete(d) => d.targets.iter().any(|t| store_target_writes(t, candidates)),
+        Stmt::Nonlocal(n) => n.names.iter().any(|id| candidates.contains(id.as_str())),
+        Stmt::Expr(e) => expr_writes(&e.value, candidates),
+        Stmt::Return(r) => r.value.as_ref().is_some_and(|v| expr_writes(v, candidates)),
+        Stmt::If(i) => expr_writes(&i.test, candidates),
+        Stmt::While(w) => expr_writes(&w.test, candidates),
+        Stmt::For(f) => expr_writes(&f.iter, candidates) || expr_writes(&f.target, candidates),
+        Stmt::With(w) => w.items.iter().any(|item| {
+            expr_writes(&item.context_expr, candidates)
+                || item.optional_vars.as_ref().is_some_and(|v| expr_writes(v, candidates))
+        }),
+        Stmt::Try(t) => t.handlers.iter().any(|h| match h {
+            ruff_python_ast::ExceptHandler::ExceptHandler(eh) => {
+                eh.type_.as_ref().is_some_and(|t| expr_writes(t, candidates))
+            }
+        }),
+        Stmt::Assert(a) => expr_writes(&a.test, candidates),
+        _ => false,
+    }
+}
+
+/// An assignment/delete TARGET that writes INTO a candidate container
+/// (L[0] = x, L.attr = x, del L[i]) — plain name rebinds are not writes to
+/// the object (they need `nonlocal`, handled separately).
+fn store_target_writes(t: &Expr, candidates: &HashSet<&str>) -> bool {
+    match t {
+        Expr::Name(_) => false,
+        Expr::Subscript(s) => {
+            let mut v = s.value.as_ref();
+            loop {
+                match v {
+                    Expr::Subscript(inner) => v = inner.value.as_ref(),
+                    Expr::Name(n) => return candidates.contains(n.id.as_str()),
+                    _ => return false,
+                }
+            }
+        }
+        Expr::Attribute(a) => store_target_writes(&a.value, candidates),
+        Expr::Tuple(t) => t.elts.iter().any(|e| store_target_writes(e, candidates)),
+        Expr::List(l) => l.elts.iter().any(|e| store_target_writes(e, candidates)),
+        Expr::Starred(st) => store_target_writes(&st.value, candidates),
+        _ => false,
+    }
+}
+
+/// Does *e* WRITE to a candidate: a mutating method call on it, or a write
+/// nested anywhere inside (call args, subscripts, comprehensions, lambdas).
+fn expr_writes(e: &Expr, candidates: &HashSet<&str>) -> bool {
+    match e {
+        Expr::Call(c) => {
+            if let Expr::Attribute(a) = c.func.as_ref() {
+                if let Expr::Name(n) = a.value.as_ref() {
+                    if MUTATING_METHODS.contains(&a.attr.as_str()) && candidates.contains(n.id.as_str()) {
+                        return true;
+                    }
+                }
+            }
+            expr_writes(&c.func, candidates)
+                || c.arguments.args.iter().any(|x| expr_writes(x, candidates))
+                || c.arguments.keywords.iter().any(|k| expr_writes(&k.value, candidates))
+        }
+        Expr::Attribute(a) => expr_writes(&a.value, candidates),
+        Expr::Subscript(s) => expr_writes(&s.value, candidates) || expr_writes(&s.slice, candidates),
+        Expr::BinOp(b) => expr_writes(&b.left, candidates) || expr_writes(&b.right, candidates),
+        Expr::BoolOp(b) => b.values.iter().any(|v| expr_writes(v, candidates)),
+        Expr::Compare(c) => {
+            expr_writes(&c.left, candidates) || c.comparators.iter().any(|v| expr_writes(v, candidates))
+        }
+        Expr::UnaryOp(u) => expr_writes(&u.operand, candidates),
+        Expr::Lambda(l) => expr_writes(&l.body, candidates),
+        Expr::If(i) => {
+            expr_writes(&i.test, candidates) || expr_writes(&i.body, candidates) || expr_writes(&i.orelse, candidates)
+        }
+        Expr::Named(n) => expr_writes(&n.value, candidates),
+        Expr::Await(a) => expr_writes(&a.value, candidates),
+        Expr::ListComp(l) => {
+            expr_writes(&l.elt, candidates)
+                || l.generators
+                    .iter()
+                    .any(|g| expr_writes(&g.iter, candidates) || g.ifs.iter().any(|c| expr_writes(c, candidates)))
+        }
+        Expr::SetComp(s) => {
+            expr_writes(&s.elt, candidates)
+                || s.generators
+                    .iter()
+                    .any(|g| expr_writes(&g.iter, candidates) || g.ifs.iter().any(|c| expr_writes(c, candidates)))
+        }
+        Expr::DictComp(d) => {
+            d.key.as_ref().is_some_and(|k| expr_writes(k, candidates))
+                || expr_writes(&d.value, candidates)
+                || d.generators
+                    .iter()
+                    .any(|g| expr_writes(&g.iter, candidates) || g.ifs.iter().any(|c| expr_writes(c, candidates)))
+        }
+        Expr::Generator(g) => {
+            expr_writes(&g.elt, candidates)
+                || g.generators
+                    .iter()
+                    .any(|gg| expr_writes(&gg.iter, candidates) || gg.ifs.iter().any(|c| expr_writes(c, candidates)))
+        }
+        _ => false,
+    }
+}
+
+/// The direct inner functions of *body*'s scope (control-flow nesting only —
+/// a def inside a nested def/class belongs to that nested scope) and the
+/// names the scope binds at any control-flow depth.
+fn scope_fns_and_bindings(body: &[Stmt]) -> (Vec<&StmtFunctionDef>, HashSet<String>) {
+    let mut fns = Vec::new();
+    let mut bound: HashSet<String> = HashSet::new();
+    let mut stack: Vec<&Stmt> = Vec::new();
+    for s in body {
+        stack.push(s);
+    }
+    while let Some(s) = stack.pop() {
+        match s {
+            Stmt::FunctionDef(f) => {
+                fns.push(f);
+                bound.insert(f.name.to_string());
+            }
+            Stmt::ClassDef(c) => {
+                bound.insert(c.name.to_string());
+            }
+            Stmt::Assign(a) => {
+                for t in &a.targets {
+                    expr_bindings(t, &mut bound);
+                }
+            }
+            Stmt::AnnAssign(a) => expr_bindings(&a.target, &mut bound),
+            Stmt::AugAssign(a) => expr_bindings(&a.target, &mut bound),
+            Stmt::For(f) => {
+                expr_bindings(&f.target, &mut bound);
+            }
+            Stmt::With(w) => {
+                for item in &w.items {
+                    if let Some(v) = &item.optional_vars {
+                        expr_bindings(v, &mut bound);
+                    }
+                }
+            }
+            Stmt::Import(i) => {
+                for a in &i.names {
+                    bound.insert(a.name.as_str().split('.').next().unwrap_or("").to_string());
+                }
+            }
+            Stmt::ImportFrom(i) => {
+                for a in &i.names {
+                    if a.name.as_str() != "*" {
+                        bound.insert(a.name.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+        if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            continue; // nested scopes are not this scope's bindings
+        }
+        push_stmt_children(s, &mut stack);
+    }
+    (fns, bound)
+}
+
+/// Names an expression binds as an assignment/unpacking target.
+fn expr_bindings(e: &Expr, out: &mut HashSet<String>) {
+    match e {
+        Expr::Name(n) => {
+            out.insert(n.id.to_string());
+        }
+        Expr::Tuple(t) => {
+            for el in &t.elts {
+                expr_bindings(el, out);
+            }
+        }
+        Expr::List(l) => {
+            for el in &l.elts {
+                expr_bindings(el, out);
+            }
+        }
+        Expr::Starred(st) => expr_bindings(&st.value, out),
+        _ => {}
+    }
+}
+
+/// The parameter names of a function (posonly, args, kwonly, vararg, kwarg).
+fn function_param_names(p: &Parameters, out: &mut HashSet<String>) {
+    for a in &p.posonlyargs {
+        out.insert(a.parameter.name.to_string());
+    }
+    for a in &p.args {
+        out.insert(a.parameter.name.to_string());
+    }
+    for a in &p.kwonlyargs {
+        out.insert(a.parameter.name.to_string());
+    }
+    if let Some(v) = &p.vararg {
+        out.insert(v.name.to_string());
+    }
+    if let Some(k) = &p.kwarg {
+        out.insert(k.name.to_string());
+    }
 }
 
 pub fn inner_function_count(fn_stmt: &Stmt) -> u32 {
@@ -922,8 +1216,21 @@ fn count_expr_lambdas(e: &Expr, count: &mut u32) {
 }
 
 /// A module with exactly one top-level class whose name doesn't match the
-/// file stem — the class-module rule.
+/// file stem — the class-module rule. A module that ALSO defines module-level
+/// functions is a tool script, not a class file (the class is a component,
+/// not the module's identity) — renaming it after the class would be wrong.
 pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &str) {
+    if rel.ends_with("__init__.py") {
+        return;
+    }
+    let classes: Vec<&Stmt> = module_body.iter().filter(|s| matches!(s, Stmt::ClassDef(_))).collect();
+    if classes.len() != 1 {
+        return;
+    }
+    let has_module_fns = module_body.iter().any(|s| matches!(s, Stmt::FunctionDef(_)));
+    if has_module_fns {
+        return;
+    }
     if rel.ends_with("__init__.py") {
         return;
     }

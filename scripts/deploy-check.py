@@ -75,7 +75,7 @@ EXPECTED_FAIL_KINDS = ("stale-suppression", "unreachable", "noop-statement")
 CONST_NAME = "MAX_RETRIES"
 
 
-# lucidlint: ignore class-module one contract-slice model in a script module — the script is the unit
+
 @dataclass(frozen=True)
 class Action:
     """One finding from the scan JSON contract — the fields the check uses."""

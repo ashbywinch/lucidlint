@@ -2213,6 +2213,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn closures_mutating_accumulator_fires_without_cc_or_span() {
+        // the _render shape: two small walkers that both append to the
+        // enclosing function's line buffer — shared-state mutation is the
+        // class-in-disguise tell even with cc < 15 and span < 60
+        let f = scan_src(
+            "def render(em, vm):\n    L = []\n    def emit_epic(cid, d):\n        L.append(cid)\n        for c in em:\n            emit_epic(c, d + 1)\n    def emit_vs(vid, d=0):\n        L.append(vid)\n        for c in vm:\n            emit_vs(c, d + 1)\n    return L\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "closures").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("accumulator pattern"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn closures_pure_handler_factory_passes() {
+        // a factory of handlers that only READ the captured config — the
+        // legit closure idiom, not a class in disguise
+        let f = scan_src(
+            "def make_handlers(config, db):\n    def on_get(request):\n        return db.query(config.filter)\n    def on_post(request):\n        return db.read(request)\n    return on_get, on_post\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "closures"), "{f:?}");
+    }
+
+    #[test]
+    fn closures_single_mutating_closure_passes() {
+        // one closure over an accumulator is a closure, not a class
+        let f = scan_src("def f():\n    L = []\n    def g(x):\n        L.append(x)\n    return g\n");
+        assert!(!f.iter().any(|x| x.kind == "closures"), "{f:?}");
+    }
+
     // ------------------------------------------------------------- class-module
     #[test]
     fn class_module_name_mismatch() {
@@ -2244,6 +2274,16 @@ mod tests {
         assert!(f.iter().any(|x| x.kind == "duplicate-def"));
     }
 
+    #[test]
+    fn class_module_ignores_tool_script_with_one_class() {
+        // generate_tree.py shape: a script whose single class is a component
+        // (module-level helpers + a build() entry) — not "a class file",
+        // renaming the file after the class would be wrong
+        let f = scan_src(
+            "def helper():\n    return 1\n\nclass _TreeRenderer:\n    pass\n\ndef build():\n    return _TreeRenderer()\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "class-module"), "{f:?}");
+    }
     #[test]
     fn duplicate_def_import_shadow_is_found() {
         // a def whose name collides with an import (the def-in-imports edit
