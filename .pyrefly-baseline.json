@@ -601,21 +601,9 @@
    "severity": "error"
   },
   {
-   "line": 1947,
-   "column": 60,
-   "stop_line": 1947,
-   "stop_column": 85,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Object of class `ParamStar` has no attribute `name`",
-   "concise_description": "Object of class `ParamStar` has no attribute `name`",
-   "severity": "error"
-  },
-  {
-   "line": 1982,
+   "line": 1985,
    "column": 16,
-   "stop_line": 1982,
+   "stop_line": 1985,
    "stop_column": 34,
    "path": "fix_engine.py",
    "code": -2,
@@ -625,21 +613,21 @@
    "severity": "error"
   },
   {
-   "line": 1988,
+   "line": 1993,
    "column": 28,
-   "stop_line": 1988,
-   "stop_column": 43,
+   "stop_line": 1993,
+   "stop_column": 48,
    "path": "fix_engine.py",
    "code": -2,
    "name": "missing-attribute",
-   "description": "Object of class `AsName` has no attribute `value`",
-   "concise_description": "Object of class `AsName` has no attribute `value`",
+   "description": "Object of type `List | Name | Tuple` has no attribute `value`\n  Object of class `List` has no attribute `value`\n  Object of class `Tuple` has no attribute `value`",
+   "concise_description": "Object of type `List | Name | Tuple` has no attribute `value`",
    "severity": "error"
   },
   {
-   "line": 2021,
+   "line": 2026,
    "column": 35,
-   "stop_line": 2021,
+   "stop_line": 2026,
    "stop_column": 82,
    "path": "fix_engine.py",
    "code": -2,
@@ -649,9 +637,9 @@
    "severity": "error"
   },
   {
-   "line": 2105,
+   "line": 2110,
    "column": 16,
-   "stop_line": 2105,
+   "stop_line": 2110,
    "stop_column": 25,
    "path": "fix_engine.py",
    "code": -2,
@@ -661,9 +649,9 @@
    "severity": "error"
   },
   {
-   "line": 2105,
+   "line": 2110,
    "column": 42,
-   "stop_line": 2105,
+   "stop_line": 2110,
    "stop_column": 49,
    "path": "fix_engine.py",
    "code": -2,
@@ -673,9 +661,9 @@
    "severity": "error"
   },
   {
-   "line": 2106,
+   "line": 2111,
    "column": 26,
-   "stop_line": 2106,
+   "stop_line": 2111,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -685,9 +673,9 @@
    "severity": "error"
   },
   {
-   "line": 2144,
+   "line": 2149,
    "column": 16,
-   "stop_line": 2144,
+   "stop_line": 2149,
    "stop_column": 34,
    "path": "fix_engine.py",
    "code": -2,
@@ -697,9 +685,9 @@
    "severity": "error"
   },
   {
-   "line": 2225,
+   "line": 2230,
    "column": 12,
-   "stop_line": 2225,
+   "stop_line": 2230,
    "stop_column": 72,
    "path": "fix_engine.py",
    "code": -2,

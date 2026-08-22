@@ -1525,3 +1525,42 @@ def test_extract_module_param_named_like_constant_not_refused(tmp_path):
     assert out is not None
     new_mod = (tmp_path / "repo" / "houses" / "text.py").read_text()
     assert "def tokenize(s, config=None):" in new_mod
+
+
+def test_extract_module_except_as_binding_does_not_crash(tmp_path):
+    # `except ValueError as e:` — libcst's ExceptHandler.name is an AsName;
+    # the free-name scan must not crash on it (review finding)
+    src = (
+        "def tokenize(s):\n"
+        "    try:\n"
+        "        return s.split()\n"
+        "    except ValueError as e:\n"
+        "        return str(e)\n"
+        "\n"
+        "def words(s):\n"
+        "    return tokenize(s)\n"
+    )
+    out, fixed = _fix_opts(
+        tmp_path, "extract-module", "houses/layout.py", src, 1,
+        name="text", params=["tokenize", "words"],
+    )
+    assert out is not None
+    assert "except ValueError as e:" in (tmp_path / "repo" / "houses" / "text.py").read_text()
+
+
+def test_extract_module_bare_star_signature_does_not_crash(tmp_path):
+    # a bare `*` keyword-only separator is ParamStar, not Param — the
+    # free-name scan must not crash (review finding)
+    src = (
+        "def tokenize(s, *, limit=None):\n"
+        "    return s.split()[:limit]\n"
+        "\n"
+        "def words(s):\n"
+        "    return tokenize(s)\n"
+    )
+    out, fixed = _fix_opts(
+        tmp_path, "extract-module", "houses/layout.py", src, 1,
+        name="text", params=["tokenize", "words"],
+    )
+    assert out is not None
+    assert "def tokenize(s, *, limit=None):" in (tmp_path / "repo" / "houses" / "text.py").read_text()
