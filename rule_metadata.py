@@ -103,7 +103,7 @@ class RuleCatalog:
     consumes (groups, families, display buckets)."""
 
     def __init__(self, rules: list[Rule]) -> None:
-        self.rules = rules
+        self.rules: list[Rule] = rules
 
     def kinds(self) -> list[str]:
         return [r.kind for r in self.rules]
@@ -207,6 +207,23 @@ CATALOG = RuleCatalog([
          "A dict whose values are same-arity tuples read with constant "
          "integer indexes — an anonymous record; name it as a NamedTuple.",
          display_name="tuple-record → record-shape", display="record-shape"),
+    Rule("data-clump", "fail", "architecture", "Python",
+         ">=3 module functions sharing the same parameter pair — the pair "
+         "travels together, so it is a data clump; introduce a parameter "
+         "object that holds it.",
+         display_name="data-clump → latent-class", display="latent-class"),
+    Rule("feature-envy", "fail", "architecture", "Python",
+         "A method reads another object's fields more than its own state — "
+         "the logic belongs on that object (feature envy); move the "
+         "computation onto the envied class as a method.",
+         display_name="feature-envy → latent-class", display="latent-class"),
+    Rule("undeclared-attribute", "fail", "architecture", "Python",
+         "A class must DECLARE its members — annotated in the class body, in "
+         "__slots__, or in __init__ — not assign them quietly in member "
+         "functions. A plain `self.x = ...` in __init__ or any member "
+         "assigned outside the constructor without a declaration is a "
+         "finding: declare it.",
+         display_name="undeclared-attribute", display=None),
     Rule("module-cohesion", "fail", "architecture", "Graph",
          "A file whose nodes split across ≥2 graph communities (each ≥2 nodes) "
          "holds several sub-domains — split the module at the domain seams."),

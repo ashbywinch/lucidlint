@@ -518,6 +518,74 @@ class RustFinding(NamedTuple):
     metric: float = 1.0
 
 
+class _File(NamedTuple):
+    """The file a fix targets — its repo and repo-relative path. The
+    (rel, repo) pair travels together, and the fix operations belong on it
+    (the strewing pattern: functions sharing a domain class are its
+    methods)."""
+
+    repo: Path
+    rel: str
+
+    def fix_rust(self, kind: str, line: int, name: str | None) -> int:
+        """A Rust fix runs in the scan core (syn), not the Python/libcst
+        engine: invoke the binary's --fix mode, which edits in place."""
+        repo, rel = self.repo, self.rel
+        binary = RUST_SCAN.binary(repo)
+        if binary is None:
+            print("fix: the Rust scan core is required — build it with `make scanner-check`")
+            return 1
+        spec = json.dumps(
+            {"kind": kind, "file": str(repo / rel), "line": line, "name": name or ""}
+        )
+        try:
+            proc = subprocess.run(
+                [str(binary), "--fix", spec], capture_output=True, text=True, timeout=120, cwd=str(repo)
+            )
+        except subprocess.SubprocessError:
+            print(f"fix: the Rust fix core failed for {rel}:{line}")
+            return 1
+        sys.stdout.write(proc.stdout)
+        if proc.returncode != 0:
+            # the scanner exits non-zero on an unknown/malformed request — an
+            # unexpected error must surface (R29), not masquerade as a success
+            if proc.stderr:
+                sys.stderr.write(proc.stderr)
+            return 1
+        return 0
+
+    def finding_lines(self, kind: str) -> list[int]:
+        """The lines of every finding of `kind` in this file — the R27 line
+        resolution: the tool scans, the agent never counts lines.
+
+        `kind` is the FIX kind (the directive's `fix: <kind>` tail — what the
+        agent's command names): a dispatch-shaped complexity finding carries
+        the kind `complexity` but its message directive says
+        `fix: dispatch-registry`, so the match is against the message's
+        directive, not the raw kind."""
+        wanted = _FIX_ALIASES.get(kind, kind)
+        found = []
+        for f in self.scan_single_file():
+            directive = _fix_directive_kind(f.message)
+            if directive is None:
+                # a finding with no directive has no fix — it never matches
+                continue
+            if _FIX_ALIASES.get(directive, directive) == wanted:
+                found.append(f.line)
+        return sorted(found)
+
+    def scan_single_file(self):
+        """Scan this file, yielding its findings."""
+        repo, rel = self.repo, self.rel
+        let_include_tests = False  # the fix resolves one file's findings
+        RUST_SCAN.prepare(repo, rel, let_include_tests, {})
+        files = _py_files(repo, rel)
+        rust = RUST_SCAN.load(repo, files)
+        if rust is None:
+            return
+        yield from rust.by_rel.get(rel, [])
+
+
 class RustFindings(NamedTuple):
     """The Rust scan output for one file set, keyed by repo-relative path —
     a named object, not a bare map (the record-shape rule's escape hatch)."""
@@ -561,6 +629,10 @@ class _RustScan:
         self._cache: dict[tuple[Path, tuple[str, ...]], RustFindings | None] = {}
         self._binary_cache: dict[Path, Path | None] = {}
         self._pending_gitignored: tuple[str, ...] = ()
+        self._pending_graph: Path | None = None
+        self._pending_churn: Path | None = None
+        self._pending_tests: bool = False
+        self._pending_docs: str | None = None
 
     def binary(self, repo: Path) -> Path | None:
         """The scan binary: env override, then the repo's own build, then the
@@ -1132,12 +1204,12 @@ class _GateRunner:
     main() as parameters — the shape the assembly-class rule flags as a
     class in waiting."""
 
-    def __init__(self, repo: Path, args):
-        self.repo = repo
-        self.args = args
+    def __init__(self, repo: Path, args: argparse.Namespace):
+        self.repo: Path = repo
+        self.args: argparse.Namespace = args
         self.fh: FileHistory | None = None
         self.cr: CoverageResult | None = None
-        self.cc = None
+        self.cc: CoverageContext | None = None
         self.diff: set[str] = set()
         self.actions: list[Action] = []
         self.ignored_config: dict = {}
@@ -1145,8 +1217,8 @@ class _GateRunner:
         self.unique: list[Action] = []
         self.stale: list[str] = []
         self.baseline_ignored: Counter[str] = Counter()
-        self.head = None
-        self.rc = None
+        self.head: GitHead | None = None
+        self.rc: _RenderCtx | None = None
 
     def gather(self) -> None:
         """History/coverage/diff context (per-file mode skips the git work)."""
@@ -1556,7 +1628,7 @@ def main() -> int:
             # R27: agents never compute line numbers — the tool owns its own
             # coordinates; when the file has exactly one finding of the kind,
             # no --line is needed (both the .py and .rs fix surfaces)
-            lines = _finding_lines(repo, args.file, args.kind)
+            lines = _File(repo, args.file).finding_lines(args.kind)
             if len(lines) == 1:
                 args.line = lines[0]
             elif not lines:
@@ -1578,7 +1650,7 @@ def main() -> int:
                 # is no Rust preview surface yet.
                 print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
                 return 0
-            return _fix_rust(repo, fix_kind, rel, args.line, args.name)
+            return _File(repo, rel).fix_rust(fix_kind, args.line, args.name)
         # Python: the libcst fix engine is a mandatory dependency
         if fix_engine is None:
             print(
@@ -1590,15 +1662,16 @@ def main() -> int:
             params=args.params.split(",") if args.params else None,
             name=args.name,
         )
+        req = fix_engine._FixRequest(
+            kind=args.kind, repo=repo, rel=rel, line=args.line, opts=opts,
+        )
         if fix_kind in fix_engine.PREVIEW_KINDS and not args.name and not args.confirm:
             # the name-free preview surface: show the proposed refactoring
             # as a diff (the seam with a placeholder name — no --fix-name
             # needed to see it). The agent reviews the seam, then re-runs
             # with --fix-name <name>; the name is the commitment, so the
             # named run applies — no --confirm dance
-            new_source, description = fix_engine.propose_finding(
-                args.kind, args.file, repo, args.line, opts
-            )
+            new_source, description = req.propose_finding()
             if new_source is None:
                 # R28: never explain an absent fix — the silence is the signal
                 print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
@@ -1680,9 +1753,7 @@ def main() -> int:
                   f"apply it: lucidlint fix --kind {args.kind} --file {args.file} "
                   f"--line {args.line} --name <name>")
             return 0
-        description = fix_engine.fix_finding(
-            args.kind, args.file, repo, args.line, opts
-        )
+        description = req.fix_finding()
         if description is None:
             # R28: never explain an absent fix — the silence is the signal
             print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
@@ -1692,62 +1763,6 @@ def main() -> int:
 
     return _GateRunner(repo, args).run()
 
-
-
-def _fix_rust(repo: Path, kind: str, rel: str, line: int, name: str | None) -> int:
-    """A Rust fix runs in the scan core (syn), not the Python/libcst engine:
-    invoke the binary's --fix mode, which edits the file in place."""
-    binary = RUST_SCAN.binary(repo)
-    if binary is None:
-        print("fix: the Rust scan core is required — build it with `make scanner-check`")
-        return 1
-    spec = json.dumps(
-        {"kind": kind, "file": str(repo / rel), "line": line, "name": name or ""}
-    )
-    try:
-        proc = subprocess.run([str(binary), "--fix", spec], capture_output=True, text=True, timeout=120, cwd=str(repo))
-    except subprocess.SubprocessError:
-        print(f"fix: the Rust fix core failed for {rel}:{line}")
-        return 1
-    sys.stdout.write(proc.stdout)
-    if proc.returncode != 0:
-        # the scanner exits non-zero on an unknown/malformed request — an
-        # unexpected error must surface (R29), not masquerade as a success
-        if proc.stderr:
-            sys.stderr.write(proc.stderr)
-        return 1
-    return 0
-
-
-def _finding_lines(repo: Path, rel: str, kind: str) -> list[int]:
-    """The lines of every finding of `kind` in one file — the R27 line
-    resolution: the tool scans, the agent never counts lines.
-
-    `kind` is the FIX kind (the directive's `fix: <kind>` tail — what the
-    agent's command names): a dispatch-shaped complexity finding carries the
-    kind `complexity` but its message directive says `fix: dispatch-registry`,
-    so the match is against the message's directive, not the raw kind."""
-    wanted = _FIX_ALIASES.get(kind, kind)
-    found = []
-    for f in _scan_single_file(repo, rel):
-        directive = _fix_directive_kind(f.message)
-        if directive is None:
-            # a finding with no directive has no fix — it never matches
-            continue
-        if _FIX_ALIASES.get(directive, directive) == wanted:
-            found.append(f.line)
-    return sorted(found)
-
-
-def _scan_single_file(repo: Path, rel: str):
-    """Scan one file, yielding its findings."""
-    let_include_tests = False  # the fix resolves one file's findings
-    RUST_SCAN.prepare(repo, rel, let_include_tests, {})
-    files = _py_files(repo, rel)
-    rust = RUST_SCAN.load(repo, files)
-    if rust is None:
-        return
-    yield from rust.by_rel.get(rel, [])
 
 
 def _fix_directive_kind(message: str) -> str | None:

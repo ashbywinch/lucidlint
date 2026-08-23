@@ -1762,6 +1762,415 @@ pub fn assembly_class_findings(state: &mut ScanState, body: &[Stmt]) {
     }
 }
 
+// ------------------------------------------------------------- latent-class
+// the declaration/ownership half of the family: shared parameter pairs,
+// cross-object field reads, and quiet member assignment.
+
+/// Three or more module functions sharing the same unordered parameter
+/// pair — the pair travels together, so it is a data clump; introduce a
+/// parameter object.
+pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
+    let mut funcs: Vec<(&StmtFunctionDef, Vec<String>)> = Vec::new();
+    for s in body {
+        let Stmt::FunctionDef(f) = s else { continue };
+        let mut params = Vec::new();
+        for a in &f.parameters.posonlyargs {
+            params.push(a.parameter.name.to_string());
+        }
+        for a in &f.parameters.args {
+            params.push(a.parameter.name.to_string());
+        }
+        funcs.push((f, params));
+    }
+    let mut pairs: std::collections::HashMap<(String, String), Vec<&StmtFunctionDef>> =
+        std::collections::HashMap::new();
+    for (f, params) in &funcs {
+        for i in 0..params.len() {
+            for j in (i + 1)..params.len() {
+                let (a, b) = if params[i] < params[j] {
+                    (params[i].clone(), params[j].clone())
+                } else {
+                    (params[j].clone(), params[i].clone())
+                };
+                pairs.entry((a, b)).or_default().push(f);
+            }
+        }
+    }
+    let mut reported: HashSet<(String, String)> = HashSet::new();
+    for ((a, b), fs) in &pairs {
+        if fs.len() < 3 || !reported.insert((a.clone(), b.clone())) {
+            continue;
+        }
+        let line = line_of(state.source, fs[0].name.range().start());
+        let names: Vec<&str> = fs.iter().map(|f| f.name.as_str()).collect();
+        state.findings.push(Finding {
+            file: state.file.to_string(),
+            line,
+            function: fs[0].name.to_string(),
+            kind: "data-clump".into(),
+            severity: "fail".into(),
+            message: format!(
+                "{} functions ({}) share the parameter pair ({}, {}) — a data clump: the pair travels together; introduce a parameter object",
+                fs.len(),
+                names.join(", "),
+                a,
+                b
+            ),
+        });
+    }
+}
+
+/// The root name of an attribute chain (self.graph.em -> self; graph.em ->
+/// graph); None for other shapes.
+fn chain_root_name(e: &Expr) -> Option<&str> {
+    let mut v = e;
+    loop {
+        match v {
+            Expr::Attribute(a) => v = a.value.as_ref(),
+            Expr::Name(n) => return Some(n.id.as_str()),
+            _ => return None,
+        }
+    }
+}
+
+/// Attribute READ counts by receiver root name — method calls (Call funcs)
+/// are not field reads and do not count.
+fn count_receiver_reads(body: &[Stmt], counts: &mut std::collections::HashMap<String, usize>) {
+    fn visit(e: &Expr, counts: &mut std::collections::HashMap<String, usize>) {
+        match e {
+            Expr::Call(c) => {
+                for a in &c.arguments.args {
+                    visit(a, counts);
+                }
+                for k in &c.arguments.keywords {
+                    visit(&k.value, counts);
+                }
+            }
+            Expr::Attribute(a) => {
+                if let Some(base) = chain_root_name(&a.value) {
+                    *counts.entry(base.to_string()).or_insert(0) += 1;
+                }
+                visit(&a.value, counts);
+            }
+            Expr::Subscript(s) => {
+                visit(&s.value, counts);
+                visit(&s.slice, counts);
+            }
+            Expr::BinOp(b) => {
+                visit(&b.left, counts);
+                visit(&b.right, counts);
+            }
+            Expr::BoolOp(b) => {
+                for v in &b.values {
+                    visit(v, counts);
+                }
+            }
+            Expr::Compare(c) => {
+                visit(&c.left, counts);
+                for o in &c.comparators {
+                    visit(o, counts);
+                }
+            }
+            Expr::UnaryOp(u) => visit(&u.operand, counts),
+            Expr::Lambda(l) => visit(&l.body, counts),
+            Expr::If(i) => {
+                visit(&i.test, counts);
+                visit(&i.body, counts);
+                visit(&i.orelse, counts);
+            }
+            Expr::Named(n) => visit(&n.value, counts),
+            Expr::Await(a) => visit(&a.value, counts),
+            Expr::Starred(st) => visit(&st.value, counts),
+            Expr::ListComp(l) => {
+                visit(&l.elt, counts);
+                for g in &l.generators {
+                    visit(&g.iter, counts);
+                    for c in &g.ifs {
+                        visit(c, counts);
+                    }
+                }
+            }
+            Expr::SetComp(sc) => {
+                visit(&sc.elt, counts);
+                for g in &sc.generators {
+                    visit(&g.iter, counts);
+                    for c in &g.ifs {
+                        visit(c, counts);
+                    }
+                }
+            }
+            Expr::DictComp(d) => {
+                if let Some(k) = &d.key {
+                    visit(k, counts);
+                }
+                visit(&d.value, counts);
+                for g in &d.generators {
+                    visit(&g.iter, counts);
+                    for c in &g.ifs {
+                        visit(c, counts);
+                    }
+                }
+            }
+            Expr::Generator(g) => {
+                visit(&g.elt, counts);
+                for gg in &g.generators {
+                    visit(&gg.iter, counts);
+                    for c in &gg.ifs {
+                        visit(c, counts);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut stack: Vec<&Stmt> = Vec::new();
+    for s in body {
+        stack.push(s);
+    }
+    while let Some(s) = stack.pop() {
+        if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            continue;
+        }
+        for e in stmt_exprs(s) {
+            visit(e, counts);
+        }
+        push_stmt_children(s, &mut stack);
+    }
+}
+
+/// The locals aliased from the class's own state: `graph = self.graph`.
+/// Feature envy reads THESE — the collaborator the method reaches into.
+fn collaborator_aliases(body: &[Stmt], out: &mut HashSet<String>) {
+    let mut stack: Vec<&Stmt> = Vec::new();
+    for s in body {
+        stack.push(s);
+    }
+    while let Some(s) = stack.pop() {
+        if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            continue;
+        }
+        if let Stmt::Assign(a) = s {
+            if a.targets.len() == 1 {
+                if let (Expr::Name(n), Expr::Attribute(at)) = (&a.targets[0], a.value.as_ref()) {
+                    if matches!(at.value.as_ref(), Expr::Name(inner) if inner.id.as_str() == "self") {
+                        out.insert(n.id.to_string());
+                    }
+                }
+            }
+        }
+        push_stmt_children(s, &mut stack);
+    }
+}
+
+/// The names bound as loop targets anywhere in a function's body (for x in
+/// ...) — elements the function iterates are its own inputs.
+fn loop_target_names(body: &[Stmt], out: &mut HashSet<String>) {
+    let mut stack: Vec<&Stmt> = Vec::new();
+    for s in body {
+        stack.push(s);
+    }
+    while let Some(s) = stack.pop() {
+        if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            continue;
+        }
+        if let Stmt::For(f) = s {
+            let mut tstack: Vec<&Expr> = Vec::new();
+            tstack.push(&f.target);
+            while let Some(t) = tstack.pop() {
+                match t {
+                    Expr::Name(n) => {
+                        out.insert(n.id.to_string());
+                    }
+                    Expr::Tuple(tp) => {
+                        for el in &tp.elts {
+                            tstack.push(el);
+                        }
+                    }
+                    Expr::List(l) => {
+                        for el in &l.elts {
+                            tstack.push(el);
+                        }
+                    }
+                    Expr::Starred(st) => tstack.push(&st.value),
+                    _ => {}
+                }
+            }
+        }
+        push_stmt_children(s, &mut stack);
+    }
+}
+
+/// A method that reads another object's fields more than its own state —
+/// feature envy: the computation belongs on the envied object.
+pub fn feature_envy_findings(state: &mut ScanState, body: &[Stmt]) {
+    for s in body {
+        let Stmt::ClassDef(c) = s else { continue };
+        for m in &c.body {
+            let Stmt::FunctionDef(f) = m else { continue };
+            let mut params = HashSet::new();
+            function_param_names(&f.parameters, &mut params);
+            let mut loop_targets = HashSet::new();
+            loop_target_names(&f.body, &mut loop_targets);
+            let mut collaborators = HashSet::new();
+            collaborator_aliases(&f.body, &mut collaborators);
+            let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            count_receiver_reads(&f.body, &mut counts);
+            let self_reads = counts.get("self").copied().unwrap_or(0);
+            if self_reads < 1 {
+                continue;
+            }
+            for (receiver, n) in &counts {
+                // envy is reaching into a COLLABORATOR (a local aliased from
+                // self.<attr>) — not the method's inputs (params, loop
+                // targets) and not computed values (pos = self.get_metadata())
+                if receiver == "self"
+                    || params.contains(receiver)
+                    || loop_targets.contains(receiver)
+                    || !collaborators.contains(receiver)
+                    || *n < 4
+                    || *n < self_reads + 3
+                {
+                    continue;
+                }
+                let line = line_of(state.source, f.name.range().start());
+                state.findings.push(Finding {
+                    file: state.file.to_string(),
+                    line,
+                    function: f.name.to_string(),
+                    kind: "feature-envy".into(),
+                    severity: "fail".into(),
+                    message: format!(
+                        "'{}' reads '{}' {} times vs its own state {} — feature envy: the logic belongs on the envied object; move the computation onto '{}' as a method",
+                        f.name.as_str(),
+                        receiver,
+                        n,
+                        self_reads,
+                        receiver
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// A class must DECLARE its members — annotated in the class body, in
+/// __slots__, or in __init__ — not assign them quietly in member functions.
+pub fn undeclared_attribute_findings(state: &mut ScanState, body: &[Stmt]) {
+    for s in body {
+        let Stmt::ClassDef(c) = s else { continue };
+        let mut declared: HashSet<String> = HashSet::new();
+        for m in &c.body {
+            match m {
+                Stmt::AnnAssign(a) => {
+                    if let Expr::Name(n) = a.target.as_ref() {
+                        declared.insert(n.id.to_string());
+                    }
+                }
+                Stmt::Assign(a) => {
+                    for t in &a.targets {
+                        if let Expr::Name(n) = t {
+                            if n.id.as_str() == "__slots__" {
+                                if let Some(tuple) = slot_names(&a.value) {
+                                    declared.extend(tuple);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for m in &c.body {
+            let Stmt::FunctionDef(f) = m else { continue };
+            if f.name.as_str() == "__init__" {
+                for st in &f.body {
+                    if let Stmt::AnnAssign(a) = st {
+                        if let Expr::Attribute(at) = a.target.as_ref() {
+                            if matches!(at.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self") {
+                                declared.insert(at.attr.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for m in &c.body {
+            let Stmt::FunctionDef(f) = m else { continue };
+            let is_init = f.name.as_str() == "__init__";
+            let mut stack: Vec<&Stmt> = Vec::new();
+            for b in &f.body {
+                stack.push(b);
+            }
+            while let Some(st) = stack.pop() {
+                if matches!(st, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+                    continue;
+                }
+                let mut targets: Vec<&Expr> = Vec::new();
+                match st {
+                    Stmt::Assign(a) => {
+                        for t in &a.targets {
+                            targets.push(t);
+                        }
+                    }
+                    Stmt::AnnAssign(a) => targets.push(a.target.as_ref()),
+                    Stmt::AugAssign(a) => targets.push(&a.target),
+                    _ => {}
+                }
+                for t in targets {
+                    let Expr::Attribute(at) = t else { continue };
+                    if !matches!(at.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self") {
+                        continue;
+                    }
+                    let attr = at.attr.to_string();
+                    if declared.contains(&attr) {
+                        continue;
+                    }
+                    let line = line_of(state.source, at.range().start());
+                    let msg = if is_init {
+                        format!(
+                            "'{}' assigns member '{attr}' in __init__ without a declaration — declare it: self.{attr}: <type> = ...",
+                            c.name.as_str()
+                        )
+                    } else {
+                        format!(
+                            "'{}' assigns member '{attr}' in '{}' without a declaration — declare it in __init__ (annotated) or the class body",
+                            c.name.as_str(),
+                            f.name.as_str()
+                        )
+                    };
+                    state.findings.push(Finding {
+                        file: state.file.to_string(),
+                        line,
+                        function: f.name.to_string(),
+                        kind: "undeclared-attribute".into(),
+                        severity: "fail".into(),
+                        message: msg,
+                    });
+                }
+                push_stmt_children(st, &mut stack);
+            }
+        }
+    }
+}
+
+/// The names in a __slots__ literal (tuple or list of string literals).
+fn slot_names(e: &Expr) -> Option<Vec<String>> {
+    let elts: Vec<&Expr> = match e {
+        Expr::Tuple(t) => t.elts.iter().collect(),
+        Expr::List(l) => l.elts.iter().collect(),
+        _ => return None,
+    };
+    let mut names = Vec::new();
+    for el in elts {
+        if let Expr::StringLiteral(s) = el {
+            names.push(s.value.to_string());
+        } else {
+            return None;
+        }
+    }
+    Some(names)
+}
+
 pub fn inner_function_count(fn_stmt: &Stmt) -> u32 {
     let mut count = 0;
     let mut stack: Vec<&Stmt> = Vec::new();

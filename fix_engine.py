@@ -19,7 +19,7 @@ from __future__ import annotations
 import builtins
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import override
+from typing import NamedTuple, override
 
 import libcst as cst
 import libcst.matchers as m
@@ -44,6 +44,622 @@ class FixOptions:
     name: str | None = None
     repo: Path | None = None
     rel: str | None = None
+
+
+class _ModuleProposal(NamedTuple):
+    """The extract-module split result: the new origin source and the new
+    module source — a named record instead of a bare tuple."""
+
+    origin: str
+    module: str
+
+
+@dataclass
+class _FixRequest:
+    """The whole fix context: which file (repo/rel), what kind, where
+    (line), with what options, and the content. The (rel, repo), (line,
+    source) and (opts, source) pairs travel together — a parameter object
+    holds them; the entry fills `source` from the file when not supplied."""
+
+    kind: str
+    repo: Path
+    rel: str
+    line: int
+    opts: FixOptions
+    max_decisions: int | None = None
+    source: str | None = None
+
+    def fix_extract_class(self) -> str | None:
+        source, line = self.source, self.line
+        name = self.opts.name
+        """Move the strewing group into a class named `name` (default: the shared
+        leading type). Returns the new source, or None when the finding is stale
+        or the group is not auto-fixable."""
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
+        found = _strewing_group(source, line)
+        if found is None:
+            return None
+        shared = found.shared
+        fns = found.fns
+        class_name = name or shared
+
+        # pass 1: rewrite the call sites WITHOUT deleting — the moved bodies must
+        # be collected from this pass so their inter-fn calls are method calls
+        # (`_window_score(state, ...)` -> `state._window_score(...)`)
+        call_rewritten = wrapper.visit(_MoveIntoClass(set(fns), delete=False)).code
+
+        # pass 2: per-function receiver rename (each fn's OWN first param, LOAD
+        # references only), then swap the first param to `self`
+        methods = _collect_defs(cst.parse_module(call_rewritten), set(fns))
+        receivers = {
+            m.name.value: (m.params.params[0].name.value if m.params.params else None)
+            for m in methods
+        }
+        mod2 = cst.parse_module(call_rewritten)
+        wrap2 = cst.MetadataWrapper(mod2)
+        stores = _CollectStores()
+        wrap2.visit(stores)
+        renamed = wrap2.visit(_ReceiverToSelf(receivers, stores.per_fn))
+        new_methods = []
+        for method in _collect_defs(renamed, set(fns)):
+            params = method.params.params
+            new_methods.append(
+                method.with_changes(
+                    params=method.params.with_changes(
+                        params=[cst.Param(name=cst.Name("self"), annotation=None), *params[1:]]
+                    ),
+                    body=method.body,
+                )
+            )
+
+        # pass 3: delete the free fns (call sites already rewritten)
+        deleted = wrapper.visit(_MoveIntoClass(set(fns))).code
+        classdef = cst.ClassDef(
+            name=cst.Name(class_name),
+            bases=[],
+            body=cst.IndentedBlock(body=list(new_methods)),
+        )
+        return cst.parse_module(deleted).visit(_InsertClass(class_name, classdef, new_methods)).code
+    def fix_parameter_object(self) -> str | None:
+        source, line = self.source, self.line
+        name = self.opts.name
+        """Introduce Parameter Object: bundle the function's params into a
+        dataclass named `name`, change the signature to `options: name`, rewrite
+        the body references and same-file call sites."""
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
+        target = _find_fn_at(wrapper, line)
+        if target is None:
+            return None
+        raw_params = [p for p in target.params.params if p.name is not None]
+        params = [p for p in raw_params if p.name.value not in ("self", "cls")]
+        if len(params) < 6:
+            return None  # not the long-param-list shape (threshold is > 5)
+        param_names = [p.name.value for p in params]
+        renamed = wrapper.visit(_FnBodyRewrite(target.name.value, line, param_names, name)).code
+        call_fixed = (
+            cst.parse_module(renamed)
+            .visit(_CallSiteRewrite(target.name.value, param_names, name))
+            .code
+        )
+        module3 = cst.parse_module(call_fixed)
+        body = list(module3.body)
+        first = next(
+            (i for i, s in enumerate(body) if isinstance(s, (cst.FunctionDef, cst.ClassDef))),
+            len(body),
+        )
+        body.insert(first, _dataclass_def(name, params))
+        return module3.with_changes(body=_ensure_dataclasses_import(body)).code
+    def extract_method_proposal(self):
+        source, line = self.source, self.line
+        name = self.opts.name
+        max_decisions = self.max_decisions
+        """Compute the best extraction seam and the resulting source, WITHOUT
+        writing. Returns (new_source, seam_text) or (None, None) when no safe
+        seam exists. `name` may be None — the preview then shows a placeholder
+        (`_extracted`) the agent replaces after reviewing the seam; a supplied
+        name is normalized to the private convention (the extracted function
+        cannot have external callers, so it takes the underscore)."""
+        if name is None:
+            name = "_extracted"
+        elif _extraction_is_private() and not name.startswith("_"):
+            name = "_" + name
+        module, wrapper, state = self._fn_seam_analysis()
+        if state.fn_node is None or len(state.flat) < 2:
+            return None, None
+        # a nested-function target cannot host the extracted helper — the insert
+        # lands at module/class level, so the rewritten call would NameError
+        # (refuse rather than write a broken file)
+        if _is_nested_target(wrapper, state.fn_node):
+            return None, None
+        seam = state.best_seam(
+            max_window_decisions=max_decisions,
+            min_window_decisions=_min_seam_decisions(state),
+        )
+        if seam is None:
+            return None, None
+        block_sids, free_vars = seam
+        first_span = state.stmt_spans[block_sids[0]]
+        flat_entry = next(e for e in state.flat if e[0] == block_sids[0])
+        container_sid, insert_index = flat_entry[1], flat_entry[2]
+        body_stmts = [state.nodes[sid] for sid in block_sids]
+        if body_stmts:
+            # the first moved statement carries its original leading blank
+            # lines (it was separated from the previous statement in the
+            # source) — that would render as an empty first body line
+            body_stmts[0] = body_stmts[0].with_changes(leading_lines=[])
+        new_def = cst.FunctionDef(
+            name=cst.Name(name),
+            params=cst.Parameters(params=[cst.Param(cst.Name(v)) for v in free_vars]),
+            body=cst.IndentedBlock(body=body_stmts),
+            returns=None,
+        )
+        replaced = wrapper.visit(
+            _ExtractMethodRewrite(set(block_sids), (container_sid, insert_index), name, free_vars)
+        ).code
+        inserted = cst.MetadataWrapper(cst.parse_module(replaced)).visit(
+            _InsertExtractedFn(state.fn_node.name.value, line, new_def)
+        ).code
+        seam_text = source.splitlines()[first_span[0] - 1] if source else ""
+        return inserted, f"line {first_span[0]}: {seam_text.strip()}"
+    def fix_extract_method(self) -> str | None:
+        """Extract Function (applied): the best self-contained seam of the
+        function at `line` becomes a new function named `name`. The seam is
+        bounded to <= 13 decisions so the extracted function lands under the
+        CC-15 gate — extraction SPLITS complexity, it does not move it. The
+        name is normalized: the extracted function is private by construction
+        (see _extraction_is_private), so a public-looking name is underscored."""
+        new_source, _ = self.extract_method_proposal()
+        return new_source
+    def fix_magic_literal(self) -> str | None:
+        source, line = self.source, self.line
+        name = self.opts.name
+        """Replace Magic Literal: `f(10, ...)` -> `f(MAX_RETRIES, ...)` with
+        `MAX_RETRIES = 10` inserted at module top."""
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
+        value: str | None = None
+
+        class _Find(cst.CSTVisitor):
+            METADATA_DEPENDENCIES = (PositionProvider,)
+
+            @override
+            def visit_Integer(self, node) -> None:
+                nonlocal value
+                if value is None and self.get_metadata(PositionProvider, node).start.line == line:
+                    value = node.value
+
+            @override
+            def visit_Float(self, node) -> None:
+                nonlocal value
+                if value is None and self.get_metadata(PositionProvider, node).start.line == line:
+                    value = node.value
+
+        wrapper.visit(_Find())
+        if value is None:
+            return None
+        replaced = wrapper.visit(_ReplaceLiteral(line, name)).code
+        if replaced == source:
+            return None
+        module2 = cst.parse_module(replaced)
+        assignment = cst.SimpleStatementLine(
+            body=[
+                cst.Assign(
+                    targets=[cst.AssignTarget(cst.Name(name))],
+                    value=cst.parse_expression(value),
+                )
+            ]
+        )
+        body = list(module2.body)
+        first = next(
+            (i for i, s in enumerate(body) if isinstance(s, (cst.FunctionDef, cst.ClassDef))),
+            len(body),
+        )
+        body.insert(first, assignment)
+        return module2.with_changes(body=body).code
+    def fix_rename(self) -> str | None:
+        source, line = self.source, self.line
+        name = self.opts.name
+        """Rename (vague-name): the class at `line` plus every same-file Name
+        reference. Cross-file call sites need FullRepoManager — same-file v1."""
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
+        old: str | None = None
+
+        class _Find(cst.CSTVisitor):
+            METADATA_DEPENDENCIES = (PositionProvider,)
+
+            @override
+            def visit_ClassDef(self, node) -> None:
+                nonlocal old
+                if old is None and self.get_metadata(PositionProvider, node).start.line == line:
+                    old = node.name.value
+
+        wrapper.visit(_Find())
+        if old is None or old == name:
+            return None
+        renamed = wrapper.visit(_RenameClass(line, old, name)).code
+        return None if renamed == source else renamed
+    def _fn_seam_analysis(self):
+        source, line = self.source, self.line
+        """Analyze the function at `line`: its body statements with per-statement
+        spans, first-use contexts, writes, and control-flow flags."""
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
+        state = _FnBodyState(line)
+        wrapper.visit(_Analyse(state))
+        state.module_globals = _module_level_names(module)
+        state.fn_writes = set().union(*(w for w in state.writes.values())) if state.writes else set()
+        return module, wrapper, state
+    def fix_duplicate_def(self) -> str | None:
+        source, line = self.source, self.line
+        opts = self.opts
+        """Delete the shadowing (second) module-scope binding when nothing
+        references it — proven by a repo-wide Name count (only the two def sites
+        hit). Referenced shadows are renamed by the agent, never auto-deleted."""
+        wrapper = cst.MetadataWrapper(cst.parse_module(source))
+        probe = _FindModuleDef(line)
+        wrapper.visit(probe)
+        if probe.found is None or probe.name is None:
+            return None
+        if _name_occurrences(opts.repo, probe.name) > 2:
+            return None  # something references the name — a delete would break it
+        return wrapper.module.visit(_RemoveNodes([probe.found])).code
+    def fix_restating_docstring(self) -> str | None:
+        source, line = self.source, self.line
+        return cst.MetadataWrapper(cst.parse_module(source)).visit(_StripDocstring(line)).code
+
+
+    def fix_duplicate_block(self) -> str | None:
+        source, line = self.source, self.line
+        """Delete the second copy of a repeated 3-statement block. Refuses when
+        the removal would empty a block (an emptied body needs `pass` — the
+        agent's call)."""
+        wrapper = cst.MetadataWrapper(cst.parse_module(source))
+
+        class _FindFn(cst.CSTVisitor):
+            METADATA_DEPENDENCIES = (PositionProvider,)
+
+            def __init__(self, target: int) -> None:
+                self.target = target
+                self.fn: cst.FunctionDef | None = None
+
+            @override
+            def visit_FunctionDef(self, node) -> None:
+                pos = self.get_metadata(PositionProvider, node)
+                if pos.start.line <= self.target <= pos.end.line:
+                    self.fn = node  # last (innermost) containing function wins
+
+        finder = _FindFn(line)
+        wrapper.visit(finder)
+        if finder.fn is None:
+            return None
+        flat: list = []
+        _flatten_stmts(list(finder.fn.body.body), flat)
+        if len(flat) < 6:
+            return None
+        targets: list | None = None
+        for i in range(len(flat) - 5):
+            for j in range(i + 3, len(flat) - 2):
+                if all(flat[i + k].deep_equals(flat[j + k]) for k in range(3)):
+                    pos = wrapper.resolve(PositionProvider)[flat[j]]
+                    if pos.start.line == line:
+                        targets = flat[j : j + 3]
+                        break
+            if targets is not None:
+                break
+
+        if targets is None:
+            return None
+        # a removal that empties a block leaves invalid Python (`pass` required) —
+        # refuse when every statement of a block is a target (the agent places
+        # the pass by hand)
+        target_set = set(targets)
+        for t in targets:
+            parent = wrapper.resolve(ParentNodeProvider)[t]
+            if isinstance(parent, cst.IndentedBlock):
+                block_stmts = list(parent.body)
+                if block_stmts and all(s in target_set for s in block_stmts):
+                    return None
+        return wrapper.module.visit(_RemoveNodes(targets)).code
+    def _extract_module_proposal(self) -> _ModuleProposal | None:
+        source, opts = self.source, self.opts
+        """(new origin source, new module source) for the extract-module split, or
+        None when the split is not safe. Pure — no writes; the apply path writes
+        both files. The moved defs are the --params names; the module is --name
+        (same directory as the origin). Refuses when the moved code needs a
+        non-moved origin def (a from-origin import in the new module would create
+        the very cycle the review log §3.4 fixed) or a decorated def (registration
+        semantics)."""
+        if not opts.name or not opts.params:
+            return None
+        module = cst.parse_module(source)
+        move = set(opts.params)
+        top_defs = {
+            stmt.name.value: stmt
+            for stmt in module.body
+            if isinstance(stmt, (cst.FunctionDef, cst.ClassDef))
+        }
+        if not move <= set(top_defs):
+            return None  # a named member is not module-scope here
+        for name in move:
+            if top_defs[name].decorators:
+                return None
+        # free reads only: a name bound inside the moved function (parameter,
+        # local, for/comprehension target) cannot reference a module-level
+        # binding — counting it would falsely refuse safe splits (review finding)
+        referenced: set[str] = set()
+        for name in move:
+            free = _FreeNames()
+            top_defs[name].visit(free)
+            referenced |= free.names - free.bound
+        if referenced & (set(top_defs) - move):
+            return None  # the moved code needs an origin def — cycle risk
+        # module-level assignments/constants the moved code reads would be
+        # missing from the new module (a runtime NameError) — refuse; moving
+        # them would break the origin's remaining code (review finding)
+        if referenced & _module_bindings(module):
+            return None
+        new_module = cst.Module(
+            body=[*_moved_imports(module, referenced), *(top_defs[n] for n in opts.params)]
+        )
+        return _ModuleProposal(
+            origin=cst.Module(body=_origin_after_move(module, move, opts)).code,
+            module=new_module.code,
+        )
+    def fix_extract_module(self) -> str | None:
+        opts = self.opts
+        """The apply side of extract-module — writes the new module and returns
+        the origin's new source (fix_finding writes the origin)."""
+        result = self._extract_module_proposal()
+        if result is None:
+            return None
+        origin_source, new_module_source = result
+        repo, rel, module_name = opts.repo, opts.rel, opts.name
+        new_path = repo / (rel.rsplit("/", 1)[0] if "/" in rel else "") / f"{module_name}.py"
+        if new_path.exists():
+            return None  # never clobber an existing module
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        new_path.write_text(new_module_source, encoding="utf-8")
+        return origin_source
+    def fix_dispatch_registry(self) -> str | None:
+        source, line = self.source, self.line
+        """A dispatch chain (`if sel == "a": return f()  if sel == "b": ...`)
+        is a handler REGISTRY in disguise — each arm is already a named handler.
+        Rewrite it to a dict of selector -> handler functions and a one-line
+        dispatch, extracting every arm's body as a private function named from
+        its literal. The handler signature is the UNION of the arms' free
+        variables (minus the selector) so the dispatch call is uniform."""
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
+        finder = _FindFnLine(line)
+        wrapper.visit(finder)
+        fn = finder.found
+        if fn is None or not any(s is fn for s in wrapper.module.body):
+            return None
+        body = list(fn.body.body)
+        shaped = _dispatch_chain_shape(fn, body)
+        if shaped is None:
+            return None
+        preamble, chain, selector, default = shaped
+
+        # the LAMBDA TABLE when every arm is a single expression — the pure data
+        # form (selector adjacent to its expression, closures capture the scope,
+        # no names, no plumbing — the rule-table principle). Multi-statement arms
+        # fall back to named handlers (a lambda cannot hold a body).
+        exprs = [_arm_single_expression(arm_body) for _lit, arm_body in chain]
+        if all(e is not None for e in exprs):
+            return _dispatch_lambda_mode(fn, wrapper, shaped, exprs)
+        return _dispatch_named_mode(fn, wrapper, shaped)
+    def fix_rule_table(self) -> str | None:
+        source, line = self.source, self.line
+        """A rule battery (`if cond: violations.append(...)` repeated) is a
+        LATENT DATA STRUCTURE — a table of (condition, violation) pairs. Hoist
+        it: each check becomes a tuple `(lambda: <cond>, <violation>)`, the
+        function collects the violations whose condition holds. The lambdas
+        capture the enclosing scope (shared preamble locals need no plumbing)
+        and need NO names — the naming problem dissolves. v1: each check is a
+        single `acc.append(<value>)` with no else."""
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
+        finder = _FindFnLine(line)
+        wrapper.visit(finder)
+        fn = finder.found
+        if fn is None or not any(s is fn for s in wrapper.module.body):
+            return None
+        body = list(fn.body.body)
+        shaped = _rule_battery_shape(fn, body)
+        if shaped is None:
+            return None
+        acc, checks, preamble, tail = shaped
+        table, collector = _rule_table_build(acc, checks)
+        new_fn = fn.with_changes(body=fn.body.with_changes(body=preamble + [table, collector] + tail))
+        # the lambdas live IN the fn — no module-level additions
+        out_body: list = [new_fn if stmt is fn else stmt for stmt in wrapper.module.body]
+        return cst.Module(body=out_body).code
+    def _fix_mechanical(self) -> str | None:
+        kind, source, line, opts = self.kind, self.source, self.line, self.opts
+        """The mechanical transforms — a changed source, or None when the callee
+        is unresolvable (the retry protocol supplies params)."""
+        if kind in ("noop-statement", "unreachable"):
+            return cst.MetadataWrapper(cst.parse_module(source)).visit(_DeleteStatement(line)).code
+        if kind == "stale-suppression":
+            return cst.MetadataWrapper(cst.parse_module(source)).visit(_DeleteComment(line)).code
+        if kind == "positional-literals":
+            params = opts.params if opts.params is not None else self._callee_params_for_call()
+            if params is None:
+                return None
+            return cst.MetadataWrapper(cst.parse_module(source)).visit(_KeywordArgs(line, params)).code
+        if kind == "duplicate-def":
+            return self.fix_duplicate_def()
+        if kind == "restating-docstring":
+            return self.fix_restating_docstring()
+        if kind == "duplicate-block":
+            return self.fix_duplicate_block()
+        return None
+    def _fix_structural(self) -> str | None:
+        kind, opts = self.kind, self.opts
+        """The name-driven transforms — the agent supplies the semantic bit."""
+        if kind == "extract-method":
+            if opts.name is None:
+                return None
+            return self.fix_extract_method()
+        if kind == "extract-class":
+            return self.fix_extract_class()
+        if kind == "magic-number":
+            if opts.name is None:
+                return None
+            return self.fix_magic_literal()
+        if kind == "vague-name":
+            if opts.name is None:
+                return None
+            return self.fix_rename()
+        if kind == "long-param-list":
+            if opts.name is None:
+                return None
+            return self.fix_parameter_object()
+        if kind == "dispatch-registry":
+            return self.fix_dispatch_registry()
+        if kind == "rule-table":
+            return self.fix_rule_table()
+        return None
+    def _repo_params(self, callee: str) -> list[str] | None:
+        repo, rel = self.repo, self.rel
+        """Resolve the callee's params repo-wide — the call's file first, then
+        every other .py under the repo (a module-level def or a class __init__).
+        First match in sorted order wins; ambiguity is documented, not fatal."""
+        candidates = sorted(
+            p for p in repo.rglob("*.py")
+            if p.is_file() and not any(part.startswith((".venv", "venv", "node_modules")) for part in p.parts)
+        )
+        # the finding's own file first (fast path + locality)
+        own = repo / rel
+        if own in candidates:
+            candidates.remove(own)
+            candidates.insert(0, own)
+        for path in candidates:
+            try:
+                source = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            params = _params_of_any_def(source, callee)
+            if params is not None:
+                return params
+        return None
+    def _callee_params_for_call(self) -> list[str] | None:
+        source, line = self.source, self.line
+        """The callee's param names for the call on `line`, resolved repo-wide.
+        Mirrors the scanner's Name-callee rule: a method/builtin callee is not
+        auto-fixable."""
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
+        callee = None
+
+        class _FindCall(cst.CSTVisitor):
+            METADATA_DEPENDENCIES = (PositionProvider,)
+
+            @override
+            def visit_Call(self, node) -> None:
+                nonlocal callee
+                if callee is not None:
+                    return
+                pos = self.get_metadata(PositionProvider, node)
+                if pos.start.line <= line <= pos.end.line and m.matches(node.func, m.Name()):
+                    callee = node.func.value
+
+        wrapper.visit(_FindCall())
+        if callee is None:
+            return None
+        return self._repo_params(callee)
+    def propose_finding(self):
+        kind, rel, repo = self.kind, self.rel, self.repo
+        opts = self.opts or FixOptions()
+        source = self.source or (repo / rel).read_text(encoding="utf-8")
+        self.source = source
+        """Compute the fix WITHOUT writing — the preview surface for every
+        structural kind. Returns (new_source, description) or (None, None) when
+        nothing changes or the agent's semantic bit is missing."""
+        opts = opts or FixOptions()
+        kind = KIND_ALIASES.get(kind, kind)
+        self.kind = kind
+        path = repo / rel
+        source = path.read_text(encoding="utf-8")
+        if kind not in STRUCTURAL_KINDS:
+            return None, None  # mechanical kinds apply directly, no preview
+        if kind == "extract-method":
+            # name-free preview: the seam is shown with a placeholder name the
+            # agent replaces — naming AFTER seeing the diff, not before
+            new_source, seam = self.extract_method_proposal()
+            if new_source is None or new_source == source:
+                return None, None
+            return new_source, seam  # "line N: <first seam line>" — what moves
+
+        if kind == "extract-module":
+            # the preview shows the origin diff; the description names the seam
+            # (the members moving and the new module) so the agent can judge.
+            # Name-free: the reexport line uses a placeholder the agent replaces
+            # (naming AFTER seeing the diff); the apply path requires the real
+            # module name.
+            if not opts.params:
+                return None, None
+            preview_opts = FixOptions(
+                params=opts.params,
+                name=opts.name or "_extracted",
+                repo=opts.repo,
+                rel=opts.rel,
+            )
+            preview = _FixRequest(
+                kind=self.kind, repo=self.repo, rel=self.rel,
+                line=self.line, opts=preview_opts, source=self.source,
+            )
+            result = preview._extract_module_proposal()
+            if result is None or result[0] == source:
+                return None, None
+            return result[0], (
+                f"extract-module: moves {', '.join(opts.params)} into a new module "
+                "(name the module to apply)"
+            )
+        new_source = self._fix_structural()
+        if new_source is None or new_source == source:
+            return None, None
+        return new_source, STRUCTURAL_KINDS[kind]
+    def fix_finding(self) -> str | None:
+        kind, rel, repo = self.kind, self.rel, self.repo
+        opts = self.opts or FixOptions()
+        source = self.source or (repo / rel).read_text(encoding="utf-8")
+        self.source = source
+        """Apply the transform for one finding. Returns a human description of
+        what changed, or None when the finding was already gone (no edit).
+
+        `opts` carries the agent-supplied semantic bits (the callee's parameter
+        names for external/unresolved callees; the class name for extract-class)
+        — the tool does the mechanical edit; the agent reads the signature once.
+        """
+        opts = opts or FixOptions()
+        kind = KIND_ALIASES.get(kind, kind)
+        self.kind = kind
+        path = repo / rel
+        source = path.read_text(encoding="utf-8")
+        opts.repo = repo
+        opts.rel = rel
+        if kind in MECHANICAL_KINDS:
+            new_source = self._fix_mechanical()
+            description = MECHANICAL_KINDS[kind]
+        elif kind == "extract-module":
+            # two files change: the new module is created, the origin re-exports
+            # the moved defs. Never clobbers an existing module.
+            new_source = self.fix_extract_module()
+            description = STRUCTURAL_KINDS[kind]
+        elif kind in STRUCTURAL_KINDS:
+            new_source = self._fix_structural()
+            description = STRUCTURAL_KINDS[kind]
+        else:
+            raise ValueError(f"kind '{kind}' has no fix (mechanical or structural)")
+        if new_source is None or new_source == source:
+            return None  # nothing changed — the finding is stale or unlocatable
+        path.write_text(new_source, encoding="utf-8")
+        return description
 
 
 @dataclass
@@ -97,8 +713,8 @@ class _DeleteStatement(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self, target_line: int) -> None:
-        self.target_line = target_line
-        self.deleted = False
+        self.target_line: int = target_line
+        self.deleted: bool = False
 
     @override
     def leave_SimpleStatementLine(
@@ -120,8 +736,8 @@ class _DeleteComment(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self, target_line: int) -> None:
-        self.target_line = target_line
-        self.deleted = False
+        self.target_line: int = target_line
+        self.deleted: bool = False
 
     @override
     def leave_EmptyLine(
@@ -157,9 +773,9 @@ class _KeywordArgs(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self, target_line: int, params: list[str]) -> None:
-        self.target_line = target_line
-        self.params = params
-        self.done = False
+        self.target_line: int = target_line
+        self.params: list[str] = params
+        self.done: bool = False
 
     @override
     def leave_Call(
@@ -236,28 +852,6 @@ def _params_of_any_def(source: str, callee: str) -> list[str] | None:
     return found or None
 
 
-def _repo_params(repo: Path, rel: str, callee: str) -> list[str] | None:
-    """Resolve the callee's params repo-wide — the call's file first, then
-    every other .py under the repo (a module-level def or a class __init__).
-    First match in sorted order wins; ambiguity is documented, not fatal."""
-    candidates = sorted(
-        p for p in repo.rglob("*.py")
-        if p.is_file() and not any(part.startswith((".venv", "venv", "node_modules")) for part in p.parts)
-    )
-    # the finding's own file first (fast path + locality)
-    own = repo / rel
-    if own in candidates:
-        candidates.remove(own)
-        candidates.insert(0, own)
-    for path in candidates:
-        try:
-            source = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        params = _params_of_any_def(source, callee)
-        if params is not None:
-            return params
-    return None
 
 
 # --------------------------------------------------------------------------- extract-class (strewing)
@@ -269,8 +863,8 @@ class _MoveIntoClass(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self, fns: set[str], delete: bool = True) -> None:
-        self.fns = fns
-        self.delete = delete
+        self.fns: set[str] = fns
+        self.delete: bool = delete
 
     @override
     def leave_FunctionDef(
@@ -364,86 +958,8 @@ def _strewing_group(source: str, anchor_line: int) -> StrewingGroup | None:
     return StrewingGroup(shared=anchor_ann, fns=fns, anchor=anchor_line)
 
 
-def fix_extract_class(source: str, line: int, name: str | None) -> str | None:
-    """Move the strewing group into a class named `name` (default: the shared
-    leading type). Returns the new source, or None when the finding is stale
-    or the group is not auto-fixable."""
-    module = cst.parse_module(source)
-    wrapper = cst.MetadataWrapper(module)
-    found = _strewing_group(source, line)
-    if found is None:
-        return None
-    shared = found.shared
-    fns = found.fns
-    class_name = name or shared
-
-    # pass 1: rewrite the call sites WITHOUT deleting — the moved bodies must
-    # be collected from this pass so their inter-fn calls are method calls
-    # (`_window_score(state, ...)` -> `state._window_score(...)`)
-    call_rewritten = wrapper.visit(_MoveIntoClass(set(fns), delete=False)).code
-
-    # pass 2: per-function receiver rename (each fn's OWN first param, LOAD
-    # references only), then swap the first param to `self`
-    methods = _collect_defs(cst.parse_module(call_rewritten), set(fns))
-    receivers = {
-        m.name.value: (m.params.params[0].name.value if m.params.params else None)
-        for m in methods
-    }
-    mod2 = cst.parse_module(call_rewritten)
-    wrap2 = cst.MetadataWrapper(mod2)
-    stores = _CollectStores()
-    wrap2.visit(stores)
-    renamed = wrap2.visit(_ReceiverToSelf(receivers, stores.per_fn))
-    new_methods = []
-    for method in _collect_defs(renamed, set(fns)):
-        params = method.params.params
-        new_methods.append(
-            method.with_changes(
-                params=method.params.with_changes(
-                    params=[cst.Param(name=cst.Name("self"), annotation=None), *params[1:]]
-                ),
-                body=method.body,
-            )
-        )
-
-    # pass 3: delete the free fns (call sites already rewritten)
-    deleted = wrapper.visit(_MoveIntoClass(set(fns))).code
-    classdef = cst.ClassDef(
-        name=cst.Name(class_name),
-        bases=[],
-        body=cst.IndentedBlock(body=list(new_methods)),
-    )
-    return cst.parse_module(deleted).visit(_InsertClass(class_name, classdef, new_methods)).code
 
 
-def fix_parameter_object(source: str, line: int, name: str) -> str | None:
-    """Introduce Parameter Object: bundle the function's params into a
-    dataclass named `name`, change the signature to `options: name`, rewrite
-    the body references and same-file call sites."""
-    module = cst.parse_module(source)
-    wrapper = cst.MetadataWrapper(module)
-    target = _find_fn_at(wrapper, line)
-    if target is None:
-        return None
-    raw_params = [p for p in target.params.params if p.name is not None]
-    params = [p for p in raw_params if p.name.value not in ("self", "cls")]
-    if len(params) < 6:
-        return None  # not the long-param-list shape (threshold is > 5)
-    param_names = [p.name.value for p in params]
-    renamed = wrapper.visit(_FnBodyRewrite(target.name.value, line, param_names, name)).code
-    call_fixed = (
-        cst.parse_module(renamed)
-        .visit(_CallSiteRewrite(target.name.value, param_names, name))
-        .code
-    )
-    module3 = cst.parse_module(call_fixed)
-    body = list(module3.body)
-    first = next(
-        (i for i, s in enumerate(body) if isinstance(s, (cst.FunctionDef, cst.ClassDef))),
-        len(body),
-    )
-    body.insert(first, _dataclass_def(name, params))
-    return module3.with_changes(body=_ensure_dataclasses_import(body)).code
 
 
 class _ExtractMethodRewrite(cst.CSTTransformer):
@@ -453,10 +969,10 @@ class _ExtractMethodRewrite(cst.CSTTransformer):
     index — so a seam inside a loop becomes a call inside the loop."""
 
     def __init__(self, block_sids: set[int], insertion, new_name: str, free_vars: list[str]) -> None:
-        self.block_sids = block_sids
+        self.block_sids: set[int] = block_sids
         self.container_sid, self.insert_index = insertion
-        self.new_name = new_name
-        self.free_vars = free_vars
+        self.new_name: str = new_name
+        self.free_vars: list[str] = free_vars
 
     def on_leave(self, original_node, updated_node):
         if id(original_node) in self.block_sids:
@@ -490,10 +1006,10 @@ class _InsertExtractedFn(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (ParentNodeProvider,)
 
     def __init__(self, fn_name: str, fn_line: int, new_def: cst.FunctionDef) -> None:
-        self.fn_name = fn_name
-        self.fn_line = fn_line
-        self.new_def = new_def
-        self.done = False
+        self.fn_name: str = fn_name
+        self.fn_line: int = fn_line
+        self.new_def: cst.FunctionDef = new_def
+        self.done: bool = False
 
     def _maybe_insert(self, body: list, blank_lines: int) -> list:
         if self.done:
@@ -527,7 +1043,7 @@ class _FnBodyState:
     control-flow flags."""
 
     def __init__(self, line: int) -> None:
-        self.line = line
+        self.line: int = line
         self.fn_node: cst.FunctionDef | None = None
         # flattened statement list: (sid, container_sid, index_in_container)
         self.flat: list[tuple[int, int, int]] = []
@@ -685,7 +1201,7 @@ class _Analyse(cst.CSTVisitor):
     METADATA_DEPENDENCIES = (PositionProvider, ExpressionContextProvider, ParentNodeProvider)
 
     def __init__(self, state: _FnBodyState) -> None:
-        self.state = state
+        self.state: _FnBodyState = state
 
     @override
     def visit_FunctionDef(self, node) -> None:
@@ -786,16 +1302,6 @@ class _Analyse(cst.CSTVisitor):
             self.state.writes[sid].add(node.value)
 
 
-def _fn_seam_analysis(source: str, line: int):
-    """Analyze the function at `line`: its body statements with per-statement
-    spans, first-use contexts, writes, and control-flow flags."""
-    module = cst.parse_module(source)
-    wrapper = cst.MetadataWrapper(module)
-    state = _FnBodyState(line)
-    wrapper.visit(_Analyse(state))
-    state.module_globals = _module_level_names(module)
-    state.fn_writes = set().union(*(w for w in state.writes.values())) if state.writes else set()
-    return module, wrapper, state
 
 
 _BUILTINS = frozenset(dir(builtins))
@@ -869,57 +1375,6 @@ def _min_seam_decisions(state) -> int:
     return max(0, total - 14) if total > 14 else 0
 
 
-def extract_method_proposal(
-    source: str, line: int, name: str | None = None, max_decisions: int | None = None,
-):
-    """Compute the best extraction seam and the resulting source, WITHOUT
-    writing. Returns (new_source, seam_text) or (None, None) when no safe
-    seam exists. `name` may be None — the preview then shows a placeholder
-    (`_extracted`) the agent replaces after reviewing the seam; a supplied
-    name is normalized to the private convention (the extracted function
-    cannot have external callers, so it takes the underscore)."""
-    if name is None:
-        name = "_extracted"
-    elif _extraction_is_private() and not name.startswith("_"):
-        name = "_" + name
-    module, wrapper, state = _fn_seam_analysis(source, line)
-    if state.fn_node is None or len(state.flat) < 2:
-        return None, None
-    # a nested-function target cannot host the extracted helper — the insert
-    # lands at module/class level, so the rewritten call would NameError
-    # (refuse rather than write a broken file)
-    if _is_nested_target(wrapper, state.fn_node):
-        return None, None
-    seam = state.best_seam(
-        max_window_decisions=max_decisions,
-        min_window_decisions=_min_seam_decisions(state),
-    )
-    if seam is None:
-        return None, None
-    block_sids, free_vars = seam
-    first_span = state.stmt_spans[block_sids[0]]
-    flat_entry = next(e for e in state.flat if e[0] == block_sids[0])
-    container_sid, insert_index = flat_entry[1], flat_entry[2]
-    body_stmts = [state.nodes[sid] for sid in block_sids]
-    if body_stmts:
-        # the first moved statement carries its original leading blank
-        # lines (it was separated from the previous statement in the
-        # source) — that would render as an empty first body line
-        body_stmts[0] = body_stmts[0].with_changes(leading_lines=[])
-    new_def = cst.FunctionDef(
-        name=cst.Name(name),
-        params=cst.Parameters(params=[cst.Param(cst.Name(v)) for v in free_vars]),
-        body=cst.IndentedBlock(body=body_stmts),
-        returns=None,
-    )
-    replaced = wrapper.visit(
-        _ExtractMethodRewrite(set(block_sids), (container_sid, insert_index), name, free_vars)
-    ).code
-    inserted = cst.MetadataWrapper(cst.parse_module(replaced)).visit(
-        _InsertExtractedFn(state.fn_node.name.value, line, new_def)
-    ).code
-    seam_text = source.splitlines()[first_span[0] - 1] if source else ""
-    return inserted, f"line {first_span[0]}: {seam_text.strip()}"
 
 
 def _extraction_is_private() -> bool:
@@ -932,60 +1387,8 @@ def _extraction_is_private() -> bool:
     return True
 
 
-def fix_extract_method(source: str, line: int, name: str | None) -> str | None:
-    """Extract Function (applied): the best self-contained seam of the
-    function at `line` becomes a new function named `name`. The seam is
-    bounded to <= 13 decisions so the extracted function lands under the
-    CC-15 gate — extraction SPLITS complexity, it does not move it. The
-    name is normalized: the extracted function is private by construction
-    (see _extraction_is_private), so a public-looking name is underscored."""
-    new_source, _ = extract_method_proposal(source, line, name, max_decisions=13)
-    return new_source
 
 
-def propose_finding(kind: str, rel: str, repo: Path, line: int, opts: FixOptions | None = None):
-    """Compute the fix WITHOUT writing — the preview surface for every
-    structural kind. Returns (new_source, description) or (None, None) when
-    nothing changes or the agent's semantic bit is missing."""
-    opts = opts or FixOptions()
-    kind = KIND_ALIASES.get(kind, kind)
-    path = repo / rel
-    source = path.read_text(encoding="utf-8")
-    if kind not in STRUCTURAL_KINDS:
-        return None, None  # mechanical kinds apply directly, no preview
-    if kind == "extract-method":
-        # name-free preview: the seam is shown with a placeholder name the
-        # agent replaces — naming AFTER seeing the diff, not before
-        new_source, seam = extract_method_proposal(source, line, opts.name, max_decisions=13)
-        if new_source is None or new_source == source:
-            return None, None
-        return new_source, seam  # "line N: <first seam line>" — what moves
-
-    if kind == "extract-module":
-        # the preview shows the origin diff; the description names the seam
-        # (the members moving and the new module) so the agent can judge.
-        # Name-free: the reexport line uses a placeholder the agent replaces
-        # (naming AFTER seeing the diff); the apply path requires the real
-        # module name.
-        if not opts.params:
-            return None, None
-        preview_opts = FixOptions(
-            params=opts.params,
-            name=opts.name or "_extracted",
-            repo=opts.repo,
-            rel=opts.rel,
-        )
-        result = _extract_module_proposal(source, preview_opts)
-        if result is None or result[0] == source:
-            return None, None
-        return result[0], (
-            f"extract-module: moves {', '.join(opts.params)} into a new module "
-            "(name the module to apply)"
-        )
-    new_source = _fix_structural(kind, source, line, opts)
-    if new_source is None or new_source == source:
-        return None, None
-    return new_source, STRUCTURAL_KINDS[kind]
 
 
 class _CollectStores(cst.CSTVisitor):
@@ -999,7 +1402,7 @@ class _CollectStores(cst.CSTVisitor):
     def __init__(self) -> None:
         self.per_fn: dict[str, set[str]] = {}
         self._current: str | None = None
-        self._in_param = False
+        self._in_param: bool = False
         self._fn_stack: list[str | None] = []
 
     @override
@@ -1050,8 +1453,8 @@ class _ReceiverToSelf(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (ExpressionContextProvider, ParentNodeProvider)
 
     def __init__(self, receivers: dict[str, str | None], shadowed: StoredNames) -> None:
-        self.receivers = receivers  # fn name -> its receiver param name
-        self.shadowed = shadowed  # fn name -> names stored in its body
+        self.receivers: object = receivers  # fn name -> its receiver param name
+        self.shadowed: object = shadowed  # fn name -> names stored in its body
         self._current: str | None = None
         self._fn_stack: list[str | None] = []
 
@@ -1104,9 +1507,9 @@ class _InsertClass(cst.CSTTransformer):
     the last one."""
 
     def __init__(self, class_name, classdef, methods) -> None:
-        self.class_name = class_name
-        self.classdef = classdef
-        self.methods = methods
+        self.class_name: object = class_name
+        self.classdef: object = classdef
+        self.methods: object = methods
 
     @override
     def leave_ClassDef(
@@ -1143,7 +1546,7 @@ class _BodyParamRewrite(cst.CSTTransformer):
     """Rewrite body references of the bundled params to options.<param>."""
 
     def __init__(self, params: list[str]) -> None:
-        self.params = set(params)
+        self.params: object = set(params)
 
     @override
     def on_visit(self, node) -> bool:
@@ -1168,9 +1571,9 @@ class _CallSiteRewrite(cst.CSTTransformer):
     """f(a, b, c) -> Name.f(a=a, b=b, c=c) for the renamed function."""
 
     def __init__(self, fn: str, params: list[str], class_name: str) -> None:
-        self.fn = fn
-        self.params = params
-        self.class_name = class_name
+        self.fn: str = fn
+        self.params: list[str] = params
+        self.class_name: str = class_name
 
     @override
     def leave_Call(
@@ -1282,10 +1685,10 @@ class _FnBodyRewrite(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self, fn_name: str, line: int, params: list[str], class_name: str) -> None:
-        self.fn_name = fn_name
-        self.line = line
-        self.params = set(params)
-        self.class_name = class_name
+        self.fn_name: str = fn_name
+        self.line: int = line
+        self.params: object = set(params)
+        self.class_name: str = class_name
 
     @override
     def leave_FunctionDef(
@@ -1317,9 +1720,9 @@ class _ReplaceLiteral(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self, target_line: int, name: str) -> None:
-        self.target_line = target_line
-        self.name = name
-        self.replaced = False
+        self.target_line: int = target_line
+        self.name: str = name
+        self.replaced: bool = False
 
     @override
     def leave_Integer(
@@ -1346,50 +1749,6 @@ class _ReplaceLiteral(cst.CSTTransformer):
         return updated_node
 
 
-def fix_magic_literal(source: str, line: int, name: str) -> str | None:
-    """Replace Magic Literal: `f(10, ...)` -> `f(MAX_RETRIES, ...)` with
-    `MAX_RETRIES = 10` inserted at module top."""
-    module = cst.parse_module(source)
-    wrapper = cst.MetadataWrapper(module)
-    value: str | None = None
-
-    class _Find(cst.CSTVisitor):
-        METADATA_DEPENDENCIES = (PositionProvider,)
-
-        @override
-        def visit_Integer(self, node) -> None:
-            nonlocal value
-            if value is None and self.get_metadata(PositionProvider, node).start.line == line:
-                value = node.value
-
-        @override
-        def visit_Float(self, node) -> None:
-            nonlocal value
-            if value is None and self.get_metadata(PositionProvider, node).start.line == line:
-                value = node.value
-
-    wrapper.visit(_Find())
-    if value is None:
-        return None
-    replaced = wrapper.visit(_ReplaceLiteral(line, name)).code
-    if replaced == source:
-        return None
-    module2 = cst.parse_module(replaced)
-    assignment = cst.SimpleStatementLine(
-        body=[
-            cst.Assign(
-                targets=[cst.AssignTarget(cst.Name(name))],
-                value=cst.parse_expression(value),
-            )
-        ]
-    )
-    body = list(module2.body)
-    first = next(
-        (i for i, s in enumerate(body) if isinstance(s, (cst.FunctionDef, cst.ClassDef))),
-        len(body),
-    )
-    body.insert(first, assignment)
-    return module2.with_changes(body=body).code
 
 
 class _RenameClass(cst.CSTTransformer):
@@ -1398,9 +1757,9 @@ class _RenameClass(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self, target_line: int, old: str, new: str) -> None:
-        self.target_line = target_line
-        self.old = old
-        self.new = new
+        self.target_line: int = target_line
+        self.old: str = old
+        self.new: str = new
 
     @override
     def leave_ClassDef(
@@ -1420,27 +1779,6 @@ class _RenameClass(cst.CSTTransformer):
         return updated_node
 
 
-def fix_rename(source: str, line: int, name: str) -> str | None:
-    """Rename (vague-name): the class at `line` plus every same-file Name
-    reference. Cross-file call sites need FullRepoManager — same-file v1."""
-    module = cst.parse_module(source)
-    wrapper = cst.MetadataWrapper(module)
-    old: str | None = None
-
-    class _Find(cst.CSTVisitor):
-        METADATA_DEPENDENCIES = (PositionProvider,)
-
-        @override
-        def visit_ClassDef(self, node) -> None:
-            nonlocal old
-            if old is None and self.get_metadata(PositionProvider, node).start.line == line:
-                old = node.name.value
-
-    wrapper.visit(_Find())
-    if old is None or old == name:
-        return None
-    renamed = wrapper.visit(_RenameClass(line, old, name)).code
-    return None if renamed == source else renamed
 
 
 class _DecisionCount(cst.CSTVisitor):
@@ -1450,8 +1788,8 @@ class _DecisionCount(cst.CSTVisitor):
     SPLIT the CC, not move it)."""
 
     def __init__(self) -> None:
-        self.n = 0
-        self._boolop_depth = 0
+        self.n: int = 0
+        self._boolop_depth: int = 0
         self._boolop_root: cst.BooleanOperation | None = None
 
     @override
@@ -1531,25 +1869,6 @@ def _stmt_decision_count(stmt) -> int:
 
 # --------------------------------------------------------------------------- the fix surface
 
-def _fix_mechanical(kind: str, source: str, line: int, opts) -> str | None:
-    """The mechanical transforms — a changed source, or None when the callee
-    is unresolvable (the retry protocol supplies params)."""
-    if kind in ("noop-statement", "unreachable"):
-        return cst.MetadataWrapper(cst.parse_module(source)).visit(_DeleteStatement(line)).code
-    if kind == "stale-suppression":
-        return cst.MetadataWrapper(cst.parse_module(source)).visit(_DeleteComment(line)).code
-    if kind == "positional-literals":
-        params = opts.params if opts.params is not None else _callee_params_for_call(opts.repo, opts.rel, source, line)
-        if params is None:
-            return None
-        return cst.MetadataWrapper(cst.parse_module(source)).visit(_KeywordArgs(line, params)).code
-    if kind == "duplicate-def":
-        return fix_duplicate_def(source, line, opts)
-    if kind == "restating-docstring":
-        return fix_restating_docstring(source, line)
-    if kind == "duplicate-block":
-        return fix_duplicate_block(source, line)
-    return None
 
 # --------------------------------------------------------------------------- review-log fixes
 # duplicate-def (delete the unreferenced shadow), restating-docstring (delete
@@ -1584,8 +1903,8 @@ def _py_files(repo: Path) -> list[Path]:
 
 class _NameCount(cst.CSTVisitor):
     def __init__(self, name: str) -> None:
-        self.name = name
-        self.n = 0
+        self.name: str = name
+        self.n: int = 0
 
     @override
     def visit_Name(self, node) -> None:
@@ -1617,8 +1936,8 @@ class _FindModuleDef(cst.CSTVisitor):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self, line: int) -> None:
-        self.line = line
-        self.depth = 0
+        self.line: int = line
+        self.depth: int = 0
         self.found: cst.CSTNode | None = None
         self.name: str | None = None
 
@@ -1647,7 +1966,7 @@ class _RemoveNodes(cst.CSTTransformer):
     """Remove exactly the given nodes from the tree (identity)."""
 
     def __init__(self, targets) -> None:
-        self.targets = set(targets)
+        self.targets: object = set(targets)
 
     @override
     def on_leave(self, original_node, updated_node):
@@ -1656,18 +1975,6 @@ class _RemoveNodes(cst.CSTTransformer):
         return updated_node
 
 
-def fix_duplicate_def(source: str, line: int, opts) -> str | None:
-    """Delete the shadowing (second) module-scope binding when nothing
-    references it — proven by a repo-wide Name count (only the two def sites
-    hit). Referenced shadows are renamed by the agent, never auto-deleted."""
-    wrapper = cst.MetadataWrapper(cst.parse_module(source))
-    probe = _FindModuleDef(line)
-    wrapper.visit(probe)
-    if probe.found is None or probe.name is None:
-        return None
-    if _name_occurrences(opts.repo, probe.name) > 2:
-        return None  # something references the name — a delete would break it
-    return wrapper.module.visit(_RemoveNodes([probe.found])).code
 
 
 def _strip_first_docstring(updated, original) -> object:
@@ -1687,8 +1994,8 @@ class _StripDocstring(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self, line: int) -> None:
-        self.line = line
-        self.done = False
+        self.line: int = line
+        self.done: bool = False
 
     @override
     def leave_FunctionDef(self, original_node, updated_node):
@@ -1709,11 +2016,7 @@ class _StripDocstring(cst.CSTTransformer):
         return updated_node
 
 
-def fix_restating_docstring(source: str, line: int) -> str | None:
-    return cst.MetadataWrapper(cst.parse_module(source)).visit(_StripDocstring(line)).code
-
-
-    # lucidlint: ignore complexity the flatten dispatches over statement kinds — a dispatch table, not branching
+# lucidlint: ignore complexity the flatten dispatches over statement kinds — a dispatch table, not branching
 def _flatten_stmts(stmts, out: list) -> None:
     """Source-ordered statement flatten: nested block bodies included, so a
     loop body repeated after the loop is one sequence (the Rust rule's
@@ -1744,61 +2047,6 @@ def _flatten_stmts(stmts, out: list) -> None:
             for case in s.cases:
                 _flatten_stmts(list(case.body.body), out)
 
-
-    # the visitor classes ARE the libcst walk idiom — a class would scatter
-    # one pass
-    # lucidlint: ignore complexity,latent-class the visitor classes are the walk idiom
-def fix_duplicate_block(source: str, line: int) -> str | None:
-    """Delete the second copy of a repeated 3-statement block. Refuses when
-    the removal would empty a block (an emptied body needs `pass` — the
-    agent's call)."""
-    wrapper = cst.MetadataWrapper(cst.parse_module(source))
-
-    class _FindFn(cst.CSTVisitor):
-        METADATA_DEPENDENCIES = (PositionProvider,)
-
-        def __init__(self, target: int) -> None:
-            self.target = target
-            self.fn: cst.FunctionDef | None = None
-
-        @override
-        def visit_FunctionDef(self, node) -> None:
-            pos = self.get_metadata(PositionProvider, node)
-            if pos.start.line <= self.target <= pos.end.line:
-                self.fn = node  # last (innermost) containing function wins
-
-    finder = _FindFn(line)
-    wrapper.visit(finder)
-    if finder.fn is None:
-        return None
-    flat: list = []
-    _flatten_stmts(list(finder.fn.body.body), flat)
-    if len(flat) < 6:
-        return None
-    targets: list | None = None
-    for i in range(len(flat) - 5):
-        for j in range(i + 3, len(flat) - 2):
-            if all(flat[i + k].deep_equals(flat[j + k]) for k in range(3)):
-                pos = wrapper.resolve(PositionProvider)[flat[j]]
-                if pos.start.line == line:
-                    targets = flat[j : j + 3]
-                    break
-        if targets is not None:
-            break
-
-    if targets is None:
-        return None
-    # a removal that empties a block leaves invalid Python (`pass` required) —
-    # refuse when every statement of a block is a target (the agent places
-    # the pass by hand)
-    target_set = set(targets)
-    for t in targets:
-        parent = wrapper.resolve(ParentNodeProvider)[t]
-        if isinstance(parent, cst.IndentedBlock):
-            block_stmts = list(parent.body)
-            if block_stmts and all(s in target_set for s in block_stmts):
-                return None
-    return wrapper.module.visit(_RemoveNodes(targets)).code
 
 
 def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
@@ -1860,49 +2108,6 @@ def _origin_after_move(module: cst.Module, move: set[str], opts) -> list:
     remaining.insert(insert_at, reexport)
     return remaining
 
-
-    # lucidlint: ignore record-shape the two-source result is a wire seam — a class is ceremony for one return
-def _extract_module_proposal(source: str, opts) -> tuple[str, str] | None:
-    """(new origin source, new module source) for the extract-module split, or
-    None when the split is not safe. Pure — no writes; the apply path writes
-    both files. The moved defs are the --params names; the module is --name
-    (same directory as the origin). Refuses when the moved code needs a
-    non-moved origin def (a from-origin import in the new module would create
-    the very cycle the review log §3.4 fixed) or a decorated def (registration
-    semantics)."""
-    if not opts.name or not opts.params:
-        return None
-    module = cst.parse_module(source)
-    move = set(opts.params)
-    top_defs = {
-        stmt.name.value: stmt
-        for stmt in module.body
-        if isinstance(stmt, (cst.FunctionDef, cst.ClassDef))
-    }
-    if not move <= set(top_defs):
-        return None  # a named member is not module-scope here
-    for name in move:
-        if top_defs[name].decorators:
-            return None
-    # free reads only: a name bound inside the moved function (parameter,
-    # local, for/comprehension target) cannot reference a module-level
-    # binding — counting it would falsely refuse safe splits (review finding)
-    referenced: set[str] = set()
-    for name in move:
-        free = _FreeNames()
-        top_defs[name].visit(free)
-        referenced |= free.names - free.bound
-    if referenced & (set(top_defs) - move):
-        return None  # the moved code needs an origin def — cycle risk
-    # module-level assignments/constants the moved code reads would be
-    # missing from the new module (a runtime NameError) — refuse; moving
-    # them would break the origin's remaining code (review finding)
-    if referenced & _module_bindings(module):
-        return None
-    new_module = cst.Module(
-        body=[*_moved_imports(module, referenced), *(top_defs[n] for n in opts.params)]
-    )
-    return cst.Module(body=_origin_after_move(module, move, opts)).code, new_module.code
 
 
 def _module_bindings(module: cst.Module) -> set[str]:
@@ -1996,19 +2201,6 @@ class _FreeNames(cst.CSTVisitor):
 
 
 
-def fix_extract_module(source: str, opts) -> str | None:
-    """The apply side of extract-module — writes the new module and returns
-    the origin's new source (fix_finding writes the origin)."""
-    result = _extract_module_proposal(source, opts)
-    if result is None:
-        return None
-    origin_source, new_module_source = result
-    new_path = opts.repo / (opts.rel.rsplit("/", 1)[0] if "/" in opts.rel else "") / f"{opts.name}.py"
-    if new_path.exists():
-        return None  # never clobber an existing module
-    new_path.parent.mkdir(parents=True, exist_ok=True)
-    new_path.write_text(new_module_source, encoding="utf-8")
-    return origin_source
 
 
 class _FindFnLine(cst.CSTVisitor):
@@ -2018,7 +2210,7 @@ class _FindFnLine(cst.CSTVisitor):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self, line: int) -> None:
-        self.line = line
+        self.line: int = line
         self.found: cst.FunctionDef | None = None
 
     @override
@@ -2028,92 +2220,10 @@ class _FindFnLine(cst.CSTVisitor):
 
 
 
-def _fix_structural(kind: str, source: str, line: int, opts) -> str | None:
-    """The name-driven transforms — the agent supplies the semantic bit."""
-    if kind == "extract-method":
-        if opts.name is None:
-            return None
-        return fix_extract_method(source, line, opts.name)
-    if kind == "extract-class":
-        return fix_extract_class(source, line, opts.name)
-    if kind == "magic-number":
-        if opts.name is None:
-            return None
-        return fix_magic_literal(source, line, opts.name)
-    if kind == "vague-name":
-        if opts.name is None:
-            return None
-        return fix_rename(source, line, opts.name)
-    if kind == "long-param-list":
-        if opts.name is None:
-            return None
-        return fix_parameter_object(source, line, opts.name)
-    if kind == "dispatch-registry":
-        return fix_dispatch_registry(source, line)
-    if kind == "rule-table":
-        return fix_rule_table(source, line)
-    return None
 
 
-def fix_finding(
-    kind: str, rel: str, repo: Path, line: int, opts: FixOptions | None = None
-) -> str | None:
-    """Apply the transform for one finding. Returns a human description of
-    what changed, or None when the finding was already gone (no edit).
-
-    `opts` carries the agent-supplied semantic bits (the callee's parameter
-    names for external/unresolved callees; the class name for extract-class)
-    — the tool does the mechanical edit; the agent reads the signature once.
-    """
-    opts = opts or FixOptions()
-    kind = KIND_ALIASES.get(kind, kind)
-    path = repo / rel
-    source = path.read_text(encoding="utf-8")
-    opts.repo = repo
-    opts.rel = rel
-    if kind in MECHANICAL_KINDS:
-        new_source = _fix_mechanical(kind, source, line, opts)
-        description = MECHANICAL_KINDS[kind]
-    elif kind == "extract-module":
-        # two files change: the new module is created, the origin re-exports
-        # the moved defs. Never clobbers an existing module.
-        new_source = fix_extract_module(source, opts)
-        description = STRUCTURAL_KINDS[kind]
-    elif kind in STRUCTURAL_KINDS:
-        new_source = _fix_structural(kind, source, line, opts)
-        description = STRUCTURAL_KINDS[kind]
-    else:
-        raise ValueError(f"kind '{kind}' has no fix (mechanical or structural)")
-    if new_source is None or new_source == source:
-        return None  # nothing changed — the finding is stale or unlocatable
-    path.write_text(new_source, encoding="utf-8")
-    return description
 
 
-def _callee_params_for_call(repo: Path, rel: str, source: str, line: int) -> list[str] | None:
-    """The callee's param names for the call on `line`, resolved repo-wide.
-    Mirrors the scanner's Name-callee rule: a method/builtin callee is not
-    auto-fixable."""
-    module = cst.parse_module(source)
-    wrapper = cst.MetadataWrapper(module)
-    callee = None
-
-    class _FindCall(cst.CSTVisitor):
-        METADATA_DEPENDENCIES = (PositionProvider,)
-
-        @override
-        def visit_Call(self, node) -> None:
-            nonlocal callee
-            if callee is not None:
-                return
-            pos = self.get_metadata(PositionProvider, node)
-            if pos.start.line <= line <= pos.end.line and m.matches(node.func, m.Name()):
-                callee = node.func.value
-
-    wrapper.visit(_FindCall())
-    if callee is None:
-        return None
-    return _repo_params(repo, rel, callee)
 
 
 # --------------------------------------------------------------------------- dispatch-registry
@@ -2474,34 +2584,6 @@ def _dispatch_call(selector: str, default, union: list[str]) -> list:
     ]
 
 
-def fix_dispatch_registry(source: str, line: int) -> str | None:
-    """A dispatch chain (`if sel == "a": return f()  if sel == "b": ...`)
-    is a handler REGISTRY in disguise — each arm is already a named handler.
-    Rewrite it to a dict of selector -> handler functions and a one-line
-    dispatch, extracting every arm's body as a private function named from
-    its literal. The handler signature is the UNION of the arms' free
-    variables (minus the selector) so the dispatch call is uniform."""
-    module = cst.parse_module(source)
-    wrapper = cst.MetadataWrapper(module)
-    finder = _FindFnLine(line)
-    wrapper.visit(finder)
-    fn = finder.found
-    if fn is None or not any(s is fn for s in wrapper.module.body):
-        return None
-    body = list(fn.body.body)
-    shaped = _dispatch_chain_shape(fn, body)
-    if shaped is None:
-        return None
-    preamble, chain, selector, default = shaped
-
-    # the LAMBDA TABLE when every arm is a single expression — the pure data
-    # form (selector adjacent to its expression, closures capture the scope,
-    # no names, no plumbing — the rule-table principle). Multi-statement arms
-    # fall back to named handlers (a lambda cannot hold a body).
-    exprs = [_arm_single_expression(arm_body) for _lit, arm_body in chain]
-    if all(e is not None for e in exprs):
-        return _dispatch_lambda_mode(fn, wrapper, shaped, exprs)
-    return _dispatch_named_mode(fn, wrapper, shaped)
 
 
 # --------------------------------------------------------------------------- rule-checks
@@ -2617,28 +2699,3 @@ def _rule_table_build(acc: str, checks: list) -> _RuleTableBuild:
     return table, collector
 
 
-def fix_rule_table(source: str, line: int) -> str | None:
-    """A rule battery (`if cond: violations.append(...)` repeated) is a
-    LATENT DATA STRUCTURE — a table of (condition, violation) pairs. Hoist
-    it: each check becomes a tuple `(lambda: <cond>, <violation>)`, the
-    function collects the violations whose condition holds. The lambdas
-    capture the enclosing scope (shared preamble locals need no plumbing)
-    and need NO names — the naming problem dissolves. v1: each check is a
-    single `acc.append(<value>)` with no else."""
-    module = cst.parse_module(source)
-    wrapper = cst.MetadataWrapper(module)
-    finder = _FindFnLine(line)
-    wrapper.visit(finder)
-    fn = finder.found
-    if fn is None or not any(s is fn for s in wrapper.module.body):
-        return None
-    body = list(fn.body.body)
-    shaped = _rule_battery_shape(fn, body)
-    if shaped is None:
-        return None
-    acc, checks, preamble, tail = shaped
-    table, collector = _rule_table_build(acc, checks)
-    new_fn = fn.with_changes(body=fn.body.with_changes(body=preamble + [table, collector] + tail))
-    # the lambdas live IN the fn — no module-level additions
-    out_body: list = [new_fn if stmt is fn else stmt for stmt in wrapper.module.body]
-    return cst.Module(body=out_body).code

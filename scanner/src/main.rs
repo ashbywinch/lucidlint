@@ -961,6 +961,9 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     misplaced_method_findings(state, body);
     tuple_record_findings(state, body);
     assembly_class_findings(state, body);
+    data_clump_findings(state, body);
+    feature_envy_findings(state, body);
+    undeclared_attribute_findings(state, body);
     record_shape_findings(state, body, source);
     partition_findings(state, body, source);
     // review-log rules: shadowing hazards + duplicated work (all per-file)
@@ -2353,6 +2356,67 @@ mod tests {
         );
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "tuple-record").collect();
         assert_eq!(r.len(), 1, "{f:?}");
+    }
+
+    // ------------------------------------ data-clump / feature-envy / undeclared-attribute
+    #[test]
+    fn data_clump_fires_on_shared_param_pair() {
+        // >=3 functions taking the same (em, vm) pair — a data clump
+        let f = scan_src(
+            "def a(em, vm):\n    return em\n\ndef b(em, vm):\n    return vm\n\ndef c(em, vm):\n    return em, vm\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "data-clump").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("em"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn data_clump_ignores_two_function_pair() {
+        // a pair shared by only two functions is not a clump
+        let f = scan_src("def a(em, vm):\n    return em\n\ndef b(em, vm):\n    return vm\n");
+        assert!(!f.iter().any(|x| x.kind == "data-clump"), "{f:?}");
+    }
+
+    #[test]
+    fn feature_envy_fires_on_collaborator_reads() {
+        // the render shape: graph = self.graph, then the method reads the
+        // graph's fields more than its own state
+        let f = scan_src(
+            "class R:\n    def render(self):\n        graph = self.graph\n        a = graph.vs_parent\n        b = graph.kids\n        c = graph.epic_vs\n        d = graph.vs_kids\n        e = graph.vs_epics\n        f = graph.epic_vs\n        g = graph.vs_kids\n        x = self.lines\n        y = self.count\n        return a, b, c, d, e, f, g, x, y\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "feature-envy").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+    }
+
+    #[test]
+    fn feature_envy_ignores_own_inputs_and_values() {
+        // a visitor callback consuming its parameter and a computed value
+        // (pos = self.get_metadata(...)) are NOT envy
+        let f = scan_src(
+            "class V:\n    def leave_Node(self, original_node, updated_node):\n        pos = self.get_metadata(original_node)\n        if pos.start.line <= updated_node.end.line:\n            return updated_node\n        return updated_node\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "feature-envy"), "{f:?}");
+    }
+
+    #[test]
+    fn undeclared_attribute_fires_on_quiet_assignment() {
+        // self.done = False in a member function without a declaration, and
+        // a plain __init__ assignment without a type
+        let f = scan_src(
+            "class C:\n    def __init__(self):\n        self.x = 0\n    def leave(self):\n        self.done = True\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
+        assert_eq!(r.len(), 2, "{f:?}");
+    }
+
+    #[test]
+    fn undeclared_attribute_accepts_declared_members() {
+        // annotated in __init__ or the class body -> declared
+        let f = scan_src(
+            "class C:\n    kind: str = \"x\"\n    def __init__(self):\n        self.x: int = 0\n    def leave(self):\n        self.done = True\n        self.kind = \"y\"\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
+        assert_eq!(r.len(), 1, "{f:?}"); // only self.done
     }
     #[test]
     fn duplicate_class_and_function_name_is_found() {

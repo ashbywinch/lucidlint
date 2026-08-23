@@ -1,9 +1,441 @@
 {
  "errors": [
   {
-   "line": 110,
+   "line": 78,
+   "column": 35,
+   "stop_line": 78,
+   "stop_column": 41,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 80,
+   "column": 33,
+   "stop_line": 80,
+   "stop_column": 39,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `str` in function `_strewing_group`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `str` in function `_strewing_group`",
+   "severity": "error"
+  },
+  {
+   "line": 130,
+   "column": 35,
+   "stop_line": 130,
+   "stop_column": 41,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 140,
+   "column": 86,
+   "stop_line": 140,
+   "stop_column": 90,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `class_name` with type `str` in function `_FnBodyRewrite.__init__`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `class_name` with type `str` in function `_FnBodyRewrite.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 143,
+   "column": 69,
+   "stop_line": 143,
+   "stop_column": 73,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `class_name` with type `str` in function `_CallSiteRewrite.__init__`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `class_name` with type `str` in function `_CallSiteRewrite.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 152,
+   "column": 43,
+   "stop_line": 152,
+   "stop_column": 47,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `name` with type `str` in function `_dataclass_def`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `name` with type `str` in function `_dataclass_def`",
+   "severity": "error"
+  },
+  {
+   "line": 191,
+   "column": 29,
+   "stop_line": 191,
+   "stop_column": 55,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `object` has no attribute `with_changes`",
+   "concise_description": "Object of class `object` has no attribute `with_changes`",
+   "severity": "error"
+  },
+  {
+   "line": 195,
+   "column": 41,
+   "stop_line": 195,
+   "stop_column": 51,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `list[object]` is not assignable to parameter `body` with type `Sequence[BaseStatement]` in function `libcst._nodes.statement.IndentedBlock.__init__`",
+   "concise_description": "Argument `list[object]` is not assignable to parameter `body` with type `Sequence[BaseStatement]` in function `libcst._nodes.statement.IndentedBlock.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 220,
+   "column": 35,
+   "stop_line": 220,
+   "stop_column": 41,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 230,
+   "column": 38,
+   "stop_line": 230,
+   "stop_column": 85,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 236,
+   "column": 38,
+   "stop_line": 236,
+   "stop_column": 85,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 242,
+   "column": 56,
+   "stop_line": 242,
+   "stop_column": 60,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `name` with type `str` in function `_ReplaceLiteral.__init__`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `name` with type `str` in function `_ReplaceLiteral.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 249,
+   "column": 56,
+   "stop_line": 249,
+   "stop_column": 60,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `value` with type `str` in function `libcst._nodes.expression.Name.__init__`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `value` with type `str` in function `libcst._nodes.expression.Name.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 266,
+   "column": 35,
+   "stop_line": 266,
+   "stop_column": 41,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 276,
+   "column": 36,
+   "stop_line": 276,
+   "stop_column": 83,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 282,
+   "column": 57,
+   "stop_line": 282,
+   "stop_column": 61,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `new` with type `str` in function `_RenameClass.__init__`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `new` with type `str` in function `_RenameClass.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 288,
+   "column": 35,
+   "stop_line": 288,
+   "stop_column": 41,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 301,
+   "column": 56,
+   "stop_line": 301,
+   "stop_column": 62,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 306,
+   "column": 30,
+   "stop_line": 306,
+   "stop_column": 39,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `Path | None` is not assignable to parameter `repo` with type `Path` in function `_name_occurrences`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `Path | None` is not assignable to parameter `repo` with type `Path` in function `_name_occurrences`",
+   "severity": "error"
+  },
+  {
+   "line": 311,
+   "column": 53,
+   "stop_line": 311,
+   "stop_column": 59,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 319,
+   "column": 56,
+   "stop_line": 319,
+   "stop_column": 62,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 331,
+   "column": 20,
+   "stop_line": 331,
+   "stop_column": 29,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 331,
+   "column": 53,
+   "stop_line": 331,
+   "stop_column": 60,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
+   "severity": "error"
+  },
+  {
+   "line": 377,
+   "column": 35,
+   "stop_line": 377,
+   "stop_column": 41,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 419,
+   "column": 20,
+   "stop_line": 419,
+   "stop_column": 87,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "unsupported-operation",
+   "description": "`/` is not supported between `None` and `Literal['']`\n  Cannot find `__truediv__` or `__rtruediv__`",
+   "concise_description": "`/` is not supported between `None` and `Literal['']`",
+   "severity": "error"
+  },
+  {
+   "line": 419,
+   "column": 33,
+   "stop_line": 419,
+   "stop_column": 48,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `rsplit`",
+   "concise_description": "Object of class `NoneType` has no attribute `rsplit`",
+   "severity": "error"
+  },
+  {
+   "line": 419,
+   "column": 63,
+   "stop_line": 419,
+   "stop_column": 78,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "not-iterable",
+   "description": "`in` is not supported between `Literal['/']` and `None`",
+   "concise_description": "`in` is not supported between `Literal['/']` and `None`",
+   "severity": "error"
+  },
+  {
+   "line": 433,
+   "column": 35,
+   "stop_line": 433,
+   "stop_column": 41,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 463,
+   "column": 35,
+   "stop_line": 463,
+   "stop_column": 41,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 485,
+   "column": 57,
+   "stop_line": 485,
+   "stop_column": 63,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 487,
+   "column": 57,
+   "stop_line": 487,
+   "stop_column": 63,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 492,
+   "column": 57,
+   "stop_line": 492,
+   "stop_column": 63,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 554,
+   "column": 35,
+   "stop_line": 554,
+   "stop_column": 41,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 567,
+   "column": 20,
+   "stop_line": 567,
+   "stop_column": 29,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 567,
+   "column": 46,
+   "stop_line": 567,
+   "stop_column": 53,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
+   "severity": "error"
+  },
+  {
+   "line": 568,
+   "column": 30,
+   "stop_line": 568,
+   "stop_column": 45,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `BaseExpression` has no attribute `value`",
+   "concise_description": "Object of class `BaseExpression` has no attribute `value`",
+   "severity": "error"
+  },
+  {
+   "line": 725,
    "column": 12,
-   "stop_line": 110,
+   "stop_line": 725,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -13,9 +445,9 @@
    "severity": "error"
   },
   {
-   "line": 110,
+   "line": 725,
    "column": 50,
-   "stop_line": 110,
+   "stop_line": 725,
    "stop_column": 57,
    "path": "fix_engine.py",
    "code": -2,
@@ -25,9 +457,9 @@
    "severity": "error"
   },
   {
-   "line": 135,
+   "line": 750,
    "column": 12,
-   "stop_line": 135,
+   "stop_line": 750,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -37,9 +469,9 @@
    "severity": "error"
   },
   {
-   "line": 141,
+   "line": 756,
    "column": 9,
-   "stop_line": 141,
+   "stop_line": 756,
    "stop_column": 22,
    "path": "fix_engine.py",
    "code": -2,
@@ -49,9 +481,9 @@
    "severity": "error"
   },
   {
-   "line": 147,
+   "line": 762,
    "column": 12,
-   "stop_line": 147,
+   "stop_line": 762,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -61,9 +493,9 @@
    "severity": "error"
   },
   {
-   "line": 171,
+   "line": 786,
    "column": 17,
-   "stop_line": 171,
+   "stop_line": 786,
    "stop_column": 26,
    "path": "fix_engine.py",
    "code": -2,
@@ -73,9 +505,9 @@
    "severity": "error"
   },
   {
-   "line": 171,
+   "line": 786,
    "column": 55,
-   "stop_line": 171,
+   "stop_line": 786,
    "stop_column": 62,
    "path": "fix_engine.py",
    "code": -2,
@@ -85,9 +517,9 @@
    "severity": "error"
   },
   {
-   "line": 289,
+   "line": 882,
    "column": 16,
-   "stop_line": 289,
+   "stop_line": 882,
    "stop_column": 39,
    "path": "fix_engine.py",
    "code": -2,
@@ -97,9 +529,9 @@
    "severity": "error"
   },
   {
-   "line": 312,
+   "line": 905,
    "column": 22,
-   "stop_line": 312,
+   "stop_line": 905,
    "stop_column": 27,
    "path": "fix_engine.py",
    "code": -2,
@@ -109,9 +541,9 @@
    "severity": "error"
   },
   {
-   "line": 313,
+   "line": 906,
    "column": 20,
-   "stop_line": 313,
+   "stop_line": 906,
    "stop_column": 31,
    "path": "fix_engine.py",
    "code": -2,
@@ -121,9 +553,9 @@
    "severity": "error"
   },
   {
-   "line": 340,
+   "line": 933,
    "column": 16,
-   "stop_line": 340,
+   "stop_line": 933,
    "stop_column": 25,
    "path": "fix_engine.py",
    "code": -2,
@@ -133,9 +565,9 @@
    "severity": "error"
   },
   {
-   "line": 694,
+   "line": 1209,
    "column": 16,
-   "stop_line": 694,
+   "stop_line": 1209,
    "stop_column": 63,
    "path": "fix_engine.py",
    "code": -2,
@@ -145,9 +577,9 @@
    "severity": "error"
   },
   {
-   "line": 714,
+   "line": 1229,
    "column": 43,
-   "stop_line": 714,
+   "stop_line": 1229,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -157,9 +589,9 @@
    "severity": "error"
   },
   {
-   "line": 714,
+   "line": 1229,
    "column": 57,
-   "stop_line": 714,
+   "stop_line": 1229,
    "stop_column": 62,
    "path": "fix_engine.py",
    "code": -2,
@@ -169,9 +601,9 @@
    "severity": "error"
   },
   {
-   "line": 752,
+   "line": 1267,
    "column": 63,
-   "stop_line": 752,
+   "stop_line": 1267,
    "stop_column": 64,
    "path": "fix_engine.py",
    "code": -2,
@@ -181,9 +613,9 @@
    "severity": "error"
   },
   {
-   "line": 771,
+   "line": 1286,
    "column": 60,
-   "stop_line": 771,
+   "stop_line": 1286,
    "stop_column": 66,
    "path": "fix_engine.py",
    "code": -2,
@@ -193,9 +625,9 @@
    "severity": "error"
   },
   {
-   "line": 829,
+   "line": 1334,
    "column": 25,
-   "stop_line": 829,
+   "stop_line": 1334,
    "stop_column": 44,
    "path": "fix_engine.py",
    "code": -2,
@@ -205,9 +637,9 @@
    "severity": "error"
   },
   {
-   "line": 829,
+   "line": 1334,
    "column": 62,
-   "stop_line": 829,
+   "stop_line": 1334,
    "stop_column": 80,
    "path": "fix_engine.py",
    "code": -2,
@@ -217,9 +649,9 @@
    "severity": "error"
   },
   {
-   "line": 832,
+   "line": 1337,
    "column": 22,
-   "stop_line": 832,
+   "stop_line": 1337,
    "stop_column": 32,
    "path": "fix_engine.py",
    "code": -2,
@@ -229,9 +661,9 @@
    "severity": "error"
   },
   {
-   "line": 834,
+   "line": 1339,
    "column": 31,
-   "stop_line": 834,
+   "stop_line": 1339,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -241,33 +673,69 @@
    "severity": "error"
   },
   {
-   "line": 908,
-   "column": 25,
-   "stop_line": 908,
+   "line": 1473,
+   "column": 15,
+   "stop_line": 1473,
+   "stop_column": 33,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `object` has no attribute `get`",
+   "concise_description": "Object of class `object` has no attribute `get`",
+   "severity": "error"
+  },
+  {
+   "line": 1479,
+   "column": 34,
+   "stop_line": 1479,
    "stop_column": 51,
    "path": "fix_engine.py",
    "code": -2,
    "name": "missing-attribute",
-   "description": "Object of class `object` has no attribute `with_changes`",
-   "concise_description": "Object of class `object` has no attribute `with_changes`",
+   "description": "Object of class `object` has no attribute `get`",
+   "concise_description": "Object of class `object` has no attribute `get`",
    "severity": "error"
   },
   {
-   "line": 912,
-   "column": 37,
-   "stop_line": 912,
-   "stop_column": 47,
+   "line": 1519,
+   "column": 29,
+   "stop_line": 1519,
+   "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
    "name": "bad-argument-type",
-   "description": "Argument `list[object]` is not assignable to parameter `body` with type `Sequence[BaseStatement]` in function `libcst._nodes.statement.IndentedBlock.__init__`",
-   "concise_description": "Argument `list[object]` is not assignable to parameter `body` with type `Sequence[BaseStatement]` in function `libcst._nodes.statement.IndentedBlock.__init__`",
+   "description": "Argument `object` is not assignable to parameter `iterable` with type `Iterable[BaseSmallStatement | BaseStatement]` in function `list.extend`\n  Protocol `Iterable` requires attribute `__iter__`",
+   "concise_description": "Argument `object` is not assignable to parameter `iterable` with type `Iterable[BaseSmallStatement | BaseStatement]` in function `list.extend`",
    "severity": "error"
   },
   {
-   "line": 1237,
+   "line": 1538,
+   "column": 30,
+   "stop_line": 1538,
+   "stop_column": 43,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `object` is not assignable to parameter `object` with type `BaseCompoundStatement | SimpleStatementLine` in function `list.insert`",
+   "concise_description": "Argument `object` is not assignable to parameter `object` with type `BaseCompoundStatement | SimpleStatementLine` in function `list.insert`",
+   "severity": "error"
+  },
+  {
+   "line": 1561,
+   "column": 12,
+   "stop_line": 1561,
+   "stop_column": 45,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "not-iterable",
+   "description": "`in` is not supported between `str` and `object`",
+   "concise_description": "`in` is not supported between `str` and `object`",
+   "severity": "error"
+  },
+  {
+   "line": 1639,
    "column": 13,
-   "stop_line": 1237,
+   "stop_line": 1639,
    "stop_column": 52,
    "path": "fix_engine.py",
    "code": -2,
@@ -277,9 +745,9 @@
    "severity": "error"
   },
   {
-   "line": 1240,
+   "line": 1642,
    "column": 23,
-   "stop_line": 1240,
+   "stop_line": 1642,
    "stop_column": 44,
    "path": "fix_engine.py",
    "code": -2,
@@ -289,9 +757,9 @@
    "severity": "error"
   },
   {
-   "line": 1269,
+   "line": 1671,
    "column": 21,
-   "stop_line": 1269,
+   "stop_line": 1671,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -301,9 +769,9 @@
    "severity": "error"
   },
   {
-   "line": 1296,
+   "line": 1698,
    "column": 12,
-   "stop_line": 1296,
+   "stop_line": 1698,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -313,9 +781,21 @@
    "severity": "error"
   },
   {
-   "line": 1331,
+   "line": 1700,
+   "column": 67,
+   "stop_line": 1700,
+   "stop_column": 78,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `object` is not assignable to parameter `iterable` with type `Iterable[@_]` in function `list.__init__`\n  Protocol `Iterable` requires attribute `__iter__`",
+   "concise_description": "Argument `object` is not assignable to parameter `iterable` with type `Iterable[@_]` in function `list.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 1733,
    "column": 12,
-   "stop_line": 1331,
+   "stop_line": 1733,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -325,9 +805,9 @@
    "severity": "error"
   },
   {
-   "line": 1343,
+   "line": 1745,
    "column": 12,
-   "stop_line": 1343,
+   "stop_line": 1745,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -337,33 +817,9 @@
    "severity": "error"
   },
   {
-   "line": 1362,
-   "column": 34,
-   "stop_line": 1362,
-   "stop_column": 81,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "severity": "error"
-  },
-  {
-   "line": 1368,
-   "column": 34,
-   "stop_line": 1368,
-   "stop_column": 81,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "severity": "error"
-  },
-  {
-   "line": 1410,
+   "line": 1768,
    "column": 12,
-   "stop_line": 1410,
+   "stop_line": 1768,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -373,21 +829,9 @@
    "severity": "error"
   },
   {
-   "line": 1436,
-   "column": 32,
-   "stop_line": 1436,
-   "stop_column": 79,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "severity": "error"
-  },
-  {
-   "line": 1627,
+   "line": 1945,
    "column": 55,
-   "stop_line": 1627,
+   "stop_line": 1945,
    "stop_column": 102,
    "path": "fix_engine.py",
    "code": -2,
@@ -397,9 +841,9 @@
    "severity": "error"
   },
   {
-   "line": 1632,
+   "line": 1950,
    "column": 9,
-   "stop_line": 1632,
+   "stop_line": 1950,
    "stop_column": 26,
    "path": "fix_engine.py",
    "code": -2,
@@ -409,9 +853,9 @@
    "severity": "error"
   },
   {
-   "line": 1637,
+   "line": 1955,
    "column": 55,
-   "stop_line": 1637,
+   "stop_line": 1955,
    "stop_column": 102,
    "path": "fix_engine.py",
    "code": -2,
@@ -421,9 +865,9 @@
    "severity": "error"
   },
   {
-   "line": 1642,
+   "line": 1960,
    "column": 9,
-   "stop_line": 1642,
+   "stop_line": 1960,
    "stop_column": 23,
    "path": "fix_engine.py",
    "code": -2,
@@ -433,9 +877,21 @@
    "severity": "error"
   },
   {
-   "line": 1694,
+   "line": 1972,
+   "column": 12,
+   "stop_line": 1972,
+   "stop_column": 41,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "not-iterable",
+   "description": "`in` is not supported between `CSTNodeT` and `object`",
+   "concise_description": "`in` is not supported between `CSTNodeT` and `object`",
+   "severity": "error"
+  },
+  {
+   "line": 2000,
    "column": 9,
-   "stop_line": 1694,
+   "stop_line": 2000,
    "stop_column": 26,
    "path": "fix_engine.py",
    "code": -2,
@@ -445,9 +901,9 @@
    "severity": "error"
   },
   {
-   "line": 1697,
+   "line": 2003,
    "column": 12,
-   "stop_line": 1697,
+   "stop_line": 2003,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -457,9 +913,9 @@
    "severity": "error"
   },
   {
-   "line": 1703,
+   "line": 2009,
    "column": 9,
-   "stop_line": 1703,
+   "stop_line": 2009,
    "stop_column": 23,
    "path": "fix_engine.py",
    "code": -2,
@@ -469,9 +925,9 @@
    "severity": "error"
   },
   {
-   "line": 1706,
+   "line": 2012,
    "column": 12,
-   "stop_line": 1706,
+   "stop_line": 2012,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -481,9 +937,9 @@
    "severity": "error"
   },
   {
-   "line": 1726,
+   "line": 2028,
    "column": 27,
-   "stop_line": 1726,
+   "stop_line": 2028,
    "stop_column": 35,
    "path": "fix_engine.py",
    "code": -2,
@@ -493,9 +949,9 @@
    "severity": "error"
   },
   {
-   "line": 1726,
+   "line": 2028,
    "column": 27,
-   "stop_line": 1726,
+   "stop_line": 2028,
    "stop_column": 35,
    "path": "fix_engine.py",
    "code": -2,
@@ -505,9 +961,9 @@
    "severity": "error"
   },
   {
-   "line": 1732,
+   "line": 2034,
    "column": 37,
-   "stop_line": 1732,
+   "stop_line": 2034,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -517,9 +973,9 @@
    "severity": "error"
   },
   {
-   "line": 1738,
+   "line": 2040,
    "column": 37,
-   "stop_line": 1738,
+   "stop_line": 2040,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -529,9 +985,9 @@
    "severity": "error"
   },
   {
-   "line": 1740,
+   "line": 2042,
    "column": 37,
-   "stop_line": 1740,
+   "stop_line": 2042,
    "stop_column": 53,
    "path": "fix_engine.py",
    "code": -2,
@@ -541,33 +997,9 @@
    "severity": "error"
   },
   {
-   "line": 1767,
-   "column": 16,
-   "stop_line": 1767,
-   "stop_column": 25,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "severity": "error"
-  },
-  {
-   "line": 1767,
-   "column": 49,
-   "stop_line": 1767,
-   "stop_column": 56,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
-   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
-   "severity": "error"
-  },
-  {
-   "line": 1814,
+   "line": 2061,
    "column": 25,
-   "stop_line": 1814,
+   "stop_line": 2061,
    "stop_column": 48,
    "path": "fix_engine.py",
    "code": -2,
@@ -577,9 +1009,9 @@
    "severity": "error"
   },
   {
-   "line": 1814,
+   "line": 2061,
    "column": 70,
-   "stop_line": 1814,
+   "stop_line": 2061,
    "stop_column": 92,
    "path": "fix_engine.py",
    "code": -2,
@@ -589,9 +1021,9 @@
    "severity": "error"
   },
   {
-   "line": 1824,
+   "line": 2071,
    "column": 25,
-   "stop_line": 1824,
+   "stop_line": 2071,
    "stop_column": 48,
    "path": "fix_engine.py",
    "code": -2,
@@ -601,9 +1033,9 @@
    "severity": "error"
   },
   {
-   "line": 1985,
+   "line": 2189,
    "column": 16,
-   "stop_line": 1985,
+   "stop_line": 2189,
    "stop_column": 34,
    "path": "fix_engine.py",
    "code": -2,
@@ -613,9 +1045,9 @@
    "severity": "error"
   },
   {
-   "line": 1993,
+   "line": 2197,
    "column": 28,
-   "stop_line": 1993,
+   "stop_line": 2197,
    "stop_column": 48,
    "path": "fix_engine.py",
    "code": -2,
@@ -625,9 +1057,9 @@
    "severity": "error"
   },
   {
-   "line": 2026,
+   "line": 2217,
    "column": 35,
-   "stop_line": 2026,
+   "stop_line": 2217,
    "stop_column": 82,
    "path": "fix_engine.py",
    "code": -2,
@@ -637,45 +1069,9 @@
    "severity": "error"
   },
   {
-   "line": 2110,
+   "line": 2258,
    "column": 16,
-   "stop_line": 2110,
-   "stop_column": 25,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "severity": "error"
-  },
-  {
-   "line": 2110,
-   "column": 42,
-   "stop_line": 2110,
-   "stop_column": 49,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
-   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
-   "severity": "error"
-  },
-  {
-   "line": 2111,
-   "column": 26,
-   "stop_line": 2111,
-   "stop_column": 41,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Object of class `BaseExpression` has no attribute `value`",
-   "concise_description": "Object of class `BaseExpression` has no attribute `value`",
-   "severity": "error"
-  },
-  {
-   "line": 2149,
-   "column": 16,
-   "stop_line": 2149,
+   "stop_line": 2258,
    "stop_column": 34,
    "path": "fix_engine.py",
    "code": -2,
@@ -685,9 +1081,9 @@
    "severity": "error"
   },
   {
-   "line": 2230,
+   "line": 2339,
    "column": 12,
-   "stop_line": 2230,
+   "stop_line": 2339,
    "stop_column": 72,
    "path": "fix_engine.py",
    "code": -2,
@@ -697,9 +1093,21 @@
    "severity": "error"
   },
   {
-   "line": 764,
+   "line": 581,
+   "column": 57,
+   "stop_line": 581,
+   "stop_column": 59,
+   "path": "lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `dict[@_, @_]` is not assignable to parameter `file_churn` with type `Counter[str]` in function `_RustScan.prepare`",
+   "concise_description": "Argument `dict[@_, @_]` is not assignable to parameter `file_churn` with type `Counter[str]` in function `_RustScan.prepare`",
+   "severity": "error"
+  },
+  {
+   "line": 836,
    "column": 24,
-   "stop_line": 764,
+   "stop_line": 836,
    "stop_column": 33,
    "path": "lucidlint.py",
    "code": -2,
@@ -709,9 +1117,9 @@
    "severity": "error"
   },
   {
-   "line": 931,
+   "line": 1003,
    "column": 39,
-   "stop_line": 931,
+   "stop_line": 1003,
    "stop_column": 59,
    "path": "lucidlint.py",
    "code": -2,
@@ -721,9 +1129,9 @@
    "severity": "error"
   },
   {
-   "line": 937,
+   "line": 1009,
    "column": 37,
-   "stop_line": 937,
+   "stop_line": 1009,
    "stop_column": 48,
    "path": "lucidlint.py",
    "code": -2,
@@ -733,9 +1141,9 @@
    "severity": "error"
   },
   {
-   "line": 1171,
+   "line": 1243,
    "column": 35,
-   "stop_line": 1171,
+   "stop_line": 1243,
    "stop_column": 48,
    "path": "lucidlint.py",
    "code": -2,
@@ -745,9 +1153,9 @@
    "severity": "error"
   },
   {
-   "line": 1171,
+   "line": 1243,
    "column": 50,
-   "stop_line": 1171,
+   "stop_line": 1243,
    "stop_column": 71,
    "path": "lucidlint.py",
    "code": -2,
@@ -757,9 +1165,9 @@
    "severity": "error"
   },
   {
-   "line": 1179,
+   "line": 1251,
    "column": 31,
-   "stop_line": 1179,
+   "stop_line": 1251,
    "stop_column": 69,
    "path": "lucidlint.py",
    "code": -2,
@@ -769,9 +1177,9 @@
    "severity": "error"
   },
   {
-   "line": 1181,
+   "line": 1253,
    "column": 16,
-   "stop_line": 1181,
+   "stop_line": 1253,
    "stop_column": 49,
    "path": "lucidlint.py",
    "code": -2,
@@ -781,9 +1189,9 @@
    "severity": "error"
   },
   {
-   "line": 1181,
+   "line": 1253,
    "column": 58,
-   "stop_line": 1181,
+   "stop_line": 1253,
    "stop_column": 93,
    "path": "lucidlint.py",
    "code": -2,
@@ -793,9 +1201,9 @@
    "severity": "error"
   },
   {
-   "line": 1185,
+   "line": 1257,
    "column": 28,
-   "stop_line": 1185,
+   "stop_line": 1257,
    "stop_column": 61,
    "path": "lucidlint.py",
    "code": -2,
@@ -805,9 +1213,9 @@
    "severity": "error"
   },
   {
-   "line": 1189,
+   "line": 1261,
    "column": 42,
-   "stop_line": 1189,
+   "stop_line": 1261,
    "stop_column": 77,
    "path": "lucidlint.py",
    "code": -2,
@@ -817,9 +1225,9 @@
    "severity": "error"
   },
   {
-   "line": 1238,
+   "line": 1310,
    "column": 65,
-   "stop_line": 1238,
+   "stop_line": 1310,
    "stop_column": 78,
    "path": "lucidlint.py",
    "code": -2,
@@ -829,9 +1237,9 @@
    "severity": "error"
   },
   {
-   "line": 1246,
+   "line": 1318,
    "column": 32,
-   "stop_line": 1246,
+   "stop_line": 1318,
    "stop_column": 43,
    "path": "lucidlint.py",
    "code": -2,
@@ -841,9 +1249,9 @@
    "severity": "error"
   },
   {
-   "line": 1252,
+   "line": 1324,
    "column": 32,
-   "stop_line": 1252,
+   "stop_line": 1324,
    "stop_column": 43,
    "path": "lucidlint.py",
    "code": -2,
@@ -853,9 +1261,9 @@
    "severity": "error"
   },
   {
-   "line": 1304,
+   "line": 1376,
    "column": 39,
-   "stop_line": 1304,
+   "stop_line": 1376,
    "stop_column": 55,
    "path": "lucidlint.py",
    "code": -2,
@@ -865,9 +1273,9 @@
    "severity": "error"
   },
   {
-   "line": 1353,
+   "line": 1425,
    "column": 20,
-   "stop_line": 1353,
+   "stop_line": 1425,
    "stop_column": 39,
    "path": "lucidlint.py",
    "code": -2,
@@ -877,9 +1285,9 @@
    "severity": "error"
   },
   {
-   "line": 1360,
+   "line": 1432,
    "column": 25,
-   "stop_line": 1360,
+   "stop_line": 1432,
    "stop_column": 32,
    "path": "lucidlint.py",
    "code": -2,
@@ -889,9 +1297,9 @@
    "severity": "error"
   },
   {
-   "line": 1400,
+   "line": 1472,
    "column": 31,
-   "stop_line": 1400,
+   "stop_line": 1472,
    "stop_column": 37,
    "path": "lucidlint.py",
    "code": -2,
@@ -901,9 +1309,9 @@
    "severity": "error"
   },
   {
-   "line": 1506,
+   "line": 1578,
    "column": 24,
-   "stop_line": 1506,
+   "stop_line": 1578,
    "stop_column": 45,
    "path": "lucidlint.py",
    "code": -2,
@@ -913,9 +1321,9 @@
    "severity": "error"
   },
   {
-   "line": 1525,
+   "line": 1597,
    "column": 71,
-   "stop_line": 1525,
+   "stop_line": 1597,
    "stop_column": 84,
    "path": "lucidlint.py",
    "code": -2,
@@ -925,27 +1333,15 @@
    "severity": "error"
   },
   {
-   "line": 1526,
+   "line": 1598,
    "column": 13,
-   "stop_line": 1526,
+   "stop_line": 1598,
    "stop_column": 36,
    "path": "lucidlint.py",
    "code": -2,
    "name": "missing-attribute",
    "description": "Object of class `NoneType` has no attribute `graph_preferred`",
    "concise_description": "Object of class `NoneType` has no attribute `graph_preferred`",
-   "severity": "error"
-  },
-  {
-   "line": 1745,
-   "column": 53,
-   "stop_line": 1745,
-   "stop_column": 55,
-   "path": "lucidlint.py",
-   "code": -2,
-   "name": "bad-argument-type",
-   "description": "Argument `dict[@_, @_]` is not assignable to parameter `file_churn` with type `Counter[str]` in function `_RustScan.prepare`",
-   "concise_description": "Argument `dict[@_, @_]` is not assignable to parameter `file_churn` with type `Counter[str]` in function `_RustScan.prepare`",
    "severity": "error"
   },
   {
@@ -1009,9 +1405,9 @@
    "severity": "error"
   },
   {
-   "line": 368,
+   "line": 391,
    "column": 12,
-   "stop_line": 368,
+   "stop_line": 391,
    "stop_column": 39,
    "path": "tests/test_fix_engine.py",
    "code": -2,
@@ -1021,9 +1417,9 @@
    "severity": "error"
   },
   {
-   "line": 528,
+   "line": 551,
    "column": 16,
-   "stop_line": 528,
+   "stop_line": 551,
    "stop_column": 55,
    "path": "tests/test_fix_engine.py",
    "code": -2,

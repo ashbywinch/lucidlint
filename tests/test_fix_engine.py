@@ -15,6 +15,29 @@ from test_lucidlint import make_repo, run_main
 import fix_engine
 
 
+def _req(kind, rel, repo, line, opts=None, source=None):
+    """A fix request in the test's old (kind, rel, repo, line, opts) shape."""
+    return fix_engine._FixRequest(
+        kind=kind, repo=repo, rel=rel, line=line, opts=opts or fix_engine.FixOptions(), source=source
+    )
+
+
+def _fix_finding(kind, rel, repo, line, opts=None):
+    return _req(kind, rel, repo, line, opts).fix_finding()
+
+
+def _propose_finding(kind, rel, repo, line, opts=None):
+    return _req(kind, rel, repo, line, opts).propose_finding()
+
+
+def _dispatch(source, line, opts=None):
+    return _req("dispatch-registry", None, None, line, opts, source=source).fix_dispatch_registry()
+
+
+def _rule_table(source, line, opts=None):
+    return _req("rule-table", None, None, line, opts, source=source).fix_rule_table()
+
+
 def _rust_run_compare(tmp_path, before: str, after: str, main_body: str) -> None:
     """Compile AND RUN both versions with the same `main`, asserting equal
     stdout — the behavior-preservation contract for Rust fixes (a compile-
@@ -42,7 +65,7 @@ def _fix(tmp_path, kind, rel, src, line):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     (repo / rel).write_text(src)
     repo.mkdir(exist_ok=True)
-    out = fix_engine.fix_finding(kind, rel, repo, line)
+    out = _fix_finding(kind, rel, repo, line)
     return out, (repo / rel).read_text()
 
 
@@ -93,7 +116,7 @@ def test_external_callee_with_supplied_params(tmp_path):
     src = "def g():\n    Money(\"0\", \"GBP\")\n"
     out, fixed = _fix(tmp_path, "positional-literals", "houses/app.py", src, 2)
     assert out is None  # unresolvable without params
-    out2 = fix_engine.fix_finding(
+    out2 = _fix_finding(
         "positional-literals",
         "houses/app.py",
         tmp_path / "repo",
@@ -124,7 +147,7 @@ def test_extract_class_moves_fns_and_rewrites_calls(tmp_path):
     )
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     (repo / "houses" / "app.py").write_text(src)
-    out = fix_engine.fix_finding("extract-class", "houses/app.py", repo, 5)
+    out = _fix_finding("extract-class", "houses/app.py", repo, 5)
     assert out is not None
     fixed = (repo / "houses" / "app.py").read_text()
     assert "def hub_edge_counts(contract" not in fixed  # no longer a free fn
@@ -151,7 +174,7 @@ def test_extract_class_with_explicit_name(tmp_path):
     )
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     (repo / "houses" / "app.py").write_text(src)
-    out = fix_engine.fix_finding(
+    out = _fix_finding(
         "extract-class", "houses/app.py", repo, 5, fix_engine.FixOptions(name="GraphOps")
     )
     assert out is not None
@@ -165,7 +188,7 @@ def test_fix_gate_rerun_is_clean(tmp_path, capsys):
     src = "def set_limits(min_v, max_v):\n    return min_v\n\n\ndef g():\n    set_limits(10, 20)\n"
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     (repo / "houses" / "app.py").write_text(src)
-    fixed = fix_engine.fix_finding("positional-literals", "houses/app.py", repo, 6)
+    fixed = _fix_finding("positional-literals", "houses/app.py", repo, 6)
     assert fixed is not None
     # the gate run reports no positional-literals finding anymore
     run_main(repo, "--warn", "--json")
@@ -231,7 +254,7 @@ def test_magic_literal_becomes_constant(tmp_path):
     src = "def g():\n    return 60 * 24\n"
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     (repo / "houses" / "app.py").write_text(src)
-    out = fix_engine.fix_finding(
+    out = _fix_finding(
         "magic-number", "houses/app.py", repo, 2, fix_engine.FixOptions(name="MINUTES_PER_DAY")
     )
     assert out is not None
@@ -244,7 +267,7 @@ def test_vague_name_rename(tmp_path):
     src = "class DataManager:\n    def run(self):\n        return 1\n\n\ndef use():\n    return DataManager()\n"
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     (repo / "houses" / "app.py").write_text(src)
-    out = fix_engine.fix_finding(
+    out = _fix_finding(
         "vague-name", "houses/app.py", repo, 1, fix_engine.FixOptions(name="DataRegistry")
     )
     assert out is not None
@@ -264,7 +287,7 @@ def test_parameter_object_introduced(tmp_path):
     )
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     (repo / "houses" / "app.py").write_text(src)
-    out = fix_engine.fix_finding(
+    out = _fix_finding(
         "long-param-list", "houses/app.py", repo, 1, fix_engine.FixOptions(name="BuildOptions")
     )
     assert out is not None
@@ -298,7 +321,7 @@ def test_extract_class_renames_receiver_and_internal_calls(tmp_path):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    out = fix_engine.fix_finding("extract-class", "houses/app.py", repo, 5)
+    out = _fix_finding("extract-class", "houses/app.py", repo, 5)
     assert out is not None
     fixed = p.read_text()
     assert "def _window_score(self, i, j, min_lines):" in fixed  # receiver renamed
@@ -337,7 +360,7 @@ def test_extract_class_renames_after_nested_function(tmp_path):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    out = fix_engine.fix_finding("extract-class", "houses/app.py", repo, 5)
+    out = _fix_finding("extract-class", "houses/app.py", repo, 5)
     assert out is not None
     fixed = p.read_text()
     assert "def _score(self, i, j):" in fixed
@@ -361,14 +384,14 @@ def test_extract_method_preview_and_confirm(tmp_path):
     p.write_text(src)
     # preview needs NO name — the seam shows with a placeholder, the agent
     # names AFTER seeing it (the S3 flow)
-    new_source, desc = fix_engine.propose_finding(
+    new_source, desc = _propose_finding(
         "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions()
     )
     assert desc is not None
     assert "_extracted(" in new_source  # the placeholder in the diff
     assert p.read_text() == src  # nothing written
     # apply with a name — normalized to private: scale_total -> _scale_total
-    out = fix_engine.fix_finding(
+    out = _fix_finding(
         "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="scale_total")
     )
     assert out is not None
@@ -424,7 +447,7 @@ def test_extract_method_descends_into_loop_body(tmp_path):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    out = fix_engine.fix_finding(
+    out = _fix_finding(
         "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="grade_row")
     )
     assert out is not None
@@ -458,7 +481,7 @@ def test_extract_method_keyword_args_are_not_phantom_params(tmp_path):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    out = fix_engine.fix_finding(
+    out = _fix_finding(
         "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="reset_leading")
     )
     assert out is not None
@@ -486,7 +509,7 @@ def test_extract_method_refuses_nested_function_target(tmp_path):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    new_source, desc = fix_engine.propose_finding(
+    new_source, desc = _propose_finding(
         "extract-method", "houses/app.py", repo, 2, fix_engine.FixOptions(name="_x")
     )
     assert desc is None  # no safe seam — refuse, do not corrupt
@@ -503,7 +526,7 @@ def test_extract_method_min_bound_refuses_insufficient_splits(tmp_path):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    new_source, desc = fix_engine.propose_finding(
+    new_source, desc = _propose_finding(
         "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="_x")
     )
     assert desc is None  # every same-container window is a single if — no split
@@ -926,7 +949,7 @@ def test_dispatch_registry_preserves_behavior(tmp_path):
         return {"rels": [r for r in facts["rels"] if r.get("a") == args.get("id")]}
     return {"error": "unknown tool"}
 '''
-    fixed = fix_engine.fix_dispatch_registry(src, 1)
+    fixed = _dispatch(src, 1)
     assert fixed is not None and fixed != src
     facts = {"people": ["Alice Smith", "Bob"], "rels": [{"a": "1"}]}
     before, after = {}, {}
@@ -956,7 +979,7 @@ def test_dispatch_registry_refuses_non_chain(tmp_path):
         return 1
     return 2
 '''
-    assert fix_engine.fix_dispatch_registry(src, 1) is None
+    assert _dispatch(src, 1) is None
 
 
 def test_dispatch_registry_passes_selector_to_selector_reading_arms(tmp_path):
@@ -975,7 +998,7 @@ def test_dispatch_registry_passes_selector_to_selector_reading_arms(tmp_path):
         return {"tool": tool, "n": len(ids)}
     return {"error": "unknown"}
 '''
-    fixed = fix_engine.fix_dispatch_registry(src, 1)
+    fixed = _dispatch(src, 1)
     assert fixed is not None and fixed != src
     before, after = {}, {}
     exec(src, before)
@@ -1004,7 +1027,7 @@ def test_dispatch_registry_refuses_sibling_bound_reads(tmp_path):
         return {"c": args.get("id", "")}
     return {"error": "unknown"}
 '''
-    assert fix_engine.fix_dispatch_registry(src, 1) is None
+    assert _dispatch(src, 1) is None
 
 
 def test_rust_dispatch_registry_applies(tmp_path):
@@ -1123,7 +1146,7 @@ def test_rule_table_preserves_behavior(tmp_path):
         '        violations.append("no ages recorded")\n'
         "    return violations\n"
     )
-    fixed = fix_engine.fix_rule_table(src, 1)
+    fixed = _rule_table(src, 1)
     assert fixed is not None and fixed != src
     before, after = {}, {}
     exec(src, before)
@@ -1158,7 +1181,7 @@ def test_rule_table_defers_value_evaluation(tmp_path):
         '        violations.append(d["n"])\n'
         "    return violations\n"
     )
-    fixed = fix_engine.fix_rule_table(src, 1)
+    fixed = _rule_table(src, 1)
     assert fixed is not None
     before, after = {}, {}
     exec(src, before)
@@ -1185,7 +1208,7 @@ def test_rule_table_captures_preamble_locals(tmp_path):
         '        violations.append("too many facts")\n'
         "    return violations\n"
     )
-    fixed = fix_engine.fix_rule_table(src, 1)
+    fixed = _rule_table(src, 1)
     assert fixed is not None
     before, after = {}, {}
     exec(src, before)
@@ -1250,7 +1273,7 @@ def test_dispatch_registry_lambda_table(tmp_path):
         return n - 1
     return -1
 '''
-    fixed = fix_engine.fix_dispatch_registry(src, 1)
+    fixed = _dispatch(src, 1)
     assert fixed is not None and fixed != src
     assert "_tools = {'a': lambda: n + 1" in fixed
     assert "def _" not in fixed  # no named handlers
@@ -1279,7 +1302,7 @@ def run_tool(tool, args):
         return {"rels": []}
     return {"error": "unknown tool"}
 '''
-    fixed = fix_engine.fix_dispatch_registry(src, 4)  # the multi-statement arm forces named mode
+    fixed = _dispatch(src, 4)
     assert fixed is not None
     assert "def _search_people(args):\n    return \"existing\"" in fixed  # untouched
     assert "def _search_people_1(" in fixed  # the colliding handler is suffixed
@@ -1295,7 +1318,7 @@ def _fix_opts(tmp_path, kind, rel, src, line, name=None, params=None):
     (repo / rel).write_text(src)
     repo.mkdir(exist_ok=True)
     opts = fix_engine.FixOptions(name=name, params=params)
-    out = fix_engine.fix_finding(kind, rel, repo, line, opts)
+    out = _fix_finding(kind, rel, repo, line, opts)
     return out, (repo / rel).read_text()
 
 
@@ -1437,7 +1460,7 @@ def test_extract_module_name_free_preview_does_not_write(tmp_path):
         "    return tokenize(s)\n"
     )
     opts = fix_engine.FixOptions(params=["tokenize", "words"])
-    new_source, desc = fix_engine.propose_finding("extract-module", rel, repo, 1, opts)
+    new_source, desc = _propose_finding("extract-module", rel, repo, 1, opts)
     assert new_source is not None
     assert "from _extracted import tokenize, words" in new_source
     assert "def tokenize" not in new_source

@@ -116,46 +116,53 @@ def fail(msg: str) -> int:
     return 1
 
 
-def find_step(binary: str, project: Path) -> int:
-    scan = run([binary, "--repo", str(project), "--json"], cwd=project)
-    actions = parse_actions(scan.stdout)
-    if actions is None:
-        return fail("the scan output was not the findings JSON contract")
-    kinds = {a.kind for a in actions if a.severity == "fail"}
-    missing = [k for k in EXPECTED_FAIL_KINDS if k not in kinds]
-    if scan.returncode == 0 or missing:
-        return fail(f"the scan missed expected fail findings: {missing or 'none found'}")
-    return 0
+class _DeployCheck:
+    """The gate steps: run the scanner on the project, assert the expected
+    fail findings, apply the fix directives, verify the re-scan is clean.
+    The (binary, project) pair travels together — a class holds it."""
 
+    def __init__(self, binary: str, project: Path):
+        self.binary: str = binary
+        self.project: Path = project
 
-def fix_step(binary: str, project: Path) -> int:
-    scan = run([binary, "--repo", str(project), "--json"], cwd=project)
-    actions = parse_actions(scan.stdout)
-    if actions is None:
-        return fail("the scan output was not the findings JSON contract")
-    for a in actions:
-        m = re.search(r"fix: (lucidlint fix --kind \S+ --file \S+ --line \d+)", a.message)
-        if not m:
-            continue
-        cmd = [binary] + m.group(1).split()[1:]
-        if a.kind == "magic-number":
-            cmd += ["--name", CONST_NAME]
-        fixed = run(cmd, cwd=project)
-        if fixed.returncode != 0:
-            return fail(f"fix {a.kind} failed: {(fixed.stderr or fixed.stdout).strip()}")
-    return 0
+    def find_step(self) -> int:
+        scan = run([self.binary, "--repo", str(self.project), "--json"], cwd=self.project)
+        actions = parse_actions(scan.stdout)
+        if actions is None:
+            return fail("the scan output was not the findings JSON contract")
+        kinds = {a.kind for a in actions if a.severity == "fail"}
+        missing = [k for k in EXPECTED_FAIL_KINDS if k not in kinds]
+        if scan.returncode == 0 or missing:
+            return fail(f"the scan missed expected fail findings: {missing or 'none found'}")
+        return 0
 
+    def fix_step(self) -> int:
+        scan = run([self.binary, "--repo", str(self.project), "--json"], cwd=self.project)
+        actions = parse_actions(scan.stdout)
+        if actions is None:
+            return fail("the scan output was not the findings JSON contract")
+        for a in actions:
+            m = re.search(r"fix: (lucidlint fix --kind \S+ --file \S+ --line \d+)", a.message)
+            if not m:
+                continue
+            cmd = [self.binary] + m.group(1).split()[1:]
+            if a.kind == "magic-number":
+                cmd += ["--name", CONST_NAME]
+            fixed = run(cmd, cwd=self.project)
+            if fixed.returncode != 0:
+                return fail(f"fix {a.kind} failed: {(fixed.stderr or fixed.stdout).strip()}")
+        return 0
 
-def verify_step(binary: str, project: Path) -> int:
-    rescan = run([binary, "--repo", str(project), "--json"], cwd=project)
-    actions = parse_actions(rescan.stdout)
-    if actions is None:
-        return fail("the re-scan output was not the findings JSON contract")
-    remaining = [a.kind for a in actions if a.severity == "fail"]
-    if rescan.returncode != 0 or remaining:
-        return fail(f"findings remained after fixes: {remaining or 'unknown'}")
-    print("deploy-check: scan found the expected findings, every fix applied, re-scan clean")
-    return 0
+    def verify_step(self) -> int:
+        rescan = run([self.binary, "--repo", str(self.project), "--json"], cwd=self.project)
+        actions = parse_actions(rescan.stdout)
+        if actions is None:
+            return fail("the re-scan output was not the findings JSON contract")
+        remaining = [a.kind for a in actions if a.severity == "fail"]
+        if rescan.returncode != 0 or remaining:
+            return fail(f"findings remained after fixes: {remaining or 'unknown'}")
+        print("deploy-check: scan found the expected findings, every fix applied, re-scan clean")
+        return 0
 
 
 def main() -> int:
@@ -170,13 +177,14 @@ def main() -> int:
     for rel, content in PROJECT_FILES.items():
         (project / rel).write_text(content)
 
-    status = find_step(binary, project)
+    check = _DeployCheck(binary, project)
+    status = check.find_step()
     if status:
         return status
-    status = fix_step(binary, project)
+    status = check.fix_step()
     if status:
         return status
-    return verify_step(binary, project)
+    return check.verify_step()
 
 
 if __name__ == "__main__":
