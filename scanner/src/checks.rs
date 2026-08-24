@@ -2029,12 +2029,12 @@ pub fn undeclared_attribute_findings(state: &mut ScanState, body: &[Stmt]) {
                     let line = line_of(state.source, at.range().start());
                     let msg = if is_init {
                         format!(
-                            "'{}' assigns member '{attr}' in __init__ without a declaration — declare it: self.{attr}: <type> = ... — fix: lucidlint fix --kind undeclared-attribute --file <F> --line <L>",
+                            "'{}' assigns member '{attr}' in __init__ without a declaration — declare it: self.{attr}: <type> = ... — fix: undeclared-attribute",
                             c.name.as_str()
                         )
                     } else {
                         format!(
-                            "'{}' assigns member '{attr}' in '{}' without a declaration — declare it in __init__ (annotated) or the class body — fix: lucidlint fix --kind undeclared-attribute --file <F> --line <L>",
+                            "'{}' assigns member '{attr}' in '{}' without a declaration — declare it in __init__ (annotated) or the class body — fix: undeclared-attribute",
                             c.name.as_str(),
                             f.name.as_str()
                         )

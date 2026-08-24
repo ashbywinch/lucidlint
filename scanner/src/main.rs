@@ -2418,11 +2418,7 @@ mod tests {
         let f = scan_src("class C:\n    def __init__(self):\n        self.x = 0\n");
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
         assert_eq!(r.len(), 1);
-        assert!(
-            r[0].message.contains("fix: lucidlint fix --kind undeclared-attribute"),
-            "{}",
-            r[0].message
-        );
+        assert!(r[0].message.contains("— fix: undeclared-attribute"), "{}", r[0].message);
     }
 
     #[test]

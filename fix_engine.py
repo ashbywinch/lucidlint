@@ -537,8 +537,8 @@ class _FixRequest:
             return {}
         result: dict[str, str] = {}
         for p in list(fn.params.posonly_params) + list(fn.params.params) + list(fn.params.kwonly_params):
-            if p.annotation is not None and isinstance(p.annotation.annotation, cst.Name):
-                result[p.name.value] = p.annotation.annotation.value
+            if p.annotation is not None:
+                result[p.name.value] = cst.Module(body=[]).code_for_node(p.annotation.annotation)
         return result
 
     def _repo_params(self, callee: str) -> list[str] | None:
@@ -752,8 +752,8 @@ class _DeclareMember(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self, target_line: int, param_types: dict[str, str]):
-        self.target_line = target_line
-        self.param_types = param_types
+        self.target_line: int = target_line
+        self.param_types: dict[str, str] = param_types
 
     @override
     def leave_Assign(self, original_node, updated_node):
@@ -772,7 +772,7 @@ class _DeclareMember(cst.CSTTransformer):
             return updated_node
         return cst.AnnAssign(
             target=target,
-            annotation=cst.Annotation(cst.Name(annotation)),
+            annotation=cst.Annotation(cst.parse_expression(annotation)),
             value=updated_node.value,
             equal=cst.AssignEqual(),
             semicolon=updated_node.semicolon,
