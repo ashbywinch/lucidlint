@@ -361,9 +361,9 @@
    "severity": "error"
   },
   {
-   "line": 573,
+   "line": 574,
    "column": 60,
-   "stop_line": 573,
+   "stop_line": 574,
    "stop_column": 102,
    "path": "fix_engine.py",
    "code": -2,
@@ -373,9 +373,9 @@
    "severity": "error"
   },
   {
-   "line": 574,
+   "line": 575,
    "column": 25,
-   "stop_line": 574,
+   "stop_line": 575,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -385,9 +385,9 @@
    "severity": "error"
   },
   {
-   "line": 605,
+   "line": 606,
    "column": 35,
-   "stop_line": 605,
+   "stop_line": 606,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -397,9 +397,9 @@
    "severity": "error"
   },
   {
-   "line": 618,
+   "line": 619,
    "column": 20,
-   "stop_line": 618,
+   "stop_line": 619,
    "stop_column": 29,
    "path": "fix_engine.py",
    "code": -2,
@@ -409,9 +409,9 @@
    "severity": "error"
   },
   {
-   "line": 618,
+   "line": 619,
    "column": 46,
-   "stop_line": 618,
+   "stop_line": 619,
    "stop_column": 53,
    "path": "fix_engine.py",
    "code": -2,
@@ -421,9 +421,9 @@
    "severity": "error"
   },
   {
-   "line": 619,
+   "line": 620,
    "column": 30,
-   "stop_line": 619,
+   "stop_line": 620,
    "stop_column": 45,
    "path": "fix_engine.py",
    "code": -2,
@@ -433,9 +433,9 @@
    "severity": "error"
   },
   {
-   "line": 795,
+   "line": 796,
    "column": 12,
-   "stop_line": 795,
+   "stop_line": 796,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -445,9 +445,9 @@
    "severity": "error"
   },
   {
-   "line": 994,
+   "line": 1004,
    "column": 12,
-   "stop_line": 994,
+   "stop_line": 1004,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -457,9 +457,9 @@
    "severity": "error"
   },
   {
-   "line": 994,
+   "line": 1004,
    "column": 50,
-   "stop_line": 994,
+   "stop_line": 1004,
    "stop_column": 57,
    "path": "fix_engine.py",
    "code": -2,
@@ -469,9 +469,9 @@
    "severity": "error"
   },
   {
-   "line": 1019,
+   "line": 1029,
    "column": 12,
-   "stop_line": 1019,
+   "stop_line": 1029,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -481,9 +481,9 @@
    "severity": "error"
   },
   {
-   "line": 1025,
+   "line": 1035,
    "column": 9,
-   "stop_line": 1025,
+   "stop_line": 1035,
    "stop_column": 22,
    "path": "fix_engine.py",
    "code": -2,
@@ -493,9 +493,9 @@
    "severity": "error"
   },
   {
-   "line": 1031,
+   "line": 1041,
    "column": 12,
-   "stop_line": 1031,
+   "stop_line": 1041,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -505,9 +505,9 @@
    "severity": "error"
   },
   {
-   "line": 1055,
+   "line": 1065,
    "column": 17,
-   "stop_line": 1055,
+   "stop_line": 1065,
    "stop_column": 26,
    "path": "fix_engine.py",
    "code": -2,
@@ -517,9 +517,9 @@
    "severity": "error"
   },
   {
-   "line": 1055,
+   "line": 1065,
    "column": 55,
-   "stop_line": 1055,
+   "stop_line": 1065,
    "stop_column": 62,
    "path": "fix_engine.py",
    "code": -2,
@@ -529,9 +529,9 @@
    "severity": "error"
   },
   {
-   "line": 1151,
+   "line": 1161,
    "column": 16,
-   "stop_line": 1151,
+   "stop_line": 1161,
    "stop_column": 39,
    "path": "fix_engine.py",
    "code": -2,
@@ -541,9 +541,9 @@
    "severity": "error"
   },
   {
-   "line": 1174,
+   "line": 1184,
    "column": 22,
-   "stop_line": 1174,
+   "stop_line": 1184,
    "stop_column": 27,
    "path": "fix_engine.py",
    "code": -2,
@@ -553,9 +553,9 @@
    "severity": "error"
   },
   {
-   "line": 1175,
+   "line": 1185,
    "column": 20,
-   "stop_line": 1175,
+   "stop_line": 1185,
    "stop_column": 31,
    "path": "fix_engine.py",
    "code": -2,
@@ -565,9 +565,9 @@
    "severity": "error"
   },
   {
-   "line": 1202,
+   "line": 1212,
    "column": 16,
-   "stop_line": 1202,
+   "stop_line": 1212,
    "stop_column": 25,
    "path": "fix_engine.py",
    "code": -2,
@@ -577,9 +577,9 @@
    "severity": "error"
   },
   {
-   "line": 1478,
+   "line": 1488,
    "column": 16,
-   "stop_line": 1478,
+   "stop_line": 1488,
    "stop_column": 63,
    "path": "fix_engine.py",
    "code": -2,
@@ -589,9 +589,9 @@
    "severity": "error"
   },
   {
-   "line": 1498,
+   "line": 1508,
    "column": 43,
-   "stop_line": 1498,
+   "stop_line": 1508,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -601,9 +601,9 @@
    "severity": "error"
   },
   {
-   "line": 1498,
+   "line": 1508,
    "column": 57,
-   "stop_line": 1498,
+   "stop_line": 1508,
    "stop_column": 62,
    "path": "fix_engine.py",
    "code": -2,
@@ -613,9 +613,9 @@
    "severity": "error"
   },
   {
-   "line": 1536,
+   "line": 1546,
    "column": 63,
-   "stop_line": 1536,
+   "stop_line": 1546,
    "stop_column": 64,
    "path": "fix_engine.py",
    "code": -2,
@@ -625,9 +625,9 @@
    "severity": "error"
   },
   {
-   "line": 1555,
+   "line": 1565,
    "column": 60,
-   "stop_line": 1555,
+   "stop_line": 1565,
    "stop_column": 66,
    "path": "fix_engine.py",
    "code": -2,
@@ -637,9 +637,9 @@
    "severity": "error"
   },
   {
-   "line": 1603,
+   "line": 1613,
    "column": 25,
-   "stop_line": 1603,
+   "stop_line": 1613,
    "stop_column": 44,
    "path": "fix_engine.py",
    "code": -2,
@@ -649,9 +649,9 @@
    "severity": "error"
   },
   {
-   "line": 1603,
+   "line": 1613,
    "column": 62,
-   "stop_line": 1603,
+   "stop_line": 1613,
    "stop_column": 80,
    "path": "fix_engine.py",
    "code": -2,
@@ -661,9 +661,9 @@
    "severity": "error"
   },
   {
-   "line": 1606,
+   "line": 1616,
    "column": 22,
-   "stop_line": 1606,
+   "stop_line": 1616,
    "stop_column": 32,
    "path": "fix_engine.py",
    "code": -2,
@@ -673,9 +673,9 @@
    "severity": "error"
   },
   {
-   "line": 1608,
+   "line": 1618,
    "column": 31,
-   "stop_line": 1608,
+   "stop_line": 1618,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -685,9 +685,9 @@
    "severity": "error"
   },
   {
-   "line": 1742,
+   "line": 1752,
    "column": 15,
-   "stop_line": 1742,
+   "stop_line": 1752,
    "stop_column": 33,
    "path": "fix_engine.py",
    "code": -2,
@@ -697,9 +697,9 @@
    "severity": "error"
   },
   {
-   "line": 1748,
+   "line": 1758,
    "column": 34,
-   "stop_line": 1748,
+   "stop_line": 1758,
    "stop_column": 51,
    "path": "fix_engine.py",
    "code": -2,
@@ -709,9 +709,9 @@
    "severity": "error"
   },
   {
-   "line": 1788,
+   "line": 1798,
    "column": 29,
-   "stop_line": 1788,
+   "stop_line": 1798,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -721,9 +721,9 @@
    "severity": "error"
   },
   {
-   "line": 1807,
+   "line": 1817,
    "column": 30,
-   "stop_line": 1807,
+   "stop_line": 1817,
    "stop_column": 43,
    "path": "fix_engine.py",
    "code": -2,
@@ -733,9 +733,9 @@
    "severity": "error"
   },
   {
-   "line": 1830,
+   "line": 1840,
    "column": 12,
-   "stop_line": 1830,
+   "stop_line": 1840,
    "stop_column": 45,
    "path": "fix_engine.py",
    "code": -2,
@@ -745,9 +745,9 @@
    "severity": "error"
   },
   {
-   "line": 1908,
+   "line": 1918,
    "column": 13,
-   "stop_line": 1908,
+   "stop_line": 1918,
    "stop_column": 52,
    "path": "fix_engine.py",
    "code": -2,
@@ -757,9 +757,9 @@
    "severity": "error"
   },
   {
-   "line": 1911,
+   "line": 1921,
    "column": 23,
-   "stop_line": 1911,
+   "stop_line": 1921,
    "stop_column": 44,
    "path": "fix_engine.py",
    "code": -2,
@@ -769,9 +769,9 @@
    "severity": "error"
   },
   {
-   "line": 1940,
+   "line": 1950,
    "column": 21,
-   "stop_line": 1940,
+   "stop_line": 1950,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -781,9 +781,9 @@
    "severity": "error"
   },
   {
-   "line": 1967,
+   "line": 1977,
    "column": 12,
-   "stop_line": 1967,
+   "stop_line": 1977,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -793,9 +793,9 @@
    "severity": "error"
   },
   {
-   "line": 1969,
+   "line": 1979,
    "column": 67,
-   "stop_line": 1969,
+   "stop_line": 1979,
    "stop_column": 78,
    "path": "fix_engine.py",
    "code": -2,
@@ -805,9 +805,9 @@
    "severity": "error"
   },
   {
-   "line": 2002,
+   "line": 2012,
    "column": 12,
-   "stop_line": 2002,
+   "stop_line": 2012,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -817,9 +817,9 @@
    "severity": "error"
   },
   {
-   "line": 2014,
+   "line": 2024,
    "column": 12,
-   "stop_line": 2014,
+   "stop_line": 2024,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -829,39 +829,15 @@
    "severity": "error"
   },
   {
-   "line": 2037,
+   "line": 2047,
    "column": 12,
-   "stop_line": 2037,
+   "stop_line": 2047,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
    "name": "missing-attribute",
    "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
    "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "severity": "error"
-  },
-  {
-   "line": 2214,
-   "column": 55,
-   "stop_line": 2214,
-   "stop_column": 102,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "severity": "error"
-  },
-  {
-   "line": 2219,
-   "column": 9,
-   "stop_line": 2219,
-   "stop_column": 26,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "bad-override-param-name",
-   "description": "Class member `_FindModuleDef.leave_FunctionDef` overrides parent class `CSTVisitor` in an inconsistent manner\n  Got parameter name `node`, expected `original_node`",
-   "concise_description": "Class member `_FindModuleDef.leave_FunctionDef` overrides parent class `CSTVisitor` in an inconsistent manner",
    "severity": "error"
   },
   {
@@ -880,6 +856,30 @@
    "line": 2229,
    "column": 9,
    "stop_line": 2229,
+   "stop_column": 26,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-override-param-name",
+   "description": "Class member `_FindModuleDef.leave_FunctionDef` overrides parent class `CSTVisitor` in an inconsistent manner\n  Got parameter name `node`, expected `original_node`",
+   "concise_description": "Class member `_FindModuleDef.leave_FunctionDef` overrides parent class `CSTVisitor` in an inconsistent manner",
+   "severity": "error"
+  },
+  {
+   "line": 2234,
+   "column": 55,
+   "stop_line": 2234,
+   "stop_column": 102,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 2239,
+   "column": 9,
+   "stop_line": 2239,
    "stop_column": 23,
    "path": "fix_engine.py",
    "code": -2,
@@ -889,9 +889,9 @@
    "severity": "error"
   },
   {
-   "line": 2241,
+   "line": 2251,
    "column": 12,
-   "stop_line": 2241,
+   "stop_line": 2251,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -901,9 +901,9 @@
    "severity": "error"
   },
   {
-   "line": 2269,
+   "line": 2279,
    "column": 9,
-   "stop_line": 2269,
+   "stop_line": 2279,
    "stop_column": 26,
    "path": "fix_engine.py",
    "code": -2,
@@ -913,9 +913,9 @@
    "severity": "error"
   },
   {
-   "line": 2272,
+   "line": 2282,
    "column": 12,
-   "stop_line": 2272,
+   "stop_line": 2282,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -925,9 +925,9 @@
    "severity": "error"
   },
   {
-   "line": 2278,
+   "line": 2288,
    "column": 9,
-   "stop_line": 2278,
+   "stop_line": 2288,
    "stop_column": 23,
    "path": "fix_engine.py",
    "code": -2,
@@ -937,9 +937,9 @@
    "severity": "error"
   },
   {
-   "line": 2281,
+   "line": 2291,
    "column": 12,
-   "stop_line": 2281,
+   "stop_line": 2291,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -949,9 +949,9 @@
    "severity": "error"
   },
   {
-   "line": 2297,
+   "line": 2307,
    "column": 27,
-   "stop_line": 2297,
+   "stop_line": 2307,
    "stop_column": 35,
    "path": "fix_engine.py",
    "code": -2,
@@ -961,9 +961,9 @@
    "severity": "error"
   },
   {
-   "line": 2297,
+   "line": 2307,
    "column": 27,
-   "stop_line": 2297,
+   "stop_line": 2307,
    "stop_column": 35,
    "path": "fix_engine.py",
    "code": -2,
@@ -973,9 +973,9 @@
    "severity": "error"
   },
   {
-   "line": 2303,
+   "line": 2313,
    "column": 37,
-   "stop_line": 2303,
+   "stop_line": 2313,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -985,9 +985,9 @@
    "severity": "error"
   },
   {
-   "line": 2309,
+   "line": 2319,
    "column": 37,
-   "stop_line": 2309,
+   "stop_line": 2319,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -997,39 +997,15 @@
    "severity": "error"
   },
   {
-   "line": 2311,
+   "line": 2321,
    "column": 37,
-   "stop_line": 2311,
+   "stop_line": 2321,
    "stop_column": 53,
    "path": "fix_engine.py",
    "code": -2,
    "name": "bad-argument-type",
    "description": "Argument `BaseSuite` is not assignable to parameter `iterable` with type `Iterable[@_]` in function `list.__init__`\n  Protocol `Iterable` requires attribute `__iter__`",
    "concise_description": "Argument `BaseSuite` is not assignable to parameter `iterable` with type `Iterable[@_]` in function `list.__init__`",
-   "severity": "error"
-  },
-  {
-   "line": 2330,
-   "column": 25,
-   "stop_line": 2330,
-   "stop_column": 48,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Object of type `List | Name | Tuple` has no attribute `value`\n  Object of class `List` has no attribute `value`\n  Object of class `Tuple` has no attribute `value`",
-   "concise_description": "Object of type `List | Name | Tuple` has no attribute `value`",
-   "severity": "error"
-  },
-  {
-   "line": 2330,
-   "column": 70,
-   "stop_line": 2330,
-   "stop_column": 92,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Object of class `BaseExpression` has no attribute `split`",
-   "concise_description": "Object of class `BaseExpression` has no attribute `split`",
    "severity": "error"
   },
   {
@@ -1045,21 +1021,21 @@
    "severity": "error"
   },
   {
-   "line": 2458,
-   "column": 16,
-   "stop_line": 2458,
-   "stop_column": 34,
+   "line": 2340,
+   "column": 70,
+   "stop_line": 2340,
+   "stop_column": 92,
    "path": "fix_engine.py",
    "code": -2,
    "name": "missing-attribute",
-   "description": "Object of class `WithItem` has no attribute `optional_vars`",
-   "concise_description": "Object of class `WithItem` has no attribute `optional_vars`",
+   "description": "Object of class `BaseExpression` has no attribute `split`",
+   "concise_description": "Object of class `BaseExpression` has no attribute `split`",
    "severity": "error"
   },
   {
-   "line": 2466,
-   "column": 28,
-   "stop_line": 2466,
+   "line": 2350,
+   "column": 25,
+   "stop_line": 2350,
    "stop_column": 48,
    "path": "fix_engine.py",
    "code": -2,
@@ -1069,45 +1045,9 @@
    "severity": "error"
   },
   {
-   "line": 2487,
-   "column": 12,
-   "stop_line": 2487,
-   "stop_column": 21,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "severity": "error"
-  },
-  {
-   "line": 2487,
-   "column": 43,
-   "stop_line": 2487,
-   "stop_column": 50,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
-   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
-   "severity": "error"
-  },
-  {
-   "line": 2503,
-   "column": 35,
-   "stop_line": 2503,
-   "stop_column": 82,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "severity": "error"
-  },
-  {
-   "line": 2544,
+   "line": 2468,
    "column": 16,
-   "stop_line": 2544,
+   "stop_line": 2468,
    "stop_column": 34,
    "path": "fix_engine.py",
    "code": -2,
@@ -1117,9 +1057,69 @@
    "severity": "error"
   },
   {
-   "line": 2625,
+   "line": 2476,
+   "column": 28,
+   "stop_line": 2476,
+   "stop_column": 48,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of type `List | Name | Tuple` has no attribute `value`\n  Object of class `List` has no attribute `value`\n  Object of class `Tuple` has no attribute `value`",
+   "concise_description": "Object of type `List | Name | Tuple` has no attribute `value`",
+   "severity": "error"
+  },
+  {
+   "line": 2497,
    "column": 12,
-   "stop_line": 2625,
+   "stop_line": 2497,
+   "stop_column": 21,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 2497,
+   "column": 43,
+   "stop_line": 2497,
+   "stop_column": 50,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
+   "severity": "error"
+  },
+  {
+   "line": 2513,
+   "column": 35,
+   "stop_line": 2513,
+   "stop_column": 82,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 2554,
+   "column": 16,
+   "stop_line": 2554,
+   "stop_column": 34,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `WithItem` has no attribute `optional_vars`",
+   "concise_description": "Object of class `WithItem` has no attribute `optional_vars`",
+   "severity": "error"
+  },
+  {
+   "line": 2635,
+   "column": 12,
+   "stop_line": 2635,
    "stop_column": 72,
    "path": "fix_engine.py",
    "code": -2,
