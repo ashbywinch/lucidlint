@@ -2412,6 +2412,20 @@ mod tests {
     }
 
     #[test]
+    fn undeclared_attribute_message_carries_fix_directive() {
+        // the finding's message must name the automated fix (the engine's
+        // directive parser matches it)
+        let f = scan_src("class C:\n    def __init__(self):\n        self.x = 0\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
+        assert_eq!(r.len(), 1);
+        assert!(
+            r[0].message.contains("fix: lucidlint fix --kind undeclared-attribute"),
+            "{}",
+            r[0].message
+        );
+    }
+
+    #[test]
     fn undeclared_attribute_accepts_declared_members() {
         // annotated in __init__ or the class body -> declared
         let f = scan_src(

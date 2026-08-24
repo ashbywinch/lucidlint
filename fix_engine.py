@@ -33,6 +33,7 @@ MECHANICAL_KINDS = {
     "duplicate-def": "delete the unreferenced shadowing module-scope def (renames stay with the agent)",
     "restating-docstring": "delete the docstring that restates the body",
     "duplicate-block": "delete the second copy of the repeated statement block",
+    "undeclared-attribute": "annotate the undeclared member: self.x: T = v (T inferred from the value)",
 }
 
 @dataclass
@@ -41,6 +42,20 @@ class FixOptions:
     positional-literals, the class name for extract-class."""
     params: list[str] | None = None
     name: str | None = None
+
+
+# the structural fixers by kind — a dispatch registry: each arm's handler is
+# already a named method; the dispatch is a table lookup, not an if-chain
+_STRUCTURAL_FIXERS = {
+    "extract-method": "fix_extract_method",
+    "extract-class": "fix_extract_class",
+    "magic-number": "fix_magic_literal",
+    "vague-name": "fix_rename",
+    "long-param-list": "fix_parameter_object",
+    "dispatch-registry": "fix_dispatch_registry",
+    "rule-table": "fix_rule_table",
+}
+_NAME_REQUIRED_KINDS = {"extract-method", "magic-number", "vague-name", "long-param-list"}
 
 
 class _ModuleProposal(NamedTuple):
@@ -495,33 +510,37 @@ class _FixRequest:
             return self.fix_restating_docstring()
         if kind == "duplicate-block":
             return self.fix_duplicate_block()
+        if kind == "undeclared-attribute":
+            param_types = self._member_param_types(line)
+            return cst.MetadataWrapper(cst.parse_module(source)).visit(
+                _DeclareMember(line, param_types)
+            ).code
         return None
     def _fix_structural(self) -> str | None:
-        kind, opts = self.kind, self.opts
-        """The name-driven transforms — the agent supplies the semantic bit."""
-        if kind == "extract-method":
-            if opts.name is None:
-                return None
-            return self.fix_extract_method()
-        if kind == "extract-class":
-            return self.fix_extract_class()
-        if kind == "magic-number":
-            if opts.name is None:
-                return None
-            return self.fix_magic_literal()
-        if kind == "vague-name":
-            if opts.name is None:
-                return None
-            return self.fix_rename()
-        if kind == "long-param-list":
-            if opts.name is None:
-                return None
-            return self.fix_parameter_object()
-        if kind == "dispatch-registry":
-            return self.fix_dispatch_registry()
-        if kind == "rule-table":
-            return self.fix_rule_table()
-        return None
+        """The name-driven transforms — the agent supplies the semantic bit.
+        A registry of kind -> fixer method (the conditional-polymorphism
+        shape: a dispatch table, not branching)."""
+        kind = self.kind
+        if kind in _NAME_REQUIRED_KINDS and self.opts.name is None:
+            return None
+        fixer = _STRUCTURAL_FIXERS.get(kind)
+        return getattr(self, fixer)() if fixer else None
+    def _member_param_types(self, line: int) -> dict[str, str]:
+        """The enclosing def's param name -> annotation map, for the member
+        annotation inference."""
+        module = cst.parse_module(self.source or "")
+        wrapper = cst.MetadataWrapper(module)
+        finder = _EnclosingFn(line)
+        wrapper.visit(finder)
+        fn = finder.found
+        if fn is None:
+            return {}
+        result: dict[str, str] = {}
+        for p in list(fn.params.posonly_params) + list(fn.params.params) + list(fn.params.kwonly_params):
+            if p.annotation is not None and isinstance(p.annotation.annotation, cst.Name):
+                result[p.name.value] = p.annotation.annotation.value
+        return result
+
     def _repo_params(self, callee: str) -> list[str] | None:
         repo, rel = self.repo, self.rel
         """Resolve the callee's params repo-wide — the call's file first, then
@@ -700,6 +719,65 @@ KIND_ALIASES = {
 
 
 # --------------------------------------------------------------------------- transforms
+
+def _infer_member_type(value: cst.BaseExpression, param_types: dict[str, str]) -> str | None:
+    """The annotation for a member's initial value: a literal's type, a
+    param's annotation, a cst.X(...) construction's class; None when the
+    type cannot be named safely (leave the member unannotated)."""
+    if isinstance(value, cst.Name):
+        return param_types.get(value.value)
+    if isinstance(value, cst.Integer):
+        return "int"
+    if isinstance(value, cst.Float):
+        return "float"
+    if isinstance(value, (cst.SimpleString, cst.ConcatenatedString)):
+        return "str"
+    if isinstance(value, cst.List):
+        return "list"
+    if isinstance(value, cst.Dict):
+        return "dict"
+    if isinstance(value, cst.Set):
+        return "set"
+    if isinstance(value, cst.Tuple):
+        return "tuple"
+    if isinstance(value, cst.Call) and isinstance(value.func, cst.Name):
+        return value.func.value  # cst.FunctionDef(...) -> FunctionDef
+    return None
+
+
+class _DeclareMember(cst.CSTTransformer):
+    """Annotate the undeclared `self.x = v` member: `self.x: T = v` with T
+    inferred from the assigned value. Pure — no behavior change."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, target_line: int, param_types: dict[str, str]):
+        self.target_line = target_line
+        self.param_types = param_types
+
+    @override
+    def leave_Assign(self, original_node, updated_node):
+        pos = self.get_metadata(PositionProvider, original_node)
+        if pos.start.line != self.target_line:
+            return updated_node
+        if len(updated_node.targets) != 1:
+            return updated_node
+        target = updated_node.targets[0].target
+        if not isinstance(target, cst.Attribute):
+            return updated_node
+        if not isinstance(target.value, cst.Name) or target.value.value != "self":
+            return updated_node
+        annotation = _infer_member_type(updated_node.value, self.param_types)
+        if annotation is None:
+            return updated_node
+        return cst.AnnAssign(
+            target=target,
+            annotation=cst.Annotation(cst.Name(annotation)),
+            value=updated_node.value,
+            equal=cst.AssignEqual(),
+            semicolon=updated_node.semicolon,
+        )
+
 
 class _DeleteStatement(cst.CSTTransformer):
     """Remove the SimpleStatementLine covering the target line."""
@@ -2195,6 +2273,23 @@ class _FreeNames(cst.CSTVisitor):
 
 
 
+
+
+class _EnclosingFn(cst.CSTVisitor):
+    """The innermost FunctionDef whose span contains the line — the member
+    assignment's enclosing constructor, for the annotation inference."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, line: int) -> None:
+        self.line: int = line
+        self.found: cst.FunctionDef | None = None
+
+    @override
+    def visit_FunctionDef(self, node) -> None:
+        pos = self.get_metadata(PositionProvider, node)
+        if pos.start.line <= self.line <= pos.end.line:
+            self.found = node
 
 
 class _FindFnLine(cst.CSTVisitor):

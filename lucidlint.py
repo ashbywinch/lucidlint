@@ -1597,49 +1597,97 @@ class _GateRunner:
 
 
 
-def main() -> int:
-    args = parse_args()
-    repo = args.repo.resolve()
+def _trim_preview_diff(diff, name, new_source):
+    """Shape the extract-method preview: the call-site hunk (header + a few
+    context lines + the inserted call + the next context line — the removed
+    lines duplicate the extracted body) plus the extracted method's first
+    lines. The agent names and comprehends from the method being created."""
+    hunks, cur = [], []
+    for line in diff:
+        if line.startswith("@@"):
+            if cur:
+                hunks.append(cur)
+            cur = [line]
+        else:
+            cur.append(line)
+    if cur:
+        hunks.append(cur)
+    call_hunk = next(
+        (h for h in hunks
+         if any(ln.startswith("+") and f"{name}(" in ln for ln in h)),
+        hunks[0] if hunks else [],
+    )
+    if call_hunk:
+        call_idx = next(
+            i for i, ln in enumerate(call_hunk)
+            if ln.startswith("+") and f"{name}(" in ln
+        )
+        head = [ln for ln in call_hunk[1:call_idx] if ln.startswith(" ")][:3]
+        tail = next((ln for ln in call_hunk[call_idx + 1:] if ln.startswith(" ")), None)
+        shown = [call_hunk[0]] + head + [call_hunk[call_idx]]
+        if tail:
+            shown.append(tail)
+        omitted = len(call_hunk) - len(shown)
+        if omitted > 0:
+            shown.append(f"... ({omitted} diff lines omitted)")
+        call_hunk = shown
+    src_lines = new_source.splitlines()
+    def_idx = next(
+        (i for i, ln in enumerate(src_lines)
+         if ln.startswith("def ") and name in ln),
+        None,
+    )
+    body: list[str] = []
+    if def_idx is not None:
+        for ln in src_lines[def_idx + 1:]:
+            if ln and not ln[0].isspace():
+                break
+            body.append(ln)
+    return call_hunk, def_idx, body
 
-    if args.command == "fix":
+
+class _FixCommand:
+    """The `lucidlint fix` command: R27 line resolution, the engine checks,
+    the preview surface, and the apply path — one command's behavior, not a
+    slice of main()."""
+
+    def __init__(self, args, repo: Path):
+        self.args: argparse.Namespace = args
+        self.repo: Path = repo
+        self.rel: str = args.file or ""
+        self.opts: fix_engine.FixOptions = fix_engine.FixOptions(
+            params=args.params.split(",") if args.params else None,
+            name=args.name,
+        )
+        self.req: fix_engine._FixRequest | None = None
+        self.fix_kind: str = ""
+
+    def run(self) -> int:
         # the agent-driven fix surface: `lucidlint fix --kind X --file F --line N`
-        rel = args.file or ""
-        if not rel.endswith((".py", ".rs")):
+        if not self.rel.endswith((".py", ".rs")):
             # the fix engines (libcst for Python, syn for Rust) cannot touch a
             # non-Python/Rust target; refuse clearly instead of a parse crash
             print(
-                f"fix: the fix engine only supports Python and Rust files — '{rel}' "
+                f"fix: the fix engine only supports Python and Rust files — '{self.rel}' "
                 f"is neither; refactor it by hand"
             )
             return 1
-        fix_kind = _FIX_ALIASES.get(args.kind, args.kind)
-        if args.line == 0:
-            # R27: agents never compute line numbers — the tool owns its own
-            # coordinates; when the file has exactly one finding of the kind,
-            # no --line is needed (both the .py and .rs fix surfaces)
-            lines = _File(repo, args.file).finding_lines(args.kind)
-            if len(lines) == 1:
-                args.line = lines[0]
-            elif not lines:
-                print(f"fix: no {args.kind} finding in {args.file} — nothing to fix")
-                return 0
-            else:
-                print(
-                    f"fix: {len(lines)} {args.kind} findings in {args.file} "
-                    f"(lines {', '.join(map(str, lines))}) — pass --line to pick one"
-                )
-                return 0
-        if rel.endswith(".rs"):
+        self.fix_kind = _FIX_ALIASES.get(self.args.kind, self.args.kind)
+        if self.args.line == 0:
+            exit_code = self._resolve_line()
+            if exit_code is not None:
+                return exit_code
+        if self.rel.endswith(".rs"):
             # a Rust fix runs in the scan core (syn) — libcst is Python-only
-            if fix_kind == "extract-method" and args.name is None and not args.confirm:
+            if self.fix_kind == "extract-method" and self.args.name is None and not self.args.confirm:
                 # H4: extract-method's semantic name is REQUIRED. A name-less
                 # request forwarded to the scanner would serialize "" and write
                 # `fn ()` — invalid Rust — so refuse silently (R28; the
                 # directive prose already told the agent to pass --name). There
                 # is no Rust preview surface yet.
-                print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
+                print(f"fix: nothing to change for {self.args.kind} at {self.args.file}:{self.args.line}")
                 return 0
-            return _File(repo, rel).fix_rust(fix_kind, args.line, args.name)
+            return _File(self.repo, self.rel).fix_rust(self.fix_kind, self.args.line, self.args.name)
         # Python: the libcst fix engine is a mandatory dependency
         if fix_engine is None:
             print(
@@ -1648,89 +1696,73 @@ def main() -> int:
             )
             return 1
         opts = fix_engine.FixOptions(
-            params=args.params.split(",") if args.params else None,
-            name=args.name,
+            params=self.args.params.split(",") if self.args.params else None,
+            name=self.args.name,
         )
-        req = fix_engine._FixRequest(
-            kind=args.kind, repo=repo, rel=rel, line=args.line, opts=opts,
+        self.req = fix_engine._FixRequest(
+            kind=self.args.kind, repo=self.repo, rel=self.rel, line=self.args.line, opts=opts,
         )
-        if fix_kind in fix_engine.PREVIEW_KINDS and not args.name and not args.confirm:
+        if self.fix_kind in fix_engine.PREVIEW_KINDS and not self.args.name and not self.args.confirm:
+            return self._preview()
+        return self._apply()
+
+    def _resolve_line(self) -> int | None:
+        """R27: agents never compute line numbers — the tool owns its own
+        coordinates; when the file has exactly one finding of the kind, no
+        --line is needed. Returns an exit code when the request cannot
+        proceed, None when the line is resolved."""
+        # R27: agents never compute line numbers — the tool owns its own
+        # coordinates; when the file has exactly one finding of the kind,
+        # no --line is needed (both the .py and .rs fix surfaces)
+        lines = _File(self.repo, self.args.file).finding_lines(self.args.kind)
+        if len(lines) == 1:
+            self.args.line = lines[0]
+        elif not lines:
+            print(f"fix: no {self.args.kind} finding in {self.args.file} — nothing to fix")
+            return 0
+        else:
+            print(
+                f"fix: {len(lines)} {self.args.kind} findings in {self.args.file} "
+                f"(lines {', '.join(map(str, lines))}) — pass --line to pick one"
+            )
+            return 0
+        return None
+
+    def _preview(self) -> int:
             # the name-free preview surface: show the proposed refactoring
             # as a diff (the seam with a placeholder name — no --fix-name
             # needed to see it). The agent reviews the seam, then re-runs
             # with --fix-name <name>; the name is the commitment, so the
             # named run applies — no --confirm dance
-            new_source, description = req.propose_finding()
+            new_source, description = self.req.propose_finding()
             if new_source is None:
                 # R28: never explain an absent fix — the silence is the signal
-                print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
+                print(f"fix: nothing to change for {self.args.kind} at {self.args.file}:{self.args.line}")
                 return 0
             diff = list(
                 difflib.unified_diff(
-                    (repo / args.file).read_text().splitlines(),
+                    (self.repo / self.args.file).read_text().splitlines(),
                     new_source.splitlines(),
-                    fromfile=args.file,
-                    tofile=args.file + " (proposed)",
+                    fromfile=self.args.file,
+                    tofile=self.args.file + " (proposed)",
                     lineterm="",
                 )
             )
-            if fix_kind == "extract-method":
+            if self.fix_kind == "extract-method":
                 # the C shape (subtask-tested): the call-site hunk plus the
                 # EXTRACTED METHOD's first lines — agents name and comprehend
                 # from the method being created, not the diff head; a bare
                 # diff-head truncation left them wanting the cut part and
                 # unsure whether _extracted was the final name
-                name = args.name or "_extracted"
-                hunks, cur = [], []
-                for line in diff:
-                    if line.startswith("@@"):
-                        if cur:
-                            hunks.append(cur)
-                        cur = [line]
-                    else:
-                        cur.append(line)
-                if cur:
-                    hunks.append(cur)
-                call_hunk = next(
-                    (h for h in hunks
-                     if any(ln.startswith("+") and f"{name}(" in ln for ln in h)),
-                    hunks[0] if hunks else [],
+                call_hunk, def_idx, body = _trim_preview_diff(
+                    diff, self.args.name or "_extracted", new_source
                 )
-                # keep the hunk's shape, not its bulk: header + a few context
-                # lines + the inserted call + the next context line — the
-                # removed lines duplicate the extracted body shown below
-                if call_hunk:
-                    call_idx = next(
-                        i for i, ln in enumerate(call_hunk)
-                        if ln.startswith("+") and f"{name}(" in ln
-                    )
-                    head = [ln for ln in call_hunk[1:call_idx] if ln.startswith(" ")][:3]
-                    tail = next((ln for ln in call_hunk[call_idx + 1:] if ln.startswith(" ")), None)
-                    shown = [call_hunk[0]] + head + [call_hunk[call_idx]]
-                    if tail:
-                        shown.append(tail)
-                    omitted = len(call_hunk) - len(shown)
-                    if omitted > 0:
-                        shown.append(f"... ({omitted} diff lines omitted)")
-                    call_hunk = shown
-                src_lines = new_source.splitlines()
-                def_idx = next(
-                    (i for i, ln in enumerate(src_lines)
-                     if ln.startswith("def ") and name in ln),
-                    None,
-                )
-                body: list[str] = []
-                if def_idx is not None:
-                    for ln in src_lines[def_idx + 1:]:
-                        if ln and not ln[0].isspace():
-                            break
-                        body.append(ln)
                 print("\n".join(diff[:2]))  # --- / +++ file headers
                 print("\n".join(call_hunk))
                 print(f"# seam: {description}")
                 if def_idx is not None:
                     print("\nExtracted (the method being created, first lines):\n")
-                    print(src_lines[def_idx])
+                    print(new_source.splitlines()[def_idx])
                     print("\n".join(body[:10]))
                     if len(body) > 10:
                         print(f"... ({len(body) - 10} more lines omitted)")
@@ -1738,17 +1770,28 @@ def main() -> int:
                 if len(diff) > 40:
                     diff = diff[:40] + [f"... ({len(diff) - 40} more lines omitted)"]
                 print("\n".join(diff))
-            print(f"# the name `{args.name or '_extracted'}` is a placeholder — pick a real one; "
-                  f"apply it: lucidlint fix --kind {args.kind} --file {args.file} "
-                  f"--line {args.line} --name <name>")
+            print(f"# the name `{self.args.name or '_extracted'}` is a placeholder — pick a real one; "
+                  f"apply it: lucidlint fix --kind {self.args.kind} --file {self.args.file} "
+                  f"--line {self.args.line} --name <name>")
             return 0
-        description = req.fix_finding()
+
+    def _apply(self) -> int:
+        description = self.req.fix_finding()
         if description is None:
             # R28: never explain an absent fix — the silence is the signal
-            print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
+            print(f"fix: nothing to change for {self.args.kind} at {self.args.file}:{self.args.line}")
             return 0
-        print(f"fix: {description} — {args.file}:{args.line} ({args.kind})")
+        print(f"fix: {description} — {self.args.file}:{self.args.line} ({self.args.kind})")
         return 0
+
+
+
+def main() -> int:
+    args = parse_args()
+    repo = args.repo.resolve()
+
+    if args.command == "fix":
+        return _FixCommand(args, repo).run()
 
     return _GateRunner(repo, args).run()
 

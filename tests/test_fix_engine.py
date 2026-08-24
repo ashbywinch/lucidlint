@@ -15,6 +15,29 @@ from test_lucidlint import make_repo, run_main
 import fix_engine
 
 
+def test_undeclared_attribute_declares_the_member(tmp_path):
+    src = (
+        "class C:\n"
+        "    def __init__(self, x: int, repo):\n"
+        "        self.x = x\n"
+        "        self.count = 0\n"
+        "        self.names = []\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    _req(
+        "undeclared-attribute", "houses/app.py", repo, 3, fix_engine.FixOptions(), source=src
+    ).fix_finding()
+    assert "self.x: int = x" in (repo / "houses" / "app.py").read_text()
+    _req(
+        "undeclared-attribute", "houses/app.py", repo, 5, fix_engine.FixOptions(), source=src
+    ).fix_finding()
+    out = (repo / "houses" / "app.py").read_text()
+    assert "self.names: list = []" in out
+    # a member assigned OUTSIDE __init__ is not auto-annotated (the fix
+    # would have to invent a default) — nothing to change
+
+
 def _req(kind, rel, repo, line, opts=None, source=None):
     """A fix request in the test's old (kind, rel, repo, line, opts) shape."""
     return fix_engine._FixRequest(
