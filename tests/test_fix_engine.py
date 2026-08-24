@@ -15,6 +15,31 @@ from test_lucidlint import make_repo, run_main
 import fix_engine
 
 
+def test_tuple_record_becomes_a_class(tmp_path):
+    # the record direction: a CLASS, not a NamedTuple — the build sites
+    # construct it, the positional reads and destructures become attribute
+    # reads, and the class is prepended (the fixer's end-to-end shape)
+    src = (
+        "em = {r[\"id\"]: (p, n) for r in epics}\n"
+        "def render(em):\n"
+        "    for cid, (p, nm) in em.items():\n"
+        "        if em[cid][0]:\n"
+        "            print(nm)\n"
+        "    a, b = em[cid]\n"
+        "    return a, b\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    _req("tuple-record", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Page"), source=src).fix_finding()
+    out = p.read_text()
+    assert "class _Page:" in out
+    assert "def __init__(self, p, n):" in out
+    assert "_Page(p, n)" in out  # the build site constructs the class
+    assert "em[cid].p" in out  # the constant-index read becomes an attribute
+    assert "a, b = (em[cid].p, em[cid].n)" in out
+
+
 def test_undeclared_attribute_declares_the_member(tmp_path):
     src = (
         "class C:\n"

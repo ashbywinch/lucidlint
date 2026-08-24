@@ -1516,7 +1516,7 @@ pub fn count_tuple_record_reads(
 }
 
 /// A dict built with same-arity tuple values, then read with constant
-/// integer indexes — an anonymous record. Name it (NamedTuple).
+/// integer indexes — an anonymous record; make it a class.
 pub fn tuple_record_findings(state: &mut ScanState, body: &[Stmt]) {
     let mut records: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
     // build sites at ANY scope (build()'s locals are records too) — walk
@@ -1613,7 +1613,7 @@ pub fn tuple_record_findings(state: &mut ScanState, body: &[Stmt]) {
                 kind: "tuple-record".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "the values of '{name}' are {arity}-tuples read {reads} times by constant index — an anonymous record; name it (NamedTuple)"
+                    "the values of '{name}' are {arity}-tuples read {reads} times by constant index — an anonymous record; make it a class (name it: lucidlint fix --kind tuple-record --name <N>) — fix: tuple-record"
                 ),
             });
         }

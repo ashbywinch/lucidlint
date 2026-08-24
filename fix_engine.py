@@ -54,8 +54,9 @@ _STRUCTURAL_FIXERS = {
     "long-param-list": "fix_parameter_object",
     "dispatch-registry": "fix_dispatch_registry",
     "rule-table": "fix_rule_table",
+    "tuple-record": "fix_tuple_record",
 }
-_NAME_REQUIRED_KINDS = {"extract-method", "magic-number", "vague-name", "long-param-list"}
+_NAME_REQUIRED_KINDS = {"extract-method", "magic-number", "vague-name", "long-param-list", "tuple-record"}
 
 
 class _ModuleProposal(NamedTuple):
@@ -541,6 +542,38 @@ class _FixRequest:
                 result[p.name.value] = cst.Module(body=[]).code_for_node(p.annotation.annotation)
         return result
 
+    def fix_tuple_record(self) -> str | None:
+        """The anonymous tuple record becomes a class: the build sites
+        construct it, the constant-index reads and destructures become
+        attribute reads, and the class definition is prepended to the
+        module."""
+        source = self.source
+        class_name = self.opts.name
+        if not class_name:
+            return None
+        if not class_name.startswith("_"):
+            class_name = "_" + class_name
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
+        # the record dict + the tuple arity from the build site
+        record_dicts, elements = _find_record_builds(module)
+        if elements is None or len(elements) < 2:
+            return None
+        field_names = []
+        seen: set[str] = set()
+        for i, el in enumerate(elements):
+            base = _tuple_element_name(el)
+            if base in seen or base == "value" and any(e != el for e in elements):
+                base = f"field_{i}"
+            seen.add(base)
+            field_names.append(base)
+        transformed = wrapper.visit(
+            _RecordToClass(self.rel, record_dicts, class_name, field_names)
+        )
+        new_body = [cst.SimpleStatementLine(body=[cst.Expr(_record_class_def(class_name, field_names))])]
+        new_body.extend(transformed.body)
+        return cst.Module(body=new_body).code
+
     def _repo_params(self, callee: str) -> list[str] | None:
         repo, rel = self.repo, self.rel
         """Resolve the callee's params repo-wide — the call's file first, then
@@ -694,6 +727,7 @@ STRUCTURAL_KINDS = {
         "(--name), re-exported from the origin"
     ),
     "magic-number": "Replace Magic Literal: introduce the named constant",
+    "tuple-record": "make the anonymous record a class (--name), rewriting the positional reads",
     "vague-name": "Rename the type and its references (same-file)",
     "long-param-list": "Introduce Parameter Object: bundle the params into a dataclass",
     "dispatch-registry": "convert the if/elif dispatch chain into a dict of selector -> handler functions",
@@ -777,6 +811,168 @@ class _DeclareMember(cst.CSTTransformer):
             equal=cst.AssignEqual(),
             semicolon=updated_node.semicolon,
         )
+
+
+def _tuple_element_name(elem: cst.BaseExpression) -> str:
+    """A field name for one tuple position: a plain Name element keeps its
+    name; a title(...)-style extraction is the record's name; anything else
+    falls back to the positional name (the agent renames the class it
+    asked for)."""
+    if isinstance(elem, cst.Name):
+        return elem.value
+    if isinstance(elem, cst.Call) and isinstance(elem.func, cst.Name):
+        return {"title": "name"}.get(elem.func.value, elem.func.value)
+    return "value"
+
+
+class _RecordToClass(cst.CSTTransformer):
+    """Turn an anonymous tuple record into a class: the build sites construct
+    the class, the positional reads become attribute reads, the destructures
+    read the fields explicitly. The class definition is prepended."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, record_name: str, record_dicts: set[str], class_name: str, field_names: list[str]):
+        self.record_name = record_name
+        self.record_dicts = record_dicts
+        self.class_name = class_name
+        self.field_names = field_names
+
+    def _is_record_base(self, e: cst.BaseExpression) -> bool:
+        """The base name of an attribute/subscript chain — one of the record
+        dicts?"""
+        v = e
+        while isinstance(v, (cst.Attribute, cst.Subscript)):
+            v = v.value
+        return isinstance(v, cst.Name) and v.value in self.record_dicts
+
+    @override
+    def leave_Subscript(self, original_node, updated_node):
+        # X[k][N] -> X[k].field_N when the outer index is a constant position
+        if not isinstance(updated_node.slice, tuple) or len(updated_node.slice) != 1:
+            return updated_node
+        el = updated_node.slice[0]
+        if not isinstance(el, cst.SubscriptElement) or not isinstance(el.slice, cst.Index):
+            return updated_node
+        idx_node = el.slice.value
+        if not isinstance(idx_node, cst.Integer):
+            return updated_node
+        idx = int(idx_node.value)
+        if idx >= len(self.field_names) or not isinstance(updated_node.value, cst.Subscript):
+            return updated_node
+        if not self._is_record_base(updated_node.value.value):
+            return updated_node
+        return cst.Attribute(value=updated_node.value, attr=cst.Name(self.field_names[idx]))
+
+    @override
+    def leave_Dict(self, original_node, updated_node):
+        return updated_node
+
+    @override
+    def leave_DictComp(self, original_node, updated_node):
+        if isinstance(updated_node.value, cst.Tuple) and len(updated_node.value.elements) == len(self.field_names):
+            return updated_node.with_changes(
+                value=cst.Call(
+                    func=cst.Name(self.class_name),
+                    args=[cst.Arg(e.value) for e in updated_node.value.elements],
+                )
+            )
+        return updated_node
+
+    @override
+    def leave_Assign(self, original_node, updated_node):
+        # a, b = X[k] -> a, b = X[k].f0, X[k].f1
+        if not isinstance(updated_node.value, cst.Subscript):
+            return updated_node
+        if not self._is_record_base(updated_node.value.value):
+            return updated_node
+        reads = [cst.Attribute(value=updated_node.value, attr=cst.Name(n)) for n in self.field_names]
+        return updated_node.with_changes(value=cst.Tuple(elements=[cst.Element(r) for r in reads]))
+
+    @override
+    def leave_For(self, original_node, updated_node):
+        # for k, (a, b) in X.items() -> for k, v in X.items(): a, b = v.f0, v.f1
+        if not isinstance(updated_node.iter, cst.Call) or not isinstance(updated_node.iter.func, cst.Attribute):
+            return updated_node
+        if updated_node.iter.func.attr.value != "items":
+            return updated_node
+        if not self._is_record_base(updated_node.iter.func.value):
+            return updated_node
+        t = updated_node.target
+        if not isinstance(t, cst.Tuple) or len(t.elements) != 2 or not isinstance(t.elements[1].value, cst.Tuple):
+            return updated_node
+        outer = t.elements[0].value
+        inner = t.elements[1].value
+        if len(inner.elements) != len(self.field_names):
+            return updated_node
+        binds = [e.value for e in inner.elements]
+        reads = [cst.Attribute(value=cst.Name("v"), attr=cst.Name(n)) for n in self.field_names]
+        unpack = cst.SimpleStatementLine(
+            body=[
+                cst.Assign(
+                    targets=[cst.AssignTarget(cst.Tuple(elements=[cst.Element(b) for b in binds]))],
+                    value=cst.Tuple(elements=[cst.Element(r) for r in reads]),
+                )
+            ],
+            leading_lines=[cst.EmptyLine()],
+        )
+        new_body = list(updated_node.body.body)
+        new_body.insert(0, unpack)
+        return updated_node.with_changes(
+            target=cst.Tuple(elements=[cst.Element(outer), cst.Element(cst.Name("v"))]),
+            body=updated_node.body.with_changes(body=new_body),
+        )
+
+
+def _find_record_builds(module: cst.Module) -> tuple[set[str], list[cst.BaseExpression] | None]:
+    """The dict names built with tuple values + the first build's elements
+    (for the field-name inference)."""
+    names: set[str] = set()
+    elements: list[cst.BaseExpression] | None = None
+    for stmt in module.body:
+        if not isinstance(stmt, cst.SimpleStatementLine) or len(stmt.body) != 1:
+            continue
+        assign = stmt.body[0]
+        if not isinstance(assign, cst.Assign) or len(assign.targets) != 1:
+            continue
+        target = assign.targets[0].target
+        if not isinstance(target, cst.Name):
+            continue
+        value = assign.value
+        if isinstance(value, cst.DictComp):
+            value = value.value
+        if isinstance(value, cst.Tuple) and len(value.elements) >= 2:
+            names.add(target.value)
+            if elements is None:
+                elements = [e.value for e in value.elements]
+            elif len(value.elements) != len(elements):
+                return set(), None
+    return names, elements
+
+
+def _record_class_def(class_name: str, field_names: list[str]) -> cst.ClassDef:
+    """The record class: __init__ taking the fields, storing them. A class,
+    not a NamedTuple — it can grow behavior without a migration."""
+    body = [
+        cst.SimpleStatementLine(
+            body=[
+                cst.Assign(
+                    targets=[cst.AssignTarget(cst.Attribute(cst.Name("self"), cst.Name(f)))],
+                    value=cst.Name(f),
+                )
+            ]
+        )
+        for f in field_names
+    ]
+    init = cst.FunctionDef(
+        name=cst.Name("__init__"),
+        params=cst.Parameters(params=[cst.Param(cst.Name("self"))] + [cst.Param(cst.Name(f)) for f in field_names]),
+        body=cst.IndentedBlock(body=body),
+    )
+    return cst.ClassDef(
+        name=cst.Name(class_name),
+        body=cst.IndentedBlock(body=[init]),
+    )
 
 
 class _DeleteStatement(cst.CSTTransformer):

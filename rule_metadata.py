@@ -205,8 +205,9 @@ CATALOG = RuleCatalog([
          display_name="assembly-class → latent-class", display="latent-class"),
     Rule("tuple-record", "fail", "architecture", "Python",
          "A dict whose values are same-arity tuples read with constant "
-         "integer indexes — an anonymous record; name it as a NamedTuple.",
-         display_name="tuple-record → record-shape", display="record-shape"),
+         "integer indexes — an anonymous record; make it a class (the "
+         "record's fields are the tuple positions).",
+         display_name="tuple-record → latent-class", display="latent-class"),
     Rule("data-clump", "fail", "architecture", "Python",
          ">=3 module functions sharing the same parameter pair — the pair "
          "travels together, so it is a data clump; introduce a parameter "

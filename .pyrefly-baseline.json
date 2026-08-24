@@ -1,9 +1,9 @@
 {
  "errors": [
   {
-   "line": 93,
+   "line": 94,
    "column": 35,
-   "stop_line": 93,
+   "stop_line": 94,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -13,9 +13,9 @@
    "severity": "error"
   },
   {
-   "line": 95,
+   "line": 96,
    "column": 33,
-   "stop_line": 95,
+   "stop_line": 96,
    "stop_column": 39,
    "path": "fix_engine.py",
    "code": -2,
@@ -25,9 +25,9 @@
    "severity": "error"
   },
   {
-   "line": 145,
+   "line": 146,
    "column": 35,
-   "stop_line": 145,
+   "stop_line": 146,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -37,9 +37,9 @@
    "severity": "error"
   },
   {
-   "line": 155,
+   "line": 156,
    "column": 86,
-   "stop_line": 155,
+   "stop_line": 156,
    "stop_column": 90,
    "path": "fix_engine.py",
    "code": -2,
@@ -49,9 +49,9 @@
    "severity": "error"
   },
   {
-   "line": 158,
+   "line": 159,
    "column": 69,
-   "stop_line": 158,
+   "stop_line": 159,
    "stop_column": 73,
    "path": "fix_engine.py",
    "code": -2,
@@ -61,9 +61,9 @@
    "severity": "error"
   },
   {
-   "line": 167,
+   "line": 168,
    "column": 43,
-   "stop_line": 167,
+   "stop_line": 168,
    "stop_column": 47,
    "path": "fix_engine.py",
    "code": -2,
@@ -73,9 +73,9 @@
    "severity": "error"
   },
   {
-   "line": 206,
+   "line": 207,
    "column": 29,
-   "stop_line": 206,
+   "stop_line": 207,
    "stop_column": 55,
    "path": "fix_engine.py",
    "code": -2,
@@ -85,9 +85,9 @@
    "severity": "error"
   },
   {
-   "line": 210,
+   "line": 211,
    "column": 41,
-   "stop_line": 210,
+   "stop_line": 211,
    "stop_column": 51,
    "path": "fix_engine.py",
    "code": -2,
@@ -97,9 +97,9 @@
    "severity": "error"
   },
   {
-   "line": 235,
+   "line": 236,
    "column": 35,
-   "stop_line": 235,
+   "stop_line": 236,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -109,9 +109,9 @@
    "severity": "error"
   },
   {
-   "line": 245,
+   "line": 246,
    "column": 38,
-   "stop_line": 245,
+   "stop_line": 246,
    "stop_column": 85,
    "path": "fix_engine.py",
    "code": -2,
@@ -121,9 +121,9 @@
    "severity": "error"
   },
   {
-   "line": 251,
+   "line": 252,
    "column": 38,
-   "stop_line": 251,
+   "stop_line": 252,
    "stop_column": 85,
    "path": "fix_engine.py",
    "code": -2,
@@ -133,9 +133,9 @@
    "severity": "error"
   },
   {
-   "line": 257,
+   "line": 258,
    "column": 56,
-   "stop_line": 257,
+   "stop_line": 258,
    "stop_column": 60,
    "path": "fix_engine.py",
    "code": -2,
@@ -145,9 +145,9 @@
    "severity": "error"
   },
   {
-   "line": 264,
+   "line": 265,
    "column": 56,
-   "stop_line": 264,
+   "stop_line": 265,
    "stop_column": 60,
    "path": "fix_engine.py",
    "code": -2,
@@ -157,9 +157,9 @@
    "severity": "error"
   },
   {
-   "line": 281,
+   "line": 282,
    "column": 35,
-   "stop_line": 281,
+   "stop_line": 282,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -169,9 +169,9 @@
    "severity": "error"
   },
   {
-   "line": 291,
+   "line": 292,
    "column": 36,
-   "stop_line": 291,
+   "stop_line": 292,
    "stop_column": 83,
    "path": "fix_engine.py",
    "code": -2,
@@ -181,9 +181,9 @@
    "severity": "error"
   },
   {
-   "line": 297,
+   "line": 298,
    "column": 57,
-   "stop_line": 297,
+   "stop_line": 298,
    "stop_column": 61,
    "path": "fix_engine.py",
    "code": -2,
@@ -193,9 +193,9 @@
    "severity": "error"
   },
   {
-   "line": 303,
+   "line": 304,
    "column": 35,
-   "stop_line": 303,
+   "stop_line": 304,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -205,9 +205,9 @@
    "severity": "error"
   },
   {
-   "line": 315,
+   "line": 316,
    "column": 56,
-   "stop_line": 315,
+   "stop_line": 316,
    "stop_column": 62,
    "path": "fix_engine.py",
    "code": -2,
@@ -217,9 +217,9 @@
    "severity": "error"
   },
   {
-   "line": 325,
+   "line": 326,
    "column": 53,
-   "stop_line": 325,
+   "stop_line": 326,
    "stop_column": 59,
    "path": "fix_engine.py",
    "code": -2,
@@ -229,9 +229,9 @@
    "severity": "error"
   },
   {
-   "line": 333,
+   "line": 334,
    "column": 56,
-   "stop_line": 333,
+   "stop_line": 334,
    "stop_column": 62,
    "path": "fix_engine.py",
    "code": -2,
@@ -241,9 +241,9 @@
    "severity": "error"
   },
   {
-   "line": 345,
+   "line": 346,
    "column": 20,
-   "stop_line": 345,
+   "stop_line": 346,
    "stop_column": 29,
    "path": "fix_engine.py",
    "code": -2,
@@ -253,9 +253,9 @@
    "severity": "error"
   },
   {
-   "line": 345,
+   "line": 346,
    "column": 53,
-   "stop_line": 345,
+   "stop_line": 346,
    "stop_column": 60,
    "path": "fix_engine.py",
    "code": -2,
@@ -265,9 +265,9 @@
    "severity": "error"
   },
   {
-   "line": 391,
+   "line": 392,
    "column": 35,
-   "stop_line": 391,
+   "stop_line": 392,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -277,9 +277,9 @@
    "severity": "error"
   },
   {
-   "line": 447,
+   "line": 448,
    "column": 35,
-   "stop_line": 447,
+   "stop_line": 448,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -289,9 +289,9 @@
    "severity": "error"
   },
   {
-   "line": 477,
+   "line": 478,
    "column": 35,
-   "stop_line": 477,
+   "stop_line": 478,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -301,9 +301,9 @@
    "severity": "error"
   },
   {
-   "line": 499,
+   "line": 500,
    "column": 57,
-   "stop_line": 499,
+   "stop_line": 500,
    "stop_column": 63,
    "path": "fix_engine.py",
    "code": -2,
@@ -313,9 +313,9 @@
    "severity": "error"
   },
   {
-   "line": 501,
+   "line": 502,
    "column": 57,
-   "stop_line": 501,
+   "stop_line": 502,
    "stop_column": 63,
    "path": "fix_engine.py",
    "code": -2,
@@ -325,9 +325,9 @@
    "severity": "error"
   },
   {
-   "line": 506,
+   "line": 507,
    "column": 57,
-   "stop_line": 506,
+   "stop_line": 507,
    "stop_column": 63,
    "path": "fix_engine.py",
    "code": -2,
@@ -337,9 +337,9 @@
    "severity": "error"
   },
   {
-   "line": 515,
+   "line": 516,
    "column": 57,
-   "stop_line": 515,
+   "stop_line": 516,
    "stop_column": 63,
    "path": "fix_engine.py",
    "code": -2,
@@ -349,9 +349,9 @@
    "severity": "error"
   },
   {
-   "line": 572,
+   "line": 556,
    "column": 35,
-   "stop_line": 572,
+   "stop_line": 556,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -361,9 +361,45 @@
    "severity": "error"
   },
   {
-   "line": 585,
+   "line": 573,
+   "column": 60,
+   "stop_line": 573,
+   "stop_column": 102,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `ClassDef` is not assignable to parameter `value` with type `BaseExpression` in function `libcst._nodes.statement.Expr.__init__`",
+   "concise_description": "Argument `ClassDef` is not assignable to parameter `value` with type `BaseExpression` in function `libcst._nodes.statement.Expr.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 574,
+   "column": 25,
+   "stop_line": 574,
+   "stop_column": 41,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `Sequence[BaseCompoundStatement | SimpleStatementLine]` is not assignable to parameter `iterable` with type `Iterable[SimpleStatementLine]` in function `list.extend`",
+   "concise_description": "Argument `Sequence[BaseCompoundStatement | SimpleStatementLine]` is not assignable to parameter `iterable` with type `Iterable[SimpleStatementLine]` in function `list.extend`",
+   "severity": "error"
+  },
+  {
+   "line": 605,
+   "column": 35,
+   "stop_line": 605,
+   "stop_column": 41,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
+   "severity": "error"
+  },
+  {
+   "line": 618,
    "column": 20,
-   "stop_line": 585,
+   "stop_line": 618,
    "stop_column": 29,
    "path": "fix_engine.py",
    "code": -2,
@@ -373,9 +409,9 @@
    "severity": "error"
   },
   {
-   "line": 585,
+   "line": 618,
    "column": 46,
-   "stop_line": 585,
+   "stop_line": 618,
    "stop_column": 53,
    "path": "fix_engine.py",
    "code": -2,
@@ -385,9 +421,9 @@
    "severity": "error"
   },
   {
-   "line": 586,
+   "line": 619,
    "column": 30,
-   "stop_line": 586,
+   "stop_line": 619,
    "stop_column": 45,
    "path": "fix_engine.py",
    "code": -2,
@@ -397,9 +433,9 @@
    "severity": "error"
   },
   {
-   "line": 761,
+   "line": 795,
    "column": 12,
-   "stop_line": 761,
+   "stop_line": 795,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -409,9 +445,9 @@
    "severity": "error"
   },
   {
-   "line": 798,
+   "line": 997,
    "column": 12,
-   "stop_line": 798,
+   "stop_line": 997,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -421,9 +457,9 @@
    "severity": "error"
   },
   {
-   "line": 798,
+   "line": 997,
    "column": 50,
-   "stop_line": 798,
+   "stop_line": 997,
    "stop_column": 57,
    "path": "fix_engine.py",
    "code": -2,
@@ -433,9 +469,9 @@
    "severity": "error"
   },
   {
-   "line": 823,
+   "line": 1022,
    "column": 12,
-   "stop_line": 823,
+   "stop_line": 1022,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -445,9 +481,9 @@
    "severity": "error"
   },
   {
-   "line": 829,
+   "line": 1028,
    "column": 9,
-   "stop_line": 829,
+   "stop_line": 1028,
    "stop_column": 22,
    "path": "fix_engine.py",
    "code": -2,
@@ -457,9 +493,9 @@
    "severity": "error"
   },
   {
-   "line": 835,
+   "line": 1034,
    "column": 12,
-   "stop_line": 835,
+   "stop_line": 1034,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -469,9 +505,9 @@
    "severity": "error"
   },
   {
-   "line": 859,
+   "line": 1058,
    "column": 17,
-   "stop_line": 859,
+   "stop_line": 1058,
    "stop_column": 26,
    "path": "fix_engine.py",
    "code": -2,
@@ -481,9 +517,9 @@
    "severity": "error"
   },
   {
-   "line": 859,
+   "line": 1058,
    "column": 55,
-   "stop_line": 859,
+   "stop_line": 1058,
    "stop_column": 62,
    "path": "fix_engine.py",
    "code": -2,
@@ -493,9 +529,9 @@
    "severity": "error"
   },
   {
-   "line": 955,
+   "line": 1154,
    "column": 16,
-   "stop_line": 955,
+   "stop_line": 1154,
    "stop_column": 39,
    "path": "fix_engine.py",
    "code": -2,
@@ -505,9 +541,9 @@
    "severity": "error"
   },
   {
-   "line": 978,
+   "line": 1177,
    "column": 22,
-   "stop_line": 978,
+   "stop_line": 1177,
    "stop_column": 27,
    "path": "fix_engine.py",
    "code": -2,
@@ -517,9 +553,9 @@
    "severity": "error"
   },
   {
-   "line": 979,
+   "line": 1178,
    "column": 20,
-   "stop_line": 979,
+   "stop_line": 1178,
    "stop_column": 31,
    "path": "fix_engine.py",
    "code": -2,
@@ -529,9 +565,9 @@
    "severity": "error"
   },
   {
-   "line": 1006,
+   "line": 1205,
    "column": 16,
-   "stop_line": 1006,
+   "stop_line": 1205,
    "stop_column": 25,
    "path": "fix_engine.py",
    "code": -2,
@@ -541,9 +577,9 @@
    "severity": "error"
   },
   {
-   "line": 1282,
+   "line": 1481,
    "column": 16,
-   "stop_line": 1282,
+   "stop_line": 1481,
    "stop_column": 63,
    "path": "fix_engine.py",
    "code": -2,
@@ -553,9 +589,9 @@
    "severity": "error"
   },
   {
-   "line": 1302,
+   "line": 1501,
    "column": 43,
-   "stop_line": 1302,
+   "stop_line": 1501,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -565,9 +601,9 @@
    "severity": "error"
   },
   {
-   "line": 1302,
+   "line": 1501,
    "column": 57,
-   "stop_line": 1302,
+   "stop_line": 1501,
    "stop_column": 62,
    "path": "fix_engine.py",
    "code": -2,
@@ -577,9 +613,9 @@
    "severity": "error"
   },
   {
-   "line": 1340,
+   "line": 1539,
    "column": 63,
-   "stop_line": 1340,
+   "stop_line": 1539,
    "stop_column": 64,
    "path": "fix_engine.py",
    "code": -2,
@@ -589,9 +625,9 @@
    "severity": "error"
   },
   {
-   "line": 1359,
+   "line": 1558,
    "column": 60,
-   "stop_line": 1359,
+   "stop_line": 1558,
    "stop_column": 66,
    "path": "fix_engine.py",
    "code": -2,
@@ -601,9 +637,9 @@
    "severity": "error"
   },
   {
-   "line": 1407,
+   "line": 1606,
    "column": 25,
-   "stop_line": 1407,
+   "stop_line": 1606,
    "stop_column": 44,
    "path": "fix_engine.py",
    "code": -2,
@@ -613,9 +649,9 @@
    "severity": "error"
   },
   {
-   "line": 1407,
+   "line": 1606,
    "column": 62,
-   "stop_line": 1407,
+   "stop_line": 1606,
    "stop_column": 80,
    "path": "fix_engine.py",
    "code": -2,
@@ -625,9 +661,9 @@
    "severity": "error"
   },
   {
-   "line": 1410,
+   "line": 1609,
    "column": 22,
-   "stop_line": 1410,
+   "stop_line": 1609,
    "stop_column": 32,
    "path": "fix_engine.py",
    "code": -2,
@@ -637,9 +673,9 @@
    "severity": "error"
   },
   {
-   "line": 1412,
+   "line": 1611,
    "column": 31,
-   "stop_line": 1412,
+   "stop_line": 1611,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -649,9 +685,9 @@
    "severity": "error"
   },
   {
-   "line": 1546,
+   "line": 1745,
    "column": 15,
-   "stop_line": 1546,
+   "stop_line": 1745,
    "stop_column": 33,
    "path": "fix_engine.py",
    "code": -2,
@@ -661,9 +697,9 @@
    "severity": "error"
   },
   {
-   "line": 1552,
+   "line": 1751,
    "column": 34,
-   "stop_line": 1552,
+   "stop_line": 1751,
    "stop_column": 51,
    "path": "fix_engine.py",
    "code": -2,
@@ -673,9 +709,9 @@
    "severity": "error"
   },
   {
-   "line": 1592,
+   "line": 1791,
    "column": 29,
-   "stop_line": 1592,
+   "stop_line": 1791,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -685,9 +721,9 @@
    "severity": "error"
   },
   {
-   "line": 1611,
+   "line": 1810,
    "column": 30,
-   "stop_line": 1611,
+   "stop_line": 1810,
    "stop_column": 43,
    "path": "fix_engine.py",
    "code": -2,
@@ -697,9 +733,9 @@
    "severity": "error"
   },
   {
-   "line": 1634,
+   "line": 1833,
    "column": 12,
-   "stop_line": 1634,
+   "stop_line": 1833,
    "stop_column": 45,
    "path": "fix_engine.py",
    "code": -2,
@@ -709,9 +745,9 @@
    "severity": "error"
   },
   {
-   "line": 1712,
+   "line": 1911,
    "column": 13,
-   "stop_line": 1712,
+   "stop_line": 1911,
    "stop_column": 52,
    "path": "fix_engine.py",
    "code": -2,
@@ -721,9 +757,9 @@
    "severity": "error"
   },
   {
-   "line": 1715,
+   "line": 1914,
    "column": 23,
-   "stop_line": 1715,
+   "stop_line": 1914,
    "stop_column": 44,
    "path": "fix_engine.py",
    "code": -2,
@@ -733,9 +769,9 @@
    "severity": "error"
   },
   {
-   "line": 1744,
+   "line": 1943,
    "column": 21,
-   "stop_line": 1744,
+   "stop_line": 1943,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -745,9 +781,9 @@
    "severity": "error"
   },
   {
-   "line": 1771,
+   "line": 1970,
    "column": 12,
-   "stop_line": 1771,
+   "stop_line": 1970,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -757,9 +793,9 @@
    "severity": "error"
   },
   {
-   "line": 1773,
+   "line": 1972,
    "column": 67,
-   "stop_line": 1773,
+   "stop_line": 1972,
    "stop_column": 78,
    "path": "fix_engine.py",
    "code": -2,
@@ -769,9 +805,9 @@
    "severity": "error"
   },
   {
-   "line": 1806,
+   "line": 2005,
    "column": 12,
-   "stop_line": 1806,
+   "stop_line": 2005,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -781,9 +817,9 @@
    "severity": "error"
   },
   {
-   "line": 1818,
+   "line": 2017,
    "column": 12,
-   "stop_line": 1818,
+   "stop_line": 2017,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -793,9 +829,9 @@
    "severity": "error"
   },
   {
-   "line": 1841,
+   "line": 2040,
    "column": 12,
-   "stop_line": 1841,
+   "stop_line": 2040,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -805,9 +841,9 @@
    "severity": "error"
   },
   {
-   "line": 2018,
+   "line": 2217,
    "column": 55,
-   "stop_line": 2018,
+   "stop_line": 2217,
    "stop_column": 102,
    "path": "fix_engine.py",
    "code": -2,
@@ -817,9 +853,9 @@
    "severity": "error"
   },
   {
-   "line": 2023,
+   "line": 2222,
    "column": 9,
-   "stop_line": 2023,
+   "stop_line": 2222,
    "stop_column": 26,
    "path": "fix_engine.py",
    "code": -2,
@@ -829,9 +865,9 @@
    "severity": "error"
   },
   {
-   "line": 2028,
+   "line": 2227,
    "column": 55,
-   "stop_line": 2028,
+   "stop_line": 2227,
    "stop_column": 102,
    "path": "fix_engine.py",
    "code": -2,
@@ -841,9 +877,9 @@
    "severity": "error"
   },
   {
-   "line": 2033,
+   "line": 2232,
    "column": 9,
-   "stop_line": 2033,
+   "stop_line": 2232,
    "stop_column": 23,
    "path": "fix_engine.py",
    "code": -2,
@@ -853,9 +889,9 @@
    "severity": "error"
   },
   {
-   "line": 2045,
+   "line": 2244,
    "column": 12,
-   "stop_line": 2045,
+   "stop_line": 2244,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -865,9 +901,9 @@
    "severity": "error"
   },
   {
-   "line": 2073,
+   "line": 2272,
    "column": 9,
-   "stop_line": 2073,
+   "stop_line": 2272,
    "stop_column": 26,
    "path": "fix_engine.py",
    "code": -2,
@@ -877,9 +913,9 @@
    "severity": "error"
   },
   {
-   "line": 2076,
+   "line": 2275,
    "column": 12,
-   "stop_line": 2076,
+   "stop_line": 2275,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -889,9 +925,9 @@
    "severity": "error"
   },
   {
-   "line": 2082,
+   "line": 2281,
    "column": 9,
-   "stop_line": 2082,
+   "stop_line": 2281,
    "stop_column": 23,
    "path": "fix_engine.py",
    "code": -2,
@@ -901,9 +937,9 @@
    "severity": "error"
   },
   {
-   "line": 2085,
+   "line": 2284,
    "column": 12,
-   "stop_line": 2085,
+   "stop_line": 2284,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -913,9 +949,9 @@
    "severity": "error"
   },
   {
-   "line": 2101,
+   "line": 2300,
    "column": 27,
-   "stop_line": 2101,
+   "stop_line": 2300,
    "stop_column": 35,
    "path": "fix_engine.py",
    "code": -2,
@@ -925,9 +961,9 @@
    "severity": "error"
   },
   {
-   "line": 2101,
+   "line": 2300,
    "column": 27,
-   "stop_line": 2101,
+   "stop_line": 2300,
    "stop_column": 35,
    "path": "fix_engine.py",
    "code": -2,
@@ -937,9 +973,9 @@
    "severity": "error"
   },
   {
-   "line": 2107,
+   "line": 2306,
    "column": 37,
-   "stop_line": 2107,
+   "stop_line": 2306,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -949,9 +985,9 @@
    "severity": "error"
   },
   {
-   "line": 2113,
+   "line": 2312,
    "column": 37,
-   "stop_line": 2113,
+   "stop_line": 2312,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -961,9 +997,9 @@
    "severity": "error"
   },
   {
-   "line": 2115,
+   "line": 2314,
    "column": 37,
-   "stop_line": 2115,
+   "stop_line": 2314,
    "stop_column": 53,
    "path": "fix_engine.py",
    "code": -2,
@@ -973,9 +1009,9 @@
    "severity": "error"
   },
   {
-   "line": 2134,
+   "line": 2333,
    "column": 25,
-   "stop_line": 2134,
+   "stop_line": 2333,
    "stop_column": 48,
    "path": "fix_engine.py",
    "code": -2,
@@ -985,9 +1021,9 @@
    "severity": "error"
   },
   {
-   "line": 2134,
+   "line": 2333,
    "column": 70,
-   "stop_line": 2134,
+   "stop_line": 2333,
    "stop_column": 92,
    "path": "fix_engine.py",
    "code": -2,
@@ -997,9 +1033,9 @@
    "severity": "error"
   },
   {
-   "line": 2144,
+   "line": 2343,
    "column": 25,
-   "stop_line": 2144,
+   "stop_line": 2343,
    "stop_column": 48,
    "path": "fix_engine.py",
    "code": -2,
@@ -1009,9 +1045,9 @@
    "severity": "error"
   },
   {
-   "line": 2262,
+   "line": 2461,
    "column": 16,
-   "stop_line": 2262,
+   "stop_line": 2461,
    "stop_column": 34,
    "path": "fix_engine.py",
    "code": -2,
@@ -1021,9 +1057,9 @@
    "severity": "error"
   },
   {
-   "line": 2270,
+   "line": 2469,
    "column": 28,
-   "stop_line": 2270,
+   "stop_line": 2469,
    "stop_column": 48,
    "path": "fix_engine.py",
    "code": -2,
@@ -1033,9 +1069,9 @@
    "severity": "error"
   },
   {
-   "line": 2291,
+   "line": 2490,
    "column": 12,
-   "stop_line": 2291,
+   "stop_line": 2490,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -1045,9 +1081,9 @@
    "severity": "error"
   },
   {
-   "line": 2291,
+   "line": 2490,
    "column": 43,
-   "stop_line": 2291,
+   "stop_line": 2490,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -1057,9 +1093,9 @@
    "severity": "error"
   },
   {
-   "line": 2307,
+   "line": 2506,
    "column": 35,
-   "stop_line": 2307,
+   "stop_line": 2506,
    "stop_column": 82,
    "path": "fix_engine.py",
    "code": -2,
@@ -1069,9 +1105,9 @@
    "severity": "error"
   },
   {
-   "line": 2348,
+   "line": 2547,
    "column": 16,
-   "stop_line": 2348,
+   "stop_line": 2547,
    "stop_column": 34,
    "path": "fix_engine.py",
    "code": -2,
@@ -1081,9 +1117,9 @@
    "severity": "error"
   },
   {
-   "line": 2429,
+   "line": 2628,
    "column": 12,
-   "stop_line": 2429,
+   "stop_line": 2628,
    "stop_column": 72,
    "path": "fix_engine.py",
    "code": -2,
@@ -1441,9 +1477,9 @@
    "severity": "error"
   },
   {
-   "line": 414,
+   "line": 439,
    "column": 12,
-   "stop_line": 414,
+   "stop_line": 439,
    "stop_column": 39,
    "path": "tests/test_fix_engine.py",
    "code": -2,
@@ -1453,9 +1489,9 @@
    "severity": "error"
   },
   {
-   "line": 574,
+   "line": 599,
    "column": 16,
-   "stop_line": 574,
+   "stop_line": 599,
    "stop_column": 55,
    "path": "tests/test_fix_engine.py",
    "code": -2,
