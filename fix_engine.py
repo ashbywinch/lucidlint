@@ -556,7 +556,8 @@ class _FixRequest:
         module = cst.parse_module(source)
         wrapper = cst.MetadataWrapper(module)
         # the record dict + the tuple arity from the build site
-        record_dicts, elements = _find_record_builds(module)
+        build = _find_record_builds(module)
+        record_dicts, elements = build.names, build.elements
         if elements is None or len(elements) < 2:
             return None
         field_names = []
@@ -833,10 +834,10 @@ class _RecordToClass(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self, record_name: str, record_dicts: set[str], class_name: str, field_names: list[str]):
-        self.record_name = record_name
-        self.record_dicts = record_dicts
-        self.class_name = class_name
-        self.field_names = field_names
+        self.record_name: str = record_name
+        self.record_dicts: set[str] = record_dicts
+        self.class_name: str = class_name
+        self.field_names: list[str] = field_names
 
     def _is_record_base(self, e: cst.BaseExpression) -> bool:
         """The base name of an attribute/subscript chain — one of the record
@@ -924,7 +925,16 @@ class _RecordToClass(cst.CSTTransformer):
         )
 
 
-def _find_record_builds(module: cst.Module) -> tuple[set[str], list[cst.BaseExpression] | None]:
+@dataclass
+class _RecordBuild:
+    """The record's dict names + the first build's elements (for the field
+    names) — a named return instead of a bare tuple."""
+
+    names: set[str]
+    elements: list[cst.BaseExpression] | None
+
+
+def _find_record_builds(module: cst.Module) -> _RecordBuild:
     """The dict names built with tuple values + the first build's elements
     (for the field-name inference)."""
     names: set[str] = set()
@@ -946,8 +956,8 @@ def _find_record_builds(module: cst.Module) -> tuple[set[str], list[cst.BaseExpr
             if elements is None:
                 elements = [e.value for e in value.elements]
             elif len(value.elements) != len(elements):
-                return set(), None
-    return names, elements
+                return _RecordBuild(set(), None)
+    return _RecordBuild(names, elements)
 
 
 def _record_class_def(class_name: str, field_names: list[str]) -> cst.ClassDef:
