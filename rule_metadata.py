@@ -224,6 +224,16 @@ CATALOG = RuleCatalog([
          "assigned outside the constructor without a declaration is a "
          "finding: declare it.",
          display_name="undeclared-attribute", display=None),
+    Rule("god-class", "warn", "architecture", "Python",
+         "A class with >=20 methods, or >=12 methods over >=250 lines — a "
+         "large class. A review signal, not a split order: split only where "
+         "the partition rule finds field-disjoint method groups.",
+         display_name="god-class → latent-class", display="latent-class"),
+    Rule("duplicate-field", "fail", "architecture", "Python",
+         "A class and a class it CONTAINS both hold the same >=2 fields — "
+         "duplicated domain state across a containment edge; one source of "
+         "truth should own it.",
+         display_name="duplicate-field → latent-class", display="latent-class"),
     Rule("module-cohesion", "fail", "architecture", "Graph",
          "A file whose nodes split across ≥2 graph communities (each ≥2 nodes) "
          "holds several sub-domains — split the module at the domain seams."),

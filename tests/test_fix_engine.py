@@ -1462,7 +1462,9 @@ def test_extract_module_name_free_preview_does_not_write(tmp_path):
     opts = fix_engine.FixOptions(params=["tokenize", "words"])
     new_source, desc = _propose_finding("extract-module", rel, repo, 1, opts)
     assert new_source is not None
-    assert "from _extracted import tokenize, words" in new_source
+    # the origin is packaged (houses/layout.py), so the reexport is RELATIVE —
+    # the preview must match what the apply path writes (consolidation fix)
+    assert "from ._extracted import tokenize, words" in new_source
     assert "def tokenize" not in new_source
     assert not (repo / "houses" / "_extracted.py").exists()  # preview writes nothing
     assert (repo / rel).read_text().count("def tokenize") == 1  # origin untouched

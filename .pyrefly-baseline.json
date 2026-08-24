@@ -205,9 +205,9 @@
    "severity": "error"
   },
   {
-   "line": 301,
+   "line": 300,
    "column": 56,
-   "stop_line": 301,
+   "stop_line": 300,
    "stop_column": 62,
    "path": "fix_engine.py",
    "code": -2,
@@ -217,21 +217,9 @@
    "severity": "error"
   },
   {
-   "line": 306,
-   "column": 30,
-   "stop_line": 306,
-   "stop_column": 39,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "bad-argument-type",
-   "description": "Argument `Path | None` is not assignable to parameter `repo` with type `Path` in function `_name_occurrences`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
-   "concise_description": "Argument `Path | None` is not assignable to parameter `repo` with type `Path` in function `_name_occurrences`",
-   "severity": "error"
-  },
-  {
-   "line": 311,
+   "line": 310,
    "column": 53,
-   "stop_line": 311,
+   "stop_line": 310,
    "stop_column": 59,
    "path": "fix_engine.py",
    "code": -2,
@@ -241,9 +229,9 @@
    "severity": "error"
   },
   {
-   "line": 319,
+   "line": 318,
    "column": 56,
-   "stop_line": 319,
+   "stop_line": 318,
    "stop_column": 62,
    "path": "fix_engine.py",
    "code": -2,
@@ -253,9 +241,9 @@
    "severity": "error"
   },
   {
-   "line": 331,
+   "line": 330,
    "column": 20,
-   "stop_line": 331,
+   "stop_line": 330,
    "stop_column": 29,
    "path": "fix_engine.py",
    "code": -2,
@@ -265,9 +253,9 @@
    "severity": "error"
   },
   {
-   "line": 331,
+   "line": 330,
    "column": 53,
-   "stop_line": 331,
+   "stop_line": 330,
    "stop_column": 60,
    "path": "fix_engine.py",
    "code": -2,
@@ -277,9 +265,9 @@
    "severity": "error"
   },
   {
-   "line": 377,
+   "line": 376,
    "column": 35,
-   "stop_line": 377,
+   "stop_line": 376,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -289,58 +277,34 @@
    "severity": "error"
   },
   {
-   "line": 420,
-   "column": 20,
-   "stop_line": 420,
-   "stop_column": 72,
+   "line": 432,
+   "column": 35,
+   "stop_line": 432,
+   "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
-   "name": "unsupported-operation",
-   "description": "`/` is not supported between `None` and `Literal['']`\n  Cannot find `__truediv__` or `__rtruediv__`",
-   "concise_description": "`/` is not supported between `None` and `Literal['']`",
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
    "severity": "error"
   },
   {
-   "line": 420,
-   "column": 28,
-   "stop_line": 420,
-   "stop_column": 38,
+   "line": 462,
+   "column": 35,
+   "stop_line": 462,
+   "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
-   "name": "missing-attribute",
-   "description": "Object of class `NoneType` has no attribute `rsplit`",
-   "concise_description": "Object of class `NoneType` has no attribute `rsplit`",
+   "name": "bad-argument-type",
+   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
+   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
    "severity": "error"
   },
   {
-   "line": 420,
-   "column": 53,
-   "stop_line": 420,
+   "line": 484,
+   "column": 57,
+   "stop_line": 484,
    "stop_column": 63,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "not-iterable",
-   "description": "`in` is not supported between `Literal['/']` and `None`",
-   "concise_description": "`in` is not supported between `Literal['/']` and `None`",
-   "severity": "error"
-  },
-  {
-   "line": 434,
-   "column": 35,
-   "stop_line": 434,
-   "stop_column": 41,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "bad-argument-type",
-   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
-   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
-   "severity": "error"
-  },
-  {
-   "line": 464,
-   "column": 35,
-   "stop_line": 464,
-   "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
    "name": "bad-argument-type",
@@ -361,9 +325,9 @@
    "severity": "error"
   },
   {
-   "line": 488,
+   "line": 491,
    "column": 57,
-   "stop_line": 488,
+   "stop_line": 491,
    "stop_column": 63,
    "path": "fix_engine.py",
    "code": -2,
@@ -373,21 +337,9 @@
    "severity": "error"
   },
   {
-   "line": 493,
-   "column": 57,
-   "stop_line": 493,
-   "stop_column": 63,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "bad-argument-type",
-   "description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
-   "concise_description": "Argument `str | None` is not assignable to parameter `source` with type `bytes | str` in function `libcst._parser.entrypoints.parse_module`",
-   "severity": "error"
-  },
-  {
-   "line": 555,
+   "line": 553,
    "column": 35,
-   "stop_line": 555,
+   "stop_line": 553,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -397,9 +349,9 @@
    "severity": "error"
   },
   {
-   "line": 568,
+   "line": 566,
    "column": 20,
-   "stop_line": 568,
+   "stop_line": 566,
    "stop_column": 29,
    "path": "fix_engine.py",
    "code": -2,
@@ -409,9 +361,9 @@
    "severity": "error"
   },
   {
-   "line": 568,
+   "line": 566,
    "column": 46,
-   "stop_line": 568,
+   "stop_line": 566,
    "stop_column": 53,
    "path": "fix_engine.py",
    "code": -2,
@@ -421,9 +373,9 @@
    "severity": "error"
   },
   {
-   "line": 569,
+   "line": 567,
    "column": 30,
-   "stop_line": 569,
+   "stop_line": 567,
    "stop_column": 45,
    "path": "fix_engine.py",
    "code": -2,
@@ -433,9 +385,9 @@
    "severity": "error"
   },
   {
-   "line": 726,
+   "line": 720,
    "column": 12,
-   "stop_line": 726,
+   "stop_line": 720,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -445,9 +397,9 @@
    "severity": "error"
   },
   {
-   "line": 726,
+   "line": 720,
    "column": 50,
-   "stop_line": 726,
+   "stop_line": 720,
    "stop_column": 57,
    "path": "fix_engine.py",
    "code": -2,
@@ -457,9 +409,9 @@
    "severity": "error"
   },
   {
-   "line": 751,
+   "line": 745,
    "column": 12,
-   "stop_line": 751,
+   "stop_line": 745,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -469,9 +421,9 @@
    "severity": "error"
   },
   {
-   "line": 757,
+   "line": 751,
    "column": 9,
-   "stop_line": 757,
+   "stop_line": 751,
    "stop_column": 22,
    "path": "fix_engine.py",
    "code": -2,
@@ -481,9 +433,9 @@
    "severity": "error"
   },
   {
-   "line": 763,
+   "line": 757,
    "column": 12,
-   "stop_line": 763,
+   "stop_line": 757,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -493,9 +445,9 @@
    "severity": "error"
   },
   {
-   "line": 787,
+   "line": 781,
    "column": 17,
-   "stop_line": 787,
+   "stop_line": 781,
    "stop_column": 26,
    "path": "fix_engine.py",
    "code": -2,
@@ -505,9 +457,9 @@
    "severity": "error"
   },
   {
-   "line": 787,
+   "line": 781,
    "column": 55,
-   "stop_line": 787,
+   "stop_line": 781,
    "stop_column": 62,
    "path": "fix_engine.py",
    "code": -2,
@@ -517,9 +469,9 @@
    "severity": "error"
   },
   {
-   "line": 883,
+   "line": 877,
    "column": 16,
-   "stop_line": 883,
+   "stop_line": 877,
    "stop_column": 39,
    "path": "fix_engine.py",
    "code": -2,
@@ -529,9 +481,9 @@
    "severity": "error"
   },
   {
-   "line": 906,
+   "line": 900,
    "column": 22,
-   "stop_line": 906,
+   "stop_line": 900,
    "stop_column": 27,
    "path": "fix_engine.py",
    "code": -2,
@@ -541,9 +493,9 @@
    "severity": "error"
   },
   {
-   "line": 907,
+   "line": 901,
    "column": 20,
-   "stop_line": 907,
+   "stop_line": 901,
    "stop_column": 31,
    "path": "fix_engine.py",
    "code": -2,
@@ -553,9 +505,9 @@
    "severity": "error"
   },
   {
-   "line": 934,
+   "line": 928,
    "column": 16,
-   "stop_line": 934,
+   "stop_line": 928,
    "stop_column": 25,
    "path": "fix_engine.py",
    "code": -2,
@@ -565,9 +517,9 @@
    "severity": "error"
   },
   {
-   "line": 1210,
+   "line": 1204,
    "column": 16,
-   "stop_line": 1210,
+   "stop_line": 1204,
    "stop_column": 63,
    "path": "fix_engine.py",
    "code": -2,
@@ -577,9 +529,9 @@
    "severity": "error"
   },
   {
-   "line": 1230,
+   "line": 1224,
    "column": 43,
-   "stop_line": 1230,
+   "stop_line": 1224,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -589,9 +541,9 @@
    "severity": "error"
   },
   {
-   "line": 1230,
+   "line": 1224,
    "column": 57,
-   "stop_line": 1230,
+   "stop_line": 1224,
    "stop_column": 62,
    "path": "fix_engine.py",
    "code": -2,
@@ -601,9 +553,9 @@
    "severity": "error"
   },
   {
-   "line": 1268,
+   "line": 1262,
    "column": 63,
-   "stop_line": 1268,
+   "stop_line": 1262,
    "stop_column": 64,
    "path": "fix_engine.py",
    "code": -2,
@@ -613,9 +565,9 @@
    "severity": "error"
   },
   {
-   "line": 1287,
+   "line": 1281,
    "column": 60,
-   "stop_line": 1287,
+   "stop_line": 1281,
    "stop_column": 66,
    "path": "fix_engine.py",
    "code": -2,
@@ -625,9 +577,9 @@
    "severity": "error"
   },
   {
-   "line": 1335,
+   "line": 1329,
    "column": 25,
-   "stop_line": 1335,
+   "stop_line": 1329,
    "stop_column": 44,
    "path": "fix_engine.py",
    "code": -2,
@@ -637,9 +589,9 @@
    "severity": "error"
   },
   {
-   "line": 1335,
+   "line": 1329,
    "column": 62,
-   "stop_line": 1335,
+   "stop_line": 1329,
    "stop_column": 80,
    "path": "fix_engine.py",
    "code": -2,
@@ -649,9 +601,9 @@
    "severity": "error"
   },
   {
-   "line": 1338,
+   "line": 1332,
    "column": 22,
-   "stop_line": 1338,
+   "stop_line": 1332,
    "stop_column": 32,
    "path": "fix_engine.py",
    "code": -2,
@@ -661,9 +613,9 @@
    "severity": "error"
   },
   {
-   "line": 1340,
+   "line": 1334,
    "column": 31,
-   "stop_line": 1340,
+   "stop_line": 1334,
    "stop_column": 50,
    "path": "fix_engine.py",
    "code": -2,
@@ -673,9 +625,9 @@
    "severity": "error"
   },
   {
-   "line": 1474,
+   "line": 1468,
    "column": 15,
-   "stop_line": 1474,
+   "stop_line": 1468,
    "stop_column": 33,
    "path": "fix_engine.py",
    "code": -2,
@@ -685,9 +637,9 @@
    "severity": "error"
   },
   {
-   "line": 1480,
+   "line": 1474,
    "column": 34,
-   "stop_line": 1480,
+   "stop_line": 1474,
    "stop_column": 51,
    "path": "fix_engine.py",
    "code": -2,
@@ -697,9 +649,9 @@
    "severity": "error"
   },
   {
-   "line": 1520,
+   "line": 1514,
    "column": 29,
-   "stop_line": 1520,
+   "stop_line": 1514,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -709,9 +661,9 @@
    "severity": "error"
   },
   {
-   "line": 1539,
+   "line": 1533,
    "column": 30,
-   "stop_line": 1539,
+   "stop_line": 1533,
    "stop_column": 43,
    "path": "fix_engine.py",
    "code": -2,
@@ -721,9 +673,9 @@
    "severity": "error"
   },
   {
-   "line": 1562,
+   "line": 1556,
    "column": 12,
-   "stop_line": 1562,
+   "stop_line": 1556,
    "stop_column": 45,
    "path": "fix_engine.py",
    "code": -2,
@@ -733,9 +685,9 @@
    "severity": "error"
   },
   {
-   "line": 1640,
+   "line": 1634,
    "column": 13,
-   "stop_line": 1640,
+   "stop_line": 1634,
    "stop_column": 52,
    "path": "fix_engine.py",
    "code": -2,
@@ -745,9 +697,9 @@
    "severity": "error"
   },
   {
-   "line": 1643,
+   "line": 1637,
    "column": 23,
-   "stop_line": 1643,
+   "stop_line": 1637,
    "stop_column": 44,
    "path": "fix_engine.py",
    "code": -2,
@@ -757,9 +709,9 @@
    "severity": "error"
   },
   {
-   "line": 1672,
+   "line": 1666,
    "column": 21,
-   "stop_line": 1672,
+   "stop_line": 1666,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -769,9 +721,9 @@
    "severity": "error"
   },
   {
-   "line": 1699,
+   "line": 1693,
    "column": 12,
-   "stop_line": 1699,
+   "stop_line": 1693,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -781,9 +733,9 @@
    "severity": "error"
   },
   {
-   "line": 1701,
+   "line": 1695,
    "column": 67,
-   "stop_line": 1701,
+   "stop_line": 1695,
    "stop_column": 78,
    "path": "fix_engine.py",
    "code": -2,
@@ -793,9 +745,9 @@
    "severity": "error"
   },
   {
-   "line": 1734,
+   "line": 1728,
    "column": 12,
-   "stop_line": 1734,
+   "stop_line": 1728,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -805,9 +757,9 @@
    "severity": "error"
   },
   {
-   "line": 1746,
+   "line": 1740,
    "column": 12,
-   "stop_line": 1746,
+   "stop_line": 1740,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -817,9 +769,9 @@
    "severity": "error"
   },
   {
-   "line": 1769,
+   "line": 1763,
    "column": 12,
-   "stop_line": 1769,
+   "stop_line": 1763,
    "stop_column": 21,
    "path": "fix_engine.py",
    "code": -2,
@@ -829,9 +781,9 @@
    "severity": "error"
   },
   {
-   "line": 1946,
+   "line": 1940,
    "column": 55,
-   "stop_line": 1946,
+   "stop_line": 1940,
    "stop_column": 102,
    "path": "fix_engine.py",
    "code": -2,
@@ -841,9 +793,9 @@
    "severity": "error"
   },
   {
-   "line": 1951,
+   "line": 1945,
    "column": 9,
-   "stop_line": 1951,
+   "stop_line": 1945,
    "stop_column": 26,
    "path": "fix_engine.py",
    "code": -2,
@@ -853,9 +805,9 @@
    "severity": "error"
   },
   {
-   "line": 1956,
+   "line": 1950,
    "column": 55,
-   "stop_line": 1956,
+   "stop_line": 1950,
    "stop_column": 102,
    "path": "fix_engine.py",
    "code": -2,
@@ -865,9 +817,9 @@
    "severity": "error"
   },
   {
-   "line": 1961,
+   "line": 1955,
    "column": 9,
-   "stop_line": 1961,
+   "stop_line": 1955,
    "stop_column": 23,
    "path": "fix_engine.py",
    "code": -2,
@@ -877,9 +829,9 @@
    "severity": "error"
   },
   {
-   "line": 1973,
+   "line": 1967,
    "column": 12,
-   "stop_line": 1973,
+   "stop_line": 1967,
    "stop_column": 41,
    "path": "fix_engine.py",
    "code": -2,
@@ -889,9 +841,9 @@
    "severity": "error"
   },
   {
-   "line": 2001,
+   "line": 1995,
    "column": 9,
-   "stop_line": 2001,
+   "stop_line": 1995,
    "stop_column": 26,
    "path": "fix_engine.py",
    "code": -2,
@@ -901,9 +853,9 @@
    "severity": "error"
   },
   {
-   "line": 2004,
+   "line": 1998,
    "column": 12,
-   "stop_line": 2004,
+   "stop_line": 1998,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -913,9 +865,9 @@
    "severity": "error"
   },
   {
-   "line": 2010,
+   "line": 2004,
    "column": 9,
-   "stop_line": 2010,
+   "stop_line": 2004,
    "stop_column": 23,
    "path": "fix_engine.py",
    "code": -2,
@@ -925,9 +877,9 @@
    "severity": "error"
   },
   {
-   "line": 2013,
+   "line": 2007,
    "column": 12,
-   "stop_line": 2013,
+   "stop_line": 2007,
    "stop_column": 68,
    "path": "fix_engine.py",
    "code": -2,
@@ -937,9 +889,9 @@
    "severity": "error"
   },
   {
-   "line": 2029,
+   "line": 2023,
    "column": 27,
-   "stop_line": 2029,
+   "stop_line": 2023,
    "stop_column": 35,
    "path": "fix_engine.py",
    "code": -2,
@@ -949,15 +901,27 @@
    "severity": "error"
   },
   {
-   "line": 2029,
+   "line": 2023,
    "column": 27,
-   "stop_line": 2029,
+   "stop_line": 2023,
    "stop_column": 35,
    "path": "fix_engine.py",
    "code": -2,
    "name": "not-iterable",
    "description": "Type `If` is not iterable",
    "concise_description": "Type `If` is not iterable",
+   "severity": "error"
+  },
+  {
+   "line": 2029,
+   "column": 37,
+   "stop_line": 2029,
+   "stop_column": 50,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `BaseSuite` is not assignable to parameter `iterable` with type `Iterable[@_]` in function `list.__init__`\n  Protocol `Iterable` requires attribute `__iter__`",
+   "concise_description": "Argument `BaseSuite` is not assignable to parameter `iterable` with type `Iterable[@_]` in function `list.__init__`",
    "severity": "error"
   },
   {
@@ -973,21 +937,9 @@
    "severity": "error"
   },
   {
-   "line": 2041,
+   "line": 2037,
    "column": 37,
-   "stop_line": 2041,
-   "stop_column": 50,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "bad-argument-type",
-   "description": "Argument `BaseSuite` is not assignable to parameter `iterable` with type `Iterable[@_]` in function `list.__init__`\n  Protocol `Iterable` requires attribute `__iter__`",
-   "concise_description": "Argument `BaseSuite` is not assignable to parameter `iterable` with type `Iterable[@_]` in function `list.__init__`",
-   "severity": "error"
-  },
-  {
-   "line": 2043,
-   "column": 37,
-   "stop_line": 2043,
+   "stop_line": 2037,
    "stop_column": 53,
    "path": "fix_engine.py",
    "code": -2,
@@ -997,9 +949,9 @@
    "severity": "error"
   },
   {
-   "line": 2062,
+   "line": 2056,
    "column": 25,
-   "stop_line": 2062,
+   "stop_line": 2056,
    "stop_column": 48,
    "path": "fix_engine.py",
    "code": -2,
@@ -1009,9 +961,9 @@
    "severity": "error"
   },
   {
-   "line": 2062,
+   "line": 2056,
    "column": 70,
-   "stop_line": 2062,
+   "stop_line": 2056,
    "stop_column": 92,
    "path": "fix_engine.py",
    "code": -2,
@@ -1021,9 +973,9 @@
    "severity": "error"
   },
   {
-   "line": 2072,
+   "line": 2066,
    "column": 25,
-   "stop_line": 2072,
+   "stop_line": 2066,
    "stop_column": 48,
    "path": "fix_engine.py",
    "code": -2,
@@ -1033,9 +985,9 @@
    "severity": "error"
   },
   {
-   "line": 2190,
+   "line": 2184,
    "column": 16,
-   "stop_line": 2190,
+   "stop_line": 2184,
    "stop_column": 34,
    "path": "fix_engine.py",
    "code": -2,
@@ -1045,9 +997,9 @@
    "severity": "error"
   },
   {
-   "line": 2198,
+   "line": 2192,
    "column": 28,
-   "stop_line": 2198,
+   "stop_line": 2192,
    "stop_column": 48,
    "path": "fix_engine.py",
    "code": -2,
@@ -1057,9 +1009,9 @@
    "severity": "error"
   },
   {
-   "line": 2218,
+   "line": 2212,
    "column": 35,
-   "stop_line": 2218,
+   "stop_line": 2212,
    "stop_column": 82,
    "path": "fix_engine.py",
    "code": -2,
@@ -1069,9 +1021,9 @@
    "severity": "error"
   },
   {
-   "line": 2259,
+   "line": 2253,
    "column": 16,
-   "stop_line": 2259,
+   "stop_line": 2253,
    "stop_column": 34,
    "path": "fix_engine.py",
    "code": -2,
@@ -1081,9 +1033,9 @@
    "severity": "error"
   },
   {
-   "line": 2340,
+   "line": 2334,
    "column": 12,
-   "stop_line": 2340,
+   "stop_line": 2334,
    "stop_column": 72,
    "path": "fix_engine.py",
    "code": -2,
@@ -1141,9 +1093,9 @@
    "severity": "error"
   },
   {
-   "line": 1243,
+   "line": 1246,
    "column": 35,
-   "stop_line": 1243,
+   "stop_line": 1246,
    "stop_column": 48,
    "path": "lucidlint.py",
    "code": -2,
@@ -1153,9 +1105,9 @@
    "severity": "error"
   },
   {
-   "line": 1243,
+   "line": 1246,
    "column": 50,
-   "stop_line": 1243,
+   "stop_line": 1246,
    "stop_column": 71,
    "path": "lucidlint.py",
    "code": -2,
@@ -1165,10 +1117,10 @@
    "severity": "error"
   },
   {
-   "line": 1251,
+   "line": 1254,
    "column": 31,
-   "stop_line": 1251,
-   "stop_column": 69,
+   "stop_line": 1254,
+   "stop_column": 60,
    "path": "lucidlint.py",
    "code": -2,
    "name": "bad-assignment",
@@ -1177,9 +1129,9 @@
    "severity": "error"
   },
   {
-   "line": 1253,
+   "line": 1256,
    "column": 16,
-   "stop_line": 1253,
+   "stop_line": 1256,
    "stop_column": 49,
    "path": "lucidlint.py",
    "code": -2,
@@ -1189,9 +1141,9 @@
    "severity": "error"
   },
   {
-   "line": 1253,
+   "line": 1256,
    "column": 58,
-   "stop_line": 1253,
+   "stop_line": 1256,
    "stop_column": 93,
    "path": "lucidlint.py",
    "code": -2,
@@ -1201,9 +1153,9 @@
    "severity": "error"
   },
   {
-   "line": 1257,
+   "line": 1260,
    "column": 28,
-   "stop_line": 1257,
+   "stop_line": 1260,
    "stop_column": 61,
    "path": "lucidlint.py",
    "code": -2,
@@ -1213,9 +1165,9 @@
    "severity": "error"
   },
   {
-   "line": 1261,
+   "line": 1264,
    "column": 42,
-   "stop_line": 1261,
+   "stop_line": 1264,
    "stop_column": 77,
    "path": "lucidlint.py",
    "code": -2,
@@ -1225,9 +1177,9 @@
    "severity": "error"
   },
   {
-   "line": 1310,
+   "line": 1312,
    "column": 65,
-   "stop_line": 1310,
+   "stop_line": 1312,
    "stop_column": 78,
    "path": "lucidlint.py",
    "code": -2,
@@ -1237,9 +1189,9 @@
    "severity": "error"
   },
   {
-   "line": 1318,
+   "line": 1320,
    "column": 32,
-   "stop_line": 1318,
+   "stop_line": 1320,
    "stop_column": 43,
    "path": "lucidlint.py",
    "code": -2,
@@ -1249,9 +1201,9 @@
    "severity": "error"
   },
   {
-   "line": 1324,
+   "line": 1326,
    "column": 32,
-   "stop_line": 1324,
+   "stop_line": 1326,
    "stop_column": 43,
    "path": "lucidlint.py",
    "code": -2,
@@ -1273,10 +1225,10 @@
    "severity": "error"
   },
   {
-   "line": 1425,
+   "line": 1421,
    "column": 20,
-   "stop_line": 1425,
-   "stop_column": 39,
+   "stop_line": 1421,
+   "stop_column": 44,
    "path": "lucidlint.py",
    "code": -2,
    "name": "bad-return",
@@ -1285,9 +1237,9 @@
    "severity": "error"
   },
   {
-   "line": 1432,
+   "line": 1428,
    "column": 25,
-   "stop_line": 1432,
+   "stop_line": 1428,
    "stop_column": 32,
    "path": "lucidlint.py",
    "code": -2,
@@ -1297,10 +1249,10 @@
    "severity": "error"
   },
   {
-   "line": 1472,
-   "column": 31,
-   "stop_line": 1472,
-   "stop_column": 37,
+   "line": 1468,
+   "column": 36,
+   "stop_line": 1468,
+   "stop_column": 42,
    "path": "lucidlint.py",
    "code": -2,
    "name": "unsupported-operation",
@@ -1309,9 +1261,9 @@
    "severity": "error"
   },
   {
-   "line": 1578,
+   "line": 1567,
    "column": 24,
-   "stop_line": 1578,
+   "stop_line": 1567,
    "stop_column": 45,
    "path": "lucidlint.py",
    "code": -2,
@@ -1321,9 +1273,9 @@
    "severity": "error"
   },
   {
-   "line": 1597,
+   "line": 1586,
    "column": 71,
-   "stop_line": 1597,
+   "stop_line": 1586,
    "stop_column": 84,
    "path": "lucidlint.py",
    "code": -2,
@@ -1333,9 +1285,9 @@
    "severity": "error"
   },
   {
-   "line": 1598,
+   "line": 1587,
    "column": 13,
-   "stop_line": 1598,
+   "stop_line": 1587,
    "stop_column": 36,
    "path": "lucidlint.py",
    "code": -2,
@@ -1609,6 +1561,66 @@
    "severity": "error"
   },
   {
+   "line": 164,
+   "column": 31,
+   "stop_line": 164,
+   "stop_column": 35,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 179,
+   "column": 31,
+   "stop_line": 179,
+   "stop_column": 35,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 194,
+   "column": 31,
+   "stop_line": 194,
+   "stop_column": 35,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 202,
+   "column": 31,
+   "stop_line": 202,
+   "stop_column": 35,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 228,
+   "column": 31,
+   "stop_line": 228,
+   "stop_column": 35,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "severity": "error"
+  },
+  {
    "line": 236,
    "column": 21,
    "stop_line": 236,
@@ -1618,6 +1630,18 @@
    "name": "bad-assignment",
    "description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
    "concise_description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
+   "severity": "error"
+  },
+  {
+   "line": 238,
+   "column": 37,
+   "stop_line": 238,
+   "stop_column": 41,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
    "severity": "error"
   },
   {
@@ -1633,6 +1657,18 @@
    "severity": "error"
   },
   {
+   "line": 304,
+   "column": 37,
+   "stop_line": 304,
+   "stop_column": 41,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "severity": "error"
+  },
+  {
    "line": 456,
    "column": 21,
    "stop_line": 456,
@@ -1642,6 +1678,66 @@
    "name": "bad-assignment",
    "description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
    "concise_description": "`FakeSubprocess` is not assignable to attribute `subprocess` with type `Module[subprocess]`",
+   "severity": "error"
+  },
+  {
+   "line": 778,
+   "column": 42,
+   "stop_line": 778,
+   "stop_column": 46,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 779,
+   "column": 42,
+   "stop_line": 779,
+   "stop_column": 46,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 780,
+   "column": 42,
+   "stop_line": 780,
+   "stop_column": 46,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 793,
+   "column": 31,
+   "stop_line": 793,
+   "stop_column": 35,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 804,
+   "column": 31,
+   "stop_line": 804,
+   "stop_column": 35,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
    "severity": "error"
   },
   {
@@ -1657,6 +1753,18 @@
    "severity": "error"
   },
   {
+   "line": 816,
+   "column": 31,
+   "stop_line": 816,
+   "stop_column": 35,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "severity": "error"
+  },
+  {
    "line": 817,
    "column": 12,
    "stop_line": 817,
@@ -1666,6 +1774,30 @@
    "name": "missing-attribute",
    "description": "Object of class `NoneType` has no attribute `get`",
    "concise_description": "Object of class `NoneType` has no attribute `get`",
+   "severity": "error"
+  },
+  {
+   "line": 826,
+   "column": 31,
+   "stop_line": 826,
+   "stop_column": 35,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "severity": "error"
+  },
+  {
+   "line": 833,
+   "column": 31,
+   "stop_line": 833,
+   "stop_column": 35,
+   "path": "tests/test_lucidlint.py",
+   "code": -2,
+   "name": "bad-argument-type",
+   "description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
+   "concise_description": "Argument `None` is not assignable to parameter `args` with type `Namespace` in function `lucidlint._GateRunner.__init__`",
    "severity": "error"
   }
  ]

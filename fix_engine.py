@@ -38,12 +38,9 @@ MECHANICAL_KINDS = {
 @dataclass
 class FixOptions:
     """The agent-supplied bits a fix may need: the callee signature for
-    positional-literals, the class name for extract-class. `repo`/`rel`
-    (filled by fix_finding) scope the repo-wide callee resolution."""
+    positional-literals, the class name for extract-class."""
     params: list[str] | None = None
     name: str | None = None
-    repo: Path | None = None
-    rel: str | None = None
 
 
 class _ModuleProposal(NamedTuple):
@@ -54,6 +51,9 @@ class _ModuleProposal(NamedTuple):
     module: str
 
 
+# lucidlint: ignore-file god-class the fix engine is ONE responsibility — 20
+# cohesive methods over the request state; the partition rule finds no
+# field-disjoint split, so the size is a review signal, not a split order
 @dataclass
 class _FixRequest:
     """The whole fix context: which file (repo/rel), what kind, where
@@ -294,7 +294,6 @@ class _FixRequest:
         return module, wrapper, state
     def fix_duplicate_def(self) -> str | None:
         source, line = self.source, self.line
-        opts = self.opts
         """Delete the shadowing (second) module-scope binding when nothing
         references it — proven by a repo-wide Name count (only the two def sites
         hit). Referenced shadows are renamed by the agent, never auto-deleted."""
@@ -303,7 +302,7 @@ class _FixRequest:
         wrapper.visit(probe)
         if probe.found is None or probe.name is None:
             return None
-        if _name_occurrences(opts.repo, probe.name) > 2:
+        if _name_occurrences(self.repo, probe.name) > 2:
             return None  # something references the name — a delete would break it
         return wrapper.module.visit(_RemoveNodes([probe.found])).code
     def fix_restating_docstring(self) -> str | None:
@@ -405,18 +404,17 @@ class _FixRequest:
             body=[*_moved_imports(module, referenced), *(top_defs[n] for n in opts.params)]
         )
         return _ModuleProposal(
-            origin=cst.Module(body=_origin_after_move(module, move, opts)).code,
+            origin=cst.Module(body=_origin_after_move(module, move, opts, self.rel)).code,
             module=new_module.code,
         )
     def fix_extract_module(self) -> str | None:
-        opts = self.opts
         """The apply side of extract-module — writes the new module and returns
         the origin's new source (fix_finding writes the origin)."""
         result = self._extract_module_proposal()
         if result is None:
             return None
         origin_source, new_module_source = result
-        repo, rel, module_name = opts.repo, opts.rel, opts.name
+        repo, rel, module_name = self.repo, self.rel, self.opts.name
         new_path = repo / (rel.rsplit("/", 1)[0] if "/" in rel else "") / f"{module_name}.py"
         if new_path.exists():
             return None  # never clobber an existing module
@@ -606,8 +604,6 @@ class _FixRequest:
             preview_opts = FixOptions(
                 params=opts.params,
                 name=opts.name or "_extracted",
-                repo=opts.repo,
-                rel=opts.rel,
             )
             preview = _FixRequest(
                 kind=self.kind, repo=self.repo, rel=self.rel,
@@ -641,8 +637,6 @@ class _FixRequest:
         self.kind = kind
         path = repo / rel
         source = path.read_text(encoding="utf-8")
-        opts.repo = repo
-        opts.rel = rel
         if kind in MECHANICAL_KINDS:
             new_source = self._fix_mechanical()
             description = MECHANICAL_KINDS[kind]
@@ -2076,7 +2070,7 @@ def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
     return moved
 
 
-def _origin_after_move(module: cst.Module, move: set[str], opts) -> list:
+def _origin_after_move(module: cst.Module, move: set[str], opts, rel: str) -> list:
     """The origin's body after the split: the moved defs dropped, the
     re-export import inserted after the last import — every other file's
     `from origin import x` keeps working (the origin re-exports). The
@@ -2087,7 +2081,7 @@ def _origin_after_move(module: cst.Module, move: set[str], opts) -> list:
         for s in module.body
         if not (isinstance(s, (cst.FunctionDef, cst.ClassDef)) and s.name.value in move)
     ]
-    in_package = "/" in (opts.rel or "")
+    in_package = "/" in (rel or "")
     reexport = cst.SimpleStatementLine(
         body=[
             cst.ImportFrom(
