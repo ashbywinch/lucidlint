@@ -307,14 +307,16 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             self.parent_stack.pop();
             return;
         }
-        // Class bodies are not walked for magic numbers (matching the
-        // pre-radonc behavior; CC itself now lives in the radonc crate).
-        if self.in_class > 0 {
-            return;
-        }
         // magic numbers (a warn finding — distinct from the CC that radonc owns)
+        // Class BODIES are not reported for magic numbers (matching the
+        // pre-radonc behavior) — but ONLY the report is skipped here, never
+        // the descent: an early return cut every class-body expression walk
+        // (lambda bodies, attribute reads, strings), so the reference scan
+        // went blind inside methods and live code read as unused.
         if let Expr::NumberLiteral(n) = expr {
-            self.magic_check(n);
+            if self.in_class == 0 {
+                self.magic_check(n);
+            }
         }
         self.parent_stack.push(ParentEntry::Expr(expr.clone()));
         walk_expr(self, expr);
@@ -1392,6 +1394,13 @@ fn main() {
                 let file = v.get("file").and_then(|k| k.as_str()).unwrap_or("");
                 let line = v.get("line").and_then(|k| k.as_u64()).unwrap_or(0) as usize;
                 let name = v.get("name").and_then(|k| k.as_str()).unwrap_or("");
+                if kind != "extract-method" && kind != "dispatch-registry" && kind != "rule-table" {
+                    // the request is WELL-FORMED — the honest refusal names
+                    // the gap: this fix family has no Rust engine yet (the
+                    // Python families run through lucidlint.py's libcst path)
+                    println!("fix: {kind} has no Rust fixer yet - the Rust core handles extract-method, dispatch-registry, rule-table; refactor by hand");
+                    std::process::exit(2);
+                }
                 if kind == "extract-method" || kind == "dispatch-registry" || kind == "rule-table" {
                     let src = match std::fs::read_to_string(file) {
                         Ok(s) => s,
@@ -3175,6 +3184,19 @@ mod tests {
     fn unused_decorated_is_referenced() {
         let f = scan_src("@app.route(\"/x\")\ndef import_places():\n    return 1\n");
         assert!(!f.iter().any(|x| x.kind == "unused"));
+    }
+
+    #[test]
+    fn unused_sees_calls_inside_class_method_lambdas() {
+        // the class-body expression descent: a call inside a lambda inside a
+        // method is a reference — the old in-class early return (a magic-number
+        // suppression that swallowed the whole walk) reported helper as unused,
+        // telling the agent to delete live code
+        let f = scan_src(
+            "def helper(x):\n    return x + 1\n\nclass C:\n    def m(self, xs):\n        return max(xs, key=lambda v: helper(v))\n",
+        );
+        let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "unused" && x.message.contains("'helper'")).collect();
+        assert!(u.is_empty(), "live code flagged unused: {f:?}");
     }
 
     #[test]
