@@ -23,7 +23,7 @@ from typing import NamedTuple, override
 
 import libcst as cst
 import libcst.matchers as m
-from libcst.metadata import ExpressionContextProvider, ParentNodeProvider, PositionProvider
+from libcst.metadata import CodeRange, ExpressionContextProvider, ParentNodeProvider, PositionProvider
 
 MECHANICAL_KINDS = {
     "stale-suppression": "delete the stale lucidlint: ignore comment",
@@ -42,6 +42,9 @@ class FixOptions:
     positional-literals, the class name for extract-class."""
     params: list[str] | None = None
     name: str | None = None
+    # the callee whose --params these are (external callees): binds the fix to
+    # THAT call on nested lines instead of the innermost spanning one
+    callee: str | None = None
 
 
 # the structural fixers by kind — a dispatch registry: each arm's handler is
@@ -512,7 +515,9 @@ class _FixRequest:
             params = opts.params if opts.params is not None else self._callee_params_for_call()
             if params is None:
                 return None
-            return cst.MetadataWrapper(cst.parse_module(source)).visit(_KeywordArgs(line, params)).code
+            xform = _KeywordArgs(line, params, opts.callee)
+            out = cst.MetadataWrapper(cst.parse_module(source)).visit(xform).code
+            return out if xform.applied else None
         if kind == "duplicate-def":
             return self.fix_duplicate_def()
         if kind == "restating-docstring":
@@ -1317,52 +1322,83 @@ class _DeleteComment(cst.CSTTransformer):
 
 
 class _KeywordArgs(cst.CSTTransformer):
-    """Keyword the positional literal args of the call on the target line —
-    parameter names come from the same-file callee definition."""
+    """Keyword the positional literal args of the flagged call on the target
+    line — parameter names come from the same-file callee definition or
+    --params for an external one. The TARGET is selected exactly like the
+    param resolver selects the callee: the OUTERMOST Name-callee call
+    spanning the line (or the --callee-named one) — innermost-first binding
+    keyworded a nested call with the outer call's names (houses quirk 3:
+    GeoPoint(amount=0, currency=0))."""
 
     METADATA_DEPENDENCIES = (PositionProvider,)
 
-    def __init__(self, target_line: int, params: list[str]) -> None:
+    def __init__(self, target_line: int, params: list[str], callee: str | None = None) -> None:
         self.target_line: int = target_line
         self.params: list[str] = params
-        self.done: bool = False
+        self.callee: str | None = callee
+        self.target_start: CodeRange | None = None  # outermost spanning call
+        self.target_end: CodeRange | None = None
+        self.applied: bool = False
+
+    @override
+    def visit_Call(
+        self, node
+    ):
+        if self.target_start is not None:
+            return True
+        if not m.matches(node.func, m.Name()):
+            return True
+        if self.callee is not None and node.func.value != self.callee:
+            return True
+        pos = self.get_metadata(PositionProvider, node)
+        if not (pos.start.line <= self.target_line <= pos.end.line):
+            return True
+        self.target_start, self.target_end = pos.start, pos.end
+        return True
 
     @override
     def leave_Call(
         self, original_node, updated_node
     ):
-        if self.done or not updated_node.args:
-            return updated_node
         pos = self.get_metadata(PositionProvider, original_node)
-        if not (pos.start.line <= self.target_line <= pos.end.line):
+        if (self.target_start, self.target_end) != (pos.start, pos.end) or not updated_node.args:
             return updated_node
-        # rebuild the positional args with keywords, in param order
+        # rebuild the positional args with keywords, in param order. Once the
+        # first literal is keyworded every LATER positional arg must keyword
+        # too — a positional after a keyword is a syntax error (the old loop
+        # skipped non-literals and could emit `f(x=1, Pair(2, 3))`).
+        positional = [i for i, a in enumerate(updated_node.args) if a.keyword is None]
+        first_kw = next(
+            (
+                i
+                for i in positional
+                if m.matches(
+                    updated_node.args[i].value,
+                    m.Integer() | m.Float() | m.SimpleString() | m.ConcatenatedString(),
+                )
+                and i < len(self.params)
+            ),
+            None,
+        )
+        if first_kw is None:
+            return updated_node
+        if any(i >= len(self.params) for i in positional if i >= first_kw):
+            return updated_node  # out of params past the first keyword
         new_args = []
-        pi = 0
-        for arg in updated_node.args:
-            if arg.keyword is not None:
+        for i, arg in enumerate(updated_node.args):
+            if arg.keyword is not None or i not in positional or i < first_kw:
                 new_args.append(arg)
                 continue
-            if pi >= len(self.params):
-                return updated_node  # out of params — leave untouched
-            if not m.matches(
-                arg.value,
-                m.Integer() | m.Float() | m.SimpleString() | m.ConcatenatedString(),
-            ):
-                new_args.append(arg)
-                pi += 1
-                continue
+            self.applied = True
             new_args.append(
                 arg.with_changes(
-                    keyword=cst.Name(self.params[pi]),
+                    keyword=cst.Name(self.params[i]),
                     equal=cst.AssignEqual(
                         whitespace_before=cst.SimpleWhitespace(""),
                         whitespace_after=cst.SimpleWhitespace(""),
                     ),
                 )
             )
-            pi += 1
-        self.done = True
         return updated_node.with_changes(args=new_args)
 
 
