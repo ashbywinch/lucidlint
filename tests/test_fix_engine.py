@@ -555,6 +555,7 @@ def test_extract_method_preview_and_confirm(tmp_path):
         "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions()
     )
     assert desc is not None
+    assert new_source is not None
     assert "_extracted(" in new_source  # the placeholder in the diff
     assert p.read_text() == src  # nothing written
     # apply with a name — normalized to private: scale_total -> _scale_total
@@ -715,7 +716,9 @@ def test_decision_count_matches_radon_for_nested_and_or():
         ("def f(a, b, c, d):\n    return (a and b) and (c and d)\n", 3),
         ("def f(a, b, c, d):\n    return a and (b and (c and d))\n", 3),
     ]:
-        stmt = cst.parse_module(src).body[0].body.body[0]
+        fn = cst.parse_module(src).body[0]
+        assert isinstance(fn, cst.FunctionDef)
+        stmt = fn.body.body[0]
         n = fe._stmt_decision_count(stmt)
         assert n == expected, (src, n)
 

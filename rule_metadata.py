@@ -376,6 +376,11 @@ CATALOG = RuleCatalog([
     Rule("stale-suppression", "fail", "suppression", "Both",
          "A `lucidlint: ignore` / `ignore-file` that no longer suppresses "
          "anything — remove it."),
+    Rule("bulk-suppression", "warn", "suppression", "Both",
+         "One signal suppressed at 10+ sites: repeated identical whys are a "
+         "policy decision (a config guidance or documented config ignore), not "
+         "per-site judgment - mass suppression hides systematic problems from "
+         "review."),
     # ---- refactoring advice (all warn — detection-only)
     Rule("guard-clauses", "warn", "advice", "Python",
          "≥3 levels of if-in-if (\"arrow code\") — Replace Nested Conditional "

@@ -617,7 +617,7 @@ pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
                     function: fn_name.clone(),
                     kind: "broad-except".into(),
                     severity: "warn".into(),
-                    message: "broad except Exception — catch the specific exception".into(),
+                    message: "broad except Exception - catch what you actually handle; a true boundary catch states its blast radius in the why".into(),
                 });
             }
         }
@@ -4658,7 +4658,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                             kind: "record-shape".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line})",
+                                "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line}) — convert it to a class with named fields (wire formats at serialization boundaries are exempt)",
                                 f.name.as_str()
                             ),
                         });
@@ -4674,7 +4674,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                             kind: "record-shape".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "bare record collection '{text}' as return type of {} (line {def_line})",
+                                "bare record collection '{text}' as return type of {} (line {def_line}) — convert it to a class with named fields (wire formats at serialization boundaries are exempt)",
                                 f.name.as_str()
                             ),
                         });
@@ -5248,7 +5248,7 @@ pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                         kind: "fakefs".into(),
                         severity: "fail".into(),
                         message: format!(
-                            "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3) and comment why — or mark `# lucidlint: ignore-file fakefs <why>`",
+                            "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3) and comment why — or mark `# lucidlint: ignore-file fakefs <why>`, citing the standard that permits real FS here",
                             f.name.as_str()
                         ),
                     });

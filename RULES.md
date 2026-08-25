@@ -145,6 +145,7 @@ with a why).
 | **allow-reason** | fail | Rust | `#[allow(...)]` / `#[expect(...)]` with no reason comment on the line or the line above. |
 | **noqa** | fail | Python | `# noqa` / `# pragma: no cover` with no explanation — a suppression is itself a finding. |
 | **stale-suppression** | fail | Both | A `lucidlint: ignore` / `ignore-file` that no longer suppresses anything — remove it. |
+| **bulk-suppression** | **warn** | Both | One signal suppressed at 10+ sites: repeated identical whys are a policy decision (a config guidance or documented config ignore), not per-site judgment - mass suppression hides systematic problems from review. |
 
 ## Group 4.5: Refactoring advice
 

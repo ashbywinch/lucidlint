@@ -59,6 +59,7 @@ pub const FAMILY_KINDS: &[&str] = &[
     "allow-reason",
     "noqa",
     "stale-suppression",
+    "bulk-suppression",
     "guard-clauses",
     "latent-visitor",
     "conditional-polymorphism",
@@ -184,6 +185,7 @@ pub const DISPLAY_BUCKETS: &[(&str, &str)] = &[
     ("allow-reason", "standard"),
     ("noqa", "noqa"),
     ("stale-suppression", "stale-suppression"),
+    ("bulk-suppression", "bulk-suppression"),
     ("guard-clauses", "guard-clauses"),
     ("latent-visitor", "latent-visitor"),
     ("conditional-polymorphism", "conditional-polymorphism"),
@@ -283,6 +285,7 @@ pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {
             "suppression",
             &[
                 "allow-reason",
+                "bulk-suppression",
                 "noqa",
                 "stale-suppression",
                 "suppression",

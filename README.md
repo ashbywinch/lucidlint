@@ -185,6 +185,19 @@ ignore = ["group:architecture"]
 
 Every rule is individually suppressible.
 
+House rules: `[lucidlint.guidance]` states a repo's standing exemption
+once; every matching finding's message then carries it (`— house rule: …`),
+so agents read the house rule with the finding instead of pasting identical
+per-site suppression whys:
+
+```toml
+[lucidlint.guidance]
+magic-number = "quantities go through houses.units — never bare ints"
+```
+
+Guidance is load-bearing config — reviewed like code, keyed by exact signal
+name (unknown keys are dropped).
+
 ---
 
 ## Contribute

@@ -29,12 +29,19 @@ def read_msg(proc) -> dict:
     return json.loads(proc.stdout.read(int(headers["content-length"])))
 
 
-def session() -> tuple[subprocess.Popen, object]:
+def send(proc: subprocess.Popen, msg) -> None:
+    """One JSON-RPC frame out. Popen types stdin Optional — a live session owns the pipe."""
+    stdin = proc.stdin
+    assert stdin is not None
+    stdin.write(frame(msg))
+    stdin.flush()
+
+
+def session() -> tuple[subprocess.Popen, dict]:
     proc = subprocess.Popen(
         [str(BINARY), "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE
     )
-    proc.stdin.write(frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
-    proc.stdin.flush()
+    send(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
     return proc, read_msg(proc)
 
 
@@ -54,16 +61,14 @@ def test_initialize_and_publish_diagnostics(binary):
     assert init["result"]["capabilities"]["textDocumentSync"]["change"] == 1
 
     bad = "def f():\n    try:\n        g()\n    except Exception:\n        log('x')\n    return a * 60\n"
-    proc.stdin.write(
-        frame(
-            {
-                "jsonrpc": "2.0",
-                "method": "textDocument/didOpen",
-                "params": {"textDocument": {"uri": "file:///tmp/buf.py", "text": bad}},
-            }
-        )
+    send(
+        proc,
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": "file:///tmp/buf.py", "text": bad}},
+        },
     )
-    proc.stdin.flush()
     diag = read_msg(proc)
     assert diag["method"] == "textDocument/publishDiagnostics"
     messages = [d["message"] for d in diag["params"]["diagnostics"]]
@@ -73,36 +78,51 @@ def test_initialize_and_publish_diagnostics(binary):
     proc.kill()
 
 
+def test_diagnostics_payload_never_carries_the_report_header(binary):
+    # the header is a REPORT surface (CLI text/json) — per-buffer LSP
+    # diagnostics are editor UI, not the report; the banner must never leak
+    proc, _ = session()
+    bad = "def f():\n    return a * 60\n"
+    send(
+        proc,
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": "file:///tmp/buf3.py", "text": bad}},
+        },
+    )
+    diag = read_msg(proc)
+    assert diag["params"]["diagnostics"], "the buffer must actually be scanned"
+    assert "obviously correct" not in json.dumps(diag)
+    proc.kill()
+
+
 def test_did_change_updates_diagnostics(binary):
     proc, _ = session()
     bad = "def f():\n    return a * 60\n"
     fixed = "def f():\n    return 60\n"
-    proc.stdin.write(
-        frame(
-            {
-                "jsonrpc": "2.0",
-                "method": "textDocument/didOpen",
-                "params": {"textDocument": {"uri": "file:///tmp/buf2.py", "text": bad}},
-            }
-        )
+    send(
+        proc,
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": "file:///tmp/buf2.py", "text": bad}},
+        },
     )
-    proc.stdin.flush()
     first = read_msg(proc)
     assert any("magic number" in d["message"] for d in first["params"]["diagnostics"])
 
-    proc.stdin.write(
-        frame(
-            {
-                "jsonrpc": "2.0",
-                "method": "textDocument/didChange",
-                "params": {
-                    "textDocument": {"uri": "file:///tmp/buf2.py"},
-                    "contentChanges": [{"text": fixed}],
-                },
-            }
-        )
+    send(
+        proc,
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/buf2.py"},
+                "contentChanges": [{"text": fixed}],
+            },
+        },
     )
-    proc.stdin.flush()
     second = read_msg(proc)
     assert not any("magic number" in d["message"] for d in second["params"]["diagnostics"])
     proc.kill()
@@ -110,9 +130,7 @@ def test_did_change_updates_diagnostics(binary):
 
 def test_shutdown_and_exit(binary):
     proc, _ = session()
-    proc.stdin.write(frame({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}}))
-    proc.stdin.flush()
+    send(proc, {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}})
     assert read_msg(proc)["result"] is None
-    proc.stdin.write(frame({"jsonrpc": "2.0", "method": "exit"}))
-    proc.stdin.flush()
+    send(proc, {"jsonrpc": "2.0", "method": "exit"})
     assert proc.wait(timeout=5) == 0
