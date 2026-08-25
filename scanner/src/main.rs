@@ -3195,7 +3195,10 @@ mod tests {
         let f = scan_src(
             "def helper(x):\n    return x + 1\n\nclass C:\n    def m(self, xs):\n        return max(xs, key=lambda v: helper(v))\n",
         );
-        let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "unused" && x.message.contains("'helper'")).collect();
+        let u: Vec<&Finding> = f
+            .iter()
+            .filter(|x| x.kind == "unused" && x.message.contains("'helper'"))
+            .collect();
         assert!(u.is_empty(), "live code flagged unused: {f:?}");
     }
 
