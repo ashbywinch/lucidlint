@@ -467,6 +467,13 @@ pub fn detached_method_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
     if f.name.as_str() == "__init__" || f.name.as_str() == "__new__" {
         return;
     }
+    // a trivial stub (`...`, `pass`, docstring, `return None`, a lone raise)
+    // is a protocol/interface placeholder — the binding is the interface's
+    // contract, not a local judgment call (long-param-list's stub rationale;
+    // houses: CommuteRouterLike.get_commute)
+    if is_trivial_stub(&f.body) {
+        return;
+    }
     // super() needs the binding even when the body never names the receiver
     // (super().__init__(v) carries no literal self)
     if body_refs_name(&f.body, "super") {
@@ -557,9 +564,10 @@ pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
     }
 }
 
-/// A one-statement placeholder body: `pass`, a bare expression, or a `return`
-/// of nothing / None. A 6-param function that does nothing is a protocol
-/// stub, not a param-list smell.
+/// A one-statement placeholder body: `pass`, a bare expression, a lone
+/// `raise`, or a `return` of nothing / None. A 6-param function that does
+/// nothing is a protocol stub, not a param-list smell; a stub method never
+/// touches instance state by design.
 fn is_trivial_stub(body: &[Stmt]) -> bool {
     if body.len() > 1 {
         return false;
@@ -568,6 +576,7 @@ fn is_trivial_stub(body: &[Stmt]) -> bool {
         None => true,
         Some(Stmt::Pass(_)) => true,
         Some(Stmt::Expr(_)) => true,
+        Some(Stmt::Raise(_)) => true,
         Some(Stmt::Return(r)) => match r.value.as_ref() {
             None => true,
             Some(e) => matches!(e.as_ref(), Expr::NoneLiteral(_)),
