@@ -958,6 +958,13 @@ def parse_args() -> argparse.Namespace:
         help="the semantic name the tool cannot invent: a constant for magic-number, the extracted method/class name",
     )
     fix.add_argument(
+        "--callee",
+        type=str,
+        default=None,
+        help="the callee whose --params these are, when the finding's message names it "
+        "(binds the fix on lines with nested calls)",
+    )
+    fix.add_argument(
         "--params",
         type=str,
         default=None,
@@ -1692,6 +1699,7 @@ class _FixCommand:
         self.opts: fix_engine.FixOptions = fix_engine.FixOptions(
             params=args.params.split(",") if args.params else None,
             name=args.name,
+            callee=args.callee,
         )
         self.req: fix_engine._FixRequest | None = None
         self.fix_kind: str = ""

@@ -409,6 +409,7 @@ pub fn positional_literals_findings(state: &mut ScanState, call: &ExprCall, sour
     if SHADOWED_BUILTINS.contains(&n.id.as_str()) {
         return;
     }
+    let callee_name = n.id.to_string();
     let mut ints = 0usize;
     let mut floats = 0usize;
     let mut strings = 0usize;
@@ -440,7 +441,8 @@ pub fn positional_literals_findings(state: &mut ScanState, call: &ExprCall, sour
         kind: "positional-literals".into(),
         severity: "warn".into(),
         message: format!(
-            "call passes {n} {kind} positionally — a swapped argument is a silent bug; use keyword arguments — fix: positional-literals"
+            "call passes {n} {kind} positionally to {callee}() — a swapped argument is a silent bug; use keyword arguments — fix: positional-literals",
+            callee = callee_name,
         ),
     });
 }
@@ -459,6 +461,22 @@ pub fn detached_method_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
         |d| matches!(&d.expression, Expr::Name(n) if n.id.as_str() == "classmethod" || n.id.as_str() == "staticmethod"),
     );
     if decorated_class_level {
+        return;
+    }
+    // __init__/__new__ can never be staticmethods
+    if f.name.as_str() == "__init__" || f.name.as_str() == "__new__" {
+        return;
+    }
+    // super() needs the binding even when the body never names the receiver
+    // (super().__init__(v) carries no literal self)
+    if body_refs_name(&f.body, "super") {
+        return;
+    }
+    // an override's binding is the base class's contract, not a local call
+    if f.decorator_list.iter().any(|d| {
+        matches!(&d.expression, Expr::Name(n) if n.id.as_str() == "override")
+            || matches!(&d.expression, Expr::Attribute(a) if a.attr.as_str() == "override")
+    }) {
         return;
     }
     if body_refs_name(&f.body, recv) {

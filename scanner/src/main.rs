@@ -3251,6 +3251,20 @@ mod tests {
     }
 
     #[test]
+    fn detached_method_exempts_init_super_and_override() {
+        // __init__ can never be static; super() needs the binding even when
+        // the body never names self (super().__init__(v) carries no literal
+        // self); an @override's binding is the BASE class's contract, not a
+        // local judgment call
+        let init = scan_src("class C(Base):\n    def __init__(self, v):\n        super().__init__(v)\n");
+        assert!(!init.iter().any(|x| x.kind == "detached-method"), "{init:?}");
+        let sup = scan_src("class C(Base):\n    def refresh(self):\n        super().refresh()\n");
+        assert!(!sup.iter().any(|x| x.kind == "detached-method"), "{sup:?}");
+        let ovr = scan_src("class C(Base):\n    @override\n    def compute(self):\n        return 1\n");
+        assert!(!ovr.iter().any(|x| x.kind == "detached-method"), "{ovr:?}");
+    }
+
+    #[test]
     fn detached_method_flagged() {
         let f = scan_src("class A:\n    def m(self, x):\n        return x + 1\n");
         assert!(f.iter().any(|x| x.kind == "detached-method"));

@@ -63,6 +63,31 @@ def test_undeclared_attribute_declares_the_member(tmp_path):
     # would have to invent a default) — nothing to change
 
 
+def test_positional_literals_binds_the_call_the_resolver_named(tmp_path):
+    # quirk 3 from houses: nested callees on one line — the transformer keyed
+    # the INNERMOST call while the param resolver picked the OUTERMOST callee,
+    # so GeoPoint got Money's parameter names. The fixer must keyword the SAME
+    # call the resolver named.
+    src = (
+        "class Pair:\n"
+        "    def __init__(self, a, b):\n"
+        "        self.a = a\n"
+        "\n"
+        "def merge(x, y, pair):\n"
+        "    return x + y + pair.a\n"
+        "\n"
+        "def build():\n"
+        "    return merge('a', 'b', Pair(1, 2))\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    _req("positional-literals", "houses/app.py", repo, 9, fix_engine.FixOptions(), source=src).fix_finding()
+    out = p.read_text()
+    assert "x='a'" in out and "y='b'" in out  # the OUTER call keyworded
+    assert "pair=Pair(1, 2)" in out  # the inner call carried, not renamed
+
+
 def test_name_required_kinds_refuse_placeholders_and_missing_names(tmp_path):
     # the LSP hands the verbatim directive tokens to a shell: a <placeholder>
     # name must be refused with a message (never an invalid-identifier
