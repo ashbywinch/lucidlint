@@ -42,7 +42,6 @@ class PlatformWheel(bdist_wheel):
 
 
 class BuildPy(build_py):
-    # lucidlint: ignore detached-method setuptools invokes these hooks as bound methods
     def run(self) -> None:
         subprocess.run(
             ["cargo", "build", "--release", "--manifest-path", "scanner/Cargo.toml"],

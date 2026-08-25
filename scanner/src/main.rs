@@ -647,7 +647,7 @@ impl<'a> ScanState<'a> {
             function: fn_name,
             kind: "magic-number".into(),
             severity: "warn".into(),
-            message: format!("magic number {value} — name it as a constant — fix: magic-number --fix-name <CONST>"),
+            message: format!("magic number {value} — name it with a domain noun (what it means here), never its value spelled out — fix: magic-number --fix-name <CONST>"),
         });
     }
 
@@ -1369,6 +1369,64 @@ pub(crate) fn rel_of(path: &str, root: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+/// Suppression census: how many `lucidlint: ignore` sites each signal has
+/// across the scanned set (line-level AND file-level). The census feeds the
+/// report's `suppressions` field and the bulk-suppression warning - repeated
+/// identical whys are a policy decision, not per-site judgment.
+fn suppression_counts<'a>(
+    supps_list: impl IntoIterator<Item = &'a common::Suppressions>,
+) -> std::collections::HashMap<String, usize> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for supps in supps_list {
+        for entries in supps.line.values() {
+            for (sig, _) in entries {
+                *counts.entry(sig.clone()).or_insert(0) += 1;
+            }
+        }
+        for sig in supps.file.keys() {
+            *counts.entry(sig.clone()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// One warn finding per signal suppressed at >= threshold sites, attached to
+/// the file carrying the most of them. Visibility, not enforcement: the
+/// pattern itself (mass per-site suppression) is what a reviewer must see.
+fn bulk_suppression_findings(
+    counts: &std::collections::HashMap<String, usize>,
+    supps_by_rel: &std::collections::HashMap<String, common::Suppressions>,
+    threshold: usize,
+) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (kind, n) in counts {
+        if *n < threshold {
+            continue;
+        }
+        let mut top: Option<(&String, usize)> = None;
+        for (rel, supps) in supps_by_rel {
+            let sites = supps.line.values().flatten().filter(|(sig, _)| sig == kind).count()
+                + supps.file.keys().filter(|k| k.as_str() == kind).count();
+            if sites > 0 && top.is_none_or(|(_, c)| sites > c) {
+                top = Some((rel, sites));
+            }
+        }
+        out.push(Finding {
+            file: top.map(|(r, _)| r.clone()).unwrap_or_default(),
+            line: 1,
+            function: String::new(),
+            kind: "bulk-suppression".into(),
+            severity: "warn".into(),
+            message: format!(
+                "{kind} suppressed at {n} sites - repeated identical whys are POLICY, not per-site judgment: \
+move the rule into [lucidlint.guidance] config guidance or a documented config ignore, or fix the recurring cause"
+            ),
+        });
+    }
+    out.sort_by(|a, b| a.kind.cmp(&b.kind));
+    out
+}
+
 // lucidlint: ignore large-function the CLI orchestrates every repo-wide family in one flow — extracting helpers would thread six collections
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1551,11 +1609,14 @@ fn main() {
         .iter()
         .map(|s| (rel_of(&s.file_name, &root), s.supps.clone()))
         .collect();
+    let suppression_census = suppression_counts(scans.iter().map(|s| &s.supps));
+    let bulk_suppressions = bulk_suppression_findings(&suppression_census, &supps_by_rel, 10);
     for scan in scans {
         all_findings.extend(scan.findings);
         all_cc.extend(scan.cc);
         total_errors += scan.errors;
     }
+    all_findings.extend(bulk_suppressions);
     // per-language duplicate pools: a Python fn and a Rust fn with the same
     // shape are a PORT, not a copy-paste duplicate — never cross-matched
     let mut py_skeletons: Vec<SkeletonFn> = Vec::new();
@@ -1765,6 +1826,8 @@ fn main() {
         .collect();
     let out = serde_json::json!({
         "schema_version": 2,
+        "header": common::REPORT_HEADER,
+        "suppressions": suppression_census,
         "files": paths.len(),
         "parse_errors": total_errors,
         "findings": contract_findings,
@@ -3011,6 +3074,9 @@ mod tests {
         all.extend(duplicate_findings(&skeletons));
         let repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
         reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel);
+        // the suppression census + its bulk warning mirror main()'s report
+        let census = suppression_counts(supps_by_rel.values());
+        all.extend(bulk_suppression_findings(&census, &supps_by_rel, 10));
         // mirror the production finalize: repo-wide findings honor per-file
         // suppressions too (family-aware, widened window), and a suppression
         // the retain uses is not stale
@@ -3160,6 +3226,59 @@ mod tests {
     }
 
     // ------------------------------------------------- unused
+    #[test]
+    fn message_wording_states_the_real_fix_and_the_exemption() {
+        // the wording must steer agents away from non-fixes (value-shaped
+        // names) and bulk suppression: each message names what a real fix
+        // is AND the only legitimate suppression
+        let m = scan_src("def f(a):\n    return a * 60\n");
+        let mn = m.iter().find(|x| x.kind == "magic-number").expect("magic-number fires");
+        assert!(mn.message.contains("domain noun"), "{}", mn.message);
+
+        let r = scan_src("def g() -> dict[str, dict[str, int]]:\n    return {}\n");
+        let rs = r.iter().find(|x| x.kind == "record-shape").expect("record-shape fires");
+        assert!(rs.message.contains("class with named fields"), "{}", rs.message);
+        assert!(rs.message.contains("wire format"), "{}", rs.message);
+
+        let b = scan_src("def f():\n    try:\n        step()\n    except Exception:\n        return None\n");
+        let be = b.iter().find(|x| x.kind == "broad-except").expect("broad-except fires");
+        assert!(be.message.contains("blast radius"), "{}", be.message);
+        assert!(be.message.contains("catch what you actually handle"), "{}", be.message);
+
+        let t = scan_src_test("def test_x(tmp_path):\n    p = tmp_path / 'a'\n    p.write_text('hi')\n");
+        let ff = t.iter().find(|x| x.kind == "fakefs").expect("fakefs fires");
+        assert!(
+            ff.message.contains("citing the standard that permits real FS here"),
+            "{}",
+            ff.message
+        );
+    }
+
+    #[test]
+    fn bulk_suppression_warns_at_ten_or_more_sites() {
+        let mut files: Vec<(&str, &str)> = Vec::new();
+        for i in 0..11 {
+            files.push((
+                Box::leak(format!("m{i:02}.py").into_boxed_str()),
+                "x = 1  # lucidlint: ignore record-shape data table row\n",
+            ));
+        }
+        let heavy = "a = 1  # lucidlint: ignore record-shape data table row\nb = 2  # lucidlint: ignore record-shape data table row\n";
+        files.push(("heavy.py", Box::leak(heavy.to_string().into_boxed_str())));
+        let f = scan_corpus(&files);
+        let bulk: Vec<&Finding> = f.iter().filter(|x| x.kind == "bulk-suppression").collect();
+        assert_eq!(bulk.len(), 1, "{f:?}");
+        assert!(bulk[0].message.contains("13 sites"), "{}", bulk[0].message);
+        assert!(bulk[0].message.to_lowercase().contains("policy"), "{}", bulk[0].message);
+        assert_eq!(bulk[0].file, "heavy.py", "attached to the file with the most sites");
+
+        let small = scan_corpus(&[
+            ("a.py", "x = 1  # lucidlint: ignore record-shape data table row\n"),
+            ("b.py", "y = 2  # lucidlint: ignore record-shape data table row\n"),
+        ]);
+        assert!(!small.iter().any(|x| x.kind == "bulk-suppression"));
+    }
+
     #[test]
     fn unused_never_referenced_is_found() {
         let f = scan_src("def helper():\n    return 1\n");

@@ -43,6 +43,11 @@ dev = [
     "pytest-cov>=5.0.0",
     "ruff>=0.11.0",
     "pyrefly>=1.2.0",
+    # setup.py is checked source — the type checker must resolve its
+    # build-time imports (setuptools stubs; wheel ships its own annotations)
+    "setuptools>=77.0",
+    "wheel>=0.40",
+    "types-setuptools",
 ]
 
 [build-system]

@@ -42,7 +42,7 @@ from dataclasses import asdict, dataclass, field
 from importlib import metadata
 from pathlib import Path
 from subprocess import SubprocessError
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import rule_metadata
 
@@ -124,6 +124,8 @@ class _RenderCtx:
     graph_preferred: bool
     diff: set[str]
     ignored_by_signal: Counter | None = None
+    report_header: str = ""
+    suppression_census: dict[str, int] | None = None
 
     def _config_ignored_note(self) -> str:
         """The §9 debt ledger: config-ignored findings are filtered BEFORE the
@@ -161,6 +163,8 @@ class _RenderCtx:
                     },
                     "baseline": str(args.baseline) if args.baseline else "",
                     "config_ignored": dict(self.ignored_by_signal) if self.ignored_by_signal else {},
+                    "header": self.report_header,
+                    "suppressions": dict(self.suppression_census or {}),
                     "actions": [asdict(a) for a in unique],
                 },
                 indent=2,
@@ -206,6 +210,9 @@ class _RenderCtx:
 
     def render_text(self, unique: list[Action], fails: list[Action], warns: list[Action], acks: list[Action]) -> None:
         repo, args = self.repo, self.args
+        if self.report_header:
+            print(self.report_header)
+            print()
         if not unique:
             # the ledger must show even when the config-ignores ate every
             # action — "clean" while debt is hidden is the invisibility the
@@ -222,14 +229,14 @@ class _RenderCtx:
             )
             if warns:
                 print(f"by kind — warnings: {_kind_counts(warns)}")
-                _render_actions(repo, args, warns, [])
+                _render_actions(repo, args, warns, [], self.suppression_census)
             return
         self.render_summary(fails, warns, acks)
         print(f"by kind — fails: {_kind_counts(fails)}; warnings: {_kind_counts(warns)}")
-        _render_actions(repo, args, fails, acks)
+        _render_actions(repo, args, fails, acks, self.suppression_census)
         if warns:
             print(f"\nwarnings (reported, never fail) — {len(warns)}:")
-            _render_actions(repo, args, warns, [])
+            _render_actions(repo, args, warns, [], self.suppression_census)
 
 
 @dataclass
@@ -578,7 +585,7 @@ class _File(NamedTuple):
         """Scan this file, yielding its findings."""
         repo, rel = self.repo, self.rel
         let_include_tests = False  # the fix resolves one file's findings
-        RUST_SCAN.prepare(repo, rel, let_include_tests, {})
+        RUST_SCAN.prepare(repo, rel, let_include_tests, Counter())
         files = _py_files(repo, rel)
         rust = RUST_SCAN.load(repo, files)
         if rust is None:
@@ -592,6 +599,8 @@ class RustFindings(NamedTuple):
 
     by_rel: dict[str, list[RustFinding]]
     cc_by_rel: dict[str, list[tuple[str, int, int]]]
+    header: str = ""
+    suppressions: dict[str, int] | None = None
 
     def for_rel(self, rel: str) -> list[RustFinding]:
         return self.by_rel.get(rel, [])
@@ -670,6 +679,8 @@ class _RustScan:
             )
         result: dict[str, list[RustFinding]] | None = None
         cc_result: dict[str, list[tuple[str, int, int]]] = {}
+        header = ""
+        suppression_census: dict[str, int] | None = None
         if not files:
             result = {}  # a repo with no .py/.rs files scans clean — GATE: PASS, not an error
         else:
@@ -698,6 +709,10 @@ class _RustScan:
                             f"scanner contract schema {data.get('schema_version')} — expected 2; "
                             "rebuild the binary (make scanner-check)"
                         )
+                    header = str(data.get("header", ""))
+                    suppression_census = {
+                        str(k): int(v) for k, v in (data.get("suppressions") or {}).items()
+                    }
                     rels_set = set(rels)
                     for f in data.get("findings", []) + data.get("complexity", []):
                         rel = _rust_finding_rel(f.get("file", ""), repo, rels_set)
@@ -727,7 +742,7 @@ class _RustScan:
             except _SCANNER_FAILURES:  # lucidlint: ignore swallow degraded runs report nothing — visible
                 result = None
         wrapped = (
-            RustFindings(result, cc_result)
+            RustFindings(result, cc_result, header, suppression_census)
             if result is not None
             else None
         )
@@ -789,7 +804,7 @@ RULE_GROUPS = rule_metadata.CATALOG.groups()
 
 # Cache for config loading
 # lucidlint: ignore global-state per-repo cache of the config file — one entry per repo per run
-_CONFIG_CACHE: dict[Path, dict] = {}
+_CONFIG_CACHE: dict[Path, _LucidlintConfig] = {}
 
 
 
@@ -810,7 +825,7 @@ except ImportError:  # lucidlint: ignore swallow code-review-graph is optional �
 
 try:
     import pygit2 as _pygit2
-    from pygit2 import GIT_SORT_TIME, GIT_SORT_TOPOLOGICAL
+    from pygit2.enums import SortMode
 except ImportError:  # lucidlint: ignore swallow pygit2 is optional — degrades to gitless mode
     _pygit2 = None
 
@@ -833,7 +848,7 @@ class _GraphContract:
             return None
         result: Path | None = None
         try:
-            data_dir = _Registry().get_data_dir_for_repo(str(repo))
+            data_dir = _Registry().get_data_dir_for_repo(str(repo)) if _Registry else None
             db = Path(data_dir) / "graph.db" if data_dir else repo / ".code-review-graph" / "graph.db"
             if not db.exists():
                 self._cache[repo] = None
@@ -1007,16 +1022,16 @@ def changed_files(repo: Path, base: str) -> set[str]:
                 ref_oid = r.lookup_reference(f"refs/heads/{ref}").target
             base_oid = r.merge_base(r.head.target, ref_oid)
             changed = set()
-            w = r.walk(r.head.target, GIT_SORT_TOPOLOGICAL)
+            w = r.walk(r.head.target, SortMode.TOPOLOGICAL)
             w.hide(base_oid)
             for commit in w:
                 if commit.parents:
                     diff = commit.tree.diff_to_tree(commit.parents[0].tree)
                     for patch in diff:
-                        changed.add(patch.delta.new_file.path)
-                else:
-                    for entry in commit.tree:
-                        changed.add(entry.name)
+                        delta = patch.delta if patch is not None else None
+                        if delta is None or not delta.new_file.path:
+                            continue
+                        changed.add(delta.new_file.path)
             if changed:
                 return changed
         except KeyError:
@@ -1113,8 +1128,11 @@ def _kind_counts(actions: list[Action]) -> str:
     return ", ".join(f"{k}={v}" for k, v in counts.most_common())
 
 
-def _render_actions(repo: Path, args, fails: list[Action], acks: list[Action]) -> None:
-    """Per-file grouped action lines, baseline acknowledgements, and the footer."""
+def _render_actions(
+    repo: Path, args, fails: list[Action], acks: list[Action], census: dict[str, int] | None = None
+) -> None:
+    """Per-file grouped action lines, baseline acknowledgements, the footer,
+    and the suppression census (what the gate did NOT report on)."""
     by_file: dict[str, list[Action]] = {}
     for a in fails:
         by_file.setdefault(a.file, []).append(a)
@@ -1126,6 +1144,9 @@ def _render_actions(repo: Path, args, fails: list[Action], acks: list[Action]) -
             + ", ".join(f"{a.file}:{a.line}" for a in acks[:5])
             + (" …" if len(acks) > 5 else "")
         )
+    if census:
+        ranked = sorted(census.items(), key=lambda kv: -kv[1])
+        print("suppressed: " + " ".join(f"{sig}×{n}" for sig, n in ranked))
     print(
         "\nre-run: python3 lucidlint.py --repo "
         + str(repo)
@@ -1194,15 +1215,17 @@ _FIX_ALIASES = {
 
 # the raw TOML payload handed to _merge_config — a wire-format blob, not a
 # domain record (record-shape exempts the deserializer boundary by naming it)
-_RawConfig = dict
+_RawConfig = dict[str, Any]
 
 
 @dataclass
 class _LucidlintConfig:
-    """The project-wide config: global ignore set + per-path ignore list."""
+    """The project-wide config: ignores (global + per-path) and per-signal
+    guidance text appended to matching findings' messages."""
 
     global_ignore: set
     per_path_ignore: list
+    guidance: dict[str, str] = field(default_factory=dict)
 
 
 # lucidlint: ignore-file god-class the gate pipeline is ONE responsibility —
@@ -1222,11 +1245,13 @@ class _GateRunner:
         self.cc: CoverageContext | None = None
         self.diff: set[str] = set()
         self.actions: list[Action] = []
-        self.ignored_config: dict = {}
+        self.report_header: str = ""
+        self.suppression_census: dict[str, int] = {}
+        self.ignored_config: _LucidlintConfig = _LucidlintConfig(set(), [])
         self.ignored_by_signal: Counter[str] = Counter()
         self.unique: list[Action] = []
         self.stale: list[str] = []
-        self.baseline_ignored: Counter[str] = Counter()
+        self.baseline_ignored: dict[str, int] = {}
         self.head: GitHead | None = None
         self.rc: _RenderCtx | None = None
 
@@ -1248,18 +1273,28 @@ class _GateRunner:
         self.diff = changed_files(self.repo, self.args.base)
 
     def collect(self) -> None:
-        """The finding actions for the repo."""
-        self.actions = _collect_actions(
-            self.repo, self.args, self.fh.churn, self.fh.last_modified, only_rel=self.args.file
-        )
+        """The finding actions for the repo, plus the scan core's report
+        header and suppression census (the banner + footer ledger)."""
+        fh = self.fh
+        assert fh is not None, "gather() precedes collect"
+        rust = _scan_rust(self.repo, self.args, fh.churn, only_rel=self.args.file)
+        self.actions = _actions_from_rust(rust, self.args.include_tests, fh.churn, fh.last_modified)
+        self.report_header = rust.header
+        self.suppression_census = rust.suppressions or {}
 
     def apply_config(self) -> None:
-        """Project-wide config (global ignore / per-path ignore), COUNTING
-        what the config hides — the §9 debt ledger: config-ignored findings
-        are filtered BEFORE the verdict, so without a count the ignore can
-        grow invisibly ("nothing is ever wrong")."""
+        """Project-wide config: [lucidlint.guidance] appends the house rule to
+        every matching finding's message — one reviewed config line replaces N
+        per-site citations and travels with each future finding; global and
+        per-path ignores filter BEFORE the verdict, COUNTING what they hide —
+        the §9 debt ledger, so an ignore cannot grow invisibly ("nothing is
+        ever wrong")."""
         self.ignored_config = self._load_lucidlint_config()
         self.ignored_by_signal = Counter()
+        for a in self.actions:
+            house_rule = self.ignored_config.guidance.get(a.signal)
+            if house_rule is not None:
+                a.message = f"{a.message} — house rule: {house_rule}"
         if not self.ignored_config.global_ignore and not self.ignored_config.per_path_ignore:
             return
         kept: list[Action] = []
@@ -1316,7 +1351,7 @@ class _GateRunner:
         try:
             r = _pygit2.Repository(str(self.repo))
             cutoff = int(time.time()) - _CHURN_MAX_AGE_DAYS * 86400
-            for seen, commit in enumerate(r.walk(r.head.target, GIT_SORT_TIME)):
+            for seen, commit in enumerate(r.walk(r.head.target, SortMode.TIME)):
                 if seen >= _CHURN_MAX_COMMITS or commit.commit_time < cutoff:
                     break
                 date = str(commit.commit_time)
@@ -1324,13 +1359,15 @@ class _GateRunner:
                 if commit.parents:
                     diff = commit.tree.diff_to_tree(commit.parents[0].tree)
                     for patch in diff:
-                        path = patch.delta.new_file.path
+                        delta = patch.delta if patch is not None else None
+                        path = delta.new_file.path if delta is not None else ""
                         if path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/")):
                             changed.add(path)
                 else:
                     # initial commit — diff against the empty tree gives every file
                     for patch in commit.tree.diff_to_tree():
-                        path = patch.delta.new_file.path
+                        delta = patch.delta if patch is not None else None
+                        path = delta.new_file.path if delta is not None else ""
                         if path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/")):
                             changed.add(path)
                 for path in changed:
@@ -1378,11 +1415,16 @@ class _GateRunner:
                 continue
             lines = covered.setdefault(self.rel_path(filename), set())
             for ln in cls.iter("line"):
-                if int(ln.get("hits", "0") or 0) > 0:
-                    try:
-                        lines.add(int(ln.get("number")))
-                    except (TypeError, ValueError):  # lucidlint: ignore swallow malformed <line> elements are skipped
-                        log(f"ignoring malformed <line> element in {self.repo / 'coverage.xml'}")
+                if int(ln.get("hits", "0") or 0) <= 0:
+                    continue
+                raw_number = ln.get("number")
+                if raw_number is None:
+                    log(f"ignoring malformed <line> element in {self.repo / 'coverage.xml'}")
+                    continue
+                try:
+                    lines.add(int(raw_number))
+                except ValueError:  # lucidlint: ignore swallow malformed <line> elements are skipped
+                    log(f"ignoring malformed <line> element in {self.repo / 'coverage.xml'}")
         return CoverageResult(covered or None, "coverage.xml")
 
     def _coverage_from_sqlite(self) -> CoverageResult:
@@ -1420,10 +1462,11 @@ class _GateRunner:
         """Load the project-wide lucidlint config, looking for (in order):
         1. .lucidlint.toml in the self.repo root
         2. [tool.lucidlint] in pyproject.toml
-        Returns a dict with 'global_ignore' (set of signal names) and
-        'per_path_ignore' (list of (glob_pattern, set)) or empty defaults.
+        Returns a _LucidlintConfig: 'global_ignore' (set of signal names),
+        'per_path_ignore' (list of (glob_pattern, set)), 'guidance'
+        (signal -> text appended to matching findings), or empty defaults.
         The config lets a team suppress entire rule groups or specific signals
-        without per-file suppression comments."""
+        without per-file suppression comments, and state house rules once."""
         if self.repo in _CONFIG_CACHE and _CONFIG_CACHE.get(self.repo) is not None:
             return _CONFIG_CACHE[self.repo]
 
@@ -1432,6 +1475,8 @@ class _GateRunner:
 
         def _merge_config(raw: _RawConfig) -> None:
             ignores = raw.get("ignore", raw.get("ignored_signals", []))
+            if ignores is None:  # a config key present with no value iterates as empty
+                ignores = []
             for item in ignores:
                 item = item.strip()
                 if item.startswith("group:"):
@@ -1456,7 +1501,14 @@ class _GateRunner:
                         else:
                             path_ignores.add(item)
                     result.per_path_ignore.append((key, path_ignores))
-
+            # Guidance: signal -> house-rule text for matching findings.
+            # Keys naming no known signal are dropped — a typo'd key would
+            # otherwise silently do nothing while reading like it works.
+            guidance = raw.get("guidance")
+            if isinstance(guidance, dict):
+                for sig, text in guidance.items():
+                    if isinstance(text, str) and sig in rule_metadata.CATALOG.kinds():
+                        result.guidance[sig] = text.strip()
         # Try .lucidlint.toml first (standalone, for Rust projects)
         toml_path = self.repo / ".lucidlint.toml"
         if toml_path.is_file():
@@ -1588,10 +1640,14 @@ class _GateRunner:
         fails = [a for a in self.unique if a.severity == "fail"]
         warns = [a for a in self.unique if a.severity == "warn"]
         acks = [a for a in self.unique if a.severity == "ack"]
-        self.head = self._git_head()
+        head = self._git_head()
+        self.head = head
+        cc = self.cc
+        assert cc is not None, "gather() precedes render"
         self.rc = _RenderCtx(
-            self.repo, self.args, self.head.branch, self.head.commit, self.cc.label,
-            self.cc.graph_preferred, self.diff, ignored_by_signal=self.ignored_by_signal,
+            self.repo, self.args, head.branch, head.commit, cc.label,
+            cc.graph_preferred, self.diff, ignored_by_signal=self.ignored_by_signal,
+            report_header=self.report_header, suppression_census=self.suppression_census,
         )
 
         if self.args.json:
@@ -1653,36 +1709,45 @@ def _trim_preview_diff(diff, name, new_source):
     return call_hunk, def_idx, body
 
 
-def _fix_identifier_problem(kind: str, opts: fix_engine.FixOptions, where: str) -> str | None:
+def _name_required_kinds() -> set[str]:
+    """The engine owns the name-required policy. With libcst absent nothing
+    can APPLY anyway, so an empty set only degrades refusal wording, never
+    gating (the engine-present paths always see the real set)."""
+    return set(fix_engine._NAME_REQUIRED_KINDS) if fix_engine else set()
+
+
+def _fix_identifier_problem(
+    kind: str, name: str | None, params: list[str] | None, where: str
+) -> str | None:
     """The invalid-argument guard: a non-identifier --name or --params entry
     would construct an invalid libcst node inside a fixer. Refused before
     dispatch with a message; a MISSING name is NOT refused here — previews
     run nameless by contract."""
-    if kind in fix_engine._NAME_REQUIRED_KINDS and opts.name is not None and not opts.name.isidentifier():
+    if kind in _name_required_kinds() and name is not None and not name.isidentifier():
         return (
-            f"fix: --name must be a valid Python identifier, got '{opts.name}' "
+            f"fix: --name must be a valid Python identifier, got '{name}' "
             f"at {where} - replace the message's <placeholder> with the real name"
         )
-    if opts.params is not None:
-        bad = [p for p in opts.params if not p.isidentifier()]
+    if params is not None:
+        bad = [p for p in params if not p.isidentifier()]
         if bad:
             return f"fix: --params entries must be valid identifiers, got {bad} at {where}"
     return None
 
 
-def _fix_refusal(kind: str, opts: fix_engine.FixOptions, file: str, line: int) -> str:
+def _fix_refusal(kind: str, name: str | None, params: list[str] | None, file: str, line: int) -> str:
     """Why a fix produced nothing. A name-required kind with a missing or
     non-identifier name is NOT 'nothing to change' — it is an unsatisfied
     prerequisite, and the silence would read as the finding being
     unfixable (the LSP placeholder flow depends on this message)."""
-    if kind in fix_engine._NAME_REQUIRED_KINDS and opts.name is None:
+    if kind in _name_required_kinds() and name is None:
         # an unsatisfied prerequisite, not 'nothing to change': the silence
         # would read as unfixable (the LSP placeholder flow depends on this)
         return (
             f"fix: {kind} needs a semantic name the tool cannot invent "
             f"(--name <Name>) at {file}:{line} - naming is the judgement call"
         )
-    return _fix_identifier_problem(kind, opts, f"{file}:{line}") or (
+    return _fix_identifier_problem(kind, name, params, f"{file}:{line}") or (
         f"fix: nothing to change for {kind} at {file}:{line}"
     )
 
@@ -1696,13 +1761,10 @@ class _FixCommand:
         self.args: argparse.Namespace = args
         self.repo: Path = repo
         self.rel: str = args.file or ""
-        self.opts: fix_engine.FixOptions = fix_engine.FixOptions(
-            params=args.params.split(",") if args.params else None,
-            name=args.name,
-            callee=args.callee,
-        )
-        self.req: fix_engine._FixRequest | None = None
         self.fix_kind: str = ""
+
+    def _params(self) -> list[str] | None:
+        return self.args.params.split(",") if self.args.params else None
 
     def run(self) -> int:
         # the agent-driven fix surface: `lucidlint fix --kind X --file F --line N`
@@ -1721,7 +1783,7 @@ class _FixCommand:
         # A MISSING name still previews — the preview IS the line-number-free
         # contract; only the apply needs the commitment.
         bad = _fix_identifier_problem(
-            self.fix_kind, self.opts, f"{self.args.file}:{self.args.line}"
+            self.fix_kind, self.args.name, self._params(), f"{self.args.file}:{self.args.line}"
         )
         if bad:
             print(bad)
@@ -1738,26 +1800,24 @@ class _FixCommand:
                 # `fn ()` — invalid Rust — so refuse silently (R28; the
                 # directive prose already told the agent to pass --name). There
                 # is no Rust preview surface yet.
-                print(_fix_refusal(self.fix_kind, self.opts, self.args.file, self.args.line))
+                print(_fix_refusal(self.fix_kind, self.args.name, self._params(), self.args.file, self.args.line))
                 return 0
             return _File(self.repo, self.rel).fix_rust(self.fix_kind, self.args.line, self.args.name)
         # Python: the libcst fix engine is a mandatory dependency
-        if fix_engine is None:
+        fe = fix_engine
+        if fe is None:
             print(
                 "fix: the Python fix engine requires libcst (a mandatory "
                 "dependency) — `uv sync` installs it"
             )
             return 1
-        opts = fix_engine.FixOptions(
-            params=self.args.params.split(",") if self.args.params else None,
-            name=self.args.name,
+        req = fe._FixRequest(
+            kind=self.args.kind, repo=self.repo, rel=self.rel, line=self.args.line,
+            opts=fe.FixOptions(params=self._params(), name=self.args.name),
         )
-        self.req = fix_engine._FixRequest(
-            kind=self.args.kind, repo=self.repo, rel=self.rel, line=self.args.line, opts=opts,
-        )
-        if self.fix_kind in fix_engine.PREVIEW_KINDS and not self.args.name and not self.args.confirm:
-            return self._preview()
-        return self._apply()
+        if self.fix_kind in fe.PREVIEW_KINDS and not self.args.name and not self.args.confirm:
+            return self._preview(req)
+        return self._apply(req)
 
     def _resolve_line(self) -> int | None:
         """R27: agents never compute line numbers — the tool owns its own
@@ -1781,56 +1841,56 @@ class _FixCommand:
             return 0
         return None
 
-    def _preview(self) -> int:
-            # the name-free preview surface: show the proposed refactoring
-            # as a diff (the seam with a placeholder name — no --fix-name
-            # needed to see it). The agent reviews the seam, then re-runs
-            # with --fix-name <name>; the name is the commitment, so the
-            # named run applies — no --confirm dance
-            new_source, description = self.req.propose_finding()
-            if new_source is None:
-                print(_fix_refusal(self.fix_kind, self.opts, self.args.file, self.args.line))
-                return 0
-            diff = list(
-                difflib.unified_diff(
-                    (self.repo / self.args.file).read_text().splitlines(),
-                    new_source.splitlines(),
-                    fromfile=self.args.file,
-                    tofile=self.args.file + " (proposed)",
-                    lineterm="",
-                )
-            )
-            if self.fix_kind == "extract-method":
-                # the C shape (subtask-tested): the call-site hunk plus the
-                # EXTRACTED METHOD's first lines — agents name and comprehend
-                # from the method being created, not the diff head; a bare
-                # diff-head truncation left them wanting the cut part and
-                # unsure whether _extracted was the final name
-                call_hunk, def_idx, body = _trim_preview_diff(
-                    diff, self.args.name or "_extracted", new_source
-                )
-                print("\n".join(diff[:2]))  # --- / +++ file headers
-                print("\n".join(call_hunk))
-                print(f"# seam: {description}")
-                if def_idx is not None:
-                    print("\nExtracted (the method being created, first lines):\n")
-                    print(new_source.splitlines()[def_idx])
-                    print("\n".join(body[:10]))
-                    if len(body) > 10:
-                        print(f"... ({len(body) - 10} more lines omitted)")
-            else:
-                if len(diff) > 40:
-                    diff = diff[:40] + [f"... ({len(diff) - 40} more lines omitted)"]
-                print("\n".join(diff))
-            print(f"# the name `{self.args.name or '_extracted'}` is a placeholder — pick a real one; "
-                  f"apply it: lucidlint fix --kind {self.args.kind} --file {self.args.file} "
-                  f"--line {self.args.line} --name <name>")
+    def _preview(self, req) -> int:
+        # the name-free preview surface: show the proposed refactoring
+        # as a diff (the seam with a placeholder name — no --fix-name
+        # needed to see it). The agent reviews the seam, then re-runs
+        # with --fix-name <name>; the name is the commitment, so the
+        # named run applies — no --confirm dance
+        new_source, description = req.propose_finding()
+        if new_source is None:
+            print(_fix_refusal(self.fix_kind, self.args.name, self._params(), self.args.file, self.args.line))
             return 0
+        diff = list(
+            difflib.unified_diff(
+                (self.repo / self.args.file).read_text().splitlines(),
+                new_source.splitlines(),
+                fromfile=self.args.file,
+                tofile=self.args.file + " (proposed)",
+                lineterm="",
+            )
+        )
+        if self.fix_kind == "extract-method":
+            # the C shape (subtask-tested): the call-site hunk plus the
+            # EXTRACTED METHOD's first lines — agents name and comprehend
+            # from the method being created, not the diff head; a bare
+            # diff-head truncation left them wanting the cut part and
+            # unsure whether _extracted was the final name
+            call_hunk, def_idx, body = _trim_preview_diff(
+                diff, self.args.name or "_extracted", new_source
+            )
+            print("\n".join(diff[:2]))  # --- / +++ file headers
+            print("\n".join(call_hunk))
+            print(f"# seam: {description}")
+            if def_idx is not None:
+                print("\nExtracted (the method being created, first lines):\n")
+                print(new_source.splitlines()[def_idx])
+                print("\n".join(body[:10]))
+                if len(body) > 10:
+                    print(f"... ({len(body) - 10} more lines omitted)")
+        else:
+            if len(diff) > 40:
+                diff = diff[:40] + [f"... ({len(diff) - 40} more lines omitted)"]
+            print("\n".join(diff))
+        print(f"# the name `{self.args.name or '_extracted'}` is a placeholder — pick a real one; "
+              f"apply it: lucidlint fix --kind {self.args.kind} --file {self.args.file} "
+              f"--line {self.args.line} --name <name>")
+        return 0
 
-    def _apply(self) -> int:
-        description = self.req.fix_finding()
+    def _apply(self, req) -> int:
+        description = req.fix_finding()
         if description is None:
-            print(_fix_refusal(self.fix_kind, self.opts, self.args.file, self.args.line))
+            print(_fix_refusal(self.fix_kind, self.args.name, self._params(), self.args.file, self.args.line))
             return 0
         print(f"fix: {description} — {self.args.file}:{self.args.line} ({self.args.kind})")
         return 0
@@ -1918,12 +1978,14 @@ def _actions_from_rust(
     return actions
 
 
-def _collect_actions(repo: Path, args, file_churn: Counter[str], last_modified: dict[str, str],
-                     only_rel: str | None = None) -> list[Action]:
+def _scan_rust(
+    repo: Path, args, file_churn: Counter[str], only_rel: str | None = None
+) -> RustFindings:
     """Every finding family computes in the Rust core (per-file, partition,
     test rules, duplicate/unused, record-shape, complexity, the graph
-    families, hotspot, abstraction, docs); the orchestrator converts and
-    renders. The thresholds live in the binary (schema 2)."""
+    families, hotspot, abstraction, docs). The thresholds live in the binary
+    (schema 2); the report header and suppression census ride on the result
+    for the banner + footer ledger."""
     if not RUST_SCAN.active(repo):
         # no Python fallback — the binary is required; a silent empty scan
         # would report GATE: PASS without checking anything (fail-fast)
@@ -1936,7 +1998,7 @@ def _collect_actions(repo: Path, args, file_churn: Counter[str], last_modified: 
     rust = RUST_SCAN.load(repo, files)
     if rust is None:
         raise RuntimeError("the Rust scan core failed — rebuild with `make scanner-check`")
-    return _actions_from_rust(rust, args.include_tests, file_churn, last_modified)
+    return rust
 
 
 

@@ -647,3 +647,22 @@ mod tests {
         assert!(fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
     }
 }
+
+/// The report header — printed on every CLI run (text banner AND a `header`
+/// field in --json; never under the LSP). It states the AIM so agents read
+/// the intent before the findings: fix rather than suppress, and make every
+/// suppression reviewer-checkable.
+pub const REPORT_HEADER: &str = "lucidlint - the aim is code that is readable, maintainable, and obviously correct: fix findings instead of suppressing them, and give every suppression a why a reviewer can check";
+
+#[cfg(test)]
+mod header_tests {
+    use super::REPORT_HEADER;
+
+    #[test]
+    fn report_header_names_the_three_aims() {
+        assert!(REPORT_HEADER.contains("readable"));
+        assert!(REPORT_HEADER.contains("maintainable"));
+        assert!(REPORT_HEADER.contains("obviously correct"));
+        assert!(REPORT_HEADER.contains("why a reviewer can check"));
+    }
+}

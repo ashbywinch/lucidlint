@@ -33,7 +33,7 @@ OUT = ROOT / "tests" / "fixtures" / "test-repo.tar.gz"
 SIG = pygit2.Signature("CodeHealth Test", "lucidlint@example.com", time=1785542400, offset=0)
 
 
-def commit_all(repo: pygit2.Repository, files: dict[str, str], message: str, parents) -> str:
+def commit_all(repo: pygit2.Repository, files: dict[str, str], message: str, parents) -> pygit2.Oid:
     for rel, content in files.items():
         p = ROOT / ".test-repo" / rel
         p.parent.mkdir(parents=True, exist_ok=True)

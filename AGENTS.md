@@ -29,6 +29,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | Why this repo exists, requirements | `docs/PRD.md` |
 | How the tool is built | `docs/TECHSPEC.md` |
 | Phased delivery and gates | `docs/PLAN.md` |
+| Suppression-guardrails workstream (decisions, remaining steps, anti-goals) | `docs/plan-suppression-guardrails.md` |
 | Coding standards (canonical + language conventions) | `docs/coding-standards.md` |
 | Testing standards | `docs/testing-standards.md` |
 | UX standards | `docs/ux-standards.md` |

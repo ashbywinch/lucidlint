@@ -360,7 +360,7 @@ impl<'a> RsState<'a> {
             "warn",
             line,
             &fn_name,
-            format!("magic number {text} — name it as a constant — fix: magic-number --fix-name <CONST>"),
+            format!("magic number {text} — name it with a domain noun (what it means here), never its value spelled out — fix: magic-number --fix-name <CONST>"),
         );
     }
 
