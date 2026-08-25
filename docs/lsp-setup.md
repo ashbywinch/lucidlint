@@ -64,3 +64,9 @@ language-servers = ["lucidlint"]
 - The LSP publishes the same findings as the gate, including the
   `fix:` directives in the messages — an agent editing in the editor sees
   the exact command to run for each finding.
+- The server answers `textDocument/codeAction`: one `quickfix` per finding
+  whose message carries a `fix:` directive (the command runs
+  `lucidlint fix <directive> --file <path> --line <n>`), plus a
+  `source.fixAll` action when any fixable finding is in range. Bind the
+  commands in your editor's LSP keymaps; findings without a directive are
+  not auto-fixable.

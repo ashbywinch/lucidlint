@@ -1381,6 +1381,21 @@ fn walk_expr_deep<'a>(e: &'a Expr, in_call_func: bool, f: &mut impl FnMut(&'a Ex
         Expr::Named(n) => walk_expr_deep(&n.value, false, f),
         Expr::Await(a) => walk_expr_deep(&a.value, false, f),
         Expr::Starred(st) => walk_expr_deep(&st.value, false, f),
+        Expr::Tuple(t) => {
+            for el in &t.elts {
+                walk_expr_deep(el, false, f);
+            }
+        }
+        Expr::List(l) => {
+            for el in &l.elts {
+                walk_expr_deep(el, false, f);
+            }
+        }
+        Expr::Set(st) => {
+            for el in &st.elts {
+                walk_expr_deep(el, false, f);
+            }
+        }
         Expr::ListComp(l) => {
             walk_expr_deep(&l.elt, false, f);
             for g in &l.generators {
@@ -1941,7 +1956,7 @@ pub fn feature_envy_findings(state: &mut ScanState, body: &[Stmt]) {
                     kind: "feature-envy".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "'{}' reads '{}' {} times vs its own state {} — feature envy: the logic belongs on the envied object; move the computation onto '{}' as a method",
+                        "'{}' reads '{}' {} times vs its own state {} — feature envy: the logic belongs on the envied object; move the computation onto '{}' as a method — fix: feature-envy",
                         f.name.as_str(),
                         receiver,
                         n,

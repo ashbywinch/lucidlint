@@ -2391,6 +2391,19 @@ mod tests {
     }
 
     #[test]
+    fn feature_envy_counts_reads_inside_tuple_assignments() {
+        // `em, vm = graph.em, graph.vm` — the tuple's elements are field
+        // reads too; a walker that stops at the Tuple would under-count to
+        // 2 and the rule would miss the envy
+        let f = scan_src(
+            "class R:\n    def render(self):\n        graph = self.graph\n        em, vm = graph.em, graph.vm\n        roots = [v for v in vm if v not in graph.vs_parent]\n        done = [v for v in vm if v not in graph.kids]\n        return roots, em, done\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "feature-envy").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("4 times"), "{}", r[0].message);
+    }
+
+    #[test]
     fn feature_envy_ignores_own_inputs_and_values() {
         // a visitor callback consuming its parameter and a computed value
         // (pos = self.get_metadata(...)) are NOT envy

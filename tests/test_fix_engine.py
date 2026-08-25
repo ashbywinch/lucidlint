@@ -63,6 +63,76 @@ def test_undeclared_attribute_declares_the_member(tmp_path):
     # would have to invent a default) — nothing to change
 
 
+def test_feature_envy_moves_the_envied_reads_into_a_method(tmp_path):
+    # the generate_tree roots()/epic_roots() shape: the receiver's field
+    # reads move onto the envied class as a method; the caller gets a call
+    src = (
+        "class _RelationGraph:\n"
+        "    def __init__(self):\n"
+        "        self.em = {}\n"
+        "        self.vm = {}\n"
+        "        self.vs_parent = {}\n"
+        "        self.parent_epic = {}\n"
+        "\n"
+        "class _TreeRenderer:\n"
+        "    def __init__(self, graph: _RelationGraph):\n"
+        "        self.graph: _RelationGraph = graph\n"
+        "        self.lines = []\n"
+        "\n"
+        "    def render(self):\n"
+        "        graph = self.graph\n"
+        "        em, vm = graph.em, graph.vm\n"
+        "        roots = [vid for vid in vm if vid not in graph.vs_parent]\n"
+        "        epic_roots = [cid for cid in em if cid not in graph.parent_epic]\n"
+        "        x = self.lines\n"
+        "        return roots, epic_roots, x\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    _req(
+        "feature-envy", "houses/app.py", repo, 13, fix_engine.FixOptions(name="root_query"), source=src
+    ).fix_finding()
+    out = p.read_text()
+    assert "def root_query(self):" in out
+    assert "em, vm = self.em, self.vm" in out
+    assert "if vid not in self.vs_parent" in out  # receiver.field -> self.field
+    assert "return (roots, epic_roots)" in out
+    assert "(roots, epic_roots) = graph.root_query()" in out
+    assert "x = self.lines" in out  # the self-reads stay in the caller
+    compile(out, "app.py", "exec")
+
+
+def test_feature_envy_refuses_without_the_envied_class_annotation(tmp_path):
+    # the envied class must be nameable: `self.graph: _RelationGraph` — no
+    # annotation, no fix (the method has nowhere to go)
+    src = (
+        "class _RelationGraph:\n"
+        "    def __init__(self):\n"
+        "        self.em = {}\n"
+        "        self.vm = {}\n"
+        "        self.vs_parent = {}\n"
+        "\n"
+        "class _TreeRenderer:\n"
+        "    def __init__(self, graph):\n"
+        "        self.graph = graph\n"
+        "\n"
+        "    def render(self):\n"
+        "        graph = self.graph\n"
+        "        em, vm = graph.em, graph.vm\n"
+        "        roots = [vid for vid in vm if vid not in graph.vs_parent]\n"
+        "        x = self.lines\n"
+        "        return roots, x\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    _req(
+        "feature-envy", "houses/app.py", repo, 11, fix_engine.FixOptions(name="root_query"), source=src
+    ).fix_finding()
+    assert p.read_text() == src  # untouched
+
+
 def _req(kind, rel, repo, line, opts=None, source=None):
     """A fix request in the test's old (kind, rel, repo, line, opts) shape."""
     return fix_engine._FixRequest(
