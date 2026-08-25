@@ -1646,6 +1646,40 @@ def _trim_preview_diff(diff, name, new_source):
     return call_hunk, def_idx, body
 
 
+def _fix_identifier_problem(kind: str, opts: fix_engine.FixOptions, where: str) -> str | None:
+    """The invalid-argument guard: a non-identifier --name or --params entry
+    would construct an invalid libcst node inside a fixer. Refused before
+    dispatch with a message; a MISSING name is NOT refused here — previews
+    run nameless by contract."""
+    if kind in fix_engine._NAME_REQUIRED_KINDS and opts.name is not None and not opts.name.isidentifier():
+        return (
+            f"fix: --name must be a valid Python identifier, got '{opts.name}' "
+            f"at {where} - replace the message's <placeholder> with the real name"
+        )
+    if opts.params is not None:
+        bad = [p for p in opts.params if not p.isidentifier()]
+        if bad:
+            return f"fix: --params entries must be valid identifiers, got {bad} at {where}"
+    return None
+
+
+def _fix_refusal(kind: str, opts: fix_engine.FixOptions, file: str, line: int) -> str:
+    """Why a fix produced nothing. A name-required kind with a missing or
+    non-identifier name is NOT 'nothing to change' — it is an unsatisfied
+    prerequisite, and the silence would read as the finding being
+    unfixable (the LSP placeholder flow depends on this message)."""
+    if kind in fix_engine._NAME_REQUIRED_KINDS and opts.name is None:
+        # an unsatisfied prerequisite, not 'nothing to change': the silence
+        # would read as unfixable (the LSP placeholder flow depends on this)
+        return (
+            f"fix: {kind} needs a semantic name the tool cannot invent "
+            f"(--name <Name>) at {file}:{line} - naming is the judgement call"
+        )
+    return _fix_identifier_problem(kind, opts, f"{file}:{line}") or (
+        f"fix: nothing to change for {kind} at {file}:{line}"
+    )
+
+
 class _FixCommand:
     """The `lucidlint fix` command: R27 line resolution, the engine checks,
     the preview surface, and the apply path — one command's behavior, not a
@@ -1673,6 +1707,17 @@ class _FixCommand:
             )
             return 1
         self.fix_kind = _FIX_ALIASES.get(self.args.kind, self.args.kind)
+        # validate BEFORE dispatch: an INVALID identifier (<CONST>) reaching a
+        # fixer constructs an invalid libcst Name and dies with a traceback,
+        # not a message (the LSP flow hands the verbatim tokens to a shell).
+        # A MISSING name still previews — the preview IS the line-number-free
+        # contract; only the apply needs the commitment.
+        bad = _fix_identifier_problem(
+            self.fix_kind, self.opts, f"{self.args.file}:{self.args.line}"
+        )
+        if bad:
+            print(bad)
+            return 1
         if self.args.line == 0:
             exit_code = self._resolve_line()
             if exit_code is not None:
@@ -1685,7 +1730,7 @@ class _FixCommand:
                 # `fn ()` — invalid Rust — so refuse silently (R28; the
                 # directive prose already told the agent to pass --name). There
                 # is no Rust preview surface yet.
-                print(f"fix: nothing to change for {self.args.kind} at {self.args.file}:{self.args.line}")
+                print(_fix_refusal(self.fix_kind, self.opts, self.args.file, self.args.line))
                 return 0
             return _File(self.repo, self.rel).fix_rust(self.fix_kind, self.args.line, self.args.name)
         # Python: the libcst fix engine is a mandatory dependency
@@ -1736,8 +1781,7 @@ class _FixCommand:
             # named run applies — no --confirm dance
             new_source, description = self.req.propose_finding()
             if new_source is None:
-                # R28: never explain an absent fix — the silence is the signal
-                print(f"fix: nothing to change for {self.args.kind} at {self.args.file}:{self.args.line}")
+                print(_fix_refusal(self.fix_kind, self.opts, self.args.file, self.args.line))
                 return 0
             diff = list(
                 difflib.unified_diff(
@@ -1778,8 +1822,7 @@ class _FixCommand:
     def _apply(self) -> int:
         description = self.req.fix_finding()
         if description is None:
-            # R28: never explain an absent fix — the silence is the signal
-            print(f"fix: nothing to change for {self.args.kind} at {self.args.file}:{self.args.line}")
+            print(_fix_refusal(self.fix_kind, self.opts, self.args.file, self.args.line))
             return 0
         print(f"fix: {description} — {self.args.file}:{self.args.line} ({self.args.kind})")
         return 0

@@ -63,6 +63,30 @@ def test_undeclared_attribute_declares_the_member(tmp_path):
     # would have to invent a default) — nothing to change
 
 
+def test_name_required_kinds_refuse_placeholders_and_missing_names(tmp_path):
+    # the LSP hands the verbatim directive tokens to a shell: a <placeholder>
+    # name must be refused with a message (never an invalid-identifier
+    # crash), and a missing name must say what is missing
+    src = (
+        "class R:\n"
+        "    def render(self):\n"
+        "        graph = self.graph\n"
+        "        em, vm = graph.em, graph.vm\n"
+        "        roots = [v for v in vm if v not in graph.vs_parent]\n"
+        "        done = [v for v in vm if v not in graph.kids]\n"
+        "        return roots, em, done\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    missing = _req("feature-envy", "houses/app.py", repo, 2, fix_engine.FixOptions(), source=src)
+    assert missing.fix_finding() is None
+    placeholder = _req(
+        "feature-envy", "houses/app.py", repo, 2, fix_engine.FixOptions(name="<Method>"), source=src
+    )
+    assert placeholder.fix_finding() is None  # refused, not applied
+    assert p.read_text() == src  # nothing was rewritten
+
 def test_feature_envy_moves_the_envied_reads_into_a_method(tmp_path):
     # the generate_tree roots()/epic_roots() shape: the receiver's field
     # reads move onto the envied class as a method; the caller gets a call
@@ -1024,7 +1048,19 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
         fix_out = capsys.readouterr().out  # "fix: ..." or "fix: nothing to change"
         attempts[key] = attempts.get(key, 0) + 1
         assert attempts[key] <= 2, f"fix did not converge on {key}"
-        prev_applied = "nothing to change" not in fix_out
+        # the CLI's no-op surface: the generic silence AND the explicit
+        # unsatisfied-prerequisite refusals (missing/placeholder name) — none
+        # of them applied anything
+        refused = any(
+            marker in fix_out
+            for marker in (
+                "nothing to change",
+                "needs a semantic name",
+                "--name must be",
+                "--params entries",
+            )
+        )
+        prev_applied = bool(fix_out.strip()) and not refused
         last_count = len(fixable)
 
     # every fixable kind is gone and the file still parses

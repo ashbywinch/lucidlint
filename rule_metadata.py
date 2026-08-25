@@ -80,6 +80,10 @@ class Rule:
     description: str
     display_name: str | None = None
     display: str | None = None
+    # the rule's fix needs a name the tool cannot invent (--name/--fix-name):
+    # the LSP marks its code action `needsName` so a client can prompt, and
+    # the CLI refuses a missing/invalid name with an explicit message
+    fix_name_required: bool = False
 
 
 # The config group a rule belongs to (RULE_GROUPS / rule_groups — the
@@ -172,10 +176,12 @@ CATALOG = RuleCatalog([
          "extract-method --file <F> --line <L>` previews the best self-contained "
          "seam (placeholder name — the extracted function is private by "
          "construction, so the fix underscores it); apply with `--name <N>` "
-         "(the name IS the commitment — no `--confirm`)."),
+         "(the name IS the commitment — no `--confirm`).",
+         fix_name_required=True),
     Rule("long-param-list", "fail", "architecture", "Both",
          "A function with > 5 parameters (receiver/`self` excluded) — introduce "
-         "a parameter object."),
+         "a parameter object.",
+         fix_name_required=True),
     Rule("large-function", "fail", "architecture", "Both",
          "Function spans ≥ 120 lines — split it: one rule per function."),
     Rule("closures", "fail", "architecture", "Both",
@@ -207,7 +213,8 @@ CATALOG = RuleCatalog([
          "A dict whose values are same-arity tuples read with constant "
          "integer indexes — an anonymous record; make it a class (the "
          "record's fields are the tuple positions).",
-         display_name="tuple-record → latent-class", display="latent-class"),
+         display_name="tuple-record → latent-class", display="latent-class",
+         fix_name_required=True),
     Rule("data-clump", "fail", "architecture", "Python",
          ">=3 module functions sharing the same parameter pair — the pair "
          "travels together, so it is a data clump; introduce a parameter "
@@ -217,7 +224,8 @@ CATALOG = RuleCatalog([
          "A method reads another object's fields more than its own state — "
          "the logic belongs on that object (feature envy); move the "
          "computation onto the envied class as a method.",
-         display_name="feature-envy → latent-class", display="latent-class"),
+         display_name="feature-envy → latent-class", display="latent-class",
+         fix_name_required=True),
     Rule("undeclared-attribute", "fail", "architecture", "Python",
          "A class must DECLARE its members — annotated in the class body, in "
          "__slots__, or in __init__ — not assign them quietly in member "
@@ -259,7 +267,8 @@ CATALOG = RuleCatalog([
     # ---- style
     Rule("magic-number", "warn", "style", "Both",
          "Numeric literal (outside 0/1/2) used as an operand — name it as a "
-         "constant."),
+         "constant.",
+         fix_name_required=True),
     Rule("debug-artifact", "fail", "style", "Both",
          "`dbg!()` / `.unwrap()` / `.expect()` in production Rust; "
          "`breakpoint()` in production Python — debugging left in."),
@@ -272,7 +281,8 @@ CATALOG = RuleCatalog([
     Rule("vague-name", "fail", "style", "Both",
          "Type ending in Manager, Handler, Store, Repository, Controller, Utils, "
          "or Info with significant size/methods — the domain concept should "
-         "name it."),
+         "name it.",
+         fix_name_required=True),
     Rule("class-module", "fail", "style", "Python",
          "A Python module holding exactly one class whose name doesn't match "
          "the filename — rename the file to match.",

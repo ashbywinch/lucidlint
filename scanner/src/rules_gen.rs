@@ -117,6 +117,19 @@ pub const FAMILY_VARIANTS: &[(&str, &[&str])] = &[
     ("docs", &["docs-link", "docs-undiscoverable"]),
 ];
 
+/// Kinds whose fix needs a name the tool cannot invent
+/// (--name/--fix-name): the LSP marks its code action
+/// `needsName` from this table; the CLI refuses a missing or
+/// invalid name with an explicit message.
+pub const NAME_REQUIRED_KINDS: &[&str] = &[
+    "complexity",
+    "long-param-list",
+    "tuple-record",
+    "feature-envy",
+    "magic-number",
+    "vague-name",
+];
+
 /// kind -> display bucket — the lookup table final_kind scans.
 /// A match of 50+ arms would be a complexity finding; data
 /// stays flat (a linear scan over the entries is nothing).

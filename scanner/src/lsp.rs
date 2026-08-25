@@ -61,6 +61,32 @@ fn fix_kind_from_directive(directive: &str) -> &str {
     directive.split_whitespace().next().unwrap_or(directive)
 }
 
+/// The directive as runnable CLI ARGV tokens: `--fix-name` maps to the
+/// parser's actual `--name` flag (the same mapping full_fix_command applies
+/// to the expanded message), so a client can execute the tokens without
+/// shell-joining. Placeholder names (`<Options>`) stay verbatim — the CLI
+/// refuses them with an explicit message; capable clients prompt and
+/// substitute.
+fn directive_tokens(directive: &str) -> Vec<String> {
+    let mut toks: Vec<String> = Vec::new();
+    let mut prev_flag = false;
+    for t in directive.split_whitespace() {
+        if prev_flag {
+            // the slot after --fix-name travels under --name
+            toks.push(t.to_string());
+            prev_flag = false;
+            continue;
+        }
+        if t == "--fix-name" {
+            toks.push("--name".to_string());
+            prev_flag = true;
+            continue;
+        }
+        toks.push(t.to_string());
+    }
+    toks
+}
+
 pub fn diagnostics_for(scan: &FileScan, source: &str, filter: Option<(&LucidConfig, &str)>) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     for f in scan.findings.iter().filter(|f| {
@@ -277,15 +303,21 @@ impl LspState {
             }
             has_fix = true;
             let kind = fix_kind_from_directive(directive);
-            let title = format!("Apply lucidlint fix: {kind}");
+            let needs_name = crate::rules_gen::NAME_REQUIRED_KINDS.contains(&kind);
+            let title = if needs_name {
+                format!("Apply lucidlint fix: {kind} (needs --name)")
+            } else {
+                format!("Apply lucidlint fix: {kind}")
+            };
             actions.push(serde_json::json!({
                 "title": title,
                 "kind": "quickfix",
                 "diagnostics": [finding_diag(f, &text)],
+                "data": {"needsName": needs_name},
                 "command": {
                     "title": title,
                     "command": "lucidlint.applyFix",
-                    "arguments": [uri, f.line, directive],
+                    "arguments": [uri, f.line, directive_tokens(directive)],
                 },
             }));
         }
@@ -519,6 +551,117 @@ mod tests {
         assert!(text.contains("publishDiagnostics"));
         assert!(text.contains("magic number"));
         assert!(docs.documents.contains_key("file:///tmp/buf.py"));
+    }
+
+    #[test]
+    fn dispatch_codeaction_lists_fixable_findings_with_directives() {
+        let mut docs = LspState::new();
+        let mut out = Vec::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": "file:///tmp/buf.py", "text": "def run(a, b, c, d, e, f):\n    return a\n"}}
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        out.clear();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/codeAction",
+            "id": 1,
+            "params": {
+                "textDocument": {"uri": "file:///tmp/buf.py"},
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 20}}
+            }
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("lucidlint.applyFix"), "the fix command: {text}");
+        assert!(
+            text.contains("(needs --name)"),
+            "the title names the requirement: {text}"
+        );
+        assert!(text.contains("\"needsName\":true"), "the data marker: {text}");
+        // the directive travels as runnable argv tokens, --fix-name mapped
+        // to the parser's --name — no shell joining on the client
+        assert!(
+            text.contains("\"arguments\":[\"file:///tmp/buf.py\",1,[\"long-param-list\",\"--name\",\"<Options>\"]]"),
+            "the command args: {text}"
+        );
+        assert!(text.contains("source.fixAll"), "the fix-all action: {text}");
+    }
+
+    #[test]
+    fn dispatch_codeaction_marks_mechanical_fixes_applicable() {
+        // undeclared-attribute needs no name: needsName false, bare token,
+        // and the title carries no caveat
+        let mut docs = LspState::new();
+        let mut out = Vec::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": "file:///tmp/buf.py", "text": "class C:\n    def __init__(self):\n        self.done = False\n"}}
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        out.clear();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/codeAction",
+            "id": 4,
+            "params": {
+                "textDocument": {"uri": "file:///tmp/buf.py"},
+                "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 25}}
+            }
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("undeclared-attribute"), "the kind: {text}");
+        assert!(text.contains("\"needsName\":false"), "mechanical: {text}");
+        assert!(!text.contains("needs --name"), "no caveat: {text}");
+    }
+
+    #[test]
+    fn dispatch_codeaction_respects_the_requested_range() {
+        // the finding sits on the def line (0); a range covering only the
+        // body (line 1) must yield no actions
+        let mut docs = LspState::new();
+        let mut out = Vec::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": "file:///tmp/buf.py", "text": "def run(a, b, c, d, e, f):\n    return a\n"}}
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        out.clear();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/codeAction",
+            "id": 2,
+            "params": {
+                "textDocument": {"uri": "file:///tmp/buf.py"},
+                "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 10}}
+            }
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("\"result\":[]"), "no actions outside the range: {text}");
+        assert!(!text.contains("applyFix"), "no fix command: {text}");
+    }
+
+    #[test]
+    fn dispatch_codeaction_unknown_doc_returns_empty() {
+        let mut docs = LspState::new();
+        let mut out = Vec::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/codeAction",
+            "id": 3,
+            "params": {
+                "textDocument": {"uri": "file:///tmp/other.py"},
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
+            }
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        assert!(String::from_utf8(out).unwrap().contains("\"result\":[]"));
     }
 
     #[test]

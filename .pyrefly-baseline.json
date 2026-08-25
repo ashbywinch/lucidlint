@@ -1477,9 +1477,57 @@
    "severity": "error"
   },
   {
-   "line": 1658,
+   "line": 1649,
+   "column": 46,
+   "stop_line": 1649,
+   "stop_column": 67,
+   "path": "lucidlint.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `FixOptions`",
+   "concise_description": "Object of class `NoneType` has no attribute `FixOptions`",
+   "severity": "error"
+  },
+  {
+   "line": 1654,
+   "column": 16,
+   "stop_line": 1654,
+   "stop_column": 47,
+   "path": "lucidlint.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `_NAME_REQUIRED_KINDS`",
+   "concise_description": "Object of class `NoneType` has no attribute `_NAME_REQUIRED_KINDS`",
+   "severity": "error"
+  },
+  {
+   "line": 1666,
+   "column": 35,
+   "stop_line": 1666,
+   "stop_column": 56,
+   "path": "lucidlint.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `FixOptions`",
+   "concise_description": "Object of class `NoneType` has no attribute `FixOptions`",
+   "severity": "error"
+  },
+  {
+   "line": 1671,
+   "column": 16,
+   "stop_line": 1671,
+   "stop_column": 47,
+   "path": "lucidlint.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `_NAME_REQUIRED_KINDS`",
+   "concise_description": "Object of class `NoneType` has no attribute `_NAME_REQUIRED_KINDS`",
+   "severity": "error"
+  },
+  {
+   "line": 1692,
    "column": 20,
-   "stop_line": 1658,
+   "stop_line": 1692,
    "stop_column": 41,
    "path": "lucidlint.py",
    "code": -2,
@@ -1489,9 +1537,9 @@
    "severity": "error"
   },
   {
-   "line": 1658,
+   "line": 1692,
    "column": 44,
-   "stop_line": 1658,
+   "stop_line": 1692,
    "stop_column": 65,
    "path": "lucidlint.py",
    "code": -2,
@@ -1501,9 +1549,9 @@
    "severity": "error"
   },
   {
-   "line": 1662,
+   "line": 1696,
    "column": 19,
-   "stop_line": 1662,
+   "stop_line": 1696,
    "stop_column": 41,
    "path": "lucidlint.py",
    "code": -2,
@@ -1573,9 +1621,9 @@
    "severity": "error"
   },
   {
-   "line": 509,
+   "line": 533,
    "column": 12,
-   "stop_line": 509,
+   "stop_line": 533,
    "stop_column": 39,
    "path": "tests/test_fix_engine.py",
    "code": -2,
@@ -1585,9 +1633,9 @@
    "severity": "error"
   },
   {
-   "line": 669,
+   "line": 693,
    "column": 16,
-   "stop_line": 669,
+   "stop_line": 693,
    "stop_column": 55,
    "path": "tests/test_fix_engine.py",
    "code": -2,

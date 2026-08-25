@@ -65,8 +65,16 @@ language-servers = ["lucidlint"]
   `fix:` directives in the messages — an agent editing in the editor sees
   the exact command to run for each finding.
 - The server answers `textDocument/codeAction`: one `quickfix` per finding
-  whose message carries a `fix:` directive (the command runs
-  `lucidlint fix <directive> --file <path> --line <n>`), plus a
-  `source.fixAll` action when any fixable finding is in range. Bind the
-  commands in your editor's LSP keymaps; findings without a directive are
-  not auto-fixable.
+- The server answers `textDocument/codeAction`: one `quickfix` per finding
+  whose message carries a `fix:` directive. The action's command arguments
+  are `[uri, line, argvTokens]` — the tokens run directly as
+  `lucidlint fix --kind <tokens...> --file <path> --line <n>`, with
+  `--fix-name` already mapped to the parser's `--name`. Fixes that need a
+  name the tool cannot invent (`needsName: true`, kinds listed in the
+  catalog's `fix_name_required`) carry the message's `<placeholder>` in the
+  tokens: prompt for the real name and substitute it before running, or the
+  CLI refuses with an explicit message instead of applying garbage. A
+  `source.fixAll` action appears when any fixable finding is in range;
+  apply its mechanical quickfixes individually.
+- Code actions target the file on DISK at the published line numbers — save
+  the buffer before applying one, or the fix may land on stale coordinates.
