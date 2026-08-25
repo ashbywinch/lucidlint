@@ -3384,6 +3384,20 @@ mod tests {
     }
 
     #[test]
+    fn detached_method_exempts_trivial_stub() {
+        // a protocol/abstract placeholder never touches state BY DESIGN —
+        // staticmethod-ing it is meaningless (houses:
+        // CommuteRouterLike.get_commute, a `...`-body Protocol stub)
+        let ell = scan_src("class P:\n    def get_commute(self, origin):\n        ...\n");
+        assert!(!ell.iter().any(|x| x.kind == "detached-method"), "{ell:?}");
+        let rais = scan_src("class A:\n    def m(self, x):\n        raise NotImplementedError\n");
+        assert!(!rais.iter().any(|x| x.kind == "detached-method"), "{rais:?}");
+        // a raise that computes WITHOUT self is real code, not a stub
+        let real = scan_src("class A:\n    def m(self, x):\n        y = x + 1\n        raise ValueError(y)\n");
+        assert!(real.iter().any(|x| x.kind == "detached-method"), "{real:?}");
+    }
+
+    #[test]
     fn detached_method_flagged() {
         let f = scan_src("class A:\n    def m(self, x):\n        return x + 1\n");
         assert!(f.iter().any(|x| x.kind == "detached-method"));
