@@ -426,7 +426,7 @@ pub fn boolean_arg_findings(state: &mut ScanState, call: &ExprCall, source: &str
 /// Callee names whose trailing positional boolean is a lookup DEFAULT, not a
 /// flag — the parameter is positional-only in CPython, so the rule's own
 /// "keyword it" prescription cannot apply.
-const LOOKUP_DEFAULT_CALLEES: &[&str] = &["get", "getattr", "setattr", "setdefault", "pop"];
+const LOOKUP_DEFAULT_CALLEES: &[&str] = &["get", "getattr", "setdefault", "pop"];
 
 /// Positional literals of the same kind — the classic argument-swapping bug
 /// (`set_limits(10, 20)` — which is min, which is max?). Warn tier: not every
@@ -2470,7 +2470,7 @@ col: 0,
 /// neither ruff nor pyrefly flags it, and the name-based ref graph cannot see
 /// it either.
 pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
-    let (overloaded, last_def_line, overload_bound) = overload_exemption(module_body, state.source);
+    let (overloaded, impl_def_line, overload_bound) = overload_exemption(module_body, state.source);
     let mut seen: Vec<(String, usize)> = Vec::new();
     for s in module_body {
         let line = stmt_line(state.source, s);
@@ -2518,7 +2518,7 @@ pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
                 continue;
             }
             if is_def {
-                let exempt = stub || (overloaded.contains(&name) && last_def_line.get(&name).copied() == Some(line));
+                let exempt = stub || (overloaded.contains(&name) && impl_def_line.get(&name).copied() == Some(line));
                 if !exempt {
                     if let Some((_, first_line)) = seen.iter().find(|(n, _)| *n == name) {
                         state.findings.push(Finding {
@@ -2570,7 +2570,7 @@ fn overload_exemption(
         }
     }
     let mut overloaded: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut last_def_line: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut impl_def_line: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for s in module_body {
         if let Stmt::FunctionDef(f) = s {
             let name = f.name.to_string();
@@ -2580,15 +2580,15 @@ fn overload_exemption(
             });
             if is_overload {
                 overloaded.insert(name.clone());
-            }
-            let line = stmt_line(source, s);
-            let last = last_def_line.entry(name).or_insert(line);
-            if line > *last {
-                *last = line;
+            } else {
+                // the FIRST non-overload def is the implementation the stubs
+                // declare; tracking the LAST def instead exempted a genuine
+                // duplicate after the impl and flagged the impl (review bot)
+                impl_def_line.entry(name).or_insert(stmt_line(source, s));
             }
         }
     }
-    (overloaded, last_def_line, overload_bound)
+    (overloaded, impl_def_line, overload_bound)
 }
 
 /// Docstring content words that add nothing the body does not already say

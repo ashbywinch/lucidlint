@@ -87,6 +87,7 @@ _NAME_REQUIRED_KINDS = {
     "tuple-record",
     "feature-envy",
     "extract-record-class",
+    "extract-module",
 }
 
 
@@ -187,10 +188,20 @@ class _FixRequest:
         target = _find_fn_at(wrapper, line)
         if target is None:
             return None
-        raw_params = [p for p in target.params.params if p.name is not None]
-        params = [p for p in raw_params if p.name.value not in ("self", "cls")]
-        if len(params) < 6:
+        # the scanner's threshold counts posonly + args + kwonly (minus a
+        # leading self/cls) — the fixer must count the SAME set, or flagged
+        # /-separated parameter lists are silently refused (review bot)
+        all_params = [
+            *target.params.posonly_params,
+            *target.params.params,
+            *target.params.kwonly_params,
+        ]
+        total = len(all_params)
+        if total and all_params[0].name is not None and all_params[0].name.value in ("self", "cls"):
+            total -= 1
+        if total <= 5:
             return None  # not the long-param-list shape (threshold is > 5)
+        params = [p for p in all_params if p.name is not None and p.name.value not in ("self", "cls")]
         param_names = [p.name.value for p in params]
         renamed = wrapper.visit(_FnBodyRewrite(target.name.value, line, param_names, name)).code
         call_fixed = cst.parse_module(renamed).visit(_CallSiteRewrite(target.name.value, param_names, name)).code
@@ -279,25 +290,12 @@ class _FixRequest:
         wrapper = cst.MetadataWrapper(module)
         value: str | None = None
 
-        class _Find(cst.CSTVisitor):
-            METADATA_DEPENDENCIES = (PositionProvider,)
-
-            @override
-            def visit_Integer(self, node) -> None:
-                nonlocal value
-                if value is None and _as_range(self.get_metadata(PositionProvider, node)).start.line == line:
-                    value = node.value
-
-            @override
-            def visit_Float(self, node) -> None:
-                nonlocal value
-                if value is None and _as_range(self.get_metadata(PositionProvider, node)).start.line == line:
-                    value = node.value
-
-        wrapper.visit(_Find())
-        if value is None:
+        finder = _FindLiteral(line, self.col)
+        wrapper.visit(finder)
+        if finder.value is None:
             return None
-        replaced = wrapper.visit(_ReplaceLiteral(line, name)).code
+        value = finder.value
+        replaced = wrapper.visit(_ReplaceLiteral(line, self.col, name)).code
         if replaced == source:
             return None
         module2 = cst.parse_module(replaced)
@@ -737,7 +735,9 @@ class _FixRequest:
         line; without col, the line must carry exactly one candidate."""
         source = self._loaded_source()
         raw_name = self.opts.name
-        if not raw_name:
+        # a placeholder or non-identifier would generate `class _<Record>:`
+        # — invalid Python; refuse before generating (review bot)
+        if not raw_name or not raw_name.isidentifier():
             return None
         class_name = raw_name if raw_name.startswith("_") else "_" + raw_name
         wrapper = cst.MetadataWrapper(cst.parse_module(source))
@@ -2493,32 +2493,64 @@ class _FnBodyRewrite(cst.CSTTransformer):
         )
 
 
+class _FindLiteral(cst.CSTVisitor):
+    """The numeric literal anchored at (line, col) — the schema-3 col pins
+    same-line twins so the fix never rewrites the wrong operand."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, line: int, col: int) -> None:
+        self.line: int = line
+        self.col: int = col
+        self.value: str | None = None
+
+    def _match(self, node) -> bool:
+        if self.value is not None:
+            return False
+        pos = _as_range(self.get_metadata(PositionProvider, node)).start
+        if pos.line != self.line:
+            return False
+        if self.col > 0 and pos.column + 1 != self.col:
+            return False
+        self.value = node.value
+        return True
+
+    @override
+    def visit_Integer(self, node) -> None:
+        self._match(node)
+
+    @override
+    def visit_Float(self, node) -> None:
+        self._match(node)
+
+
 class _ReplaceLiteral(cst.CSTTransformer):
     """Replace the numeric literal on the target line with a name."""
 
     METADATA_DEPENDENCIES = (PositionProvider,)
 
-    def __init__(self, target_line: int, name: str) -> None:
+    def __init__(self, target_line: int, col: int, name: str) -> None:
         self.target_line: int = target_line
+        self.col: int = col
         self.name: str = name
         self.replaced: bool = False
 
+    def _match(self, original_node) -> bool:
+        if self.replaced:
+            return False
+        pos = _as_range(self.get_metadata(PositionProvider, original_node)).start
+        return pos.line == self.target_line and (self.col == 0 or pos.column + 1 == self.col)
+
     @override
     def leave_Integer(self, original_node, updated_node):
-        if self.replaced:
-            return updated_node
-        pos = _as_range(self.get_metadata(PositionProvider, original_node))
-        if pos.start.line == self.target_line:
+        if self._match(original_node):
             self.replaced = True
             return cst.Name(self.name)
         return updated_node
 
     @override
     def leave_Float(self, original_node, updated_node):
-        if self.replaced:
-            return updated_node
-        pos = _as_range(self.get_metadata(PositionProvider, original_node))
-        if pos.start.line == self.target_line:
+        if self._match(original_node):
             self.replaced = True
             return cst.Name(self.name)
         return updated_node
@@ -2932,6 +2964,7 @@ class _FreeNames(cst.CSTVisitor):
     @override
     def visit_FunctionDef(self, node) -> None:
         self.bound.add(node.name.value)
+        self._add_params(node.params.posonly_params)
         self._add_params(node.params.params)
         self._add_params(node.params.kwonly_params)
         # a bare `*` keyword-only separator is ParamStar — no name; the
@@ -2944,6 +2977,7 @@ class _FreeNames(cst.CSTVisitor):
 
     @override
     def visit_Lambda(self, node) -> None:
+        self._add_params(node.params.posonly_params)
         self._add_params(node.params.params)
         self._add_params(node.params.kwonly_params)
 

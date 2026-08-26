@@ -186,7 +186,18 @@ def render_rules_rs() -> str:
         out.append(f'    ("{fam}", &[{", ".join(f'"{m}"' for m in members)}]),')
     out.append("];")
     out.append("")
-    name_required = [r.kind for r in rules if r.fix_name_required]
+    # the LSP reads the DIRECTIVE's fix kind, which differs from the rule
+    # kind where a fix has its own name (record-shape -> extract-record-class,
+    # module-cohesion -> extract-module, data-clump -> extract-class) — the
+    # table must carry the fix kinds or needsName never fires (review bot)
+    fix_kind_of = {
+        "record-shape": "extract-record-class",
+        "module-cohesion": "extract-module",
+        "data-clump": "extract-class",
+    }
+    name_required = sorted(
+        set(fix_kind_of.get(r.kind, r.kind) for r in rules if r.fix_name_required)
+    )
     out.append("")
     out.append("/// Kinds whose fix needs a name the tool cannot invent")
     out.append("/// (--name/--fix-name): the LSP marks its code action")

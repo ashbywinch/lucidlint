@@ -35,10 +35,21 @@ fn severity_of(f: &Finding) -> i64 {
 /// the message so the client can show how to fix it.
 fn finding_diag(f: &Finding, source: &str) -> serde_json::Value {
     let line = f.line.saturating_sub(1); // LSP lines are 0-based
-    let line_len = source.lines().nth(line).map(str::len).unwrap_or(0);
-    // col (1-based, schema 3) pins the anchor node — twins on one line
-    // highlight separately; 0 keeps the whole-line span
-    let start_char = if f.col > 0 { (f.col - 1).min(line_len) } else { 0 };
+                                         // LSP positions are UTF-16 CODE UNITS; the scanner's col is a byte
+                                         // column — convert the line prefix, or ranges land wrong on lines with
+                                         // non-ASCII text (é is 2 bytes but 1 unit) (review bot)
+    let line_text = source.lines().nth(line).unwrap_or("");
+    let line_len = line_text.encode_utf16().count();
+    // col (1-based byte column, schema 3) pins the anchor node — twins on
+    // one line highlight separately; 0 keeps the whole-line span
+    let start_char = if f.col > 0 {
+        line_text
+            .get(..(f.col - 1).min(line_text.len()))
+            .map(|s| s.encode_utf16().count())
+            .unwrap_or(0)
+    } else {
+        0
+    };
     serde_json::json!({
         "range": {
             "start": {"line": line, "character": start_char},
@@ -590,6 +601,25 @@ mod tests {
         assert!(text.contains("publishDiagnostics"));
         assert!(text.contains("magic number"));
         assert!(docs.documents.contains_key("file:///tmp/buf.py"));
+    }
+
+    #[test]
+    fn diagnostic_positions_are_utf16_code_units() {
+        // LSP positions are UTF-16 code units, not bytes: a non-ASCII char
+        // before the anchor (here "café" = 5 bytes, 4 units) must shift the
+        // byte column by the byte/unit delta (review bot)
+        let scan = scan_buffer("file:///tmp/buf.py", "def f():\n    return café * 60\n");
+        let src = "def f():\n    return café * 60\n";
+        let diags = diagnostics_for(&scan, src, None);
+        let magic = diags
+            .iter()
+            .find(|d| d["message"].as_str().is_some_and(|m| m.contains("magic number")))
+            .unwrap();
+        // "    return " (11 units) + "café" (4 units) + " * " (3 units) —
+        // the 60's first char is unit 18; whole line = 20 units. The old
+        // byte math put both at 19/19 (é is 2 bytes)
+        assert_eq!(magic["range"]["start"]["character"], 18);
+        assert_eq!(magic["range"]["end"]["character"], 20);
     }
 
     #[test]

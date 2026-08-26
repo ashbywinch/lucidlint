@@ -414,18 +414,23 @@ struct LineMarkerCtx<'a> {
 fn peel_assign(members: &[usize], findings: &[crate::Finding], ctx: &mut LineMarkerCtx) -> Vec<bool> {
     let pairs = marker_inventory(members, findings, ctx.supps, ctx.used_line, ctx.taken);
     let mut ok = vec![false; members.len()];
-    let mut pi = 0usize;
+    // members sort by col DESC (inner-first) while the inventory sorts by
+    // line DESC — a single advancing pointer strands a marker whose kind
+    // matches a LATER member behind an earlier non-match (review bot):
+    // search the whole inventory for the first unused marker matching each
+    // member's signal
+    let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (j, &i) in members.iter().enumerate() {
-        if pi < pairs.len() {
-            let cand = &pairs[pi];
-            if signal_matches(&cand.1, &findings[i].kind) {
-                ctx.taken.insert(cand.clone());
-                ctx.used_line.insert(cand.clone());
-                ctx.spent.insert(cand.clone());
-                ok[j] = true;
-                pi += 1;
-                continue;
-            }
+        if let Some((pi, cand)) = pairs
+            .iter()
+            .enumerate()
+            .find(|(pi, cand)| !used.contains(pi) && signal_matches(&cand.1, &findings[i].kind))
+        {
+            used.insert(pi);
+            ctx.taken.insert(cand.clone());
+            ctx.used_line.insert(cand.clone());
+            ctx.spent.insert(cand.clone());
+            ok[j] = true;
         }
     }
     ok
@@ -447,8 +452,6 @@ pub fn apply_suppressions_impl(
     let mut out = Vec::new();
     let mut used_line: std::collections::HashSet<(usize, String)> = books.pre_used.lines.clone();
     let mut used_file: std::collections::HashSet<String> = books.pre_used.files.clone();
-    // dedup per (line, signal) — `ignore sig1,sig2` with no why must report
-    // BOTH signals' missing reasons, not just the first on the line
     let mut seen_invalid: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
     for (ln, entries) in &supps.line {
         for (sig, why) in entries {
@@ -713,6 +716,39 @@ mod tests {
         let fs = apply_suppressions_impl(vec![finding("strewing", 2)], &comments, "x.py", "#", &mut books);
         assert!(!fs.iter().any(|f| f.kind == "strewing"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
+    }
+
+    #[test]
+    fn peel_searches_inventory_not_pointer() {
+        // group members sort by col DESC (inner-first) while the marker
+        // inventory sorts by line DESC — the deeper finding's marker on an
+        // EARLIER window line strands under pointer-only assignment: the
+        // shallower member consumes its marker, the deep member's valid
+        // suppression is silently ignored (review bot)
+        let comments = vec![
+            (1, "# lucidlint: ignore magic-number why-b".to_string()),
+            (2, "# lucidlint: ignore middle-man why-a".to_string()),
+        ];
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let deep_magic = Finding {
+            col: 5,
+            ..finding("magic-number", 2)
+        };
+        let fs = apply_suppressions_impl(
+            vec![deep_magic, finding("middle-man", 2)],
+            &comments,
+            "x.py",
+            "#",
+            &mut books,
+        );
+        assert!(
+            !fs.iter().any(|f| f.kind == "magic-number" || f.kind == "middle-man"),
+            "both markers must bind regardless of order skew: {:?}",
+            fs
+        );
     }
 
     #[test]

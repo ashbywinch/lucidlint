@@ -127,6 +127,18 @@ thread_local! {
 }
 
 /// 1-based line of an offset.
+/// The LINE_STARTS cache is keyed by (ptr, len) — a fresh String can reuse
+/// the previous file's buffer address at the same length, so the key alone
+/// is unsafe; force a rebuild for every scan (review bot).
+fn reset_line_starts() {
+    LINE_STARTS.with(|c| {
+        let mut c = c.borrow_mut();
+        c.0 = 0;
+        c.1 = 0;
+        c.2.clear();
+    });
+}
+
 fn line_of(source: &str, offset: ruff_text_size::TextSize) -> usize {
     LINE_STARTS.with(|c| {
         let mut c = c.borrow_mut();
@@ -1087,6 +1099,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
 }
 
 fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
+    reset_line_starts();
     let parsed: Parsed<ModModule> = match parse_module(source) {
         Ok(p) => p,
         Err(_) => {
@@ -2177,8 +2190,17 @@ mod tests {
     }
 
     #[test]
+    fn name_required_kinds_carries_fix_kinds() {
+        // the LSP matches the directive's FIX kind — record-shape's fix is
+        // extract-record-class, module-cohesion's is extract-module; rule
+        // kinds alone never matched, so needsName never fired (review bot)
+        assert!(crate::rules_gen::NAME_REQUIRED_KINDS.contains(&"extract-record-class"));
+        assert!(crate::rules_gen::NAME_REQUIRED_KINDS.contains(&"extract-module"));
+        assert!(crate::rules_gen::NAME_REQUIRED_KINDS.contains(&"extract-class"));
+    }
+
+    #[test]
     fn comment_lines_tracks_lines_across_multiline_tokens() {
-        // the incremental line tracker counts newlines between comment
         // starts; a multi-line string between comments must not lose count
         let src = "# one\nx = (\n    1 +\n    \"\"\"\nmulti\nline\n\"\"\"\n)\n# two\ny = 2  # three\n";
         let parsed = parse_module(src).unwrap();
@@ -2238,7 +2260,6 @@ mod tests {
              \x20   c = os.environ.get('DEBUG', False)\n\
              \x20   d = cfg.setdefault('cached', False)\n\
              \x20   e = cfg.pop('stale', True)\n\
-             \x20   g = setattr(cfg, 'debug', True)\n\
              \x20   return a, b, c, d, e\n",
         );
         assert!(
@@ -2246,6 +2267,12 @@ mod tests {
             "lookup defaults exempt: {:?}",
             f
         );
+        // setattr is NOT a lookup-with-default: the trailing boolean is the
+        // VALUE being assigned (nameable), so it stays a finding — the
+        // exemption is for missing-key/attribute defaults only (review bot)
+        let f3 = scan_src("def f(cfg):\n    setattr(cfg, 'debug', True)\n    return 1\n");
+        let b3: Vec<&Finding> = f3.iter().filter(|x| x.kind == "boolean-arg").collect();
+        assert_eq!(b3.len(), 1, "setattr value must stay flagged: {:?}", f3);
         // a non-default boolean in a lookup call is still a finding
         let f2 = scan_src("def f(cfg):\n    return cfg.get(False, 'x')\n");
         assert!(f2.iter().any(|x| x.kind == "boolean-arg"), "{:?}", f2);
@@ -2854,11 +2881,20 @@ mod tests {
     #[test]
     fn duplicate_def_overload_impl_duplicate_still_flagged() {
         // stubs + impl are exempt — a FOURTH def of the same name after the
-        // impl is a genuine duplicate and must still fire (review finding)
+        // impl is a genuine duplicate and must still fire (review finding).
+        // The exemption tracks the FIRST non-overload def (the impl): a
+        // duplicate AFTER it is flagged, never the impl itself (the bot's
+        // logic-inversion: last-def tracking flagged the impl and exempted
+        // the duplicate).
         let f = scan_src(
             "from typing import overload\n\n@overload\ndef f(x: int) -> int:\n    ...\n\ndef f(x):\n    return x\n\ndef f(x):\n    return x + 1\n",
         );
-        assert!(f.iter().any(|x| x.kind == "duplicate-def"), "{f:?}");
+        let dup: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-def").collect();
+        assert_eq!(dup.len(), 1, "{f:?}");
+        assert_eq!(
+            dup[0].line, 10,
+            "the genuine duplicate (line 10), not the impl (line 7): {f:?}"
+        );
     }
     #[test]
     fn restating_docstring_is_found() {
