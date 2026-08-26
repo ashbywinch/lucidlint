@@ -1,28 +1,3 @@
 {
- "errors": [
-  {
-   "line": 1239,
-   "column": 14,
-   "stop_line": 1239,
-   "stop_column": 45,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "bad-specialization",
-   "description": "Expected 0 type arguments for `MetadataWrapper`, got 1",
-   "concise_description": "Expected 0 type arguments for `MetadataWrapper`, got 1",
-   "severity": "error"
-  },
-  {
-   "line": 1259,
-   "column": 14,
-   "stop_line": 1259,
-   "stop_column": 45,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "bad-specialization",
-   "description": "Expected 0 type arguments for `MetadataWrapper`, got 1",
-   "concise_description": "Expected 0 type arguments for `MetadataWrapper`, got 1",
-   "severity": "error"
-  }
- ]
+ "errors": []
 }
