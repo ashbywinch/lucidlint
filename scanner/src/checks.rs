@@ -89,11 +89,20 @@ pub const SHADOWED_BUILTINS: &[&str] = &[
 /// token stream (0.0.9's lexer exposes no public range accessor).
 pub fn comment_lines(source: &str, tokens: &Tokens) -> Vec<(usize, String)> {
     let mut out = Vec::new();
+    // tokens are in source order — count newlines between comment starts
+    // instead of re-scanning from offset 0 per comment (`line_of` is O(n);
+    // N comments used to cost O(N^2) — a comment-heavy file scanned 4x per
+    // run and went quadratic)
+    let mut line = 1usize;
+    let mut prev = 0usize;
     for tok in tokens.iter() {
         if tok.kind() == TokenKind::Comment {
             let range = tok.range();
+            let start = range.start().to_usize();
+            line += source[prev..start].bytes().filter(|&b| b == b'\n').count();
+            prev = start;
             let text = &source[range];
-            out.push((line_of(source, range.start()), text.to_string()));
+            out.push((line, text.to_string()));
         }
     }
     out
@@ -3746,7 +3755,7 @@ fn dispatch_arm(e: &Expr) -> Option<(String, String)> {
 // _unused_actions in lucidlint.py.
 // =====================================================================
 
-pub use crate::common::{dice_similarity, SkeletonFn};
+pub use crate::common::SkeletonFn;
 
 /// The structural fingerprint: node types in CPython `ast.walk` BFS order,
 /// with names/constants/args collapsed (`_fn_skeleton`). The BFS child
@@ -4426,6 +4435,7 @@ pub fn is_duplicate_candidate(f: &StmtFunctionDef, skeleton_len: usize) -> bool 
 pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
     use std::collections::HashMap;
     let mut out = Vec::new();
+    let interner = BigramInterner::new(&fns.iter().map(|f| f.skeleton.as_slice()).collect::<Vec<_>>());
     let mut buckets: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, fr) in fns.iter().enumerate() {
         buckets.entry(fr.skeleton.len()).or_default().push(i);
@@ -4448,7 +4458,7 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
                 let bucket = &buckets[&len];
                 let start = bucket.partition_point(|&j| j <= i);
                 for &j in &bucket[start..] {
-                    let sim = dice_similarity(&fr.skeleton, &fns[j].skeleton);
+                    let sim = dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j));
                     if sim >= 0.9 {
                         if best.is_none_or(|(b, _)| j < b) {
                             best = Some((j, sim));
@@ -4479,6 +4489,75 @@ col: 0,
         out.push(f);
     }
     out
+}
+
+/// Interns skeleton tokens to small ids and precomputes each function's
+/// sorted bigram index list ONCE — `duplicate_findings` then scores pairs
+/// with an allocation-free two-pointer merge instead of rebuilding bigram
+/// maps per pair (the save-time repo-wide merge's dominant cost: 59ms on a
+/// 57-file repo for 224 skeletons).
+pub struct BigramInterner {
+    bigrams: Vec<(u32, u32)>,
+    offsets: Vec<(usize, usize)>, // (start, end) into bigrams per input
+}
+
+impl BigramInterner {
+    pub fn new(skeletons: &[&[String]]) -> Self {
+        let mut intern: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+        let mut bigrams: Vec<(u32, u32)> = Vec::new();
+        let mut offsets: Vec<(usize, usize)> = Vec::with_capacity(skeletons.len());
+        for skel in skeletons {
+            let mut ids: Vec<u32> = Vec::with_capacity(skel.len());
+            for tok in *skel {
+                let next = intern.len() as u32;
+                let id = *intern.entry(tok.as_str()).or_insert(next);
+                ids.push(id);
+            }
+            let start = bigrams.len();
+            bigrams.extend(ids.windows(2).map(|w| (w[0], w[1])));
+            bigrams[start..].sort_unstable();
+            offsets.push((start, bigrams.len()));
+        }
+        Self { bigrams, offsets }
+    }
+
+    /// The function's sorted bigram list.
+    pub fn bigrams_of(&self, i: usize) -> &[(u32, u32)] {
+        let (s, e) = self.offsets[i];
+        &self.bigrams[s..e]
+    }
+}
+
+/// Dice over SORTED bigram lists — multiset intersection via a two-pointer
+/// merge (counts equal runs). Matches `dice_similarity`'s multiset contract
+/// exactly; the pairing test pins them equal on the review-log cases.
+pub fn dice_from_bigrams(a: &[(u32, u32)], b: &[(u32, u32)]) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 0.0;
+    }
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let mut common = 0usize;
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            let x = a[i];
+            let (ci, cj) = (i, j);
+            while i < a.len() && a[i] == x {
+                i += 1;
+            }
+            while j < b.len() && b[j] == x {
+                j += 1;
+            }
+            common += (i - ci).min(j - cj);
+        } else if a[i] < b[j] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    (2.0 * common as f64) / (a.len() + b.len()) as f64
 }
 
 /// Dead-code findings (`_unused_actions`).

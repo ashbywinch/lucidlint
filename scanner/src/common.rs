@@ -137,10 +137,23 @@ pub fn is_duplicate_size(skeleton_len: usize, non_doc_stmts: usize) -> bool {
 }
 
 /// Dice coefficient over bigram sets — the language-neutral similarity.
+/// MULTISET semantics (pinned by `duplicate_dice_contract_no_set_hash_shortcut`):
+/// repeated bigrams count. Computed via count maps instead of the old
+/// repo cost 69ms of the LSP's save-time merge; this is O(len(a) + len(b)).
+/// Reference implementation only now — production scores via the sorted-
+/// bigram fast path in `duplicate_findings`; the parity tests pin them equal.
+/// NOT `#[cfg(test)]`-gated: gen-rules.py treats the first cfg(test) as the
+/// test-module boundary and would miss the emissions later in this file.
+#[allow(dead_code)]
 pub fn dice_similarity(a: &[String], b: &[String]) -> f64 {
-    let bigrams =
-        |t: &[String]| -> Vec<(String, String)> { t.windows(2).map(|w| (w[0].clone(), w[1].clone())).collect() };
-    let (ab, bb) = (bigrams(a), bigrams(b));
+    let bigram_counts = |t: &[String]| -> std::collections::HashMap<(String, String), usize> {
+        let mut m = std::collections::HashMap::new();
+        for w in t.windows(2) {
+            *m.entry((w[0].clone(), w[1].clone())).or_insert(0) += 1;
+        }
+        m
+    };
+    let (ab, bb) = (bigram_counts(a), bigram_counts(b));
     if ab.is_empty() && bb.is_empty() {
         return 0.0; // matches the Python reference: no shared bigrams, never a duplicate
     }
@@ -148,17 +161,14 @@ pub fn dice_similarity(a: &[String], b: &[String]) -> f64 {
         return 0.0;
     }
     let mut common = 0usize;
-    let mut bseen: Vec<bool> = vec![false; bb.len()];
-    for x in &ab {
-        for (j, y) in bb.iter().enumerate() {
-            if !bseen[j] && x == y {
-                common += 1;
-                bseen[j] = true;
-                break;
-            }
+    for (k, ca) in &ab {
+        if let Some(cb) = bb.get(k) {
+            common += ca.min(cb);
         }
     }
-    (2.0 * common as f64) / (ab.len() + bb.len()) as f64
+    let total_a: usize = ab.values().sum();
+    let total_b: usize = bb.values().sum();
+    (2.0 * common as f64) / (total_a + total_b) as f64
 }
 
 // --------------------------------------------------------------------------- suppressions
