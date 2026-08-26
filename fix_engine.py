@@ -1236,7 +1236,7 @@ class _FindRecordDicts(cst.CSTVisitor):
 
 
 def _find_record_dicts(
-    wrapper: cst.MetadataWrapper[cst.Module], line: int
+    wrapper: cst.MetadataWrapper, line: int
 ) -> list[_RecordDictHit]:
     finder = _FindRecordDicts(line)
     wrapper.visit(finder)
@@ -1256,7 +1256,7 @@ def _dict_constant_keys(d: cst.Dict) -> list[str]:
 
 
 def _record_bind_names(
-    wrapper: cst.MetadataWrapper[cst.Module], target_dict: cst.Dict
+    wrapper: cst.MetadataWrapper, target_dict: cst.Dict
 ) -> set[str]:
     """Names bound to THIS dict literal by assignment (`payload = {...}`)."""
     names: set[str] = set()
