@@ -115,11 +115,9 @@ pub fn apply_suppressions_impl(
     source: &str,
     file: &str,
     tokens: &Tokens,
-    pre_used: &crate::common::PreUsedSuppressions,
-    spent: &mut std::collections::HashSet<(usize, String)>,
+    books: &mut crate::common::SuppressionBooks,
 ) -> Vec<Finding> {
-    let mut books = crate::common::SuppressionBooks { pre_used, spent };
-    crate::common::apply_suppressions_impl(findings, &comment_lines(source, tokens), file, "#", &mut books)
+    crate::common::apply_suppressions_impl(findings, &comment_lines(source, tokens), file, "#", books)
 }
 
 /// `# type: ignore` without a why (a second comment on the line) is a finding.

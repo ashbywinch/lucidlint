@@ -763,6 +763,8 @@ mod tests {
     }
 }
 
+// lucidlint: ignore-file fakefs integration test writes a real repo tree to a
+// temp dir — same sanctioned real-FS seam as tests/test_lsp.py
 #[test]
 fn didsave_publishes_repo_wide_unused_for_saved_file() {
     // review-log §10: a function that is dead REPO-WIDE never showed in

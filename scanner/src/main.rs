@@ -1003,8 +1003,8 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         Ok(p) => p,
         Err(_) => {
             return FileScan {
-                file_name: name.to_string(),
                 supps_spent: HashSet::new(),
+                file_name: name.to_string(),
                 findings: Vec::new(),
                 cc: Vec::new(),
                 errors: 1,
@@ -1094,12 +1094,12 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
             !line_suppressed && !file_suppressed
         });
     }
-    let mut supps_spent: HashSet<(usize, String)> = HashSet::new();
-    let books = crate::common::SuppressionBooks {
+    let mut supps_spent = HashSet::new();
+    let mut books = crate::common::SuppressionBooks {
         pre_used: &pre_used,
         spent: &mut supps_spent,
     };
-    let findings = checks::apply_suppressions_impl(state.findings, source, name, tokens, books.pre_used, books.spent);
+    let findings = checks::apply_suppressions_impl(state.findings, source, name, tokens, &mut books);
     let mut all = type_ignore_findings(source, name, tokens);
     all.extend(noqa_findings(source, name, tokens));
     all.extend(findings);
