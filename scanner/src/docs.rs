@@ -125,6 +125,7 @@ fn check_target(
         out.push(Finding {
             file: rel.to_string(),
             line: 0,
+            col: 0,
             function: String::new(),
             kind: "docs-link".into(),
             severity: "fail".into(),
@@ -293,16 +294,9 @@ fn docs_reachability(repo: &Path, gitignored: &HashSet<String>) -> Vec<Finding> 
     for d in &docs {
         let rel = d.strip_prefix(repo).unwrap_or(d).to_string_lossy().replace('\\', "/");
         if !reachable.contains(&rel) {
-            out.push(Finding {
-                file: "AGENTS.md".into(),
-                line: 0,
-                function: String::new(),
-                kind: "docs-undiscoverable".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "doc '{rel}' is not reachable from AGENTS.md at any hop — a doc the reader cannot reach from where everyone starts does not exist. Link it from its group's index"
-                ),
-            });
+            out.push(Finding { file: "AGENTS.md".into(), line: 0, col: 0, function: String::new(), kind: "docs-undiscoverable".into(), severity: "fail".into(), message: format!(
+                "doc '{rel}' is not reachable from AGENTS.md at any hop — a doc the reader cannot reach from where everyone starts does not exist. Link it from its group's index"
+            ) });
         }
     }
     out

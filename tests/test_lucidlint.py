@@ -450,7 +450,7 @@ def test_scanner_failure_raises(tmp_path):
 def test_scanner_garbage_findings_dropped(tmp_path, capsys):
     repo = make_repo(tmp_path)
     scan_json = json.dumps({
-        "schema_version": 2,
+        "schema_version": 3,
         "findings": [{
             "kind": "standard", "signal": "standard", "severity": "fail",
             "file": "/elsewhere/x.py", "line": 1, "function": "", "message": "drop me",
