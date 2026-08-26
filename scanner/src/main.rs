@@ -99,6 +99,11 @@ struct ScanState<'a> {
     module_flagged: HashSet<String>,
     /// Module-level function definitions (name, line) — non-test files.
     defs: Vec<(String, usize)>,
+    /// set_* methods and property setters (name, line) — repo-wide pass.
+    setters: Vec<(String, usize)>,
+    /// Offsets of numeric literals in data-table collections (>= 3 same-kind
+    /// siblings) — magic-number exempt.
+    magic_table_exempts: HashSet<usize>,
     /// Every referenced name (Name nodes + import aliases) in this file.
     refs: HashSet<String>,
     /// String literal values (prod files only).
@@ -285,7 +290,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
         // position rule must match Python's (status_code=403 is NOT a finding).
         if let Expr::Call(call) = expr {
             let source = self.source;
-            boolean_arg_findings(self, &call.arguments.args, source);
+            boolean_arg_findings(self, call, source);
             positional_literals_findings(self, call, source);
             // debug-artifact (Python half): breakpoint() left in production —
             // the dbg!/unwrap analog (Rust half lives in rustscan.rs)
@@ -652,8 +657,11 @@ impl<'a> ScanState<'a> {
         if !parent_is_op {
             return;
         }
+        if self.magic_table_exempts.contains(&n.range().start().to_usize()) {
+            return; // data-table entry: >= 3 same-kind numeric siblings in one collection literal
+        }
         let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-        self.findings.push(Finding { file: self.file.to_string(), line: line_of(self.source, n.range.start()), col: col_of(self.source, n.range.start()), function: fn_name, kind: "magic-number".into(), severity: "warn".into(), message: format!("magic number {value} — name it with a domain noun (what it means here), never its value spelled out — fix: magic-number --fix-name <CONST>") });
+        self.findings.push(Finding { file: self.file.to_string(), line: line_of(self.source, n.range.start()), col: col_of(self.source, n.range.start()), function: fn_name, kind: "magic-number".into(), severity: "warn".into(), message: format!("magic number {value} — name it with a domain noun (what it means here), never its value spelled out; collection-literal data tables (>= 3 same-kind numeric siblings) are exempt — fix: magic-number --fix-name <CONST>") });
     }
 
     /// No-op statements: expression statements that discard their value.
@@ -922,12 +930,14 @@ pub struct ImportInfo {
     pub imported: String,
 }
 
+#[derive(Default)]
 pub struct FileScan {
     pub file_name: String,
     pub findings: Vec<Finding>,
     pub cc: Vec<FnCc>,
     pub errors: usize,
     pub defs: Vec<(String, usize)>,
+    pub setters: Vec<(String, usize)>,
     pub refs: HashSet<String>,
     pub strings: Vec<String>,
     pub decorated: HashSet<String>,
@@ -994,7 +1004,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     conditional_polymorphism_findings(state, body, source);
     special_case_findings(state, body, source);
     middle_man_findings(state, body, source);
-    unused_setter_findings(state, body, source);
+    collect_setters(state, body);
     loop_pipeline_findings(state, body, source);
 }
 
@@ -1003,19 +1013,9 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         Ok(p) => p,
         Err(_) => {
             return FileScan {
-                supps_spent: HashSet::new(),
                 file_name: name.to_string(),
-                findings: Vec::new(),
-                cc: Vec::new(),
                 errors: 1,
-                defs: Vec::new(),
-                refs: HashSet::new(),
-                strings: Vec::new(),
-                decorated: HashSet::new(),
-                skeletons: Vec::new(),
-                classes: Vec::new(),
-                imports: Vec::new(),
-                supps: common::Suppressions::default(),
+                ..Default::default()
             };
         }
     };
@@ -1026,6 +1026,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         source,
         module_mutables: module_container_names(&body),
         module_flagged: module_flagged_names(&body),
+        magic_table_exempts: checks::magic_table_exempt_offsets(&body),
         is_test: is_test_path(name),
         ..Default::default()
     };
@@ -1111,6 +1112,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         cc: state.cc,
         errors,
         defs: state.defs,
+        setters: state.setters,
         refs: state.refs,
         strings: state.strings,
         decorated: state.decorated,
@@ -1186,6 +1188,7 @@ pub(crate) fn repo_wide_scan(root: &Path) -> std::collections::HashMap<String, V
     let root_s = root.to_string_lossy().to_string();
     let mut skeletons = Vec::new();
     let mut definitions: Vec<(String, String, usize)> = Vec::new();
+    let mut setters: Vec<(String, String, usize)> = Vec::new();
     let mut prod_refs = HashSet::new();
     let mut test_refs = HashSet::new();
     let mut strings = Vec::new();
@@ -1206,6 +1209,9 @@ pub(crate) fn repo_wide_scan(root: &Path) -> std::collections::HashMap<String, V
         for (name, line) in &scan.defs {
             definitions.push((rel.clone(), name.clone(), *line));
         }
+        for (name, line) in &scan.setters {
+            setters.push((rel.clone(), name.clone(), *line));
+        }
         if is_test {
             test_refs.extend(scan.refs.iter().cloned());
         } else {
@@ -1218,7 +1224,8 @@ pub(crate) fn repo_wide_scan(root: &Path) -> std::collections::HashMap<String, V
     }
     let mut additions: Vec<Finding> = Vec::new();
     additions.extend(checks::duplicate_findings(&skeletons));
-    let repo_wide_unused = checks::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+    let mut repo_wide_unused = checks::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+    repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
     reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
     let mut by_file: std::collections::HashMap<String, Vec<Finding>> = std::collections::HashMap::new();
     for f in additions {
@@ -1239,6 +1246,7 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         cc: rs.cc.clone(),
         errors: rs.errors,
         defs: Vec::new(),
+        setters: Vec::new(),
         refs: HashSet::new(),
         strings: Vec::new(),
         decorated: HashSet::new(),
@@ -1597,6 +1605,7 @@ fn main() {
     // carry no defs/refs and never fire the unused family)
     let mut skeletons = Vec::new();
     let mut definitions: Vec<(String, String, usize)> = Vec::new();
+    let mut setters: Vec<(String, String, usize)> = Vec::new();
     let mut prod_refs = HashSet::new();
     let mut test_refs = HashSet::new();
     let mut strings = Vec::new();
@@ -1614,6 +1623,9 @@ fn main() {
 
         for (name, line) in &scan.defs {
             definitions.push((rel.clone(), name.clone(), *line));
+        }
+        for (name, line) in &scan.setters {
+            setters.push((rel.clone(), name.clone(), *line));
         }
         if is_test {
             test_refs.extend(scan.refs.iter().cloned());
@@ -1664,7 +1676,8 @@ fn main() {
     // unused is a repo-wide family computed AFTER the per-file suppression
     // pass — reconcile it through those suppressions so an `ignore unused <why>`
     // comment suppresses the finding and is not reported stale (review-log B3)
-    let repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+    let mut repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+    repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
     reconcile_repo_wide(&mut all_findings, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
     // import cycles for Rust crates: the local mod/use graph (the
     // code-review-graph contract is Python-only; Rust resolves itself)
@@ -2055,6 +2068,30 @@ mod tests {
     }
 
     #[test]
+    fn magic_table_carve_out_exempts_data_tables_keeps_operands() {
+        // statutory band ratios: same-kind ints in Div ops inside one dict —
+        // the literal IS the data, naming each would destroy the table
+        let f = scan_src("BAND = {\"A\": 6 / 9, \"B\": 7 / 9, \"C\": 8 / 9, \"D\": 9 / 9}\n");
+        assert!(!f.iter().any(|x| x.kind == "magic-number"), "{f:?}");
+        // postcode bounds: negative floats in UnaryOps inside tuples inside a dict
+        let f2 = scan_src(
+            "B = {\"UB\": (51.4, 51.6, -0.5, 0.0), \"TW\": (51.4, 51.6, -0.6, 0.0), \"SE\": (51.4, 51.5, -0.2, 0.1)}\n",
+        );
+        assert!(!f2.iter().any(|x| x.kind == "magic-number"), "{f2:?}");
+        // two same-kind operands in a collection are NOT a table — still flagged
+        let f3 = scan_src("M = {\"a\": x * 1.5, \"b\": y * 2.5}\n");
+        let m: Vec<&Finding> = f3.iter().filter(|x| x.kind == "magic-number").collect();
+        assert_eq!(m.len(), 2, "{f3:?}");
+        // ordinary operands outside any collection stay flagged
+        let f4 = scan_src("def f(a):\n    return a * 60\n");
+        assert_eq!(f4.iter().filter(|x| x.kind == "magic-number").count(), 1);
+        // the message names the data-table exemption so agents know the bar
+        let f5 = scan_src("def f(a):\n    return a * 60\n");
+        let m5: Vec<&Finding> = f5.iter().filter(|x| x.kind == "magic-number").collect();
+        assert!(m5[0].message.contains("data table"), "{}", m5[0].message);
+    }
+
+    #[test]
     fn positional_boolean_literals_are_found_keyword_exempt() {
         let f = scan_src("def f():\n    retry(g(True), h(retry=True), False)\n    return 1\n");
         let b: Vec<&Finding> = f.iter().filter(|x| x.kind == "boolean-arg").collect();
@@ -2066,6 +2103,32 @@ mod tests {
     fn boolean_name_and_keyword_args_pass() {
         let f = scan_src("def f(flag):\n    run(flag, retry=True, cache=False)\n    return 1\n");
         assert!(!f.iter().any(|x| x.kind == "boolean-arg"));
+    }
+
+    #[test]
+    fn boolean_lookup_defaults_are_exempt_other_calls_stay_flagged() {
+        // the boolean is the DEFAULT for a missing key/attribute — the
+        // "name it: retry=True" prescription is impossible for these
+        // positional-only params, so the finding is unactionable noise
+        let f = scan_src(
+            "import os\n\
+             def f(cfg):\n\
+             \x20   a = cfg.get('retryable', False)\n\
+             \x20   b = getattr(cfg, 'strict', True)\n\
+             \x20   c = os.environ.get('DEBUG', False)\n\
+             \x20   d = cfg.setdefault('cached', False)\n\
+             \x20   e = cfg.pop('stale', True)\n\
+             \x20   g = setattr(cfg, 'debug', True)\n\
+             \x20   return a, b, c, d, e\n",
+        );
+        assert!(
+            !f.iter().any(|x| x.kind == "boolean-arg"),
+            "lookup defaults exempt: {:?}",
+            f
+        );
+        // a non-default boolean in a lookup call is still a finding
+        let f2 = scan_src("def f(cfg):\n    return cfg.get(False, 'x')\n");
+        assert!(f2.iter().any(|x| x.kind == "boolean-arg"), "{:?}", f2);
     }
 
     #[test]
@@ -2269,6 +2332,25 @@ mod tests {
     fn sys_exit_surfaces() {
         let f = scan_src("import sys\ndef f():\n    try:\n        data = parse()\n    except ValueError:\n        sys.stderr.write('bad')\n        sys.exit(2)\n    return data\n");
         assert!(!f.iter().any(|x| x.kind == "swallow"));
+    }
+
+    #[test]
+    fn swallow_message_names_the_antipattern_and_the_bar() {
+        // the message must teach WHY a log-only handler is still a swallow:
+        // a caller exists that needs to decide, and the terminal-boundary
+        // escape hatch is conditional on no caller existing
+        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:\n        log('x')\n");
+        let s = f.iter().find(|x| x.kind == "swallow").expect("swallow fires");
+        assert!(
+            s.message.contains("a caller exists that needs to decide"),
+            "message must name the invisible-audience problem: {}",
+            s.message
+        );
+        assert!(
+            s.message.contains("no caller exists to propagate to"),
+            "message must make the terminal-boundary bar explicit: {}",
+            s.message
+        );
     }
 
     #[test]
@@ -3084,6 +3166,7 @@ mod tests {
     fn scan_corpus(files: &[(&str, &str)]) -> Vec<Finding> {
         let mut skeletons = Vec::new();
         let mut definitions = Vec::new();
+        let mut setters: Vec<(String, String, usize)> = Vec::new();
         let mut prod_refs = HashSet::new();
         let mut test_refs = HashSet::new();
         let mut strings = Vec::new();
@@ -3112,6 +3195,9 @@ mod tests {
             for (fn_name, line) in &scan.defs {
                 definitions.push((rel.clone(), fn_name.clone(), *line));
             }
+            for (name, line) in &scan.setters {
+                setters.push((rel.clone(), name.clone(), *line));
+            }
             if is_test {
                 test_refs.extend(scan.refs.iter().cloned());
             } else {
@@ -3121,7 +3207,8 @@ mod tests {
             prod_refs.extend(scan.decorated.iter().cloned());
         }
         all.extend(duplicate_findings(&skeletons));
-        let repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+        let mut repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+        repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
         reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel, &spent_by_rel);
         // the suppression census + its bulk warning mirror main()'s report
         let census = suppression_counts(supps_by_rel.values());
@@ -3684,6 +3771,44 @@ mod tests {
             "class A:\n    def set_x(self, v):\n        self.x = v\n    def get(self):\n        return self.set_x(1)\n",
         );
         assert!(!ok.iter().any(|x| x.kind == "unused-setter"));
+    }
+
+    #[test]
+    fn setter_test_only_reference_gets_seam_message_never_referenced_gets_delete() {
+        // a setter referenced only from tests is DEAD code wearing a harness —
+        // the message must teach that and name the imminent-caller escape; a
+        // setter with zero references anywhere gets the delete message
+        let f = scan_corpus(&[
+            (
+                "app.py",
+                "class A:\n    def set_scheduler(self, v):\n        self.x = v\n    def set_cache(self, v):\n        self.y = v\n",
+            ),
+            (
+                "tests/unit/test_app.py",
+                "from app import A\ndef test_sched():\n    A().set_scheduler(1)\n",
+            ),
+        ]);
+        let seam: Vec<&Finding> = f
+            .iter()
+            .filter(|x| x.kind == "unused-setter" && x.message.contains("set_scheduler"))
+            .collect();
+        assert_eq!(seam.len(), 1, "{f:?}");
+        assert!(
+            seam[0].message.contains("referenced only from tests"),
+            "seam message must name the test-only status: {}",
+            seam[0].message
+        );
+        assert!(
+            seam[0].message.contains("write the calling code"),
+            "imminent-caller escape must be named: {}",
+            seam[0].message
+        );
+        let dead: Vec<&Finding> = f
+            .iter()
+            .filter(|x| x.kind == "unused-setter" && x.message.contains("set_cache"))
+            .collect();
+        assert_eq!(dead.len(), 1, "{f:?}");
+        assert!(dead[0].message.contains("never referenced"), "{}", dead[0].message);
     }
 
     #[test]
