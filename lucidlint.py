@@ -240,7 +240,8 @@ class _RenderCtx:
         _render_actions(repo, args, fails, acks, self.suppression_census)
         if warns:
             print(f"\nwarnings (reported, never fail) — {len(warns)}:")
-            _render_actions(repo, args, warns, [], self.suppression_census)
+            # the census was printed with the fails group — once per report
+            _render_actions(repo, args, warns, [], None)
 
 
 @dataclass
@@ -430,20 +431,37 @@ def _gitignored_docs(repo: Path) -> tuple[str, ...]:
                 continue
             text = Path(root).joinpath(fname).read_text(encoding="utf-8", errors="replace")
             for hit in re.findall(r"`([^`]+\.md)`|\[[^\]]*\]\(([^)]+\.md)\)", text):
-                refs.add(hit[0] or hit[1])
+                ref = hit[0] or hit[1]
+                # a parent-relative or absolute reference lies OUTSIDE the
+                # repo — `git check-ignore` aborts the whole batch on one
+                # (rc 128, no output); those are never repo-ignored anyway
+                if ref.startswith(("../", "/")):
+                    continue
+                # references resolve like the Rust docs scan: `docs/`- and
+                # `standards/`-prefixed names against the repo ROOT, anything
+                # else (a sibling bare name) against the doc's own directory —
+                # `other.md` from docs/sub/guide.md is docs/sub/other.md, not
+                # repo-root other.md (review bot)
+                cand = repo / ref if ref.startswith(("docs/", "standards/")) else Path(root) / ref
+                try:
+                    refs.add(cand.resolve().relative_to(repo).as_posix())
+                except ValueError:
+                    continue  # resolved outside the repo
 
     if refs:
-        # a parent-relative or absolute reference lies OUTSIDE the repo —
-        # `git check-ignore` aborts the whole batch on one (rc 128, no
-        # output); those are never repo-ignored anyway
-        queryable = sorted(r for r in refs if not r.startswith("../") and not r.startswith("/"))
-        if queryable:
+        queryable = sorted(refs)
+        try:
             proc = subprocess.run(
                 ["git", "-C", str(repo), "check-ignore", "--stdin"],
                 input="\n".join(queryable),
                 capture_output=True,
                 text=True,
             )
+        except OSError as e:  # lucidlint: ignore swallow terminal boundary — gitless env, no caller to propagate to
+            # no git binary — the referenced-absent-doc query degrades; the
+            # walk's pygit2 answer still stands (gitless mode, review bot)
+            log(f"git check-ignore unavailable ({e}) — referenced-absent docs stay visible")
+        else:
             for line in proc.stdout.splitlines():
                 line = line.strip()
                 if line.endswith(".md"):
@@ -1830,7 +1848,7 @@ class _FixCommand:
             repo=self.repo,
             rel=self.rel,
             line=self.args.line,
-            opts=fe.FixOptions(params=self._params(), name=self.args.name),
+            opts=fe.FixOptions(params=self._params(), name=self.args.name, callee=self.args.callee),
             col=col,
         )
         if self.fix_kind in fe.PREVIEW_KINDS and not self.args.name and not self.args.confirm:
@@ -1867,7 +1885,11 @@ class _FixCommand:
         # named run applies — no --confirm dance
         new_source, description = req.propose_finding()
         if new_source is None:
-            print(_fix_refusal(self.fix_kind, self.args.name, self._params(), self.args.file, self.args.line))
+            # no seam exists — the finding is unfixable HERE; the missing-name
+            # refusal would send the agent on a naming chase that cannot
+            # succeed (the name-required gate lives in the apply path, where
+            # a seam EXISTS) (review bot)
+            print(f"fix: nothing to change for {self.args.kind} at {self.args.file}:{self.args.line}")
             return 0
         diff = list(
             difflib.unified_diff(

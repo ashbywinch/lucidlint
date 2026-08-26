@@ -61,9 +61,11 @@ class FakeSubprocess:
     def __init__(self, routes):
         self.routes = routes  # list of (predicate(args) -> bool, stdout, returncode)
         self.calls = []
+        self.call_kwargs = []  # parallel to calls — stdin/capture flags per argv
 
     def run(self, args, **kwargs):
         self.calls.append(args)
+        self.call_kwargs.append(kwargs)
         for pred, stdout, returncode in self.routes:
             if pred(args):
                 if isinstance(stdout, type) and issubclass(stdout, BaseException):
@@ -423,6 +425,48 @@ def test_no_pygit2_file_list_uses_git_and_honors_gitignore(tmp_path):
     assert rc == 0  # .tools/self.py would fail (CC 60) — its exclusion IS the check
 
 
+def test_gitignored_docs_survives_missing_git(tmp_path):
+    # a machine without the git binary must not crash the gate — the
+    # referenced-absent-doc query degrades (the walk's pygit2 answer stands)
+    # instead of FileNotFoundError-ing the whole run (review bot)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "guide.md").write_text("# g\n")
+    (repo / "AGENTS.md").write_text("# agents\n- [g](docs/guide.md)\n")
+    (repo / ".gitignore").write_text("docs/private.md\n")
+
+    def is_check_ignore(args):
+        return args[:2] == ["git", "-C"] and args[3] == "check-ignore"
+
+    with Env(routes=[(lambda a: is_check_ignore(a), FileNotFoundError, 0)]):
+        assert ch._gitignored_docs(repo) == ()
+
+
+def test_gitignored_docs_resolves_sibling_refs_against_the_file(tmp_path):
+    # a sibling reference `other.md` from docs/sub/guide.md resolves against
+    # the doc's own directory — the query must ask about docs/sub/other.md,
+    # not repo-root other.md (which would never match and silently miss the
+    # ignored private doc) (review bot)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "docs" / "sub").mkdir(parents=True)
+    (repo / "docs" / "sub" / "guide.md").write_text("see `other.md`\n")
+    (repo / ".gitignore").write_text("docs/sub/other.md\n")
+
+    def is_check_ignore(args):
+        return args[:2] == ["git", "-C"] and args[3] == "check-ignore"
+
+    with Env(routes=[(lambda a: is_check_ignore(a), "", 0)]) as env:
+        ch._gitignored_docs(repo)
+    idx = next(i for i, a in enumerate(env.fake.calls) if is_check_ignore(a))
+    stdin = env.fake.call_kwargs[idx]["input"]
+    assert "docs/sub/other.md" in stdin, f"sibling ref must resolve against the file: {stdin!r}"
+    assert "other.md" not in stdin.split() or stdin.strip() == "docs/sub/other.md", stdin
+
+
 def test_refresh_coverage_runs_make(tmp_path):
     repo = make_repo(tmp_path)
     with Env(routes=git_routes()) as env:
@@ -629,12 +673,29 @@ def test_config_ignored_ledger_shows_when_all_actions_ignored(tmp_path, capsys):
 # --------------------------------------------------------------------------- fix + scan contracts
 def test_raw_score_uses_the_metric():
     """R8: priority ranks churn x complexity x fan-in — a higher metric must
+
     score higher at equal churn (a constant 1.0 metric flattened every
     complexity/large-function finding to the same priority)."""
     assert ch._raw_score("complexity", 60, 10) > ch._raw_score("complexity", 15, 10)
     assert ch._raw_score("large-function", 300, 5) > ch._raw_score("large-function", 100, 5)
     # the churn factor still scales within a metric
     assert ch._raw_score("complexity", 20, 30) > ch._raw_score("complexity", 20, 5)
+
+
+def test_preview_refusal_names_nothing_to_change(tmp_path, capsys):
+    # a preview-kind fix on a target with NO seam: propose_finding returns a
+    # None source, and the message must say "nothing to change" — the
+    # missing-name refusal would send the agent on a naming chase that
+    # cannot succeed (review bot)
+    repo = make_repo(tmp_path, app_src="def f(a, b):\n    return a + b\n")
+    (repo / "houses" / "app.py").write_text("def f(a, b):\n    return a + b\n")
+    rc = run_main(
+        repo, "fix", "--kind", "long-param-list", "--file", "houses/app.py", "--line", "1"
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "nothing to change" in out, out
+    assert "needs a semantic name" not in out, out
 
 
 def test_fix_refuses_rust_targets_cleanly(tmp_path, capsys):

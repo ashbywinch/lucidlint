@@ -430,6 +430,45 @@ def test_magic_literal_becomes_constant(tmp_path):
     assert "return MINUTES_PER_DAY * 24" in fixed
 
 
+
+def test_extract_record_class_rejects_placeholder_name(tmp_path):
+    # a placeholder <Record> must not generate `class _<Record>:` — invalid
+    # Python; refuse before generating (review bot)
+    src = 'def f():\n    return {"a": 1, "b": 2}\n'
+    repo = make_repo(tmp_path, app_src=src)
+    req = fix_engine._FixRequest(
+        kind="extract-record-class",
+        repo=repo,
+        rel="houses/app.py",
+        line=2,
+        opts=fix_engine.FixOptions(name="<Record>"),
+        col=0,
+    )
+    out = req.propose_finding()
+    assert out is None or out[0] is None, out
+
+
+def test_magic_literal_fix_honors_column_anchor(tmp_path):
+    # two numeric literals on the target line — the schema-3 col pins the
+    # anchored one; the fix must not rewrite the first literal (review bot)
+    src = "def f():\n    return a * 60 + b * 90\n"
+    repo = make_repo(tmp_path, app_src=src)
+    # 60 sits at 1-based byte col 16, 90 at col 25 — anchor the 90
+    req = fix_engine._FixRequest(
+        kind="magic-number",
+        repo=repo,
+        rel="houses/app.py",
+        line=2,
+        opts=fix_engine.FixOptions(name="NINETY"),
+        col=25,
+    )
+    out = req.propose_finding()
+    assert out is not None
+    new_source, _ = out
+    assert new_source is not None, out
+    assert "a * 60 + b * NINETY" in new_source, new_source
+    assert "return a * 60" in new_source, "the unanchored first literal must stay: {new_source}"
+
 def test_vague_name_rename(tmp_path):
     src = "class DataManager:\n    def run(self):\n        return 1\n\n\ndef use():\n    return DataManager()\n"
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
@@ -463,6 +502,21 @@ def test_parameter_object_introduced(tmp_path):
     assert "def build(options: BuildOptions):" in fixed
     assert "return options.a + options.b + options.c" in fixed
     assert "build(BuildOptions(a=1, b=2, c=3, d=4, e=5, f=6))" in fixed
+
+
+def test_parameter_object_fix_counts_posonly_params(tmp_path):
+    # the scanner's threshold counts posonly + args + kwonly (minus a
+    # leading self/cls); the fixer must count the SAME set — six
+    # positional-only params are flagged and must be fixable, not silently
+    # refused because .params excludes the /-separated ones (review bot)
+    src = "def f(a, /, b, c, d, e, g):\n    return a + b + c + d + e + g\n"
+    out, fixed = _fix_opts(
+        tmp_path, "long-param-list", "houses/app.py", src, 1,
+        name="Opts",
+    )
+    assert out is not None
+    assert "class Opts:" in fixed
+    assert "options.a + options.b" in fixed, fixed
 
 
 def test_extract_class_renames_receiver_and_internal_calls(tmp_path):
@@ -1692,6 +1746,23 @@ def test_extract_module_package_reexport_is_relative(tmp_path):
     assert "from .text import tokenize, words" in fixed
     assert "from text import" not in fixed
 
+
+
+def test_extract_module_binds_positional_only_params(tmp_path):
+    # `LIMIT` is a POSITIONAL-ONLY parameter — a local, not a read of the
+    # module constant of the same name; without binding posonly_params the
+    # free-name check treats it as a dependency and falsely refuses (bot)
+    src = (
+        "LIMIT = 10\n"
+        "\n"
+        "def scale(LIMIT, /, factor):\n"
+        "    return LIMIT * factor\n"
+    )
+    out, fixed = _fix_opts(
+        tmp_path, "extract-module", "houses/layout.py", src, 1,
+        name="metrics", params=["scale"],
+    )
+    assert out is not None, "a posonly param named like a constant is a local, not a dependency"
 
 def test_extract_module_star_import_does_not_crash(tmp_path):
     # `from x import *` in the origin — ImportStar has no .value; the fix

@@ -124,10 +124,13 @@ pub const FAMILY_VARIANTS: &[(&str, &[&str])] = &[
 /// invalid name with an explicit message.
 pub const NAME_REQUIRED_KINDS: &[&str] = &[
     "complexity",
-    "long-param-list",
-    "tuple-record",
+    "extract-class",
+    "extract-module",
+    "extract-record-class",
     "feature-envy",
+    "long-param-list",
     "magic-number",
+    "tuple-record",
     "vague-name",
 ];
 
