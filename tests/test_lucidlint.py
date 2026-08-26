@@ -698,6 +698,34 @@ def test_preview_refusal_names_nothing_to_change(tmp_path, capsys):
     assert "needs a semantic name" not in out, out
 
 
+def test_callee_flag_selects_the_named_call_on_the_line(tmp_path, capsys):
+    # two calls span the target line — `--callee Money` must keyword the
+    # NAMED call; before the forwarding fix the flag was parsed and dropped,
+    # and the first call on the line was keyworded with the wrong params
+    # (review bot)
+    src = 'def g():\n    Other("x", 1) + Money("0", "GBP")\n'
+    repo = make_repo(tmp_path, app_src=src)
+    (repo / "houses" / "app.py").write_text(src)
+    rc = run_main(
+        repo,
+        "fix",
+        "--kind",
+        "positional-literals",
+        "--file",
+        "houses/app.py",
+        "--line",
+        "2",
+        "--callee",
+        "Money",
+        "--params",
+        "amount,currency",
+    )
+    assert rc == 0
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert 'Money(amount="0", currency="GBP")' in fixed, fixed
+    assert 'Other("x", 1)' in fixed, "the unselected call must stay untouched: {fixed}"
+
+
 def test_fix_refuses_rust_targets_cleanly(tmp_path, capsys):
     """A name-less extract-method on a .rs target must refuse SILENTLY (R28:
     extract-method's semantic name is required; the scanner would otherwise
@@ -1044,6 +1072,22 @@ def test_census_ledger_in_text_footer(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=src)
     run_main(repo)
     assert "suppressed: record-shape×1" in capsys.readouterr().out
+
+
+def test_census_prints_once_when_fails_and_warns_coexist(tmp_path, capsys):
+    # the fails group renders the suppression census, then the warns group —
+    # the census must print ONCE per report, not once per group (review bot:
+    # both _render_actions calls passed the census, duplicating the footer)
+    src = (
+        SWALLOW_SRC  # fail, unsuppressed
+        + "\ndef m():\n    return 60 * 24\n"  # magic-number warn, unsuppressed
+        + 'RECORD = {"a": 1}  # lucidlint: ignore record-shape data table row\n'  # suppressed -> census entry
+    )
+    repo = make_repo(tmp_path, app_src=src)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert out.count("suppressed:") == 1, out
+    assert "record-shape×1" in out
 
 
 GUIDANCE = "quantities go through houses.units — never bare ints"
