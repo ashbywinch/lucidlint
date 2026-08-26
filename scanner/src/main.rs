@@ -116,18 +116,82 @@ struct ScanState<'a> {
     is_test: bool,
 }
 
+// The last line start per `line_of`/`col_of` source — a thread-local cache
+// keyed by (ptr, len): `line_of` used to scan from offset 0 for every call,
+// so a scan with F findings and C comments cost O((F+C) * file_len) — a
+// 2000-line file of function defs paid ~10ms of line scans per 1000 defs.
+// The index is rebuilt once per distinct source (O(n)), then binary search.
+thread_local! {
+    static LINE_STARTS: std::cell::RefCell<(usize, usize, Vec<usize>)> =
+        const { std::cell::RefCell::new((0, 0, Vec::new())) };
+}
+
+/// 1-based line of an offset.
 fn line_of(source: &str, offset: ruff_text_size::TextSize) -> usize {
-    1 + source[..offset.to_usize()].bytes().filter(|&b| b == b'\n').count()
+    LINE_STARTS.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 != source.as_ptr() as usize || c.1 != source.len() {
+            c.0 = source.as_ptr() as usize;
+            c.1 = source.len();
+            c.2.clear();
+            c.2.push(0);
+            for (i, b) in source.bytes().enumerate() {
+                if b == b'\n' {
+                    c.2.push(i + 1);
+                }
+            }
+        }
+        c.2.partition_point(|&s| s <= offset.to_usize())
+    })
 }
 
 /// 1-based column of an offset — the schema-3 disambiguation coordinate.
 fn col_of(source: &str, offset: ruff_text_size::TextSize) -> usize {
-    let start = source[..offset.to_usize()].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    offset.to_usize() - start + 1
+    LINE_STARTS.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 != source.as_ptr() as usize || c.1 != source.len() {
+            c.0 = source.as_ptr() as usize;
+            c.1 = source.len();
+            c.2.clear();
+            c.2.push(0);
+            for (i, b) in source.bytes().enumerate() {
+                if b == b'\n' {
+                    c.2.push(i + 1);
+                }
+            }
+        }
+        let off = offset.to_usize();
+        off - c.2[c.2.partition_point(|&s| s <= off) - 1] + 1
+    })
+}
+
+/// The parent expr's KIND for the magic-number position rule — the variant
+/// discriminant, never the node: holding a cloned `Expr` per visited node
+/// deep-cloned every subtree (the scan's biggest allocation; a keystroke on
+/// a 2000-line file cloned the whole AST twice over).
+#[derive(Copy, Clone, PartialEq)]
+enum ParentExprKind {
+    BinOp,
+    Compare,
+    UnaryOp,
+    Subscript,
+    Call,
+    Other,
+}
+
+fn parent_kind(e: &Expr) -> ParentExprKind {
+    match e {
+        Expr::BinOp(_) => ParentExprKind::BinOp,
+        Expr::Compare(_) => ParentExprKind::Compare,
+        Expr::UnaryOp(_) => ParentExprKind::UnaryOp,
+        Expr::Subscript(_) => ParentExprKind::Subscript,
+        Expr::Call(_) => ParentExprKind::Call,
+        _ => ParentExprKind::Other,
+    }
 }
 
 enum ParentEntry {
-    Expr(Expr),
+    Expr(ParentExprKind),
     Stmt,
     Keyword,
 }
@@ -144,6 +208,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 let module_level = self.fn_stack.is_empty() && self.in_class == 0;
                 let was_fn = self.current_fn.take();
                 self.current_fn = Some((f.name.to_string(), line_of(self.source, f.range.start())));
+
                 self.fn_stack.push(FnScope {
                     returned: returned_names(&f.body),
                 });
@@ -311,7 +376,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                     message: "breakpoint() left in production code — remove it".into(),
                 });
             }
-            self.parent_stack.push(ParentEntry::Expr(expr.clone()));
+            self.parent_stack.push(ParentEntry::Expr(parent_kind(expr)));
             self.visit_expr(&call.func);
             for arg in &call.arguments.args {
                 self.visit_expr(arg);
@@ -335,7 +400,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 self.magic_check(n);
             }
         }
-        self.parent_stack.push(ParentEntry::Expr(expr.clone()));
+        self.parent_stack.push(ParentEntry::Expr(parent_kind(expr)));
         walk_expr(self, expr);
         self.parent_stack.pop();
     }
@@ -650,9 +715,14 @@ impl<'a> ScanState<'a> {
         }
         let parent_is_op = matches!(
             self.parent_stack.last(),
-            Some(ParentEntry::Expr(
-                Expr::BinOp(_) | Expr::Compare(_) | Expr::UnaryOp(_) | Expr::Subscript(_) | Expr::Call(_)
-            ))
+            Some(ParentEntry::Expr(k)) if matches!(
+                k,
+                ParentExprKind::BinOp
+                    | ParentExprKind::Compare
+                    | ParentExprKind::UnaryOp
+                    | ParentExprKind::Subscript
+                    | ParentExprKind::Call
+            )
         );
         if !parent_is_op {
             return;
@@ -930,7 +1000,7 @@ pub struct ImportInfo {
     pub imported: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct FileScan {
     pub file_name: String,
     pub findings: Vec<Finding>,
@@ -951,6 +1021,14 @@ pub struct FileScan {
     /// (line, signal) pairs the per-file pass consumed — stage-2 repo-wide
     /// re-honoring must not spend them again (innermost-peel capacity).
     pub supps_spent: HashSet<(usize, String)>,
+}
+
+impl FileScan {
+    /// The repo-relative path — the scan's identity (the orchestrator's
+    /// `rel`); the repo-wide merge keys everything by it.
+    pub fn rel_of(&self, root_s: &str) -> String {
+        rel_of(&self.file_name, root_s)
+    }
 }
 
 pub(crate) fn is_test_path(name: &str) -> bool {
@@ -1166,7 +1244,10 @@ const SCAN_SKIP_DIRS: &[&str] = &[
 /// file; the per-file findings travel via the buffer scan so nothing is
 /// double-reported. Lives here (the composition root) so lsp stays a
 /// standalone scan-core module (layers test).
-pub(crate) fn repo_wide_scan(root: &Path) -> std::collections::HashMap<String, Vec<Finding>> {
+/// Every Python file under `root` (the scan walk; `SCAN_SKIP_DIRS` prunes
+/// venvs/caches/build output). Shared by the full gate scan and the LSP's
+/// incremental save path — the LSP stats these paths instead of re-scanning.
+pub(crate) fn repo_files(root: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -1184,8 +1265,14 @@ pub(crate) fn repo_wide_scan(root: &Path) -> std::collections::HashMap<String, V
         }
     }
     paths.sort();
-    let scans: Vec<FileScan> = paths.par_iter().map(|p| scan_file(p)).collect();
-    let root_s = root.to_string_lossy().to_string();
+    paths
+}
+
+/// The repo-wide merge (duplicate + unused + unused-setter, reconciled
+/// through each file's suppressions) over a set of scans — the expensive
+/// part of a repo-wide scan is the per-file scan, so the LSP reuses cached
+/// scans and re-runs only this pure in-memory aggregation on save.
+pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collections::HashMap<String, Vec<Finding>> {
     let mut skeletons = Vec::new();
     let mut definitions: Vec<(String, String, usize)> = Vec::new();
     let mut setters: Vec<(String, String, usize)> = Vec::new();
@@ -1195,8 +1282,8 @@ pub(crate) fn repo_wide_scan(root: &Path) -> std::collections::HashMap<String, V
     let mut supps_by_rel: std::collections::HashMap<String, common::Suppressions> = std::collections::HashMap::new();
     let mut supps_spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
         std::collections::HashMap::new();
-    for scan in &scans {
-        let rel = rel_of(&scan.file_name, &root_s);
+    for scan in scans {
+        let rel = scan.rel_of(root_s);
         let is_test = is_test_path(&rel);
         for s in &scan.skeletons {
             skeletons.push(SkeletonFn {
@@ -2068,6 +2155,39 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_fast_path_matches_reference_dice() {
+        // the sorted-index-bigram fast path must agree with the reference
+        // multiset dice on the pinned repetition cases (2026-08-17 review-log)
+        use common::dice_similarity;
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let rep = s(&["a", "b", "a", "b"]);
+        let uniq = s(&["a", "b", "a"]);
+        let interner = checks::BigramInterner::new(&[&rep, &uniq]);
+        let fa = interner.bigrams_of(0);
+        let fb = interner.bigrams_of(1);
+        assert_eq!(checks::dice_from_bigrams(fa, fb), dice_similarity(&rep, &uniq));
+        assert_eq!(checks::dice_from_bigrams(fa, fa), 1.0);
+        // empty skeletons: never a duplicate, matches the reference
+        let e = Vec::<String>::new();
+        let interner2 = checks::BigramInterner::new(&[&e, &rep]);
+        assert_eq!(
+            checks::dice_from_bigrams(interner2.bigrams_of(0), interner2.bigrams_of(1)),
+            dice_similarity(&e, &rep)
+        );
+    }
+
+    #[test]
+    fn comment_lines_tracks_lines_across_multiline_tokens() {
+        // the incremental line tracker counts newlines between comment
+        // starts; a multi-line string between comments must not lose count
+        let src = "# one\nx = (\n    1 +\n    \"\"\"\nmulti\nline\n\"\"\"\n)\n# two\ny = 2  # three\n";
+        let parsed = parse_module(src).unwrap();
+        let lines = checks::comment_lines(src, parsed.tokens());
+        let got: Vec<(usize, &str)> = lines.iter().map(|(l, t)| (*l, t.as_str())).collect();
+        assert_eq!(got, vec![(1, "# one"), (9, "# two"), (10, "# three")], "{got:?}");
+    }
+    #[test]
+
     fn magic_table_carve_out_exempts_data_tables_keeps_operands() {
         // statutory band ratios: same-kind ints in Div ops inside one dict —
         // the literal IS the data, naming each would destroy the table
@@ -3362,9 +3482,9 @@ mod tests {
     fn dice_partial_similarity_below_threshold() {
         let a: Vec<String> = "A B C D E".split(' ').map(str::to_string).collect();
         let b: Vec<String> = "A B X Y Z".split(' ').map(str::to_string).collect();
-        assert!(checks::dice_similarity(&a, &b) < 0.9);
+        assert!(common::dice_similarity(&a, &b) < 0.9);
         let same: Vec<String> = "A B C D E".split(' ').map(str::to_string).collect();
-        assert_eq!(checks::dice_similarity(&a, &same), 1.0);
+        assert_eq!(common::dice_similarity(&a, &same), 1.0);
     }
 
     // ------------------------------------------------- unused

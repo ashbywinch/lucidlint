@@ -168,16 +168,6 @@ fn scan_buffer(uri: &str, text: &str) -> FileScan {
     scan.file_name = uri_to_path(uri);
     scan
 }
-/// The repo-wide verdict for every Python file: per-file findings plus the
-/// families that need the whole repo (duplicate, unused) — the same merge the
-/// gate runs. The LSP's per-buffer scan cannot produce these (a single buffer
-/// cannot know who references a function), so the editor never showed the
-/// gate's repo-wide findings — the review-log edit-time gap. Runs on save,
-/// in-process, from disk. The merge lives in main (the composition root —
-/// the scan-core modules stay standalone, layers test).
-pub fn repo_wide_findings(root: &Path) -> std::collections::HashMap<String, Vec<Finding>> {
-    crate::repo_wide_scan(root)
-}
 /// A repo-wide finding as an LSP diagnostic — gate severity, the full fix
 /// command in the message, the repo config's silencing applied.
 fn repo_wide_diag(f: &Finding, rel: &str, cfg: &LucidConfig) -> Option<serde_json::Value> {
@@ -234,6 +224,12 @@ pub struct LspState {
     pub documents: HashMap<String, String>,
     root: Option<PathBuf>,
     config: Option<LucidConfig>,
+    /// Repo-relative path -> (mtime, size, scan) of the last disk scan —
+    /// the save-time repo-wide merge reuses these; a file whose mtime+size
+    /// changed on disk (edited outside the editor, git operations) is
+    /// re-scanned. Keeps a save at one re-scan + a pure in-memory merge
+    /// instead of a full-repo re-scan per save.
+    scan_cache: HashMap<String, (std::time::SystemTime, u64, FileScan)>,
 }
 
 impl LspState {
@@ -242,6 +238,7 @@ impl LspState {
             documents: HashMap::new(),
             root: None,
             config: None,
+            scan_cache: HashMap::new(),
         }
     }
 
@@ -341,14 +338,51 @@ impl LspState {
 
     /// The didSave repo-wide verdict: the duplicate/unused findings that the
     /// per-buffer scan cannot see, appended to the buffer's diagnostics.
-    fn append_repo_wide_diags(&self, rel: &str, cfg: &LucidConfig, diags: &mut Vec<serde_json::Value>) {
-        if let Some(root) = self.root.as_ref() {
-            let by_file = repo_wide_findings(root);
-            if let Some(fs) = by_file.get(rel) {
-                for f in fs {
-                    if let Some(d) = repo_wide_diag(f, rel, cfg) {
-                        diags.push(d);
-                    }
+    /// Scans are cached per file (mtime+size keyed) — only files that changed
+    /// on disk since the last save are re-scanned, then the pure in-memory
+    /// merge re-runs over the cache.
+    fn append_repo_wide_diags(&mut self, rel: &str, cfg: &LucidConfig, diags: &mut Vec<serde_json::Value>) {
+        let Some(root) = self.root.clone() else { return };
+        let paths = crate::repo_files(&root);
+        let mut scans: Vec<FileScan> = Vec::with_capacity(paths.len());
+        for path in paths {
+            let meta = std::fs::metadata(&path);
+            let rel_path = path
+                .strip_prefix(&root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let key = rel_path;
+            let cached = self.scan_cache.get(&key).and_then(|(m, s, scan)| {
+                meta.as_ref().ok().map(|m2| {
+                    (
+                        m == &m2.modified().unwrap_or(std::time::UNIX_EPOCH),
+                        s == &m2.len(),
+                        scan,
+                    )
+                })
+            });
+            if let Some((true, true, scan)) = cached {
+                scans.push(scan.clone());
+            } else if let Ok(meta) = meta {
+                let scan = crate::scan_file(&path);
+                self.scan_cache.insert(
+                    key,
+                    (
+                        meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                        meta.len(),
+                        scan.clone(),
+                    ),
+                );
+                scans.push(scan);
+            }
+        }
+        let root_s = root.to_string_lossy().to_string();
+        let by_file = crate::repo_wide_merge(&scans, &root_s);
+        if let Some(fs) = by_file.get(rel) {
+            for f in fs {
+                if let Some(d) = repo_wide_diag(f, rel, cfg) {
+                    diags.push(d);
                 }
             }
         }
@@ -795,6 +829,47 @@ fn didsave_publishes_repo_wide_unused_for_saved_file() {
     assert!(
         text.contains("never referenced"),
         "repo-wide unused must reach the save diagnostics: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn didsave_scan_cache_tracks_external_file_changes() {
+    // the save-time repo-wide scan caches per-file scans keyed by mtime+size;
+    // a file changed on DISK outside the editor must invalidate its cache
+    // entry — a stale scan would keep reporting dead code that a new
+    // reference resurrected (and vice versa)
+    let dir = std::env::temp_dir().join(format!("lsp_incr_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir(dir.join(".git")).unwrap(); // repo-root marker for derive_root
+    std::fs::write(dir.join("dead.py"), "def _helper():\n    return 1\n").unwrap();
+    std::fs::write(dir.join("live.py"), "def live():\n    return 2\n").unwrap();
+    let uri = format!("file://{}/dead.py", dir.display());
+    let mut state = LspState::new();
+    state
+        .documents
+        .insert(uri.clone(), "def _helper():\n    return 1\n".to_string());
+    let mut out = Vec::new();
+    let save = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didSave",
+        "params": {"textDocument": {"uri": uri}}
+    });
+    assert!(dispatch(&mut state, &save, &mut out));
+    let text = String::from_utf8(out.clone()).unwrap();
+    assert!(
+        text.contains("never referenced"),
+        "first save must flag dead code: {text}"
+    );
+    // live.py now CALLS _helper — written to disk, the editor never saw it
+    std::fs::write(dir.join("live.py"), "def live():\n    return _helper()\n").unwrap();
+    out.clear();
+    assert!(dispatch(&mut state, &save, &mut out));
+    let text2 = String::from_utf8(out).unwrap();
+    assert!(
+        !text2.contains("never referenced"),
+        "stale cache must not keep reporting resurrected code: {text2}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
