@@ -338,6 +338,7 @@ impl<'a> RsState<'a> {
     }
 
     /// Same, with the schema-3 anchor column (1-based; 0 = line-level).
+    // lucidlint: ignore long-param-list one caller — the struct would be ceremony for a single call site
     fn finding_col(&mut self, kind: &str, severity: &str, line: usize, col: usize, function: &str, message: String) {
         self.findings.push(Finding {
             col,

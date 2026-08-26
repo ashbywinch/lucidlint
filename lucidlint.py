@@ -147,10 +147,11 @@ class _RenderCtx:
         branch, commit = self.branch, self.commit
         coverage_source = self.coverage_source
         print(
+            # lucidlint: ignore record-shape this dict IS the JSON report —
             json.dumps(
-                # lucidlint: ignore record-shape this dict IS the JSON report —
-                # machine-readable wire format, schema-documented (PRD R18)
                 {
+                    # lucidlint: ignore record-shape this meta section IS part of
+                    # the JSON report wire format (PRD R18)
                     "meta": {
                         "repo": str(repo),
                         "branch": branch,
