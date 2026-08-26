@@ -53,4 +53,6 @@ class BuildPy(build_py):
         super().run()
 
 
+# lucidlint: ignore record-shape cmdclass is setuptools' plugin wire —
+# a name->class registry, not a domain record
 setup(cmdclass={"build_py": BuildPy, "bdist_wheel": PlatformWheel})

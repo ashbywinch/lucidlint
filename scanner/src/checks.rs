@@ -16,7 +16,7 @@ use ruff_python_ast::{
 use ruff_text_size::Ranged;
 use std::collections::HashSet;
 
-use crate::{line_of, stmt_line, Finding, ScanState};
+use crate::{col_of, line_of, stmt_line, Finding, ScanState};
 
 pub use crate::common::VAGUE_SUFFIXES;
 
@@ -116,8 +116,10 @@ pub fn apply_suppressions_impl(
     file: &str,
     tokens: &Tokens,
     pre_used: &crate::common::PreUsedSuppressions,
+    spent: &mut std::collections::HashSet<(usize, String)>,
 ) -> Vec<Finding> {
-    crate::common::apply_suppressions_impl(findings, &comment_lines(source, tokens), file, "#", pre_used)
+    let mut books = crate::common::SuppressionBooks { pre_used, spent };
+    crate::common::apply_suppressions_impl(findings, &comment_lines(source, tokens), file, "#", &mut books)
 }
 
 /// `# type: ignore` without a why (a second comment on the line) is a finding.
@@ -130,6 +132,7 @@ pub fn type_ignore_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Fi
         let rest = text.split_once("type: ignore").map(|(_, r)| r).unwrap_or("");
         if !rest.contains('#') {
             out.push(Finding {
+col: 0,
                 file: file.to_string(),
                 line: ln,
                 function: String::new(),
@@ -182,6 +185,7 @@ pub fn noqa_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Finding> 
         let rest = text.split_once(marker).map(|(_, r)| r).unwrap_or("");
         if !noqa_reason(rest) {
             out.push(Finding {
+                col: 0,
                 file: file.to_string(),
                 line: ln,
                 function: String::new(),
@@ -201,6 +205,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
     if let Stmt::Global(g) = stmt {
         let line = stmt_line(state.source, stmt);
         state.findings.push(Finding {
+col: 0,
             file: state.file.to_string(),
             line,
             function: fn_name.clone(),
@@ -233,6 +238,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
                     if let Expr::Name(n) = target {
                         let line = stmt_line(state.source, stmt);
                         state.findings.push(Finding {
+                            col: 0,
                             file: state.file.to_string(),
                             line,
                             function: fn_name.clone(),
@@ -278,6 +284,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         for a in &f.parameters.posonlyargs {
             if SHADOWED_BUILTINS.contains(&a.parameter.name.as_str()) {
                 state.findings.push(Finding {
+                    col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
                     function: f.name.to_string(),
@@ -293,6 +300,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         for a in &f.parameters.args {
             if SHADOWED_BUILTINS.contains(&a.parameter.name.as_str()) {
                 state.findings.push(Finding {
+                    col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
                     function: f.name.to_string(),
@@ -308,6 +316,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         for a in &f.parameters.kwonlyargs {
             if SHADOWED_BUILTINS.contains(&a.parameter.name.as_str()) {
                 state.findings.push(Finding {
+                    col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
                     function: f.name.to_string(),
@@ -323,6 +332,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         if let Some(v) = &f.parameters.vararg {
             if SHADOWED_BUILTINS.contains(&v.name.as_str()) {
                 state.findings.push(Finding {
+                    col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
                     function: f.name.to_string(),
@@ -335,6 +345,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         if let Some(k) = &f.parameters.kwarg {
             if SHADOWED_BUILTINS.contains(&k.name.as_str()) {
                 state.findings.push(Finding {
+                    col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
                     function: f.name.to_string(),
@@ -354,6 +365,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
                 if SHADOWED_BUILTINS.contains(&n.id.as_str()) {
                     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
                     state.findings.push(Finding {
+                        col: 0,
                         file: state.file.to_string(),
                         line: stmt_line(state.source, stmt),
                         function: fn_name,
@@ -380,6 +392,7 @@ pub fn boolean_arg_findings(state: &mut ScanState, args: &[Expr], source: &str) 
     for arg in args {
         if let Expr::BooleanLiteral(_) = arg {
             state.findings.push(Finding {
+                col: 0,
                 file: state.file.to_string(),
                 line: line_of(source, arg.range().start()),
                 function: fn_name.clone(),
@@ -435,6 +448,7 @@ pub fn positional_literals_findings(state: &mut ScanState, call: &ExprCall, sour
     };
     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
     state.findings.push(Finding {
+col: 0,
         file: state.file.to_string(),
         line: line_of(source, call.range().start()),
         function: fn_name,
@@ -492,6 +506,7 @@ pub fn detached_method_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
     let fn_name = f.name.to_string();
     let line = line_of(source, f.name.range().start());
     state.findings.push(Finding {
+col: 0,
         file: state.file.to_string(),
         line,
         function: fn_name.clone(),
@@ -552,6 +567,7 @@ pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
     }
     if n > 5 && !is_trivial_stub(&f.body) {
         state.findings.push(Finding {
+            col: 0,
             file: state.file.to_string(),
             line: line_of(source, f.name.range().start()),
             function: f.name.to_string(),
@@ -608,6 +624,7 @@ pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
                 "except that swallows"
             };
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line,
                 function: fn_name.clone(),
@@ -621,6 +638,7 @@ pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
             let base = annotation_base_name(ty);
             if matches!(base.as_deref(), Some("Exception") | Some("BaseException")) {
                 state.findings.push(Finding {
+col: 0,
                     file: state.file.to_string(),
                     line: line_of(state.source, eh.range().start()),
                     function: fn_name.clone(),
@@ -916,6 +934,7 @@ pub fn closure_findings(state: &mut ScanState, stmt: &Stmt, cc: u32, span: u32) 
         )
     };
     state.findings.push(Finding {
+        col: 0,
         file: state.file.to_string(),
         line,
         function: f.name.to_string(),
@@ -1280,6 +1299,7 @@ pub fn misplaced_method_findings(state: &mut ScanState, body: &[Stmt]) {
                     });
                     if matched {
                         state.findings.push(Finding {
+col: 0,
                             file: state.file.to_string(),
                             line: *def_line,
                             function: fn_name.id.to_string(),
@@ -1649,6 +1669,7 @@ pub fn tuple_record_findings(state: &mut ScanState, body: &[Stmt]) {
         let reads = counts.get(name).copied().unwrap_or(0);
         if reads >= 3 {
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line: *line,
                 function: String::new(),
@@ -1761,6 +1782,7 @@ pub fn assembly_class_findings(state: &mut ScanState, body: &[Stmt]) {
         let Some(base) = base else { continue };
         let chain_names: Vec<&str> = calls.iter().map(|(n, _)| n.as_str()).collect();
         state.findings.push(Finding {
+col: 0,
             file: state.file.to_string(),
             line,
             function: f.name.to_string(),
@@ -1821,6 +1843,7 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
         let line = line_of(state.source, fs[0].name.range().start());
         let names: Vec<&str> = fs.iter().map(|f| f.name.as_str()).collect();
         state.findings.push(Finding {
+col: 0,
             file: state.file.to_string(),
             line,
             function: fs[0].name.to_string(),
@@ -1977,6 +2000,7 @@ pub fn feature_envy_findings(state: &mut ScanState, body: &[Stmt]) {
                 }
                 let line = line_of(state.source, f.name.range().start());
                 state.findings.push(Finding {
+col: 0,
                     file: state.file.to_string(),
                     line,
                     function: f.name.to_string(),
@@ -2082,6 +2106,7 @@ pub fn undeclared_attribute_findings(state: &mut ScanState, body: &[Stmt]) {
                         )
                     };
                     state.findings.push(Finding {
+                        col: 0,
                         file: state.file.to_string(),
                         line,
                         function: f.name.to_string(),
@@ -2136,6 +2161,7 @@ pub fn god_class_findings(state: &mut ScanState, body: &[Stmt]) {
         }
         let line = line_of(state.source, c.name.range().start());
         state.findings.push(Finding {
+col: 0,
             file: state.file.to_string(),
             line,
             function: c.name.to_string(),
@@ -2217,6 +2243,7 @@ pub fn duplicate_field_findings(state: &mut ScanState, body: &[Stmt]) {
             }
             let line = line_of(state.source, c.name.range().start());
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line,
                 function: c.name.to_string(),
@@ -2305,6 +2332,7 @@ pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &
     // starts at the first decorator — use the name's range for parity
     let line = line_of(state.source, cls.name.range().start());
     state.findings.push(Finding {
+        col: 0,
         file: state.file.to_string(),
         line,
         function: cls.name.to_string(),
@@ -2334,6 +2362,7 @@ pub fn vague_name_findings(state: &mut ScanState, module_body: &[Stmt]) {
             }
             let line = stmt_line(state.source, s);
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line,
                 function: cls.name.to_string(),
@@ -2389,6 +2418,7 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
         let names: Vec<String> = members.iter().map(|(n, l)| format!("{n} (line {l})")).collect();
         let line = members[0].1;
         state.findings.push(Finding {
+col: 0,
             file: state.file.to_string(),
             line,
             function: String::new(),
@@ -2468,6 +2498,7 @@ pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
                 if !exempt {
                     if let Some((_, first_line)) = seen.iter().find(|(n, _)| *n == name) {
                         state.findings.push(Finding {
+col: 0,
                             file: state.file.to_string(),
                             line,
                             function: name.clone(),
@@ -2616,6 +2647,7 @@ pub fn restating_docstring_findings(state: &mut ScanState, module_body: &[Stmt])
         if covered as f64 / words.len() as f64 >= 0.9 {
             let line = stmt_line(state.source, s);
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line,
                 function: String::new(),
@@ -2723,6 +2755,7 @@ pub fn duplicate_block_findings(state: &mut ScanState, module_body: &[Stmt]) {
                 if i + BLOCK_WINDOW <= j {
                     let line = stmt_line(state.source, flat[j]);
                     state.findings.push(Finding {
+col: 0,
                         file: state.file.to_string(),
                         line,
                         function: String::new(),
@@ -2823,6 +2856,7 @@ pub fn mutation_findings(state: &mut ScanState, stmt: &Stmt) {
                 continue; // the module literal itself is already a finding
             }
             state.findings.push(Finding {
+                col: 0,
                 file: state.file.to_string(),
                 line: stmt_line(state.source, stmt),
                 function: String::new(),
@@ -2933,6 +2967,7 @@ pub fn guard_clause_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                 if len >= 3 {
                     let line = line_of(source, s.range().start());
                     state.findings.push(Finding {
+col: 0,
                         file: state.file.to_string(),
                         line,
                         function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
@@ -3026,6 +3061,7 @@ pub fn conditional_polymorphism_findings(state: &mut ScanState, body: &[Stmt], s
                     if keys.iter().all(|k| k.is_some()) && keys.windows(2).all(|w| w[0] == w[1]) {
                         let line = chain_line;
                         state.findings.push(Finding {
+col: 0,
                             file: state.file.to_string(),
                             line,
                             function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
@@ -3075,6 +3111,7 @@ pub fn special_case_findings(state: &mut ScanState, body: &[Stmt], source: &str)
     for (name, (n, line)) in v {
         if *n >= 3 {
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line: *line,
                 function: String::new(),
@@ -3110,6 +3147,7 @@ pub fn middle_man_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                                 if is_self_call(v) {
                                     let line = line_of(source, f.name.range().start());
                                     state.findings.push(Finding {
+col: 0,
                                         file: state.file.to_string(),
                                         line,
                                         function: f.name.to_string(),
@@ -3167,6 +3205,7 @@ pub fn unused_setter_findings(state: &mut ScanState, body: &[Stmt], source: &str
     for (name, line) in setters {
         if !state.refs.contains(&name) {
             state.findings.push(Finding {
+                col: 0,
                 file: state.file.to_string(),
                 line,
                 function: name.clone(),
@@ -3206,6 +3245,7 @@ pub fn loop_pipeline_findings(state: &mut ScanState, body: &[Stmt], source: &str
                     if body_is_pipeline(&f.body) {
                         let line = line_of(source, f.range().start());
                         state.findings.push(Finding {
+                            col: 0,
                             file: state.file.to_string(),
                             line,
                             function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
@@ -3448,6 +3488,7 @@ pub fn latent_visitor_findings(state: &mut ScanState, body: &[Stmt], source: &st
     for (family, (n, line)) in v {
         if *n >= 2 {
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line: *line,
                 function: String::new(),
@@ -3557,7 +3598,7 @@ pub use crate::common::{dice_similarity, SkeletonFn};
 /// (CPython visits `ast.operator` / `ast.expr_context` nodes in `ast.walk`).
 pub enum Q<'a> {
     N(AnyNodeRef<'a>),
-    T(&'static str),
+    T(&'a str),
 }
 
 pub fn fn_skeleton(f: &StmtFunctionDef) -> Vec<String> {
@@ -4259,6 +4300,7 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
             if let Some((j, sim)) = best {
                 let dup = &fns[j];
                 return Some(Finding {
+col: 0,
                     file: dup.rel.clone(),
                     line: dup.line,
                     function: dup.name.clone(),
@@ -4307,6 +4349,7 @@ pub fn unused_findings(
             )
         };
         out.push(Finding {
+            col: 0,
             file: rel.clone(),
             line: *line,
             function: name.clone(),
@@ -4547,21 +4590,37 @@ fn is_constant_value(e: &Expr) -> bool {
 
 /// The dict-literal scan: record positions only; inline call arguments are
 /// maps and are not descended into; spread merges are not records.
-fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<usize>) {
+struct RecordHit {
+    line: usize,
+    col: usize,
+    keys: Vec<String>,
+}
+
+/// The dict-literal scan: SHAPE, not position, defines a record — every
+/// expression container is descended (call arguments included; the old
+/// "inline arguments are maps" carve-out hid wire-format construction sites).
+/// Spread merges ({**base, ...}) update an existing shape and are not records.
+fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<RecordHit>) {
     match e {
         Expr::Dict(d) => {
-            // a spread merge ({**session, ...}) updates an existing shape —
-            // not a record being built (ruff keys are None for the unpack)
             if d.items.iter().any(|it| it.key.is_none()) {
                 return;
             }
-            let has_const_key = d
+            let keys: Vec<String> = d
                 .items
                 .iter()
-                .any(|it| matches!(&it.key, Some(k) if matches!(k, Expr::StringLiteral(_))));
+                .filter_map(|it| match &it.key {
+                    Some(Expr::StringLiteral(s)) => Some(s.value.to_string()),
+                    _ => None,
+                })
+                .collect();
             let has_dynamic_value = d.items.iter().any(|it| !is_constant_value(&it.value));
-            if d.items.len() >= 2 && has_const_key && has_dynamic_value {
-                found.push(line_of(source, d.range().start()));
+            if d.items.len() >= 2 && !keys.is_empty() && has_dynamic_value {
+                found.push(RecordHit {
+                    line: line_of(source, d.range().start()),
+                    col: col_of(source, d.range().start()),
+                    keys,
+                });
             }
             for it in &d.items {
                 record_literal_scan(&it.value, source, found);
@@ -4574,6 +4633,11 @@ fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<usize>) {
         }
         Expr::Tuple(t) => {
             for elt in &t.elts {
+                record_literal_scan(elt, source, found);
+            }
+        }
+        Expr::Set(s) => {
+            for elt in &s.elts {
                 record_literal_scan(elt, source, found);
             }
         }
@@ -4592,11 +4656,8 @@ fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<usize>) {
         }
         Expr::Lambda(l) => record_literal_scan(&l.body, source, found),
         Expr::Call(c) => {
-            // dict(a=1, b=x) is the literal's call-form twin: the same
-            // record shape built through a call, so the literal-only scan
-            // could be dodged with dict(...) — a record that is not a
-            // literal. A bare dict() call with >= 2 keyword args and >= 1
-            // dynamic value is a record being built.
+            // dict(a=1, b=x) is the literal's call-form twin — a record built
+            // through a call so the literal-only scan could be dodged.
             let is_dict = match c.func.as_ref() {
                 Expr::Name(n) => n.id.as_str() == "dict",
                 Expr::Attribute(a) => a.attr.as_str() == "dict",
@@ -4606,23 +4667,38 @@ fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<usize>) {
                 let kwargs = &c.arguments.keywords;
                 let has_dynamic = kwargs.iter().any(|k| !is_constant_value(&k.value));
                 if kwargs.len() >= 2 && has_dynamic {
-                    found.push(line_of(source, c.range().start()));
-                }
-                // dict()'s args ARE the data — descend (unlike other calls,
-                // whose inline arguments are maps): dict({"a": 1, "b": x})
-                // is a record built from a literal, and a kwarg value may
-                // hold one too
-                for a in &c.arguments.args {
-                    record_literal_scan(a, source, found);
-                }
-                for k in kwargs {
-                    record_literal_scan(&k.value, source, found);
+                    let keys: Vec<String> = kwargs
+                        .iter()
+                        .filter_map(|k| k.arg.as_ref().map(|n| n.id.to_string()))
+                        .collect();
+                    found.push(RecordHit {
+                        line: line_of(source, c.range().start()),
+                        col: col_of(source, c.range().start()),
+                        keys,
+                    });
                 }
             }
-            // other calls: inline arguments are maps — not descended into
+            // uniform descent: EVERY call's inline arguments are expressions
+            // like any other container's
+            for a in &c.arguments.args {
+                record_literal_scan(a, source, found);
+            }
+            for k in &c.arguments.keywords {
+                record_literal_scan(&k.value, source, found);
+            }
         }
         _ => {}
     }
+}
+
+/// The message's key listing — source order, capped so a generated
+/// 40-field record stays one line.
+fn display_keys(keys: &[String]) -> String {
+    const MAX: usize = 6;
+    if keys.len() <= MAX {
+        return keys.join(", ");
+    }
+    format!("{}, … (+{})", keys[..MAX].join(", "), keys.len() - MAX)
 }
 
 /// The record-shape family: signature findings + record dict literals,
@@ -4661,6 +4737,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                         }
                         let text = source[a.range()].to_string();
                         state.findings.push(Finding {
+col: 0,
                             file: state.file.to_string(),
                             line: def_line,
                             function: f.name.to_string(),
@@ -4677,6 +4754,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                     if annotation_is_record(r.as_ref()) {
                         let text = source[r.range()].to_string();
                         state.findings.push(Finding {
+col: 0,
                             file: state.file.to_string(),
                             line: def_line,
                             function: f.name.to_string(),
@@ -4694,36 +4772,46 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
         }
         qi += 1;
     }
-    // record dict literals in record positions (assign/annassign/return/yield)
-    let mut found: Vec<usize> = Vec::new();
-    let mut sq: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+    // record dict literals ANYWHERE — shape, not position, defines a record
+    // (uniform descent; the record-position carve-out hid call-site wires)
+    let mut found: Vec<RecordHit> = Vec::new();
+    // descend EVERY node (function bodies included) — each Expr feeds the
+    // scan, which recurses internally through containers
+    let mut sq: Vec<&Stmt> = body.iter().collect();
     let mut si = 0usize;
     while si < sq.len() {
-        if let Q::N(n) = sq[si] {
-            let value: Option<&Expr> = match n {
-                AnyNodeRef::StmtAssign(a) => Some(a.value.as_ref()),
-                AnyNodeRef::StmtAnnAssign(a) => a.value.as_deref(),
-                AnyNodeRef::StmtReturn(r) => r.value.as_deref(),
-                AnyNodeRef::ExprYield(y) => y.value.as_deref(),
-                AnyNodeRef::ExprYieldFrom(y) => Some(y.value.as_ref()),
-                _ => None,
-            };
-            if let Some(v) = value {
-                record_literal_scan(v, source, &mut found);
+        // descend ALL statement kinds incl. function/class bodies
+        match sq[si] {
+            Stmt::FunctionDef(f) => {
+                let fd_stmt = Stmt::FunctionDef(f.clone());
+                for e in stmt_exprs(&fd_stmt) {
+                    record_literal_scan(e, source, &mut found);
+                }
+                for b in &f.body {
+                    sq.push(b);
+                }
             }
-            skel_children(n, &mut sq);
+            _ => {
+                for e in stmt_exprs(sq[si]) {
+                    record_literal_scan(e, source, &mut found);
+                }
+                push_stmt_children(sq[si], &mut sq);
+            }
         }
         si += 1;
     }
-    for ln in found {
-        state.findings.push(Finding {
-            file: state.file.to_string(),
-            line: ln,
-            function: String::new(),
-            kind: "record-shape".into(),
-            severity: "fail".into(),
-            message: format!("dict with constant keys is a record — make a class (line {ln})"),
-        });
+    // dedupe on (line, col): the dict() call-form and a nested literal can
+    // share a range — one finding per record node
+    let mut seen: HashSet<(usize, usize)> = HashSet::new();
+    let mut unique: Vec<RecordHit> = Vec::new();
+    for h in found {
+        if seen.insert((h.line, h.col)) {
+            unique.push(h);
+        }
+    }
+    for h in unique {
+        let keys = display_keys(&h.keys);
+        state.findings.push(Finding { file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("dict with constant keys {{{keys}}} is a record — make a class (fields: {keys}) — fix: extract-record-class --name <Record>") });
     }
 }
 
@@ -4877,6 +4965,7 @@ pub fn partition_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
             let metric: usize = groups.iter().map(|g| g.len()).sum();
             let _ = metric;
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line: line_of(source, cls.name.range().start()),
                 function: cls.name.to_string(),
@@ -4998,6 +5087,7 @@ pub fn monkeypatch_findings(state: &mut ScanState, body: &[Stmt], source: &str) 
 
 fn mp_finding(state: &mut ScanState, desc: &str, line: usize) {
     state.findings.push(Finding {
+col: 0,
         file: state.file.to_string(),
         line,
         function: String::new(),
@@ -5030,6 +5120,7 @@ fn is_pytest_mark_skip(a: &ExprAttribute) -> bool {
 fn parked_skip_finding(state: &mut ScanState, source: &str, offset: ruff_text_size::TextSize) {
     let line = line_of(source, offset);
     state.findings.push(Finding {
+        col: 0,
         file: state.file.to_string(),
         line,
         function: String::new(),
@@ -5070,6 +5161,7 @@ pub fn skipif_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                             let cond = cond_parts.join(" ");
                             if SKIPIF_NEEDLES.iter().any(|needle| cond.contains(needle)) {
                                 state.findings.push(Finding {
+col: 0,
                                     file: state.file.to_string(),
                                     line: line_of(source, call.range().start()),
                                     function: String::new(),
@@ -5251,6 +5343,7 @@ pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                 }
                 if real_fs && !needs_real {
                     state.findings.push(Finding {
+col: 0,
                         file: state.file.to_string(),
                         line,
                         function: f.name.to_string(),
@@ -5312,6 +5405,7 @@ pub fn no_assert_test_findings(state: &mut ScanState, body: &[Stmt], source: &st
             if let AnyNodeRef::StmtFunctionDef(f) = n {
                 if f.name.as_str().starts_with("test_") && !has_assertion(&f.body) {
                     state.findings.push(Finding {
+                        col: 0,
                         file: state.file.to_string(),
                         line: line_of(source, f.name.range().start()),
                         function: f.name.to_string(),
@@ -5510,6 +5604,7 @@ pub fn abstraction_findings(scans: &[(String, Vec<crate::ClassInfo>, Vec<crate::
         if subs.len() == 1 {
             let line = classes.get(&(rel.clone(), name.clone())).map(|c| c.line).unwrap_or(1);
             out.push(Finding {
+col: 0,
                 file: rel.clone(),
                 line,
                 function: name.clone(),

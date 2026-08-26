@@ -1771,3 +1771,62 @@ def test_extract_module_bare_star_signature_does_not_crash(tmp_path):
     )
     assert out is not None
     assert "def tokenize(s, *, limit=None):" in (tmp_path / "repo" / "houses" / "text.py").read_text()
+
+
+# --------------------------------------------------------------------------- extract-record-class
+
+def test_extract_record_class_converts_literal_and_reads(tmp_path):
+    src = (
+        "def go(u):\n"
+        "    payload = {\"user\": u, \"stamp\": u}\n"
+        "    return payload[\"user\"], payload\n"
+    )
+    out, fixed = _fix_opts(
+        tmp_path, "extract-record-class", "houses/rec.py", src, 2,
+        name="Payload",
+    )
+    assert out is not None
+    assert "class _Payload:" in fixed
+    assert "_Payload(user=u, stamp=u)" in fixed
+    assert 'payload["user"]' not in fixed
+    assert "payload.user" in fixed
+
+
+def test_extract_record_class_col_disambiguates_twins(tmp_path):
+    # two constant-key dicts share the line — the anchor column selects
+    # WHICH one becomes the class (schema-3 col transport)
+    src = (
+        "def deep(user):\n"
+        "    return {\"a\": {\"x\": user, \"y\": user}, \"b\": 1}\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "twin.py").write_text(src)
+    inner = fix_engine._FixRequest(
+        kind="extract-record-class",
+        repo=repo,
+        rel="houses/twin.py",
+        line=2,
+        opts=fix_engine.FixOptions(name="Inner"),
+        source=src,
+        col=18,  # the INNER dict's brace
+    )
+    out = inner.fix_extract_record_class()
+    assert out is not None
+    assert "class _Inner:" in out
+    assert "self.x" in out and "self.y" in out
+    assert "_Inner(x=user, y=user)" in out  # the INNER record converted
+    assert '{\"x\": user' not in out
+
+
+def test_extract_record_class_refuses_non_identifier_keys(tmp_path):
+    src = (
+        "def go(u):\n"
+        "    payload = {\"content-type\": u, \"stamp\": u}\n"
+        "    return payload\n"
+    )
+    out, fixed = _fix_opts(
+        tmp_path, "extract-record-class", "houses/bad.py", src, 2,
+        name="Payload",
+    )
+    assert out is None
+    assert fixed == src  # nothing written on refusal

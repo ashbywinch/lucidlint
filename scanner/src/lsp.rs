@@ -36,9 +36,12 @@ fn severity_of(f: &Finding) -> i64 {
 fn finding_diag(f: &Finding, source: &str) -> serde_json::Value {
     let line = f.line.saturating_sub(1); // LSP lines are 0-based
     let line_len = source.lines().nth(line).map(str::len).unwrap_or(0);
+    // col (1-based, schema 3) pins the anchor node — twins on one line
+    // highlight separately; 0 keeps the whole-line span
+    let start_char = if f.col > 0 { (f.col - 1).min(line_len) } else { 0 };
     serde_json::json!({
         "range": {
-            "start": {"line": line, "character": 0},
+            "start": {"line": line, "character": start_char},
             "end": {"line": line, "character": line_len},
         },
         "severity": severity_of(f),
@@ -469,6 +472,7 @@ mod tests {
         let warn = Finding {
             file: "x.py".into(),
             line: 1,
+            col: 0,
             function: String::new(),
             kind: "magic-number".into(),
             severity: "warn".into(),
@@ -477,6 +481,7 @@ mod tests {
         let fail = Finding {
             file: "x.py".into(),
             line: 2,
+            col: 0,
             function: String::new(),
             kind: "except".into(),
             severity: "fail".into(),

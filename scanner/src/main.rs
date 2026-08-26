@@ -46,6 +46,11 @@ pub struct FnScope {
 pub struct Finding {
     file: String,
     line: usize,
+    /// 1-based column of the finding's anchor node; 0 = line-level (schema 3).
+    /// Populated only where disambiguation needs it (magic-number,
+    /// positional-literals, record-shape literals).
+    #[serde(default)]
+    col: usize,
     function: String,
     kind: String,
     severity: String,
@@ -108,6 +113,12 @@ struct ScanState<'a> {
 
 fn line_of(source: &str, offset: ruff_text_size::TextSize) -> usize {
     1 + source[..offset.to_usize()].bytes().filter(|&b| b == b'\n').count()
+}
+
+/// 1-based column of an offset — the schema-3 disambiguation coordinate.
+fn col_of(source: &str, offset: ruff_text_size::TextSize) -> usize {
+    let start = source[..offset.to_usize()].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    offset.to_usize() - start + 1
 }
 
 enum ParentEntry {
@@ -288,6 +299,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 self.findings.push(Finding {
                     file: self.file.to_string(),
                     line: line_of(source, call.range().start()),
+                    col: 0,
                     function: fn_name,
                     kind: "debug-artifact".into(),
                     severity: "fail".into(),
@@ -641,14 +653,7 @@ impl<'a> ScanState<'a> {
             return;
         }
         let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-        self.findings.push(Finding {
-            file: self.file.to_string(),
-            line: line_of(self.source, n.range.start()),
-            function: fn_name,
-            kind: "magic-number".into(),
-            severity: "warn".into(),
-            message: format!("magic number {value} — name it with a domain noun (what it means here), never its value spelled out — fix: magic-number --fix-name <CONST>"),
-        });
+        self.findings.push(Finding { file: self.file.to_string(), line: line_of(self.source, n.range.start()), col: col_of(self.source, n.range.start()), function: fn_name, kind: "magic-number".into(), severity: "warn".into(), message: format!("magic number {value} — name it with a domain noun (what it means here), never its value spelled out — fix: magic-number --fix-name <CONST>") });
     }
 
     /// No-op statements: expression statements that discard their value.
@@ -673,6 +678,7 @@ impl<'a> ScanState<'a> {
             self.findings.push(Finding {
                 file: self.file.to_string(),
                 line: line_of(self.source, v.range().start()),
+                col: 0,
                 function: fn_name,
                 kind: "noop-statement".into(),
                 severity: "fail".into(),
@@ -689,6 +695,7 @@ impl<'a> ScanState<'a> {
         if !self.fn_stack.is_empty() {
             let line = stmt_line(self.source, stmt);
             self.findings.push(Finding {
+                col: 0,
                 file: self.file.to_string(),
                 line,
                 function: fn_name.clone(),
@@ -718,6 +725,7 @@ impl<'a> ScanState<'a> {
                         self.findings.push(Finding {
                             file: self.file.to_string(),
                             line: stmt_line(self.source, stmt),
+                            col: 0,
                             function: fn_name.clone(),
                             kind: "private-import".into(),
                             severity: "fail".into(),
@@ -733,6 +741,7 @@ impl<'a> ScanState<'a> {
                         self.findings.push(Finding {
                             file: self.file.to_string(),
                             line: stmt_line(self.source, stmt),
+                            col: 0,
                             function: fn_name.clone(),
                             kind: "private-import".into(),
                             severity: "fail".into(),
@@ -763,6 +772,7 @@ impl<'a> ScanState<'a> {
                     if let Some(dead) = list.get(i + 1) {
                         let line = stmt_line(self.source, dead);
                         self.findings.push(Finding {
+                            col: 0,
                             file: self.file.to_string(),
                             line,
                             function: fn_name.clone(),
@@ -928,6 +938,9 @@ pub struct FileScan {
     /// families (duplicate/unused/docs/graph) are filtered through them at
     /// the end of the scan (per-file families apply theirs during the scan).
     pub supps: common::Suppressions,
+    /// (line, signal) pairs the per-file pass consumed — stage-2 repo-wide
+    /// re-honoring must not spend them again (innermost-peel capacity).
+    pub supps_spent: HashSet<(usize, String)>,
 }
 
 pub(crate) fn is_test_path(name: &str) -> bool {
@@ -991,6 +1004,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         Err(_) => {
             return FileScan {
                 file_name: name.to_string(),
+                supps_spent: HashSet::new(),
                 findings: Vec::new(),
                 cc: Vec::new(),
                 errors: 1,
@@ -1080,7 +1094,12 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
             !line_suppressed && !file_suppressed
         });
     }
-    let findings = checks::apply_suppressions_impl(state.findings, source, name, tokens, &pre_used);
+    let mut supps_spent: HashSet<(usize, String)> = HashSet::new();
+    let books = crate::common::SuppressionBooks {
+        pre_used: &pre_used,
+        spent: &mut supps_spent,
+    };
+    let findings = checks::apply_suppressions_impl(state.findings, source, name, tokens, books.pre_used, books.spent);
     let mut all = type_ignore_findings(source, name, tokens);
     all.extend(noqa_findings(source, name, tokens));
     all.extend(findings);
@@ -1099,6 +1118,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         classes,
         imports,
         supps,
+        supps_spent,
     }
 }
 
@@ -1170,6 +1190,8 @@ pub(crate) fn repo_wide_scan(root: &Path) -> std::collections::HashMap<String, V
     let mut test_refs = HashSet::new();
     let mut strings = Vec::new();
     let mut supps_by_rel: std::collections::HashMap<String, common::Suppressions> = std::collections::HashMap::new();
+    let mut supps_spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
+        std::collections::HashMap::new();
     for scan in &scans {
         let rel = rel_of(&scan.file_name, &root_s);
         let is_test = is_test_path(&rel);
@@ -1192,11 +1214,12 @@ pub(crate) fn repo_wide_scan(root: &Path) -> std::collections::HashMap<String, V
         }
         prod_refs.extend(scan.decorated.iter().cloned());
         supps_by_rel.insert(rel.clone(), scan.supps.clone());
+        supps_spent_by_rel.insert(rel.clone(), scan.supps_spent.clone());
     }
     let mut additions: Vec<Finding> = Vec::new();
     additions.extend(checks::duplicate_findings(&skeletons));
     let repo_wide_unused = checks::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
-    reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel);
+    reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
     let mut by_file: std::collections::HashMap<String, Vec<Finding>> = std::collections::HashMap::new();
     for f in additions {
         by_file.entry(f.file.clone()).or_default().push(f);
@@ -1223,6 +1246,7 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         classes: Vec::new(),
         imports: Vec::new(),
         supps,
+        supps_spent: rs.supps_spent.clone(),
     }
 }
 
@@ -1322,16 +1346,26 @@ pub(crate) fn reconcile_repo_wide(
     all: &mut Vec<Finding>,
     repo_wide: Vec<Finding>,
     supps_by_rel: &std::collections::HashMap<String, common::Suppressions>,
+    supps_spent_by_rel: &std::collections::HashMap<String, std::collections::HashSet<(usize, String)>>,
 ) {
     let mut used_line: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
     let mut used_file: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // batch each file's findings so innermost-peel capacity is computed
+    // over the whole group — and pairs the per-file pass already spent are
+    // not spent again here
+    let mut by_file: std::collections::BTreeMap<String, Vec<Finding>> = Default::default();
     for f in repo_wide {
-        match supps_by_rel.get(&f.file) {
+        by_file.entry(f.file.clone()).or_default().push(f);
+    }
+    for (file, fs) in by_file {
+        match supps_by_rel.get(&file) {
             Some(supps) => {
-                let kept = common::filter_repo_wide(vec![f], supps, &mut used_line, &mut used_file);
+                let empty = std::collections::HashSet::new();
+                let spent = supps_spent_by_rel.get(&file).unwrap_or(&empty);
+                let kept = common::filter_repo_wide(fs, supps, &mut used_line, &mut used_file, spent);
                 all.extend(kept);
             }
-            None => all.push(f),
+            None => all.extend(fs),
         }
     }
     if used_line.is_empty() && used_file.is_empty() {
@@ -1411,17 +1445,10 @@ fn bulk_suppression_findings(
                 top = Some((rel, sites));
             }
         }
-        out.push(Finding {
-            file: top.map(|(r, _)| r.clone()).unwrap_or_default(),
-            line: 1,
-            function: String::new(),
-            kind: "bulk-suppression".into(),
-            severity: "warn".into(),
-            message: format!(
-                "{kind} suppressed at {n} sites - repeated identical whys are POLICY, not per-site judgment: \
-move the rule into [lucidlint.guidance] config guidance or a documented config ignore, or fix the recurring cause"
-            ),
-        });
+        out.push(Finding { file: top.map(|(r, _)| r.clone()).unwrap_or_default(), line: 1, col: 0, function: String::new(), kind: "bulk-suppression".into(), severity: "warn".into(), message: format!(
+            "{kind} suppressed at {n} sites - repeated identical whys are POLICY, not per-site judgment: \
+        move the rule into [lucidlint.guidance] config guidance or a documented config ignore, or fix the recurring cause"
+        ) });
     }
     out.sort_by(|a, b| a.kind.cmp(&b.kind));
     out
@@ -1609,6 +1636,10 @@ fn main() {
         .iter()
         .map(|s| (rel_of(&s.file_name, &root), s.supps.clone()))
         .collect();
+    let supps_spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> = scans
+        .iter()
+        .map(|s| (rel_of(&s.file_name, &root), s.supps_spent.clone()))
+        .collect();
     let suppression_census = suppression_counts(scans.iter().map(|s| &s.supps));
     let bulk_suppressions = bulk_suppression_findings(&suppression_census, &supps_by_rel, 10);
     for scan in scans {
@@ -1634,7 +1665,7 @@ fn main() {
     // pass — reconcile it through those suppressions so an `ignore unused <why>`
     // comment suppresses the finding and is not reported stale (review-log B3)
     let repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
-    reconcile_repo_wide(&mut all_findings, repo_wide_unused, &supps_by_rel);
+    reconcile_repo_wide(&mut all_findings, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
     // import cycles for Rust crates: the local mod/use graph (the
     // code-review-graph contract is Python-only; Rust resolves itself)
     if !rust_scans.is_empty() {
@@ -1786,16 +1817,26 @@ fn main() {
     // (review-log B3 wired for ALL repo-wide families, not just unused).
     let mut used_ln: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
     let mut used_fl: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let retained: Vec<Finding> = all_findings
-        .into_iter()
-        .filter(|f| match supps_by_rel.get(&f.file) {
+    // batch per file so innermost-peel capacity is computed over the whole
+    // group; spent pairs (per-file pass) cannot exempt again here
+    let mut by_file: std::collections::BTreeMap<String, Vec<Finding>> = Default::default();
+    for f in all_findings {
+        by_file.entry(f.file.clone()).or_default().push(f);
+    }
+    let mut retained: Vec<Finding> = Vec::new();
+    for (file, fs) in by_file {
+        match supps_by_rel.get(&file) {
             Some(supps) => {
-                let kept = common::filter_repo_wide(vec![f.clone()], supps, &mut used_ln, &mut used_fl);
-                !kept.is_empty() // false = suppressed (recorded) + dropped; true = keep
+                let empty = std::collections::HashSet::new();
+                let spent = supps_spent_by_rel.get(&file).unwrap_or(&empty);
+                retained.extend(common::filter_repo_wide(fs, supps, &mut used_ln, &mut used_fl, spent));
             }
-            None => true,
-        })
-        .collect();
+            None => {
+                let mut fs = fs;
+                retained.append(&mut fs);
+            }
+        }
+    }
     // drop stale-suppression findings for suppressions the retain just used
     let filtered: Vec<Finding> = retained
         .into_iter()
@@ -1816,6 +1857,7 @@ fn main() {
             serde_json::json!({
                 "file": f.file,
                 "line": f.line,
+                "col": f.col,
                 "function": f.function,
                 "kind": final_kind(&f.kind),
                 "signal": f.kind,
@@ -1825,7 +1867,7 @@ fn main() {
         })
         .collect();
     let out = serde_json::json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "header": common::REPORT_HEADER,
         "suppressions": suppression_census,
         "files": paths.len(),
@@ -2865,9 +2907,13 @@ mod tests {
     }
 
     #[test]
-    fn record_inline_call_args_and_lookup_tables_pass() {
+    fn record_inline_call_args_flagged_lookup_tables_pass() {
+        // uniform descent: a wire-format dict built at a call site IS a
+        // record; an all-constant lookup table still passes
         let f = scan_src("def f(x):\n    client.post(url, headers={\"Content-Type\": \"json\", \"X\": x})\n    table = {\"a\": 1, \"b\": 2}\n    return table\n");
-        assert!(!f.iter().any(|x| x.kind == "record-shape"));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("{Content-Type, X}"), "{f:?}");
     }
 
     #[test]
@@ -2894,10 +2940,10 @@ mod tests {
     }
 
     #[test]
-    fn record_dict_call_as_inline_argument_passes() {
-        // inline call arguments are maps — not record positions
+    fn record_dict_call_as_inline_argument_is_found() {
+        // uniform descent: dict(...) built as a call argument is a record
         let f = scan_src("def f(x):\n    client.post(dict(a=1, b=x))\n");
-        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
     }
 
     #[test]
@@ -3044,11 +3090,14 @@ mod tests {
         let mut all = Vec::new();
         let mut supps_by_rel: std::collections::HashMap<String, common::Suppressions> =
             std::collections::HashMap::new();
+        let mut spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
+            std::collections::HashMap::new();
         let root = "repo";
         for (name, src) in files {
             let mut scan = scan_source(src, name);
             scan.file_name = name.to_string();
             supps_by_rel.insert(name.to_string(), std::mem::take(&mut scan.supps));
+            spent_by_rel.insert(name.to_string(), std::mem::take(&mut scan.supps_spent));
             all.extend(scan.findings);
             let rel = name.to_string();
             let is_test = is_test_path(&rel);
@@ -3073,7 +3122,7 @@ mod tests {
         }
         all.extend(duplicate_findings(&skeletons));
         let repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
-        reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel);
+        reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel, &spent_by_rel);
         // the suppression census + its bulk warning mirror main()'s report
         let census = suppression_counts(supps_by_rel.values());
         all.extend(bulk_suppression_findings(&census, &supps_by_rel, 10));
@@ -3087,7 +3136,13 @@ mod tests {
             .into_iter()
             .filter(|f| match supps_by_rel.get(&f.file) {
                 Some(supps) => {
-                    let kept = common::filter_repo_wide(vec![f.clone()], supps, &mut used_ln, &mut used_fl);
+                    let kept = common::filter_repo_wide(
+                        vec![f.clone()],
+                        supps,
+                        &mut used_ln,
+                        &mut used_fl,
+                        &spent_by_rel.get(&f.file).cloned().unwrap_or_default(),
+                    );
                     !kept.is_empty() // false = suppressed (recorded) + dropped; true = keep
                 }
                 None => true,
@@ -3434,6 +3489,52 @@ mod tests {
         assert!(
             !f.iter().any(|x| x.kind == "stale-suppression"),
             "the used suppression must not be stale"
+        );
+    }
+
+    #[test]
+    fn record_shape_twins_carry_distinct_cols_and_keys() {
+        let f = scan_src("def deep(user):\n    return {\"a\": {\"x\": user, \"y\": user}, \"b\": 1}\n");
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 2, "{f:?}");
+        assert_ne!(rs[0].col, rs[1].col, "twin anchors must differ: {rs:?}");
+        assert_ne!(rs[0].message, rs[1].message, "twin messages must name their keys");
+        assert!(rs.iter().any(|x| x.message.contains("{a, b}")), "{rs:?}");
+        assert!(rs.iter().any(|x| x.message.contains("{x, y}")), "{rs:?}");
+    }
+
+    #[test]
+    fn suppression_peels_innermost_first() {
+        // markers stack directly above the target line; each marker comment
+        // exempts ONE anchor, inner-first (schema-3 col). One marker peels
+        // only the innermost record; two peel inner then outer.
+        let src_two =
+            "def deep(user):\n    # lucidlint: ignore record-shape outer seam\n    # lucidlint: ignore record-shape inner seam\n    return {\"a\": {\"x\": user, \"y\": user}, \"b\": 1}\n";
+        let two = scan_src(src_two);
+        assert!(!two.iter().any(|x| x.kind == "record-shape"), "{two:?}");
+
+        let src_one =
+            "def deep(user):\n    # lucidlint: ignore record-shape inner seam\n    return {\"a\": {\"x\": user, \"y\": user}, \"b\": 1}\n";
+        let one = scan_src(src_one);
+        let left: Vec<&Finding> = one.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(left.len(), 1, "{one:?}");
+        assert!(
+            left[0].message.contains("{a, b}"),
+            "outer must remain: {}",
+            left[0].message
+        );
+        assert!(!one.iter().any(|x| x.kind == "stale-suppression"), "{one:?}");
+    }
+
+    #[test]
+    fn record_shape_fires_on_call_argument() {
+        // uniform descent: a record built at a call site is a record — the
+        // old record-position carve-out hid exactly this wire-format shape
+        let f = scan_src("def send(p):\n    pass\n\n\ndef go(u):\n    send({\"user\": u, \"stamp\": u})\n");
+        assert!(
+            f.iter()
+                .any(|x| x.kind == "record-shape" && x.message.contains("{user, stamp}")),
+            "{f:?}"
         );
     }
 
