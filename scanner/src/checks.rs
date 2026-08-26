@@ -385,10 +385,22 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
 /// A positional call argument that is a literal True/False — the intent is
 /// unreadable at the call site; it should be a named keyword
 /// (f(..., retry=True)). Keyword arguments are self-documenting and exempt.
-pub fn boolean_arg_findings(state: &mut ScanState, args: &[Expr], source: &str) {
+///
+/// Lookup-with-default calls are exempt: the trailing boolean IS the default
+/// for a missing key/attribute (`d.get("retryable", False)`), and those
+/// parameters are positional-only — the "name it" prescription is
+/// impossible, so the finding would be unactionable noise.
+pub fn boolean_arg_findings(state: &mut ScanState, call: &ExprCall, source: &str) {
     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-    for arg in args {
+    let lookup_default = matches!(call.func.as_ref(), Expr::Name(n) if LOOKUP_DEFAULT_CALLEES.contains(&n.id.as_str()))
+        || matches!(call.func.as_ref(), Expr::Attribute(a) if LOOKUP_DEFAULT_CALLEES.contains(&a.attr.as_str()));
+    for (i, arg) in call.arguments.args.iter().enumerate() {
         if let Expr::BooleanLiteral(_) = arg {
+            // the trailing positional boolean on a lookup call is the
+            // DEFAULT, not a flag — positional-only, cannot be keyworded
+            if lookup_default && i + 1 == call.arguments.args.len() {
+                continue;
+            }
             state.findings.push(Finding {
                 col: 0,
                 file: state.file.to_string(),
@@ -401,6 +413,11 @@ pub fn boolean_arg_findings(state: &mut ScanState, args: &[Expr], source: &str) 
         }
     }
 }
+
+/// Callee names whose trailing positional boolean is a lookup DEFAULT, not a
+/// flag — the parameter is positional-only in CPython, so the rule's own
+/// "keyword it" prescription cannot apply.
+const LOOKUP_DEFAULT_CALLEES: &[&str] = &["get", "getattr", "setattr", "setdefault", "pop"];
 
 /// Positional literals of the same kind — the classic argument-swapping bug
 /// (`set_limits(10, 20)` — which is min, which is max?). Warn tier: not every
@@ -629,7 +646,7 @@ col: 0,
                 kind: "swallow".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "{kind} at line {line} — the catch never raises, returns, or surfaces the error; re-raise or mark `# lucidlint: ignore swallow <why>`"
+                    "{kind} at line {line} — logs are not surfacing: a caller exists that needs to decide; re-raise, return an error value, or mark `# lucidlint: ignore swallow <terminal-boundary reason>` only when no caller exists to propagate to"
                 ),
             });
         } else if let Some(ty) = type_opt {
@@ -2908,6 +2925,124 @@ pub fn module_container_names(body: &[Stmt]) -> HashSet<String> {
     out
 }
 
+/// Offsets of numeric literals that are data-table entries, exempt from
+/// magic-number: inside a single collection literal (dict/list/set/tuple,
+/// nested collections allowed) where at least 3 same-kind numeric siblings
+/// (same int/float type, same operator) sit directly under a BinOp/UnaryOp/
+/// Compare. The literal IS the data there — `{"A": 6/9, "B": 7/9, ...}` and
+/// `{"UB": (51.4, 51.6, -0.5, 0.0), ...}` — naming each would destroy the
+/// table. A number is exempt when ANY enclosing collection's sibling group
+/// reaches the bar (the geo case only clears at the dict level, not per row).
+pub fn magic_table_exempt_offsets(body: &[Stmt]) -> HashSet<usize> {
+    use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
+    struct CollectionFinder<'a> {
+        collections: Vec<&'a Expr>,
+    }
+    impl<'a> SourceOrderVisitor<'a> for CollectionFinder<'a> {
+        fn visit_expr(&mut self, e: &'a Expr) {
+            if matches!(e, Expr::Dict(_) | Expr::List(_) | Expr::Set(_) | Expr::Tuple(_)) {
+                self.collections.push(e);
+            }
+            walk_expr(self, e);
+        }
+    }
+    fn walk_expr<'a, V: SourceOrderVisitor<'a>>(v: &mut V, e: &'a Expr) {
+        ruff_python_ast::visitor::source_order::walk_expr(v, e);
+    }
+    let mut finder = CollectionFinder {
+        collections: Vec::new(),
+    };
+    for s in body {
+        walk_stmt(&mut finder, s);
+    }
+    let mut exempt: HashSet<usize> = HashSet::new();
+    for c in finder.collections {
+        let mut groups: std::collections::HashMap<(bool, String), Vec<usize>> = std::collections::HashMap::new();
+        census_collection(c, &mut groups);
+        for offsets in groups.values() {
+            if offsets.len() >= 3 {
+                exempt.extend(offsets.iter().copied());
+            }
+        }
+    }
+    exempt
+}
+
+/// Census a collection literal's subtree: numbers whose op-parent chain up to
+/// this collection passes only through collection literals.
+fn census_collection(e: &Expr, groups: &mut std::collections::HashMap<(bool, String), Vec<usize>>) {
+    match e {
+        Expr::Dict(d) => {
+            for item in &d.items {
+                if let Some(k) = &item.key {
+                    census_value(k, groups);
+                }
+                census_value(&item.value, groups);
+            }
+        }
+        Expr::List(l) => {
+            for el in &l.elts {
+                census_value(el, groups);
+            }
+        }
+        Expr::Set(s) => {
+            for el in &s.elts {
+                census_value(el, groups);
+            }
+        }
+        Expr::Tuple(t) => {
+            for el in &t.elts {
+                census_value(el, groups);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A direct element of a collection: nested collections recurse; an op's
+/// direct number children are data candidates; anything else (calls,
+/// subscripts, comprehensions) stops the census — not table data.
+fn census_value(e: &Expr, groups: &mut std::collections::HashMap<(bool, String), Vec<usize>>) {
+    match e {
+        Expr::Dict(_) | Expr::List(_) | Expr::Set(_) | Expr::Tuple(_) => census_collection(e, groups),
+        Expr::BinOp(b) => {
+            let op = format!("{:?}", b.op);
+            census_op_number(&b.left, &op, groups);
+            census_op_number(&b.right, &op, groups);
+        }
+        Expr::UnaryOp(u) => {
+            let op = format!("{:?}", u.op);
+            census_op_number(&u.operand, &op, groups);
+        }
+        Expr::Compare(c) => {
+            let op = format!("{:?}", c.ops);
+            census_op_number(&c.left, &op, groups);
+            for cmp in &c.comparators {
+                census_op_number(cmp, &op, groups);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn census_op_number(e: &Expr, op: &str, groups: &mut std::collections::HashMap<(bool, String), Vec<usize>>) {
+    if let Expr::NumberLiteral(n) = e {
+        let is_int = matches!(n.value, ruff_python_ast::Number::Int(_));
+        let value = match &n.value {
+            ruff_python_ast::Number::Int(i) => i.to_string(),
+            ruff_python_ast::Number::Float(f) => f.to_string(),
+            ruff_python_ast::Number::Complex { .. } => return,
+        };
+        if matches!(value.as_str(), "0" | "1" | "2") {
+            return; // never magic anyway
+        }
+        groups
+            .entry((is_int, op.to_string()))
+            .or_default()
+            .push(n.range().start().to_usize());
+    }
+}
+
 /// Module containers whose module-level literal is non-constant — already
 /// flagged, so their mutations are not reported again (Python's `flagged`).
 pub fn module_flagged_names(body: &[Stmt]) -> HashSet<String> {
@@ -3177,12 +3312,11 @@ col: 0,
     walk(state, body, source);
 }
 
-/// Remove Setting Method: a `set_*` method (or a property setter) that is
-/// never referenced anywhere in the module — deletable, not just unused.
-/// Runs in the post-pass, so `state.refs` (incl. attribute names) is complete.
-pub fn unused_setter_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
-    let mut setters: Vec<(String, usize)> = Vec::new();
-    fn walk(stmts: &[Stmt], out: &mut Vec<(String, usize)>, source: &str) {
+/// Collect `set_*` methods (and property setters) for the repo-wide
+/// unused-setter pass — runs per file; reference counting needs the whole
+/// repo (prod vs test split) to distinguish dead from test-only.
+pub fn collect_setters(state: &mut ScanState, body: &[Stmt]) {
+    fn walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
         for s in stmts {
             match s {
                 Stmt::FunctionDef(f) => {
@@ -3191,28 +3325,56 @@ pub fn unused_setter_findings(state: &mut ScanState, body: &[Stmt], source: &str
                             .iter()
                             .any(|d| matches!(&d.expression, Expr::Attribute(a) if a.attr.as_str() == "setter"));
                     if is_setter {
-                        out.push((f.name.to_string(), line_of(source, f.name.range().start())));
+                        state
+                            .setters
+                            .push((f.name.to_string(), line_of(source, f.name.range().start())));
                     }
                 }
-                Stmt::ClassDef(cd) => walk(&cd.body, out, source),
+                Stmt::ClassDef(cd) => walk(state, &cd.body, source),
                 _ => {}
             }
         }
     }
-    walk(body, &mut setters, source);
-    for (name, line) in setters {
-        if !state.refs.contains(&name) {
-            state.findings.push(Finding {
-                col: 0,
-                file: state.file.to_string(),
-                line,
-                function: name.clone(),
-                kind: "unused-setter".into(),
-                severity: "warn".into(),
-                message: format!("setter '{name}' is never referenced — Remove Setting Method: delete it"),
-            });
+    walk(state, body, state.source);
+}
+
+/// Remove Setting Method: a `set_*` method (or a property setter) referenced
+/// nowhere in production is dead — deletable, not just unused. Runs
+/// repo-wide so prod refs (same-file AND cross-file) are complete.
+///
+/// Test-only references do NOT make it live: a test seam for code nothing
+/// ships calls is not a seam, it is dead code wearing a harness. The message
+/// names the imminent-caller escape so an agent mid-refactor is not wrongly
+/// told to delete.
+pub fn unused_setter_findings(
+    setters: &[(String, String, usize)],
+    prod_refs: &HashSet<String>,
+    test_refs: &HashSet<String>,
+) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (rel, name, line) in setters {
+        if prod_refs.contains(name) {
+            continue; // referenced by production — live
         }
+        let test_only = test_refs.contains(name);
+        let message = if test_only {
+            format!(
+                "setter '{name}' ({rel}:{line}) is referenced only from tests, never from production — a test seam for dead code is not a seam: nothing shipped calls it, so it is dead. If the production caller is imminent, write the calling code — this finding then clears. Public API entry points are exempt"
+            )
+        } else {
+            format!("setter '{name}' ({rel}:{line}) is never referenced — Remove Setting Method: delete it")
+        };
+        out.push(Finding {
+            file: rel.to_string(),
+            line: *line,
+            col: 0,
+            function: name.to_string(),
+            kind: "unused-setter".into(),
+            severity: "warn".into(),
+            message,
+        });
     }
+    out
 }
 
 /// Replace Loop with Pipeline: a for-loop whose body is only a collection

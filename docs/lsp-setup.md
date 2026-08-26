@@ -57,6 +57,22 @@ name = "rust"
 language-servers = ["lucidlint"]
 ```
 
+## The three-LSP standard
+
+The house setup runs three language servers side by side on Python — each
+owns one job, and none re-implements another's:
+
+|Server|Owns|
+|---|---|
+|`ruff`|Lint: undefined names (F821), unused imports, formatting, import sorting|
+|`pyrefly`|Type checking — the both-direction baseline lock lives in `scripts/pyrefly-lock.py`|
+|`lucidlint`|The gate findings this repo ships (complexity, coupling, docs integrity, ...)|
+
+The undefined-name check is deliberately NOT a lucidlint rule: ruff F821
+owns it, and it fires in the editor at the moment of typing. lucidlint does
+not duplicate it, so a buffer with an undefined name shows exactly one
+diagnostic from the right server — not two competing ones.
+
 ## Notes
 
 - macOS: the first run of a downloaded (unsigned) binary needs
@@ -64,7 +80,6 @@ language-servers = ["lucidlint"]
 - The LSP publishes the same findings as the gate, including the
   `fix:` directives in the messages — an agent editing in the editor sees
   the exact command to run for each finding.
-- The server answers `textDocument/codeAction`: one `quickfix` per finding
 - The server answers `textDocument/codeAction`: one `quickfix` per finding
   whose message carries a `fix:` directive. The action's command arguments
   are `[uri, line, argvTokens]` — the tokens run directly as
