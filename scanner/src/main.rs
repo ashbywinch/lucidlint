@@ -2276,6 +2276,17 @@ mod tests {
         // a non-default boolean in a lookup call is still a finding
         let f2 = scan_src("def f(cfg):\n    return cfg.get(False, 'x')\n");
         assert!(f2.iter().any(|x| x.kind == "boolean-arg"), "{:?}", f2);
+        // a user function literally named `get`/`setdefault`/`pop` is NOT a
+        // lookup-with-default — only ATTRIBUTE receivers and the bare
+        // getattr builtin are exempt; a bare `get(...)` must stay flagged
+        // (review bot)
+        let f4 = scan_src("def get(k):\n    return get('x', False)\n");
+        assert!(f4.iter().any(|x| x.kind == "boolean-arg"), "{:?}", f4);
+        let f5 = scan_src("def pop(k):\n    return pop('x', True)\n");
+        assert!(f5.iter().any(|x| x.kind == "boolean-arg"), "{:?}", f5);
+        // the bare getattr builtin stays exempt (it IS a lookup)
+        let f6 = scan_src("def f(obj):\n    return getattr(obj, 'k', False)\n");
+        assert!(!f6.iter().any(|x| x.kind == "boolean-arg"), "{:?}", f6);
     }
 
     #[test]
@@ -2917,6 +2928,30 @@ mod tests {
     }
 
     // ------------------------------------------------------------- duplicate-block
+    #[test]
+    fn duplicate_block_directive_only_for_exact_duplicates() {
+        // renamed duplicates are still flagged (the transcription class)
+        // but the fix requires libcst deep_equals — the directive must
+        // attach only when the two blocks are token-identical, or agents
+        // chase a fix that refuses to apply (review bot)
+        let exact = scan_src(
+            "def f():\n    t = transcribe(p)\n    write(t)\n    mark(p)\n    t = transcribe(p)\n    write(t)\n    mark(p)\n",
+        );
+        let e: Vec<&Finding> = exact.iter().filter(|x| x.kind == "duplicate-block").collect();
+        assert_eq!(e.len(), 1, "{exact:?}");
+        assert!(e[0].message.contains("fix: duplicate-block"), "{}", e[0].message);
+        let renamed = scan_src(
+            "def f():\n    a = transcribe(p)\n    write(a)\n    mark(p)\n    b = transcribe(p)\n    write(b)\n    mark(p)\n",
+        );
+        let r: Vec<&Finding> = renamed.iter().filter(|x| x.kind == "duplicate-block").collect();
+        assert_eq!(r.len(), 1, "{renamed:?}");
+        assert!(
+            !r[0].message.contains("fix:"),
+            "a renamed duplicate is not deep-equal — no directive: {}",
+            r[0].message
+        );
+    }
+
     #[test]
     fn adjacent_duplicate_block_is_found() {
         // the transcribe-twice class: a replaced loop header leaves the old

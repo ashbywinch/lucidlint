@@ -401,8 +401,14 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
 /// impossible, so the finding would be unactionable noise.
 pub fn boolean_arg_findings(state: &mut ScanState, call: &ExprCall, source: &str) {
     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-    let lookup_default = matches!(call.func.as_ref(), Expr::Name(n) if LOOKUP_DEFAULT_CALLEES.contains(&n.id.as_str()))
-        || matches!(call.func.as_ref(), Expr::Attribute(a) if LOOKUP_DEFAULT_CALLEES.contains(&a.attr.as_str()));
+    // only ATTRIBUTE receivers (cfg.get, os.environ.get) and the bare
+    // getattr builtin are lookup-with-default calls — a user function
+    // literally named `get`/`setdefault`/`pop` is not, and must stay
+    // flagged (review bot)
+    let bare_lookup = matches!(call.func.as_ref(), Expr::Name(n) if n.id.as_str() == "getattr");
+    let attr_lookup =
+        matches!(call.func.as_ref(), Expr::Attribute(a) if LOOKUP_DEFAULT_CALLEES.contains(&a.attr.as_str()));
+    let lookup_default = bare_lookup || attr_lookup;
     for (i, arg) in call.arguments.args.iter().enumerate() {
         if let Expr::BooleanLiteral(_) = arg {
             // the trailing positional boolean on a lookup call is the
@@ -2778,6 +2784,11 @@ pub fn duplicate_block_findings(state: &mut ScanState, module_body: &[Stmt]) {
             if let Some(&i) = first_seen.get(&window) {
                 if i + BLOCK_WINDOW <= j {
                     let line = stmt_line(state.source, flat[j]);
+                    // the directive is truthful only for deep-equal blocks
+                    // (raw keys match); renamed duplicates keep the finding
+                    // but no fix — agents delete by hand (review bot)
+                    let exact = (0..BLOCK_WINDOW).all(|k| stmt_exact_key(flat[i + k]) == stmt_exact_key(flat[j + k]));
+                    let directive = if exact { " — fix: duplicate-block" } else { "" };
                     state.findings.push(Finding {
 col: 0,
                         file: state.file.to_string(),
@@ -2786,7 +2797,7 @@ col: 0,
                         kind: "duplicate-block".into(),
                         severity: "warn".into(),
                         message: format!(
-                            "a {BLOCK_WINDOW}-statement block appears twice in this function — duplicated work (an edit mistake?); delete the second copy — fix: duplicate-block"
+                            "a {BLOCK_WINDOW}-statement block appears twice in this function — duplicated work (an edit mistake?); delete the second copy{directive}"
                         ),
                     });
                     break 'outer;
@@ -2824,6 +2835,45 @@ fn stmt_key(s: &Stmt) -> Vec<String> {
             | AnyNodeRef::ExprNoneLiteral(_)
             | AnyNodeRef::ExprEllipsisLiteral(_)
             | AnyNodeRef::InterpolatedStringLiteralElement(_) => toks.push("C".to_string()),
+            AnyNodeRef::Parameter(_) | AnyNodeRef::ParameterWithDefault(_) => toks.push("A".to_string()),
+            AnyNodeRef::Parameters(_) => toks.push("arguments".to_string()),
+            AnyNodeRef::ElifElseClause(_) => toks.push("If".to_string()),
+            AnyNodeRef::InterpolatedElement(_) => toks.push("FormattedValue".to_string()),
+            _ => toks.push(format!("{:?}", node.kind())),
+        }
+        skel_children(node, &mut queue);
+    }
+    toks
+}
+/// The RAW token key — same walk as `stmt_key` but without the name/literal
+/// normalization: two blocks are deep-equal (the libcst `deep_equals` the
+/// duplicate-block fix requires) only when their raw keys match. The
+/// duplicate-block FINDING fires on normalized keys (renamed transcription
+/// duplicates are the rule's target) but the fix DIRECTIVE must not attach
+/// to a block the fix will refuse (review bot).
+fn stmt_exact_key(s: &Stmt) -> Vec<String> {
+    let mut toks: Vec<String> = Vec::new();
+    let mut queue: Vec<Q> = vec![Q::N(AnyNodeRef::from(s))];
+    let mut i = 0usize;
+    while i < queue.len() {
+        let node = match &queue[i] {
+            Q::N(n) => *n,
+            Q::T(t) => {
+                toks.push((*t).to_string());
+                i += 1;
+                continue;
+            }
+        };
+        i += 1;
+        match node {
+            AnyNodeRef::ExprName(n) => toks.push(n.id.to_string()),
+            AnyNodeRef::ExprStringLiteral(_)
+            | AnyNodeRef::ExprBytesLiteral(_)
+            | AnyNodeRef::ExprNumberLiteral(_)
+            | AnyNodeRef::ExprBooleanLiteral(_)
+            | AnyNodeRef::ExprNoneLiteral(_)
+            | AnyNodeRef::ExprEllipsisLiteral(_)
+            | AnyNodeRef::InterpolatedStringLiteralElement(_) => toks.push(format!("{:?}", node.kind())),
             AnyNodeRef::Parameter(_) | AnyNodeRef::ParameterWithDefault(_) => toks.push("A".to_string()),
             AnyNodeRef::Parameters(_) => toks.push("arguments".to_string()),
             AnyNodeRef::ElifElseClause(_) => toks.push("If".to_string()),
