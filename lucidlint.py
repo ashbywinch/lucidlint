@@ -1836,11 +1836,16 @@ class _FixCommand:
         # schema-3 anchor: same-line twins need the finding's column — the
         # innermost match wins, mirroring the peel binding order
         col = 0
-        if self.fix_kind == "extract-record-class":
+        # schema-3 anchor: same-line twins need the finding's column — the
+        # innermost match wins, mirroring the peel binding order. The
+        # fix-kind to finding-kind mapping differs: extract-record-class is
+        # the fix for record-shape findings; magic-number is its own kind.
+        signal = "record-shape" if self.fix_kind == "extract-record-class" else self.fix_kind
+        if signal:
             anchors = [
                 f.col
                 for f in _File(self.repo, self.rel).scan_single_file()
-                if f.signal == "record-shape" and f.line == self.args.line and f.col
+                if f.signal == signal and f.line == self.args.line and f.col
             ]
             col = max(anchors) if anchors else 0
         req = fe._FixRequest(

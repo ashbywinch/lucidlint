@@ -698,6 +698,22 @@ def test_preview_refusal_names_nothing_to_change(tmp_path, capsys):
     assert "needs a semantic name" not in out, out
 
 
+def test_magic_fix_cli_derives_anchor_column(tmp_path, capsys):
+    # the schema-3 col reaches the fix engine for magic-number too — two
+    # literals on one line, the CLI must rewrite the ANCHORED one, not the
+    # first (the anchor scan only ran for extract-record-class) (review bot)
+    src = "def f():\n    return a * 60 + b * 90\n"
+    repo = make_repo(tmp_path, app_src=src)
+    (repo / "houses" / "app.py").write_text(src)
+    rc = run_main(
+        repo, "fix", "--kind", "magic-number", "--file", "houses/app.py",
+        "--line", "2", "--name", "NINETY",
+    )
+    assert rc == 0
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "a * 60 + b * NINETY" in fixed, fixed
+
+
 def test_callee_flag_selects_the_named_call_on_the_line(tmp_path, capsys):
     # two calls span the target line — `--callee Money` must keyword the
     # NAMED call; before the forwarding fix the flag was parsed and dropped,

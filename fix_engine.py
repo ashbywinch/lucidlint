@@ -217,7 +217,10 @@ class _FixRequest:
     def extract_method_proposal(self):
         source, line = self._loaded_source(), self.line
         name = self.opts.name
-        max_decisions = self.max_decisions
+        # the _FixRequest refactor dropped the caller-supplied 13 — the
+        # bound is the contract (an extracted helper must not still be
+        # complex); restore it as the default (review bot)
+        max_decisions = self.max_decisions if self.max_decisions is not None else 13
         """Compute the best extraction seam and the resulting source, WITHOUT
         writing. Returns (new_source, seam_text) or (None, None) when no safe
         seam exists. `name` may be None — the preview then shows a placeholder
@@ -2870,27 +2873,36 @@ def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
     new module needs (libcst wraps imports in SimpleStatementLine)."""
     moved: list = []
     for stmt in module.body:
-        if not (isinstance(stmt, cst.SimpleStatementLine) and len(stmt.body) == 1):
+        if not isinstance(stmt, cst.SimpleStatementLine):
             continue
-        inner = stmt.body[0]
-        if isinstance(inner, cst.Import):
-            for alias in inner.names:
-                bound = (
-                    _target_names(alias.asname.name) if alias.asname is not None else {_import_base_name(alias.name)}
-                )
-                if bound & referenced:
-                    moved.append(stmt)
-                    break
-        elif isinstance(inner, cst.ImportFrom):
-            if isinstance(inner.names, cst.ImportStar):
-                continue  # `from x import *` binds no importable name
-            for alias in inner.names:
-                if not isinstance(alias.name, cst.Name):
-                    continue
-                bound = _target_names(alias.asname.name) if alias.asname is not None else {alias.name.value}
-                if bound & referenced:
-                    moved.append(stmt)
-                    break
+        # a line can hold several imports (`import os; import sys`) — emit
+        # each matching import as its own statement, or the new module
+        # misses a name the moved def needs and NameErrors (review bot)
+        for inner in stmt.body:
+            if isinstance(inner, cst.Import):
+                for alias in inner.names:
+                    bound = (
+                        _target_names(alias.asname.name)
+                        if alias.asname is not None
+                        else {_import_base_name(alias.name)}
+                    )
+                    if bound & referenced:
+                        moved.append(cst.SimpleStatementLine(body=[inner]))
+                        break
+            elif isinstance(inner, cst.ImportFrom):
+                if isinstance(inner.names, cst.ImportStar):
+                    continue  # `from x import *` binds no importable name
+                for alias in inner.names:
+                    if not isinstance(alias.name, cst.Name):
+                        continue
+                    bound = (
+                        _target_names(alias.asname.name)
+                        if alias.asname is not None
+                        else {alias.name.value}
+                    )
+                    if bound & referenced:
+                        moved.append(cst.SimpleStatementLine(body=[inner]))
+                        break
     return moved
 
 

@@ -504,6 +504,49 @@ def test_parameter_object_introduced(tmp_path):
     assert "build(BuildOptions(a=1, b=2, c=3, d=4, e=5, f=6))" in fixed
 
 
+def test_extract_method_refuses_over_thirteen_decision_seam(tmp_path):
+    # the _FixRequest refactor dropped max_decisions=13 — without the bound
+    # the whole 14-branch chain extracts wholesale (helper_ifs=14); the
+    # bound refuses a >13-decision seam (review bot)
+    conds = []
+    for i in range(14):
+        conds.append(
+            "        if x > 0:\n            out.append(x * 0)\n"
+            if i == 0
+            else f"        elif x >= {i * 10}:\n            out.append(x * {i})\n"
+        )
+    src = "def f(xs):\n    out = []\n    for x in xs:\n" + "".join(conds) + "    return out\n"
+    repo = make_repo(tmp_path, app_src=src)
+    (repo / "houses" / "app.py").write_text(src)
+    out = _fix_finding(
+        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="helper")
+    )
+    assert out is None, "a >13-decision seam must refuse, not move wholesale"
+
+
+def test_extract_module_moves_import_from_multi_statement_line(tmp_path):
+    # `import os; import sys` on ONE line — _moved_imports skipped
+    # multi-statement SimpleStatementLines, so the new module lost the
+    # import the moved def needs and would NameError (review bot)
+    src = (
+        "import os; import sys\n"
+        "\n"
+        "def t():\n"
+        "    return os.getcwd()\n"
+        "\n"
+        "def u():\n"
+        "    return sys.version\n"
+    )
+    out, fixed = _fix_opts(
+        tmp_path, "extract-module", "houses/layout.py", src, 1,
+        name="text", params=["t"],
+    )
+    assert out is not None
+    new_mod = (tmp_path / "repo" / "houses" / "text.py").read_text()
+    assert "import os" in new_mod, new_mod
+    assert "def t():" in new_mod
+
+
 def test_parameter_object_fix_counts_posonly_params(tmp_path):
     # the scanner's threshold counts posonly + args + kwonly (minus a
     # leading self/cls); the fixer must count the SAME set — six

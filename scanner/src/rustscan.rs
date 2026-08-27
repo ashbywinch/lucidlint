@@ -380,7 +380,13 @@ impl<'a> RsState<'a> {
             line,
             col,
             &fn_name,
-            format!("magic number {text} — name it with a domain noun (what it means here), never its value spelled out — fix: magic-number --fix-name <CONST>"),
+            // no fix: directive — the Rust fix surface refuses magic-number
+            // (main.rs --fix handles extract-method/dispatch-registry/rule-table
+            // only); advertising it would send agents on a fix that cannot
+            // apply (review bot)
+            format!(
+                "magic number {text} — name it with a domain noun (what it means here), never its value spelled out"
+            ),
         );
     }
 
@@ -2162,6 +2168,18 @@ mod tests {
         let src = "fn f() -> u32 { let x = 3 * 60; foo(300); x }\n";
         let fs = scan(src);
         assert_eq!(fs.iter().filter(|f| f.kind == "magic-number").count(), 3); // 3, 60, 300 — only 0/1/2 are trivial
+    }
+
+    #[test]
+    fn magic_message_carries_no_fix_directive_for_rust() {
+        // the Rust fix surface refuses magic-number (main.rs --fix handles
+        // extract-method/dispatch-registry/rule-table only) — the directive
+        // would send agents on a fix that cannot apply (review bot)
+        let src = "fn f() -> u32 { let x = 3 * 60; x }\n";
+        let fs = scan(src);
+        let m: Vec<&Finding> = fs.iter().filter(|f| f.kind == "magic-number").collect();
+        assert!(!m.is_empty());
+        assert!(!m[0].message.contains("fix:"), "{}", m[0].message);
     }
 
     #[test]
