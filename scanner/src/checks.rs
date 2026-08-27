@@ -1,4 +1,6 @@
 // lucidlint: ignore-file complexity the parity-locked AST walkers are single dispatch tables —
+// lucidlint: ignore-file boolean-arg Rust has no named arguments — the traversal's
+// positional in_call_func flag is the API contract, not an unnamed boolean
 // match-arm count is table size, not branching; keep NEW functions under cc 15
 
 //! The remaining standard-family checks, mirroring the Python implementation
@@ -1027,8 +1029,14 @@ fn store_target_writes(t: &Expr, candidates: &HashSet<&str>) -> bool {
 /// Does *e* WRITE to a candidate: a mutating method call on it, or a write
 /// nested anywhere inside (call args, subscripts, comprehensions, lambdas).
 fn expr_writes(e: &Expr, candidates: &HashSet<&str>) -> bool {
-    match e {
-        Expr::Call(c) => {
+    // the unified traversal descends every child; this closure only decides
+    // whether a CALL mutates a captured candidate (the receiver check)
+    let mut found = false;
+    walk_expr_deep(e, false, &mut |x, _| {
+        if found {
+            return;
+        }
+        if let Expr::Call(c) = x {
             if let Expr::Attribute(a) = c.func.as_ref() {
                 // receiver mutation: L.append(...) or writer.lines.append(...)
                 // — peel attribute chains to the base name before the
@@ -1040,7 +1048,7 @@ fn expr_writes(e: &Expr, candidates: &HashSet<&str>) -> bool {
                             Expr::Attribute(inner) => receiver = inner.value.as_ref(),
                             Expr::Name(n) => {
                                 if candidates.contains(n.id.as_str()) {
-                                    return true;
+                                    found = true;
                                 }
                                 break;
                             }
@@ -1049,51 +1057,9 @@ fn expr_writes(e: &Expr, candidates: &HashSet<&str>) -> bool {
                     }
                 }
             }
-            expr_writes(&c.func, candidates)
-                || c.arguments.args.iter().any(|x| expr_writes(x, candidates))
-                || c.arguments.keywords.iter().any(|k| expr_writes(&k.value, candidates))
         }
-        Expr::Attribute(a) => expr_writes(&a.value, candidates),
-        Expr::Subscript(s) => expr_writes(&s.value, candidates) || expr_writes(&s.slice, candidates),
-        Expr::BinOp(b) => expr_writes(&b.left, candidates) || expr_writes(&b.right, candidates),
-        Expr::BoolOp(b) => b.values.iter().any(|v| expr_writes(v, candidates)),
-        Expr::Compare(c) => {
-            expr_writes(&c.left, candidates) || c.comparators.iter().any(|v| expr_writes(v, candidates))
-        }
-        Expr::UnaryOp(u) => expr_writes(&u.operand, candidates),
-        Expr::Lambda(l) => expr_writes(&l.body, candidates),
-        Expr::If(i) => {
-            expr_writes(&i.test, candidates) || expr_writes(&i.body, candidates) || expr_writes(&i.orelse, candidates)
-        }
-        Expr::Named(n) => expr_writes(&n.value, candidates),
-        Expr::Await(a) => expr_writes(&a.value, candidates),
-        Expr::ListComp(l) => {
-            expr_writes(&l.elt, candidates)
-                || l.generators
-                    .iter()
-                    .any(|g| expr_writes(&g.iter, candidates) || g.ifs.iter().any(|c| expr_writes(c, candidates)))
-        }
-        Expr::SetComp(s) => {
-            expr_writes(&s.elt, candidates)
-                || s.generators
-                    .iter()
-                    .any(|g| expr_writes(&g.iter, candidates) || g.ifs.iter().any(|c| expr_writes(c, candidates)))
-        }
-        Expr::DictComp(d) => {
-            d.key.as_ref().is_some_and(|k| expr_writes(k, candidates))
-                || expr_writes(&d.value, candidates)
-                || d.generators
-                    .iter()
-                    .any(|g| expr_writes(&g.iter, candidates) || g.ifs.iter().any(|c| expr_writes(c, candidates)))
-        }
-        Expr::Generator(g) => {
-            expr_writes(&g.elt, candidates)
-                || g.generators
-                    .iter()
-                    .any(|gg| expr_writes(&gg.iter, candidates) || gg.ifs.iter().any(|c| expr_writes(c, candidates)))
-        }
-        _ => false,
-    }
+    });
+    found
 }
 
 /// The direct inner functions of *body*'s scope (control-flow nesting only —
@@ -1368,89 +1334,113 @@ fn const_int_index(e: &Expr) -> Option<usize> {
 ///
 /// Every expression reachable from *e*, INCLUDING comprehension internals
 /// (elt/key/value/ifs/iter) — the reads hidden inside comprehensions.
-fn all_exprs<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
-    out.push(e);
+///
+/// The ONE expression traversal — every child, including comprehension
+/// internals and call-func position (flagged so call-func receivers can be
+/// excluded). all_exprs / the receiver-read counter / expr_writes all
+/// descend through this; a new Expr variant is handled here once.
+fn walk_expr_deep<'a>(e: &'a Expr, in_call_func: bool, f: &mut impl FnMut(&'a Expr, bool)) {
+    f(e, in_call_func);
     match e {
         Expr::Call(c) => {
-            all_exprs(&c.func, out);
+            walk_expr_deep(&c.func, true, f);
             for a in &c.arguments.args {
-                all_exprs(a, out);
+                walk_expr_deep(a, false, f);
             }
             for k in &c.arguments.keywords {
-                all_exprs(&k.value, out);
+                walk_expr_deep(&k.value, false, f);
             }
         }
-        Expr::Attribute(a) => all_exprs(&a.value, out),
+        Expr::Attribute(a) => walk_expr_deep(&a.value, false, f),
         Expr::Subscript(s) => {
-            all_exprs(&s.value, out);
-            all_exprs(&s.slice, out);
+            walk_expr_deep(&s.value, false, f);
+            walk_expr_deep(&s.slice, false, f);
         }
         Expr::BinOp(b) => {
-            all_exprs(&b.left, out);
-            all_exprs(&b.right, out);
+            walk_expr_deep(&b.left, false, f);
+            walk_expr_deep(&b.right, false, f);
         }
         Expr::BoolOp(b) => {
             for v in &b.values {
-                all_exprs(v, out);
+                walk_expr_deep(v, false, f);
             }
         }
         Expr::Compare(c) => {
-            all_exprs(&c.left, out);
+            walk_expr_deep(&c.left, false, f);
             for o in &c.comparators {
-                all_exprs(o, out);
+                walk_expr_deep(o, false, f);
             }
         }
-        Expr::UnaryOp(u) => all_exprs(&u.operand, out),
-        Expr::Lambda(l) => all_exprs(&l.body, out),
+        Expr::UnaryOp(u) => walk_expr_deep(&u.operand, false, f),
+        Expr::Lambda(l) => walk_expr_deep(&l.body, false, f),
         Expr::If(i) => {
-            all_exprs(&i.test, out);
-            all_exprs(&i.body, out);
-            all_exprs(&i.orelse, out);
+            walk_expr_deep(&i.test, false, f);
+            walk_expr_deep(&i.body, false, f);
+            walk_expr_deep(&i.orelse, false, f);
         }
-        Expr::Named(n) => all_exprs(&n.value, out),
-        Expr::Await(a) => all_exprs(&a.value, out),
+        Expr::Named(n) => walk_expr_deep(&n.value, false, f),
+        Expr::Await(a) => walk_expr_deep(&a.value, false, f),
+        Expr::Starred(st) => walk_expr_deep(&st.value, false, f),
+        Expr::Tuple(t) => {
+            for el in &t.elts {
+                walk_expr_deep(el, false, f);
+            }
+        }
+        Expr::List(l) => {
+            for el in &l.elts {
+                walk_expr_deep(el, false, f);
+            }
+        }
+        Expr::Set(st) => {
+            for el in &st.elts {
+                walk_expr_deep(el, false, f);
+            }
+        }
         Expr::ListComp(l) => {
-            all_exprs(&l.elt, out);
+            walk_expr_deep(&l.elt, false, f);
             for g in &l.generators {
-                all_exprs(&g.iter, out);
+                walk_expr_deep(&g.iter, false, f);
                 for c in &g.ifs {
-                    all_exprs(c, out);
+                    walk_expr_deep(c, false, f);
                 }
             }
         }
         Expr::SetComp(sc) => {
-            all_exprs(&sc.elt, out);
+            walk_expr_deep(&sc.elt, false, f);
             for g in &sc.generators {
-                all_exprs(&g.iter, out);
+                walk_expr_deep(&g.iter, false, f);
                 for c in &g.ifs {
-                    all_exprs(c, out);
+                    walk_expr_deep(c, false, f);
                 }
             }
         }
         Expr::DictComp(d) => {
             if let Some(k) = &d.key {
-                all_exprs(k, out);
+                walk_expr_deep(k, false, f);
             }
-            all_exprs(&d.value, out);
+            walk_expr_deep(&d.value, false, f);
             for g in &d.generators {
-                all_exprs(&g.iter, out);
+                walk_expr_deep(&g.iter, false, f);
                 for c in &g.ifs {
-                    all_exprs(c, out);
+                    walk_expr_deep(c, false, f);
                 }
             }
         }
         Expr::Generator(g) => {
-            all_exprs(&g.elt, out);
+            walk_expr_deep(&g.elt, false, f);
             for gg in &g.generators {
-                all_exprs(&gg.iter, out);
+                walk_expr_deep(&gg.iter, false, f);
                 for c in &gg.ifs {
-                    all_exprs(c, out);
+                    walk_expr_deep(c, false, f);
                 }
             }
         }
-        Expr::Starred(st) => all_exprs(&st.value, out),
         _ => {}
     }
+}
+
+fn all_exprs<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    walk_expr_deep(e, false, &mut |x, _| out.push(x));
 }
 
 pub fn count_tuple_record_reads(
@@ -1541,7 +1531,7 @@ pub fn count_tuple_record_reads(
 }
 
 /// A dict built with same-arity tuple values, then read with constant
-/// integer indexes — an anonymous record. Name it (NamedTuple).
+/// integer indexes — an anonymous record; make it a class.
 pub fn tuple_record_findings(state: &mut ScanState, body: &[Stmt]) {
     let mut records: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
     // build sites at ANY scope (build()'s locals are records too) — walk
@@ -1638,7 +1628,7 @@ pub fn tuple_record_findings(state: &mut ScanState, body: &[Stmt]) {
                 kind: "tuple-record".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "the values of '{name}' are {arity}-tuples read {reads} times by constant index — an anonymous record; name it (NamedTuple)"
+                    "the values of '{name}' are {arity}-tuples read {reads} times by constant index — an anonymous record; make it a class (name it: lucidlint fix --kind tuple-record --name <N>) — fix: tuple-record"
                 ),
             });
         }
@@ -1837,92 +1827,18 @@ fn chain_root_name(e: &Expr) -> Option<&str> {
 /// are not field reads and do not count.
 fn count_receiver_reads(body: &[Stmt], counts: &mut std::collections::HashMap<String, usize>) {
     fn visit(e: &Expr, counts: &mut std::collections::HashMap<String, usize>) {
-        match e {
-            Expr::Call(c) => {
-                for a in &c.arguments.args {
-                    visit(a, counts);
+        walk_expr_deep(e, false, &mut |x, in_call_func| {
+            if let Expr::Attribute(a) = x {
+                if in_call_func {
+                    return; // method calls are not field reads
                 }
-                for k in &c.arguments.keywords {
-                    visit(&k.value, counts);
-                }
-            }
-            Expr::Attribute(a) => {
                 if let Some(base) = chain_root_name(&a.value) {
                     *counts.entry(base.to_string()).or_insert(0) += 1;
                 }
-                visit(&a.value, counts);
             }
-            Expr::Subscript(s) => {
-                visit(&s.value, counts);
-                visit(&s.slice, counts);
-            }
-            Expr::BinOp(b) => {
-                visit(&b.left, counts);
-                visit(&b.right, counts);
-            }
-            Expr::BoolOp(b) => {
-                for v in &b.values {
-                    visit(v, counts);
-                }
-            }
-            Expr::Compare(c) => {
-                visit(&c.left, counts);
-                for o in &c.comparators {
-                    visit(o, counts);
-                }
-            }
-            Expr::UnaryOp(u) => visit(&u.operand, counts),
-            Expr::Lambda(l) => visit(&l.body, counts),
-            Expr::If(i) => {
-                visit(&i.test, counts);
-                visit(&i.body, counts);
-                visit(&i.orelse, counts);
-            }
-            Expr::Named(n) => visit(&n.value, counts),
-            Expr::Await(a) => visit(&a.value, counts),
-            Expr::Starred(st) => visit(&st.value, counts),
-            Expr::ListComp(l) => {
-                visit(&l.elt, counts);
-                for g in &l.generators {
-                    visit(&g.iter, counts);
-                    for c in &g.ifs {
-                        visit(c, counts);
-                    }
-                }
-            }
-            Expr::SetComp(sc) => {
-                visit(&sc.elt, counts);
-                for g in &sc.generators {
-                    visit(&g.iter, counts);
-                    for c in &g.ifs {
-                        visit(c, counts);
-                    }
-                }
-            }
-            Expr::DictComp(d) => {
-                if let Some(k) = &d.key {
-                    visit(k, counts);
-                }
-                visit(&d.value, counts);
-                for g in &d.generators {
-                    visit(&g.iter, counts);
-                    for c in &g.ifs {
-                        visit(c, counts);
-                    }
-                }
-            }
-            Expr::Generator(g) => {
-                visit(&g.elt, counts);
-                for gg in &g.generators {
-                    visit(&gg.iter, counts);
-                    for c in &gg.ifs {
-                        visit(c, counts);
-                    }
-                }
-            }
-            _ => {}
-        }
+        });
     }
+
     let mut stack: Vec<&Stmt> = Vec::new();
     for s in body {
         stack.push(s);
@@ -2040,7 +1956,7 @@ pub fn feature_envy_findings(state: &mut ScanState, body: &[Stmt]) {
                     kind: "feature-envy".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "'{}' reads '{}' {} times vs its own state {} — feature envy: the logic belongs on the envied object; move the computation onto '{}' as a method",
+                        "'{}' reads '{}' {} times vs its own state {} — feature envy: the logic belongs on the envied object; move the computation onto '{}' as a method — fix: feature-envy",
                         f.name.as_str(),
                         receiver,
                         n,
@@ -2128,12 +2044,12 @@ pub fn undeclared_attribute_findings(state: &mut ScanState, body: &[Stmt]) {
                     let line = line_of(state.source, at.range().start());
                     let msg = if is_init {
                         format!(
-                            "'{}' assigns member '{attr}' in __init__ without a declaration — declare it: self.{attr}: <type> = ...",
+                            "'{}' assigns member '{attr}' in __init__ without a declaration — declare it: self.{attr}: <type> = ... — fix: undeclared-attribute",
                             c.name.as_str()
                         )
                     } else {
                         format!(
-                            "'{}' assigns member '{attr}' in '{}' without a declaration — declare it in __init__ (annotated) or the class body",
+                            "'{}' assigns member '{attr}' in '{}' without a declaration — declare it in __init__ (annotated) or the class body — fix: undeclared-attribute",
                             c.name.as_str(),
                             f.name.as_str()
                         )
@@ -2169,6 +2085,125 @@ fn slot_names(e: &Expr) -> Option<Vec<String>> {
         }
     }
     Some(names)
+}
+
+// ------------------------------------------------------------- latent-class
+// the size + duplication counterweights: a class too large to review, and
+// domain state duplicated across a containment edge.
+
+/// A class so large it strains review: 20 or more methods, or 12 or more
+/// methods over a 250-line span. A WARN — the split is only sound where the
+/// partition rule finds field-disjoint method groups; size alone never
+/// forces a bad split.
+pub fn god_class_findings(state: &mut ScanState, body: &[Stmt]) {
+    for s in body {
+        let Stmt::ClassDef(c) = s else { continue };
+        let methods = c.body.iter().filter(|m| matches!(m, Stmt::FunctionDef(_))).count();
+        if methods < 12 {
+            continue;
+        }
+        let span = line_of(state.source, c.range().end()).saturating_sub(line_of(state.source, c.range().start()));
+        let big = methods >= 20 || (methods >= 12 && span >= 250);
+        if !big {
+            continue;
+        }
+        let line = line_of(state.source, c.name.range().start());
+        state.findings.push(Finding {
+            file: state.file.to_string(),
+            line,
+            function: c.name.to_string(),
+            kind: "god-class".into(),
+            severity: "warn".into(),
+            message: format!(
+                "'{}' has {methods} methods over {span} lines — a large class; split it ONLY where the partition rule finds field-disjoint method groups (size alone is a review signal, not a split order)",
+                c.name.as_str()
+            ),
+        });
+    }
+}
+
+/// A class's field names (class-level annotated declarations + self.X
+/// assignments in __init__), with the annotation type where present.
+fn class_field_names(c: &StmtClassDef) -> Vec<(String, Option<String>)> {
+    let mut fields: Vec<(String, Option<String>)> = Vec::new();
+    for m in &c.body {
+        match m {
+            Stmt::AnnAssign(a) => {
+                if let Expr::Name(n) = a.target.as_ref() {
+                    let ty = annotation_base_name(a.annotation.as_ref()).map(|s| s.to_string());
+                    fields.push((n.id.to_string(), ty));
+                }
+            }
+            Stmt::FunctionDef(f) => {
+                if f.name.as_str() != "__init__" {
+                    continue;
+                }
+                for st in &f.body {
+                    if let Stmt::AnnAssign(a) = st {
+                        if let Expr::Attribute(at) = a.target.as_ref() {
+                            if matches!(at.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self") {
+                                let ty = annotation_base_name(a.annotation.as_ref()).map(|s| s.to_string());
+                                fields.push((at.attr.to_string(), ty));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    fields
+}
+
+/// The same domain state on a class and on a class it CONTAINS — the
+/// duplicate lives across a containment edge; one source of truth should
+/// own it.
+pub fn duplicate_field_findings(state: &mut ScanState, body: &[Stmt]) {
+    let classes: Vec<&StmtClassDef> = body
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::ClassDef(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+    for c in &classes {
+        let fields = class_field_names(c);
+        for ty in fields.iter().map(|(_, t)| t) {
+            let Some(ty) = ty else { continue };
+            let Some(contained) = classes.iter().find(|b| b.name.as_str() == ty.as_str()) else {
+                continue;
+            };
+            if std::ptr::eq(*c, *contained) {
+                continue;
+            }
+            // the shared field set across the containment edge — >=2 shared
+            // names is duplicated domain state (one generic name like `name`
+            // is coincidence)
+            let contained_fields = class_field_names(contained);
+            let shared: Vec<&str> = fields
+                .iter()
+                .filter(|(n, _)| contained_fields.iter().any(|(cn, _)| cn == n))
+                .map(|(n, _)| n.as_str())
+                .collect();
+            if shared.len() < 2 {
+                continue;
+            }
+            let line = line_of(state.source, c.name.range().start());
+            state.findings.push(Finding {
+                file: state.file.to_string(),
+                line,
+                function: c.name.to_string(),
+                kind: "duplicate-field".into(),
+                severity: "fail".into(),
+                message: format!(
+                    "'{}' and the '{}' it contains both hold {} — duplicated domain state across the containment edge; one source of truth should own it",
+                    c.name.as_str(),
+                    contained.name.as_str(),
+                    shared.join(", ")
+                ),
+            });
+        }
+    }
 }
 
 pub fn inner_function_count(fn_stmt: &Stmt) -> u32 {

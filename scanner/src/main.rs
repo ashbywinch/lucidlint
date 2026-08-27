@@ -964,6 +964,8 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     data_clump_findings(state, body);
     feature_envy_findings(state, body);
     undeclared_attribute_findings(state, body);
+    god_class_findings(state, body);
+    duplicate_field_findings(state, body);
     record_shape_findings(state, body, source);
     partition_findings(state, body, source);
     // review-log rules: shadowing hazards + duplicated work (all per-file)
@@ -2389,6 +2391,19 @@ mod tests {
     }
 
     #[test]
+    fn feature_envy_counts_reads_inside_tuple_assignments() {
+        // `em, vm = graph.em, graph.vm` — the tuple's elements are field
+        // reads too; a walker that stops at the Tuple would under-count to
+        // 2 and the rule would miss the envy
+        let f = scan_src(
+            "class R:\n    def render(self):\n        graph = self.graph\n        em, vm = graph.em, graph.vm\n        roots = [v for v in vm if v not in graph.vs_parent]\n        done = [v for v in vm if v not in graph.kids]\n        return roots, em, done\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "feature-envy").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("4 times"), "{}", r[0].message);
+    }
+
+    #[test]
     fn feature_envy_ignores_own_inputs_and_values() {
         // a visitor callback consuming its parameter and a computed value
         // (pos = self.get_metadata(...)) are NOT envy
@@ -2410,6 +2425,16 @@ mod tests {
     }
 
     #[test]
+    fn undeclared_attribute_message_carries_fix_directive() {
+        // the finding's message must name the automated fix (the engine's
+        // directive parser matches it)
+        let f = scan_src("class C:\n    def __init__(self):\n        self.x = 0\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
+        assert_eq!(r.len(), 1);
+        assert!(r[0].message.contains("— fix: undeclared-attribute"), "{}", r[0].message);
+    }
+
+    #[test]
     fn undeclared_attribute_accepts_declared_members() {
         // annotated in __init__ or the class body -> declared
         let f = scan_src(
@@ -2417,6 +2442,45 @@ mod tests {
         );
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
         assert_eq!(r.len(), 1, "{f:?}"); // only self.done
+    }
+
+    #[test]
+    fn god_class_fires_on_large_cohesive_class() {
+        // 20 methods over 400 lines — the size signal (a warn, not a split
+        // order: the partition rule decides whether a split is sound)
+        let mut src = String::from("class Big:\n");
+        for i in 0..20 {
+            src.push_str(&format!("    def m{i}(self):\n        return {i}\n"));
+        }
+        let f = scan_src(&src);
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "god-class").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert_eq!(r[0].severity, "warn");
+    }
+
+    #[test]
+    fn god_class_ignores_small_class() {
+        let f = scan_src("class Small:\n    def a(self):\n        return 1\n    def b(self):\n        return 2\n");
+        assert!(!f.iter().any(|x| x.kind == "god-class"), "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_field_fires_across_containment() {
+        // the request/options shape: the containing class and its contained
+        // class both hold repo+rel — duplicated domain state
+        let f = scan_src(
+            "@dataclass\nclass Inner:\n    repo: object\n    rel: object\n\n@dataclass\nclass Outer:\n    kind: str\n    repo: object\n    rel: object\n    inner: Inner\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-field").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("repo, rel"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn duplicate_field_ignores_unrelated_shared_names() {
+        // same field name on classes with NO containment edge — coincidence
+        let f = scan_src("class A:\n    name: str\n\nclass B:\n    name: str\n    count: int\n");
+        assert!(!f.iter().any(|x| x.kind == "duplicate-field"), "{f:?}");
     }
     #[test]
     fn duplicate_class_and_function_name_is_found() {

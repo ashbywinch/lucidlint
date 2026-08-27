@@ -21,6 +21,8 @@ pub const FAMILY_KINDS: &[&str] = &[
     "data-clump",
     "feature-envy",
     "undeclared-attribute",
+    "god-class",
+    "duplicate-field",
     "module-cohesion",
     "record-shape",
     "detached-method",
@@ -105,11 +107,27 @@ pub const FAMILY_VARIANTS: &[(&str, &[&str])] = &[
             "strewing",
             "misplaced-method",
             "assembly-class",
+            "tuple-record",
             "data-clump",
             "feature-envy",
+            "god-class",
+            "duplicate-field",
         ],
     ),
     ("docs", &["docs-link", "docs-undiscoverable"]),
+];
+
+/// Kinds whose fix needs a name the tool cannot invent
+/// (--name/--fix-name): the LSP marks its code action
+/// `needsName` from this table; the CLI refuses a missing or
+/// invalid name with an explicit message.
+pub const NAME_REQUIRED_KINDS: &[&str] = &[
+    "complexity",
+    "long-param-list",
+    "tuple-record",
+    "feature-envy",
+    "magic-number",
+    "vague-name",
 ];
 
 /// kind -> display bucket — the lookup table final_kind scans.
@@ -124,10 +142,12 @@ pub const DISPLAY_BUCKETS: &[(&str, &str)] = &[
     ("strewing", "latent-class"),
     ("misplaced-method", "latent-class"),
     ("assembly-class", "latent-class"),
-    ("tuple-record", "record-shape"),
+    ("tuple-record", "latent-class"),
     ("data-clump", "latent-class"),
     ("feature-envy", "latent-class"),
     ("undeclared-attribute", "undeclared-attribute"),
+    ("god-class", "latent-class"),
+    ("duplicate-field", "latent-class"),
     ("module-cohesion", "module-cohesion"),
     ("record-shape", "record-shape"),
     ("detached-method", "detached-method"),
@@ -202,8 +222,10 @@ pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {
                 "data-clump",
                 "detached-method",
                 "duplicate",
+                "duplicate-field",
                 "feature-envy",
                 "folder-mix",
+                "god-class",
                 "high-risk",
                 "hotspot",
                 "hub-file",

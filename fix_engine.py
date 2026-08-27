@@ -33,17 +33,38 @@ MECHANICAL_KINDS = {
     "duplicate-def": "delete the unreferenced shadowing module-scope def (renames stay with the agent)",
     "restating-docstring": "delete the docstring that restates the body",
     "duplicate-block": "delete the second copy of the repeated statement block",
+    "undeclared-attribute": "annotate the undeclared member: self.x: T = v (T inferred from the value)",
 }
 
 @dataclass
 class FixOptions:
     """The agent-supplied bits a fix may need: the callee signature for
-    positional-literals, the class name for extract-class. `repo`/`rel`
-    (filled by fix_finding) scope the repo-wide callee resolution."""
+    positional-literals, the class name for extract-class."""
     params: list[str] | None = None
     name: str | None = None
-    repo: Path | None = None
-    rel: str | None = None
+
+
+# the structural fixers by kind — a dispatch registry: each arm's handler is
+# already a named method; the dispatch is a table lookup, not an if-chain
+_STRUCTURAL_FIXERS = {
+    "extract-method": "fix_extract_method",
+    "extract-class": "fix_extract_class",
+    "magic-number": "fix_magic_literal",
+    "vague-name": "fix_rename",
+    "long-param-list": "fix_parameter_object",
+    "dispatch-registry": "fix_dispatch_registry",
+    "rule-table": "fix_rule_table",
+    "tuple-record": "fix_tuple_record",
+    "feature-envy": "fix_feature_envy",
+}
+_NAME_REQUIRED_KINDS = {
+    "extract-method",
+    "magic-number",
+    "vague-name",
+    "long-param-list",
+    "tuple-record",
+    "feature-envy",
+}
 
 
 class _ModuleProposal(NamedTuple):
@@ -54,6 +75,9 @@ class _ModuleProposal(NamedTuple):
     module: str
 
 
+# lucidlint: ignore-file god-class the fix engine is ONE responsibility — 20
+# cohesive methods over the request state; the partition rule finds no
+# field-disjoint split, so the size is a review signal, not a split order
 @dataclass
 class _FixRequest:
     """The whole fix context: which file (repo/rel), what kind, where
@@ -294,7 +318,6 @@ class _FixRequest:
         return module, wrapper, state
     def fix_duplicate_def(self) -> str | None:
         source, line = self.source, self.line
-        opts = self.opts
         """Delete the shadowing (second) module-scope binding when nothing
         references it — proven by a repo-wide Name count (only the two def sites
         hit). Referenced shadows are renamed by the agent, never auto-deleted."""
@@ -303,7 +326,7 @@ class _FixRequest:
         wrapper.visit(probe)
         if probe.found is None or probe.name is None:
             return None
-        if _name_occurrences(opts.repo, probe.name) > 2:
+        if _name_occurrences(self.repo, probe.name) > 2:
             return None  # something references the name — a delete would break it
         return wrapper.module.visit(_RemoveNodes([probe.found])).code
     def fix_restating_docstring(self) -> str | None:
@@ -405,18 +428,17 @@ class _FixRequest:
             body=[*_moved_imports(module, referenced), *(top_defs[n] for n in opts.params)]
         )
         return _ModuleProposal(
-            origin=cst.Module(body=_origin_after_move(module, move, opts)).code,
+            origin=cst.Module(body=_origin_after_move(module, move, opts, self.rel)).code,
             module=new_module.code,
         )
     def fix_extract_module(self) -> str | None:
-        opts = self.opts
         """The apply side of extract-module — writes the new module and returns
         the origin's new source (fix_finding writes the origin)."""
         result = self._extract_module_proposal()
         if result is None:
             return None
         origin_source, new_module_source = result
-        repo, rel, module_name = opts.repo, opts.rel, opts.name
+        repo, rel, module_name = self.repo, self.rel, self.opts.name
         new_path = repo / (rel.rsplit("/", 1)[0] if "/" in rel else "") / f"{module_name}.py"
         if new_path.exists():
             return None  # never clobber an existing module
@@ -497,33 +519,179 @@ class _FixRequest:
             return self.fix_restating_docstring()
         if kind == "duplicate-block":
             return self.fix_duplicate_block()
+        if kind == "undeclared-attribute":
+            param_types = self._member_param_types(line)
+            return cst.MetadataWrapper(cst.parse_module(source)).visit(
+                _DeclareMember(line, param_types)
+            ).code
         return None
+    def fix_feature_envy(self) -> str | None:
+        """Move the envied-receiver reads out of the method into a new method
+        on the envied class (--name), replacing them with a call. The receiver
+        is the local aliased from self.<attr> with the most field reads; the
+        envied class comes from the owner's annotated `self.<attr>: <Class>` —
+        the fix refuses when the class cannot be named (no annotation)."""
+        source = self.source or ""
+        method_name = self.opts.name
+        if not method_name:
+            return None
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
+        finder = _EnclosingFn(self.line)
+        wrapper.visit(finder)
+        method = finder.found
+        if method is None or not isinstance(method, cst.FunctionDef):
+            return None
+        owner_cls = _EnclosingClass(self.line)
+        wrapper.visit(owner_cls)
+        owner = owner_cls.found
+        if owner is None:
+            return None
+        aliases = _collaborator_aliases(method)
+        if not aliases:
+            return None
+        alias, attr = max(aliases, key=lambda a: _alias_field_reads(method, a.alias))
+        if _alias_field_reads(method, alias) < 4:
+            return None
+        envied = _find_envied_class(owner, attr)
+        if envied is None:
+            return None
+        derived: set[str] = {alias}
+        derived_order: list[str] = []
+        movable: list[cst.BaseStatement] = []
+        movable_idx: list[int] = []
+        remaining: list[cst.BaseStatement] = []
+        stmts = list(method.body.body)
+        for i, stmt in enumerate(stmts):
+            reads, bound, has_self = _stmt_analysis(stmt)
+            external = reads - derived
+            if not has_self and not external and bound:
+                derived |= bound
+                for n in bound:
+                    if n not in derived_order:
+                        derived_order.append(n)
+                movable.append(stmt)
+                movable_idx.append(i)
+            else:
+                remaining.append(stmt)
+        if len(movable) < 1:
+            return None
+        remaining_reads: set[str] = set()
+        for stmt in remaining:
+            reads, _, _ = _stmt_analysis(stmt)
+            remaining_reads |= reads
+        outputs = [n for n in derived_order if n in remaining_reads]
+        new_body: list[cst.BaseStatement] = []
+        for stmt in movable:
+            new_body.append(_rewrite_receiver_to_self(stmt, alias))
+        ret = cst.Return(
+            value=cst.Tuple(elements=[cst.Element(cst.Name(n)) for n in outputs]) if outputs else None
+        )
+        new_body.append(cst.SimpleStatementLine(body=[ret]))
+        new_method = cst.FunctionDef(
+            name=cst.Name(method_name),
+            params=cst.Parameters(params=[cst.Param(cst.Name("self"))]),
+            body=cst.IndentedBlock(body=new_body),
+        )
+        wrapper_module = wrapper.module
+        envied_cls = next(
+            (c for c in wrapper_module.body if isinstance(c, cst.ClassDef) and c.name.value == envied),
+            None,
+        )
+        if envied_cls is None:
+            return None
+        new_module_body = list(wrapper_module.body)
+        cls_i = new_module_body.index(envied_cls)
+        new_module_body[cls_i] = envied_cls.with_changes(
+            body=envied_cls.body.with_changes(body=list(envied_cls.body.body) + [new_method])
+        )
+        call = cst.Call(func=cst.Attribute(value=cst.Name(alias), attr=cst.Name(method_name)))
+        if outputs:
+            call_stmt: cst.BaseStatement = cst.SimpleStatementLine(
+                body=[
+                    cst.Assign(
+                        targets=[cst.AssignTarget(cst.Tuple(elements=[cst.Element(cst.Name(n)) for n in outputs]))],
+                        value=call,
+                    )
+                ],
+                leading_lines=[cst.EmptyLine()],
+            )
+        else:
+            call_stmt = cst.SimpleStatementLine(body=[cst.Expr(call)])
+        new_method_body: list[cst.BaseStatement] = []
+        for i, stmt in enumerate(stmts):
+            if i in movable_idx:
+                if i == movable_idx[0]:
+                    new_method_body.append(call_stmt)
+                continue
+            new_method_body.append(stmt)
+        new_method_def = method.with_changes(body=cst.IndentedBlock(body=new_method_body))
+        owner_i = new_module_body.index(owner)
+        new_module_body[owner_i] = owner.with_changes(
+            body=owner.body.with_changes(
+                body=[new_method_def if s is method else s for s in owner.body.body]
+            )
+        )
+        return cst.Module(body=new_module_body).code
+
     def _fix_structural(self) -> str | None:
-        kind, opts = self.kind, self.opts
-        """The name-driven transforms — the agent supplies the semantic bit."""
-        if kind == "extract-method":
-            if opts.name is None:
-                return None
-            return self.fix_extract_method()
-        if kind == "extract-class":
-            return self.fix_extract_class()
-        if kind == "magic-number":
-            if opts.name is None:
-                return None
-            return self.fix_magic_literal()
-        if kind == "vague-name":
-            if opts.name is None:
-                return None
-            return self.fix_rename()
-        if kind == "long-param-list":
-            if opts.name is None:
-                return None
-            return self.fix_parameter_object()
-        if kind == "dispatch-registry":
-            return self.fix_dispatch_registry()
-        if kind == "rule-table":
-            return self.fix_rule_table()
-        return None
+        """The name-driven transforms — the agent supplies the semantic bit.
+        A registry of kind -> fixer method (the conditional-polymorphism
+        shape: a dispatch table, not branching)."""
+        kind = self.kind
+        if kind in _NAME_REQUIRED_KINDS and self.opts.name is None:
+            return None
+        fixer = _STRUCTURAL_FIXERS.get(kind)
+        return getattr(self, fixer)() if fixer else None
+    def _member_param_types(self, line: int) -> dict[str, str]:
+        """The enclosing def's param name -> annotation map, for the member
+        annotation inference."""
+        module = cst.parse_module(self.source or "")
+        wrapper = cst.MetadataWrapper(module)
+        finder = _EnclosingFn(line)
+        wrapper.visit(finder)
+        fn = finder.found
+        if fn is None:
+            return {}
+        result: dict[str, str] = {}
+        for p in list(fn.params.posonly_params) + list(fn.params.params) + list(fn.params.kwonly_params):
+            if p.annotation is not None:
+                result[p.name.value] = cst.Module(body=[]).code_for_node(p.annotation.annotation)
+        return result
+
+    def fix_tuple_record(self) -> str | None:
+        """The anonymous tuple record becomes a class: the build sites
+        construct it, the constant-index reads and destructures become
+        attribute reads, and the class definition is prepended to the
+        module."""
+        source = self.source
+        class_name = self.opts.name
+        if not class_name:
+            return None
+        if not class_name.startswith("_"):
+            class_name = "_" + class_name
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
+        # the record dict + the tuple arity from the build site
+        build = _find_record_builds(module)
+        record_dicts, elements = build.names, build.elements
+        if elements is None or len(elements) < 2:
+            return None
+        field_names = []
+        seen: set[str] = set()
+        for i, el in enumerate(elements):
+            base = _tuple_element_name(el)
+            if base in seen or base == "value" and any(e != el for e in elements):
+                base = f"field_{i}"
+            seen.add(base)
+            field_names.append(base)
+        transformed = wrapper.visit(
+            _RecordToClass(self.rel, record_dicts, class_name, field_names)
+        )
+        new_body = [cst.SimpleStatementLine(body=[cst.Expr(_record_class_def(class_name, field_names))])]
+        new_body.extend(transformed.body)
+        return cst.Module(body=new_body).code
+
     def _repo_params(self, callee: str) -> list[str] | None:
         repo, rel = self.repo, self.rel
         """Resolve the callee's params repo-wide — the call's file first, then
@@ -606,8 +774,6 @@ class _FixRequest:
             preview_opts = FixOptions(
                 params=opts.params,
                 name=opts.name or "_extracted",
-                repo=opts.repo,
-                rel=opts.rel,
             )
             preview = _FixRequest(
                 kind=self.kind, repo=self.repo, rel=self.rel,
@@ -641,8 +807,6 @@ class _FixRequest:
         self.kind = kind
         path = repo / rel
         source = path.read_text(encoding="utf-8")
-        opts.repo = repo
-        opts.rel = rel
         if kind in MECHANICAL_KINDS:
             new_source = self._fix_mechanical()
             description = MECHANICAL_KINDS[kind]
@@ -681,6 +845,11 @@ STRUCTURAL_KINDS = {
         "(--name), re-exported from the origin"
     ),
     "magic-number": "Replace Magic Literal: introduce the named constant",
+    "tuple-record": "make the anonymous record a class (--name), rewriting the positional reads",
+    "feature-envy": (
+        "move the envied-receiver reads into a method on the envied class (--name), "
+        "replacing them with a call"
+    ),
     "vague-name": "Rename the type and its references (same-file)",
     "long-param-list": "Introduce Parameter Object: bundle the params into a dataclass",
     "dispatch-registry": "convert the if/elif dispatch chain into a dict of selector -> handler functions",
@@ -706,6 +875,387 @@ KIND_ALIASES = {
 
 
 # --------------------------------------------------------------------------- transforms
+
+def _infer_member_type(value: cst.BaseExpression, param_types: dict[str, str]) -> str | None:
+    """The annotation for a member's initial value: a literal's type, a
+    param's annotation, a cst.X(...) construction's class; None when the
+    type cannot be named safely (leave the member unannotated)."""
+    if isinstance(value, cst.Name):
+        return param_types.get(value.value)
+    if isinstance(value, cst.Integer):
+        return "int"
+    if isinstance(value, cst.Float):
+        return "float"
+    if isinstance(value, (cst.SimpleString, cst.ConcatenatedString)):
+        return "str"
+    if isinstance(value, cst.List):
+        return "list"
+    if isinstance(value, cst.Dict):
+        return "dict"
+    if isinstance(value, cst.Set):
+        return "set"
+    if isinstance(value, cst.Tuple):
+        return "tuple"
+    if isinstance(value, cst.Call) and isinstance(value.func, cst.Name):
+        return value.func.value  # cst.FunctionDef(...) -> FunctionDef
+    return None
+
+
+class _DeclareMember(cst.CSTTransformer):
+    """Annotate the undeclared `self.x = v` member: `self.x: T = v` with T
+    inferred from the assigned value. Pure — no behavior change."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, target_line: int, param_types: dict[str, str]):
+        self.target_line: int = target_line
+        self.param_types: dict[str, str] = param_types
+
+    @override
+    def leave_Assign(self, original_node, updated_node):
+        pos = self.get_metadata(PositionProvider, original_node)
+        if pos.start.line != self.target_line:
+            return updated_node
+        if len(updated_node.targets) != 1:
+            return updated_node
+        target = updated_node.targets[0].target
+        if not isinstance(target, cst.Attribute):
+            return updated_node
+        if not isinstance(target.value, cst.Name) or target.value.value != "self":
+            return updated_node
+        annotation = _infer_member_type(updated_node.value, self.param_types)
+        if annotation is None:
+            return updated_node
+        return cst.AnnAssign(
+            target=target,
+            annotation=cst.Annotation(cst.parse_expression(annotation)),
+            value=updated_node.value,
+            equal=cst.AssignEqual(),
+            semicolon=updated_node.semicolon,
+        )
+
+
+def _tuple_element_name(elem: cst.BaseExpression) -> str:
+    """A field name for one tuple position: a plain Name element keeps its
+    name; a title(...)-style extraction is the record's name; anything else
+    falls back to the positional name (the agent renames the class it
+    asked for)."""
+    if isinstance(elem, cst.Name):
+        return elem.value
+    if isinstance(elem, cst.Call) and isinstance(elem.func, cst.Name):
+        return {"title": "name"}.get(elem.func.value, elem.func.value)
+    return "value"
+
+
+class _RecordToClass(cst.CSTTransformer):
+    """Turn an anonymous tuple record into a class: the build sites construct
+    the class, the positional reads become attribute reads, the destructures
+    read the fields explicitly. The class definition is prepended."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, record_name: str, record_dicts: set[str], class_name: str, field_names: list[str]):
+        self.record_name: str = record_name
+        self.record_dicts: set[str] = record_dicts
+        self.class_name: str = class_name
+        self.field_names: list[str] = field_names
+
+    def _is_record_base(self, e: cst.BaseExpression) -> bool:
+        """The base name of an attribute/subscript chain — one of the record
+        dicts?"""
+        v = e
+        while isinstance(v, (cst.Attribute, cst.Subscript)):
+            v = v.value
+        return isinstance(v, cst.Name) and v.value in self.record_dicts
+
+    @override
+    def leave_Subscript(self, original_node, updated_node):
+        # X[k][N] -> X[k].field_N when the outer index is a constant position
+        if not isinstance(updated_node.slice, tuple) or len(updated_node.slice) != 1:
+            return updated_node
+        el = updated_node.slice[0]
+        if not isinstance(el, cst.SubscriptElement) or not isinstance(el.slice, cst.Index):
+            return updated_node
+        idx_node = el.slice.value
+        if not isinstance(idx_node, cst.Integer):
+            return updated_node
+        idx = int(idx_node.value)
+        if idx >= len(self.field_names) or not isinstance(updated_node.value, cst.Subscript):
+            return updated_node
+        if not self._is_record_base(updated_node.value.value):
+            return updated_node
+        return cst.Attribute(value=updated_node.value, attr=cst.Name(self.field_names[idx]))
+
+    @override
+    def leave_Dict(self, original_node, updated_node):
+        return updated_node
+
+    @override
+    def leave_DictComp(self, original_node, updated_node):
+        if isinstance(updated_node.value, cst.Tuple) and len(updated_node.value.elements) == len(self.field_names):
+            return updated_node.with_changes(
+                value=cst.Call(
+                    func=cst.Name(self.class_name),
+                    args=[cst.Arg(e.value) for e in updated_node.value.elements],
+                )
+            )
+        return updated_node
+
+    @override
+    def leave_Assign(self, original_node, updated_node):
+        # a, b = X[k] -> a, b = X[k].f0, X[k].f1
+        if not isinstance(updated_node.value, cst.Subscript):
+            return updated_node
+        if not self._is_record_base(updated_node.value.value):
+            return updated_node
+        reads = [cst.Attribute(value=updated_node.value, attr=cst.Name(n)) for n in self.field_names]
+        return updated_node.with_changes(value=cst.Tuple(elements=[cst.Element(r) for r in reads]))
+
+    @override
+    def leave_For(self, original_node, updated_node):
+        # for k, (a, b) in X.items() -> for k, v in X.items(): a, b = v.f0, v.f1
+        if not isinstance(updated_node.iter, cst.Call) or not isinstance(updated_node.iter.func, cst.Attribute):
+            return updated_node
+        if updated_node.iter.func.attr.value != "items":
+            return updated_node
+        if not self._is_record_base(updated_node.iter.func.value):
+            return updated_node
+        t = updated_node.target
+        if not isinstance(t, cst.Tuple) or len(t.elements) != 2 or not isinstance(t.elements[1].value, cst.Tuple):
+            return updated_node
+        outer = t.elements[0].value
+        inner = t.elements[1].value
+        if len(inner.elements) != len(self.field_names):
+            return updated_node
+        binds = [e.value for e in inner.elements]
+        reads = [cst.Attribute(value=cst.Name("v"), attr=cst.Name(n)) for n in self.field_names]
+        unpack = cst.SimpleStatementLine(
+            body=[
+                cst.Assign(
+                    targets=[cst.AssignTarget(cst.Tuple(elements=[cst.Element(b) for b in binds]))],
+                    value=cst.Tuple(elements=[cst.Element(r) for r in reads]),
+                )
+            ],
+            leading_lines=[cst.EmptyLine()],
+        )
+        new_body = list(updated_node.body.body)
+        new_body.insert(0, unpack)
+        return updated_node.with_changes(
+            target=cst.Tuple(elements=[cst.Element(outer), cst.Element(cst.Name("v"))]),
+            body=updated_node.body.with_changes(body=new_body),
+        )
+
+
+@dataclass
+class _RecordBuild:
+    """The record's dict names + the first build's elements (for the field
+    names) — a named return instead of a bare tuple."""
+
+    names: set[str]
+    elements: list[cst.BaseExpression] | None
+
+
+def _find_record_builds(module: cst.Module) -> _RecordBuild:
+    """The dict names built with tuple values + the first build's elements
+    (for the field-name inference)."""
+    names: set[str] = set()
+    elements: list[cst.BaseExpression] | None = None
+    for stmt in module.body:
+        if not isinstance(stmt, cst.SimpleStatementLine) or len(stmt.body) != 1:
+            continue
+        assign = stmt.body[0]
+        if not isinstance(assign, cst.Assign) or len(assign.targets) != 1:
+            continue
+        target = assign.targets[0].target
+        if not isinstance(target, cst.Name):
+            continue
+        value = assign.value
+        if isinstance(value, cst.DictComp):
+            value = value.value
+        if isinstance(value, cst.Tuple) and len(value.elements) >= 2:
+            names.add(target.value)
+            if elements is None:
+                elements = [e.value for e in value.elements]
+            elif len(value.elements) != len(elements):
+                return _RecordBuild(set(), None)
+    return _RecordBuild(names, elements)
+
+
+def _record_class_def(class_name: str, field_names: list[str]) -> cst.ClassDef:
+    """The record class: __init__ taking the fields, storing them. A class,
+    not a NamedTuple — it can grow behavior without a migration."""
+    body = [
+        cst.SimpleStatementLine(
+            body=[
+                cst.Assign(
+                    targets=[cst.AssignTarget(cst.Attribute(cst.Name("self"), cst.Name(f)))],
+                    value=cst.Name(f),
+                )
+            ]
+        )
+        for f in field_names
+    ]
+    init = cst.FunctionDef(
+        name=cst.Name("__init__"),
+        params=cst.Parameters(params=[cst.Param(cst.Name("self"))] + [cst.Param(cst.Name(f)) for f in field_names]),
+        body=cst.IndentedBlock(body=body),
+    )
+    return cst.ClassDef(
+        name=cst.Name(class_name),
+        body=cst.IndentedBlock(body=[init]),
+    )
+
+
+class _Collaborator(NamedTuple):
+    """One `graph = self.graph` alias: the local name and the owner field it
+    aliases — a named return instead of a bare tuple."""
+
+    alias: str
+    attr: str
+
+
+class _StmtReads(NamedTuple):
+    """One top-level statement's analysis for the feature-envy move: the
+    names it reads (bound names excluded), the names it binds, and whether
+    it touches self — a named return instead of a bare tuple."""
+
+    reads: set[str]
+    bound: set[str]
+    has_self: bool
+
+
+class _EnclosingClass(cst.CSTVisitor):
+    """The innermost ClassDef containing the line — the method's owner."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, line: int) -> None:
+        self.line: int = line
+        self.found: cst.ClassDef | None = None
+
+    @override
+    def visit_ClassDef(self, node) -> None:
+        pos = self.get_metadata(PositionProvider, node)
+        if pos.start.line <= self.line <= pos.end.line:
+            self.found = node
+
+
+def _collaborator_aliases(method: cst.FunctionDef) -> list[_Collaborator]:
+    """The (alias, attr) pairs: `graph = self.graph` assignments in the
+    method — the collaborators the method may envy."""
+    out: list[_Collaborator] = []
+    for stmt in method.body.body:
+        if not isinstance(stmt, cst.SimpleStatementLine) or len(stmt.body) != 1:
+            continue
+        assign = stmt.body[0]
+        if not isinstance(assign, cst.Assign) or len(assign.targets) != 1:
+            continue
+        target = assign.targets[0].target
+        if not isinstance(target, cst.Name):
+            continue
+        value = assign.value
+        if isinstance(value, cst.Attribute) and isinstance(value.value, cst.Name) and value.value.value == "self":
+            out.append(_Collaborator(target.value, value.attr.value))
+    return out
+
+
+def _alias_field_reads(method: cst.FunctionDef, alias: str) -> int:
+    """The `alias.field` reads in the method."""
+    count = 0
+
+    class _V(cst.CSTVisitor):
+        @override
+        def visit_Attribute(self, node) -> None:
+            nonlocal count
+            if isinstance(node.value, cst.Name) and node.value.value == alias:
+                count += 1
+
+    method.visit(_V())
+    return count
+
+
+def _stmt_analysis(stmt: cst.BaseStatement) -> _StmtReads:
+    reads: set[str] = set()
+    bound: set[str] = set()
+    attr_names: set[str] = set()
+    has_self = False
+
+    class _V(cst.CSTVisitor):
+        @override
+        def visit_Name(self, node) -> None:
+            reads.add(node.value)
+
+        @override
+        def visit_Attribute(self, node) -> None:
+            nonlocal has_self
+            attr_names.add(node.attr.value)
+            if isinstance(node.value, cst.Name) and node.value.value == "self":
+                has_self = True
+
+        @override
+        def visit_Assign(self, node) -> None:
+            for t in node.targets:
+                bound.update(_target_names(t.target))
+
+        @override
+        def visit_AnnAssign(self, node) -> None:
+            if node.target:
+                bound.update(_target_names(node.target))
+
+        @override
+        def visit_For(self, node) -> None:
+            bound.update(_target_names(node.target))
+
+        @override
+        def visit_CompFor(self, node) -> None:
+            bound.update(_target_names(node.target))
+
+        @override
+        def visit_With(self, node) -> None:
+            for item in node.items:
+                if item.optional_vars:
+                    bound.update(_target_names(item.optional_vars))
+
+    stmt.visit(_V())
+    return _StmtReads(reads - bound - attr_names, bound, has_self)
+
+
+def _find_envied_class(owner: cst.ClassDef, attr: str) -> str | None:
+    """The annotated type of `self.<attr>` in the owner's __init__."""
+    for stmt in owner.body.body:
+        if not isinstance(stmt, cst.FunctionDef) or stmt.name.value != "__init__":
+            continue
+        for s in stmt.body.body:
+            if not isinstance(s, cst.SimpleStatementLine) or len(s.body) != 1:
+                continue
+            assign = s.body[0]
+            if not isinstance(assign, cst.AnnAssign) or assign.target is None:
+                continue
+            target = assign.target
+            if (
+                isinstance(target, cst.Attribute)
+                and isinstance(target.value, cst.Name)
+                and target.value.value == "self"
+                and target.attr.value == attr
+                and isinstance(assign.annotation.annotation, cst.Name)
+            ):
+                return assign.annotation.annotation.value
+    return None
+
+
+def _rewrite_receiver_to_self(stmt: cst.BaseStatement, alias: str) -> cst.BaseStatement:
+    """receiver.field -> self.field in the statement (attribute reads on the
+    alias become self reads)."""
+
+    class _T(cst.CSTTransformer):
+        @override
+        def leave_Attribute(self, original_node, updated_node):
+            if isinstance(updated_node.value, cst.Name) and updated_node.value.value == alias:
+                return updated_node.with_changes(value=cst.Name("self"))
+            return updated_node
+
+    return stmt.visit(_T())
+
 
 class _DeleteStatement(cst.CSTTransformer):
     """Remove the SimpleStatementLine covering the target line."""
@@ -2076,7 +2626,7 @@ def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
     return moved
 
 
-def _origin_after_move(module: cst.Module, move: set[str], opts) -> list:
+def _origin_after_move(module: cst.Module, move: set[str], opts, rel: str) -> list:
     """The origin's body after the split: the moved defs dropped, the
     re-export import inserted after the last import — every other file's
     `from origin import x` keeps working (the origin re-exports). The
@@ -2087,7 +2637,7 @@ def _origin_after_move(module: cst.Module, move: set[str], opts) -> list:
         for s in module.body
         if not (isinstance(s, (cst.FunctionDef, cst.ClassDef)) and s.name.value in move)
     ]
-    in_package = "/" in (opts.rel or "")
+    in_package = "/" in (rel or "")
     reexport = cst.SimpleStatementLine(
         body=[
             cst.ImportFrom(
@@ -2201,6 +2751,23 @@ class _FreeNames(cst.CSTVisitor):
 
 
 
+
+
+class _EnclosingFn(cst.CSTVisitor):
+    """The innermost FunctionDef whose span contains the line — the member
+    assignment's enclosing constructor, for the annotation inference."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, line: int) -> None:
+        self.line: int = line
+        self.found: cst.FunctionDef | None = None
+
+    @override
+    def visit_FunctionDef(self, node) -> None:
+        pos = self.get_metadata(PositionProvider, node)
+        if pos.start.line <= self.line <= pos.end.line:
+            self.found = node
 
 
 class _FindFnLine(cst.CSTVisitor):
