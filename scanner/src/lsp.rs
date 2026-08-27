@@ -31,22 +31,68 @@ fn severity_of(f: &Finding) -> i64 {
 /// complexity diagnostic for functions at/above the gate threshold. The
 /// repo config's silencing rules (global + per-path ignores) are applied
 /// here so the LSP agrees with the gate.
+/// One finding as an LSP diagnostic: gate severity, the full fix command in
+/// the message so the client can show how to fix it.
+fn finding_diag(f: &Finding, source: &str) -> serde_json::Value {
+    let line = f.line.saturating_sub(1); // LSP lines are 0-based
+    let line_len = source.lines().nth(line).map(str::len).unwrap_or(0);
+    serde_json::json!({
+        "range": {
+            "start": {"line": line, "character": 0},
+            "end": {"line": line, "character": line_len},
+        },
+        "severity": severity_of(f),
+        "source": "lucidlint",
+        "message": crate::common::full_fix_command(&f.file, f.line, &f.message),
+    })
+}
+
+/// The finding's `— fix: <directive>` tail, if any — the exact argument
+/// sequence the client runs after `lucidlint fix` (`long-param-list
+/// --fix-name <Options>` keeps its flags). Findings without a directive are
+/// not auto-fixable.
+fn fix_directive_from_message(message: &str) -> Option<&str> {
+    message.rsplit_once("— fix: ").map(|(_, directive)| directive.trim())
+}
+
+/// The fixer kind: the directive's first token (the flags stay out of the
+/// code-action title).
+fn fix_kind_from_directive(directive: &str) -> &str {
+    directive.split_whitespace().next().unwrap_or(directive)
+}
+
+/// The directive as runnable CLI ARGV tokens: `--fix-name` maps to the
+/// parser's actual `--name` flag (the same mapping full_fix_command applies
+/// to the expanded message), so a client can execute the tokens without
+/// shell-joining. Placeholder names (`<Options>`) stay verbatim — the CLI
+/// refuses them with an explicit message; capable clients prompt and
+/// substitute.
+fn directive_tokens(directive: &str) -> Vec<String> {
+    let mut toks: Vec<String> = Vec::new();
+    let mut prev_flag = false;
+    for t in directive.split_whitespace() {
+        if prev_flag {
+            // the slot after --fix-name travels under --name
+            toks.push(t.to_string());
+            prev_flag = false;
+            continue;
+        }
+        if t == "--fix-name" {
+            toks.push("--name".to_string());
+            prev_flag = true;
+            continue;
+        }
+        toks.push(t.to_string());
+    }
+    toks
+}
+
 pub fn diagnostics_for(scan: &FileScan, source: &str, filter: Option<(&LucidConfig, &str)>) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     for f in scan.findings.iter().filter(|f| {
         f.kind != "duplicate" && f.kind != "unused" && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored(&f.kind, rel))
     }) {
-        let line = f.line.saturating_sub(1); // LSP lines are 0-based
-        let line_len = source.lines().nth(line).map(str::len).unwrap_or(0);
-        out.push(serde_json::json!({
-            "range": {
-                "start": {"line": line, "character": 0},
-                "end": {"line": line, "character": line_len},
-            },
-            "severity": severity_of(f),
-            "source": "lucidlint",
-            "message": crate::common::full_fix_command(&f.file, f.line, &f.message),
-        }));
+        out.push(finding_diag(f, source));
     }
     for e in &scan.cc {
         if e.cc >= 15 && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored("complexity", rel)) {
@@ -224,6 +270,88 @@ impl LspState {
     }
 }
 
+impl LspState {
+    /// The `textDocument/codeAction` request: one quickfix per finding with a
+    /// fix directive in range (the directive the client runs as
+    /// `lucidlint fix <directive> --file <path> --line <n>`), plus one
+    /// source.fixAll — the LSP surface for the auto-fix engine.
+    fn handle_code_action(&mut self, msg: &serde_json::Value, out: &mut impl Write) -> bool {
+        let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let uri = msg["params"]["textDocument"]["uri"].as_str().unwrap_or("").to_string();
+        let params = &msg["params"];
+        let start_line = params["range"]["start"]["line"].as_u64().unwrap_or(0) as usize;
+        let end_line = params["range"]["end"]["line"].as_u64().unwrap_or(u64::MAX) as usize;
+        let Some(text) = self.documents.get(&uri).cloned() else {
+            send_response(&id, serde_json::json!([]), out);
+            return true;
+        };
+        let scan = scan_buffer(&uri, &text);
+        let ctx = self.filtering_for(&uri);
+        let mut actions: Vec<serde_json::Value> = Vec::new();
+        let mut has_fix = false;
+        for f in scan.findings.iter().filter(|f| {
+            f.kind != "duplicate"
+                && f.kind != "unused"
+                && !ctx.as_ref().is_some_and(|(rel, cfg)| cfg.is_ignored(&f.kind, rel))
+        }) {
+            let Some(directive) = fix_directive_from_message(&f.message) else {
+                continue;
+            };
+            let line = f.line.saturating_sub(1); // LSP lines are 0-based
+            if line < start_line || line > end_line {
+                continue;
+            }
+            has_fix = true;
+            let kind = fix_kind_from_directive(directive);
+            let needs_name = crate::rules_gen::NAME_REQUIRED_KINDS.contains(&kind);
+            let title = if needs_name {
+                format!("Apply lucidlint fix: {kind} (needs --name)")
+            } else {
+                format!("Apply lucidlint fix: {kind}")
+            };
+            actions.push(serde_json::json!({
+                "title": title,
+                "kind": "quickfix",
+                "diagnostics": [finding_diag(f, &text)],
+                "data": {"needsName": needs_name},
+                "command": {
+                    "title": title,
+                    "command": "lucidlint.applyFix",
+                    "arguments": [uri, f.line, directive_tokens(directive)],
+                },
+            }));
+        }
+        if has_fix {
+            actions.push(serde_json::json!({
+                "title": "Fix all lucidlint findings in file",
+                "kind": "source.fixAll",
+                "command": {
+                    "title": "Fix all lucidlint findings in file",
+                    "command": "lucidlint.fixAll",
+                    "arguments": [uri],
+                },
+            }));
+        }
+        send_response(&id, serde_json::json!(actions), out);
+        true
+    }
+
+    /// The didSave repo-wide verdict: the duplicate/unused findings that the
+    /// per-buffer scan cannot see, appended to the buffer's diagnostics.
+    fn append_repo_wide_diags(&self, rel: &str, cfg: &LucidConfig, diags: &mut Vec<serde_json::Value>) {
+        if let Some(root) = self.root.as_ref() {
+            let by_file = repo_wide_findings(root);
+            if let Some(fs) = by_file.get(rel) {
+                for f in fs {
+                    if let Some(d) = repo_wide_diag(f, rel, cfg) {
+                        diags.push(d);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn dispatch(state: &mut LspState, msg: &serde_json::Value, out: &mut impl Write) -> bool {
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(serde_json::Value::Null);
@@ -251,7 +379,7 @@ pub fn dispatch(state: &mut LspState, msg: &serde_json::Value, out: &mut impl Wr
                 serde_json::json!({
                     "capabilities": {
                         "textDocumentSync": {"openClose": true, "change": 1},
-                        "serverInfo": {"name": "lucidlint", "version": "0.2.0"}
+                        "serverInfo": {"name": "lucidlint", "version": "0.3.0"}
                     }
                 }),
                 out,
@@ -262,6 +390,7 @@ pub fn dispatch(state: &mut LspState, msg: &serde_json::Value, out: &mut impl Wr
             send_response(&id, serde_json::Value::Null, out);
         }
         "exit" => return false,
+        "textDocument/codeAction" => return state.handle_code_action(msg, out),
         "textDocument/didOpen" => {
             let doc = &params["textDocument"];
             let uri = doc["uri"].as_str().unwrap_or("").to_string();
@@ -300,15 +429,8 @@ pub fn dispatch(state: &mut LspState, msg: &serde_json::Value, out: &mut impl Wr
                 // publish them now that the file is on disk (review-log §10:
                 // transient dead/duplicate states were never flagged at edit
                 // time). One full-repo scan per save, in-process.
-                if let (Some((rel, cfg)), Some(root)) = (ctx.as_ref(), state.root.as_ref()) {
-                    let by_file = repo_wide_findings(root);
-                    if let Some(fs) = by_file.get(rel.as_str()) {
-                        for f in fs {
-                            if let Some(d) = repo_wide_diag(f, rel, cfg) {
-                                diags.push(d);
-                            }
-                        }
-                    }
+                if let Some((rel, cfg)) = ctx.as_ref() {
+                    state.append_repo_wide_diags(rel, cfg, &mut diags);
                 }
                 publish(&uri, &diags, out);
             }
@@ -429,6 +551,117 @@ mod tests {
         assert!(text.contains("publishDiagnostics"));
         assert!(text.contains("magic number"));
         assert!(docs.documents.contains_key("file:///tmp/buf.py"));
+    }
+
+    #[test]
+    fn dispatch_codeaction_lists_fixable_findings_with_directives() {
+        let mut docs = LspState::new();
+        let mut out = Vec::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": "file:///tmp/buf.py", "text": "def run(a, b, c, d, e, f):\n    return a\n"}}
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        out.clear();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/codeAction",
+            "id": 1,
+            "params": {
+                "textDocument": {"uri": "file:///tmp/buf.py"},
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 20}}
+            }
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("lucidlint.applyFix"), "the fix command: {text}");
+        assert!(
+            text.contains("(needs --name)"),
+            "the title names the requirement: {text}"
+        );
+        assert!(text.contains("\"needsName\":true"), "the data marker: {text}");
+        // the directive travels as runnable argv tokens, --fix-name mapped
+        // to the parser's --name — no shell joining on the client
+        assert!(
+            text.contains("\"arguments\":[\"file:///tmp/buf.py\",1,[\"long-param-list\",\"--name\",\"<Options>\"]]"),
+            "the command args: {text}"
+        );
+        assert!(text.contains("source.fixAll"), "the fix-all action: {text}");
+    }
+
+    #[test]
+    fn dispatch_codeaction_marks_mechanical_fixes_applicable() {
+        // undeclared-attribute needs no name: needsName false, bare token,
+        // and the title carries no caveat
+        let mut docs = LspState::new();
+        let mut out = Vec::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": "file:///tmp/buf.py", "text": "class C:\n    def __init__(self):\n        self.done = False\n"}}
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        out.clear();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/codeAction",
+            "id": 4,
+            "params": {
+                "textDocument": {"uri": "file:///tmp/buf.py"},
+                "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 25}}
+            }
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("undeclared-attribute"), "the kind: {text}");
+        assert!(text.contains("\"needsName\":false"), "mechanical: {text}");
+        assert!(!text.contains("needs --name"), "no caveat: {text}");
+    }
+
+    #[test]
+    fn dispatch_codeaction_respects_the_requested_range() {
+        // the finding sits on the def line (0); a range covering only the
+        // body (line 1) must yield no actions
+        let mut docs = LspState::new();
+        let mut out = Vec::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": "file:///tmp/buf.py", "text": "def run(a, b, c, d, e, f):\n    return a\n"}}
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        out.clear();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/codeAction",
+            "id": 2,
+            "params": {
+                "textDocument": {"uri": "file:///tmp/buf.py"},
+                "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 10}}
+            }
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("\"result\":[]"), "no actions outside the range: {text}");
+        assert!(!text.contains("applyFix"), "no fix command: {text}");
+    }
+
+    #[test]
+    fn dispatch_codeaction_unknown_doc_returns_empty() {
+        let mut docs = LspState::new();
+        let mut out = Vec::new();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/codeAction",
+            "id": 3,
+            "params": {
+                "textDocument": {"uri": "file:///tmp/other.py"},
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
+            }
+        });
+        assert!(dispatch(&mut docs, &msg, &mut out));
+        assert!(String::from_utf8(out).unwrap().contains("\"result\":[]"));
     }
 
     #[test]

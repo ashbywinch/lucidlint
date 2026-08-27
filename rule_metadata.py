@@ -80,6 +80,10 @@ class Rule:
     description: str
     display_name: str | None = None
     display: str | None = None
+    # the rule's fix needs a name the tool cannot invent (--name/--fix-name):
+    # the LSP marks its code action `needsName` so a client can prompt, and
+    # the CLI refuses a missing/invalid name with an explicit message
+    fix_name_required: bool = False
 
 
 # The config group a rule belongs to (RULE_GROUPS / rule_groups — the
@@ -103,7 +107,7 @@ class RuleCatalog:
     consumes (groups, families, display buckets)."""
 
     def __init__(self, rules: list[Rule]) -> None:
-        self.rules = rules
+        self.rules: list[Rule] = rules
 
     def kinds(self) -> list[str]:
         return [r.kind for r in self.rules]
@@ -172,10 +176,12 @@ CATALOG = RuleCatalog([
          "extract-method --file <F> --line <L>` previews the best self-contained "
          "seam (placeholder name — the extracted function is private by "
          "construction, so the fix underscores it); apply with `--name <N>` "
-         "(the name IS the commitment — no `--confirm`)."),
+         "(the name IS the commitment — no `--confirm`).",
+         fix_name_required=True),
     Rule("long-param-list", "fail", "architecture", "Both",
          "A function with > 5 parameters (receiver/`self` excluded) — introduce "
-         "a parameter object."),
+         "a parameter object.",
+         fix_name_required=True),
     Rule("large-function", "fail", "architecture", "Both",
          "Function spans ≥ 120 lines — split it: one rule per function."),
     Rule("closures", "fail", "architecture", "Both",
@@ -191,6 +197,52 @@ CATALOG = RuleCatalog([
          "≥3 free functions sharing the same leading parameter — they share "
          "data, they're a class.",
          display_name="strewing → latent-class", display="latent-class"),
+    Rule("misplaced-method", "fail", "architecture", "Python",
+         "A module-level function called from a method with `self.<attr>` "
+         "arguments matching every parameter — the class already holds the "
+         "data, so the function is that class's method in exile; move it "
+         "onto the class.",
+         display_name="misplaced-method → latent-class", display="latent-class"),
+    Rule("assembly-class", "fail", "architecture", "Python",
+         "A function assembles >=3 structures by threading the same data "
+         "through module-level functions whose outputs feed each other's "
+         "inputs — a class in waiting: the threaded state belongs on an "
+         "object, the module functions are its methods.",
+         display_name="assembly-class → latent-class", display="latent-class"),
+    Rule("tuple-record", "fail", "architecture", "Python",
+         "A dict whose values are same-arity tuples read with constant "
+         "integer indexes — an anonymous record; make it a class (the "
+         "record's fields are the tuple positions).",
+         display_name="tuple-record → latent-class", display="latent-class",
+         fix_name_required=True),
+    Rule("data-clump", "fail", "architecture", "Python",
+         ">=3 module functions sharing the same parameter pair — the pair "
+         "travels together, so it is a data clump; introduce a parameter "
+         "object that holds it.",
+         display_name="data-clump → latent-class", display="latent-class"),
+    Rule("feature-envy", "fail", "architecture", "Python",
+         "A method reads another object's fields more than its own state — "
+         "the logic belongs on that object (feature envy); move the "
+         "computation onto the envied class as a method.",
+         display_name="feature-envy → latent-class", display="latent-class",
+         fix_name_required=True),
+    Rule("undeclared-attribute", "fail", "architecture", "Python",
+         "A class must DECLARE its members — annotated in the class body, in "
+         "__slots__, or in __init__ — not assign them quietly in member "
+         "functions. A plain `self.x = ...` in __init__ or any member "
+         "assigned outside the constructor without a declaration is a "
+         "finding: declare it.",
+         display_name="undeclared-attribute", display=None),
+    Rule("god-class", "warn", "architecture", "Python",
+         "A class with >=20 methods, or >=12 methods over >=250 lines — a "
+         "large class. A review signal, not a split order: split only where "
+         "the partition rule finds field-disjoint method groups.",
+         display_name="god-class → latent-class", display="latent-class"),
+    Rule("duplicate-field", "fail", "architecture", "Python",
+         "A class and a class it CONTAINS both hold the same >=2 fields — "
+         "duplicated domain state across a containment edge; one source of "
+         "truth should own it.",
+         display_name="duplicate-field → latent-class", display="latent-class"),
     Rule("module-cohesion", "fail", "architecture", "Graph",
          "A file whose nodes split across ≥2 graph communities (each ≥2 nodes) "
          "holds several sub-domains — split the module at the domain seams."),
@@ -215,7 +267,8 @@ CATALOG = RuleCatalog([
     # ---- style
     Rule("magic-number", "warn", "style", "Both",
          "Numeric literal (outside 0/1/2) used as an operand — name it as a "
-         "constant."),
+         "constant.",
+         fix_name_required=True),
     Rule("debug-artifact", "fail", "style", "Both",
          "`dbg!()` / `.unwrap()` / `.expect()` in production Rust; "
          "`breakpoint()` in production Python — debugging left in."),
@@ -228,7 +281,8 @@ CATALOG = RuleCatalog([
     Rule("vague-name", "fail", "style", "Both",
          "Type ending in Manager, Handler, Store, Repository, Controller, Utils, "
          "or Info with significant size/methods — the domain concept should "
-         "name it."),
+         "name it.",
+         fix_name_required=True),
     Rule("class-module", "fail", "style", "Python",
          "A Python module holding exactly one class whose name doesn't match "
          "the filename — rename the file to match.",

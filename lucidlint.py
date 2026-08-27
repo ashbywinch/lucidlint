@@ -289,13 +289,6 @@ class GitHead:
     commit: str
 
 
-def rel_path(repo: Path, p: str) -> str:
-    """Graph stores absolute paths; radon/git use repo-relative. Normalize."""
-    p = p.replace("\\", "/")
-    root = str(repo.resolve()).replace("\\", "/") + "/"
-    if p.startswith(root):
-        p = p[len(root) :]
-    return p
 
 
 def is_test_path(rel: str) -> bool:
@@ -320,135 +313,12 @@ _CHURN_MAX_COMMITS = 200
 _CHURN_MAX_AGE_DAYS = 730
 
 
-def file_history(repo: Path) -> FileHistory:
-    """The recent git history: per-file change counts and last-modified date.
-
-    The walk is bounded (the last 200 commits or 730 days, whichever stops
-    first) — old churn dilutes the CURRENT hotspot signal, so limiting the
-    window is more signal, not less. The walk is deterministic for a given
-    HEAD, so the result is cached per (HEAD, window) — repeat gate runs skip
-    the walk entirely. `last_modified` is the NEWEST touch (the walk is
-    newest-first; first-seen-wins).
-    """
-    if _pygit2 is None or not (repo / ".git").exists():
-        # no pygit2 or not a git repo — the absence is certain and nothing
-        # can fix it in this run: silent (never announce an unfixable gap)
-        return FileHistory(Counter(), {})
-    head = ""
-    cache_key = ""
-    try:
-        r = _pygit2.Repository(str(repo))
-        head = str(r.head.target)
-        cutoff = int(time.time()) - _CHURN_MAX_AGE_DAYS * 86400
-        cutoff_day = time.strftime("%Y-%m-%d", time.localtime(cutoff))
-        cache_key = f"churn-{head}-{_CHURN_MAX_COMMITS}-{cutoff_day}.json"
-        cache_path = repo / ".lucidlint-cache" / cache_key
-        try:
-            data = json.loads(cache_path.read_text())
-            return FileHistory(Counter(data["churn"]), data["last_modified"])
-        except (OSError, ValueError, KeyError):  # lucidlint: ignore swallow a missing/corrupt cache just walks
-            pass  # no cache yet — walk
-    except KeyError:
-        return FileHistory(Counter(), {})  # not a git repo — certain: silent
-    except Exception as e:
-        log(f"churn: {e}")  # unexpected — show the actual error
-        return FileHistory(Counter(), {})
-
-    churn: Counter[str] = Counter()
-    last: dict[str, str] = {}
-    try:
-        r = _pygit2.Repository(str(repo))
-        cutoff = int(time.time()) - _CHURN_MAX_AGE_DAYS * 86400
-        for seen, commit in enumerate(r.walk(r.head.target, GIT_SORT_TIME)):
-            if seen >= _CHURN_MAX_COMMITS or commit.commit_time < cutoff:
-                break
-            date = str(commit.commit_time)
-            changed = set()
-            if commit.parents:
-                diff = commit.tree.diff_to_tree(commit.parents[0].tree)
-                for patch in diff:
-                    path = patch.delta.new_file.path
-                    if path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/")):
-                        changed.add(path)
-            else:
-                # initial commit — diff against the empty tree gives every file
-                for patch in commit.tree.diff_to_tree():
-                    path = patch.delta.new_file.path
-                    if path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/")):
-                        changed.add(path)
-            for path in changed:
-                churn[path] += 1
-                if date and path not in last:
-                    last[path] = date  # first-seen = newest in a newest-first walk
-    except Exception as e:
-        log(f"churn walk: {e}")  # unexpected — show the actual error
-        return FileHistory(churn, last)  # partial/empty history, surfaced
-
-    if cache_key:
-        try:
-            (repo / ".lucidlint-cache").mkdir(exist_ok=True)
-            (repo / ".lucidlint-cache" / cache_key).write_text(
-                json.dumps({"churn": dict(churn), "last_modified": last})
-            )
-        except OSError:  # lucidlint: ignore swallow the cache is best-effort — a read-only repo still works
-            pass  # the cache is best-effort — a read-only repo still works
-    return FileHistory(churn, last)
 
 
-def load_coverage(repo: Path) -> CoverageResult:
-    """Per-file covered line sets, preferring the repo's own coverage data.
-
-    Sources, in order: coverage.xml (Cobertura, what CI gates on), then
-    .coverage (coverage.py SQLite, line_bits format). The graph's TESTED_BY
-    edges miss tests that import inside the test body — real coverage data
-    does not. lines is None when neither source exists.
-    """
-    if (repo / "coverage.xml").exists():
-        return _coverage_from_xml(repo)
-    if (repo / ".coverage").exists():
-        return _coverage_from_sqlite(repo)
-    return CoverageResult(None, "no coverage data (no coverage.xml, no .coverage)")
 
 
-def _coverage_from_xml(repo: Path) -> CoverageResult:
-    """Cobertura coverage.xml: class line elements with hits > 0."""
-    try:
-        root = ET.parse(repo / "coverage.xml").getroot()
-    except ET.ParseError:
-        return CoverageResult(None, "coverage.xml unparseable")
-    covered: dict[str, set[int]] = {}
-    for cls in root.iter("class"):
-        filename = (cls.get("filename") or "").replace("\\", "/")
-        if not filename.endswith(".py"):
-            continue
-        lines = covered.setdefault(rel_path(repo, filename), set())
-        for ln in cls.iter("line"):
-            if int(ln.get("hits", "0") or 0) > 0:
-                try:
-                    lines.add(int(ln.get("number")))
-                except (TypeError, ValueError):  # lucidlint: ignore swallow malformed <line> elements are skipped
-                    log(f"ignoring malformed <line> element in {repo / 'coverage.xml'}")
-    return CoverageResult(covered or None, "coverage.xml")
 
 
-def _coverage_from_sqlite(repo: Path) -> CoverageResult:
-    """coverage.py .coverage SQLite: line_bits rows per file."""
-    try:
-        db = sqlite3.connect(repo / ".coverage")
-        files = dict(db.execute("SELECT id, path FROM file"))
-        covered: dict[str, set[int]] = {}
-        for fid, numbits in db.execute("SELECT file_id, numbits FROM line_bits"):
-            path = files.get(fid)
-            if not path:
-                continue
-            rel = rel_path(repo, path)
-            if not rel.endswith(".py"):
-                continue
-            covered.setdefault(rel, set()).update(_numbits_to_lines(numbits))
-        db.close()
-        return CoverageResult(covered or None, ".coverage")
-    except sqlite3.Error:
-        return CoverageResult(None, ".coverage unreadable")
 
 
 def _numbits_to_lines(numbits: bytes) -> set[int]:
@@ -576,6 +446,22 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
         py = repo / only_rel
         return [SourceFile(py, only_rel)] if py.is_file() and py.suffix in (".py", ".rs", ".md") else []
     if _pygit2 is None or not (repo / ".git").exists():
+        # no pygit2 (CI runners, bare pythons): ask git itself — the answer
+        # honors .gitignore, so an ignored dir (a repo's own .tools/lucidlint
+        # bundle, a venv) is never scanned. rglob only when git is also
+        # unavailable — a git-less repo has nothing ignored to respect.
+        if (repo / ".git").exists():
+            try:
+                proc = subprocess.run(
+                    ["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if proc.returncode == 0:
+                    rels = [p for p in proc.stdout.split("\0") if p.endswith((".py", ".rs", ".md"))]
+                    return [SourceFile(repo / rel, rel) for rel in sorted(rels)]
+            # lucidlint: ignore swallow git missing or unrunnable — degrade to the rglob walk rather than crash
+            except Exception as e:
+                log(f"git ls-files: {e}")
         return [
             SourceFile(py, py.relative_to(repo).as_posix())
             for py in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.rs")) + sorted(repo.rglob("*.md"))
@@ -632,6 +518,74 @@ class RustFinding(NamedTuple):
     metric: float = 1.0
 
 
+class _File(NamedTuple):
+    """The file a fix targets — its repo and repo-relative path. The
+    (rel, repo) pair travels together, and the fix operations belong on it
+    (the strewing pattern: functions sharing a domain class are its
+    methods)."""
+
+    repo: Path
+    rel: str
+
+    def fix_rust(self, kind: str, line: int, name: str | None) -> int:
+        """A Rust fix runs in the scan core (syn), not the Python/libcst
+        engine: invoke the binary's --fix mode, which edits in place."""
+        repo, rel = self.repo, self.rel
+        binary = RUST_SCAN.binary(repo)
+        if binary is None:
+            print("fix: the Rust scan core is required — build it with `make scanner-check`")
+            return 1
+        spec = json.dumps(
+            {"kind": kind, "file": str(repo / rel), "line": line, "name": name or ""}
+        )
+        try:
+            proc = subprocess.run(
+                [str(binary), "--fix", spec], capture_output=True, text=True, timeout=120, cwd=str(repo)
+            )
+        except subprocess.SubprocessError:
+            print(f"fix: the Rust fix core failed for {rel}:{line}")
+            return 1
+        sys.stdout.write(proc.stdout)
+        if proc.returncode != 0:
+            # the scanner exits non-zero on an unknown/malformed request — an
+            # unexpected error must surface (R29), not masquerade as a success
+            if proc.stderr:
+                sys.stderr.write(proc.stderr)
+            return 1
+        return 0
+
+    def finding_lines(self, kind: str) -> list[int]:
+        """The lines of every finding of `kind` in this file — the R27 line
+        resolution: the tool scans, the agent never counts lines.
+
+        `kind` is the FIX kind (the directive's `fix: <kind>` tail — what the
+        agent's command names): a dispatch-shaped complexity finding carries
+        the kind `complexity` but its message directive says
+        `fix: dispatch-registry`, so the match is against the message's
+        directive, not the raw kind."""
+        wanted = _FIX_ALIASES.get(kind, kind)
+        found = []
+        for f in self.scan_single_file():
+            directive = _fix_directive_kind(f.message)
+            if directive is None:
+                # a finding with no directive has no fix — it never matches
+                continue
+            if _FIX_ALIASES.get(directive, directive) == wanted:
+                found.append(f.line)
+        return sorted(found)
+
+    def scan_single_file(self):
+        """Scan this file, yielding its findings."""
+        repo, rel = self.repo, self.rel
+        let_include_tests = False  # the fix resolves one file's findings
+        RUST_SCAN.prepare(repo, rel, let_include_tests, {})
+        files = _py_files(repo, rel)
+        rust = RUST_SCAN.load(repo, files)
+        if rust is None:
+            return
+        yield from rust.by_rel.get(rel, [])
+
+
 class RustFindings(NamedTuple):
     """The Rust scan output for one file set, keyed by repo-relative path —
     a named object, not a bare map (the record-shape rule's escape hatch)."""
@@ -675,6 +629,10 @@ class _RustScan:
         self._cache: dict[tuple[Path, tuple[str, ...]], RustFindings | None] = {}
         self._binary_cache: dict[Path, Path | None] = {}
         self._pending_gitignored: tuple[str, ...] = ()
+        self._pending_graph: Path | None = None
+        self._pending_churn: Path | None = None
+        self._pending_tests: bool = False
+        self._pending_docs: str | None = None
 
     def binary(self, repo: Path) -> Path | None:
         """The scan binary: env override, then the repo's own build, then the
@@ -834,66 +792,7 @@ RULE_GROUPS = rule_metadata.CATALOG.groups()
 _CONFIG_CACHE: dict[Path, dict] = {}
 
 
-# lucidlint: ignore record-shape wire-format envelope for the config — a class is ceremony
-def _load_lucidlint_config(repo: Path) -> dict:
-    """Load the project-wide lucidlint config, looking for (in order):
-    1. .lucidlint.toml in the repo root
-    2. [tool.lucidlint] in pyproject.toml
-    Returns a dict with 'global_ignore' (set of signal names) and
-    'per_path_ignore' (list of (glob_pattern, set)) or empty defaults.
-    The config lets a team suppress entire rule groups or specific signals
-    without per-file suppression comments."""
-    if repo in _CONFIG_CACHE and _CONFIG_CACHE.get(repo) is not None:
-        return _CONFIG_CACHE[repo]
 
-    # lucidlint: ignore record-shape wire-format envelope for the config
-    result = {"global_ignore": set(), "per_path_ignore": []}
-
-    # lucidlint: ignore record-shape wire-format envelope for the config
-    def _merge_config(raw: dict) -> None:
-        ignores = raw.get("ignore", raw.get("ignored_signals", []))
-        for item in ignores:
-            item = item.strip()
-            if item.startswith("group:"):
-                group_name = item[6:]
-                group_signals = RULE_GROUPS.get(group_name)
-                if group_signals:
-                    result["global_ignore"].update(group_signals)
-            else:
-                result["global_ignore"].add(item)
-        # Per-path overrides: keys that are glob patterns
-        for key, val in raw.items():
-            if key in ("ignore", "ignored_signals"):
-                continue
-            if isinstance(val, dict) and "ignore" in val:
-                path_ignores = set()
-                for item in val["ignore"]:
-                    item = item.strip()
-                    if item.startswith("group:"):
-                        gs = RULE_GROUPS.get(item[6:])
-                        if gs:
-                            path_ignores.update(gs)
-                    else:
-                        path_ignores.add(item)
-                result["per_path_ignore"].append((key, path_ignores))
-
-    # Try .lucidlint.toml first (standalone, for Rust projects)
-    toml_path = repo / ".lucidlint.toml"
-    if toml_path.is_file():
-        with open(toml_path, "rb") as f:
-            _merge_config(tomllib.load(f).get("lucidlint", {}))
-    else:
-        # Fall back to pyproject.toml [tool.lucidlint]
-        pyproject = repo / "pyproject.toml"
-        if pyproject.is_file():
-            with open(pyproject, "rb") as f:
-                data = tomllib.load(f)
-            tool_config = data.get("tool", {}).get("lucidlint", {})
-            if tool_config:
-                _merge_config(tool_config)
-
-    _CONFIG_CACHE[repo] = result
-    return result
 
 
 RUST_SCAN = _RustScan()
@@ -1077,7 +976,7 @@ def _version() -> str:
     try:
         return metadata.version("lucidlint")
     except Exception:
-        return "0.2.0"
+        return "0.3.0"
 
 
 _VERSION = _version()
@@ -1141,37 +1040,10 @@ def _coverage_context(repo: Path, covered, coverage_source: str) -> CoverageCont
     return CoverageContext(label=coverage_source, graph_preferred=graph_preferred, stale_note=stale_note)
 
 
-def _git_head(repo: Path) -> GitHead:
-    """Current branch and short commit for report provenance, via pygit2.
-    Returns empty strings when git or pygit2 is unavailable."""
-    if _pygit2 is None:
-        return GitHead(branch="", commit="")
-    try:
-        r = _pygit2.Repository(str(repo))
-        return GitHead(branch=r.head.shorthand or "", commit=str(r.head.target)[:7])
-    # git-absent is a supported mode — the handler returns the empty head
-    except Exception:
-        return GitHead(branch="", commit="")
 
 
-def _dedupe(actions: list[Action]) -> list[Action]:
-    """Same kind+file+line+function fires once (graph and radon can both flag a function)."""
-    seen: dict[tuple, Action] = {}
-    for a in actions:
-        key = (a.kind, a.file, a.line, a.function)
-        if key not in seen or a.raw > seen[key].raw:
-            seen[key] = a
-    return list(seen.values())
 
 
-def _percentile_rank(unique: list[Action], diff: set[str]) -> None:
-    """Rank raw risk 1-99 (percentile) so the list spreads; tag in-diff actions."""
-    if not unique:
-        return
-    lo, hi = min(a.raw for a in unique), max(a.raw for a in unique)
-    for a in unique:
-        a.priority = 99 if hi <= lo else max(1, round(1 + 98 * (a.raw - lo) / (hi - lo)))
-        a.in_diff = a.file in diff
 
 
 def _merge_key(a: Action) -> tuple:
@@ -1184,53 +1056,19 @@ def _merge_key(a: Action) -> tuple:
     return (a.file, a.function, a.line, a.kind)
 
 
-def _merge_targets(unique: list[Action]) -> list[Action]:
-    """Per-target merge: complexity + large-function on the same function is one fix."""
-    merged: dict[tuple, Action] = {}
-    for a in sorted(unique, key=lambda a: (-a.raw, a.file, a.line)):
-        key = _merge_key(a)
-        if key not in merged:
-            merged[key] = a
-        else:
-            prev = merged[key]
-            prev.kinds = sorted({prev.kind, a.kind})
-            prev.raw = max(prev.raw, a.raw)
-            if a.note and a.note not in prev.note:
-                prev.note = (prev.note + " " + a.note).strip()
-            prev.line = min(prev.line, a.line)
-            if a.severity == "fail":
-                prev.severity = "fail"  # a warn merged into a fail target must not clear the gate
-            if a.message != prev.message:
-                extra = f"{a.severity.upper()}: {a.message}"
-                if extra not in prev.note:
-                    prev.note = (prev.note + " " + extra).strip()
-    return list(merged.values())
 
 
-def _lifecycle_notes(unique: list[Action]) -> None:
-    """Facts only — low-churn scripts/tools. Delete-vs-refactor is the agent's call."""
-    for a in unique:
-        if a.file.startswith(("scripts/", "tools/")) and a.churn <= 2 and a.last_modified:
-            a.note = (
-                a.note + f" Lifecycle: {a.churn}x churn, last touched {a.last_modified} — "
-                f"low-change file under scripts/tools."
-            ).strip()
 
 
-def _dedupe_merge(actions: list[Action], diff: set[str]) -> list[Action]:
-    """Dedupe, rank, merge per-target kinds, then lifecycle notes."""
-    unique = _dedupe(actions)
-    _percentile_rank(unique, diff)
-    unique = _merge_targets(unique)
-    # Re-rank on the merged raw values, but KEEP the diff marking — the
-    # merged actions must still show "[in your diff]" (PRD R10).
-    _percentile_rank(unique, diff)
-    unique.sort(key=lambda a: (-a.priority, a.file, a.line))
-    _lifecycle_notes(unique)
-    return unique
+class _Baseline(NamedTuple):
+    """The acknowledged-action keys + config-ignored counts from the baseline
+    file — a named record instead of a bare tuple."""
 
-    # lucidlint: ignore record-shape the baseline file's two sections are a wire-format seam; a class is ceremony
-def _load_baseline(path) -> tuple[set[str], dict[str, int]]:
+    keys: set[str]
+    ignored: dict[str, int]
+
+
+def _load_baseline(path) -> _Baseline:
     """Acknowledged action keys + the config-ignored counts (the §9 growth
     ledger) from the baseline file (best-effort)."""
 
@@ -1240,11 +1078,11 @@ def _load_baseline(path) -> tuple[set[str], dict[str, int]]:
             data = json.loads(path.read_text())
             keys = set(data.get("actions", []))
             ignored = dict(data.get("config_ignored", {}))
-            return keys, {k: int(v) for k, v in ignored.items()}
+            return _Baseline(keys, {k: int(v) for k, v in ignored.items()})
         # lucidlint: ignore swallow corrupt baseline; gate unbaselined
         except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
             log(f"baseline {path} unreadable — ignoring")
-    return set(), {}
+    return _Baseline(set(), {})
 
 
 def _render_file_group(file: str, items: list[Action]) -> None:
@@ -1294,18 +1132,6 @@ def _render_actions(repo: Path, args, fails: list[Action], acks: list[Action]) -
     )
 
 
-def _write_baseline(args, unique: list[Action], ignored_by_signal: Counter | None = None) -> int:
-    """--update-baseline: lock all current action keys and exit clean."""
-    if not args.baseline:
-        log("--update-baseline requires --baseline PATH")
-        return 2
-    keys = [action_key(a) for a in unique if a.severity != "warn"]
-    baseline: dict = {"actions": keys}
-    if ignored_by_signal:
-        baseline["config_ignored"] = dict(ignored_by_signal)
-    args.baseline.write_text(json.dumps(baseline, indent=2))
-    print(f"lucidlint: baseline written — {len(keys)} action(s) locked to {args.baseline}")
-    return 0
 
 
 def _apply_baseline(unique: list[Action], baseline_keys: set[str]) -> list[str]:
@@ -1359,49 +1185,554 @@ _FIX_ALIASES = {
 }
 
 
-def main() -> int:
-    args = parse_args()
-    repo = args.repo.resolve()
+# the raw TOML payload handed to _merge_config — a wire-format blob, not a
+# domain record (record-shape exempts the deserializer boundary by naming it)
+_RawConfig = dict
 
-    if args.command == "fix":
+
+@dataclass
+class _LucidlintConfig:
+    """The project-wide config: global ignore set + per-path ignore list."""
+
+    global_ignore: set
+    per_path_ignore: list
+
+
+# lucidlint: ignore-file god-class the gate pipeline is ONE responsibility —
+# the runner owns the repo scan end to end; the partition rule finds no
+# field-disjoint method groups, so the size is a review signal, not a split
+class _GateRunner:
+    """The repo-scan gate flow. The pipeline state (history, coverage,
+    actions, baselines) lives on the runner instead of threading through
+    main() as parameters — the shape the assembly-class rule flags as a
+    class in waiting."""
+
+    def __init__(self, repo: Path, args: argparse.Namespace):
+        self.repo: Path = repo
+        self.args: argparse.Namespace = args
+        self.fh: FileHistory | None = None
+        self.cr: CoverageResult | None = None
+        self.cc: CoverageContext | None = None
+        self.diff: set[str] = set()
+        self.actions: list[Action] = []
+        self.ignored_config: dict = {}
+        self.ignored_by_signal: Counter[str] = Counter()
+        self.unique: list[Action] = []
+        self.stale: list[str] = []
+        self.baseline_ignored: Counter[str] = Counter()
+        self.head: GitHead | None = None
+        self.rc: _RenderCtx | None = None
+
+    def gather(self) -> None:
+        """History/coverage/diff context (per-file mode skips the git work)."""
+        if self.args.file:
+            # Single-file / LSP mode: no git history, coverage, or diff — the
+            # per-file findings are what an editor shows on save.
+            self.fh = FileHistory(Counter(), {})
+            self.cr = CoverageResult(None, "")
+            self.cc = _coverage_context(self.repo, None, "")
+            self.diff = set()
+            return
+        if self.args.refresh_coverage:
+            self._refresh_coverage()
+        self.fh = self.file_history()
+        self.cr = self.load_coverage()
+        self.cc = _coverage_context(self.repo, self.cr.lines, self.cr.source)
+        self.diff = changed_files(self.repo, self.args.base)
+
+    def collect(self) -> None:
+        """The finding actions for the repo."""
+        self.actions = _collect_actions(
+            self.repo, self.args, self.fh.churn, self.fh.last_modified, only_rel=self.args.file
+        )
+
+    def apply_config(self) -> None:
+        """Project-wide config (global ignore / per-path ignore), COUNTING
+        what the config hides — the §9 debt ledger: config-ignored findings
+        are filtered BEFORE the verdict, so without a count the ignore can
+        grow invisibly ("nothing is ever wrong")."""
+        self.ignored_config = self._load_lucidlint_config()
+        self.ignored_by_signal = Counter()
+        if not self.ignored_config.global_ignore and not self.ignored_config.per_path_ignore:
+            return
+        kept: list[Action] = []
+        for a in self.actions:
+            if a.signal in self.ignored_config.global_ignore:
+                self.ignored_by_signal[a.signal] += 1
+                continue
+            removed = False
+            for pattern, path_ignored in self.ignored_config.per_path_ignore:
+                if Path(a.file).match(pattern) and a.signal in path_ignored:
+                    self.ignored_by_signal[a.signal] += 1
+                    removed = True
+                    break
+            if not removed:
+                kept.append(a)
+        self.actions = kept
+
+    def file_history(self) -> FileHistory:
+        """The recent git history: per-file change counts and last-modified date.
+
+        The walk is bounded (the last 200 commits or 730 days, whichever stops
+        first) — old churn dilutes the CURRENT hotspot signal, so limiting the
+        window is more signal, not less. The walk is deterministic for a given
+        HEAD, so the result is cached per (HEAD, window) — repeat gate runs skip
+        the walk entirely. `last_modified` is the NEWEST touch (the walk is
+        newest-first; first-seen-wins).
+        """
+        if _pygit2 is None or not (self.repo / ".git").exists():
+            # no pygit2 or not a git self.repo — the absence is certain and nothing
+            # can fix it in this run: silent (never announce an unfixable gap)
+            return FileHistory(Counter(), {})
+        head = ""
+        cache_key = ""
+        try:
+            r = _pygit2.Repository(str(self.repo))
+            head = str(r.head.target)
+            cutoff = int(time.time()) - _CHURN_MAX_AGE_DAYS * 86400
+            cutoff_day = time.strftime("%Y-%m-%d", time.localtime(cutoff))
+            cache_key = f"churn-{head}-{_CHURN_MAX_COMMITS}-{cutoff_day}.json"
+            cache_path = self.repo / ".lucidlint-cache" / cache_key
+            try:
+                data = json.loads(cache_path.read_text())
+                return FileHistory(Counter(data["churn"]), data["last_modified"])
+            except (OSError, ValueError, KeyError):  # lucidlint: ignore swallow a missing/corrupt cache just walks
+                pass  # no cache yet — walk
+        except KeyError:
+            return FileHistory(Counter(), {})  # not a git self.repo — certain: silent
+        except Exception as e:
+            log(f"churn: {e}")  # unexpected — show the actual error
+            return FileHistory(Counter(), {})
+
+        churn: Counter[str] = Counter()
+        last: dict[str, str] = {}
+        try:
+            r = _pygit2.Repository(str(self.repo))
+            cutoff = int(time.time()) - _CHURN_MAX_AGE_DAYS * 86400
+            for seen, commit in enumerate(r.walk(r.head.target, GIT_SORT_TIME)):
+                if seen >= _CHURN_MAX_COMMITS or commit.commit_time < cutoff:
+                    break
+                date = str(commit.commit_time)
+                changed = set()
+                if commit.parents:
+                    diff = commit.tree.diff_to_tree(commit.parents[0].tree)
+                    for patch in diff:
+                        path = patch.delta.new_file.path
+                        if path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/")):
+                            changed.add(path)
+                else:
+                    # initial commit — diff against the empty tree gives every file
+                    for patch in commit.tree.diff_to_tree():
+                        path = patch.delta.new_file.path
+                        if path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/")):
+                            changed.add(path)
+                for path in changed:
+                    churn[path] += 1
+                    if date and path not in last:
+                        last[path] = date  # first-seen = newest in a newest-first walk
+        except Exception as e:
+            log(f"churn walk: {e}")  # unexpected — show the actual error
+            return FileHistory(churn, last)  # partial/empty history, surfaced
+
+        if cache_key:
+            try:
+                (self.repo / ".lucidlint-cache").mkdir(exist_ok=True)
+                (self.repo / ".lucidlint-cache" / cache_key).write_text(
+                    json.dumps({"churn": dict(churn), "last_modified": last})
+                )
+            except OSError:  # lucidlint: ignore swallow the cache is best-effort — a read-only self.repo still works
+                pass  # the cache is best-effort — a read-only self.repo still works
+        return FileHistory(churn, last)
+
+    def load_coverage(self) -> CoverageResult:
+        """Per-file covered line sets, preferring the self.repo's own coverage data.
+
+        Sources, in order: coverage.xml (Cobertura, what CI gates on), then
+        .coverage (coverage.py SQLite, line_bits format). The graph's TESTED_BY
+        edges miss tests that import inside the test body — real coverage data
+        does not. lines is None when neither source exists.
+        """
+        if (self.repo / "coverage.xml").exists():
+            return self._coverage_from_xml()
+        if (self.repo / ".coverage").exists():
+            return self._coverage_from_sqlite()
+        return CoverageResult(None, "no coverage data (no coverage.xml, no .coverage)")
+
+    def _coverage_from_xml(self) -> CoverageResult:
+        """Cobertura coverage.xml: class line elements with hits > 0."""
+        try:
+            root = ET.parse(self.repo / "coverage.xml").getroot()
+        except ET.ParseError:
+            return CoverageResult(None, "coverage.xml unparseable")
+        covered: dict[str, set[int]] = {}
+        for cls in root.iter("class"):
+            filename = (cls.get("filename") or "").replace("\\", "/")
+            if not filename.endswith(".py"):
+                continue
+            lines = covered.setdefault(self.rel_path(filename), set())
+            for ln in cls.iter("line"):
+                if int(ln.get("hits", "0") or 0) > 0:
+                    try:
+                        lines.add(int(ln.get("number")))
+                    except (TypeError, ValueError):  # lucidlint: ignore swallow malformed <line> elements are skipped
+                        log(f"ignoring malformed <line> element in {self.repo / 'coverage.xml'}")
+        return CoverageResult(covered or None, "coverage.xml")
+
+    def _coverage_from_sqlite(self) -> CoverageResult:
+        """coverage.py .coverage SQLite: line_bits rows per file."""
+        try:
+            db = sqlite3.connect(self.repo / ".coverage")
+            files = dict(db.execute("SELECT id, path FROM file"))
+            covered: dict[str, set[int]] = {}
+            for fid, numbits in db.execute("SELECT file_id, numbits FROM line_bits"):
+                path = files.get(fid)
+                if not path:
+                    continue
+                rel = self.rel_path(path)
+                if not rel.endswith(".py"):
+                    continue
+                covered.setdefault(rel, set()).update(_numbits_to_lines(numbits))
+            db.close()
+            return CoverageResult(covered or None, ".coverage")
+        except sqlite3.Error:
+            return CoverageResult(None, ".coverage unreadable")
+
+    def rel_path(self, p: str) -> str:
+        """Graph stores absolute paths; radon/git use self.repo-relative. Normalize."""
+        p = p.replace("\\", "/")
+        root = str(self.repo.resolve()).replace("\\", "/") + "/"
+        if p.startswith(root):
+            p = p[len(root) :]
+        return p
+
+    def _refresh_coverage(self) -> None:
+        """Run the self.repo's coverage suite so verdicts are fresh."""
+        subprocess.run(["make", "-C", str(self.repo), "coverage"], capture_output=True, text=True, timeout=1800)
+
+    def _load_lucidlint_config(self) -> _LucidlintConfig:
+        """Load the project-wide lucidlint config, looking for (in order):
+        1. .lucidlint.toml in the self.repo root
+        2. [tool.lucidlint] in pyproject.toml
+        Returns a dict with 'global_ignore' (set of signal names) and
+        'per_path_ignore' (list of (glob_pattern, set)) or empty defaults.
+        The config lets a team suppress entire rule groups or specific signals
+        without per-file suppression comments."""
+        if self.repo in _CONFIG_CACHE and _CONFIG_CACHE.get(self.repo) is not None:
+            return _CONFIG_CACHE[self.repo]
+
+
+        result = _LucidlintConfig(set(), [])
+
+        def _merge_config(raw: _RawConfig) -> None:
+            ignores = raw.get("ignore", raw.get("ignored_signals", []))
+            for item in ignores:
+                item = item.strip()
+                if item.startswith("group:"):
+                    group_name = item[6:]
+                    group_signals = RULE_GROUPS.get(group_name)
+                    if group_signals:
+                        result.global_ignore.update(group_signals)
+                else:
+                    result.global_ignore.add(item)
+            # Per-path overrides: keys that are glob patterns
+            for key, val in raw.items():
+                if key in ("ignore", "ignored_signals"):
+                    continue
+                if isinstance(val, dict) and "ignore" in val:
+                    path_ignores = set()
+                    for item in val["ignore"]:
+                        item = item.strip()
+                        if item.startswith("group:"):
+                            gs = RULE_GROUPS.get(item[6:])
+                            if gs:
+                                path_ignores.update(gs)
+                        else:
+                            path_ignores.add(item)
+                    result.per_path_ignore.append((key, path_ignores))
+
+        # Try .lucidlint.toml first (standalone, for Rust projects)
+        toml_path = self.repo / ".lucidlint.toml"
+        if toml_path.is_file():
+            with open(toml_path, "rb") as f:
+                _merge_config(tomllib.load(f).get("lucidlint", {}))
+        else:
+            # Fall back to pyproject.toml [tool.lucidlint]
+            pyproject = self.repo / "pyproject.toml"
+            if pyproject.is_file():
+                with open(pyproject, "rb") as f:
+                    data = tomllib.load(f)
+                tool_config = data.get("tool", {}).get("lucidlint", {})
+                if tool_config:
+                    _merge_config(tool_config)
+
+        _CONFIG_CACHE[self.repo] = result
+        return result
+
+    def _git_head(self) -> GitHead:
+        """Current branch and short commit for report provenance, via pygit2.
+        Returns empty strings when git or pygit2 is unavailable."""
+        if _pygit2 is None:
+            return GitHead(branch="", commit="")
+        try:
+            r = _pygit2.Repository(str(self.repo))
+            return GitHead(branch=r.head.shorthand or "", commit=str(r.head.target)[:7])
+        # git-absent is a supported mode — the handler returns the empty head
+        except Exception:
+            return GitHead(branch="", commit="")
+
+    def _dedupe_merge(self, actions: list[Action], diff: set[str]) -> list[Action]:
+        """Dedupe, rank, merge per-target kinds, then lifecycle notes."""
+        unique = self._dedupe(actions)
+        self._percentile_rank(unique, diff)
+        unique = self._merge_targets(unique)
+        # Re-rank on the merged raw values, but KEEP the diff marking — the
+        # merged actions must still show "[in your diff]" (PRD R10).
+        self._percentile_rank(unique, diff)
+        unique.sort(key=lambda a: (-a.priority, a.file, a.line))
+        self._lifecycle_notes(unique)
+        return unique
+
+
+    def _write_baseline(self, unique: list[Action], ignored_by_signal: Counter | None = None) -> int:
+        """--update-baseline: lock all current action keys and exit clean."""
+        if not self.args.baseline:
+            log("--update-baseline requires --baseline PATH")
+            return 2
+        keys = [action_key(a) for a in unique if a.severity != "warn"]
+        baseline: dict = {"actions": keys}
+        if ignored_by_signal:
+            baseline["config_ignored"] = dict(ignored_by_signal)
+        self.args.baseline.write_text(json.dumps(baseline, indent=2))
+        print(f"lucidlint: baseline written — {len(keys)} action(s) locked to {self.args.baseline}")
+        return 0
+
+    def _dedupe(self, actions: list[Action]) -> list[Action]:
+        """Same kind+file+line+function fires once (graph and radon can both flag a function)."""
+        seen: dict[tuple, Action] = {}
+        for a in actions:
+            key = (a.kind, a.file, a.line, a.function)
+            if key not in seen or a.raw > seen[key].raw:
+                seen[key] = a
+        return list(seen.values())
+
+    def _percentile_rank(self, unique: list[Action], diff: set[str]) -> None:
+        """Rank raw risk 1-99 (percentile) so the list spreads; tag in-diff actions."""
+        if not unique:
+            return
+        lo, hi = min(a.raw for a in unique), max(a.raw for a in unique)
+        for a in unique:
+            a.priority = 99 if hi <= lo else max(1, round(1 + 98 * (a.raw - lo) / (hi - lo)))
+            a.in_diff = a.file in diff
+
+    def _merge_targets(self, unique: list[Action]) -> list[Action]:
+        """Per-target merge: complexity + large-function on the same function is one fix."""
+        merged: dict[tuple, Action] = {}
+        for a in sorted(unique, key=lambda a: (-a.raw, a.file, a.line)):
+            key = _merge_key(a)
+            if key not in merged:
+                merged[key] = a
+            else:
+                prev = merged[key]
+                prev.kinds = sorted({prev.kind, a.kind})
+                prev.raw = max(prev.raw, a.raw)
+                if a.note and a.note not in prev.note:
+                    prev.note = (prev.note + " " + a.note).strip()
+                prev.line = min(prev.line, a.line)
+                if a.severity == "fail":
+                    prev.severity = "fail"  # a warn merged into a fail target must not clear the gate
+                if a.message != prev.message:
+                    extra = f"{a.severity.upper()}: {a.message}"
+                    if extra not in prev.note:
+                        prev.note = (prev.note + " " + extra).strip()
+        return list(merged.values())
+
+    def _lifecycle_notes(self, unique: list[Action]) -> None:
+        """Facts only — low-churn scripts/tools. Delete-vs-refactor is the agent's call."""
+        for a in unique:
+            if a.file.startswith(("scripts/", "tools/")) and a.churn <= 2 and a.last_modified:
+                a.note = (
+                    a.note + f" Lifecycle: {a.churn}x churn, last touched {a.last_modified} — "
+                    f"low-change file under scripts/tools."
+                ).strip()
+
+    def run(self) -> int:
+        """The gate verdict for the repo."""
+        self.gather()
+        self.collect()
+        self.apply_config()
+        self.unique = self._dedupe_merge(self.actions, self.diff)
+
+        if self.args.update_baseline:
+            return self._write_baseline(self.unique, self.ignored_by_signal)
+        baseline_keys, self.baseline_ignored = _load_baseline(self.args.baseline)
+        self.stale = _apply_baseline(self.unique, baseline_keys)
+        # the §9 growth signal: a config-ignored family whose count GREW since
+        # the baseline is debt being added to, not held — the ignore's scope is
+        # wrong. A warning, never a gate failure (growing repos legitimately
+        # grow): --update-baseline re-locks the new counts. Only meaningful when
+        # a baseline exists to compare against.
+        if self.args.baseline:
+            for sig, n in self.ignored_by_signal.items():
+                if self.baseline_ignored.get(sig, 0) < n:
+                    log(
+                        f"config-ignored '{sig}' grew {self.baseline_ignored.get(sig, 0)} -> {n} since the baseline — "
+                        "the ignore's scope is being added to; re-scope it or re-lock with --update-baseline"
+                    )
+        fails = [a for a in self.unique if a.severity == "fail"]
+        warns = [a for a in self.unique if a.severity == "warn"]
+        acks = [a for a in self.unique if a.severity == "ack"]
+        self.head = self._git_head()
+        self.rc = _RenderCtx(
+            self.repo, self.args, self.head.branch, self.head.commit, self.cc.label,
+            self.cc.graph_preferred, self.diff, ignored_by_signal=self.ignored_by_signal,
+        )
+
+        if self.args.json:
+            self.rc.render_json(self.unique)
+        else:
+            self.rc.render_text(self.unique, fails, warns, acks)
+
+        return _gate_exit(self.stale, fails, self.args)
+
+
+
+
+def _trim_preview_diff(diff, name, new_source):
+    """Shape the extract-method preview: the call-site hunk (header + a few
+    context lines + the inserted call + the next context line — the removed
+    lines duplicate the extracted body) plus the extracted method's first
+    lines. The agent names and comprehends from the method being created."""
+    hunks, cur = [], []
+    for line in diff:
+        if line.startswith("@@"):
+            if cur:
+                hunks.append(cur)
+            cur = [line]
+        else:
+            cur.append(line)
+    if cur:
+        hunks.append(cur)
+    call_hunk = next(
+        (h for h in hunks
+         if any(ln.startswith("+") and f"{name}(" in ln for ln in h)),
+        hunks[0] if hunks else [],
+    )
+    if call_hunk:
+        call_idx = next(
+            i for i, ln in enumerate(call_hunk)
+            if ln.startswith("+") and f"{name}(" in ln
+        )
+        head = [ln for ln in call_hunk[1:call_idx] if ln.startswith(" ")][:3]
+        tail = next((ln for ln in call_hunk[call_idx + 1:] if ln.startswith(" ")), None)
+        shown = [call_hunk[0]] + head + [call_hunk[call_idx]]
+        if tail:
+            shown.append(tail)
+        omitted = len(call_hunk) - len(shown)
+        if omitted > 0:
+            shown.append(f"... ({omitted} diff lines omitted)")
+        call_hunk = shown
+    src_lines = new_source.splitlines()
+    def_idx = next(
+        (i for i, ln in enumerate(src_lines)
+         if ln.startswith("def ") and name in ln),
+        None,
+    )
+    body: list[str] = []
+    if def_idx is not None:
+        for ln in src_lines[def_idx + 1:]:
+            if ln and not ln[0].isspace():
+                break
+            body.append(ln)
+    return call_hunk, def_idx, body
+
+
+def _fix_identifier_problem(kind: str, opts: fix_engine.FixOptions, where: str) -> str | None:
+    """The invalid-argument guard: a non-identifier --name or --params entry
+    would construct an invalid libcst node inside a fixer. Refused before
+    dispatch with a message; a MISSING name is NOT refused here — previews
+    run nameless by contract."""
+    if kind in fix_engine._NAME_REQUIRED_KINDS and opts.name is not None and not opts.name.isidentifier():
+        return (
+            f"fix: --name must be a valid Python identifier, got '{opts.name}' "
+            f"at {where} - replace the message's <placeholder> with the real name"
+        )
+    if opts.params is not None:
+        bad = [p for p in opts.params if not p.isidentifier()]
+        if bad:
+            return f"fix: --params entries must be valid identifiers, got {bad} at {where}"
+    return None
+
+
+def _fix_refusal(kind: str, opts: fix_engine.FixOptions, file: str, line: int) -> str:
+    """Why a fix produced nothing. A name-required kind with a missing or
+    non-identifier name is NOT 'nothing to change' — it is an unsatisfied
+    prerequisite, and the silence would read as the finding being
+    unfixable (the LSP placeholder flow depends on this message)."""
+    if kind in fix_engine._NAME_REQUIRED_KINDS and opts.name is None:
+        # an unsatisfied prerequisite, not 'nothing to change': the silence
+        # would read as unfixable (the LSP placeholder flow depends on this)
+        return (
+            f"fix: {kind} needs a semantic name the tool cannot invent "
+            f"(--name <Name>) at {file}:{line} - naming is the judgement call"
+        )
+    return _fix_identifier_problem(kind, opts, f"{file}:{line}") or (
+        f"fix: nothing to change for {kind} at {file}:{line}"
+    )
+
+
+class _FixCommand:
+    """The `lucidlint fix` command: R27 line resolution, the engine checks,
+    the preview surface, and the apply path — one command's behavior, not a
+    slice of main()."""
+
+    def __init__(self, args, repo: Path):
+        self.args: argparse.Namespace = args
+        self.repo: Path = repo
+        self.rel: str = args.file or ""
+        self.opts: fix_engine.FixOptions = fix_engine.FixOptions(
+            params=args.params.split(",") if args.params else None,
+            name=args.name,
+        )
+        self.req: fix_engine._FixRequest | None = None
+        self.fix_kind: str = ""
+
+    def run(self) -> int:
         # the agent-driven fix surface: `lucidlint fix --kind X --file F --line N`
-        rel = args.file or ""
-        if not rel.endswith((".py", ".rs")):
+        if not self.rel.endswith((".py", ".rs")):
             # the fix engines (libcst for Python, syn for Rust) cannot touch a
             # non-Python/Rust target; refuse clearly instead of a parse crash
             print(
-                f"fix: the fix engine only supports Python and Rust files — '{rel}' "
+                f"fix: the fix engine only supports Python and Rust files — '{self.rel}' "
                 f"is neither; refactor it by hand"
             )
             return 1
-        fix_kind = _FIX_ALIASES.get(args.kind, args.kind)
-        if args.line == 0:
-            # R27: agents never compute line numbers — the tool owns its own
-            # coordinates; when the file has exactly one finding of the kind,
-            # no --line is needed (both the .py and .rs fix surfaces)
-            lines = _finding_lines(repo, args.file, args.kind)
-            if len(lines) == 1:
-                args.line = lines[0]
-            elif not lines:
-                print(f"fix: no {args.kind} finding in {args.file} — nothing to fix")
-                return 0
-            else:
-                print(
-                    f"fix: {len(lines)} {args.kind} findings in {args.file} "
-                    f"(lines {', '.join(map(str, lines))}) — pass --line to pick one"
-                )
-                return 0
-        if rel.endswith(".rs"):
+        self.fix_kind = _FIX_ALIASES.get(self.args.kind, self.args.kind)
+        # validate BEFORE dispatch: an INVALID identifier (<CONST>) reaching a
+        # fixer constructs an invalid libcst Name and dies with a traceback,
+        # not a message (the LSP flow hands the verbatim tokens to a shell).
+        # A MISSING name still previews — the preview IS the line-number-free
+        # contract; only the apply needs the commitment.
+        bad = _fix_identifier_problem(
+            self.fix_kind, self.opts, f"{self.args.file}:{self.args.line}"
+        )
+        if bad:
+            print(bad)
+            return 1
+        if self.args.line == 0:
+            exit_code = self._resolve_line()
+            if exit_code is not None:
+                return exit_code
+        if self.rel.endswith(".rs"):
             # a Rust fix runs in the scan core (syn) — libcst is Python-only
-            if fix_kind == "extract-method" and args.name is None and not args.confirm:
+            if self.fix_kind == "extract-method" and self.args.name is None and not self.args.confirm:
                 # H4: extract-method's semantic name is REQUIRED. A name-less
                 # request forwarded to the scanner would serialize "" and write
                 # `fn ()` — invalid Rust — so refuse silently (R28; the
                 # directive prose already told the agent to pass --name). There
                 # is no Rust preview surface yet.
-                print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
+                print(_fix_refusal(self.fix_kind, self.opts, self.args.file, self.args.line))
                 return 0
-            return _fix_rust(repo, fix_kind, rel, args.line, args.name)
+            return _File(self.repo, self.rel).fix_rust(self.fix_kind, self.args.line, self.args.name)
         # Python: the libcst fix engine is a mandatory dependency
         if fix_engine is None:
             print(
@@ -1410,88 +1741,72 @@ def main() -> int:
             )
             return 1
         opts = fix_engine.FixOptions(
-            params=args.params.split(",") if args.params else None,
-            name=args.name,
+            params=self.args.params.split(",") if self.args.params else None,
+            name=self.args.name,
         )
-        if fix_kind in fix_engine.PREVIEW_KINDS and not args.name and not args.confirm:
+        self.req = fix_engine._FixRequest(
+            kind=self.args.kind, repo=self.repo, rel=self.rel, line=self.args.line, opts=opts,
+        )
+        if self.fix_kind in fix_engine.PREVIEW_KINDS and not self.args.name and not self.args.confirm:
+            return self._preview()
+        return self._apply()
+
+    def _resolve_line(self) -> int | None:
+        """R27: agents never compute line numbers — the tool owns its own
+        coordinates; when the file has exactly one finding of the kind, no
+        --line is needed. Returns an exit code when the request cannot
+        proceed, None when the line is resolved."""
+        # R27: agents never compute line numbers — the tool owns its own
+        # coordinates; when the file has exactly one finding of the kind,
+        # no --line is needed (both the .py and .rs fix surfaces)
+        lines = _File(self.repo, self.args.file).finding_lines(self.args.kind)
+        if len(lines) == 1:
+            self.args.line = lines[0]
+        elif not lines:
+            print(f"fix: no {self.args.kind} finding in {self.args.file} — nothing to fix")
+            return 0
+        else:
+            print(
+                f"fix: {len(lines)} {self.args.kind} findings in {self.args.file} "
+                f"(lines {', '.join(map(str, lines))}) — pass --line to pick one"
+            )
+            return 0
+        return None
+
+    def _preview(self) -> int:
             # the name-free preview surface: show the proposed refactoring
             # as a diff (the seam with a placeholder name — no --fix-name
             # needed to see it). The agent reviews the seam, then re-runs
             # with --fix-name <name>; the name is the commitment, so the
             # named run applies — no --confirm dance
-            new_source, description = fix_engine.propose_finding(
-                args.kind, args.file, repo, args.line, opts
-            )
+            new_source, description = self.req.propose_finding()
             if new_source is None:
-                # R28: never explain an absent fix — the silence is the signal
-                print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
+                print(_fix_refusal(self.fix_kind, self.opts, self.args.file, self.args.line))
                 return 0
             diff = list(
                 difflib.unified_diff(
-                    (repo / args.file).read_text().splitlines(),
+                    (self.repo / self.args.file).read_text().splitlines(),
                     new_source.splitlines(),
-                    fromfile=args.file,
-                    tofile=args.file + " (proposed)",
+                    fromfile=self.args.file,
+                    tofile=self.args.file + " (proposed)",
                     lineterm="",
                 )
             )
-            if fix_kind == "extract-method":
+            if self.fix_kind == "extract-method":
                 # the C shape (subtask-tested): the call-site hunk plus the
                 # EXTRACTED METHOD's first lines — agents name and comprehend
                 # from the method being created, not the diff head; a bare
                 # diff-head truncation left them wanting the cut part and
                 # unsure whether _extracted was the final name
-                name = args.name or "_extracted"
-                hunks, cur = [], []
-                for line in diff:
-                    if line.startswith("@@"):
-                        if cur:
-                            hunks.append(cur)
-                        cur = [line]
-                    else:
-                        cur.append(line)
-                if cur:
-                    hunks.append(cur)
-                call_hunk = next(
-                    (h for h in hunks
-                     if any(ln.startswith("+") and f"{name}(" in ln for ln in h)),
-                    hunks[0] if hunks else [],
+                call_hunk, def_idx, body = _trim_preview_diff(
+                    diff, self.args.name or "_extracted", new_source
                 )
-                # keep the hunk's shape, not its bulk: header + a few context
-                # lines + the inserted call + the next context line — the
-                # removed lines duplicate the extracted body shown below
-                if call_hunk:
-                    call_idx = next(
-                        i for i, ln in enumerate(call_hunk)
-                        if ln.startswith("+") and f"{name}(" in ln
-                    )
-                    head = [ln for ln in call_hunk[1:call_idx] if ln.startswith(" ")][:3]
-                    tail = next((ln for ln in call_hunk[call_idx + 1:] if ln.startswith(" ")), None)
-                    shown = [call_hunk[0]] + head + [call_hunk[call_idx]]
-                    if tail:
-                        shown.append(tail)
-                    omitted = len(call_hunk) - len(shown)
-                    if omitted > 0:
-                        shown.append(f"... ({omitted} diff lines omitted)")
-                    call_hunk = shown
-                src_lines = new_source.splitlines()
-                def_idx = next(
-                    (i for i, ln in enumerate(src_lines)
-                     if ln.startswith("def ") and name in ln),
-                    None,
-                )
-                body: list[str] = []
-                if def_idx is not None:
-                    for ln in src_lines[def_idx + 1:]:
-                        if ln and not ln[0].isspace():
-                            break
-                        body.append(ln)
                 print("\n".join(diff[:2]))  # --- / +++ file headers
                 print("\n".join(call_hunk))
                 print(f"# seam: {description}")
                 if def_idx is not None:
                     print("\nExtracted (the method being created, first lines):\n")
-                    print(src_lines[def_idx])
+                    print(new_source.splitlines()[def_idx])
                     print("\n".join(body[:10]))
                     if len(body) > 10:
                         print(f"... ({len(body) - 10} more lines omitted)")
@@ -1499,146 +1814,30 @@ def main() -> int:
                 if len(diff) > 40:
                     diff = diff[:40] + [f"... ({len(diff) - 40} more lines omitted)"]
                 print("\n".join(diff))
-            print(f"# the name `{args.name or '_extracted'}` is a placeholder — pick a real one; "
-                  f"apply it: lucidlint fix --kind {args.kind} --file {args.file} "
-                  f"--line {args.line} --name <name>")
+            print(f"# the name `{self.args.name or '_extracted'}` is a placeholder — pick a real one; "
+                  f"apply it: lucidlint fix --kind {self.args.kind} --file {self.args.file} "
+                  f"--line {self.args.line} --name <name>")
             return 0
-        description = fix_engine.fix_finding(
-            args.kind, args.file, repo, args.line, opts
-        )
+
+    def _apply(self) -> int:
+        description = self.req.fix_finding()
         if description is None:
-            # R28: never explain an absent fix — the silence is the signal
-            print(f"fix: nothing to change for {args.kind} at {args.file}:{args.line}")
+            print(_fix_refusal(self.fix_kind, self.opts, self.args.file, self.args.line))
             return 0
-        print(f"fix: {description} — {args.file}:{args.line} ({args.kind})")
+        print(f"fix: {description} — {self.args.file}:{self.args.line} ({self.args.kind})")
         return 0
 
-    if args.file:
-        # Single-file / LSP mode: no git history, coverage, or diff — the
-        # per-file findings are what an editor shows on save.
-        fh = FileHistory(Counter(), {})
-        cr = CoverageResult(None, "")
-        cc = _coverage_context(repo, None, "")
-        diff: set[str] = set()
-    else:
-        fh = file_history(repo)
-        if args.refresh_coverage:
-            _refresh_coverage(repo)
-        cr = load_coverage(repo)
-        cc = _coverage_context(repo, cr.lines, cr.source)
-        diff = changed_files(repo, args.base)
-    actions = _collect_actions(repo, args, fh.churn, fh.last_modified, only_rel=args.file)
-    # Apply project-wide config (global ignore / per-path ignore), COUNTING
-    # what the config hides — the §9 debt ledger: config-ignored findings are
-    # filtered BEFORE the verdict, so without a count the ignore can grow
-    # invisibly ("nothing is ever wrong").
-    ignored_config = _load_lucidlint_config(repo)
-    ignored_by_signal: Counter[str] = Counter()
-    if ignored_config["global_ignore"] or ignored_config["per_path_ignore"]:
-        kept: list[Action] = []
-        for a in actions:
-            if a.signal in ignored_config["global_ignore"]:
-                ignored_by_signal[a.signal] += 1
-                continue
-            removed = False
-            for pattern, path_ignored in ignored_config["per_path_ignore"]:
-                if Path(a.file).match(pattern) and a.signal in path_ignored:
-                    ignored_by_signal[a.signal] += 1
-                    removed = True
-                    break
-            if not removed:
-                kept.append(a)
-        actions = kept
-    unique = _dedupe_merge(actions, diff)
-
-    if args.update_baseline:
-        return _write_baseline(args, unique, ignored_by_signal)
-    baseline_keys, baseline_ignored = _load_baseline(args.baseline)
-    stale = _apply_baseline(unique, baseline_keys)
-    # the §9 growth signal: a config-ignored family whose count GREW since
-    # the baseline is debt being added to, not held — the ignore's scope is
-    # wrong. A warning, never a gate failure (growing repos legitimately
-    # grow): --update-baseline re-locks the new counts. Only meaningful when
-    # a baseline exists to compare against.
-    if args.baseline:
-        for sig, n in ignored_by_signal.items():
-            if baseline_ignored.get(sig, 0) < n:
-                log(
-                    f"config-ignored '{sig}' grew {baseline_ignored.get(sig, 0)} -> {n} since the baseline — "
-                    "the ignore's scope is being added to; re-scope it or re-lock with --update-baseline"
-                )
-    fails = [a for a in unique if a.severity == "fail"]
-    warns = [a for a in unique if a.severity == "warn"]
-    acks = [a for a in unique if a.severity == "ack"]
-    head = _git_head(repo)
-    rc = _RenderCtx(
-        repo, args, head.branch, head.commit, cc.label, cc.graph_preferred, diff,
-        ignored_by_signal=ignored_by_signal,
-    )
-
-    if args.json:
-        rc.render_json(unique)
-    else:
-        rc.render_text(unique, fails, warns, acks)
-
-    return _gate_exit(stale, fails, args)
 
 
+def main() -> int:
+    args = parse_args()
+    repo = args.repo.resolve()
 
-def _fix_rust(repo: Path, kind: str, rel: str, line: int, name: str | None) -> int:
-    """A Rust fix runs in the scan core (syn), not the Python/libcst engine:
-    invoke the binary's --fix mode, which edits the file in place."""
-    binary = RUST_SCAN.binary(repo)
-    if binary is None:
-        print("fix: the Rust scan core is required — build it with `make scanner-check`")
-        return 1
-    spec = json.dumps(
-        {"kind": kind, "file": str(repo / rel), "line": line, "name": name or ""}
-    )
-    try:
-        proc = subprocess.run([str(binary), "--fix", spec], capture_output=True, text=True, timeout=120, cwd=str(repo))
-    except subprocess.SubprocessError:
-        print(f"fix: the Rust fix core failed for {rel}:{line}")
-        return 1
-    sys.stdout.write(proc.stdout)
-    if proc.returncode != 0:
-        # the scanner exits non-zero on an unknown/malformed request — an
-        # unexpected error must surface (R29), not masquerade as a success
-        if proc.stderr:
-            sys.stderr.write(proc.stderr)
-        return 1
-    return 0
+    if args.command == "fix":
+        return _FixCommand(args, repo).run()
 
+    return _GateRunner(repo, args).run()
 
-def _finding_lines(repo: Path, rel: str, kind: str) -> list[int]:
-    """The lines of every finding of `kind` in one file — the R27 line
-    resolution: the tool scans, the agent never counts lines.
-
-    `kind` is the FIX kind (the directive's `fix: <kind>` tail — what the
-    agent's command names): a dispatch-shaped complexity finding carries the
-    kind `complexity` but its message directive says `fix: dispatch-registry`,
-    so the match is against the message's directive, not the raw kind."""
-    wanted = _FIX_ALIASES.get(kind, kind)
-    found = []
-    for f in _scan_single_file(repo, rel):
-        directive = _fix_directive_kind(f.message)
-        if directive is None:
-            # a finding with no directive has no fix — it never matches
-            continue
-        if _FIX_ALIASES.get(directive, directive) == wanted:
-            found.append(f.line)
-    return sorted(found)
-
-
-def _scan_single_file(repo: Path, rel: str):
-    """Scan one file, yielding its findings."""
-    let_include_tests = False  # the fix resolves one file's findings
-    RUST_SCAN.prepare(repo, rel, let_include_tests, {})
-    files = _py_files(repo, rel)
-    rust = RUST_SCAN.load(repo, files)
-    if rust is None:
-        return
-    yield from rust.by_rel.get(rel, [])
 
 
 def _fix_directive_kind(message: str) -> str | None:
@@ -1732,9 +1931,6 @@ def _collect_actions(repo: Path, args, file_churn: Counter[str], last_modified: 
     return _actions_from_rust(rust, args.include_tests, file_churn, last_modified)
 
 
-def _refresh_coverage(repo: Path) -> None:
-    """Run the repo's coverage suite so verdicts are fresh."""
-    subprocess.run(["make", "-C", str(repo), "coverage"], capture_output=True, text=True, timeout=1800)
 
 if __name__ == "__main__":
     sys.exit(main())

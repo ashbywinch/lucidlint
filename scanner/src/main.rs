@@ -958,6 +958,14 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     class_module_findings(state, body, name);
     vague_name_findings(state, body);
     strewing_findings(state, body);
+    misplaced_method_findings(state, body);
+    tuple_record_findings(state, body);
+    assembly_class_findings(state, body);
+    data_clump_findings(state, body);
+    feature_envy_findings(state, body);
+    undeclared_attribute_findings(state, body);
+    god_class_findings(state, body);
+    duplicate_field_findings(state, body);
     record_shape_findings(state, body, source);
     partition_findings(state, body, source);
     // review-log rules: shadowing hazards + duplicated work (all per-file)
@@ -2213,6 +2221,110 @@ mod tests {
         );
     }
 
+    #[test]
+    fn closures_mutating_accumulator_fires_without_cc_or_span() {
+        // the _render shape: two small walkers that both append to the
+        // enclosing function's line buffer — shared-state mutation is the
+        // class-in-disguise tell even with cc < 15 and span < 60
+        let f = scan_src(
+            "def render(em, vm):\n    L = []\n    def emit_epic(cid, d):\n        L.append(cid)\n        for c in em:\n            emit_epic(c, d + 1)\n    def emit_vs(vid, d=0):\n        L.append(vid)\n        for c in vm:\n            emit_vs(c, d + 1)\n    return L\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "closures").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("accumulator pattern"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn closures_pure_handler_factory_passes() {
+        // a factory of handlers that only READ the captured config — the
+        // legit closure idiom, not a class in disguise
+        let f = scan_src(
+            "def make_handlers(config, db):\n    def on_get(request):\n        return db.query(config.filter)\n    def on_post(request):\n        return db.read(request)\n    return on_get, on_post\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "closures"), "{f:?}");
+    }
+
+    #[test]
+    fn closures_single_mutating_closure_passes() {
+        // one closure over an accumulator is a closure, not a class
+        let f = scan_src("def f():\n    L = []\n    def g(x):\n        L.append(x)\n    return g\n");
+        assert!(!f.iter().any(|x| x.kind == "closures"), "{f:?}");
+    }
+
+    #[test]
+    fn closures_attribute_chain_mutation_fires() {
+        // the accumulator reached through an attribute of a captured name
+        // (writer.lines.append) — the same latent class, a harder receiver
+        let f = scan_src(
+            "def build(writer):\n    def add_header():\n        writer.lines.append(\"h\")\n    def add_footer():\n        writer.lines.append(\"f\")\n    add_header()\n    add_footer()\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "closures").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+    }
+
+    // ------------------------------------ misplaced-method / tuple-record / assembly
+    #[test]
+    fn misplaced_method_fires_when_class_state_is_passed() {
+        // _superseded_lines(em, vm) called from a method holding em/vm as
+        // instance state — the function is the class's method in exile
+        let f = scan_src(
+            "def _superseded_lines(em, vm):\n    return len(em) + len(vm)\n\nclass R:\n    def __init__(self, em, vm):\n        self.em = em\n        self.vm = vm\n    def render(self):\n        em, vm = self.em, self.vm\n        return _superseded_lines(em, vm)\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "misplaced-method").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("R.render"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn misplaced_method_ignores_helper_called_with_plain_locals() {
+        // a helper called with locals that are NOT class attributes — no
+        // instance state in exile
+        let f = scan_src(
+            "def format_line(text, width):\n    return text[:width]\n\nclass R:\n    def render(self, text):\n        width = 80\n        return format_line(text, width)\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "misplaced-method"), "{f:?}");
+    }
+
+    #[test]
+    fn tuple_record_fires_on_positional_reads() {
+        // (props, name) tuples built into dicts, read by constant index and
+        // destructure — an anonymous record
+        let f = scan_src(
+            "em = {r[\"id\"]: (p, n) for r in []}\ndef f(em):\n    return em[x][1]\ndef g(em):\n    a, b = em[x]\ndef h(em):\n    return em[x][0]\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "tuple-record").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("em"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn tuple_record_ignores_single_read() {
+        // a dict of tuples read once is not a record-shaped pattern yet
+        let f = scan_src("em = {r[\"id\"]: (p, n) for r in []}\ndef f(em):\n    return em[x][1]\n");
+        assert!(!f.iter().any(|x| x.kind == "tuple-record"), "{f:?}");
+    }
+
+    #[test]
+    fn assembly_class_fires_on_threaded_build() {
+        // __init__ threading em/vm through functions whose outputs feed each
+        // other, storing every result — a class in waiting
+        let f = scan_src(
+            "def _epic_relations(em):\n    return {\"a\": 1}, {\"b\": 2}\ndef _vs_relations(vm, epic_vs, em):\n    return 1, 2, 3\nclass R:\n    def __init__(self, em, vm):\n        self.em = em\n        self.vm = vm\n        epic_vs, kids = _epic_relations(em)\n        vs_parent, vs_kids, vs_epics = _vs_relations(vm, epic_vs, em)\n        self.epic_vs = epic_vs\n        self.kids = kids\n        self.vs_parent = vs_parent\n        self.vs_kids = vs_kids\n        self.vs_epics = vs_epics\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "assembly-class").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+    }
+
+    #[test]
+    fn assembly_class_ignores_plain_pipeline() {
+        // a linear a = f(x); b = g(a) chain has no shared base — the
+        // functional style is not a class in waiting
+        let f = scan_src(
+            "def f(x):\n    return x + 1\ndef g(a):\n    return a * 2\ndef h(b):\n    return b - 1\ndef main(x):\n    a = f(x)\n    b = g(a)\n    c = h(b)\n    return c\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "assembly-class"), "{f:?}");
+    }
+
     // ------------------------------------------------------------- class-module
     #[test]
     fn class_module_name_mismatch() {
@@ -2238,12 +2350,155 @@ mod tests {
     }
 
     #[test]
+    fn tuple_record_counts_reads_inside_comprehensions() {
+        // em[x][0] in a comprehension if, em[k][1] in a dictcomp value, and
+        // a lambda sort key all count — the reads hidden inside expressions
+        let f = scan_src(
+            "em = {r[\"id\"]: (p, n) for r in []}\ndef f(em):\n    return [x for x in em if em[x][0]]\ndef g(em):\n    return {k: em[k][1] for k in em}\ndef h(em):\n    return sorted(em, key=lambda k: em[k][1])\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "tuple-record").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+    }
+
+    // ------------------------------------ data-clump / feature-envy / undeclared-attribute
+    #[test]
+    fn data_clump_fires_on_shared_param_pair() {
+        // >=3 functions taking the same (em, vm) pair — a data clump
+        let f = scan_src(
+            "def a(em, vm):\n    return em\n\ndef b(em, vm):\n    return vm\n\ndef c(em, vm):\n    return em, vm\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "data-clump").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("em"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn data_clump_ignores_two_function_pair() {
+        // a pair shared by only two functions is not a clump
+        let f = scan_src("def a(em, vm):\n    return em\n\ndef b(em, vm):\n    return vm\n");
+        assert!(!f.iter().any(|x| x.kind == "data-clump"), "{f:?}");
+    }
+
+    #[test]
+    fn feature_envy_fires_on_collaborator_reads() {
+        // the render shape: graph = self.graph, then the method reads the
+        // graph's fields more than its own state
+        let f = scan_src(
+            "class R:\n    def render(self):\n        graph = self.graph\n        a = graph.vs_parent\n        b = graph.kids\n        c = graph.epic_vs\n        d = graph.vs_kids\n        e = graph.vs_epics\n        f = graph.epic_vs\n        g = graph.vs_kids\n        x = self.lines\n        y = self.count\n        return a, b, c, d, e, f, g, x, y\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "feature-envy").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+    }
+
+    #[test]
+    fn feature_envy_counts_reads_inside_tuple_assignments() {
+        // `em, vm = graph.em, graph.vm` — the tuple's elements are field
+        // reads too; a walker that stops at the Tuple would under-count to
+        // 2 and the rule would miss the envy
+        let f = scan_src(
+            "class R:\n    def render(self):\n        graph = self.graph\n        em, vm = graph.em, graph.vm\n        roots = [v for v in vm if v not in graph.vs_parent]\n        done = [v for v in vm if v not in graph.kids]\n        return roots, em, done\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "feature-envy").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("4 times"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn feature_envy_ignores_own_inputs_and_values() {
+        // a visitor callback consuming its parameter and a computed value
+        // (pos = self.get_metadata(...)) are NOT envy
+        let f = scan_src(
+            "class V:\n    def leave_Node(self, original_node, updated_node):\n        pos = self.get_metadata(original_node)\n        if pos.start.line <= updated_node.end.line:\n            return updated_node\n        return updated_node\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "feature-envy"), "{f:?}");
+    }
+
+    #[test]
+    fn undeclared_attribute_fires_on_quiet_assignment() {
+        // self.done = False in a member function without a declaration, and
+        // a plain __init__ assignment without a type
+        let f = scan_src(
+            "class C:\n    def __init__(self):\n        self.x = 0\n    def leave(self):\n        self.done = True\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
+        assert_eq!(r.len(), 2, "{f:?}");
+    }
+
+    #[test]
+    fn undeclared_attribute_message_carries_fix_directive() {
+        // the finding's message must name the automated fix (the engine's
+        // directive parser matches it)
+        let f = scan_src("class C:\n    def __init__(self):\n        self.x = 0\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
+        assert_eq!(r.len(), 1);
+        assert!(r[0].message.contains("— fix: undeclared-attribute"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn undeclared_attribute_accepts_declared_members() {
+        // annotated in __init__ or the class body -> declared
+        let f = scan_src(
+            "class C:\n    kind: str = \"x\"\n    def __init__(self):\n        self.x: int = 0\n    def leave(self):\n        self.done = True\n        self.kind = \"y\"\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
+        assert_eq!(r.len(), 1, "{f:?}"); // only self.done
+    }
+
+    #[test]
+    fn god_class_fires_on_large_cohesive_class() {
+        // 20 methods over 400 lines — the size signal (a warn, not a split
+        // order: the partition rule decides whether a split is sound)
+        let mut src = String::from("class Big:\n");
+        for i in 0..20 {
+            src.push_str(&format!("    def m{i}(self):\n        return {i}\n"));
+        }
+        let f = scan_src(&src);
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "god-class").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert_eq!(r[0].severity, "warn");
+    }
+
+    #[test]
+    fn god_class_ignores_small_class() {
+        let f = scan_src("class Small:\n    def a(self):\n        return 1\n    def b(self):\n        return 2\n");
+        assert!(!f.iter().any(|x| x.kind == "god-class"), "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_field_fires_across_containment() {
+        // the request/options shape: the containing class and its contained
+        // class both hold repo+rel — duplicated domain state
+        let f = scan_src(
+            "@dataclass\nclass Inner:\n    repo: object\n    rel: object\n\n@dataclass\nclass Outer:\n    kind: str\n    repo: object\n    rel: object\n    inner: Inner\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-field").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("repo, rel"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn duplicate_field_ignores_unrelated_shared_names() {
+        // same field name on classes with NO containment edge — coincidence
+        let f = scan_src("class A:\n    name: str\n\nclass B:\n    name: str\n    count: int\n");
+        assert!(!f.iter().any(|x| x.kind == "duplicate-field"), "{f:?}");
+    }
+    #[test]
     fn duplicate_class_and_function_name_is_found() {
         // def shadowing a class of the same name is the same hazard
         let f = scan_src("class Record:\n    pass\n\ndef Record():\n    return 1\n");
         assert!(f.iter().any(|x| x.kind == "duplicate-def"));
     }
 
+    #[test]
+    fn class_module_ignores_tool_script_with_one_class() {
+        // generate_tree.py shape: a script whose single class is a component
+        // (module-level helpers + a build() entry) — not "a class file",
+        // renaming the file after the class would be wrong
+        let f = scan_src(
+            "def helper():\n    return 1\n\nclass _TreeRenderer:\n    pass\n\ndef build():\n    return _TreeRenderer()\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "class-module"), "{f:?}");
+    }
     #[test]
     fn duplicate_def_import_shadow_is_found() {
         // a def whose name collides with an import (the def-in-imports edit
@@ -2533,7 +2788,7 @@ mod tests {
         let f = scan_src("def f(x):\n    return {\"kind\": \"tool_call\", \"value\": x}\n");
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1);
-        assert!(r[0].message.contains("dict literal"));
+        assert!(r[0].message.contains("dict with constant keys"));
         assert_eq!(r[0].line, 2);
     }
 
@@ -2547,6 +2802,38 @@ mod tests {
     fn record_spread_merge_is_not_a_record() {
         let f = scan_src("def f(session, x):\n    return {**session, \"x\": x}\n");
         assert!(!f.iter().any(|x| x.kind == "record-shape"));
+    }
+
+    #[test]
+    fn record_dict_call_in_return_is_found() {
+        // dict(a=1, b=x) is the literal's call-form twin — the bypass a
+        // literal-only scan left open
+        let f = scan_src("def f(x):\n    return dict(kind=\"tool_call\", value=x)\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert_eq!(r[0].line, 2);
+    }
+
+    #[test]
+    fn record_dict_call_all_constant_passes() {
+        // a lookup, not a record — same exemption as the literal form
+        let f = scan_src("def f():\n    return dict(a=1, b=2)\n");
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+    }
+
+    #[test]
+    fn record_dict_call_as_inline_argument_passes() {
+        // inline call arguments are maps — not record positions
+        let f = scan_src("def f(x):\n    client.post(dict(a=1, b=x))\n");
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+    }
+
+    #[test]
+    fn record_dict_call_wrapping_literal_is_found() {
+        // dict({"a": 1, "b": x}) — the inner literal is the record
+        let f = scan_src("def f(x):\n    return dict({\"a\": 1, \"b\": x})\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
     }
 
     // ------------------------------------------- partition + test families

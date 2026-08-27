@@ -1,4 +1,6 @@
 // lucidlint: ignore-file complexity the parity-locked AST walkers are single dispatch tables —
+// lucidlint: ignore-file boolean-arg Rust has no named arguments — the traversal's
+// positional in_call_func flag is the API contract, not an unnamed boolean
 // match-arm count is table size, not branching; keep NEW functions under cc 15
 
 //! The remaining standard-family checks, mirroring the Python implementation
@@ -8,8 +10,8 @@
 use rayon::prelude::*;
 use ruff_python_ast::token::{TokenKind, Tokens};
 use ruff_python_ast::{
-    AnyNodeRef, BoolOp, CmpOp, Decorator, Expr, ExprAttribute, ExprCall, ExprContext, Operator, Pattern, Stmt,
-    StmtClassDef, StmtFunctionDef, UnaryOp,
+    AnyNodeRef, BoolOp, CmpOp, Decorator, Expr, ExprAttribute, ExprCall, ExprContext, Operator, Parameters, Pattern,
+    Stmt, StmtClassDef, StmtFunctionDef, UnaryOp,
 };
 use ruff_text_size::Ranged;
 use std::collections::HashSet;
@@ -678,7 +680,7 @@ fn is_process_exit(e: &Expr) -> bool {
     }
 }
 
-fn stmt_exprs(s: &Stmt) -> Vec<&Expr> {
+pub fn stmt_exprs(s: &Stmt) -> Vec<&Expr> {
     // the expressions directly reachable from a statement (one level)
     let mut out = Vec::new();
     match s {
@@ -863,17 +865,29 @@ pub fn annotation_base_name(e: &Expr) -> Option<String> {
     }
 }
 
-/// Closures: >= 2 inner functions/lambdas with cc >= 15 or span >= 60.
+/// Closures: >= 2 inner functions/lambdas with cc >= 15, span >= 60, OR
+/// shared-state mutation (the accumulator pattern — closures that WRITE to
+/// the enclosing function's locals are a class in disguise even when small).
 pub fn closure_findings(state: &mut ScanState, stmt: &Stmt, cc: u32, span: u32) {
     let Stmt::FunctionDef(f) = stmt else { return };
     let inner = inner_function_count(stmt);
     if inner < 2 {
         return;
     }
-    if cc < 15 && span < 60 {
+    let mutated = closures_mutate_shared_state(f);
+    if cc < 15 && span < 60 && mutated.is_empty() {
         return;
     }
     let line = stmt_line(state.source, stmt);
+    let why = if mutated.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " — its closures write to {} captured local{} (the accumulator pattern)",
+            mutated.len(),
+            if mutated.len() == 1 { "" } else { "s" }
+        )
+    };
     state.findings.push(Finding {
         file: state.file.to_string(),
         line,
@@ -881,10 +895,1315 @@ pub fn closure_findings(state: &mut ScanState, stmt: &Stmt, cc: u32, span: u32) 
         kind: "closures".into(),
         severity: "fail".into(),
         message: format!(
-            "'{}' defines {inner} inner functions closing over its state — a class in disguise",
+            "'{}' defines {inner} inner functions closing over its state{why} — a class in disguise",
             f.name.as_str()
         ),
     });
+}
+
+/// Method calls that mutate the receiver in place — the writes that turn a
+/// captured enclosing-scope local into shared instance state.
+const MUTATING_METHODS: &[&str] = &[
+    "append",
+    "extend",
+    "insert",
+    "pop",
+    "remove",
+    "clear",
+    "sort",
+    "reverse",
+    "add",
+    "discard",
+    "update",
+    "setdefault",
+    "appendleft",
+    "appendright",
+    "put",
+    "push",
+    "enqueue",
+    "__setitem__",
+    "__iadd__",
+];
+
+/// The distinct enclosing-scope locals that the direct inner functions WRITE
+/// to (mutating method calls, subscript/attribute stores, nonlocal rebinds).
+/// Empty = the closures only read the enclosing state (a factory of handlers
+/// is the legit idiom; a class in disguise is not). Only DIRECT inner
+/// functions are scanned — a deeper nesting is judged by its own
+/// `closure_findings` run when its enclosing function is scanned.
+pub fn closures_mutate_shared_state(f: &StmtFunctionDef) -> Vec<String> {
+    let (inners, outer_bound) = scope_fns_and_bindings(&f.body);
+    let mut params = HashSet::new();
+    function_param_names(&f.parameters, &mut params);
+    let mut mutated: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for inner in inners {
+        let mut inner_bound = HashSet::new();
+        function_param_names(&inner.parameters, &mut inner_bound);
+        let (_, deeper) = scope_fns_and_bindings(&inner.body);
+        inner_bound.extend(deeper);
+        let candidates: HashSet<&str> = outer_bound
+            .union(&params)
+            .filter(|n| !inner_bound.contains(*n))
+            .map(|s| s.as_str())
+            .collect();
+        for name in &candidates {
+            if !seen.contains(*name) && scope_mutates(&inner.body, &HashSet::from([*name])) {
+                seen.insert(name.to_string());
+                mutated.push(name.to_string());
+            }
+        }
+    }
+    mutated
+}
+
+/// Does any statement in *body* (control-flow descend, not nested def/class
+/// scopes) WRITE to one of *candidates*?
+fn scope_mutates(body: &[Stmt], candidates: &HashSet<&str>) -> bool {
+    let mut stack: Vec<&Stmt> = Vec::new();
+    for s in body {
+        stack.push(s);
+    }
+    while let Some(s) = stack.pop() {
+        if stmt_writes(s, candidates) {
+            return true;
+        }
+        if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            continue; // a new scope — its bodies belong to a deeper run
+        }
+        push_stmt_children(s, &mut stack);
+    }
+    false
+}
+
+fn stmt_writes(s: &Stmt, candidates: &HashSet<&str>) -> bool {
+    match s {
+        Stmt::Assign(a) => a.targets.iter().any(|t| store_target_writes(t, candidates)),
+        Stmt::AnnAssign(a) => store_target_writes(&a.target, candidates),
+        Stmt::AugAssign(a) => store_target_writes(&a.target, candidates),
+        Stmt::Delete(d) => d.targets.iter().any(|t| store_target_writes(t, candidates)),
+        Stmt::Nonlocal(n) => n.names.iter().any(|id| candidates.contains(id.as_str())),
+        Stmt::Expr(e) => expr_writes(&e.value, candidates),
+        Stmt::Return(r) => r.value.as_ref().is_some_and(|v| expr_writes(v, candidates)),
+        Stmt::If(i) => expr_writes(&i.test, candidates),
+        Stmt::While(w) => expr_writes(&w.test, candidates),
+        Stmt::For(f) => expr_writes(&f.iter, candidates) || expr_writes(&f.target, candidates),
+        Stmt::With(w) => w.items.iter().any(|item| {
+            expr_writes(&item.context_expr, candidates)
+                || item.optional_vars.as_ref().is_some_and(|v| expr_writes(v, candidates))
+        }),
+        Stmt::Try(t) => t.handlers.iter().any(|h| match h {
+            ruff_python_ast::ExceptHandler::ExceptHandler(eh) => {
+                eh.type_.as_ref().is_some_and(|t| expr_writes(t, candidates))
+            }
+        }),
+        Stmt::Assert(a) => expr_writes(&a.test, candidates),
+        _ => false,
+    }
+}
+
+/// An assignment/delete TARGET that writes INTO a candidate container
+/// (L[0] = x, L.attr = x, del L[i]) — plain name rebinds are not writes to
+/// the object (they need `nonlocal`, handled separately).
+fn store_target_writes(t: &Expr, candidates: &HashSet<&str>) -> bool {
+    match t {
+        Expr::Name(_) => false,
+        Expr::Subscript(s) => {
+            let mut v = s.value.as_ref();
+            loop {
+                match v {
+                    Expr::Subscript(inner) => v = inner.value.as_ref(),
+                    Expr::Name(n) => return candidates.contains(n.id.as_str()),
+                    _ => return false,
+                }
+            }
+        }
+        Expr::Attribute(a) => store_target_writes(&a.value, candidates),
+        Expr::Tuple(t) => t.elts.iter().any(|e| store_target_writes(e, candidates)),
+        Expr::List(l) => l.elts.iter().any(|e| store_target_writes(e, candidates)),
+        Expr::Starred(st) => store_target_writes(&st.value, candidates),
+        _ => false,
+    }
+}
+
+/// Does *e* WRITE to a candidate: a mutating method call on it, or a write
+/// nested anywhere inside (call args, subscripts, comprehensions, lambdas).
+fn expr_writes(e: &Expr, candidates: &HashSet<&str>) -> bool {
+    // the unified traversal descends every child; this closure only decides
+    // whether a CALL mutates a captured candidate (the receiver check)
+    let mut found = false;
+    walk_expr_deep(e, false, &mut |x, _| {
+        if found {
+            return;
+        }
+        if let Expr::Call(c) = x {
+            if let Expr::Attribute(a) = c.func.as_ref() {
+                // receiver mutation: L.append(...) or writer.lines.append(...)
+                // — peel attribute chains to the base name before the
+                // candidates check
+                if MUTATING_METHODS.contains(&a.attr.as_str()) {
+                    let mut receiver = a.value.as_ref();
+                    loop {
+                        match receiver {
+                            Expr::Attribute(inner) => receiver = inner.value.as_ref(),
+                            Expr::Name(n) => {
+                                if candidates.contains(n.id.as_str()) {
+                                    found = true;
+                                }
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+            }
+        }
+    });
+    found
+}
+
+/// The direct inner functions of *body*'s scope (control-flow nesting only —
+/// a def inside a nested def/class belongs to that nested scope) and the
+/// names the scope binds at any control-flow depth.
+fn scope_fns_and_bindings(body: &[Stmt]) -> (Vec<&StmtFunctionDef>, HashSet<String>) {
+    let mut fns = Vec::new();
+    let mut bound: HashSet<String> = HashSet::new();
+    let mut stack: Vec<&Stmt> = Vec::new();
+    for s in body {
+        stack.push(s);
+    }
+    while let Some(s) = stack.pop() {
+        match s {
+            Stmt::FunctionDef(f) => {
+                fns.push(f);
+                bound.insert(f.name.to_string());
+            }
+            Stmt::ClassDef(c) => {
+                bound.insert(c.name.to_string());
+            }
+            Stmt::Assign(a) => {
+                for t in &a.targets {
+                    expr_bindings(t, &mut bound);
+                }
+            }
+            Stmt::AnnAssign(a) => expr_bindings(&a.target, &mut bound),
+            Stmt::AugAssign(a) => expr_bindings(&a.target, &mut bound),
+            Stmt::For(f) => {
+                expr_bindings(&f.target, &mut bound);
+            }
+            Stmt::With(w) => {
+                for item in &w.items {
+                    if let Some(v) = &item.optional_vars {
+                        expr_bindings(v, &mut bound);
+                    }
+                }
+            }
+            Stmt::Import(i) => {
+                for a in &i.names {
+                    bound.insert(a.name.as_str().split('.').next().unwrap_or("").to_string());
+                }
+            }
+            Stmt::ImportFrom(i) => {
+                for a in &i.names {
+                    if a.name.as_str() != "*" {
+                        bound.insert(a.name.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+        if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            continue; // nested scopes are not this scope's bindings
+        }
+        push_stmt_children(s, &mut stack);
+    }
+    (fns, bound)
+}
+
+/// Names an expression binds as an assignment/unpacking target.
+fn expr_bindings(e: &Expr, out: &mut HashSet<String>) {
+    match e {
+        Expr::Name(n) => {
+            out.insert(n.id.to_string());
+        }
+        Expr::Tuple(t) => {
+            for el in &t.elts {
+                expr_bindings(el, out);
+            }
+        }
+        Expr::List(l) => {
+            for el in &l.elts {
+                expr_bindings(el, out);
+            }
+        }
+        Expr::Starred(st) => expr_bindings(&st.value, out),
+        _ => {}
+    }
+}
+
+/// The parameter names of a function (posonly, args, kwonly, vararg, kwarg).
+fn function_param_names(p: &Parameters, out: &mut HashSet<String>) {
+    for a in &p.posonlyargs {
+        out.insert(a.parameter.name.to_string());
+    }
+    for a in &p.args {
+        out.insert(a.parameter.name.to_string());
+    }
+    for a in &p.kwonlyargs {
+        out.insert(a.parameter.name.to_string());
+    }
+    if let Some(v) = &p.vararg {
+        out.insert(v.name.to_string());
+    }
+    if let Some(k) = &p.kwarg {
+        out.insert(k.name.to_string());
+    }
+}
+
+// ------------------------------------------------------------- latent-class
+// cross-function shapes (module scope): a method in exile, an anonymous
+// tuple record, and a state-threading assembly site.
+
+/// The `self.<attr> = ...` assignments across a class's methods.
+fn class_attr_names(class_body: &[Stmt]) -> HashSet<String> {
+    let mut attrs = HashSet::new();
+    for m in class_body {
+        let Stmt::FunctionDef(f) = m else { continue };
+        for s in &f.body {
+            let Stmt::Assign(a) = s else { continue };
+            for t in &a.targets {
+                if let Expr::Attribute(at) = t {
+                    if let Expr::Name(n) = at.value.as_ref() {
+                        if n.id.as_str() == "self" {
+                            attrs.insert(at.attr.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    attrs
+}
+
+/// A module-level function called from a method with `self.<attr>` arguments
+/// (or locals named like the class's attributes) matching EVERY parameter —
+/// the class already holds the data, so the function is its method in exile.
+pub fn misplaced_method_findings(state: &mut ScanState, body: &[Stmt]) {
+    let mut module_fns: std::collections::HashMap<String, (usize, Vec<String>)> = std::collections::HashMap::new();
+    for s in body {
+        let Stmt::FunctionDef(f) = s else { continue };
+        let mut params = Vec::new();
+        for a in &f.parameters.posonlyargs {
+            params.push(a.parameter.name.to_string());
+        }
+        for a in &f.parameters.args {
+            params.push(a.parameter.name.to_string());
+        }
+        for a in &f.parameters.kwonlyargs {
+            params.push(a.parameter.name.to_string());
+        }
+        if let Some(v) = &f.parameters.vararg {
+            params.push(v.name.to_string());
+        }
+        if let Some(k) = &f.parameters.kwarg {
+            params.push(k.name.to_string());
+        }
+        let line = line_of(state.source, f.name.range().start());
+        module_fns.insert(f.name.to_string(), (line, params));
+    }
+    if module_fns.is_empty() {
+        return;
+    }
+    for s in body {
+        let Stmt::ClassDef(c) = s else { continue };
+        let attrs = class_attr_names(&c.body);
+        if attrs.is_empty() {
+            continue;
+        }
+        for m in &c.body {
+            let Stmt::FunctionDef(method) = m else { continue };
+            let mut stack: Vec<&Stmt> = Vec::new();
+            for b in &method.body {
+                stack.push(b);
+            }
+            while let Some(st) = stack.pop() {
+                if matches!(st, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+                    continue;
+                }
+                for e in stmt_exprs(st) {
+                    let Expr::Call(call) = e else { continue };
+                    let Expr::Name(fn_name) = call.func.as_ref() else {
+                        continue;
+                    };
+                    let Some((def_line, params)) = module_fns.get(fn_name.id.as_str()) else {
+                        continue;
+                    };
+                    if params.is_empty() || call.arguments.args.len() < params.len() {
+                        continue;
+                    }
+                    let matched = params.iter().enumerate().all(|(i, p)| {
+                        call.arguments.args.get(i).is_some_and(|arg| match arg {
+                            Expr::Attribute(a) => {
+                                matches!(a.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self")
+                                    && a.attr.as_str() == p.as_str()
+                            }
+                            Expr::Name(n) => n.id.as_str() == p.as_str() && attrs.contains(n.id.as_str()),
+                            _ => false,
+                        })
+                    });
+                    if matched {
+                        state.findings.push(Finding {
+                            file: state.file.to_string(),
+                            line: *def_line,
+                            function: fn_name.id.to_string(),
+                            kind: "misplaced-method".into(),
+                            severity: "fail".into(),
+                            message: format!(
+                                "'{}' is called from '{}.{}' with the class's own state (self.{}) — the class already holds the data; move the function onto the class",
+                                fn_name.id.as_str(),
+                                c.name.as_str(),
+                                method.name.as_str(),
+                                params.join(", self.")
+                            ),
+                        });
+                    }
+                }
+                push_stmt_children(st, &mut stack);
+            }
+        }
+    }
+}
+
+/// A dict whose values are same-arity tuples (arity >= 2) — the anonymous
+/// record shape. None for mixed/unpacked dicts.
+pub fn dict_tuple_arity(e: &Expr) -> Option<usize> {
+    match e {
+        Expr::Dict(d) => {
+            let mut arity = None;
+            for item in &d.items {
+                item.key.as_ref()?; // **unpacking — cannot verify every value
+                match &item.value {
+                    Expr::Tuple(t) => {
+                        let n = t.elts.len();
+                        if n < 2 {
+                            return None;
+                        }
+                        if arity.is_some_and(|a| a != n) {
+                            return None;
+                        }
+                        arity = Some(n);
+                    }
+                    _ => return None,
+                }
+            }
+            arity
+        }
+        Expr::DictComp(dc) => match dc.value.as_ref() {
+            Expr::Tuple(t) => (t.elts.len() >= 2).then_some(t.elts.len()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The accessed member of a chain: self.em -> em, cfg.table -> table,
+/// em -> em. The closures receiver peel needs the BASE name; the tuple-record
+/// reads need the member.
+fn attr_chain_last_name(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::Name(n) => Some(n.id.as_str()),
+        Expr::Attribute(a) => Some(a.attr.as_str()),
+        _ => None,
+    }
+}
+
+/// A literal non-negative integer index (1 in `em[cid][1]`).
+fn const_int_index(e: &Expr) -> Option<usize> {
+    match e {
+        Expr::NumberLiteral(n) => match &n.value {
+            ruff_python_ast::Number::Int(i) => i.as_u8().map(|v| v as usize),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Count positional reads of tuple-record dicts: `NAME[k][1]`, `a, b = NAME[k]`,
+/// and `for k, (a, b) in NAME.items()` (aliases resolved through module-fn
+/// call args).
+///
+/// Every expression reachable from *e*, INCLUDING comprehension internals
+/// (elt/key/value/ifs/iter) — the reads hidden inside comprehensions.
+///
+/// The ONE expression traversal — every child, including comprehension
+/// internals and call-func position (flagged so call-func receivers can be
+/// excluded). all_exprs / the receiver-read counter / expr_writes all
+/// descend through this; a new Expr variant is handled here once.
+fn walk_expr_deep<'a>(e: &'a Expr, in_call_func: bool, f: &mut impl FnMut(&'a Expr, bool)) {
+    f(e, in_call_func);
+    match e {
+        Expr::Call(c) => {
+            walk_expr_deep(&c.func, true, f);
+            for a in &c.arguments.args {
+                walk_expr_deep(a, false, f);
+            }
+            for k in &c.arguments.keywords {
+                walk_expr_deep(&k.value, false, f);
+            }
+        }
+        Expr::Attribute(a) => walk_expr_deep(&a.value, false, f),
+        Expr::Subscript(s) => {
+            walk_expr_deep(&s.value, false, f);
+            walk_expr_deep(&s.slice, false, f);
+        }
+        Expr::BinOp(b) => {
+            walk_expr_deep(&b.left, false, f);
+            walk_expr_deep(&b.right, false, f);
+        }
+        Expr::BoolOp(b) => {
+            for v in &b.values {
+                walk_expr_deep(v, false, f);
+            }
+        }
+        Expr::Compare(c) => {
+            walk_expr_deep(&c.left, false, f);
+            for o in &c.comparators {
+                walk_expr_deep(o, false, f);
+            }
+        }
+        Expr::UnaryOp(u) => walk_expr_deep(&u.operand, false, f),
+        Expr::Lambda(l) => walk_expr_deep(&l.body, false, f),
+        Expr::If(i) => {
+            walk_expr_deep(&i.test, false, f);
+            walk_expr_deep(&i.body, false, f);
+            walk_expr_deep(&i.orelse, false, f);
+        }
+        Expr::Named(n) => walk_expr_deep(&n.value, false, f),
+        Expr::Await(a) => walk_expr_deep(&a.value, false, f),
+        Expr::Starred(st) => walk_expr_deep(&st.value, false, f),
+        Expr::Tuple(t) => {
+            for el in &t.elts {
+                walk_expr_deep(el, false, f);
+            }
+        }
+        Expr::List(l) => {
+            for el in &l.elts {
+                walk_expr_deep(el, false, f);
+            }
+        }
+        Expr::Set(st) => {
+            for el in &st.elts {
+                walk_expr_deep(el, false, f);
+            }
+        }
+        Expr::ListComp(l) => {
+            walk_expr_deep(&l.elt, false, f);
+            for g in &l.generators {
+                walk_expr_deep(&g.iter, false, f);
+                for c in &g.ifs {
+                    walk_expr_deep(c, false, f);
+                }
+            }
+        }
+        Expr::SetComp(sc) => {
+            walk_expr_deep(&sc.elt, false, f);
+            for g in &sc.generators {
+                walk_expr_deep(&g.iter, false, f);
+                for c in &g.ifs {
+                    walk_expr_deep(c, false, f);
+                }
+            }
+        }
+        Expr::DictComp(d) => {
+            if let Some(k) = &d.key {
+                walk_expr_deep(k, false, f);
+            }
+            walk_expr_deep(&d.value, false, f);
+            for g in &d.generators {
+                walk_expr_deep(&g.iter, false, f);
+                for c in &g.ifs {
+                    walk_expr_deep(c, false, f);
+                }
+            }
+        }
+        Expr::Generator(g) => {
+            walk_expr_deep(&g.elt, false, f);
+            for gg in &g.generators {
+                walk_expr_deep(&gg.iter, false, f);
+                for c in &gg.ifs {
+                    walk_expr_deep(c, false, f);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn all_exprs<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    walk_expr_deep(e, false, &mut |x, _| out.push(x));
+}
+
+pub fn count_tuple_record_reads(
+    body: &[Stmt],
+    records: &std::collections::HashMap<String, usize>,
+    aliases: &std::collections::HashMap<String, String>,
+    counts: &mut std::collections::HashMap<String, usize>,
+) {
+    fn bump(
+        base: &str,
+        records: &std::collections::HashMap<String, usize>,
+        aliases: &std::collections::HashMap<String, String>,
+        counts: &mut std::collections::HashMap<String, usize>,
+    ) {
+        let base = aliases.get(base).map(String::as_str).unwrap_or(base);
+        if records.contains_key(base) {
+            *counts.entry(base.to_string()).or_insert(0) += 1;
+        }
+    }
+    let mut stack: Vec<&Stmt> = Vec::new();
+    for s in body {
+        stack.push(s);
+    }
+    while let Some(s) = stack.pop() {
+        if let Stmt::FunctionDef(f) = s {
+            for b in &f.body {
+                stack.push(b);
+            }
+            continue; // ClassDef descent is push_stmt_children's job
+        }
+        // pattern 1: NAME[KEY][K] with a constant index — including the
+        // reads nested inside comprehensions
+        let mut exprs: Vec<&Expr> = Vec::new();
+        for e in stmt_exprs(s) {
+            all_exprs(e, &mut exprs);
+        }
+        for e in exprs {
+            if let Expr::Subscript(outer) = e {
+                if let Expr::Subscript(inner) = outer.value.as_ref() {
+                    if let Some(base) = attr_chain_last_name(&inner.value) {
+                        if const_int_index(&outer.slice).is_some() {
+                            bump(base, records, aliases, counts);
+                        }
+                    }
+                }
+            }
+        }
+        // pattern 2: `p, nm = NAME[key]` — a tuple of plain names unpacking
+        // a record value
+        if let Stmt::Assign(a) = s {
+            if let Some(Expr::Tuple(t)) = a.targets.first() {
+                if t.elts.iter().all(|el| matches!(el, Expr::Name(_))) {
+                    if let Expr::Subscript(sub) = a.value.as_ref() {
+                        if let Some(b) = attr_chain_last_name(&sub.value) {
+                            bump(b, records, aliases, counts);
+                        }
+                    }
+                }
+            }
+        }
+        // pattern 3: `for k, (a, b) in NAME.items()` — a nested tuple target
+        if let Stmt::For(f) = s {
+            if let Expr::Attribute(attr) = f.iter.as_ref() {
+                if attr.attr.as_str() == "items" {
+                    if let Some(base) = attr_chain_last_name(&attr.value) {
+                        let mut has_nested = false;
+                        let mut tstack: Vec<&Expr> = Vec::new();
+                        tstack.push(&f.target);
+                        while let Some(t) = tstack.pop() {
+                            if let Expr::Tuple(tp) = t {
+                                if tp.elts.iter().any(|el| matches!(el, Expr::Tuple(_))) {
+                                    has_nested = true;
+                                }
+                                for el in &tp.elts {
+                                    tstack.push(el);
+                                }
+                            }
+                        }
+                        if has_nested {
+                            bump(base, records, aliases, counts);
+                        }
+                    }
+                }
+            }
+        }
+        push_stmt_children(s, &mut stack);
+    }
+}
+
+/// A dict built with same-arity tuple values, then read with constant
+/// integer indexes — an anonymous record; make it a class.
+pub fn tuple_record_findings(state: &mut ScanState, body: &[Stmt]) {
+    let mut records: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+    // build sites at ANY scope (build()'s locals are records too) — walk
+    // control flow only, not nested defs (a def owns its own bindings)
+    let mut stack: Vec<&Stmt> = Vec::new();
+    for s in body {
+        stack.push(s);
+    }
+    while let Some(s) = stack.pop() {
+        if let Stmt::FunctionDef(f) = s {
+            for b in &f.body {
+                stack.push(b);
+            }
+            continue; // ClassDef descent is push_stmt_children's job
+        }
+        if let Stmt::Assign(a) = s {
+            if a.targets.len() == 1 {
+                if let Some(arity) = dict_tuple_arity(&a.value) {
+                    if let Expr::Name(n) = &a.targets[0] {
+                        let line = line_of(state.source, n.range().start());
+                        records.insert(n.id.to_string(), (arity, line));
+                    }
+                }
+            }
+        }
+        push_stmt_children(s, &mut stack);
+    }
+    if records.is_empty() {
+        return;
+    }
+    // alias resolution: a module-fn param receiving a record as an argument
+    let mut module_params: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for s in body {
+        let Stmt::FunctionDef(f) = s else { continue };
+        let mut params = Vec::new();
+        for a in &f.parameters.args {
+            params.push(a.parameter.name.to_string());
+        }
+        module_params.insert(f.name.to_string(), params);
+    }
+    let mut aliases: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    {
+        let mut stack: Vec<&Stmt> = Vec::new();
+        for s in body {
+            stack.push(s);
+        }
+        while let Some(s) = stack.pop() {
+            if let Stmt::FunctionDef(f) = s {
+                for b in &f.body {
+                    stack.push(b);
+                }
+                continue;
+            }
+            for e in stmt_exprs(s) {
+                let Expr::Call(c) = e else { continue };
+                let Expr::Name(fn_name) = c.func.as_ref() else { continue };
+                let Some(params) = module_params.get(fn_name.id.as_str()) else {
+                    continue;
+                };
+                for (i, arg) in c.arguments.args.iter().enumerate() {
+                    if let (Some(p), Expr::Name(n)) = (params.get(i), arg) {
+                        if records.contains_key(n.id.as_str()) {
+                            aliases.insert(p.clone(), n.id.to_string());
+                        }
+                    }
+                }
+            }
+            push_stmt_children(s, &mut stack);
+        }
+    }
+    // count reads across every function body
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let arities: std::collections::HashMap<String, usize> = records.iter().map(|(n, (a, _))| (n.clone(), *a)).collect();
+    for s in body {
+        match s {
+            Stmt::FunctionDef(f) => count_tuple_record_reads(&f.body, &arities, &aliases, &mut counts),
+            Stmt::ClassDef(c) => {
+                for m in &c.body {
+                    if let Stmt::FunctionDef(f) = m {
+                        count_tuple_record_reads(&f.body, &arities, &aliases, &mut counts);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for (name, (arity, line)) in &records {
+        let reads = counts.get(name).copied().unwrap_or(0);
+        if reads >= 3 {
+            state.findings.push(Finding {
+                file: state.file.to_string(),
+                line: *line,
+                function: String::new(),
+                kind: "tuple-record".into(),
+                severity: "fail".into(),
+                message: format!(
+                    "the values of '{name}' are {arity}-tuples read {reads} times by constant index — an anonymous record; make it a class (name it: lucidlint fix --kind tuple-record --name <N>) — fix: tuple-record"
+                ),
+            });
+        }
+    }
+}
+
+/// A function assembles >=3 structures by threading the same data through
+/// module-level functions whose outputs feed each other's inputs — a class
+/// in waiting: the threaded state belongs on an object.
+pub fn assembly_class_findings(state: &mut ScanState, body: &[Stmt]) {
+    let module_fns: HashSet<String> = body
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::FunctionDef(f) => Some(f.name.to_string()),
+            _ => None,
+        })
+        .collect();
+    if module_fns.len() < 2 {
+        return;
+    }
+    let mut fns: Vec<(&StmtFunctionDef, usize)> = Vec::new();
+    for s in body {
+        match s {
+            Stmt::FunctionDef(f) => fns.push((f, line_of(state.source, f.name.range().start()))),
+            Stmt::ClassDef(c) => {
+                for m in &c.body {
+                    if let Stmt::FunctionDef(f) = m {
+                        fns.push((f, line_of(state.source, f.name.range().start())));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for (f, line) in fns {
+        let mut results: HashSet<String> = HashSet::new();
+        let mut calls: Vec<(String, Vec<String>)> = Vec::new();
+        let mut stack: Vec<&Stmt> = Vec::new();
+        for b in &f.body {
+            stack.push(b);
+        }
+        while let Some(s) = stack.pop() {
+            if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+                continue;
+            }
+            if let Stmt::Assign(a) = s {
+                if let Expr::Call(c) = a.value.as_ref() {
+                    if let Expr::Name(n) = c.func.as_ref() {
+                        if module_fns.contains(n.id.as_str()) {
+                            let args: Vec<String> = c
+                                .arguments
+                                .args
+                                .iter()
+                                .filter_map(|x| match x {
+                                    Expr::Name(m) => Some(m.id.to_string()),
+                                    _ => None,
+                                })
+                                .collect();
+                            calls.push((n.id.to_string(), args));
+                            for t in &a.targets {
+                                match t {
+                                    Expr::Name(rn) => {
+                                        results.insert(rn.id.to_string());
+                                    }
+                                    Expr::Tuple(tp) => {
+                                        for el in &tp.elts {
+                                            if let Expr::Name(rn) = el {
+                                                results.insert(rn.id.to_string());
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            push_stmt_children(s, &mut stack);
+        }
+        if calls.len() < 2 || results.len() < 3 {
+            continue;
+        }
+        // chain: one call's argument is another call's result
+        let chain = calls.iter().any(|(_, args)| args.iter().any(|a| results.contains(a)));
+        if !chain {
+            continue;
+        }
+        // shared base: a non-result argument name appearing in >= 2 calls
+        let mut base: Option<String> = None;
+        'outer: for (_, args) in &calls {
+            for a in args {
+                if results.contains(a) {
+                    continue;
+                }
+                let n = calls.iter().filter(|(_, as2)| as2.iter().any(|x| x == a)).count();
+                if n >= 2 {
+                    base = Some(a.clone());
+                    break 'outer;
+                }
+            }
+        }
+        let Some(base) = base else { continue };
+        let chain_names: Vec<&str> = calls.iter().map(|(n, _)| n.as_str()).collect();
+        state.findings.push(Finding {
+            file: state.file.to_string(),
+            line,
+            function: f.name.to_string(),
+            kind: "assembly-class".into(),
+            severity: "fail".into(),
+            message: format!(
+                "'{}' assembles {} structures by threading '{}' through {} ({} → {}) — a class in waiting: the threaded state belongs on an object, the module functions are its methods",
+                f.name.as_str(),
+                results.len(),
+                base,
+                calls.len(),
+                chain_names.join(" → "),
+                chain_names.last().copied().unwrap_or("")
+            ),
+        });
+    }
+}
+
+// ------------------------------------------------------------- latent-class
+// the declaration/ownership half of the family: shared parameter pairs,
+// cross-object field reads, and quiet member assignment.
+
+/// Three or more module functions sharing the same unordered parameter
+/// pair — the pair travels together, so it is a data clump; introduce a
+/// parameter object.
+pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
+    let mut funcs: Vec<(&StmtFunctionDef, Vec<String>)> = Vec::new();
+    for s in body {
+        let Stmt::FunctionDef(f) = s else { continue };
+        let mut params = Vec::new();
+        for a in &f.parameters.posonlyargs {
+            params.push(a.parameter.name.to_string());
+        }
+        for a in &f.parameters.args {
+            params.push(a.parameter.name.to_string());
+        }
+        funcs.push((f, params));
+    }
+    let mut pairs: std::collections::HashMap<(String, String), Vec<&StmtFunctionDef>> =
+        std::collections::HashMap::new();
+    for (f, params) in &funcs {
+        for i in 0..params.len() {
+            for j in (i + 1)..params.len() {
+                let (a, b) = if params[i] < params[j] {
+                    (params[i].clone(), params[j].clone())
+                } else {
+                    (params[j].clone(), params[i].clone())
+                };
+                pairs.entry((a, b)).or_default().push(f);
+            }
+        }
+    }
+    let mut reported: HashSet<(String, String)> = HashSet::new();
+    for ((a, b), fs) in &pairs {
+        if fs.len() < 3 || !reported.insert((a.clone(), b.clone())) {
+            continue;
+        }
+        let line = line_of(state.source, fs[0].name.range().start());
+        let names: Vec<&str> = fs.iter().map(|f| f.name.as_str()).collect();
+        state.findings.push(Finding {
+            file: state.file.to_string(),
+            line,
+            function: fs[0].name.to_string(),
+            kind: "data-clump".into(),
+            severity: "fail".into(),
+            message: format!(
+                "{} functions ({}) share the parameter pair ({}, {}) — a data clump: the pair travels together; introduce a parameter object",
+                fs.len(),
+                names.join(", "),
+                a,
+                b
+            ),
+        });
+    }
+}
+
+/// The root name of an attribute chain (self.graph.em -> self; graph.em ->
+/// graph); None for other shapes.
+fn chain_root_name(e: &Expr) -> Option<&str> {
+    let mut v = e;
+    loop {
+        match v {
+            Expr::Attribute(a) => v = a.value.as_ref(),
+            Expr::Name(n) => return Some(n.id.as_str()),
+            _ => return None,
+        }
+    }
+}
+
+/// Attribute READ counts by receiver root name — method calls (Call funcs)
+/// are not field reads and do not count.
+fn count_receiver_reads(body: &[Stmt], counts: &mut std::collections::HashMap<String, usize>) {
+    fn visit(e: &Expr, counts: &mut std::collections::HashMap<String, usize>) {
+        walk_expr_deep(e, false, &mut |x, in_call_func| {
+            if let Expr::Attribute(a) = x {
+                if in_call_func {
+                    return; // method calls are not field reads
+                }
+                if let Some(base) = chain_root_name(&a.value) {
+                    *counts.entry(base.to_string()).or_insert(0) += 1;
+                }
+            }
+        });
+    }
+
+    let mut stack: Vec<&Stmt> = Vec::new();
+    for s in body {
+        stack.push(s);
+    }
+    while let Some(s) = stack.pop() {
+        if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            continue;
+        }
+        for e in stmt_exprs(s) {
+            visit(e, counts);
+        }
+        push_stmt_children(s, &mut stack);
+    }
+}
+
+/// The locals aliased from the class's own state: `graph = self.graph`.
+/// Feature envy reads THESE — the collaborator the method reaches into.
+fn collaborator_aliases(body: &[Stmt], out: &mut HashSet<String>) {
+    let mut stack: Vec<&Stmt> = Vec::new();
+    for s in body {
+        stack.push(s);
+    }
+    while let Some(s) = stack.pop() {
+        if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            continue;
+        }
+        if let Stmt::Assign(a) = s {
+            if a.targets.len() == 1 {
+                if let (Expr::Name(n), Expr::Attribute(at)) = (&a.targets[0], a.value.as_ref()) {
+                    if matches!(at.value.as_ref(), Expr::Name(inner) if inner.id.as_str() == "self") {
+                        out.insert(n.id.to_string());
+                    }
+                }
+            }
+        }
+        push_stmt_children(s, &mut stack);
+    }
+}
+
+/// The names bound as loop targets anywhere in a function's body (for x in
+/// ...) — elements the function iterates are its own inputs.
+fn loop_target_names(body: &[Stmt], out: &mut HashSet<String>) {
+    let mut stack: Vec<&Stmt> = Vec::new();
+    for s in body {
+        stack.push(s);
+    }
+    while let Some(s) = stack.pop() {
+        if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            continue;
+        }
+        if let Stmt::For(f) = s {
+            let mut tstack: Vec<&Expr> = Vec::new();
+            tstack.push(&f.target);
+            while let Some(t) = tstack.pop() {
+                match t {
+                    Expr::Name(n) => {
+                        out.insert(n.id.to_string());
+                    }
+                    Expr::Tuple(tp) => {
+                        for el in &tp.elts {
+                            tstack.push(el);
+                        }
+                    }
+                    Expr::List(l) => {
+                        for el in &l.elts {
+                            tstack.push(el);
+                        }
+                    }
+                    Expr::Starred(st) => tstack.push(&st.value),
+                    _ => {}
+                }
+            }
+        }
+        push_stmt_children(s, &mut stack);
+    }
+}
+
+/// A method that reads another object's fields more than its own state —
+/// feature envy: the computation belongs on the envied object.
+pub fn feature_envy_findings(state: &mut ScanState, body: &[Stmt]) {
+    for s in body {
+        let Stmt::ClassDef(c) = s else { continue };
+        for m in &c.body {
+            let Stmt::FunctionDef(f) = m else { continue };
+            let mut params = HashSet::new();
+            function_param_names(&f.parameters, &mut params);
+            let mut loop_targets = HashSet::new();
+            loop_target_names(&f.body, &mut loop_targets);
+            let mut collaborators = HashSet::new();
+            collaborator_aliases(&f.body, &mut collaborators);
+            let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            count_receiver_reads(&f.body, &mut counts);
+            let self_reads = counts.get("self").copied().unwrap_or(0);
+            if self_reads < 1 {
+                continue;
+            }
+            for (receiver, n) in &counts {
+                // envy is reaching into a COLLABORATOR (a local aliased from
+                // self.<attr>) — not the method's inputs (params, loop
+                // targets) and not computed values (pos = self.get_metadata())
+                if receiver == "self"
+                    || params.contains(receiver)
+                    || loop_targets.contains(receiver)
+                    || !collaborators.contains(receiver)
+                    || *n < 4
+                    || *n < self_reads + 3
+                {
+                    continue;
+                }
+                let line = line_of(state.source, f.name.range().start());
+                state.findings.push(Finding {
+                    file: state.file.to_string(),
+                    line,
+                    function: f.name.to_string(),
+                    kind: "feature-envy".into(),
+                    severity: "fail".into(),
+                    message: format!(
+                        "'{}' reads '{}' {} times vs its own state {} — feature envy: the logic belongs on the envied object; move the computation onto '{}' as a method — fix: feature-envy",
+                        f.name.as_str(),
+                        receiver,
+                        n,
+                        self_reads,
+                        receiver
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// A class must DECLARE its members — annotated in the class body, in
+/// __slots__, or in __init__ — not assign them quietly in member functions.
+pub fn undeclared_attribute_findings(state: &mut ScanState, body: &[Stmt]) {
+    for s in body {
+        let Stmt::ClassDef(c) = s else { continue };
+        let mut declared: HashSet<String> = HashSet::new();
+        for m in &c.body {
+            match m {
+                Stmt::AnnAssign(a) => {
+                    if let Expr::Name(n) = a.target.as_ref() {
+                        declared.insert(n.id.to_string());
+                    }
+                }
+                Stmt::Assign(a) => {
+                    for t in &a.targets {
+                        if let Expr::Name(n) = t {
+                            if n.id.as_str() == "__slots__" {
+                                if let Some(tuple) = slot_names(&a.value) {
+                                    declared.extend(tuple);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for m in &c.body {
+            let Stmt::FunctionDef(f) = m else { continue };
+            if f.name.as_str() == "__init__" {
+                for st in &f.body {
+                    if let Stmt::AnnAssign(a) = st {
+                        if let Expr::Attribute(at) = a.target.as_ref() {
+                            if matches!(at.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self") {
+                                declared.insert(at.attr.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for m in &c.body {
+            let Stmt::FunctionDef(f) = m else { continue };
+            let is_init = f.name.as_str() == "__init__";
+            let mut stack: Vec<&Stmt> = Vec::new();
+            for b in &f.body {
+                stack.push(b);
+            }
+            while let Some(st) = stack.pop() {
+                if matches!(st, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+                    continue;
+                }
+                let mut targets: Vec<&Expr> = Vec::new();
+                match st {
+                    Stmt::Assign(a) => {
+                        for t in &a.targets {
+                            targets.push(t);
+                        }
+                    }
+                    Stmt::AnnAssign(a) => targets.push(a.target.as_ref()),
+                    Stmt::AugAssign(a) => targets.push(&a.target),
+                    _ => {}
+                }
+                for t in targets {
+                    let Expr::Attribute(at) = t else { continue };
+                    if !matches!(at.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self") {
+                        continue;
+                    }
+                    let attr = at.attr.to_string();
+                    if declared.contains(&attr) {
+                        continue;
+                    }
+                    let line = line_of(state.source, at.range().start());
+                    let msg = if is_init {
+                        format!(
+                            "'{}' assigns member '{attr}' in __init__ without a declaration — declare it: self.{attr}: <type> = ... — fix: undeclared-attribute",
+                            c.name.as_str()
+                        )
+                    } else {
+                        format!(
+                            "'{}' assigns member '{attr}' in '{}' without a declaration — declare it in __init__ (annotated) or the class body — fix: undeclared-attribute",
+                            c.name.as_str(),
+                            f.name.as_str()
+                        )
+                    };
+                    state.findings.push(Finding {
+                        file: state.file.to_string(),
+                        line,
+                        function: f.name.to_string(),
+                        kind: "undeclared-attribute".into(),
+                        severity: "fail".into(),
+                        message: msg,
+                    });
+                }
+                push_stmt_children(st, &mut stack);
+            }
+        }
+    }
+}
+
+/// The names in a __slots__ literal (tuple or list of string literals).
+fn slot_names(e: &Expr) -> Option<Vec<String>> {
+    let elts: Vec<&Expr> = match e {
+        Expr::Tuple(t) => t.elts.iter().collect(),
+        Expr::List(l) => l.elts.iter().collect(),
+        _ => return None,
+    };
+    let mut names = Vec::new();
+    for el in elts {
+        if let Expr::StringLiteral(s) = el {
+            names.push(s.value.to_string());
+        } else {
+            return None;
+        }
+    }
+    Some(names)
+}
+
+// ------------------------------------------------------------- latent-class
+// the size + duplication counterweights: a class too large to review, and
+// domain state duplicated across a containment edge.
+
+/// A class so large it strains review: 20 or more methods, or 12 or more
+/// methods over a 250-line span. A WARN — the split is only sound where the
+/// partition rule finds field-disjoint method groups; size alone never
+/// forces a bad split.
+pub fn god_class_findings(state: &mut ScanState, body: &[Stmt]) {
+    for s in body {
+        let Stmt::ClassDef(c) = s else { continue };
+        let methods = c.body.iter().filter(|m| matches!(m, Stmt::FunctionDef(_))).count();
+        if methods < 12 {
+            continue;
+        }
+        let span = line_of(state.source, c.range().end()).saturating_sub(line_of(state.source, c.range().start()));
+        let big = methods >= 20 || (methods >= 12 && span >= 250);
+        if !big {
+            continue;
+        }
+        let line = line_of(state.source, c.name.range().start());
+        state.findings.push(Finding {
+            file: state.file.to_string(),
+            line,
+            function: c.name.to_string(),
+            kind: "god-class".into(),
+            severity: "warn".into(),
+            message: format!(
+                "'{}' has {methods} methods over {span} lines — a large class; split it ONLY where the partition rule finds field-disjoint method groups (size alone is a review signal, not a split order)",
+                c.name.as_str()
+            ),
+        });
+    }
+}
+
+/// A class's field names (class-level annotated declarations + self.X
+/// assignments in __init__), with the annotation type where present.
+fn class_field_names(c: &StmtClassDef) -> Vec<(String, Option<String>)> {
+    let mut fields: Vec<(String, Option<String>)> = Vec::new();
+    for m in &c.body {
+        match m {
+            Stmt::AnnAssign(a) => {
+                if let Expr::Name(n) = a.target.as_ref() {
+                    let ty = annotation_base_name(a.annotation.as_ref()).map(|s| s.to_string());
+                    fields.push((n.id.to_string(), ty));
+                }
+            }
+            Stmt::FunctionDef(f) => {
+                if f.name.as_str() != "__init__" {
+                    continue;
+                }
+                for st in &f.body {
+                    if let Stmt::AnnAssign(a) = st {
+                        if let Expr::Attribute(at) = a.target.as_ref() {
+                            if matches!(at.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self") {
+                                let ty = annotation_base_name(a.annotation.as_ref()).map(|s| s.to_string());
+                                fields.push((at.attr.to_string(), ty));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    fields
+}
+
+/// The same domain state on a class and on a class it CONTAINS — the
+/// duplicate lives across a containment edge; one source of truth should
+/// own it.
+pub fn duplicate_field_findings(state: &mut ScanState, body: &[Stmt]) {
+    let classes: Vec<&StmtClassDef> = body
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::ClassDef(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+    for c in &classes {
+        let fields = class_field_names(c);
+        for ty in fields.iter().map(|(_, t)| t) {
+            let Some(ty) = ty else { continue };
+            let Some(contained) = classes.iter().find(|b| b.name.as_str() == ty.as_str()) else {
+                continue;
+            };
+            if std::ptr::eq(*c, *contained) {
+                continue;
+            }
+            // the shared field set across the containment edge — >=2 shared
+            // names is duplicated domain state (one generic name like `name`
+            // is coincidence)
+            let contained_fields = class_field_names(contained);
+            let shared: Vec<&str> = fields
+                .iter()
+                .filter(|(n, _)| contained_fields.iter().any(|(cn, _)| cn == n))
+                .map(|(n, _)| n.as_str())
+                .collect();
+            if shared.len() < 2 {
+                continue;
+            }
+            let line = line_of(state.source, c.name.range().start());
+            state.findings.push(Finding {
+                file: state.file.to_string(),
+                line,
+                function: c.name.to_string(),
+                kind: "duplicate-field".into(),
+                severity: "fail".into(),
+                message: format!(
+                    "'{}' and the '{}' it contains both hold {} — duplicated domain state across the containment edge; one source of truth should own it",
+                    c.name.as_str(),
+                    contained.name.as_str(),
+                    shared.join(", ")
+                ),
+            });
+        }
+    }
 }
 
 pub fn inner_function_count(fn_stmt: &Stmt) -> u32 {
@@ -922,8 +2241,21 @@ fn count_expr_lambdas(e: &Expr, count: &mut u32) {
 }
 
 /// A module with exactly one top-level class whose name doesn't match the
-/// file stem — the class-module rule.
+/// file stem — the class-module rule. A module that ALSO defines module-level
+/// functions is a tool script, not a class file (the class is a component,
+/// not the module's identity) — renaming it after the class would be wrong.
 pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &str) {
+    if rel.ends_with("__init__.py") {
+        return;
+    }
+    let classes: Vec<&Stmt> = module_body.iter().filter(|s| matches!(s, Stmt::ClassDef(_))).collect();
+    if classes.len() != 1 {
+        return;
+    }
+    let has_module_fns = module_body.iter().any(|s| matches!(s, Stmt::FunctionDef(_)));
+    if has_module_fns {
+        return;
+    }
     if rel.ends_with("__init__.py") {
         return;
     }
@@ -3232,7 +4564,37 @@ fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<usize>) {
             record_literal_scan(&c.value, source, found);
         }
         Expr::Lambda(l) => record_literal_scan(&l.body, source, found),
-        _ => {} // NOT Call — inline arguments (headers={...}) are maps
+        Expr::Call(c) => {
+            // dict(a=1, b=x) is the literal's call-form twin: the same
+            // record shape built through a call, so the literal-only scan
+            // could be dodged with dict(...) — a record that is not a
+            // literal. A bare dict() call with >= 2 keyword args and >= 1
+            // dynamic value is a record being built.
+            let is_dict = match c.func.as_ref() {
+                Expr::Name(n) => n.id.as_str() == "dict",
+                Expr::Attribute(a) => a.attr.as_str() == "dict",
+                _ => false,
+            };
+            if is_dict {
+                let kwargs = &c.arguments.keywords;
+                let has_dynamic = kwargs.iter().any(|k| !is_constant_value(&k.value));
+                if kwargs.len() >= 2 && has_dynamic {
+                    found.push(line_of(source, c.range().start()));
+                }
+                // dict()'s args ARE the data — descend (unlike other calls,
+                // whose inline arguments are maps): dict({"a": 1, "b": x})
+                // is a record built from a literal, and a kwarg value may
+                // hold one too
+                for a in &c.arguments.args {
+                    record_literal_scan(a, source, found);
+                }
+                for k in kwargs {
+                    record_literal_scan(&k.value, source, found);
+                }
+            }
+            // other calls: inline arguments are maps — not descended into
+        }
+        _ => {}
     }
 }
 
@@ -3333,7 +4695,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
             function: String::new(),
             kind: "record-shape".into(),
             severity: "fail".into(),
-            message: format!("dict literal with constant keys is a record — make a class (line {ln})"),
+            message: format!("dict with constant keys is a record — make a class (line {ln})"),
         });
     }
 }

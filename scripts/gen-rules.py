@@ -186,6 +186,14 @@ def render_rules_rs() -> str:
         out.append(f'    ("{fam}", &[{", ".join(f'"{m}"' for m in members)}]),')
     out.append("];")
     out.append("")
+    name_required = [r.kind for r in rules if r.fix_name_required]
+    out.append("")
+    out.append("/// Kinds whose fix needs a name the tool cannot invent")
+    out.append("/// (--name/--fix-name): the LSP marks its code action")
+    out.append("/// `needsName` from this table; the CLI refuses a missing or")
+    out.append("/// invalid name with an explicit message.")
+    out.append(f"pub const NAME_REQUIRED_KINDS: &[&str] = &[{', '.join(f'"{k}"' for k in name_required)}];")
+    out.append("")
     out.append("/// kind -> display bucket — the lookup table final_kind scans.")
     out.append("/// A match of 50+ arms would be a complexity finding; data")
     out.append("/// stays flat (a linear scan over the entries is nothing).")
@@ -220,10 +228,10 @@ def render_rules_rs() -> str:
 
 def _fmt_rust(code: str) -> str:
     """Run the generated Rust through rustfmt so the committed file is
-    fmt-clean and the --check comparison is stable (cargo fmt would
-    otherwise rewrap the long const lines and make every generated file
-    look stale). Falls back to the raw output when rustfmt is absent."""
-
+    fmt-clean and the --check comparison is byte-stable. rustfmt is a
+    required tool (the lint gate runs cargo fmt) — a missing binary is a
+    broken environment, and a raw fallback would make --check report a
+    freshly generated file as stale (review finding)."""
     try:
         proc = subprocess.run(
             ["rustfmt", "--emit", "stdout"],
@@ -232,12 +240,13 @@ def _fmt_rust(code: str) -> str:
             text=True,
             timeout=30,
         )
-        if proc.returncode == 0 and proc.stdout:
-            return proc.stdout
-    # lucidlint: ignore swallow rustfmt absent — the raw output is the documented fallback
-    except OSError:
-        pass
-    return code
+    except OSError as e:
+        raise SystemExit(
+            f"rustfmt is required to generate rules_gen.rs — install it (rustup component add rustfmt): {e}"
+        ) from e
+    if proc.returncode != 0 or not proc.stdout:
+        raise SystemExit(f"rustfmt failed on the generated rules_gen.rs:\n{proc.stderr}")
+    return proc.stdout
 
 
 def main() -> int:

@@ -74,6 +74,7 @@ jobs:
           mkdir -p "dist/${dir}/bin"
           cp "scanner/target/${target}/release/lucidlint${exe}" "dist/${dir}/bin/lucidlint${exe}"
           cp lucidlint.py "dist/${dir}/"
+          cp rule_metadata.py "dist/${dir}/"
           cp fix_engine.py "dist/${dir}/"
           cp release/Makefile "dist/${dir}/Makefile"
           printf '%s\n' "$ver" > "dist/${dir}/version.txt"
@@ -89,6 +90,19 @@ jobs:
             python3 -m pip install --quiet --target "dist/${dir}/deps" "libcst>=1.9.0"
           fi
           tar -C dist -czf "dist/${dir}.tar.gz" "${dir}"
+      - name: Smoke-test the bundle (imports resolve, gate runs)
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="lucidlint-${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}-${{ matrix.target }}"
+          python3 "dist/${dir}/lucidlint.py" --version
+          python3 "dist/${dir}/lucidlint.py" --repo .
+          # the documented consumer flow — `make -C <bundle> lucidlint` —
+          # must work from the tarball layout (bundle Makefile present).
+          # Guarded to the linux row: the windows runner has no `make`.
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            make -C "dist/${dir}" lucidlint REPO="$GITHUB_WORKSPACE" BASELINE=
+          fi
       - uses: astral-sh/setup-uv@v5
       - name: Build the pip wheel (host-target Rust core)
         # The cross action on the musl row exports CARGO_BUILD_TARGET=...musl;
