@@ -1816,7 +1816,11 @@ def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
                     moved.append(stmt)
                     break
         elif isinstance(inner, cst.ImportFrom):
+            if isinstance(inner.names, cst.ImportStar):
+                continue  # `from x import *` binds no importable name
             for alias in inner.names:
+                if not isinstance(alias.name, cst.Name):
+                    continue
                 bound = alias.asname.name.value if alias.asname else alias.name.value
                 if bound in referenced:
                     moved.append(stmt)
@@ -1827,17 +1831,21 @@ def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
 def _origin_after_move(module: cst.Module, move: set[str], opts) -> list:
     """The origin's body after the split: the moved defs dropped, the
     re-export import inserted after the last import — every other file's
-    `from origin import x` keeps working (the origin re-exports)."""
+    `from origin import x` keeps working (the origin re-exports). The
+    re-export is RELATIVE when the origin sits in a package (`houses/text.py`
+    is not on sys.path as a top-level module) — review finding."""
     remaining = [
         s
         for s in module.body
         if not (isinstance(s, (cst.FunctionDef, cst.ClassDef)) and s.name.value in move)
     ]
+    in_package = "/" in (opts.rel or "")
     reexport = cst.SimpleStatementLine(
         body=[
             cst.ImportFrom(
                 module=cst.Name(opts.name),
                 names=[cst.ImportAlias(name=cst.Name(n)) for n in opts.params],
+                relative=[cst.Dot()] if in_package else (),
                 lpar=None,
                 rpar=None,
             )
@@ -1876,26 +1884,116 @@ def _extract_module_proposal(source: str, opts) -> tuple[str, str] | None:
     for name in move:
         if top_defs[name].decorators:
             return None
+    # free reads only: a name bound inside the moved function (parameter,
+    # local, for/comprehension target) cannot reference a module-level
+    # binding — counting it would falsely refuse safe splits (review finding)
     referenced: set[str] = set()
     for name in move:
-        probe = _NameSet()
-        top_defs[name].visit(probe)
-        referenced |= probe.names
+        free = _FreeNames()
+        top_defs[name].visit(free)
+        referenced |= free.names - free.bound
     if referenced & (set(top_defs) - move):
         return None  # the moved code needs an origin def — cycle risk
+    # module-level assignments/constants the moved code reads would be
+    # missing from the new module (a runtime NameError) — refuse; moving
+    # them would break the origin's remaining code (review finding)
+    if referenced & _module_bindings(module):
+        return None
     new_module = cst.Module(
         body=[*_moved_imports(module, referenced), *(top_defs[n] for n in opts.params)]
     )
     return cst.Module(body=_origin_after_move(module, move, opts)).code, new_module.code
 
 
-class _NameSet(cst.CSTVisitor):
+def _module_bindings(module: cst.Module) -> set[str]:
+    """The names module-level assignments/constants bind — the extract-module
+    split refuses when moved code reads one (the new module would NameError;
+    moving the binding would break the origin)."""
+    bound: set[str] = set()
+    for stmt in module.body:
+        if not (isinstance(stmt, cst.SimpleStatementLine) and len(stmt.body) == 1):
+            continue
+        inner = stmt.body[0]
+        if isinstance(inner, cst.Assign):
+            for t in inner.targets:
+                bound |= _target_names(t.target)
+        elif isinstance(inner, cst.AnnAssign) and inner.target is not None:
+            bound |= _target_names(inner.target)
+    return bound
+
+
+class _FreeNames(cst.CSTVisitor):
+    """The names a function READS from enclosing scopes: every Name node in
+    the tree minus the names bound anywhere inside it (parameters, locals,
+    for/comprehension/with targets, nested def names). A name bound inside
+    cannot be a reference to a module-level binding, so the extract-module
+    module-binding check must exclude it (review finding: a moved function
+    with a parameter named like a module constant was falsely refused)."""
+
     def __init__(self) -> None:
         self.names: set[str] = set()
+        self.bound: set[str] = set()
+
+    def _add_params(self, params) -> None:
+        for p in params:
+            if p.name is not None:
+                self.bound.add(p.name.value)
+
+    @override
+    def visit_FunctionDef(self, node) -> None:
+        self.bound.add(node.name.value)
+        self._add_params(node.params.params)
+        self._add_params(node.params.kwonly_params)
+        # a bare `*` keyword-only separator is ParamStar — no name; the
+        # guard must check the NODE type before touching `.name` (review
+        # finding: the isinstance on `.name` crashed first)
+        if isinstance(node.params.star_arg, cst.Param):
+            self.bound.add(node.params.star_arg.name.value)
+        if isinstance(node.params.star_kwarg, cst.Param):
+            self.bound.add(node.params.star_kwarg.name.value)
+
+    @override
+    def visit_Lambda(self, node) -> None:
+        self._add_params(node.params.params)
+        self._add_params(node.params.kwonly_params)
 
     @override
     def visit_Name(self, node) -> None:
         self.names.add(node.value)
+
+    @override
+    def visit_Assign(self, node) -> None:
+        for t in node.targets:
+            self.bound.update(_target_names(t.target))
+
+    @override
+    def visit_AnnAssign(self, node) -> None:
+        if node.target:
+            self.bound.update(_target_names(node.target))
+
+    @override
+    def visit_For(self, node) -> None:
+        self.bound.update(_target_names(node.target))
+
+    @override
+    def visit_CompFor(self, node) -> None:
+        self.bound.update(_target_names(node.target))
+
+    @override
+    def visit_With(self, node) -> None:
+        for item in node.items:
+            if item.optional_vars:
+                self.bound.update(_target_names(item.optional_vars))
+
+    @override
+    def visit_ExceptHandler(self, node) -> None:
+        # libcst's ExceptHandler.name is an AsName — the alias is `.name`,
+        # not `.value` (review finding: a crash on any `except ... as e:`)
+        if node.name is not None:
+            self.bound.add(node.name.name.value)
+
+
+
 
 
 def fix_extract_module(source: str, opts) -> str | None:

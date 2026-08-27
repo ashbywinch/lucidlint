@@ -589,81 +589,21 @@
    "severity": "error"
   },
   {
-   "line": 1819,
-   "column": 26,
-   "stop_line": 1819,
-   "stop_column": 37,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "not-iterable",
-   "description": "Type `ImportStar` is not iterable",
-   "concise_description": "Type `ImportStar` is not iterable",
-   "severity": "error"
-  },
-  {
-   "line": 1820,
+   "line": 1824,
    "column": 25,
-   "stop_line": 1820,
+   "stop_line": 1824,
    "stop_column": 48,
    "path": "fix_engine.py",
    "code": -2,
    "name": "missing-attribute",
-   "description": "Object of type `List | Name | Tuple | Unknown` has no attribute `value`\n  Object of class `List` has no attribute `value`\n  Object of class `Tuple` has no attribute `value`",
-   "concise_description": "Object of type `List | Name | Tuple | Unknown` has no attribute `value`",
+   "description": "Object of type `List | Name | Tuple` has no attribute `value`\n  Object of class `List` has no attribute `value`\n  Object of class `Tuple` has no attribute `value`",
+   "concise_description": "Object of type `List | Name | Tuple` has no attribute `value`",
    "severity": "error"
   },
   {
-   "line": 1928,
-   "column": 35,
-   "stop_line": 1928,
-   "stop_column": 82,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "severity": "error"
-  },
-  {
-   "line": 2012,
+   "line": 1985,
    "column": 16,
-   "stop_line": 2012,
-   "stop_column": 25,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
-   "severity": "error"
-  },
-  {
-   "line": 2012,
-   "column": 42,
-   "stop_line": 2012,
-   "stop_column": 49,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
-   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
-   "severity": "error"
-  },
-  {
-   "line": 2013,
-   "column": 26,
-   "stop_line": 2013,
-   "stop_column": 41,
-   "path": "fix_engine.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Object of class `BaseExpression` has no attribute `value`",
-   "concise_description": "Object of class `BaseExpression` has no attribute `value`",
-   "severity": "error"
-  },
-  {
-   "line": 2051,
-   "column": 16,
-   "stop_line": 2051,
+   "stop_line": 1985,
    "stop_column": 34,
    "path": "fix_engine.py",
    "code": -2,
@@ -673,9 +613,81 @@
    "severity": "error"
   },
   {
-   "line": 2132,
+   "line": 1993,
+   "column": 28,
+   "stop_line": 1993,
+   "stop_column": 48,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of type `List | Name | Tuple` has no attribute `value`\n  Object of class `List` has no attribute `value`\n  Object of class `Tuple` has no attribute `value`",
+   "concise_description": "Object of type `List | Name | Tuple` has no attribute `value`",
+   "severity": "error"
+  },
+  {
+   "line": 2026,
+   "column": 35,
+   "stop_line": 2026,
+   "stop_column": 82,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 2110,
+   "column": 16,
+   "stop_line": 2110,
+   "stop_column": 25,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `start`",
+   "severity": "error"
+  },
+  {
+   "line": 2110,
+   "column": 42,
+   "stop_line": 2110,
+   "stop_column": 49,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
+   "concise_description": "Class `_UNDEFINED_DEFAULT` has no class attribute `end`",
+   "severity": "error"
+  },
+  {
+   "line": 2111,
+   "column": 26,
+   "stop_line": 2111,
+   "stop_column": 41,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `BaseExpression` has no attribute `value`",
+   "concise_description": "Object of class `BaseExpression` has no attribute `value`",
+   "severity": "error"
+  },
+  {
+   "line": 2149,
+   "column": 16,
+   "stop_line": 2149,
+   "stop_column": 34,
+   "path": "fix_engine.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `WithItem` has no attribute `optional_vars`",
+   "concise_description": "Object of class `WithItem` has no attribute `optional_vars`",
+   "severity": "error"
+  },
+  {
+   "line": 2230,
    "column": 12,
-   "stop_line": 2132,
+   "stop_line": 2230,
    "stop_column": 72,
    "path": "fix_engine.py",
    "code": -2,
@@ -685,27 +697,15 @@
    "severity": "error"
   },
   {
-   "line": 356,
+   "line": 362,
    "column": 61,
-   "stop_line": 356,
+   "stop_line": 362,
    "stop_column": 74,
    "path": "lucidlint.py",
    "code": -2,
    "name": "bad-argument-type",
    "description": "Argument `int` is not assignable to parameter `sort_mode` with type `SortMode` in function `pygit2._pygit2.Repository.walk`",
    "concise_description": "Argument `int` is not assignable to parameter `sort_mode` with type `SortMode` in function `pygit2._pygit2.Repository.walk`",
-   "severity": "error"
-  },
-  {
-   "line": 364,
-   "column": 28,
-   "stop_line": 364,
-   "stop_column": 39,
-   "path": "lucidlint.py",
-   "code": -2,
-   "name": "missing-attribute",
-   "description": "Object of class `NoneType` has no attribute `delta`",
-   "concise_description": "Object of class `NoneType` has no attribute `delta`",
    "severity": "error"
   },
   {
@@ -721,9 +721,21 @@
    "severity": "error"
   },
   {
-   "line": 422,
+   "line": 376,
+   "column": 28,
+   "stop_line": 376,
+   "stop_column": 39,
+   "path": "lucidlint.py",
+   "code": -2,
+   "name": "missing-attribute",
+   "description": "Object of class `NoneType` has no attribute `delta`",
+   "concise_description": "Object of class `NoneType` has no attribute `delta`",
+   "severity": "error"
+  },
+  {
+   "line": 428,
    "column": 35,
-   "stop_line": 422,
+   "stop_line": 428,
    "stop_column": 51,
    "path": "lucidlint.py",
    "code": -2,
@@ -733,9 +745,9 @@
    "severity": "error"
   },
   {
-   "line": 862,
+   "line": 855,
    "column": 21,
-   "stop_line": 862,
+   "stop_line": 855,
    "stop_column": 28,
    "path": "lucidlint.py",
    "code": -2,
@@ -745,9 +757,9 @@
    "severity": "error"
   },
   {
-   "line": 944,
+   "line": 937,
    "column": 24,
-   "stop_line": 944,
+   "stop_line": 937,
    "stop_column": 33,
    "path": "lucidlint.py",
    "code": -2,
@@ -757,9 +769,9 @@
    "severity": "error"
   },
   {
-   "line": 1111,
+   "line": 1104,
    "column": 39,
-   "stop_line": 1111,
+   "stop_line": 1104,
    "stop_column": 59,
    "path": "lucidlint.py",
    "code": -2,
@@ -769,9 +781,9 @@
    "severity": "error"
   },
   {
-   "line": 1117,
+   "line": 1110,
    "column": 37,
-   "stop_line": 1117,
+   "stop_line": 1110,
    "stop_column": 48,
    "path": "lucidlint.py",
    "code": -2,
@@ -781,9 +793,9 @@
    "severity": "error"
   },
   {
-   "line": 1436,
+   "line": 1429,
    "column": 20,
-   "stop_line": 1444,
+   "stop_line": 1437,
    "stop_column": 14,
    "path": "lucidlint.py",
    "code": -2,
@@ -793,9 +805,9 @@
    "severity": "error"
   },
   {
-   "line": 1496,
+   "line": 1489,
    "column": 33,
-   "stop_line": 1496,
+   "stop_line": 1489,
    "stop_column": 41,
    "path": "lucidlint.py",
    "code": -2,
@@ -805,9 +817,9 @@
    "severity": "error"
   },
   {
-   "line": 1507,
+   "line": 1500,
    "column": 28,
-   "stop_line": 1507,
+   "stop_line": 1500,
    "stop_column": 37,
    "path": "lucidlint.py",
    "code": -2,
@@ -817,9 +829,9 @@
    "severity": "error"
   },
   {
-   "line": 1643,
+   "line": 1636,
    "column": 53,
-   "stop_line": 1643,
+   "stop_line": 1636,
    "stop_column": 55,
    "path": "lucidlint.py",
    "code": -2,
@@ -1129,9 +1141,9 @@
    "severity": "error"
   },
   {
-   "line": 759,
+   "line": 773,
    "column": 12,
-   "stop_line": 759,
+   "stop_line": 773,
    "stop_column": 24,
    "path": "tests/test_lucidlint.py",
    "code": -2,
@@ -1141,9 +1153,9 @@
    "severity": "error"
   },
   {
-   "line": 771,
+   "line": 785,
    "column": 12,
-   "stop_line": 771,
+   "stop_line": 785,
    "stop_column": 24,
    "path": "tests/test_lucidlint.py",
    "code": -2,

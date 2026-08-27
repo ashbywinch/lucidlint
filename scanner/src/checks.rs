@@ -1057,6 +1057,7 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
 /// neither ruff nor pyrefly flags it, and the name-based ref graph cannot see
 /// it either.
 pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
+    let (overloaded, last_def_line, overload_bound) = overload_exemption(module_body, state.source);
     let mut seen: Vec<(String, usize)> = Vec::new();
     for s in module_body {
         let line = stmt_line(state.source, s);
@@ -1064,10 +1065,16 @@ pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
         // is a hazard worth flagging: `import urllib` + `import urllib.request`
         // both bind `urllib` idiomatically, and the §10 def-in-imports
         // mistake is exactly a def landing on an import's name.
-        let mut bindings: Vec<(String, bool)> = Vec::new();
+        let mut bindings: Vec<(String, bool, bool)> = Vec::new(); // (name, is def, overload stub)
         match s {
-            Stmt::FunctionDef(f) => bindings.push((f.name.to_string(), true)),
-            Stmt::ClassDef(c) => bindings.push((c.name.to_string(), true)),
+            Stmt::FunctionDef(f) => {
+                let stub = f.decorator_list.iter().any(|d| {
+                    matches!(&d.expression, Expr::Name(n) if overload_bound.contains(n.id.as_str()))
+                        || matches!(&d.expression, Expr::Attribute(a) if a.attr.as_str() == "overload")
+                });
+                bindings.push((f.name.to_string(), true, stub));
+            }
+            Stmt::ClassDef(c) => bindings.push((c.name.to_string(), true, false)),
             Stmt::Import(i) => {
                 for a in &i.names {
                     let bound = a
@@ -1075,7 +1082,7 @@ pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
                         .as_ref()
                         .map(|n| n.id.to_string())
                         .unwrap_or_else(|| a.name.split('.').next().unwrap_or("").to_string());
-                    bindings.push((bound, false));
+                    bindings.push((bound, false, false));
                 }
             }
             Stmt::ImportFrom(fr) => {
@@ -1088,32 +1095,86 @@ pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
                         .as_ref()
                         .map(|n| n.id.to_string())
                         .unwrap_or_else(|| a.name.to_string());
-                    bindings.push((bound, false));
+                    bindings.push((bound, false, false));
                 }
             }
             _ => {}
         }
-        for (name, is_def) in bindings {
+        for (name, is_def, stub) in bindings {
             if name.is_empty() {
                 continue;
             }
             if is_def {
-                if let Some((_, first_line)) = seen.iter().find(|(n, _)| *n == name) {
-                    state.findings.push(Finding {
-                        file: state.file.to_string(),
-                        line,
-                        function: name.clone(),
-                        kind: "duplicate-def".into(),
-                        severity: "fail".into(),
-                        message: format!(
-                            "module-scope name '{name}' is bound twice (first at line {first_line}) — the later definition shadows the earlier: a shadowing hazard (dispatch or edit mistake); rename one — fix: duplicate-def"
-                        ),
-                    });
+                let exempt = stub || (overloaded.contains(&name) && last_def_line.get(&name).copied() == Some(line));
+                if !exempt {
+                    if let Some((_, first_line)) = seen.iter().find(|(n, _)| *n == name) {
+                        state.findings.push(Finding {
+                            file: state.file.to_string(),
+                            line,
+                            function: name.clone(),
+                            kind: "duplicate-def".into(),
+                            severity: "fail".into(),
+                            message: format!(
+                                "module-scope name '{name}' is bound twice (first at line {first_line}) — the later definition shadows the earlier: a shadowing hazard (dispatch or edit mistake); rename one — fix: duplicate-def"
+                            ),
+                        });
+                    }
                 }
             }
             seen.push((name, line));
         }
     }
+}
+
+/// The @overload exemption pre-scan: the bound decorator names (aliases
+/// resolved — `overload as ov` binds `ov`), the overloaded def names, and
+/// each overloaded name's LAST def line (the implementation). Only the
+/// stubs and that one impl are exempt; a further def of the name is a
+/// genuine duplicate (review finding).
+fn overload_exemption(
+    module_body: &[Stmt],
+    source: &str,
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashMap<String, usize>,
+    std::collections::HashSet<String>,
+) {
+    let mut overload_bound: std::collections::HashSet<String> =
+        std::collections::HashSet::from(["overload".to_string()]);
+    for s in module_body {
+        if let Stmt::ImportFrom(fr) = s {
+            for a in &fr.names {
+                if a.name.as_str() == "overload" || a.name.as_str() == "*" {
+                    overload_bound.insert(
+                        a.asname
+                            .as_ref()
+                            .map(|n| n.id.to_string())
+                            .unwrap_or_else(|| "overload".to_string()),
+                    );
+                }
+            }
+        }
+    }
+    let mut overloaded: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut last_def_line: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for s in module_body {
+        if let Stmt::FunctionDef(f) = s {
+            let name = f.name.to_string();
+            let is_overload = f.decorator_list.iter().any(|d| {
+                matches!(&d.expression, Expr::Name(n) if overload_bound.contains(n.id.as_str()))
+                    || matches!(&d.expression, Expr::Attribute(a) if a.attr.as_str() == "overload")
+            });
+            if is_overload {
+                overloaded.insert(name.clone());
+            }
+            let line = stmt_line(source, s);
+            let last = last_def_line.entry(name).or_insert(line);
+            if line > *last {
+                *last = line;
+            }
+        }
+    }
+    (overloaded, last_def_line, overload_bound)
 }
 
 /// Docstring content words that add nothing the body does not already say

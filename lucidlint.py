@@ -44,6 +44,8 @@ from pathlib import Path
 from subprocess import SubprocessError
 from typing import NamedTuple
 
+import rule_metadata
+
 # the fix engine is optional — the fix command degrades to a clear error
 # when the `fix` extra is not installed
 #
@@ -205,7 +207,11 @@ class _RenderCtx:
     def render_text(self, unique: list[Action], fails: list[Action], warns: list[Action], acks: list[Action]) -> None:
         repo, args = self.repo, self.args
         if not unique:
-            print("GATE: PASS — clean, no actions")
+            # the ledger must show even when the config-ignores ate every
+            # action — "clean" while debt is hidden is the invisibility the
+            # ledger exists to remove (review finding)
+            ignored_note = self._config_ignored_note()
+            print(f"GATE: PASS — clean, no actions{ignored_note}")
             return
         if not fails:
             warn_note = f" ({len(warns)} warnings reported, never fail)" if warns else ""
@@ -817,24 +823,11 @@ def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
     return rel if rel in rels else None
 
 
-# Rule groups matching RULES.md — reference by name in the config file
-# to suppress whole groups across the codebase.
-# lucidlint: ignore record-shape wire-format dict — a class is ceremony for a rule-group map
-RULE_GROUPS = {
-    "architecture": {"complexity", "large-function", "closures", "partition", "strewing", "record-shape",
-                     "duplicate", "layer-mix", "folder-mix", "hub-file", "high-risk",
-                     "hotspot", "over-abstraction", "long-param-list", "churn-untested",
-                     "detached-method", "module-cohesion"},
-    "style": {"magic-number", "noop-statement", "unreachable", "vague-name", "class-module",
-              "builtin-shadow", "broad-except", "swallow", "inline-import", "private-import",
-              "global-state", "unused", "import-cycle", "docs-link", "docs-undiscoverable",
-              "boolean-arg", "debug-artifact", "positional-literals",
-              "guard-clauses", "latent-visitor", "conditional-polymorphism", "special-case",
-              "middle-man", "unused-setter", "loop-pipeline", "duplicate-def",
-              "restating-docstring", "duplicate-block"},
-    "test-discipline": {"monkeypatch", "skipif", "fakefs", "no-assert-test"},
-    "suppression": {"suppression", "type-ignore", "allow-reason", "noqa", "stale-suppression"},
-}
+# Rule groups — reference by name in the config file to suppress whole
+# groups across the codebase. DERIVED from the rule catalog
+# (rule_metadata.py) — the config.rs mirror is generated from the same
+# source by `make rules`, so the gate and the LSP cannot drift.
+RULE_GROUPS = rule_metadata.CATALOG.groups()
 
 # Cache for config loading
 # lucidlint: ignore global-state per-repo cache of the config file — one entry per repo per run
