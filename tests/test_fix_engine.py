@@ -1284,3 +1284,162 @@ def run_tool(tool, args):
     assert "def _search_people(args):\n    return \"existing\"" in fixed  # untouched
     assert "def _search_people_1(" in fixed  # the colliding handler is suffixed
     assert "_search_people_1" in fixed
+
+
+# --------------------------------------------------------------------------- review-log fixes
+
+def _fix_opts(tmp_path, kind, rel, src, line, name=None, params=None):
+    """Like _fix but with the agent-supplied semantic bits (extract-module's
+    module name + member list)."""
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / rel).write_text(src)
+    repo.mkdir(exist_ok=True)
+    opts = fix_engine.FixOptions(name=name, params=params)
+    out = fix_engine.fix_finding(kind, rel, repo, line, opts)
+    return out, (repo / rel).read_text()
+
+
+def test_duplicate_def_unreferenced_shadow_deleted(tmp_path):
+    # the review-log guess_pages shadow: the second def is referenced nowhere
+    # (only the two def sites hit the name) — the delete is provably safe
+    src = "def guess_pages():\n    return 1\n\n\ndef guess_pages(model):\n    return model\n"
+    out, fixed = _fix(tmp_path, "duplicate-def", "houses/app.py", src, 5)
+    assert out is not None
+    assert fixed.count("def guess_pages") == 1
+    assert "return 1" in fixed  # the FIRST def survives verbatim
+
+
+def test_duplicate_def_referenced_shadow_not_deleted(tmp_path):
+    # a caller exists — a delete would break it; the agent must rename
+    src = "def f():\n    return 1\n\n\ndef f(x):\n    return x\n\n\ndef g():\n    return f(2)\n"
+    out, fixed = _fix(tmp_path, "duplicate-def", "houses/app.py", src, 5)
+    assert out is None
+    assert fixed == src
+
+
+def test_restating_docstring_deleted(tmp_path):
+    src = (
+        "def check(box, line):\n"
+        '    """the line orientation must be consistent with the box aspect"""\n'
+        "    orientation = line.orientation\n"
+        "    consistent = box.aspect\n"
+        "    return orientation == consistent\n"
+    )
+    out, fixed = _fix(tmp_path, "restating-docstring", "houses/app.py", src, 1)
+    assert out is not None
+    assert '"""the line orientation' not in fixed
+    assert "orientation = line.orientation" in fixed  # the body survives
+
+
+def test_restating_docstring_absent_returns_none(tmp_path):
+    src = "def f():\n    return 1\n"
+    out, fixed = _fix(tmp_path, "restating-docstring", "houses/app.py", src, 1)
+    assert out is None
+    assert fixed == src
+
+
+def test_duplicate_block_second_copy_deleted(tmp_path):
+    # the transcribe-twice class: the post-loop copy is removed, the loop
+    # body survives
+    src = (
+        "def run(pages):\n"
+        "    for p in pages:\n"
+        "        t = transcribe(p)\n"
+        "        write(t)\n"
+        "        mark(p)\n"
+        "    t = transcribe(p)\n"
+        "    write(t)\n"
+        "    mark(p)\n"
+        "    return t\n"
+    )
+    out, fixed = _fix(tmp_path, "duplicate-block", "houses/app.py", src, 6)
+    assert out is not None
+    assert fixed.count("write(t)") == 1
+    assert "for p in pages:" in fixed  # the first copy (loop body) survives
+
+
+def test_duplicate_block_empty_block_refused(tmp_path):
+    # the second copy FILLS the second loop body — deleting it empties the
+    # block -> invalid Python; the fix must refuse rather than emit a bare
+    # block
+    src = (
+        "def run(pages):\n"
+        "    for p in pages:\n"
+        "        t = transcribe(p)\n"
+        "        write(t)\n"
+        "        mark(p)\n"
+        "    for p in pages:\n"
+        "        t = transcribe(p)\n"
+        "        write(t)\n"
+        "        mark(p)\n"
+    )
+    out, fixed = _fix(tmp_path, "duplicate-block", "houses/app.py", src, 7)
+    assert out is None
+    assert fixed == src
+
+
+
+def test_extract_module_moves_domain_and_reexports(tmp_path):
+    # the module-cohesion fix: one domain's defs move to the new module; the
+    # origin re-exports them so every other file's imports keep working
+    src = (
+        "from math import sqrt\n"
+        "def tokenize(s):\n"
+        "    return sqrt(len(s.split()))\n"
+        "\n"
+        "def words(s):\n"
+        "    return tokenize(s)\n"
+    )
+    out, fixed = _fix_opts(
+        tmp_path, "extract-module", "houses/layout.py", src, 1,
+        name="text", params=["tokenize", "words"],
+    )
+    assert out is not None
+    repo = tmp_path / "repo"
+    new_mod = (repo / "houses" / "text.py").read_text()
+    assert "def tokenize(s):" in new_mod
+    assert "def words(s):" in new_mod
+    assert "from math import sqrt" in new_mod  # the needed import moved with them
+    assert "from text import tokenize, words" in fixed  # the origin re-exports
+    assert "def tokenize" not in fixed
+
+
+def test_extract_module_refuses_leaking_dependency(tmp_path):
+    # the moved code needs an origin def that is NOT moving -> a from-origin
+    # import in the new module would create a cycle (review log §3.4) — refuse
+    src = (
+        "def helper():\n"
+        "    return 1\n"
+        "\n"
+        "def tokenize(s):\n"
+        "    return helper()\n"
+    )
+    out, fixed = _fix_opts(
+        tmp_path, "extract-module", "houses/layout.py", src, 1,
+        name="text", params=["tokenize"],
+    )
+    assert out is None
+    assert fixed == src
+    assert not (tmp_path / "repo" / "houses" / "text.py").exists()
+
+
+def test_extract_module_name_free_preview_does_not_write(tmp_path):
+    # the preview shows the seam with a placeholder module name and writes
+    # nothing — naming AFTER seeing the diff
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    rel = "houses/layout.py"
+    (repo / rel).write_text(
+        "from math import sqrt\n"
+        "def tokenize(s):\n"
+        "    return sqrt(len(s.split()))\n"
+        "\n"
+        "def words(s):\n"
+        "    return tokenize(s)\n"
+    )
+    opts = fix_engine.FixOptions(params=["tokenize", "words"])
+    new_source, desc = fix_engine.propose_finding("extract-module", rel, repo, 1, opts)
+    assert new_source is not None
+    assert "from _extracted import tokenize, words" in new_source
+    assert "def tokenize" not in new_source
+    assert not (repo / "houses" / "_extracted.py").exists()  # preview writes nothing
+    assert (repo / rel).read_text().count("def tokenize") == 1  # origin untouched

@@ -1,15 +1,18 @@
 //! `lucidlint --lsp` — a stdio JSON-RPC language server.
 //!
 //! The scan core runs IN-PROCESS: buffers from didOpen/didChange are fed to
-//! `scan_source` directly, so a keystroke costs a parse, not a process. No
-//! Python, no binary spawn, no repo state — the per-file families plus
-//! complexity (CC >= 15) become diagnostics on save; the repo-wide families
-//! (duplicate, unused) are meaningless for a single buffer and are dropped.
+//! `scan_source` directly, so a keystroke costs a parse, not a process. The
+//! per-file families plus complexity (CC >= 15) become diagnostics on every
+//! change; on SAVE the whole repo is re-scanned in-process so the repo-wide
+//! families (duplicate, unused — meaningless for a single buffer) join the
+//! saved file's diagnostics at their gate severity (the review-log §10
+//! edit-time gap: transient dead/duplicate states were never flagged).
 //!
 //! Editors point at: `lucidlint --lsp`
 
 use crate::config::{load_lucidlint_config, LucidConfig};
 use crate::{scan_source_lsp, FileScan, Finding};
+
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -115,6 +118,33 @@ fn scan_buffer(uri: &str, text: &str) -> FileScan {
     let mut scan = scan_source_lsp(text, &uri_to_path(uri));
     scan.file_name = uri_to_path(uri);
     scan
+}
+/// The repo-wide verdict for every Python file: per-file findings plus the
+/// families that need the whole repo (duplicate, unused) — the same merge the
+/// gate runs. The LSP's per-buffer scan cannot produce these (a single buffer
+/// cannot know who references a function), so the editor never showed the
+/// gate's repo-wide findings — the review-log edit-time gap. Runs on save,
+/// in-process, from disk. The merge lives in main (the composition root —
+/// the scan-core modules stay standalone, layers test).
+pub fn repo_wide_findings(root: &Path) -> std::collections::HashMap<String, Vec<Finding>> {
+    crate::repo_wide_scan(root)
+}
+/// A repo-wide finding as an LSP diagnostic — gate severity, the full fix
+/// command in the message, the repo config's silencing applied.
+fn repo_wide_diag(f: &Finding, rel: &str, cfg: &LucidConfig) -> Option<serde_json::Value> {
+    if cfg.is_ignored(&f.kind, rel) {
+        return None;
+    }
+    let line = f.line.saturating_sub(1);
+    Some(serde_json::json!({
+        "range": {
+            "start": {"line": line, "character": 0},
+            "end": {"line": line, "character": 1000},
+        },
+        "severity": severity_of(f),
+        "source": "lucidlint",
+        "message": crate::common::full_fix_command(&f.file, f.line, &f.message),
+    }))
 }
 
 /// One Content-Length-framed JSON-RPC message from stdin; None on EOF.
@@ -264,7 +294,22 @@ pub fn dispatch(state: &mut LspState, msg: &serde_json::Value, out: &mut impl Wr
             if let Some(text) = state.documents.get(&uri).cloned() {
                 let scan = scan_buffer(&uri, &text);
                 let ctx = state.filtering_for(&uri);
-                let diags = diagnostics_for(&scan, &text, ctx.as_ref().map(|(r, c)| (c, r.as_str())));
+                let mut diags = diagnostics_for(&scan, &text, ctx.as_ref().map(|(r, c)| (c, r.as_str())));
+                // the repo-wide verdict on save: duplicate/unused need the
+                // whole repo, so the per-buffer scan cannot show them —
+                // publish them now that the file is on disk (review-log §10:
+                // transient dead/duplicate states were never flagged at edit
+                // time). One full-repo scan per save, in-process.
+                if let (Some((rel, cfg)), Some(root)) = (ctx.as_ref(), state.root.as_ref()) {
+                    let by_file = repo_wide_findings(root);
+                    if let Some(fs) = by_file.get(rel.as_str()) {
+                        for f in fs {
+                            if let Some(d) = repo_wide_diag(f, rel, cfg) {
+                                diags.push(d);
+                            }
+                        }
+                    }
+                }
                 publish(&uri, &diags, out);
             }
         }
@@ -478,6 +523,40 @@ mod tests {
         let msg = read_message(&mut cursor).unwrap();
         assert_eq!(msg["method"], "exit");
     }
+}
+
+#[test]
+fn didsave_publishes_repo_wide_unused_for_saved_file() {
+    // review-log §10: a function that is dead REPO-WIDE never showed in
+    // the editor (the per-buffer scan cannot know). On save, the
+    // repo-wide merge must surface it at gate severity.
+    let dir = std::env::temp_dir().join(format!("lsp_rw_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir(dir.join(".git")).unwrap(); // repo-root marker for derive_root
+                                                    // dead.py defines _helper referenced nowhere; live.py is unrelated —
+                                                    // the per-buffer scan of dead.py alone cannot see the absence
+                                                    // lucidlint: ignore fakefs the fixture writes REAL temp files — the rule's own temp-dir carve-out
+    std::fs::write(dir.join("dead.py"), "def _helper():\n    return 1\n").unwrap();
+    std::fs::write(dir.join("live.py"), "def live():\n    return 2\n").unwrap();
+    let uri = format!("file://{}/dead.py", dir.display());
+    let mut state = LspState::new();
+    state
+        .documents
+        .insert(uri.clone(), "def _helper():\n    return 1\n".to_string());
+    let mut out = Vec::new();
+    let msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didSave",
+        "params": {"textDocument": {"uri": uri}}
+    });
+    assert!(dispatch(&mut state, &msg, &mut out));
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains("never referenced"),
+        "repo-wide unused must reach the save diagnostics: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

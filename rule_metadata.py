@@ -65,9 +65,12 @@ RULES = [
      "The field-partition variant of latent-class: free functions partition "
      "a struct's fields (each touches a disjoint subset) — the fields and "
      "their functions belong together as a class."),
-    ("strewing", None, "architecture", "Both", "fail",
+    ("strewing", "strewing → latent-class", "architecture", "Both", "fail",
      "≥3 free functions sharing the same leading parameter — they share "
      "data, they're a class."),
+    ("module-cohesion", None, "architecture", "Graph", "fail",
+     "A file whose nodes split across ≥2 graph communities (each ≥2 nodes) "
+     "holds several sub-domains — split the module at the domain seams."),
     ("record-shape", None, "architecture", "Both", "fail",
      "A function takes a struct/class with ≥5 fields and no methods — the "
      "struct's rules belong as methods on it."),
@@ -130,8 +133,19 @@ RULES = [
      "Module-level mutable container mutated inside a function — put state "
      "in a class."),
     ("unused", None, "style", "Python", "fail",
-     "A function defined in production code that's never referenced from "
-     "any other prod file (Python only)."),
+     "A function defined in production code that's never referenced "
+     "anywhere in the repo (same-file references count — Python only)."),
+    ("duplicate-def", None, "style", "Both", "fail",
+     "A module-scope def/class/import that shadows an earlier module-scope "
+     "binding of the same name — the later definition wins legally, but it "
+     "is a shadowing hazard (dispatch or edit mistake); rename one."),
+    ("restating-docstring", None, "style", "Both", "warn",
+     "A docstring whose content words all appear in the body's own tokens "
+     "— it restates the code; name the concept instead."),
+    ("duplicate-block", None, "style", "Both", "warn",
+     "An identical statement block (≥3 statements) appearing twice in one "
+     "function — duplicated work (an edit mistake?); delete the second "
+     "copy."),
     ("import-cycle", None, "style", "Both", "fail",
      "Circular imports — restructure modules."),
     ("docs-link", None, "style", "Both", "fail",

@@ -1044,6 +1044,319 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// review-log rules (family-album log §10/§11): duplicate module-scope
+// definitions, restating docstrings, duplicated statement blocks — all
+// deterministic on the AST the scan already walks.
+// ---------------------------------------------------------------------------
+
+/// Module-scope name reuse: a def/class/import binding that shadows an earlier
+/// module-scope binding of the same name (review-log §10, finding 1 — the
+/// `guess_pages` CLI command shadowing the module helper; also the
+/// double-`def` edit mistake). Legal Python — the later definition wins — so
+/// neither ruff nor pyrefly flags it, and the name-based ref graph cannot see
+/// it either.
+pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
+    let mut seen: Vec<(String, usize)> = Vec::new();
+    for s in module_body {
+        let line = stmt_line(state.source, s);
+        // (bound name, is the binder a def/class?) — only a DEF/CLASS shadow
+        // is a hazard worth flagging: `import urllib` + `import urllib.request`
+        // both bind `urllib` idiomatically, and the §10 def-in-imports
+        // mistake is exactly a def landing on an import's name.
+        let mut bindings: Vec<(String, bool)> = Vec::new();
+        match s {
+            Stmt::FunctionDef(f) => bindings.push((f.name.to_string(), true)),
+            Stmt::ClassDef(c) => bindings.push((c.name.to_string(), true)),
+            Stmt::Import(i) => {
+                for a in &i.names {
+                    let bound = a
+                        .asname
+                        .as_ref()
+                        .map(|n| n.id.to_string())
+                        .unwrap_or_else(|| a.name.split('.').next().unwrap_or("").to_string());
+                    bindings.push((bound, false));
+                }
+            }
+            Stmt::ImportFrom(fr) => {
+                for a in &fr.names {
+                    if a.name.as_str() == "*" {
+                        continue;
+                    }
+                    let bound = a
+                        .asname
+                        .as_ref()
+                        .map(|n| n.id.to_string())
+                        .unwrap_or_else(|| a.name.to_string());
+                    bindings.push((bound, false));
+                }
+            }
+            _ => {}
+        }
+        for (name, is_def) in bindings {
+            if name.is_empty() {
+                continue;
+            }
+            if is_def {
+                if let Some((_, first_line)) = seen.iter().find(|(n, _)| *n == name) {
+                    state.findings.push(Finding {
+                        file: state.file.to_string(),
+                        line,
+                        function: name.clone(),
+                        kind: "duplicate-def".into(),
+                        severity: "fail".into(),
+                        message: format!(
+                            "module-scope name '{name}' is bound twice (first at line {first_line}) — the later definition shadows the earlier: a shadowing hazard (dispatch or edit mistake); rename one — fix: duplicate-def"
+                        ),
+                    });
+                }
+            }
+            seen.push((name, line));
+        }
+    }
+}
+
+/// Docstring content words that add nothing the body does not already say
+/// (review-log §11.5: "the heaviest comment load restated the body"). A
+/// docstring whose content words all appear in the body's own tokens is
+/// comment noise — name the concept instead.
+const DOCSTRING_STOPWORDS: &[&str] = &[
+    "the", "a", "an", "and", "or", "of", "to", "in", "for", "on", "with", "its", "it", "is", "are", "be", "was",
+    "were", "this", "that", "these", "those", "from", "as", "at", "by", "into", "over", "under", "when", "while", "if",
+    "not", "no", "any", "all", "each", "their", "his", "her", "we", "you", "they",
+    // modals are prose structure, never code: "must be consistent with" —
+    // the content words are the identifiers the body already names
+    "must", "will", "should", "would", "can", "could", "may", "might", "shall",
+];
+
+fn docstring_content_words(doc: &str) -> Vec<String> {
+    doc.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 3 && !DOCSTRING_STOPWORDS.contains(w))
+        .map(|w| w.to_lowercase())
+        .collect()
+}
+
+/// The body's identifier/string tokens — what a docstring word must cover to
+/// count as "already said".
+fn body_tokens(body: &[Stmt]) -> HashSet<String> {
+    use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
+    struct Tokens(HashSet<String>);
+    impl<'a> SourceOrderVisitor<'a> for Tokens {
+        fn visit_expr(&mut self, e: &'a Expr) {
+            match e {
+                Expr::Name(n) => {
+                    self.0.insert(n.id.to_lowercase());
+                }
+                Expr::Attribute(a) => {
+                    self.0.insert(a.attr.to_lowercase());
+                }
+                Expr::StringLiteral(l) => {
+                    self.0.insert(l.value.to_str().to_lowercase());
+                }
+                _ => {}
+            }
+            walk_stmt_tokens(self, e);
+        }
+        fn visit_keyword(&mut self, k: &'a ruff_python_ast::Keyword) {
+            if let Some(arg) = &k.arg {
+                self.0.insert(arg.to_lowercase());
+            }
+            ruff_python_ast::visitor::source_order::walk_keyword(self, k);
+        }
+    }
+    fn walk_stmt_tokens<'a, V: SourceOrderVisitor<'a>>(v: &mut V, e: &'a Expr) {
+        ruff_python_ast::visitor::source_order::walk_expr(v, e);
+    }
+    let mut t = Tokens(HashSet::new());
+    for s in body {
+        walk_stmt(&mut t, s);
+    }
+    t.0
+}
+
+/// A module-scope def/class whose docstring restates its own body (warn).
+pub fn restating_docstring_findings(state: &mut ScanState, module_body: &[Stmt]) {
+    for s in module_body {
+        let body: &[Stmt] = match s {
+            Stmt::FunctionDef(f) => &f.body,
+            Stmt::ClassDef(c) => &c.body,
+            _ => continue,
+        };
+        let Some(Stmt::Expr(e)) = body.first() else { continue };
+        let Expr::StringLiteral(lit) = e.value.as_ref() else {
+            continue;
+        };
+        let doc = lit.value.to_str();
+        let words = docstring_content_words(doc);
+        if words.len() < 5 {
+            continue; // short docstrings carry the name; not noise
+        }
+        let tokens = body_tokens(&body[1..]);
+        let covered = words.iter().filter(|w| tokens.contains(w.as_str())).count();
+        if covered as f64 / words.len() as f64 >= 0.9 {
+            let line = stmt_line(state.source, s);
+            state.findings.push(Finding {
+                file: state.file.to_string(),
+                line,
+                function: String::new(),
+                kind: "restating-docstring".into(),
+                severity: "warn".into(),
+                message: format!(
+                    "docstring restates the body — {covered}/{} content words appear in the code; name the concept instead — fix: restating-docstring",
+                    words.len()
+                ),
+            });
+        }
+    }
+}
+
+/// An identical statement block (>= 3 statements) appearing twice in one
+/// function body — the edit-mistake signature (a replaced loop header leaves
+/// the old body in place; the review-log fingerprint work's transcribe-twice
+/// class, where every page would be processed and billed twice). warn:
+/// repeated identical blocks are provably duplicated work.
+const BLOCK_WINDOW: usize = 3;
+
+fn flatten_stmts<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a Stmt>) {
+    for s in stmts {
+        out.push(s);
+        match s {
+            Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
+            Stmt::If(i) => {
+                flatten_stmts(&i.body, out);
+                for cl in &i.elif_else_clauses {
+                    flatten_stmts(&cl.body, out);
+                }
+            }
+            Stmt::While(w) => {
+                flatten_stmts(&w.body, out);
+                flatten_stmts(&w.orelse, out);
+            }
+            Stmt::For(fr) => {
+                flatten_stmts(&fr.body, out);
+                flatten_stmts(&fr.orelse, out);
+            }
+            Stmt::With(w) => flatten_stmts(&w.body, out),
+            Stmt::Try(t) => {
+                flatten_stmts(&t.body, out);
+                for h in &t.handlers {
+                    let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                    flatten_stmts(&eh.body, out);
+                }
+                flatten_stmts(&t.orelse, out);
+                flatten_stmts(&t.finalbody, out);
+            }
+            Stmt::Match(m) => {
+                for case in &m.cases {
+                    flatten_stmts(&case.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn duplicate_block_findings(state: &mut ScanState, module_body: &[Stmt]) {
+    use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
+    struct Bodies<'a>(Vec<&'a [Stmt]>);
+    impl<'a> SourceOrderVisitor<'a> for Bodies<'a> {
+        fn visit_stmt(&mut self, s: &'a Stmt) {
+            if let Stmt::FunctionDef(f) = s {
+                self.0.push(&f.body);
+            }
+            walk_stmt(self, s);
+        }
+    }
+    let mut b = Bodies(Vec::new());
+    for s in module_body {
+        // walk_stmt visits DESCENDANTS only — the top-level def is invisible
+        // to visit_stmt, so collect it explicitly (nested defs fire via the
+        // descent)
+        if let Stmt::FunctionDef(f) = s {
+            b.0.push(&f.body);
+        }
+        walk_stmt(&mut b, s);
+    }
+    for body in &b.0 {
+        let mut flat: Vec<&Stmt> = Vec::new();
+        flatten_stmts(body, &mut flat);
+        if flat.len() < BLOCK_WINDOW * 2 {
+            continue;
+        }
+        // node-index-free structural keys: Stmt's PartialEq includes the
+        // parser's AtomicNodeIndex, so two identical statements are never
+        // `==` — the skeleton key is the comparison. First-seen map: a
+        // window keyed by its joined statements finds its duplicate in O(1)
+        // (the naive i/j scan is O(n^2) and a generated 15k-statement
+        // function pays real seconds for it).
+        let keys: Vec<Vec<String>> = flat.iter().map(|s| stmt_key(s)).collect();
+        let mut first_seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        'outer: for j in 0..=keys.len() - BLOCK_WINDOW {
+            let mut window = String::new();
+            for k in 0..BLOCK_WINDOW {
+                for tok in &keys[j + k] {
+                    window.push_str(tok);
+                    window.push('\u{1}');
+                }
+            }
+            if let Some(&i) = first_seen.get(&window) {
+                if i + BLOCK_WINDOW <= j {
+                    let line = stmt_line(state.source, flat[j]);
+                    state.findings.push(Finding {
+                        file: state.file.to_string(),
+                        line,
+                        function: String::new(),
+                        kind: "duplicate-block".into(),
+                        severity: "warn".into(),
+                        message: format!(
+                            "a {BLOCK_WINDOW}-statement block appears twice in this function — duplicated work (an edit mistake?); delete the second copy — fix: duplicate-block"
+                        ),
+                    });
+                    break 'outer;
+                }
+            } else {
+                first_seen.insert(window, j);
+            }
+        }
+    }
+}
+
+/// A node-index-free structural key for ONE statement — the same BFS the
+/// duplicate skeleton uses, seeded with the statement. Two statements are
+/// "identical" for the duplicate-block rule when their keys are equal.
+fn stmt_key(s: &Stmt) -> Vec<String> {
+    let mut toks: Vec<String> = Vec::new();
+    let mut queue: Vec<Q> = vec![Q::N(AnyNodeRef::from(s))];
+    let mut i = 0usize;
+    while i < queue.len() {
+        let node = match &queue[i] {
+            Q::N(n) => *n,
+            Q::T(t) => {
+                toks.push((*t).to_string());
+                i += 1;
+                continue;
+            }
+        };
+        i += 1;
+        match node {
+            AnyNodeRef::ExprName(_) => toks.push("N".to_string()),
+            AnyNodeRef::ExprStringLiteral(_)
+            | AnyNodeRef::ExprBytesLiteral(_)
+            | AnyNodeRef::ExprNumberLiteral(_)
+            | AnyNodeRef::ExprBooleanLiteral(_)
+            | AnyNodeRef::ExprNoneLiteral(_)
+            | AnyNodeRef::ExprEllipsisLiteral(_)
+            | AnyNodeRef::InterpolatedStringLiteralElement(_) => toks.push("C".to_string()),
+            AnyNodeRef::Parameter(_) | AnyNodeRef::ParameterWithDefault(_) => toks.push("A".to_string()),
+            AnyNodeRef::Parameters(_) => toks.push("arguments".to_string()),
+            AnyNodeRef::ElifElseClause(_) => toks.push("If".to_string()),
+            AnyNodeRef::InterpolatedElement(_) => toks.push("FormattedValue".to_string()),
+            _ => toks.push(format!("{:?}", node.kind())),
+        }
+        skel_children(node, &mut queue);
+    }
+    toks
+}
 /// Names the function returns at its own top level (nested functions excluded).
 pub fn returned_names(body: &[Stmt]) -> HashSet<String> {
     let mut out = HashSet::new();

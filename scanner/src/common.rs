@@ -94,7 +94,16 @@ pub fn full_fix_command(file: &str, line: usize, message: &str) -> String {
             name_slot = format!(" --name {slot}");
         }
     }
-    format!("{head}— fix: lucidlint fix --kind {fix_kind} --file {file} --line {line}{name_slot}")
+    // extract-module's member list travels as --params (the seam: which
+    // module-scope defs move) — the rewrite must carry it or the agent gets
+    // a command the fix cannot act on
+    let mut params_slot = String::new();
+    if let Some(i) = rest.iter().position(|p| *p == "--params") {
+        if let Some(slot) = rest.get(i + 1) {
+            params_slot = format!(" --params {slot}");
+        }
+    }
+    format!("{head}— fix: lucidlint fix --kind {fix_kind} --file {file} --line {line}{name_slot}{params_slot}")
 }
 
 /// The complexity finding message, routed by the function's SHAPE: a
@@ -200,13 +209,14 @@ pub fn suppressions_from_comments(comments: &[(usize, String)]) -> Suppressions 
     }
 }
 
-/// Suppression keywords that name a FAMILY rather than one raw kind —
 /// the reverse of rule_metadata.py's `display_name "X → <family>"` aliases
-/// (closures → latent-class, partition → latent-class). A suppression naming
+/// (closures → latent-class, partition → latent-class, strewing → latent-class).
+/// A suppression naming
 /// the family also exempts its variant kinds, so `ignore latent-class <why>`
-/// is not silently stale against a `closures`/`partition` finding (RUST-CORE
-/// B6: the alias map must match rule_metadata's `→` convention — keep in sync).
-const FAMILY_VARIANTS: &[(&str, &[&str])] = &[("latent-class", &["closures", "partition"])];
+/// is not silently stale against a `closures`/`partition`/`strewing` finding
+/// (RUST-CORE B6: the alias map must match rule_metadata's `→` convention —
+/// keep in sync; final_kind in main.rs collapses the same three).
+const FAMILY_VARIANTS: &[(&str, &[&str])] = &[("latent-class", &["closures", "partition", "strewing"])];
 
 fn alias_variants(sig: &str) -> &'static [&'static str] {
     for (fam, vars) in FAMILY_VARIANTS {
@@ -583,6 +593,26 @@ mod tests {
             &PreUsedSuppressions::default(),
         );
         assert!(!fs.iter().any(|f| f.kind == "partition"), "{:?}", fs);
+        assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
+    }
+    #[test]
+    fn family_suppression_matches_strewing_variant() {
+        // B6: the third latent-class variant. `ignore latent-class` must
+        // suppress a `strewing` finding too — final_kind collapses it into
+        // the family, so the family keyword without the variant is the exact
+        // stale-suppression trap the review log hit.
+        let comments = vec![(
+            1,
+            "// lucidlint: ignore latent-class the helpers are the module's seams".to_string(),
+        )];
+        let fs = apply_suppressions_impl(
+            vec![finding("strewing", 2)],
+            &comments,
+            "x.py",
+            "#",
+            &PreUsedSuppressions::default(),
+        );
+        assert!(!fs.iter().any(|f| f.kind == "strewing"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
 

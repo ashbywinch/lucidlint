@@ -21,7 +21,7 @@ use ruff_python_parser::{parse_module, Parsed};
 use ruff_text_size::Ranged;
 use serde::Serialize;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 mod checks;
 mod common;
@@ -959,6 +959,10 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     strewing_findings(state, body);
     record_shape_findings(state, body, source);
     partition_findings(state, body, source);
+    // review-log rules: shadowing hazards + duplicated work (all per-file)
+    duplicate_def_findings(state, body);
+    restating_docstring_findings(state, body);
+    duplicate_block_findings(state, body);
     // advisory refactorings (warn): detection-only, the fix names the Fowler
     // refactoring for the agent (or a future fix)
     guard_clause_findings(state, body, source);
@@ -1087,7 +1091,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     }
 }
 
-fn scan_file(path: &Path) -> FileScan {
+pub(crate) fn scan_file(path: &Path) -> FileScan {
     let source = std::fs::read_to_string(path).unwrap_or_default();
     let name = path.to_str().unwrap_or("<file>").to_string();
     if name.ends_with(".rs") {
@@ -1098,6 +1102,95 @@ fn scan_file(path: &Path) -> FileScan {
     let mut scan = scan_source(&source, &name);
     scan.file_name = name;
     scan
+}
+
+/// Directories a repo-wide scan never enters (venvs, caches, build output —
+/// the orchestrator's git-ls-files equivalent without git).
+const SCAN_SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".lucidlint-cache",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".pyrefly-cache",
+    "htmlcov",
+    "dist",
+    "build",
+    "target",
+    ".code-review-graph",
+    ".tox",
+    ".eggs",
+];
+
+/// The repo-wide merge for the LSP's save path: every Python file under
+/// `root` scanned with the repo-wide flag, then the families that need the
+/// whole repo (duplicate, unused — reconciled through each file's
+/// suppressions, review-log B3). Returns the ADDITIONS per repo-relative
+/// file; the per-file findings travel via the buffer scan so nothing is
+/// double-reported. Lives here (the composition root) so lsp stays a
+/// standalone scan-core module (layers test).
+pub(crate) fn repo_wide_scan(root: &Path) -> std::collections::HashMap<String, Vec<Finding>> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !SCAN_SKIP_DIRS.contains(&name) {
+                    stack.push(p);
+                }
+            } else if p.extension().is_some_and(|x| x == "py") {
+                paths.push(p);
+            }
+        }
+    }
+    paths.sort();
+    let scans: Vec<FileScan> = paths.par_iter().map(|p| scan_file(p)).collect();
+    let root_s = root.to_string_lossy().to_string();
+    let mut skeletons = Vec::new();
+    let mut definitions: Vec<(String, String, usize)> = Vec::new();
+    let mut prod_refs = HashSet::new();
+    let mut test_refs = HashSet::new();
+    let mut strings = Vec::new();
+    let mut supps_by_rel: std::collections::HashMap<String, common::Suppressions> = std::collections::HashMap::new();
+    for scan in &scans {
+        let rel = rel_of(&scan.file_name, &root_s);
+        let is_test = is_test_path(&rel);
+        for s in &scan.skeletons {
+            skeletons.push(SkeletonFn {
+                rel: rel.clone(),
+                name: s.name.clone(),
+                line: s.line,
+                skeleton: s.skeleton.clone(),
+            });
+        }
+        for (name, line) in &scan.defs {
+            definitions.push((rel.clone(), name.clone(), *line));
+        }
+        if is_test {
+            test_refs.extend(scan.refs.iter().cloned());
+        } else {
+            prod_refs.extend(scan.refs.iter().cloned());
+            strings.extend(scan.strings.iter().cloned());
+        }
+        prod_refs.extend(scan.decorated.iter().cloned());
+        supps_by_rel.insert(rel.clone(), scan.supps.clone());
+    }
+    let mut additions: Vec<Finding> = Vec::new();
+    additions.extend(checks::duplicate_findings(&skeletons));
+    let repo_wide_unused = checks::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+    reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel);
+    let mut by_file: std::collections::HashMap<String, Vec<Finding>> = std::collections::HashMap::new();
+    for f in additions {
+        by_file.entry(f.file.clone()).or_default().push(f);
+    }
+    by_file
 }
 
 /// The Rust layer's scan into the shared FileScan shape. The Python-specific
@@ -1174,6 +1267,11 @@ pub const FAMILY_KINDS: &[&str] = &[
     "middle-man",
     "unused-setter",
     "loop-pipeline",
+    // review-log rules (family-album log §10/§11)
+    "duplicate-def",
+    "module-cohesion",
+    "restating-docstring",
+    "duplicate-block",
     // test discipline
     "monkeypatch",
     "skipif",
@@ -1257,6 +1355,10 @@ pub fn final_kind(kind: &str) -> &'static str {
         "middle-man" => "middle-man",
         "unused-setter" => "unused-setter",
         "loop-pipeline" => "loop-pipeline",
+        "duplicate-def" => "duplicate-def",
+        "module-cohesion" => "module-cohesion",
+        "restating-docstring" => "restating-docstring",
+        "duplicate-block" => "duplicate-block",
         _ => "standard", // broad-except, imports, over-abstraction, cycles, duplicate, unused, ...
     }
 }
@@ -1268,11 +1370,36 @@ pub fn final_kind(kind: &str) -> &'static str {
 /// trailing 't'), so it backs off to the last path separator — rels are
 /// always clean directory boundaries.
 fn repo_root(paths: &[String]) -> String {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    repo_root_impl(paths, &cwd)
+}
+
+/// The longest common prefix of the passed paths, backed off to the last
+/// path separator. Paths are resolved against `cwd` FIRST: the orchestrator
+/// passes REPO-RELATIVE paths (the binary runs with the repo as its cwd),
+/// and the raw common prefix of `tests/a.py` + `tools/b.py` is `"t"` — which
+/// backed off to `""` and silently broke every graph-family rel resolution
+/// (repo_rel on the graph's ABSOLUTE node paths stripped nothing), so
+/// large-function/hub-file/high-risk/layer-mix/folder-mix never fired
+/// through the orchestrator. Joining the cwd makes the root the absolute
+/// repo path for relative inputs and leaves absolute inputs unchanged.
+fn repo_root_impl(paths: &[String], cwd: &Path) -> String {
     if paths.is_empty() {
         return String::new();
     }
-    let mut prefix = paths[0].clone();
-    for p in &paths[1..] {
+    let abs: Vec<String> = paths
+        .iter()
+        .map(|p| {
+            let pb = Path::new(p);
+            if pb.is_absolute() {
+                p.clone()
+            } else {
+                cwd.join(pb).to_string_lossy().to_string()
+            }
+        })
+        .collect();
+    let mut prefix = abs[0].clone();
+    for p in &abs[1..] {
         while !p.starts_with(&prefix) {
             prefix.truncate(prefix.len().saturating_sub(1));
         }
@@ -1283,9 +1410,6 @@ fn repo_root(paths: &[String]) -> String {
     }
     prefix
 }
-
-/// The signal a stale-suppression message names, for matching a stale finding
-/// against the (line, signal) a repo-wide pass consumed.
 fn sig_of_stale(msg: &str) -> String {
     // line form: "suppression '// lucidlint: ignore <sig>' at line N no longer fires"
     if let Some(i) = msg.find("ignore ") {
@@ -1313,7 +1437,7 @@ fn sig_of_stale(msg: &str) -> String {
 /// window) and drop the stale-suppression findings the consumed comments
 /// caused (review-log B3). The survivors are appended to `all` in place.
 // lucidlint: ignore record-shape Finding is the core finding type consumed repo-wide — one more consumer is not a new record
-fn reconcile_repo_wide(
+pub(crate) fn reconcile_repo_wide(
     all: &mut Vec<Finding>,
     repo_wide: Vec<Finding>,
     supps_by_rel: &std::collections::HashMap<String, common::Suppressions>,
@@ -1341,8 +1465,21 @@ fn reconcile_repo_wide(
     });
 }
 
-fn rel_of(path: &str, root: &str) -> String {
-    if let Some(rel) = path.strip_prefix(root).and_then(|r| r.strip_prefix('/')) {
+pub(crate) fn rel_of(path: &str, root: &str) -> String {
+    // a relative path is resolved against the cwd (the binary runs with the
+    // repo as its cwd) — stripping the root then yields the true rel instead
+    // of falling back to the bare file name (which left per-file rels to be
+    // re-resolved by the orchestrator's cwd-dependent guess)
+    let abs = if Path::new(path).is_absolute() {
+        path.to_string()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join(path)
+            .to_string_lossy()
+            .to_string()
+    };
+    if let Some(rel) = abs.strip_prefix(root).and_then(|r| r.strip_prefix('/')) {
         return rel.to_string();
     }
     std::path::Path::new(path)
@@ -1626,6 +1763,7 @@ fn main() {
         let rels: Vec<String> = paths.iter().map(|p| rel_of(p, &root)).collect();
         all_findings.extend(graph_families::layer_mix_findings(repo_root, c, &rels));
         all_findings.extend(graph_families::folder_mix_findings(repo_root, c));
+        all_findings.extend(graph_families::module_cohesion_findings(repo_root, c, 150));
     }
     if let Some(d) = &docs_root {
         let gitignored: std::collections::HashSet<String> = gitignored_json
@@ -1778,6 +1916,49 @@ mod tests {
             "x \u{2014} fix: extract-method (preview; --fix-name; prose)",
         );
         assert!(!m3.contains("--name"), "{m3}");
+    }
+    #[test]
+    fn repo_root_resolves_relative_paths_against_cwd() {
+        // the orchestrator passes REPO-RELATIVE paths with the binary's cwd
+        // at the repo root: the raw common prefix of tests/a.py + tools/b.py
+        // is "t" — which used to back off to "" and silently broke every
+        // graph-family rel resolution (large-function/hub-file/high-risk/
+        // layer-mix/folder-mix never fired through the orchestrator)
+        let cwd = Path::new("/work/repo");
+        let root = repo_root_impl(
+            &[
+                "tests/a.py".to_string(),
+                "tests/b.py".to_string(),
+                "tools/c.py".to_string(),
+            ],
+            cwd,
+        );
+        assert_eq!(root, "/work/repo");
+    }
+
+    #[test]
+    fn repo_root_absolute_paths_unchanged() {
+        let cwd = Path::new("/work/repo");
+        let root = repo_root_impl(
+            &[
+                "/home/u/proj/tests/a.py".to_string(),
+                "/home/u/proj/tools/b.py".to_string(),
+            ],
+            cwd,
+        );
+        assert_eq!(root, "/home/u/proj");
+    }
+
+    #[test]
+    fn fix_command_carries_params_slot() {
+        // the extract-module directive names the seam's members via --params —
+        // the rewrite must carry them or the agent gets a command the fix
+        let msg = "module x holds 2 domains — fix: extract-module --fix-name text --params tokenize,words";
+
+        let cmd = common::full_fix_command("tools/layout.py", 0, msg);
+        assert!(cmd.contains("--kind extract-module"), "{cmd}");
+        assert!(cmd.contains("--name text"), "{cmd}");
+        assert!(cmd.contains("--params tokenize,words"), "{cmd}");
     }
 
     fn scan_src(src: &str) -> Vec<Finding> {
@@ -2173,6 +2354,77 @@ mod tests {
     fn strewing_three_functions_shared_param() {
         let f = scan_src("class Record:\n    pass\n\ndef a(x: Record):\n    return x\n\ndef b(x: Record):\n    return x\n\ndef c(x: Record):\n    return x\n");
         assert!(f.iter().any(|x| x.kind == "strewing"));
+    }
+
+    // ------------------------------------------------------------- duplicate-def
+    #[test]
+    fn duplicate_module_scope_def_is_found() {
+        // the review-log guess_pages shadow: two defs, same name, module scope
+        let f = scan_src("def guess_pages():\n    return 1\n\ndef guess_pages(model):\n    return model\n");
+        let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-def").collect();
+        assert_eq!(d.len(), 1, "{f:?}");
+        assert_eq!(d[0].line, 4, "the SECOND binding is the finding");
+    }
+
+    #[test]
+    fn duplicate_class_and_function_name_is_found() {
+        // def shadowing a class of the same name is the same hazard
+        let f = scan_src("class Record:\n    pass\n\ndef Record():\n    return 1\n");
+        assert!(f.iter().any(|x| x.kind == "duplicate-def"));
+    }
+
+    #[test]
+    fn duplicate_def_import_shadow_is_found() {
+        // a def whose name collides with an import (the def-in-imports edit
+        // mistake class)
+        let f = scan_src("from x import helper\n\ndef helper():\n    return 1\n");
+        assert!(f.iter().any(|x| x.kind == "duplicate-def"));
+    }
+
+    #[test]
+    fn duplicate_def_suppressed_with_why() {
+        let f = scan_src(
+            "def a():\n    return 1\n\n# lucidlint: ignore duplicate-def the override is deliberate\n\ndef a(x):\n    return x\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "duplicate-def"), "{f:?}");
+    }
+    #[test]
+    fn restating_docstring_is_found() {
+        // the log's example: "the line's orientation must be consistent with
+        // its box's aspect" beside code that says exactly that — every content
+        // word is an identifier already in the body
+        let f = scan_src(
+            "def check(box, line):\n    \"\"\"the line orientation must be consistent with the box aspect\"\"\"\n    orientation = line.orientation\n    consistent = box.aspect\n    return orientation == consistent\n",
+        );
+        assert!(f.iter().any(|x| x.kind == "restating-docstring"), "{f:?}");
+    }
+
+    #[test]
+    fn meaningful_docstring_passes() {
+        // the docstring names what the body does not: the CONCEPT
+        let f = scan_src(
+            "def check(box, line):\n    \"\"\"admission gate: the reading order must stay on the ink axis\"\"\"\n    orient = line.orientation\n    aspect = box.aspect\n    return orient == aspect\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "restating-docstring"), "{f:?}");
+    }
+
+    // ------------------------------------------------------------- duplicate-block
+    #[test]
+    fn adjacent_duplicate_block_is_found() {
+        // the transcribe-twice class: a replaced loop header leaves the old
+        // body in place — two identical transcribe->write->mark sequences
+        let f = scan_src(
+            "def run(pages):\n    for p in pages:\n        t = transcribe(p)\n        write(t)\n        mark(p)\n    t = transcribe(p)\n    write(t)\n    mark(p)\n",
+        );
+        assert!(f.iter().any(|x| x.kind == "duplicate-block"), "{f:?}");
+    }
+
+    #[test]
+    fn short_duplicate_pair_passes() {
+        // two identical statements are common and often fine — 3+ is the
+        // edit-mistake signature
+        let f = scan_src("def f(a):\n    a = a + 1\n    a = a + 1\n    return a\n");
+        assert!(!f.iter().any(|x| x.kind == "duplicate-block"), "{f:?}");
     }
 
     // ------------------------------------------------- suppression scope
