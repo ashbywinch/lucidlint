@@ -2,9 +2,12 @@
 #
 # CHANGE: the pinned SHA in the check-review step's fetch of
 # check_review_posted.py — re-pin to a newer MAIN SHA when the script
-# evolves. The script's home is omp-config (tools/check_review_posted.py);
-# this repo's copy was deleted when the script moved (its raw URL would
-# 404).
+# evolves. 2026-08-27: 9a23d897 -> 7f8bd165 — the check now accepts the
+# bot's "Incremental Review Skipped" verdict as covering the head commit
+# (a base-merge with no PR diff posts a skip, not a guide; the stale pin
+# failed PR 7's check on exactly that). The script's home is omp-config
+# (tools/check_review_posted.py); this repo's copy was deleted when the
+# script moved (its raw URL would 404).
 #
 # DO NOT CHANGE:
 # - NO actions/checkout here — deliberate. PR-Agent fetches everything via
@@ -84,5 +87,5 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # check_review_posted.py reads GITHUB_TOKEN (the omp-config contract)
         run: |
           curl -fsSL -o check_review_posted.py \
-            https://raw.githubusercontent.com/ashbywinch/omp-config/9a23d89713f89de8ab447ee135520f5088dc5cb9/tools/check_review_posted.py
+            https://raw.githubusercontent.com/ashbywinch/omp-config/7f8bd165cc5a35688e68b5ca737ca4f599fa7e50/tools/check_review_posted.py
           python3 check_review_posted.py
