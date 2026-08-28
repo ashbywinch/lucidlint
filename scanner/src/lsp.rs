@@ -427,7 +427,7 @@ pub fn dispatch(state: &mut LspState, msg: &serde_json::Value, out: &mut impl Wr
                 serde_json::json!({
                     "capabilities": {
                         "textDocumentSync": {"openClose": true, "change": 1},
-                        "serverInfo": {"name": "lucidlint", "version": "0.3.0"}
+                        "serverInfo": {"name": "lucidlint", "version": env!("CARGO_PKG_VERSION")}
                     }
                 }),
                 out,

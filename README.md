@@ -96,10 +96,31 @@ python3 lucidlint.py --repo .    # GATE: PASS / FAIL
 pip install lucidlint            # once published to PyPI
 # or directly from GitHub today:
 pip install "git+https://github.com/ashbywinch/lucidlint.git"
-# or from a downloaded artifact (the releases page, a CI copy):
-pip install ./lucidlint-0.2.0-py3-none-linux_x86_64.whl
+# or from a downloaded artifact (the releases page, a CI copy — the
+# version in the filename is the release's own):
+pip install ./lucidlint-<version>-py3-none-<platform>.whl
 lucidlint --repo .
 ```
+
+## Versioning
+
+lucidlint follows [Semantic Versioning](https://semver.org/). The version
+lives in two places that a test pins equal — `pyproject.toml` (the Python
+package) and `scanner/Cargo.toml` (the Rust crate); the binary and the LSP
+report the version derived from them, never a hardcoded literal. The
+README intentionally carries no version number so it cannot go stale.
+
+To cut a release, classify the changes since the last tag
+(`git log $(git tag --sort=-v:refname | head -1)..HEAD`):
+
+- a breaking change (a removed/changed CLI contract, a schema-version bump,
+  a behavior a caller relies on that flips) → **MAJOR** (`X`),
+- a backwards-compatible feature (a new rule, fix, or option) → **MINOR** (`Y`),
+- bug fixes only → **PATCH** (`Z`).
+
+Bump both version files, commit, tag `vX.Y.Z`, push the tag — the release
+workflow builds and publishes the bundles and wheels.
+
 
 The pip install gives the `lucidlint` command (no `.py`, no flags with
 `fix-` prefixes). 

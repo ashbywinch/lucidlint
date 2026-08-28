@@ -862,6 +862,19 @@ def test_every_emitted_kind_is_registered():
         assert kind in registered, f"kind '{kind}' is emitted by {f.name} but missing from FAMILY_KINDS"
 
 
+def test_package_and_crate_versions_agree():
+    # pyproject.toml and scanner/Cargo.toml are the TWO real version sources
+    # (lucidlint.py derives its dev fallback from pyproject; the LSP
+    # serverInfo comes from the crate at build time) — a release bumps both
+    # and they must never drift (the version/README drift class)
+    import tomllib
+
+    root = Path(__file__).resolve().parent.parent
+    py = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    cargo = tomllib.loads((root / "scanner" / "Cargo.toml").read_text())["package"]["version"]
+    assert py == cargo, f"pyproject version {py} != Cargo.toml version {cargo}"
+
+
 def test_rules_md_is_generated():
     """The RULES.md rule tables are generated from rule_metadata.py (`make
     rules`) — a new family, a severity change, or a hand edit that leaves
