@@ -1033,11 +1033,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def _version() -> str:
-    """The installed package version, or the dev fallback."""
+    """The installed package version, or the source-checkout version from
+    pyproject.toml — NEVER a hardcoded literal (the README/version drift
+    class; pyproject.toml is the single source, tests pin it equal to the
+    Rust crate version)."""
     try:
         return metadata.version("lucidlint")
     except Exception:
-        return "0.3.0"
+        try:
+            with (Path(__file__).resolve().parent / "pyproject.toml").open("rb") as f:
+                return str(tomllib.load(f)["project"]["version"])
+        except Exception:
+            return "0.0.0.dev"
 
 
 _VERSION = _version()
