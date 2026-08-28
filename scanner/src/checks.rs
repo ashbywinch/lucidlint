@@ -16,7 +16,7 @@ use ruff_python_ast::{
 use ruff_text_size::Ranged;
 use std::collections::HashSet;
 
-use crate::{line_of, stmt_line, Finding, ScanState};
+use crate::{col_of, line_of, stmt_line, Finding, ScanState};
 
 pub use crate::common::VAGUE_SUFFIXES;
 
@@ -89,11 +89,20 @@ pub const SHADOWED_BUILTINS: &[&str] = &[
 /// token stream (0.0.9's lexer exposes no public range accessor).
 pub fn comment_lines(source: &str, tokens: &Tokens) -> Vec<(usize, String)> {
     let mut out = Vec::new();
+    // tokens are in source order — count newlines between comment starts
+    // instead of re-scanning from offset 0 per comment (`line_of` is O(n);
+    // N comments used to cost O(N^2) — a comment-heavy file scanned 4x per
+    // run and went quadratic)
+    let mut line = 1usize;
+    let mut prev = 0usize;
     for tok in tokens.iter() {
         if tok.kind() == TokenKind::Comment {
             let range = tok.range();
+            let start = range.start().to_usize();
+            line += source[prev..start].bytes().filter(|&b| b == b'\n').count();
+            prev = start;
             let text = &source[range];
-            out.push((line_of(source, range.start()), text.to_string()));
+            out.push((line, text.to_string()));
         }
     }
     out
@@ -115,9 +124,9 @@ pub fn apply_suppressions_impl(
     source: &str,
     file: &str,
     tokens: &Tokens,
-    pre_used: &crate::common::PreUsedSuppressions,
+    books: &mut crate::common::SuppressionBooks,
 ) -> Vec<Finding> {
-    crate::common::apply_suppressions_impl(findings, &comment_lines(source, tokens), file, "#", pre_used)
+    crate::common::apply_suppressions_impl(findings, &comment_lines(source, tokens), file, "#", books)
 }
 
 /// `# type: ignore` without a why (a second comment on the line) is a finding.
@@ -130,6 +139,7 @@ pub fn type_ignore_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Fi
         let rest = text.split_once("type: ignore").map(|(_, r)| r).unwrap_or("");
         if !rest.contains('#') {
             out.push(Finding {
+col: 0,
                 file: file.to_string(),
                 line: ln,
                 function: String::new(),
@@ -182,6 +192,7 @@ pub fn noqa_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Finding> 
         let rest = text.split_once(marker).map(|(_, r)| r).unwrap_or("");
         if !noqa_reason(rest) {
             out.push(Finding {
+                col: 0,
                 file: file.to_string(),
                 line: ln,
                 function: String::new(),
@@ -201,6 +212,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
     if let Stmt::Global(g) = stmt {
         let line = stmt_line(state.source, stmt);
         state.findings.push(Finding {
+col: 0,
             file: state.file.to_string(),
             line,
             function: fn_name.clone(),
@@ -233,6 +245,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
                     if let Expr::Name(n) = target {
                         let line = stmt_line(state.source, stmt);
                         state.findings.push(Finding {
+                            col: 0,
                             file: state.file.to_string(),
                             line,
                             function: fn_name.clone(),
@@ -278,6 +291,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         for a in &f.parameters.posonlyargs {
             if SHADOWED_BUILTINS.contains(&a.parameter.name.as_str()) {
                 state.findings.push(Finding {
+                    col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
                     function: f.name.to_string(),
@@ -293,6 +307,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         for a in &f.parameters.args {
             if SHADOWED_BUILTINS.contains(&a.parameter.name.as_str()) {
                 state.findings.push(Finding {
+                    col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
                     function: f.name.to_string(),
@@ -308,6 +323,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         for a in &f.parameters.kwonlyargs {
             if SHADOWED_BUILTINS.contains(&a.parameter.name.as_str()) {
                 state.findings.push(Finding {
+                    col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
                     function: f.name.to_string(),
@@ -323,6 +339,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         if let Some(v) = &f.parameters.vararg {
             if SHADOWED_BUILTINS.contains(&v.name.as_str()) {
                 state.findings.push(Finding {
+                    col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
                     function: f.name.to_string(),
@@ -335,6 +352,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         if let Some(k) = &f.parameters.kwarg {
             if SHADOWED_BUILTINS.contains(&k.name.as_str()) {
                 state.findings.push(Finding {
+                    col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
                     function: f.name.to_string(),
@@ -354,6 +372,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
                 if SHADOWED_BUILTINS.contains(&n.id.as_str()) {
                     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
                     state.findings.push(Finding {
+                        col: 0,
                         file: state.file.to_string(),
                         line: stmt_line(state.source, stmt),
                         function: fn_name,
@@ -375,11 +394,30 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
 /// A positional call argument that is a literal True/False — the intent is
 /// unreadable at the call site; it should be a named keyword
 /// (f(..., retry=True)). Keyword arguments are self-documenting and exempt.
-pub fn boolean_arg_findings(state: &mut ScanState, args: &[Expr], source: &str) {
+///
+/// Lookup-with-default calls are exempt: the trailing boolean IS the default
+/// for a missing key/attribute (`d.get("retryable", False)`), and those
+/// parameters are positional-only — the "name it" prescription is
+/// impossible, so the finding would be unactionable noise.
+pub fn boolean_arg_findings(state: &mut ScanState, call: &ExprCall, source: &str) {
     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-    for arg in args {
+    // only ATTRIBUTE receivers (cfg.get, os.environ.get) and the bare
+    // getattr builtin are lookup-with-default calls — a user function
+    // literally named `get`/`setdefault`/`pop` is not, and must stay
+    // flagged (review bot)
+    let bare_lookup = matches!(call.func.as_ref(), Expr::Name(n) if n.id.as_str() == "getattr");
+    let attr_lookup =
+        matches!(call.func.as_ref(), Expr::Attribute(a) if LOOKUP_DEFAULT_CALLEES.contains(&a.attr.as_str()));
+    let lookup_default = bare_lookup || attr_lookup;
+    for (i, arg) in call.arguments.args.iter().enumerate() {
         if let Expr::BooleanLiteral(_) = arg {
+            // the trailing positional boolean on a lookup call is the
+            // DEFAULT, not a flag — positional-only, cannot be keyworded
+            if lookup_default && i + 1 == call.arguments.args.len() {
+                continue;
+            }
             state.findings.push(Finding {
+                col: 0,
                 file: state.file.to_string(),
                 line: line_of(source, arg.range().start()),
                 function: fn_name.clone(),
@@ -390,6 +428,11 @@ pub fn boolean_arg_findings(state: &mut ScanState, args: &[Expr], source: &str) 
         }
     }
 }
+
+/// Callee names whose trailing positional boolean is a lookup DEFAULT, not a
+/// flag — the parameter is positional-only in CPython, so the rule's own
+/// "keyword it" prescription cannot apply.
+const LOOKUP_DEFAULT_CALLEES: &[&str] = &["get", "getattr", "setdefault", "pop"];
 
 /// Positional literals of the same kind — the classic argument-swapping bug
 /// (`set_limits(10, 20)` — which is min, which is max?). Warn tier: not every
@@ -409,6 +452,7 @@ pub fn positional_literals_findings(state: &mut ScanState, call: &ExprCall, sour
     if SHADOWED_BUILTINS.contains(&n.id.as_str()) {
         return;
     }
+    let callee_name = n.id.to_string();
     let mut ints = 0usize;
     let mut floats = 0usize;
     let mut strings = 0usize;
@@ -434,13 +478,15 @@ pub fn positional_literals_findings(state: &mut ScanState, call: &ExprCall, sour
     };
     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
     state.findings.push(Finding {
+col: 0,
         file: state.file.to_string(),
         line: line_of(source, call.range().start()),
         function: fn_name,
         kind: "positional-literals".into(),
         severity: "warn".into(),
         message: format!(
-            "call passes {n} {kind} positionally — a swapped argument is a silent bug; use keyword arguments — fix: positional-literals"
+            "call passes {n} {kind} positionally to {callee}() — a swapped argument is a silent bug; use keyword arguments — fix: positional-literals",
+            callee = callee_name,
         ),
     });
 }
@@ -461,12 +507,36 @@ pub fn detached_method_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
     if decorated_class_level {
         return;
     }
+    // __init__/__new__ can never be staticmethods
+    if f.name.as_str() == "__init__" || f.name.as_str() == "__new__" {
+        return;
+    }
+    // a trivial stub (`...`, `pass`, docstring, `return None`, a lone raise)
+    // is a protocol/interface placeholder — the binding is the interface's
+    // contract, not a local judgment call (long-param-list's stub rationale;
+    // houses: CommuteRouterLike.get_commute)
+    if is_trivial_stub(&f.body) {
+        return;
+    }
+    // super() needs the binding even when the body never names the receiver
+    // (super().__init__(v) carries no literal self)
+    if body_refs_name(&f.body, "super") {
+        return;
+    }
+    // an override's binding is the base class's contract, not a local call
+    if f.decorator_list.iter().any(|d| {
+        matches!(&d.expression, Expr::Name(n) if n.id.as_str() == "override")
+            || matches!(&d.expression, Expr::Attribute(a) if a.attr.as_str() == "override")
+    }) {
+        return;
+    }
     if body_refs_name(&f.body, recv) {
         return;
     }
     let fn_name = f.name.to_string();
     let line = line_of(source, f.name.range().start());
     state.findings.push(Finding {
+col: 0,
         file: state.file.to_string(),
         line,
         function: fn_name.clone(),
@@ -527,6 +597,7 @@ pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
     }
     if n > 5 && !is_trivial_stub(&f.body) {
         state.findings.push(Finding {
+            col: 0,
             file: state.file.to_string(),
             line: line_of(source, f.name.range().start()),
             function: f.name.to_string(),
@@ -539,9 +610,10 @@ pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
     }
 }
 
-/// A one-statement placeholder body: `pass`, a bare expression, or a `return`
-/// of nothing / None. A 6-param function that does nothing is a protocol
-/// stub, not a param-list smell.
+/// A one-statement placeholder body: `pass`, a bare expression, a lone
+/// `raise`, or a `return` of nothing / None. A 6-param function that does
+/// nothing is a protocol stub, not a param-list smell; a stub method never
+/// touches instance state by design.
 fn is_trivial_stub(body: &[Stmt]) -> bool {
     if body.len() > 1 {
         return false;
@@ -550,6 +622,7 @@ fn is_trivial_stub(body: &[Stmt]) -> bool {
         None => true,
         Some(Stmt::Pass(_)) => true,
         Some(Stmt::Expr(_)) => true,
+        Some(Stmt::Raise(_)) => true,
         Some(Stmt::Return(r)) => match r.value.as_ref() {
             None => true,
             Some(e) => matches!(e.as_ref(), Expr::NoneLiteral(_)),
@@ -581,25 +654,27 @@ pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
                 "except that swallows"
             };
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line,
                 function: fn_name.clone(),
                 kind: "swallow".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "{kind} at line {line} — the catch never raises, returns, or surfaces the error; re-raise or mark `# lucidlint: ignore swallow <why>`"
+                    "{kind} at line {line} — logs are not surfacing: a caller exists that needs to decide; re-raise, return an error value, or mark `# lucidlint: ignore swallow <terminal-boundary reason>` only when no caller exists to propagate to"
                 ),
             });
         } else if let Some(ty) = type_opt {
             let base = annotation_base_name(ty);
             if matches!(base.as_deref(), Some("Exception") | Some("BaseException")) {
                 state.findings.push(Finding {
+col: 0,
                     file: state.file.to_string(),
                     line: line_of(state.source, eh.range().start()),
                     function: fn_name.clone(),
                     kind: "broad-except".into(),
                     severity: "warn".into(),
-                    message: "broad except Exception — catch the specific exception".into(),
+                    message: "broad except Exception - catch what you actually handle; a true boundary catch states its blast radius in the why".into(),
                 });
             }
         }
@@ -889,6 +964,7 @@ pub fn closure_findings(state: &mut ScanState, stmt: &Stmt, cc: u32, span: u32) 
         )
     };
     state.findings.push(Finding {
+        col: 0,
         file: state.file.to_string(),
         line,
         function: f.name.to_string(),
@@ -1253,6 +1329,7 @@ pub fn misplaced_method_findings(state: &mut ScanState, body: &[Stmt]) {
                     });
                     if matched {
                         state.findings.push(Finding {
+col: 0,
                             file: state.file.to_string(),
                             line: *def_line,
                             function: fn_name.id.to_string(),
@@ -1622,6 +1699,7 @@ pub fn tuple_record_findings(state: &mut ScanState, body: &[Stmt]) {
         let reads = counts.get(name).copied().unwrap_or(0);
         if reads >= 3 {
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line: *line,
                 function: String::new(),
@@ -1734,6 +1812,7 @@ pub fn assembly_class_findings(state: &mut ScanState, body: &[Stmt]) {
         let Some(base) = base else { continue };
         let chain_names: Vec<&str> = calls.iter().map(|(n, _)| n.as_str()).collect();
         state.findings.push(Finding {
+col: 0,
             file: state.file.to_string(),
             line,
             function: f.name.to_string(),
@@ -1794,6 +1873,7 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
         let line = line_of(state.source, fs[0].name.range().start());
         let names: Vec<&str> = fs.iter().map(|f| f.name.as_str()).collect();
         state.findings.push(Finding {
+col: 0,
             file: state.file.to_string(),
             line,
             function: fs[0].name.to_string(),
@@ -1950,6 +2030,7 @@ pub fn feature_envy_findings(state: &mut ScanState, body: &[Stmt]) {
                 }
                 let line = line_of(state.source, f.name.range().start());
                 state.findings.push(Finding {
+col: 0,
                     file: state.file.to_string(),
                     line,
                     function: f.name.to_string(),
@@ -2055,6 +2136,7 @@ pub fn undeclared_attribute_findings(state: &mut ScanState, body: &[Stmt]) {
                         )
                     };
                     state.findings.push(Finding {
+                        col: 0,
                         file: state.file.to_string(),
                         line,
                         function: f.name.to_string(),
@@ -2109,6 +2191,7 @@ pub fn god_class_findings(state: &mut ScanState, body: &[Stmt]) {
         }
         let line = line_of(state.source, c.name.range().start());
         state.findings.push(Finding {
+col: 0,
             file: state.file.to_string(),
             line,
             function: c.name.to_string(),
@@ -2190,6 +2273,7 @@ pub fn duplicate_field_findings(state: &mut ScanState, body: &[Stmt]) {
             }
             let line = line_of(state.source, c.name.range().start());
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line,
                 function: c.name.to_string(),
@@ -2278,6 +2362,7 @@ pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &
     // starts at the first decorator — use the name's range for parity
     let line = line_of(state.source, cls.name.range().start());
     state.findings.push(Finding {
+        col: 0,
         file: state.file.to_string(),
         line,
         function: cls.name.to_string(),
@@ -2307,6 +2392,7 @@ pub fn vague_name_findings(state: &mut ScanState, module_body: &[Stmt]) {
             }
             let line = stmt_line(state.source, s);
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line,
                 function: cls.name.to_string(),
@@ -2362,6 +2448,7 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
         let names: Vec<String> = members.iter().map(|(n, l)| format!("{n} (line {l})")).collect();
         let line = members[0].1;
         state.findings.push(Finding {
+col: 0,
             file: state.file.to_string(),
             line,
             function: String::new(),
@@ -2389,7 +2476,7 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
 /// neither ruff nor pyrefly flags it, and the name-based ref graph cannot see
 /// it either.
 pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
-    let (overloaded, last_def_line, overload_bound) = overload_exemption(module_body, state.source);
+    let (overloaded, impl_def_line, overload_bound) = overload_exemption(module_body, state.source);
     let mut seen: Vec<(String, usize)> = Vec::new();
     for s in module_body {
         let line = stmt_line(state.source, s);
@@ -2437,10 +2524,11 @@ pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
                 continue;
             }
             if is_def {
-                let exempt = stub || (overloaded.contains(&name) && last_def_line.get(&name).copied() == Some(line));
+                let exempt = stub || (overloaded.contains(&name) && impl_def_line.get(&name).copied() == Some(line));
                 if !exempt {
                     if let Some((_, first_line)) = seen.iter().find(|(n, _)| *n == name) {
                         state.findings.push(Finding {
+col: 0,
                             file: state.file.to_string(),
                             line,
                             function: name.clone(),
@@ -2488,7 +2576,7 @@ fn overload_exemption(
         }
     }
     let mut overloaded: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut last_def_line: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut impl_def_line: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for s in module_body {
         if let Stmt::FunctionDef(f) = s {
             let name = f.name.to_string();
@@ -2498,15 +2586,15 @@ fn overload_exemption(
             });
             if is_overload {
                 overloaded.insert(name.clone());
-            }
-            let line = stmt_line(source, s);
-            let last = last_def_line.entry(name).or_insert(line);
-            if line > *last {
-                *last = line;
+            } else {
+                // the FIRST non-overload def is the implementation the stubs
+                // declare; tracking the LAST def instead exempted a genuine
+                // duplicate after the impl and flagged the impl (review bot)
+                impl_def_line.entry(name).or_insert(stmt_line(source, s));
             }
         }
     }
-    (overloaded, last_def_line, overload_bound)
+    (overloaded, impl_def_line, overload_bound)
 }
 
 /// Docstring content words that add nothing the body does not already say
@@ -2589,6 +2677,7 @@ pub fn restating_docstring_findings(state: &mut ScanState, module_body: &[Stmt])
         if covered as f64 / words.len() as f64 >= 0.9 {
             let line = stmt_line(state.source, s);
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line,
                 function: String::new(),
@@ -2695,14 +2784,20 @@ pub fn duplicate_block_findings(state: &mut ScanState, module_body: &[Stmt]) {
             if let Some(&i) = first_seen.get(&window) {
                 if i + BLOCK_WINDOW <= j {
                     let line = stmt_line(state.source, flat[j]);
+                    // the directive is truthful only for deep-equal blocks
+                    // (raw keys match); renamed duplicates keep the finding
+                    // but no fix — agents delete by hand (review bot)
+                    let exact = (0..BLOCK_WINDOW).all(|k| stmt_exact_key(flat[i + k]) == stmt_exact_key(flat[j + k]));
+                    let directive = if exact { " — fix: duplicate-block" } else { "" };
                     state.findings.push(Finding {
+col: 0,
                         file: state.file.to_string(),
                         line,
                         function: String::new(),
                         kind: "duplicate-block".into(),
                         severity: "warn".into(),
                         message: format!(
-                            "a {BLOCK_WINDOW}-statement block appears twice in this function — duplicated work (an edit mistake?); delete the second copy — fix: duplicate-block"
+                            "a {BLOCK_WINDOW}-statement block appears twice in this function — duplicated work (an edit mistake?); delete the second copy{directive}"
                         ),
                     });
                     break 'outer;
@@ -2740,6 +2835,45 @@ fn stmt_key(s: &Stmt) -> Vec<String> {
             | AnyNodeRef::ExprNoneLiteral(_)
             | AnyNodeRef::ExprEllipsisLiteral(_)
             | AnyNodeRef::InterpolatedStringLiteralElement(_) => toks.push("C".to_string()),
+            AnyNodeRef::Parameter(_) | AnyNodeRef::ParameterWithDefault(_) => toks.push("A".to_string()),
+            AnyNodeRef::Parameters(_) => toks.push("arguments".to_string()),
+            AnyNodeRef::ElifElseClause(_) => toks.push("If".to_string()),
+            AnyNodeRef::InterpolatedElement(_) => toks.push("FormattedValue".to_string()),
+            _ => toks.push(format!("{:?}", node.kind())),
+        }
+        skel_children(node, &mut queue);
+    }
+    toks
+}
+/// The RAW token key — same walk as `stmt_key` but without the name/literal
+/// normalization: two blocks are deep-equal (the libcst `deep_equals` the
+/// duplicate-block fix requires) only when their raw keys match. The
+/// duplicate-block FINDING fires on normalized keys (renamed transcription
+/// duplicates are the rule's target) but the fix DIRECTIVE must not attach
+/// to a block the fix will refuse (review bot).
+fn stmt_exact_key(s: &Stmt) -> Vec<String> {
+    let mut toks: Vec<String> = Vec::new();
+    let mut queue: Vec<Q> = vec![Q::N(AnyNodeRef::from(s))];
+    let mut i = 0usize;
+    while i < queue.len() {
+        let node = match &queue[i] {
+            Q::N(n) => *n,
+            Q::T(t) => {
+                toks.push((*t).to_string());
+                i += 1;
+                continue;
+            }
+        };
+        i += 1;
+        match node {
+            AnyNodeRef::ExprName(n) => toks.push(n.id.to_string()),
+            AnyNodeRef::ExprStringLiteral(_)
+            | AnyNodeRef::ExprBytesLiteral(_)
+            | AnyNodeRef::ExprNumberLiteral(_)
+            | AnyNodeRef::ExprBooleanLiteral(_)
+            | AnyNodeRef::ExprNoneLiteral(_)
+            | AnyNodeRef::ExprEllipsisLiteral(_)
+            | AnyNodeRef::InterpolatedStringLiteralElement(_) => toks.push(format!("{:?}", node.kind())),
             AnyNodeRef::Parameter(_) | AnyNodeRef::ParameterWithDefault(_) => toks.push("A".to_string()),
             AnyNodeRef::Parameters(_) => toks.push("arguments".to_string()),
             AnyNodeRef::ElifElseClause(_) => toks.push("If".to_string()),
@@ -2796,6 +2930,7 @@ pub fn mutation_findings(state: &mut ScanState, stmt: &Stmt) {
                 continue; // the module literal itself is already a finding
             }
             state.findings.push(Finding {
+                col: 0,
                 file: state.file.to_string(),
                 line: stmt_line(state.source, stmt),
                 function: String::new(),
@@ -2847,6 +2982,124 @@ pub fn module_container_names(body: &[Stmt]) -> HashSet<String> {
         }
     }
     out
+}
+
+/// Offsets of numeric literals that are data-table entries, exempt from
+/// magic-number: inside a single collection literal (dict/list/set/tuple,
+/// nested collections allowed) where at least 3 same-kind numeric siblings
+/// (same int/float type, same operator) sit directly under a BinOp/UnaryOp/
+/// Compare. The literal IS the data there — `{"A": 6/9, "B": 7/9, ...}` and
+/// `{"UB": (51.4, 51.6, -0.5, 0.0), ...}` — naming each would destroy the
+/// table. A number is exempt when ANY enclosing collection's sibling group
+/// reaches the bar (the geo case only clears at the dict level, not per row).
+pub fn magic_table_exempt_offsets(body: &[Stmt]) -> HashSet<usize> {
+    use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
+    struct CollectionFinder<'a> {
+        collections: Vec<&'a Expr>,
+    }
+    impl<'a> SourceOrderVisitor<'a> for CollectionFinder<'a> {
+        fn visit_expr(&mut self, e: &'a Expr) {
+            if matches!(e, Expr::Dict(_) | Expr::List(_) | Expr::Set(_) | Expr::Tuple(_)) {
+                self.collections.push(e);
+            }
+            walk_expr(self, e);
+        }
+    }
+    fn walk_expr<'a, V: SourceOrderVisitor<'a>>(v: &mut V, e: &'a Expr) {
+        ruff_python_ast::visitor::source_order::walk_expr(v, e);
+    }
+    let mut finder = CollectionFinder {
+        collections: Vec::new(),
+    };
+    for s in body {
+        walk_stmt(&mut finder, s);
+    }
+    let mut exempt: HashSet<usize> = HashSet::new();
+    for c in finder.collections {
+        let mut groups: std::collections::HashMap<(bool, String), Vec<usize>> = std::collections::HashMap::new();
+        census_collection(c, &mut groups);
+        for offsets in groups.values() {
+            if offsets.len() >= 3 {
+                exempt.extend(offsets.iter().copied());
+            }
+        }
+    }
+    exempt
+}
+
+/// Census a collection literal's subtree: numbers whose op-parent chain up to
+/// this collection passes only through collection literals.
+fn census_collection(e: &Expr, groups: &mut std::collections::HashMap<(bool, String), Vec<usize>>) {
+    match e {
+        Expr::Dict(d) => {
+            for item in &d.items {
+                if let Some(k) = &item.key {
+                    census_value(k, groups);
+                }
+                census_value(&item.value, groups);
+            }
+        }
+        Expr::List(l) => {
+            for el in &l.elts {
+                census_value(el, groups);
+            }
+        }
+        Expr::Set(s) => {
+            for el in &s.elts {
+                census_value(el, groups);
+            }
+        }
+        Expr::Tuple(t) => {
+            for el in &t.elts {
+                census_value(el, groups);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A direct element of a collection: nested collections recurse; an op's
+/// direct number children are data candidates; anything else (calls,
+/// subscripts, comprehensions) stops the census — not table data.
+fn census_value(e: &Expr, groups: &mut std::collections::HashMap<(bool, String), Vec<usize>>) {
+    match e {
+        Expr::Dict(_) | Expr::List(_) | Expr::Set(_) | Expr::Tuple(_) => census_collection(e, groups),
+        Expr::BinOp(b) => {
+            let op = format!("{:?}", b.op);
+            census_op_number(&b.left, &op, groups);
+            census_op_number(&b.right, &op, groups);
+        }
+        Expr::UnaryOp(u) => {
+            let op = format!("{:?}", u.op);
+            census_op_number(&u.operand, &op, groups);
+        }
+        Expr::Compare(c) => {
+            let op = format!("{:?}", c.ops);
+            census_op_number(&c.left, &op, groups);
+            for cmp in &c.comparators {
+                census_op_number(cmp, &op, groups);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn census_op_number(e: &Expr, op: &str, groups: &mut std::collections::HashMap<(bool, String), Vec<usize>>) {
+    if let Expr::NumberLiteral(n) = e {
+        let is_int = matches!(n.value, ruff_python_ast::Number::Int(_));
+        let value = match &n.value {
+            ruff_python_ast::Number::Int(i) => i.to_string(),
+            ruff_python_ast::Number::Float(f) => f.to_string(),
+            ruff_python_ast::Number::Complex { .. } => return,
+        };
+        if matches!(value.as_str(), "0" | "1" | "2") {
+            return; // never magic anyway
+        }
+        groups
+            .entry((is_int, op.to_string()))
+            .or_default()
+            .push(n.range().start().to_usize());
+    }
 }
 
 /// Module containers whose module-level literal is non-constant — already
@@ -2906,6 +3159,7 @@ pub fn guard_clause_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                 if len >= 3 {
                     let line = line_of(source, s.range().start());
                     state.findings.push(Finding {
+col: 0,
                         file: state.file.to_string(),
                         line,
                         function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
@@ -2999,6 +3253,7 @@ pub fn conditional_polymorphism_findings(state: &mut ScanState, body: &[Stmt], s
                     if keys.iter().all(|k| k.is_some()) && keys.windows(2).all(|w| w[0] == w[1]) {
                         let line = chain_line;
                         state.findings.push(Finding {
+col: 0,
                             file: state.file.to_string(),
                             line,
                             function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
@@ -3048,6 +3303,7 @@ pub fn special_case_findings(state: &mut ScanState, body: &[Stmt], source: &str)
     for (name, (n, line)) in v {
         if *n >= 3 {
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line: *line,
                 function: String::new(),
@@ -3083,6 +3339,7 @@ pub fn middle_man_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                                 if is_self_call(v) {
                                     let line = line_of(source, f.name.range().start());
                                     state.findings.push(Finding {
+col: 0,
                                         file: state.file.to_string(),
                                         line,
                                         function: f.name.to_string(),
@@ -3114,12 +3371,11 @@ pub fn middle_man_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
     walk(state, body, source);
 }
 
-/// Remove Setting Method: a `set_*` method (or a property setter) that is
-/// never referenced anywhere in the module — deletable, not just unused.
-/// Runs in the post-pass, so `state.refs` (incl. attribute names) is complete.
-pub fn unused_setter_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
-    let mut setters: Vec<(String, usize)> = Vec::new();
-    fn walk(stmts: &[Stmt], out: &mut Vec<(String, usize)>, source: &str) {
+/// Collect `set_*` methods (and property setters) for the repo-wide
+/// unused-setter pass — runs per file; reference counting needs the whole
+/// repo (prod vs test split) to distinguish dead from test-only.
+pub fn collect_setters(state: &mut ScanState, body: &[Stmt]) {
+    fn walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
         for s in stmts {
             match s {
                 Stmt::FunctionDef(f) => {
@@ -3128,27 +3384,56 @@ pub fn unused_setter_findings(state: &mut ScanState, body: &[Stmt], source: &str
                             .iter()
                             .any(|d| matches!(&d.expression, Expr::Attribute(a) if a.attr.as_str() == "setter"));
                     if is_setter {
-                        out.push((f.name.to_string(), line_of(source, f.name.range().start())));
+                        state
+                            .setters
+                            .push((f.name.to_string(), line_of(source, f.name.range().start())));
                     }
                 }
-                Stmt::ClassDef(cd) => walk(&cd.body, out, source),
+                Stmt::ClassDef(cd) => walk(state, &cd.body, source),
                 _ => {}
             }
         }
     }
-    walk(body, &mut setters, source);
-    for (name, line) in setters {
-        if !state.refs.contains(&name) {
-            state.findings.push(Finding {
-                file: state.file.to_string(),
-                line,
-                function: name.clone(),
-                kind: "unused-setter".into(),
-                severity: "warn".into(),
-                message: format!("setter '{name}' is never referenced — Remove Setting Method: delete it"),
-            });
+    walk(state, body, state.source);
+}
+
+/// Remove Setting Method: a `set_*` method (or a property setter) referenced
+/// nowhere in production is dead — deletable, not just unused. Runs
+/// repo-wide so prod refs (same-file AND cross-file) are complete.
+///
+/// Test-only references do NOT make it live: a test seam for code nothing
+/// ships calls is not a seam, it is dead code wearing a harness. The message
+/// names the imminent-caller escape so an agent mid-refactor is not wrongly
+/// told to delete.
+pub fn unused_setter_findings(
+    setters: &[(String, String, usize)],
+    prod_refs: &HashSet<String>,
+    test_refs: &HashSet<String>,
+) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (rel, name, line) in setters {
+        if prod_refs.contains(name) {
+            continue; // referenced by production — live
         }
+        let test_only = test_refs.contains(name);
+        let message = if test_only {
+            format!(
+                "setter '{name}' ({rel}:{line}) is referenced only from tests, never from production — a test seam for dead code is not a seam: nothing shipped calls it, so it is dead. If the production caller is imminent, write the calling code — this finding then clears. Public API entry points are exempt"
+            )
+        } else {
+            format!("setter '{name}' ({rel}:{line}) is never referenced — Remove Setting Method: delete it")
+        };
+        out.push(Finding {
+            file: rel.to_string(),
+            line: *line,
+            col: 0,
+            function: name.to_string(),
+            kind: "unused-setter".into(),
+            severity: "warn".into(),
+            message,
+        });
     }
+    out
 }
 
 /// Replace Loop with Pipeline: a for-loop whose body is only a collection
@@ -3179,6 +3464,7 @@ pub fn loop_pipeline_findings(state: &mut ScanState, body: &[Stmt], source: &str
                     if body_is_pipeline(&f.body) {
                         let line = line_of(source, f.range().start());
                         state.findings.push(Finding {
+                            col: 0,
                             file: state.file.to_string(),
                             line,
                             function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
@@ -3421,6 +3707,7 @@ pub fn latent_visitor_findings(state: &mut ScanState, body: &[Stmt], source: &st
     for (family, (n, line)) in v {
         if *n >= 2 {
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line: *line,
                 function: String::new(),
@@ -3518,7 +3805,7 @@ fn dispatch_arm(e: &Expr) -> Option<(String, String)> {
 // _unused_actions in lucidlint.py.
 // =====================================================================
 
-pub use crate::common::{dice_similarity, SkeletonFn};
+pub use crate::common::SkeletonFn;
 
 /// The structural fingerprint: node types in CPython `ast.walk` BFS order,
 /// with names/constants/args collapsed (`_fn_skeleton`). The BFS child
@@ -3530,7 +3817,7 @@ pub use crate::common::{dice_similarity, SkeletonFn};
 /// (CPython visits `ast.operator` / `ast.expr_context` nodes in `ast.walk`).
 pub enum Q<'a> {
     N(AnyNodeRef<'a>),
-    T(&'static str),
+    T(&'a str),
 }
 
 pub fn fn_skeleton(f: &StmtFunctionDef) -> Vec<String> {
@@ -4198,6 +4485,7 @@ pub fn is_duplicate_candidate(f: &StmtFunctionDef, skeleton_len: usize) -> bool 
 pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
     use std::collections::HashMap;
     let mut out = Vec::new();
+    let interner = BigramInterner::new(&fns.iter().map(|f| f.skeleton.as_slice()).collect::<Vec<_>>());
     let mut buckets: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, fr) in fns.iter().enumerate() {
         buckets.entry(fr.skeleton.len()).or_default().push(i);
@@ -4220,7 +4508,7 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
                 let bucket = &buckets[&len];
                 let start = bucket.partition_point(|&j| j <= i);
                 for &j in &bucket[start..] {
-                    let sim = dice_similarity(&fr.skeleton, &fns[j].skeleton);
+                    let sim = dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j));
                     if sim >= 0.9 {
                         if best.is_none_or(|(b, _)| j < b) {
                             best = Some((j, sim));
@@ -4232,6 +4520,7 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
             if let Some((j, sim)) = best {
                 let dup = &fns[j];
                 return Some(Finding {
+col: 0,
                     file: dup.rel.clone(),
                     line: dup.line,
                     function: dup.name.clone(),
@@ -4250,6 +4539,75 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
         out.push(f);
     }
     out
+}
+
+/// Interns skeleton tokens to small ids and precomputes each function's
+/// sorted bigram index list ONCE — `duplicate_findings` then scores pairs
+/// with an allocation-free two-pointer merge instead of rebuilding bigram
+/// maps per pair (the save-time repo-wide merge's dominant cost: 59ms on a
+/// 57-file repo for 224 skeletons).
+pub struct BigramInterner {
+    bigrams: Vec<(u32, u32)>,
+    offsets: Vec<(usize, usize)>, // (start, end) into bigrams per input
+}
+
+impl BigramInterner {
+    pub fn new(skeletons: &[&[String]]) -> Self {
+        let mut intern: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+        let mut bigrams: Vec<(u32, u32)> = Vec::new();
+        let mut offsets: Vec<(usize, usize)> = Vec::with_capacity(skeletons.len());
+        for skel in skeletons {
+            let mut ids: Vec<u32> = Vec::with_capacity(skel.len());
+            for tok in *skel {
+                let next = intern.len() as u32;
+                let id = *intern.entry(tok.as_str()).or_insert(next);
+                ids.push(id);
+            }
+            let start = bigrams.len();
+            bigrams.extend(ids.windows(2).map(|w| (w[0], w[1])));
+            bigrams[start..].sort_unstable();
+            offsets.push((start, bigrams.len()));
+        }
+        Self { bigrams, offsets }
+    }
+
+    /// The function's sorted bigram list.
+    pub fn bigrams_of(&self, i: usize) -> &[(u32, u32)] {
+        let (s, e) = self.offsets[i];
+        &self.bigrams[s..e]
+    }
+}
+
+/// Dice over SORTED bigram lists — multiset intersection via a two-pointer
+/// merge (counts equal runs). Matches `dice_similarity`'s multiset contract
+/// exactly; the pairing test pins them equal on the review-log cases.
+pub fn dice_from_bigrams(a: &[(u32, u32)], b: &[(u32, u32)]) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 0.0;
+    }
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let mut common = 0usize;
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            let x = a[i];
+            let (ci, cj) = (i, j);
+            while i < a.len() && a[i] == x {
+                i += 1;
+            }
+            while j < b.len() && b[j] == x {
+                j += 1;
+            }
+            common += (i - ci).min(j - cj);
+        } else if a[i] < b[j] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    (2.0 * common as f64) / (a.len() + b.len()) as f64
 }
 
 /// Dead-code findings (`_unused_actions`).
@@ -4280,6 +4638,7 @@ pub fn unused_findings(
             )
         };
         out.push(Finding {
+            col: 0,
             file: rel.clone(),
             line: *line,
             function: name.clone(),
@@ -4520,21 +4879,37 @@ fn is_constant_value(e: &Expr) -> bool {
 
 /// The dict-literal scan: record positions only; inline call arguments are
 /// maps and are not descended into; spread merges are not records.
-fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<usize>) {
+struct RecordHit {
+    line: usize,
+    col: usize,
+    keys: Vec<String>,
+}
+
+/// The dict-literal scan: SHAPE, not position, defines a record — every
+/// expression container is descended (call arguments included; the old
+/// "inline arguments are maps" carve-out hid wire-format construction sites).
+/// Spread merges ({**base, ...}) update an existing shape and are not records.
+fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<RecordHit>) {
     match e {
         Expr::Dict(d) => {
-            // a spread merge ({**session, ...}) updates an existing shape —
-            // not a record being built (ruff keys are None for the unpack)
             if d.items.iter().any(|it| it.key.is_none()) {
                 return;
             }
-            let has_const_key = d
+            let keys: Vec<String> = d
                 .items
                 .iter()
-                .any(|it| matches!(&it.key, Some(k) if matches!(k, Expr::StringLiteral(_))));
+                .filter_map(|it| match &it.key {
+                    Some(Expr::StringLiteral(s)) => Some(s.value.to_string()),
+                    _ => None,
+                })
+                .collect();
             let has_dynamic_value = d.items.iter().any(|it| !is_constant_value(&it.value));
-            if d.items.len() >= 2 && has_const_key && has_dynamic_value {
-                found.push(line_of(source, d.range().start()));
+            if d.items.len() >= 2 && !keys.is_empty() && has_dynamic_value {
+                found.push(RecordHit {
+                    line: line_of(source, d.range().start()),
+                    col: col_of(source, d.range().start()),
+                    keys,
+                });
             }
             for it in &d.items {
                 record_literal_scan(&it.value, source, found);
@@ -4547,6 +4922,11 @@ fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<usize>) {
         }
         Expr::Tuple(t) => {
             for elt in &t.elts {
+                record_literal_scan(elt, source, found);
+            }
+        }
+        Expr::Set(s) => {
+            for elt in &s.elts {
                 record_literal_scan(elt, source, found);
             }
         }
@@ -4565,11 +4945,8 @@ fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<usize>) {
         }
         Expr::Lambda(l) => record_literal_scan(&l.body, source, found),
         Expr::Call(c) => {
-            // dict(a=1, b=x) is the literal's call-form twin: the same
-            // record shape built through a call, so the literal-only scan
-            // could be dodged with dict(...) — a record that is not a
-            // literal. A bare dict() call with >= 2 keyword args and >= 1
-            // dynamic value is a record being built.
+            // dict(a=1, b=x) is the literal's call-form twin — a record built
+            // through a call so the literal-only scan could be dodged.
             let is_dict = match c.func.as_ref() {
                 Expr::Name(n) => n.id.as_str() == "dict",
                 Expr::Attribute(a) => a.attr.as_str() == "dict",
@@ -4579,23 +4956,38 @@ fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<usize>) {
                 let kwargs = &c.arguments.keywords;
                 let has_dynamic = kwargs.iter().any(|k| !is_constant_value(&k.value));
                 if kwargs.len() >= 2 && has_dynamic {
-                    found.push(line_of(source, c.range().start()));
-                }
-                // dict()'s args ARE the data — descend (unlike other calls,
-                // whose inline arguments are maps): dict({"a": 1, "b": x})
-                // is a record built from a literal, and a kwarg value may
-                // hold one too
-                for a in &c.arguments.args {
-                    record_literal_scan(a, source, found);
-                }
-                for k in kwargs {
-                    record_literal_scan(&k.value, source, found);
+                    let keys: Vec<String> = kwargs
+                        .iter()
+                        .filter_map(|k| k.arg.as_ref().map(|n| n.id.to_string()))
+                        .collect();
+                    found.push(RecordHit {
+                        line: line_of(source, c.range().start()),
+                        col: col_of(source, c.range().start()),
+                        keys,
+                    });
                 }
             }
-            // other calls: inline arguments are maps — not descended into
+            // uniform descent: EVERY call's inline arguments are expressions
+            // like any other container's
+            for a in &c.arguments.args {
+                record_literal_scan(a, source, found);
+            }
+            for k in &c.arguments.keywords {
+                record_literal_scan(&k.value, source, found);
+            }
         }
         _ => {}
     }
+}
+
+/// The message's key listing — source order, capped so a generated
+/// 40-field record stays one line.
+fn display_keys(keys: &[String]) -> String {
+    const MAX: usize = 6;
+    if keys.len() <= MAX {
+        return keys.join(", ");
+    }
+    format!("{}, … (+{})", keys[..MAX].join(", "), keys.len() - MAX)
 }
 
 /// The record-shape family: signature findings + record dict literals,
@@ -4634,13 +5026,14 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                         }
                         let text = source[a.range()].to_string();
                         state.findings.push(Finding {
+col: 0,
                             file: state.file.to_string(),
                             line: def_line,
                             function: f.name.to_string(),
                             kind: "record-shape".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line})",
+                                "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line}) — convert it to a class with named fields (wire formats at serialization boundaries are exempt)",
                                 f.name.as_str()
                             ),
                         });
@@ -4650,13 +5043,14 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                     if annotation_is_record(r.as_ref()) {
                         let text = source[r.range()].to_string();
                         state.findings.push(Finding {
+col: 0,
                             file: state.file.to_string(),
                             line: def_line,
                             function: f.name.to_string(),
                             kind: "record-shape".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "bare record collection '{text}' as return type of {} (line {def_line})",
+                                "bare record collection '{text}' as return type of {} (line {def_line}) — convert it to a class with named fields (wire formats at serialization boundaries are exempt)",
                                 f.name.as_str()
                             ),
                         });
@@ -4667,36 +5061,46 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
         }
         qi += 1;
     }
-    // record dict literals in record positions (assign/annassign/return/yield)
-    let mut found: Vec<usize> = Vec::new();
-    let mut sq: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+    // record dict literals ANYWHERE — shape, not position, defines a record
+    // (uniform descent; the record-position carve-out hid call-site wires)
+    let mut found: Vec<RecordHit> = Vec::new();
+    // descend EVERY node (function bodies included) — each Expr feeds the
+    // scan, which recurses internally through containers
+    let mut sq: Vec<&Stmt> = body.iter().collect();
     let mut si = 0usize;
     while si < sq.len() {
-        if let Q::N(n) = sq[si] {
-            let value: Option<&Expr> = match n {
-                AnyNodeRef::StmtAssign(a) => Some(a.value.as_ref()),
-                AnyNodeRef::StmtAnnAssign(a) => a.value.as_deref(),
-                AnyNodeRef::StmtReturn(r) => r.value.as_deref(),
-                AnyNodeRef::ExprYield(y) => y.value.as_deref(),
-                AnyNodeRef::ExprYieldFrom(y) => Some(y.value.as_ref()),
-                _ => None,
-            };
-            if let Some(v) = value {
-                record_literal_scan(v, source, &mut found);
+        // descend ALL statement kinds incl. function/class bodies
+        match sq[si] {
+            Stmt::FunctionDef(f) => {
+                let fd_stmt = Stmt::FunctionDef(f.clone());
+                for e in stmt_exprs(&fd_stmt) {
+                    record_literal_scan(e, source, &mut found);
+                }
+                for b in &f.body {
+                    sq.push(b);
+                }
             }
-            skel_children(n, &mut sq);
+            _ => {
+                for e in stmt_exprs(sq[si]) {
+                    record_literal_scan(e, source, &mut found);
+                }
+                push_stmt_children(sq[si], &mut sq);
+            }
         }
         si += 1;
     }
-    for ln in found {
-        state.findings.push(Finding {
-            file: state.file.to_string(),
-            line: ln,
-            function: String::new(),
-            kind: "record-shape".into(),
-            severity: "fail".into(),
-            message: format!("dict with constant keys is a record — make a class (line {ln})"),
-        });
+    // dedupe on (line, col): the dict() call-form and a nested literal can
+    // share a range — one finding per record node
+    let mut seen: HashSet<(usize, usize)> = HashSet::new();
+    let mut unique: Vec<RecordHit> = Vec::new();
+    for h in found {
+        if seen.insert((h.line, h.col)) {
+            unique.push(h);
+        }
+    }
+    for h in unique {
+        let keys = display_keys(&h.keys);
+        state.findings.push(Finding { file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("dict with constant keys {{{keys}}} is a record — make a class (fields: {keys}) — fix: extract-record-class --name <Record>") });
     }
 }
 
@@ -4850,6 +5254,7 @@ pub fn partition_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
             let metric: usize = groups.iter().map(|g| g.len()).sum();
             let _ = metric;
             state.findings.push(Finding {
+col: 0,
                 file: state.file.to_string(),
                 line: line_of(source, cls.name.range().start()),
                 function: cls.name.to_string(),
@@ -4971,6 +5376,7 @@ pub fn monkeypatch_findings(state: &mut ScanState, body: &[Stmt], source: &str) 
 
 fn mp_finding(state: &mut ScanState, desc: &str, line: usize) {
     state.findings.push(Finding {
+col: 0,
         file: state.file.to_string(),
         line,
         function: String::new(),
@@ -5003,6 +5409,7 @@ fn is_pytest_mark_skip(a: &ExprAttribute) -> bool {
 fn parked_skip_finding(state: &mut ScanState, source: &str, offset: ruff_text_size::TextSize) {
     let line = line_of(source, offset);
     state.findings.push(Finding {
+        col: 0,
         file: state.file.to_string(),
         line,
         function: String::new(),
@@ -5043,6 +5450,7 @@ pub fn skipif_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                             let cond = cond_parts.join(" ");
                             if SKIPIF_NEEDLES.iter().any(|needle| cond.contains(needle)) {
                                 state.findings.push(Finding {
+col: 0,
                                     file: state.file.to_string(),
                                     line: line_of(source, call.range().start()),
                                     function: String::new(),
@@ -5224,13 +5632,14 @@ pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                 }
                 if real_fs && !needs_real {
                     state.findings.push(Finding {
+col: 0,
                         file: state.file.to_string(),
                         line,
                         function: f.name.to_string(),
                         kind: "fakefs".into(),
                         severity: "fail".into(),
                         message: format!(
-                            "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3) and comment why — or mark `# lucidlint: ignore-file fakefs <why>`",
+                            "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3) and comment why — or mark `# lucidlint: ignore-file fakefs <why>`, citing the standard that permits real FS here",
                             f.name.as_str()
                         ),
                     });
@@ -5285,6 +5694,7 @@ pub fn no_assert_test_findings(state: &mut ScanState, body: &[Stmt], source: &st
             if let AnyNodeRef::StmtFunctionDef(f) = n {
                 if f.name.as_str().starts_with("test_") && !has_assertion(&f.body) {
                     state.findings.push(Finding {
+                        col: 0,
                         file: state.file.to_string(),
                         line: line_of(source, f.name.range().start()),
                         function: f.name.to_string(),
@@ -5483,6 +5893,7 @@ pub fn abstraction_findings(scans: &[(String, Vec<crate::ClassInfo>, Vec<crate::
         if subs.len() == 1 {
             let line = classes.get(&(rel.clone(), name.clone())).map(|c| c.line).unwrap_or(1);
             out.push(Finding {
+col: 0,
                 file: rel.clone(),
                 line,
                 function: name.clone(),

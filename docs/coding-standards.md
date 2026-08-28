@@ -285,6 +285,23 @@ without a check is a wish:
   of well-known computation is worth it; one that adds more complexity than
   the code it replaces is not.
 
+### Suppressions carry checkable evidence
+
+- **A suppression's why must state what a reviewer can CHECK.** Every
+  exemption (`# lucidlint: ignore <signal> <why>`, `ignore-file`,
+  `# type: ignore`, `#[allow(...)]`, `# noqa`) cites the standard it leans
+  on AND names the concrete fact that makes THIS site the exception —
+  something a reviewer can verify. ✗ "the repo standards allow this" is
+  circular: the standard is the claim under justification, not evidence
+  for it. This was the houses failure mode: 408 record-shape and 77 fakefs
+  sites carrying one identical, unverifiable why.
+- **Ten identical whys are policy, not judgment.** A signal suppressed at
+  many sites with the same why is a decision to make once, visibly: state
+  the house rule in `[lucidlint.guidance]` (README Configuration — one
+  reviewed line travels with every future finding) or use a documented
+  config `ignore` with a stated reason; do not keep pasting per-site
+  comments.
+
 # lucidlint language conventions
 
 ## Python conventions

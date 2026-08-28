@@ -57,6 +57,7 @@ pub struct RustScan {
     /// The file's parsed `lucidlint: ignore` suppressions — the orchestrator
     /// needs them to suppress the repo-wide families (duplicate/unused).
     pub supps: common::Suppressions,
+    pub supps_spent: std::collections::HashSet<(usize, String)>,
 }
 
 impl RustScan {
@@ -71,6 +72,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         Err(_) => {
             return RustScan {
                 supps: common::Suppressions::default(),
+                supps_spent: Default::default(),
                 file_name: name.to_string(),
                 findings: Vec::new(),
                 cc: Vec::new(),
@@ -89,6 +91,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
 
     let mut state = RsState {
         supps: common::Suppressions::default(),
+        supps_spent: Default::default(),
         file: name,
         file_name: name.to_string(),
         reason_lines,
@@ -146,8 +149,14 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
             !line_suppressed && !file_suppressed
         });
     }
-    scan.findings = common::apply_suppressions_impl(scan.findings, &comments, name, "//", &pre_used);
+    let mut supps_spent = std::collections::HashSet::new();
+    let mut books = common::SuppressionBooks {
+        pre_used: &pre_used,
+        spent: &mut supps_spent,
+    };
+    scan.findings = common::apply_suppressions_impl(scan.findings, &comments, name, "//", &mut books);
     scan.supps = supps;
+    scan.supps_spent = supps_spent;
     scan
 }
 
@@ -166,6 +175,7 @@ struct RsState<'a> {
     uses: Vec<String>,
     structs: Vec<RsStruct>,
     supps: common::Suppressions,
+    supps_spent: std::collections::HashSet<(usize, String)>,
     /// (self type name, method count) — record-shape post-pass.
     impls: Vec<(String, usize)>,
     /// (fn name, line, param type idents) — the boundary record-shape check.
@@ -283,6 +293,7 @@ impl<'a> RsState<'a> {
         }
         RustScan {
             supps: self.supps.clone(),
+            supps_spent: self.supps_spent,
             file_name: self.file_name.clone(),
             findings: self.findings,
             cc: self.cc,
@@ -323,7 +334,14 @@ impl<'a> RsState<'a> {
     }
 
     fn finding(&mut self, kind: &str, severity: &str, line: usize, function: &str, message: String) {
+        self.finding_col(kind, severity, line, 0, function, message);
+    }
+
+    /// Same, with the schema-3 anchor column (1-based; 0 = line-level).
+    // lucidlint: ignore long-param-list one caller — the struct would be ceremony for a single call site
+    fn finding_col(&mut self, kind: &str, severity: &str, line: usize, col: usize, function: &str, message: String) {
         self.findings.push(Finding {
+            col,
             file: self.file.to_string(),
             line,
             function: function.to_string(),
@@ -355,12 +373,20 @@ impl<'a> RsState<'a> {
         }
         let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
         let line = lit.span().start().line;
-        self.finding(
+        let col = lit.span().start().column + 1; // syn columns are 0-based
+        self.finding_col(
             "magic-number",
             "warn",
             line,
+            col,
             &fn_name,
-            format!("magic number {text} — name it as a constant — fix: magic-number --fix-name <CONST>"),
+            // no fix: directive — the Rust fix surface refuses magic-number
+            // (main.rs --fix handles extract-method/dispatch-registry/rule-table
+            // only); advertising it would send agents on a fix that cannot
+            // apply (review bot)
+            format!(
+                "magic number {text} — name it with a domain noun (what it means here), never its value spelled out"
+            ),
         );
     }
 
@@ -1119,6 +1145,7 @@ fn walk_test_fns(item: &Item, out: &mut Vec<Finding>, file_name: &str) {
                 out.push(Finding {
                     file: file_name.to_string(),
                     line: f.sig.span().start().line,
+                    col: 0,
                     function: f.sig.ident.to_string(),
                     kind: "no-assert-test".into(),
                     severity: "fail".into(),
@@ -1211,6 +1238,7 @@ fn ignored_test_findings(file: &File, file_name: &str) -> Vec<Finding> {
                 self.findings.push(Finding {
                     file: self.file.clone(),
                     line: f.sig.span().start().line,
+                    col: 0,
                     function: f.sig.ident.to_string(),
                     kind: "skipif".into(),
                     severity: "fail".into(),
@@ -2143,6 +2171,18 @@ mod tests {
     }
 
     #[test]
+    fn magic_message_carries_no_fix_directive_for_rust() {
+        // the Rust fix surface refuses magic-number (main.rs --fix handles
+        // extract-method/dispatch-registry/rule-table only) — the directive
+        // would send agents on a fix that cannot apply (review bot)
+        let src = "fn f() -> u32 { let x = 3 * 60; x }\n";
+        let fs = scan(src);
+        let m: Vec<&Finding> = fs.iter().filter(|f| f.kind == "magic-number").collect();
+        assert!(!m.is_empty());
+        assert!(!m[0].message.contains("fix:"), "{}", m[0].message);
+    }
+
+    #[test]
     fn magic_return_value_and_const_def_not_found() {
         let src = "fn f() -> u32 { return 60; }\nconst LIMIT: u32 = 60;\n";
         let fs = scan(src);
@@ -2254,9 +2294,17 @@ mod tests {
     // ------------------------------------------------------------- suppressions
     #[test]
     fn suppression_with_why_exempts_and_whyless_is_finding() {
+        // capacity: one marker exempts ONE anchor, inner-first (schema-3
+        // col) — the second literal on the line stays visible until it is
+        // named or gets its own marker (peel ruling)
         let src = "fn f() -> u32 {\n    // lucidlint: ignore magic-number the gate threshold\n    let x = 3 * 60;\n}\n";
         let fs = scan(src);
-        assert!(!has_kind(&fs, "magic-number"));
+        let mn: Vec<&Finding> = fs.iter().filter(|x| x.kind == "magic-number").collect();
+        assert_eq!(mn.len(), 1, "{fs:?}");
+        assert!(
+            mn[0].message.contains("magic number 3"),
+            "the lower-col literal remains: {mn:?}"
+        );
         let src2 = "fn f() -> u32 {\n    // lucidlint: ignore magic-number\n    let x = 3 * 60;\n}\n";
         assert!(has_kind(&scan(src2), "suppression"));
     }

@@ -35,10 +35,24 @@ fn severity_of(f: &Finding) -> i64 {
 /// the message so the client can show how to fix it.
 fn finding_diag(f: &Finding, source: &str) -> serde_json::Value {
     let line = f.line.saturating_sub(1); // LSP lines are 0-based
-    let line_len = source.lines().nth(line).map(str::len).unwrap_or(0);
+                                         // LSP positions are UTF-16 CODE UNITS; the scanner's col is a byte
+                                         // column — convert the line prefix, or ranges land wrong on lines with
+                                         // non-ASCII text (é is 2 bytes but 1 unit) (review bot)
+    let line_text = source.lines().nth(line).unwrap_or("");
+    let line_len = line_text.encode_utf16().count();
+    // col (1-based byte column, schema 3) pins the anchor node — twins on
+    // one line highlight separately; 0 keeps the whole-line span
+    let start_char = if f.col > 0 {
+        line_text
+            .get(..(f.col - 1).min(line_text.len()))
+            .map(|s| s.encode_utf16().count())
+            .unwrap_or(0)
+    } else {
+        0
+    };
     serde_json::json!({
         "range": {
-            "start": {"line": line, "character": 0},
+            "start": {"line": line, "character": start_char},
             "end": {"line": line, "character": line_len},
         },
         "severity": severity_of(f),
@@ -165,16 +179,6 @@ fn scan_buffer(uri: &str, text: &str) -> FileScan {
     scan.file_name = uri_to_path(uri);
     scan
 }
-/// The repo-wide verdict for every Python file: per-file findings plus the
-/// families that need the whole repo (duplicate, unused) — the same merge the
-/// gate runs. The LSP's per-buffer scan cannot produce these (a single buffer
-/// cannot know who references a function), so the editor never showed the
-/// gate's repo-wide findings — the review-log edit-time gap. Runs on save,
-/// in-process, from disk. The merge lives in main (the composition root —
-/// the scan-core modules stay standalone, layers test).
-pub fn repo_wide_findings(root: &Path) -> std::collections::HashMap<String, Vec<Finding>> {
-    crate::repo_wide_scan(root)
-}
 /// A repo-wide finding as an LSP diagnostic — gate severity, the full fix
 /// command in the message, the repo config's silencing applied.
 fn repo_wide_diag(f: &Finding, rel: &str, cfg: &LucidConfig) -> Option<serde_json::Value> {
@@ -231,6 +235,12 @@ pub struct LspState {
     pub documents: HashMap<String, String>,
     root: Option<PathBuf>,
     config: Option<LucidConfig>,
+    /// Repo-relative path -> (mtime, size, scan) of the last disk scan —
+    /// the save-time repo-wide merge reuses these; a file whose mtime+size
+    /// changed on disk (edited outside the editor, git operations) is
+    /// re-scanned. Keeps a save at one re-scan + a pure in-memory merge
+    /// instead of a full-repo re-scan per save.
+    scan_cache: HashMap<String, (std::time::SystemTime, u64, FileScan)>,
 }
 
 impl LspState {
@@ -239,6 +249,7 @@ impl LspState {
             documents: HashMap::new(),
             root: None,
             config: None,
+            scan_cache: HashMap::new(),
         }
     }
 
@@ -338,14 +349,51 @@ impl LspState {
 
     /// The didSave repo-wide verdict: the duplicate/unused findings that the
     /// per-buffer scan cannot see, appended to the buffer's diagnostics.
-    fn append_repo_wide_diags(&self, rel: &str, cfg: &LucidConfig, diags: &mut Vec<serde_json::Value>) {
-        if let Some(root) = self.root.as_ref() {
-            let by_file = repo_wide_findings(root);
-            if let Some(fs) = by_file.get(rel) {
-                for f in fs {
-                    if let Some(d) = repo_wide_diag(f, rel, cfg) {
-                        diags.push(d);
-                    }
+    /// Scans are cached per file (mtime+size keyed) — only files that changed
+    /// on disk since the last save are re-scanned, then the pure in-memory
+    /// merge re-runs over the cache.
+    fn append_repo_wide_diags(&mut self, rel: &str, cfg: &LucidConfig, diags: &mut Vec<serde_json::Value>) {
+        let Some(root) = self.root.clone() else { return };
+        let paths = crate::repo_files(&root);
+        let mut scans: Vec<FileScan> = Vec::with_capacity(paths.len());
+        for path in paths {
+            let meta = std::fs::metadata(&path);
+            let rel_path = path
+                .strip_prefix(&root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let key = rel_path;
+            let cached = self.scan_cache.get(&key).and_then(|(m, s, scan)| {
+                meta.as_ref().ok().map(|m2| {
+                    (
+                        m == &m2.modified().unwrap_or(std::time::UNIX_EPOCH),
+                        s == &m2.len(),
+                        scan,
+                    )
+                })
+            });
+            if let Some((true, true, scan)) = cached {
+                scans.push(scan.clone());
+            } else if let Ok(meta) = meta {
+                let scan = crate::scan_file(&path);
+                self.scan_cache.insert(
+                    key,
+                    (
+                        meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                        meta.len(),
+                        scan.clone(),
+                    ),
+                );
+                scans.push(scan);
+            }
+        }
+        let root_s = root.to_string_lossy().to_string();
+        let by_file = crate::repo_wide_merge(&scans, &root_s);
+        if let Some(fs) = by_file.get(rel) {
+            for f in fs {
+                if let Some(d) = repo_wide_diag(f, rel, cfg) {
+                    diags.push(d);
                 }
             }
         }
@@ -469,6 +517,7 @@ mod tests {
         let warn = Finding {
             file: "x.py".into(),
             line: 1,
+            col: 0,
             function: String::new(),
             kind: "magic-number".into(),
             severity: "warn".into(),
@@ -477,6 +526,7 @@ mod tests {
         let fail = Finding {
             file: "x.py".into(),
             line: 2,
+            col: 0,
             function: String::new(),
             kind: "except".into(),
             severity: "fail".into(),
@@ -551,6 +601,25 @@ mod tests {
         assert!(text.contains("publishDiagnostics"));
         assert!(text.contains("magic number"));
         assert!(docs.documents.contains_key("file:///tmp/buf.py"));
+    }
+
+    #[test]
+    fn diagnostic_positions_are_utf16_code_units() {
+        // LSP positions are UTF-16 code units, not bytes: a non-ASCII char
+        // before the anchor (here "café" = 5 bytes, 4 units) must shift the
+        // byte column by the byte/unit delta (review bot)
+        let scan = scan_buffer("file:///tmp/buf.py", "def f():\n    return café * 60\n");
+        let src = "def f():\n    return café * 60\n";
+        let diags = diagnostics_for(&scan, src, None);
+        let magic = diags
+            .iter()
+            .find(|d| d["message"].as_str().is_some_and(|m| m.contains("magic number")))
+            .unwrap();
+        // "    return " (11 units) + "café" (4 units) + " * " (3 units) —
+        // the 60's first char is unit 18; whole line = 20 units. The old
+        // byte math put both at 19/19 (é is 2 bytes)
+        assert_eq!(magic["range"]["start"]["character"], 18);
+        assert_eq!(magic["range"]["end"]["character"], 20);
     }
 
     #[test]
@@ -758,6 +827,8 @@ mod tests {
     }
 }
 
+// lucidlint: ignore-file fakefs integration test writes a real repo tree to a
+// temp dir — same sanctioned real-FS seam as tests/test_lsp.py
 #[test]
 fn didsave_publishes_repo_wide_unused_for_saved_file() {
     // review-log §10: a function that is dead REPO-WIDE never showed in
@@ -788,6 +859,47 @@ fn didsave_publishes_repo_wide_unused_for_saved_file() {
     assert!(
         text.contains("never referenced"),
         "repo-wide unused must reach the save diagnostics: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn didsave_scan_cache_tracks_external_file_changes() {
+    // the save-time repo-wide scan caches per-file scans keyed by mtime+size;
+    // a file changed on DISK outside the editor must invalidate its cache
+    // entry — a stale scan would keep reporting dead code that a new
+    // reference resurrected (and vice versa)
+    let dir = std::env::temp_dir().join(format!("lsp_incr_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir(dir.join(".git")).unwrap(); // repo-root marker for derive_root
+    std::fs::write(dir.join("dead.py"), "def _helper():\n    return 1\n").unwrap();
+    std::fs::write(dir.join("live.py"), "def live():\n    return 2\n").unwrap();
+    let uri = format!("file://{}/dead.py", dir.display());
+    let mut state = LspState::new();
+    state
+        .documents
+        .insert(uri.clone(), "def _helper():\n    return 1\n".to_string());
+    let mut out = Vec::new();
+    let save = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didSave",
+        "params": {"textDocument": {"uri": uri}}
+    });
+    assert!(dispatch(&mut state, &save, &mut out));
+    let text = String::from_utf8(out.clone()).unwrap();
+    assert!(
+        text.contains("never referenced"),
+        "first save must flag dead code: {text}"
+    );
+    // live.py now CALLS _helper — written to disk, the editor never saw it
+    std::fs::write(dir.join("live.py"), "def live():\n    return _helper()\n").unwrap();
+    out.clear();
+    assert!(dispatch(&mut state, &save, &mut out));
+    let text2 = String::from_utf8(out).unwrap();
+    assert!(
+        !text2.contains("never referenced"),
+        "stale cache must not keep reporting resurrected code: {text2}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

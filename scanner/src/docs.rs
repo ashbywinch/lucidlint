@@ -125,6 +125,7 @@ fn check_target(
         out.push(Finding {
             file: rel.to_string(),
             line: 0,
+            col: 0,
             function: String::new(),
             kind: "docs-link".into(),
             severity: "fail".into(),
@@ -290,21 +291,34 @@ fn docs_reachability(repo: &Path, gitignored: &HashSet<String>) -> Vec<Finding> 
         reachable.extend(frontier);
     }
     let mut out = Vec::new();
+    let mut unreachable: Vec<String> = Vec::new();
     for d in &docs {
         let rel = d.strip_prefix(repo).unwrap_or(d).to_string_lossy().replace('\\', "/");
         if !reachable.contains(&rel) {
-            out.push(Finding {
-                file: "AGENTS.md".into(),
-                line: 0,
-                function: String::new(),
-                kind: "docs-undiscoverable".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "doc '{rel}' is not reachable from AGENTS.md at any hop — a doc the reader cannot reach from where everyone starts does not exist. Link it from its group's index"
-                ),
-            });
+            unreachable.push(rel);
         }
     }
+    if unreachable.is_empty() {
+        return Vec::new();
+    }
+    // ONE finding naming them all — the agent fixes one finding per run, so
+    // per-doc findings would make it re-run once per unreachable doc and
+    // never see the tail (each re-run hides one behind a suppression).
+    let mut message = format!(
+        "{} doc(s) not reachable from AGENTS.md at any hop — a doc the reader cannot reach from where everyone starts does not exist: ",
+        unreachable.len()
+    );
+    message.push_str(&unreachable.join(", "));
+    message.push_str(". Link each from its group's index");
+    out.push(Finding {
+        file: "AGENTS.md".into(),
+        line: 0,
+        col: 0,
+        function: String::new(),
+        kind: "docs-undiscoverable".into(),
+        severity: "fail".into(),
+        message,
+    });
     out
 }
 
@@ -408,6 +422,30 @@ mod tests {
         assert!(
             !f.iter().any(|x| x.kind == "docs-link"),
             "parent-relative backtick path must resolve: {f:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn all_unreachable_docs_are_enumerated_in_one_finding() {
+        // the agent fixes one finding at a time; per-doc findings would make
+        // it re-run once per unreachable doc — one finding names them all
+        let dir = std::env::temp_dir().join(format!("docs_enum_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "# agents\n").unwrap();
+        std::fs::write(dir.join("docs/ALPHA.md"), "a\n").unwrap();
+        std::fs::write(dir.join("docs/BETA.md"), "b\n").unwrap();
+        std::fs::write(dir.join("docs/GAMMA.md"), "c\n").unwrap();
+        let f = docs_findings(&dir, &std::collections::HashSet::new());
+        let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "docs-undiscoverable").collect();
+        assert_eq!(u.len(), 1, "{f:?}");
+        assert!(
+            u[0].message.contains("docs/ALPHA.md")
+                && u[0].message.contains("docs/BETA.md")
+                && u[0].message.contains("docs/GAMMA.md"),
+            "one finding must enumerate every unreachable doc: {}",
+            u[0].message
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

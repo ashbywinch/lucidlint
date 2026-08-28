@@ -65,7 +65,6 @@ language-servers = ["lucidlint"]
   `fix:` directives in the messages — an agent editing in the editor sees
   the exact command to run for each finding.
 - The server answers `textDocument/codeAction`: one `quickfix` per finding
-- The server answers `textDocument/codeAction`: one `quickfix` per finding
   whose message carries a `fix:` directive. The action's command arguments
   are `[uri, line, argvTokens]` — the tokens run directly as
   `lucidlint fix --kind <tokens...> --file <path> --line <n>`, with

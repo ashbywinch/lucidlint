@@ -137,10 +137,23 @@ pub fn is_duplicate_size(skeleton_len: usize, non_doc_stmts: usize) -> bool {
 }
 
 /// Dice coefficient over bigram sets — the language-neutral similarity.
+/// MULTISET semantics (pinned by `duplicate_dice_contract_no_set_hash_shortcut`):
+/// repeated bigrams count. Computed via count maps instead of the old
+/// repo cost 69ms of the LSP's save-time merge; this is O(len(a) + len(b)).
+/// Reference implementation only now — production scores via the sorted-
+/// bigram fast path in `duplicate_findings`; the parity tests pin them equal.
+/// NOT `#[cfg(test)]`-gated: gen-rules.py treats the first cfg(test) as the
+/// test-module boundary and would miss the emissions later in this file.
+#[allow(dead_code)]
 pub fn dice_similarity(a: &[String], b: &[String]) -> f64 {
-    let bigrams =
-        |t: &[String]| -> Vec<(String, String)> { t.windows(2).map(|w| (w[0].clone(), w[1].clone())).collect() };
-    let (ab, bb) = (bigrams(a), bigrams(b));
+    let bigram_counts = |t: &[String]| -> std::collections::HashMap<(String, String), usize> {
+        let mut m = std::collections::HashMap::new();
+        for w in t.windows(2) {
+            *m.entry((w[0].clone(), w[1].clone())).or_insert(0) += 1;
+        }
+        m
+    };
+    let (ab, bb) = (bigram_counts(a), bigram_counts(b));
     if ab.is_empty() && bb.is_empty() {
         return 0.0; // matches the Python reference: no shared bigrams, never a duplicate
     }
@@ -148,17 +161,14 @@ pub fn dice_similarity(a: &[String], b: &[String]) -> f64 {
         return 0.0;
     }
     let mut common = 0usize;
-    let mut bseen: Vec<bool> = vec![false; bb.len()];
-    for x in &ab {
-        for (j, y) in bb.iter().enumerate() {
-            if !bseen[j] && x == y {
-                common += 1;
-                bseen[j] = true;
-                break;
-            }
+    for (k, ca) in &ab {
+        if let Some(cb) = bb.get(k) {
+            common += ca.min(cb);
         }
     }
-    (2.0 * common as f64) / (ab.len() + bb.len()) as f64
+    let total_a: usize = ab.values().sum();
+    let total_b: usize = bb.values().sum();
+    (2.0 * common as f64) / (total_a + total_b) as f64
 }
 
 // --------------------------------------------------------------------------- suppressions
@@ -265,6 +275,7 @@ pub fn filter_repo_wide(
     supps: &Suppressions,
     used_line: &mut std::collections::HashSet<(usize, String)>,
     used_file: &mut std::collections::HashSet<String>,
+    spent: &std::collections::HashSet<(usize, String)>,
 ) -> Vec<crate::Finding> {
     let mut kept = Vec::new();
     for f in findings {
@@ -285,7 +296,7 @@ pub fn filter_repo_wide(
         for ln in window_lines(f.line) {
             if let Some(entries) = supps.line.get(&ln) {
                 for (sig, why) in entries {
-                    if why.is_empty() {
+                    if why.is_empty() || spent.contains(&(ln, sig.clone())) {
                         continue;
                     }
                     if signal_matches(sig, &f.kind) {
@@ -325,10 +336,104 @@ pub fn suppressed(signal: &str, line: usize, supps: &Suppressions) -> bool {
 /// Suppressions the caller's own filtering paths already honored (the Rust
 /// cc-array retain removes complexity findings before this filter runs) —
 /// stale detection must not re-flag them.
+/// Ledger handles for one suppression pass: what was already honored
+/// upstream (pre_used), and where newly consumed pairs are recorded (spent).
+pub struct SuppressionBooks<'a> {
+    pub pre_used: &'a PreUsedSuppressions,
+    pub spent: &'a mut std::collections::HashSet<(usize, String)>,
+}
+
 #[derive(Default)]
 pub struct PreUsedSuppressions {
     pub lines: std::collections::HashSet<(usize, String)>,
     pub files: std::collections::HashSet<String>,
+}
+
+/// Partition finding indices into (file, line) groups — inner-first within
+/// each line (higher col = deeper literal), stable otherwise.
+fn common_group_line_indices(findings: &[crate::Finding]) -> Vec<Vec<usize>> {
+    let mut order: Vec<usize> = (0..findings.len()).collect();
+    order.sort_by(|&a, &b| {
+        findings[a]
+            .file
+            .cmp(&findings[b].file)
+            .then(findings[a].line.cmp(&findings[b].line))
+            .then(findings[b].col.cmp(&findings[a].col))
+            .then(a.cmp(&b))
+    });
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for i in order {
+        match groups.last_mut() {
+            Some(g) if findings[g[0]].file == findings[i].file && findings[g[0]].line == findings[i].line => {
+                g.push(i);
+            }
+            _ => groups.push(vec![i]),
+        }
+    }
+    groups
+}
+
+/// Marker inventory for one line-group: distinct explained marker lines whose
+/// signal matches any member, minus globally spent/taken pairs.
+fn marker_inventory(
+    members: &[usize],
+    findings: &[crate::Finding],
+    supps: &Suppressions,
+    used_line: &std::collections::HashSet<(usize, String)>,
+    taken: &std::collections::HashSet<(usize, String)>,
+) -> Vec<(usize, String)> {
+    let mut pairs: Vec<(usize, String)> = Vec::new();
+    for ln in window_lines(findings[members[0]].line) {
+        if let Some(entries) = supps.line.get(&ln) {
+            for (sig, why) in entries {
+                if why.is_empty()
+                    || used_line.contains(&(ln, sig.clone()))
+                    || taken.contains(&(ln, sig.clone()))
+                    || pairs.iter().any(|(pl, _)| *pl == ln)
+                {
+                    continue;
+                }
+                if members.iter().any(|&i| signal_matches(sig, &findings[i].kind)) {
+                    pairs.push((ln, sig.clone()));
+                }
+            }
+        }
+    }
+    pairs
+}
+
+struct LineMarkerCtx<'a> {
+    supps: &'a Suppressions,
+    used_line: &'a mut std::collections::HashSet<(usize, String)>,
+    taken: &'a mut std::collections::HashSet<(usize, String)>,
+    spent: &'a mut std::collections::HashSet<(usize, String)>,
+}
+
+/// Bind one line-group's members to its markers inner-first. Returns flags
+/// parallel to `members`: true = exempted by a LINE marker (consumed).
+fn peel_assign(members: &[usize], findings: &[crate::Finding], ctx: &mut LineMarkerCtx) -> Vec<bool> {
+    let pairs = marker_inventory(members, findings, ctx.supps, ctx.used_line, ctx.taken);
+    let mut ok = vec![false; members.len()];
+    // members sort by col DESC (inner-first) while the inventory sorts by
+    // line DESC — a single advancing pointer strands a marker whose kind
+    // matches a LATER member behind an earlier non-match (review bot):
+    // search the whole inventory for the first unused marker matching each
+    // member's signal
+    let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (j, &i) in members.iter().enumerate() {
+        if let Some((pi, cand)) = pairs
+            .iter()
+            .enumerate()
+            .find(|(pi, cand)| !used.contains(pi) && signal_matches(&cand.1, &findings[i].kind))
+        {
+            used.insert(pi);
+            ctx.taken.insert(cand.clone());
+            ctx.used_line.insert(cand.clone());
+            ctx.spent.insert(cand.clone());
+            ok[j] = true;
+        }
+    }
+    ok
 }
 
 /// Filter findings through the suppressions + emit the why-less suppression
@@ -341,19 +446,18 @@ pub fn apply_suppressions_impl(
     comments: &[(usize, String)],
     file: &str,
     marker: &str,
-    pre_used: &PreUsedSuppressions,
+    books: &mut SuppressionBooks,
 ) -> Vec<crate::Finding> {
     let supps = suppressions_from_comments(comments);
     let mut out = Vec::new();
-    let mut used_line: std::collections::HashSet<(usize, String)> = pre_used.lines.clone();
-    let mut used_file: std::collections::HashSet<String> = pre_used.files.clone();
-    // dedup per (line, signal) — `ignore sig1,sig2` with no why must report
-    // BOTH signals' missing reasons, not just the first on the line
+    let mut used_line: std::collections::HashSet<(usize, String)> = books.pre_used.lines.clone();
+    let mut used_file: std::collections::HashSet<String> = books.pre_used.files.clone();
     let mut seen_invalid: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
     for (ln, entries) in &supps.line {
         for (sig, why) in entries {
             if why.is_empty() && seen_invalid.insert((*ln, sig.clone())) {
                 out.push(crate::Finding {
+col: 0,
                 file: file.to_string(),
                 line: *ln,
                 function: String::new(),
@@ -373,6 +477,7 @@ pub fn apply_suppressions_impl(
                 .find(|(_, t)| t.contains(&format!("lucidlint: ignore-file {sig}")))
             {
                 out.push(crate::Finding {
+col: 0,
                     file: file.to_string(),
                     line: *ln,
                     function: String::new(),
@@ -385,14 +490,31 @@ pub fn apply_suppressions_impl(
             }
         }
     }
-    for f in findings {
-        if suppress_track_line(&mut used_line, &supps, &f) {
-            continue;
+    // innermost-peel: markers bind inner-first, one marker per finding
+    let mut exempted = vec![false; findings.len()];
+    let mut taken: std::collections::HashSet<(usize, String)> = Default::default();
+    for members in common_group_line_indices(&findings) {
+        let mut ctx = LineMarkerCtx {
+            supps: &supps,
+            used_line: &mut used_line,
+            taken: &mut taken,
+            spent: books.spent,
+        };
+        let ok = peel_assign(&members, &findings, &mut ctx);
+        for (j, &i) in members.iter().enumerate() {
+            if ok[j] {
+                exempted[i] = true;
+                continue;
+            }
+            if suppress_track_file(&mut used_file, &supps, &findings[i]) {
+                exempted[i] = true;
+            }
         }
-        if suppress_track_file(&mut used_file, &supps, &f) {
-            continue; // ignore-file with a why exempts; a why-less one does not
+    }
+    for (i, f) in findings.into_iter().enumerate() {
+        if !exempted[i] {
+            out.push(f);
         }
-        out.push(f);
     }
     let ctx = StaleCtx {
         supps: &supps,
@@ -404,26 +526,6 @@ pub fn apply_suppressions_impl(
     };
     out.extend(ctx.stale_suppression_findings());
     out
-}
-
-/// Was this finding exempted by an explained line suppression? Records the
-/// matched comment so the stale check does not re-flag it.
-fn suppress_track_line(
-    used_line: &mut std::collections::HashSet<(usize, String)>,
-    supps: &Suppressions,
-    f: &crate::Finding,
-) -> bool {
-    for ln in window_lines(f.line) {
-        if let Some(entries) = supps.line.get(&ln) {
-            for (sig, why) in entries {
-                if signal_matches(sig, &f.kind) && !why.is_empty() {
-                    used_line.insert((ln, sig.clone()));
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 /// Was this finding exempted by an explained file suppression?
@@ -472,6 +574,7 @@ impl<'a> StaleCtx<'a> {
                     continue;
                 }
                 out.push(crate::Finding {
+col: 0,
                     file: self.file.to_string(),
                     line: *ln,
                     function: String::new(),
@@ -494,6 +597,7 @@ impl<'a> StaleCtx<'a> {
                 .find(|(_, t)| t.contains(&format!("lucidlint: ignore-file {sig}")))
             {
                 out.push(crate::Finding {
+col: 0,
                     file: self.file.to_string(),
                     line: *ln,
                     function: String::new(),
@@ -541,6 +645,7 @@ mod tests {
         Finding {
             file: "x.rs".into(),
             line,
+            col: 0,
             function: "f".into(),
             kind: kind.into(),
             severity: "fail".into(),
@@ -557,13 +662,11 @@ mod tests {
             1,
             "// lucidlint: ignore latent-class route closures are the idiom".to_string(),
         )];
-        let fs = apply_suppressions_impl(
-            vec![finding("closures", 2)],
-            &comments,
-            "x.rs",
-            "//",
-            &PreUsedSuppressions::default(),
-        );
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let fs = apply_suppressions_impl(vec![finding("closures", 2)], &comments, "x.rs", "//", &mut books);
         assert!(!fs.iter().any(|f| f.kind == "closures"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -573,7 +676,11 @@ mod tests {
         // B6 control: the same family suppression with no closures/partition
         // finding is dead weight → stale-suppression.
         let comments = vec![(1, "// lucidlint: ignore latent-class nothing here".to_string())];
-        let fs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &PreUsedSuppressions::default());
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let fs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books);
         assert!(fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
 
@@ -584,13 +691,11 @@ mod tests {
             1,
             "// lucidlint: ignore-file latent-class the whole file's closures are idiom".to_string(),
         )];
-        let fs = apply_suppressions_impl(
-            vec![finding("partition", 9)],
-            &comments,
-            "x.rs",
-            "//",
-            &PreUsedSuppressions::default(),
-        );
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let fs = apply_suppressions_impl(vec![finding("partition", 9)], &comments, "x.rs", "//", &mut books);
         assert!(!fs.iter().any(|f| f.kind == "partition"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -604,15 +709,46 @@ mod tests {
             1,
             "// lucidlint: ignore latent-class the helpers are the module's seams".to_string(),
         )];
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let fs = apply_suppressions_impl(vec![finding("strewing", 2)], &comments, "x.py", "#", &mut books);
+        assert!(!fs.iter().any(|f| f.kind == "strewing"), "{:?}", fs);
+        assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
+    }
+
+    #[test]
+    fn peel_searches_inventory_not_pointer() {
+        // group members sort by col DESC (inner-first) while the marker
+        // inventory sorts by line DESC — the deeper finding's marker on an
+        // EARLIER window line strands under pointer-only assignment: the
+        // shallower member consumes its marker, the deep member's valid
+        // suppression is silently ignored (review bot)
+        let comments = vec![
+            (1, "# lucidlint: ignore magic-number why-b".to_string()),
+            (2, "# lucidlint: ignore middle-man why-a".to_string()),
+        ];
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let deep_magic = Finding {
+            col: 5,
+            ..finding("magic-number", 2)
+        };
         let fs = apply_suppressions_impl(
-            vec![finding("strewing", 2)],
+            vec![deep_magic, finding("middle-man", 2)],
             &comments,
             "x.py",
             "#",
-            &PreUsedSuppressions::default(),
+            &mut books,
         );
-        assert!(!fs.iter().any(|f| f.kind == "strewing"), "{:?}", fs);
-        assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
+        assert!(
+            !fs.iter().any(|f| f.kind == "magic-number" || f.kind == "middle-man"),
+            "both markers must bind regardless of order skew: {:?}",
+            fs
+        );
     }
 
     #[test]
@@ -621,13 +757,11 @@ mod tests {
         // intervenes) still suppresses — the window is 3 lines, not
         // line/line-1.
         let comments = vec![(1, "// lucidlint: ignore magic-number the gate threshold".to_string())];
-        let fs = apply_suppressions_impl(
-            vec![finding("magic-number", 3)],
-            &comments,
-            "x.rs",
-            "//",
-            &PreUsedSuppressions::default(),
-        );
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let fs = apply_suppressions_impl(vec![finding("magic-number", 3)], &comments, "x.rs", "//", &mut books);
         assert!(!fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -637,13 +771,30 @@ mod tests {
         // B7 guard: the window stays adjacent — a comment 4+ lines above is
         // NOT a suppression of the finding.
         let comments = vec![(1, "// lucidlint: ignore magic-number far away".to_string())];
-        let fs = apply_suppressions_impl(
-            vec![finding("magic-number", 5)],
-            &comments,
-            "x.rs",
-            "//",
-            &PreUsedSuppressions::default(),
-        );
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let fs = apply_suppressions_impl(vec![finding("magic-number", 5)], &comments, "x.rs", "//", &mut books);
         assert!(fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
+    }
+}
+
+/// The report header — printed on every CLI run (text banner AND a `header`
+/// field in --json; never under the LSP). It states the AIM so agents read
+/// the intent before the findings: fix rather than suppress, and make every
+/// suppression reviewer-checkable.
+pub const REPORT_HEADER: &str = "lucidlint - the aim is code that is readable, maintainable, and obviously correct: fix findings instead of suppressing them, and give every suppression a why a reviewer can check";
+
+#[cfg(test)]
+mod header_tests {
+    use super::REPORT_HEADER;
+
+    #[test]
+    fn report_header_names_the_three_aims() {
+        assert!(REPORT_HEADER.contains("readable"));
+        assert!(REPORT_HEADER.contains("maintainable"));
+        assert!(REPORT_HEADER.contains("obviously correct"));
+        assert!(REPORT_HEADER.contains("why a reviewer can check"));
     }
 }

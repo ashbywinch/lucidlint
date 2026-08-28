@@ -219,7 +219,8 @@ CATALOG = RuleCatalog([
          ">=3 module functions sharing the same parameter pair — the pair "
          "travels together, so it is a data clump; introduce a parameter "
          "object that holds it.",
-         display_name="data-clump → latent-class", display="latent-class"),
+         display_name="data-clump → latent-class", display="latent-class",
+         fix_name_required=True),
     Rule("feature-envy", "fail", "architecture", "Python",
          "A method reads another object's fields more than its own state — "
          "the logic belongs on that object (feature envy); move the "
@@ -245,10 +246,12 @@ CATALOG = RuleCatalog([
          display_name="duplicate-field → latent-class", display="latent-class"),
     Rule("module-cohesion", "fail", "architecture", "Graph",
          "A file whose nodes split across ≥2 graph communities (each ≥2 nodes) "
-         "holds several sub-domains — split the module at the domain seams."),
+         "holds several sub-domains — split the module at the domain seams.",
+         fix_name_required=True),
     Rule("record-shape", "fail", "architecture", "Both",
          "A function takes a struct/class with ≥5 fields and no methods — the "
-         "struct's rules belong as methods on it."),
+         "struct's rules belong as methods on it.",
+         fix_name_required=True),
     Rule("detached-method", "warn", "architecture", "Both",
          "A method that never touches its receiver — a classmethod should "
          "always use `cls`; a plain method should use `self` or move out — it "
@@ -376,6 +379,11 @@ CATALOG = RuleCatalog([
     Rule("stale-suppression", "fail", "suppression", "Both",
          "A `lucidlint: ignore` / `ignore-file` that no longer suppresses "
          "anything — remove it."),
+    Rule("bulk-suppression", "warn", "suppression", "Both",
+         "One signal suppressed at 10+ sites: repeated identical whys are a "
+         "policy decision (a config guidance or documented config ignore), not "
+         "per-site judgment - mass suppression hides systematic problems from "
+         "review."),
     # ---- refactoring advice (all warn — detection-only)
     Rule("guard-clauses", "warn", "advice", "Python",
          "≥3 levels of if-in-if (\"arrow code\") — Replace Nested Conditional "

@@ -42,7 +42,6 @@ class PlatformWheel(bdist_wheel):
 
 
 class BuildPy(build_py):
-    # lucidlint: ignore detached-method setuptools invokes these hooks as bound methods
     def run(self) -> None:
         subprocess.run(
             ["cargo", "build", "--release", "--manifest-path", "scanner/Cargo.toml"],
@@ -54,4 +53,6 @@ class BuildPy(build_py):
         super().run()
 
 
+# lucidlint: ignore record-shape cmdclass is setuptools' plugin wire —
+# a name->class registry, not a domain record
 setup(cmdclass={"build_py": BuildPy, "bdist_wheel": PlatformWheel})

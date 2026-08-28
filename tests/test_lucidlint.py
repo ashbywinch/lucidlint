@@ -9,6 +9,7 @@ verdict, baselines, dedupe/merge, priority, and rendering — driving the
 real binary through a passthrough subprocess route.
 """
 
+import argparse
 import json
 import re
 import sqlite3
@@ -17,6 +18,7 @@ import sys
 import tarfile
 from collections import Counter
 from pathlib import Path
+from typing import Any, cast
 
 import pygit2
 
@@ -59,9 +61,11 @@ class FakeSubprocess:
     def __init__(self, routes):
         self.routes = routes  # list of (predicate(args) -> bool, stdout, returncode)
         self.calls = []
+        self.call_kwargs = []  # parallel to calls — stdin/capture flags per argv
 
     def run(self, args, **kwargs):
         self.calls.append(args)
+        self.call_kwargs.append(kwargs)
         for pred, stdout, returncode in self.routes:
             if pred(args):
                 if isinstance(stdout, type) and issubclass(stdout, BaseException):
@@ -89,7 +93,7 @@ class Env:
     def __enter__(self):
         self.fake = FakeSubprocess(self.routes)
         self._saved["subprocess"] = ch.subprocess
-        ch.subprocess = self.fake
+        ch.subprocess = cast(Any, self.fake)
         return self
 
     def __exit__(self, *exc):
@@ -157,11 +161,29 @@ def run_main(repo, *extra, routes=None):
         sys.argv = saved_argv
 
 
+def gate_args() -> argparse.Namespace:
+    """A fully-defaulted lucidlint Namespace — what parse_args() yields for a
+    bare invocation. Runner-unit tests build _GateRunner directly, where no
+    argv parsing runs."""
+    return argparse.Namespace(
+        repo=Path.cwd(),
+        file=None,
+        include_tests=False,
+        baseline=None,
+        update_baseline=False,
+        base="",
+        json=False,
+        refresh_coverage=False,
+        warn=False,
+        command=None,
+    )
+
+
 # --------------------------------------------------------------------------- coverage edges
 def test_coverage_xml_unparseable(tmp_path):
     repo = make_repo(tmp_path)
     (repo / "coverage.xml").write_text("not xml at all")
-    cr = ch._GateRunner(repo, None).load_coverage()
+    cr = ch._GateRunner(repo, gate_args()).load_coverage()
     assert cr.source == "coverage.xml unparseable"
     assert cr.lines is None
 
@@ -176,7 +198,7 @@ def test_coverage_xml_malformed_line_skipped(tmp_path, capsys):
         "<class filename=\"notes.txt\"><line hits=\"1\" number=\"1\"/></class>"
         "</coverage>"
     )
-    cr = ch._GateRunner(repo, None).load_coverage()
+    cr = ch._GateRunner(repo, gate_args()).load_coverage()
     # the malformed <line> is skipped with a log; the valid one survives; the .txt class is skipped
     assert cr.lines == {"houses/app.py": {2}}
     assert "malformed <line>" in capsys.readouterr().err
@@ -191,7 +213,7 @@ def test_coverage_sqlite_skips_unknown_and_nonpy(tmp_path):
     db.execute("INSERT INTO line_bits VALUES (1, X'05'), (2, X'05'), (3, X'05')")
     db.commit()
     db.close()
-    cr = ch._GateRunner(repo, None).load_coverage()
+    cr = ch._GateRunner(repo, gate_args()).load_coverage()
     # file_id 2 has no file row (skipped); notes.txt is not .py (skipped); app.py lines 1,3 covered
     assert cr.lines == {"houses/app.py": {1, 3}}
 
@@ -199,7 +221,7 @@ def test_coverage_sqlite_skips_unknown_and_nonpy(tmp_path):
 def test_coverage_sqlite_unreadable(tmp_path):
     repo = make_repo(tmp_path)
     (repo / ".coverage").write_bytes(b"this is not a sqlite database at all, definitely")
-    cr = ch._GateRunner(repo, None).load_coverage()
+    cr = ch._GateRunner(repo, gate_args()).load_coverage()
     assert cr.source == ".coverage unreadable"
 
 
@@ -225,7 +247,7 @@ def test_file_history_parser_edges(tmp_path):
     # fixture: houses/app.py touched in c1+c2 (churn 2), Makefile never
     # exists (not .py — must be skipped), oneoff.py in c3
     repo = materialize_test_repo(tmp_path)
-    fh = ch._GateRunner(repo, None).file_history()
+    fh = ch._GateRunner(repo, gate_args()).file_history()
     assert fh.churn["houses/app.py"] == 2
     assert "Makefile" not in fh.churn  # not .py — skipped
     assert fh.last_modified["houses/app.py"]  # commit-timestamp present
@@ -233,9 +255,9 @@ def test_file_history_parser_edges(tmp_path):
 
 def _file_history_with(routes, repo):
     saved = ch.subprocess
-    ch.subprocess = FakeSubprocess(routes)
+    ch.subprocess = cast(Any, FakeSubprocess(routes))
     try:
-        return ch._GateRunner(repo, None).file_history()
+        return ch._GateRunner(repo, gate_args()).file_history()
     finally:
         ch.subprocess = saved
 
@@ -259,7 +281,9 @@ def test_changed_files_branch_diff_and_no_git(tmp_path):
     git = pygit2.Repository(str(repo))
     # pin "other" at HEAD, then commit a change on main (the HEAD side of the
     # three-dot diff) — real pygit2 ops on the materialized fixture
-    git.branches.create("other", git.get(git.head.target))
+    head = git.get(git.head.target)
+    assert head is not None
+    git.branches.create("other", head.peel(pygit2.Commit))
     (repo / "houses" / "x.py").write_text("def g():\n    pass\n")
     git.index.add_all()
     tree = git.index.write_tree()
@@ -301,7 +325,7 @@ def test_merge_warn_into_fail_target():
     # same target (file+function+kind-group) but a different line — distinct dedupe keys,
     # same merge key: the merge path (not the dedupe path) must handle the warn
     warn = ch.Action("complexity", "warn", "houses/app.py", 5, "alpha", "m2", 1, 0, "", "", note="n2", raw=1)
-    out = ch._GateRunner(Path("."), None)._dedupe_merge([fail, warn], set())
+    out = ch._GateRunner(Path("."), gate_args())._dedupe_merge([fail, warn], set())
     assert len(out) == 1
     assert out[0].severity == "fail"  # a warn merged into a fail target keeps the gate
     assert "n2" in out[0].note
@@ -401,6 +425,48 @@ def test_no_pygit2_file_list_uses_git_and_honors_gitignore(tmp_path):
     assert rc == 0  # .tools/self.py would fail (CC 60) — its exclusion IS the check
 
 
+def test_gitignored_docs_survives_missing_git(tmp_path):
+    # a machine without the git binary must not crash the gate — the
+    # referenced-absent-doc query degrades (the walk's pygit2 answer stands)
+    # instead of FileNotFoundError-ing the whole run (review bot)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "guide.md").write_text("# g\n")
+    (repo / "AGENTS.md").write_text("# agents\n- [g](docs/guide.md)\n")
+    (repo / ".gitignore").write_text("docs/private.md\n")
+
+    def is_check_ignore(args):
+        return args[:2] == ["git", "-C"] and args[3] == "check-ignore"
+
+    with Env(routes=[(lambda a: is_check_ignore(a), FileNotFoundError, 0)]):
+        assert ch._gitignored_docs(repo) == ()
+
+
+def test_gitignored_docs_resolves_sibling_refs_against_the_file(tmp_path):
+    # a sibling reference `other.md` from docs/sub/guide.md resolves against
+    # the doc's own directory — the query must ask about docs/sub/other.md,
+    # not repo-root other.md (which would never match and silently miss the
+    # ignored private doc) (review bot)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "docs" / "sub").mkdir(parents=True)
+    (repo / "docs" / "sub" / "guide.md").write_text("see `other.md`\n")
+    (repo / ".gitignore").write_text("docs/sub/other.md\n")
+
+    def is_check_ignore(args):
+        return args[:2] == ["git", "-C"] and args[3] == "check-ignore"
+
+    with Env(routes=[(lambda a: is_check_ignore(a), "", 0)]) as env:
+        ch._gitignored_docs(repo)
+    idx = next(i for i, a in enumerate(env.fake.calls) if is_check_ignore(a))
+    stdin = env.fake.call_kwargs[idx]["input"]
+    assert "docs/sub/other.md" in stdin, f"sibling ref must resolve against the file: {stdin!r}"
+    assert "other.md" not in stdin.split() or stdin.strip() == "docs/sub/other.md", stdin
+
+
 def test_refresh_coverage_runs_make(tmp_path):
     repo = make_repo(tmp_path)
     with Env(routes=git_routes()) as env:
@@ -428,7 +494,7 @@ def test_scanner_failure_raises(tmp_path):
 def test_scanner_garbage_findings_dropped(tmp_path, capsys):
     repo = make_repo(tmp_path)
     scan_json = json.dumps({
-        "schema_version": 2,
+        "schema_version": 3,
         "findings": [{
             "kind": "standard", "signal": "standard", "severity": "fail",
             "file": "/elsewhere/x.py", "line": 1, "function": "", "message": "drop me",
@@ -453,7 +519,7 @@ def test_scanner_cache_hits(tmp_path):
     rs._pending_tests = False
     rs._pending_docs = None
     saved = ch.subprocess
-    ch.subprocess = fs
+    ch.subprocess = cast(Any, fs)
     try:
         assert rs.load(repo, files) is not None
         assert rs.load(repo, files) is not None
@@ -607,12 +673,73 @@ def test_config_ignored_ledger_shows_when_all_actions_ignored(tmp_path, capsys):
 # --------------------------------------------------------------------------- fix + scan contracts
 def test_raw_score_uses_the_metric():
     """R8: priority ranks churn x complexity x fan-in — a higher metric must
+
     score higher at equal churn (a constant 1.0 metric flattened every
     complexity/large-function finding to the same priority)."""
     assert ch._raw_score("complexity", 60, 10) > ch._raw_score("complexity", 15, 10)
     assert ch._raw_score("large-function", 300, 5) > ch._raw_score("large-function", 100, 5)
     # the churn factor still scales within a metric
     assert ch._raw_score("complexity", 20, 30) > ch._raw_score("complexity", 20, 5)
+
+
+def test_preview_refusal_names_nothing_to_change(tmp_path, capsys):
+    # a preview-kind fix on a target with NO seam: propose_finding returns a
+    # None source, and the message must say "nothing to change" — the
+    # missing-name refusal would send the agent on a naming chase that
+    # cannot succeed (review bot)
+    repo = make_repo(tmp_path, app_src="def f(a, b):\n    return a + b\n")
+    (repo / "houses" / "app.py").write_text("def f(a, b):\n    return a + b\n")
+    rc = run_main(
+        repo, "fix", "--kind", "long-param-list", "--file", "houses/app.py", "--line", "1"
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "nothing to change" in out, out
+    assert "needs a semantic name" not in out, out
+
+
+def test_magic_fix_cli_derives_anchor_column(tmp_path, capsys):
+    # the schema-3 col reaches the fix engine for magic-number too — two
+    # literals on one line, the CLI must rewrite the ANCHORED one, not the
+    # first (the anchor scan only ran for extract-record-class) (review bot)
+    src = "def f():\n    return a * 60 + b * 90\n"
+    repo = make_repo(tmp_path, app_src=src)
+    (repo / "houses" / "app.py").write_text(src)
+    rc = run_main(
+        repo, "fix", "--kind", "magic-number", "--file", "houses/app.py",
+        "--line", "2", "--name", "NINETY",
+    )
+    assert rc == 0
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "a * 60 + b * NINETY" in fixed, fixed
+
+
+def test_callee_flag_selects_the_named_call_on_the_line(tmp_path, capsys):
+    # two calls span the target line — `--callee Money` must keyword the
+    # NAMED call; before the forwarding fix the flag was parsed and dropped,
+    # and the first call on the line was keyworded with the wrong params
+    # (review bot)
+    src = 'def g():\n    Other("x", 1) + Money("0", "GBP")\n'
+    repo = make_repo(tmp_path, app_src=src)
+    (repo / "houses" / "app.py").write_text(src)
+    rc = run_main(
+        repo,
+        "fix",
+        "--kind",
+        "positional-literals",
+        "--file",
+        "houses/app.py",
+        "--line",
+        "2",
+        "--callee",
+        "Money",
+        "--params",
+        "amount,currency",
+    )
+    assert rc == 0
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert 'Money(amount="0", currency="GBP")' in fixed, fixed
+    assert 'Other("x", 1)' in fixed, "the unselected call must stay untouched: {fixed}"
 
 
 def test_fix_refuses_rust_targets_cleanly(tmp_path, capsys):
@@ -775,9 +902,9 @@ def test_numbits_roundtrip():
 
 
 def test_rel_path():
-    assert ch._GateRunner(Path("/repo"), None).rel_path("/repo/a/b.py") == "a/b.py"
-    assert ch._GateRunner(Path("/repo"), None).rel_path("a/b.py") == "a/b.py"
-    assert ch._GateRunner(Path("/repo"), None).rel_path("/elsewhere/x.py") == "/elsewhere/x.py"
+    assert ch._GateRunner(Path("/repo"), gate_args()).rel_path("/repo/a/b.py") == "a/b.py"
+    assert ch._GateRunner(Path("/repo"), gate_args()).rel_path("a/b.py") == "a/b.py"
+    assert ch._GateRunner(Path("/repo"), gate_args()).rel_path("/elsewhere/x.py") == "/elsewhere/x.py"
 
 
 def test_is_test_path():
@@ -790,7 +917,7 @@ def test_is_test_path():
 # --------------------------------------------------------------------------- coverage
 def test_load_coverage_none(tmp_path):
     repo = make_repo(tmp_path)
-    cr = ch._GateRunner(repo, None).load_coverage()
+    cr = ch._GateRunner(repo, gate_args()).load_coverage()
     assert cr.lines is None
 
 
@@ -801,7 +928,8 @@ def test_load_coverage_xml(tmp_path):
         '<lines><line number="1" hits="1"/><line number="2" hits="0"/></lines>'
         "</class></classes></package></packages></coverage>"
     )
-    cr = ch._GateRunner(repo, None).load_coverage()
+    cr = ch._GateRunner(repo, gate_args()).load_coverage()
+    assert cr.lines is not None
     assert cr.lines.get("houses/app.py") == {1}
 
 
@@ -813,8 +941,10 @@ def test_load_coverage_dot(tmp_path):
     db.execute("INSERT INTO file (path) VALUES ('houses/app.py')")
     db.execute("INSERT INTO line_bits VALUES (1, ?)", (b"\x01",))
     db.commit()
-    cr = ch._GateRunner(repo, None).load_coverage()
+    cr = ch._GateRunner(repo, gate_args()).load_coverage()
+    assert cr.lines is not None
     assert cr.lines.get("houses/app.py") == {1}
+
 
 
 def test_load_coverage_prefers_xml(tmp_path):
@@ -823,14 +953,14 @@ def test_load_coverage_prefers_xml(tmp_path):
         '<coverage><packages><package><classes><class filename="houses/app.py">'
         '<lines><line number="1" hits="1"/></lines></class></classes></package></packages></coverage>'
     )
-    cr = ch._GateRunner(repo, None).load_coverage()
+    cr = ch._GateRunner(repo, gate_args()).load_coverage()
     assert "coverage.xml" in cr.source
 
 
 # --------------------------------------------------------------------------- git
 def test_file_history(tmp_path):
     repo = materialize_test_repo(tmp_path)
-    fh = ch._GateRunner(repo, None).file_history()
+    fh = ch._GateRunner(repo, gate_args()).file_history()
     assert fh.churn["houses/app.py"] == 2  # base + modify
     assert fh.churn["scripts/oneoff.py"] == 1
     assert fh.churn["tests/unit/test_app.py"] == 1
@@ -933,6 +1063,80 @@ def test_kind_rollup_in_fail_output(tmp_path, capsys):
     run_main(repo)
     out = capsys.readouterr().out
     assert "by kind — fails:" in out
+
+
+def test_text_report_opens_with_header_banner(tmp_path, capsys):
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    run_main(repo)
+    out = capsys.readouterr().out
+    assert "readable, maintainable, and obviously correct" in out.splitlines()[0]
+    assert out.index("obviously correct") < out.index("GATE:")
+
+
+def test_json_carries_header_and_census(tmp_path, capsys):
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    assert "obviously correct" in data["header"]
+    assert isinstance(data["suppressions"], dict)
+
+
+def test_census_ledger_in_text_footer(tmp_path, capsys):
+    # the census shows what the gate did NOT report on — the suppression
+    # volume sits beside the findings, in the same footer
+    src = SWALLOW_SRC + 'RECORD = {"a": 1}  # lucidlint: ignore record-shape data table row\n'
+    repo = make_repo(tmp_path, app_src=src)
+    run_main(repo)
+    assert "suppressed: record-shape×1" in capsys.readouterr().out
+
+
+def test_census_prints_once_when_fails_and_warns_coexist(tmp_path, capsys):
+    # the fails group renders the suppression census, then the warns group —
+    # the census must print ONCE per report, not once per group (review bot:
+    # both _render_actions calls passed the census, duplicating the footer)
+    src = (
+        SWALLOW_SRC  # fail, unsuppressed
+        + "\ndef m():\n    return 60 * 24\n"  # magic-number warn, unsuppressed
+        + 'RECORD = {"a": 1}  # lucidlint: ignore record-shape data table row\n'  # suppressed -> census entry
+    )
+    repo = make_repo(tmp_path, app_src=src)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert out.count("suppressed:") == 1, out
+    assert "record-shape×1" in out
+
+
+GUIDANCE = "quantities go through houses.units — never bare ints"
+
+
+def test_guidance_config_appends_house_rule(tmp_path, capsys):
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 60\n")
+    (repo / ".lucidlint.toml").write_text(f"[lucidlint.guidance]\nmagic-number = \"{GUIDANCE}\"\n")
+    run_main(repo)
+    out = capsys.readouterr().out
+    assert f"house rule: {GUIDANCE}" in out
+
+
+def test_guidance_via_pyproject_tool_table(tmp_path, capsys):
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 60\n")
+    (repo / "pyproject.toml").write_text(f'[tool.lucidlint.guidance]\nmagic-number = "{GUIDANCE}"\n')
+    run_main(repo)
+    assert f"house rule: {GUIDANCE}" in capsys.readouterr().out
+
+
+def test_no_config_no_house_rule_suffix(tmp_path, capsys):
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 60\n")
+    run_main(repo)
+    assert "house rule:" not in capsys.readouterr().out
+
+
+def test_guidance_unknown_signal_is_dropped(tmp_path, capsys):
+    # a typo'd key would silently do nothing while reading like it works —
+    # the loader drops it instead of carrying dead config
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 60\n")
+    (repo / ".lucidlint.toml").write_text("[lucidlint.guidance]\nmagic-numberr = \"typo\"\n")
+    run_main(repo)
+    assert "house rule:" not in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------- baseline semantics
