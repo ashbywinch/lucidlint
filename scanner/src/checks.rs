@@ -477,6 +477,18 @@ pub fn positional_literals_findings(state: &mut ScanState, call: &ExprCall, sour
         return;
     };
     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
+    // The directive states THIS site's case — no conditional for the reader
+    // to evaluate (user ruling: never suggest a fix that cannot fix). A
+    // same-file callee resolves from the call's file alone, so the bare
+    // command fixes; anything else carries its semantic slot up front, the
+    // same contract as magic-number's --name <CONST>. A call textually
+    // above its def misclassifies toward the slot — an unnecessary
+    // placeholder, never a command that cannot fix.
+    let directive = if state.defs.iter().any(|(name, _)| *name == callee_name) {
+        " — fix: positional-literals"
+    } else {
+        " — fix: positional-literals --params <names>"
+    };
     state.findings.push(Finding {
 col: 0,
         file: state.file.to_string(),
@@ -485,7 +497,7 @@ col: 0,
         kind: "positional-literals".into(),
         severity: "warn".into(),
         message: format!(
-            "call passes {n} {kind} positionally to {callee}() — a swapped argument is a silent bug; use keyword arguments — fix: positional-literals (--params <names> when the callee's signature is not resolvable)",
+            "call passes {n} {kind} positionally to {callee}() — a swapped argument is a silent bug; use keyword arguments{directive}",
             callee = callee_name,
         ),
     });

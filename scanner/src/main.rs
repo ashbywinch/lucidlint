@@ -3701,6 +3701,23 @@ mod tests {
         let ok2 = scan_src("def g():\n    range(1, 10)\n");
         assert!(!ok2.iter().any(|x| x.kind == "positional-literals")); // builtin exempt
     }
+    #[test]
+    fn positional_directive_states_the_callee_case() {
+        // The directive states THIS site's case: a same-file callee's bare
+        // command fixes (the engine resolves the signature from the call's
+        // file); anything else carries its --params slot up front — the
+        // magic-number --name contract. No conditional for the reader.
+        let local = scan_src("def set_limits(a, b):\n    pass\n\ndef g():\n    set_limits(10, 20)\n");
+        let m = local.iter().find(|x| x.kind == "positional-literals").unwrap();
+        assert!(!m.message.contains("--params"), "{m:?}");
+        assert!(m.message.ends_with("— fix: positional-literals"), "{m:?}");
+        let ext = scan_src("def g():\n    set_limits(10, 20)\n");
+        let m = ext.iter().find(|x| x.kind == "positional-literals").unwrap();
+        assert!(
+            m.message.ends_with("— fix: positional-literals --params <names>"),
+            "{m:?}"
+        );
+    }
 
     #[test]
     fn detached_method_exempts_init_super_and_override() {

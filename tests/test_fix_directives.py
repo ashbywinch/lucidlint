@@ -90,6 +90,19 @@ def test_fix_refuses_unfixable_kind_on_rust_file(tmp_path, capsys):
     assert (repo / "lib.rs").read_text() == "fn main() {}\n"
 
 
+def test_fix_names_the_params_prerequisite_when_unresolvable(tmp_path, capsys):
+    """A positional-literals fix whose callee cannot be resolved refuses
+    naming the exact missing input and the exact rerun — never a bare
+    'nothing to change' (which reads as already-fixed)."""
+    repo = tmp_path / "repo"
+    (repo / "houses").mkdir(parents=True)
+    (repo / "houses" / "app.py").write_text("def g():\n    mystery(10, 20)\n")
+    rc = run_fix(repo, "fix", "--kind", "positional-literals", "--file", "houses/app.py", "--line", "2")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "--params" in out and "nothing to change" not in out, out
+
+
 def run_fix(repo, *extra):
     """Run `lucidlint fix` against a bare repo — the fixerless guard must
     fire before any scan or git access, so no fakes are needed."""

@@ -123,7 +123,6 @@ class _FixRequest:
     source: str | None = None
     wrote: bool = False        # set by fix_finding: the file was actually rewritten
     decline: str | None = None  # set by fix_finding/fixers: why nothing was written
-    col: int = 0  # schema-3 anchor column; disambiguates same-line twins
 
     def _loaded_source(self) -> str:
         """The file's text. propose_finding/fix_finding fill `source` from the
