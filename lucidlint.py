@@ -1855,6 +1855,10 @@ class _FixCommand:
                 if f.signal == signal and f.line == self.args.line and f.col
             ]
             col = max(anchors) if anchors else 0
+        if (self.fix_kind not in fe.MECHANICAL_KINDS and self.fix_kind not in fe.STRUCTURAL_KINDS):
+            print(f"fix: no auto-fix exists for kind '{self.args.kind}' — check the kind name "
+                  f"against the finding's directive")
+            return 1
         req = fe._FixRequest(
             kind=self.args.kind,
             repo=self.repo,
@@ -1879,8 +1883,7 @@ class _FixCommand:
         if len(lines) == 1:
             self.args.line = lines[0]
         elif not lines:
-            print(f"fix: no {self.args.kind} finding in {self.args.file} — nothing to fix")
-            return 0
+            return 0  # nothing of this kind exists — R28 silence
         else:
             print(
                 f"fix: {len(lines)} {self.args.kind} findings in {self.args.file} "
@@ -1901,8 +1904,7 @@ class _FixCommand:
             # refusal would send the agent on a naming chase that cannot
             # succeed (the name-required gate lives in the apply path, where
             # a seam EXISTS) (review bot)
-            print(f"fix: nothing to change for {self.args.kind} at {self.args.file}:{self.args.line}")
-            return 0
+            return 0  # no seam — R28 silence
         diff = list(
             difflib.unified_diff(
                 (self.repo / self.args.file).read_text().splitlines(),
@@ -1939,18 +1941,40 @@ class _FixCommand:
         )
         return 0
 
-    def _apply(self, req) -> int:
+    def _apply(self, req, moved: bool = False) -> int:
         description = req.fix_finding()
         if description is None:
             if req.decline:
-                # the fix declined with a known reason — say so explicitly, so
-                # the output never reads as applied (or as "no finding exists")
-                print(f"fix: {self.fix_kind} NOT APPLIED at {self.args.file}:{self.args.line} — {req.decline}")
+                # autofix pending agent-supplied input, at a good anchor
+                print(f"fix: {self.fix_kind} at {self.args.file}:{self.args.line} needs input — {req.decline}")
                 return 0
-            print(_fix_refusal(self.fix_kind, self.args.name, self._params(), self.args.file, self.args.line))
-            return 0
-        print(f"fix: applied {self.args.kind} at {self.args.file}:{self.args.line} — {description}")
+            if self.fix_kind in _name_required_kinds() and self.args.name is None:
+                print(f"fix: {self.fix_kind} at {self.args.file}:{self.args.line} needs a semantic name "
+                      f"the tool cannot invent — pass --name <Name> (naming is the judgement call)")
+                return 0
+            return self._reattach_or_silence(req, moved)
+        print(f"fix: applied {self.fix_kind} at {self.args.file}:{self.args.line} — {description}")
         return 0
+
+    def _reattach_or_silence(self, req, moved: bool) -> int:
+        """The anchor no longer matches a writing fix. R27: the tool owns its
+        coordinates — re-attach to the finding's current line when that is
+        unambiguous (announcing the move), ask when it is not, and stay
+        silent when nothing of this kind remains."""
+        if moved:
+            return 0  # already re-attached once and it still will not write
+        lines = [l for l in _File(self.repo, self.args.file).finding_lines(self.fix_kind)
+                 if l != self.args.line]
+        if len(lines) == 1:
+            print(f"fix: anchor moved — {self.fix_kind} now at {self.args.file}:{lines[0]}")
+            req.line = lines[0]
+            req.source = None
+            req.decline = None
+            return self._apply(req, moved=True)
+        if len(lines) > 1:
+            print(f"fix: {self.fix_kind} anchor moved — live findings at "
+                  f"{', '.join(map(str, lines))} — pass --line to pick one")
+        return 0  # nothing of this kind remains — R28 silence
 
 
 def main() -> int:

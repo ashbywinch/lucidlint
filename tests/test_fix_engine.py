@@ -1209,9 +1209,9 @@ def test_extract_method_refusal_is_silent(tmp_path, capsys):
                   "--name", "_apply", "--confirm")
     assert rc == 0
     out = capsys.readouterr().out
-    assert "nothing to change" in out
+    # R28 three-shape contract: nothing fixable here -> complete silence
+    assert out.strip() == "", out
     assert "out-variable" not in out and "extractable" not in out, out
-    assert "no " not in out.replace("nothing to change", ""), out
 
 def test_dispatch_registry_preserves_behavior(tmp_path):
     """The dispatch-registry fix: an if/elif chain over a selector becomes a
