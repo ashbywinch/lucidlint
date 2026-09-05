@@ -2022,7 +2022,6 @@ class _FixCommand:
             # the agent already reviewed
             _print_trimmed_diff(before, target.read_text(encoding="utf-8"), self.args.file)
         return 0
-        return 0
 
     def _reattach_or_silence(self, req, moved: bool) -> int:
         """The anchor no longer matches a writing fix. R27: the tool owns its
