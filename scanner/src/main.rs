@@ -1098,6 +1098,22 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     loop_pipeline_findings(state, body, source);
 }
 
+/// Per-buffer scans never run the repo-wide families (unused, unused-setter,
+/// duplicate) — their findings are evaluated only in repo_wide_merge — so
+/// their markers cannot bind here and a stale finding for one is a false
+/// fail artifact. The gate path keeps stale reporting: its merge consumes
+/// those markers and drops exactly the stale findings that survive it.
+// lucidlint: ignore record-shape Finding is the core finding type consumed repo-wide — one more consumer is not a new record
+fn drop_repo_wide_stale_artifacts(findings: &mut Vec<Finding>) {
+    findings.retain(|f| {
+        f.kind != "stale-suppression"
+            || !matches!(
+                sig_of_stale(&f.message).as_str(),
+                "unused" | "unused-setter" | "duplicate"
+            )
+    });
+}
+
 fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     reset_line_starts();
     let parsed: Parsed<ModModule> = match parse_module(source) {
@@ -1195,6 +1211,9 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     let mut all = type_ignore_findings(source, name, tokens);
     all.extend(noqa_findings(source, name, tokens));
     all.extend(findings);
+    if !repo_wide {
+        drop_repo_wide_stale_artifacts(&mut all);
+    }
     let classes = collect_classes(&body, source);
     let imports = collect_imports(&body, source);
     FileScan {
@@ -2731,6 +2750,40 @@ mod tests {
         // a pair shared by only two functions is not a clump
         let f = scan_src("def a(em, vm):\n    return em\n\ndef b(em, vm):\n    return vm\n");
         assert!(!f.iter().any(|x| x.kind == "data-clump"), "{f:?}");
+    }
+    #[test]
+    fn data_clump_pairs_aggregate_per_anchor() {
+        // Two pairs sharing one anchor = ONE finding naming both: per-pair
+        // findings stacked at the same def line could never be per-site
+        // suppressed (one marker consumes one finding).
+        let f = scan_src(
+            "def a(em, vm, x):\n    return em, vm, x\n\ndef b(em, vm):\n    return em\n\ndef c(em, vm, x):\n    return vm, x\n\ndef d(x, em):\n    return x, em\n",
+        );
+        let clumps: Vec<&Finding> = f.iter().filter(|x| x.kind == "data-clump").collect();
+        assert_eq!(clumps.len(), 1, "{f:?}");
+        assert!(clumps[0].message.contains("(em, vm)"), "{}", clumps[0].message);
+        assert!(clumps[0].message.contains("(em, x)"), "{}", clumps[0].message);
+        assert!(clumps[0].message.contains("pairs travel"), "{}", clumps[0].message);
+    }
+
+    #[test]
+    fn per_buffer_scan_does_not_stale_repo_wide_markers() {
+        // The repo-wide-only families never fire per-file, so their markers
+        // cannot bind in a per-buffer scan — flagging them stale there was
+        // a false fail artifact (the gate's repo-wide merge evaluates them).
+        let src = "# lucidlint: ignore duplicate cross-file twins are the point\ndef a():\n    return 1\n";
+        let per_buffer = scan_source_impl(src, "prod_mod.py", false);
+        assert!(
+            !per_buffer.findings.iter().any(|f| f.kind == "stale-suppression"),
+            "{:?}",
+            per_buffer.findings
+        );
+        let gate = scan_source_impl(src, "prod_mod.py", true);
+        assert!(
+            gate.findings.iter().any(|f| f.kind == "stale-suppression"),
+            "{:?}",
+            gate.findings
+        );
     }
 
     #[test]

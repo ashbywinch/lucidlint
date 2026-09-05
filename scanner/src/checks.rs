@@ -673,7 +673,7 @@ col: 0,
                 kind: "swallow".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "{kind} at line {line} — logs are not surfacing: a caller exists that needs to decide; re-raise, return an error value, or mark `# lucidlint: ignore swallow <terminal-boundary reason>` only when no caller exists to propagate to"
+                    "{kind} at line {line} — logs are not surfacing: a caller exists that needs to decide; surface by return, raise, break, continue, sys.exit, or mutating a name the enclosing function returns — mark `# lucidlint: ignore swallow <terminal-boundary reason>` only when no caller exists to propagate to"
                 ),
             });
         } else if let Some(ty) = type_opt {
@@ -1847,6 +1847,13 @@ col: 0,
 // the declaration/ownership half of the family: shared parameter pairs,
 // cross-object field reads, and quiet member assignment.
 
+/// One anchor's clump: the functions sharing it and the pairs they share.
+#[derive(Default)]
+struct AnchorClump {
+    functions: Vec<String>,
+    pairs: Vec<(String, String)>,
+}
+
 /// Three or more module functions sharing the same unordered parameter
 /// pair — the pair travels together, so it is a data clump; introduce a
 /// parameter object.
@@ -1877,26 +1884,58 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
             }
         }
     }
+    // ONE finding per anchor naming every pair that shares it: per-pair
+    // findings stack at the same def line and one marker consumes one
+    // finding, so an anchor with >3 pairs could never be per-site
+    // suppressed — the whack-a-mole the houses sweep hit (suppress the
+    // visible one, the next pair surfaces).
+    let mut by_anchor: std::collections::HashMap<(usize, String), AnchorClump> = std::collections::HashMap::new();
     let mut reported: HashSet<(String, String)> = HashSet::new();
     for ((a, b), fs) in &pairs {
         if fs.len() < 3 || !reported.insert((a.clone(), b.clone())) {
             continue;
         }
         let line = line_of(state.source, fs[0].name.range().start());
-        let names: Vec<&str> = fs.iter().map(|f| f.name.as_str()).collect();
+        let entry = by_anchor.entry((line, fs[0].name.to_string())).or_default();
+        for f in fs {
+            let name = f.name.to_string();
+            if !entry.functions.contains(&name) {
+                entry.functions.push(name);
+            }
+        }
+        entry.pairs.push((a.clone(), b.clone()));
+    }
+    let mut anchors: Vec<_> = by_anchor.into_iter().collect();
+    anchors.sort_by_key(|((line, _), _)| *line);
+    for ((line, anchor), clump) in anchors {
+        let (mut names, mut group_pairs) = (clump.functions, clump.pairs);
+        names.sort();
+        group_pairs.sort();
+        let pair_text = group_pairs
+            .iter()
+            .map(|(a, b)| format!("({a}, {b})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (pair_word, verb) = if group_pairs.len() == 1 {
+            ("pair", "travels")
+        } else {
+            ("pairs", "travel")
+        };
         state.findings.push(Finding {
-col: 0,
+            col: 0,
             file: state.file.to_string(),
             line,
-            function: fs[0].name.to_string(),
+            function: anchor,
             kind: "data-clump".into(),
             severity: "fail".into(),
             message: format!(
-                "{} functions ({}) share the parameter pair ({}, {}) — a data clump: the pair travels together; introduce a parameter object",
-                fs.len(),
+                "{} functions ({}) share the parameter {} {} — a data clump: the {} {} together; introduce a parameter object",
+                names.len(),
                 names.join(", "),
-                a,
-                b
+                pair_word,
+                pair_text,
+                pair_word,
+                verb
             ),
         });
     }

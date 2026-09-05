@@ -1153,7 +1153,12 @@ def _render_file_group(file: str, items: list[Action]) -> None:
         churn = f" [churn {a.churn}x]" if a.churn else ""
         kinds = ",".join(a.kinds) if a.kinds else a.kind
         tag = f"P{a.priority:02d}" if a.severity != "warn" else "warn"
-        print(f"  [{tag}][{kinds}] {loc}{churn} — {a.message}")
+        suppress = (
+            f" — suppress with: {a.signal}"
+            if a.signal and a.signal != a.kind and a.signal not in a.kinds
+            else ""
+        )
+        print(f"  [{tag}][{kinds}]{suppress} {loc}{churn} — {a.message}")
         if a.note:
             print(f"      -> {a.note}")
 

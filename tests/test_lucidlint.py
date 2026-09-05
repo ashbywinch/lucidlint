@@ -574,6 +574,22 @@ def test_render_actions_acks(tmp_path, capsys):
     assert "acknowledged in baseline (1): houses/app.py:1" in capsys.readouterr().out
 
 
+def test_render_actions_names_the_suppression_signal(capsys):
+    """A finding whose display kind differs from its marker kind says so —
+    an agent must not have to guess `latent-class` for a data-clump."""
+    a = ch.Action("latent-class", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a.signal = "data-clump"
+    ch._render_file_group("x.py", [a])
+    assert "suppress with: data-clump" in capsys.readouterr().out
+
+
+def test_render_actions_omits_signal_when_it_matches(capsys):
+    a = ch.Action("swallow", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a.signal = "swallow"
+    ch._render_file_group("x.py", [a])
+    assert "suppress with:" not in capsys.readouterr().out
+
+
 def test_main_stale_coverage_warning(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)  # except Exception -> a fail action
     db = sqlite3.connect(repo / ".coverage")
