@@ -470,7 +470,7 @@ impl<'a> RsState<'a> {
                     line,
                     &sig.ident.to_string(),
                     format!(
-                        "'{}' takes {typed} parameters — introduce a parameter object",
+                        "'{}' takes {typed} parameters — introduce a parameter object named with a domain noun",
                         sig.ident
                     ),
                 );

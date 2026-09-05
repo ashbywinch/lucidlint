@@ -616,7 +616,7 @@ pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
             kind: "long-param-list".into(),
             severity: "fail".into(),
             message: format!(
-                "{n} parameters — introduce a parameter object — fix: long-param-list --fix-name <Options>"
+                "{n} parameters — introduce a parameter object named with a domain noun — fix: long-param-list --fix-name <Options>"
             ),
         });
     }
@@ -1725,7 +1725,7 @@ fn emit_wide_tuple(state: &mut ScanState, ann: Option<&Expr>, what: &str, line: 
         return;
     };
     let message = format!(
-        "{what} is a {n}-tuple — the positions carry meaning the call site cannot see; introduce a named record with fields (packing a long parameter list into a tuple is the same defect with fewer lines)"
+        "{what} is a {n}-tuple — the positions carry meaning the call site cannot see; introduce a record named with a domain noun, with named fields and a to_dict() at any serialization edge (packing a long parameter list into a tuple is the same defect with fewer lines)"
     );
     // 4+ elements fail; exactly 3 warns (the RGB gray zone). Two pushes so
     // the kind/severity literal pair stays adjacent — `make rules`' drift
@@ -1852,7 +1852,7 @@ col: 0,
                 kind: "tuple-record".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "the values of '{name}' are {arity}-tuples read {reads} times by constant index — an anonymous record; make it a class (name it: lucidlint fix --kind tuple-record --name <N>) — fix: tuple-record"
+                    "the values of '{name}' are {arity}-tuples read {reads} times by constant index — an anonymous record; make it a class named with a domain noun (apply: lucidlint fix --kind tuple-record --name <N>) — fix: tuple-record"
                 ),
             });
         }
@@ -2063,7 +2063,7 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
             kind: "data-clump".into(),
             severity: "fail".into(),
             message: format!(
-                "{} functions ({}) share the parameter {} {} — a data clump: the {} {} together; introduce a parameter object",
+                "{} functions ({}) share the parameter {} {} — a data clump: the {} {} together; introduce a parameter object named with a domain noun",
                 names.len(),
                 names.join(", "),
                 pair_word,
@@ -2222,7 +2222,7 @@ col: 0,
                     kind: "feature-envy".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "'{}' reads '{}' {} times vs its own state {} — feature envy: the logic belongs on the envied object; move the computation onto '{}' as a method — fix: feature-envy",
+                        "'{}' reads '{}' {} times vs its own state {} — feature envy: the logic belongs on the envied object; move the computation onto '{}' as a method named with a domain verb (what it does) — fix: feature-envy",
                         f.name.as_str(),
                         receiver,
                         n,
@@ -4903,13 +4903,12 @@ pub fn unused_findings(
 // =====================================================================
 // record-shape: "never a bare dict as a record" (check_records.py)
 //   - signatures: record-shaped collections in params/returns (grab-bags,
-//     collections of dicts/tuples, nested lists, fixed tuples); maps pass;
-//     deserializer boundaries (raw JSON in, domain class out) are exempt
+//     collections of dicts/tuples, nested lists, fixed tuples); maps pass.
+//     NO boundary exemption: a wire payload is still a record — the class
+//     carries a to_dict()/to_json() at the serialization edge
 //   - literals: dict literals with >= 2 keys, >= 1 constant string key,
 //     >= 1 dynamic value, in a record position (assign/return/yield)
 // =====================================================================
-
-const PRIMITIVES: [&str; 8] = ["str", "int", "float", "bool", "bytes", "Any", "object", "None"];
 
 /// `_name_of`: the bare name of an annotation (typing.Any -> Any).
 fn ann_name_of(e: &Expr) -> Option<String> {
@@ -4960,45 +4959,6 @@ fn is_variadic_tuple(e: &Expr) -> bool {
             if let Expr::Tuple(t) = s.slice.as_ref() {
                 return t.elts.iter().any(|elt| matches!(elt, Expr::EllipsisLiteral(_)));
             }
-        }
-    }
-    false
-}
-
-/// `_is_raw_json`: bare/grab-bag dict (dict, dict[str, Any], ...) or a
-/// collection of one — the deserializer-boundary exemption.
-fn is_raw_json(e: &Expr) -> bool {
-    let mut wrapped = Vec::new();
-    ann_unwrap(e, &mut wrapped);
-    if wrapped.len() != 1 {
-        return wrapped.iter().any(|p| is_raw_json(p));
-    }
-    let node = wrapped[0];
-    if let Expr::Name(n) = node {
-        return n.id.eq_ignore_ascii_case("dict");
-    }
-    if let Expr::Subscript(s) = node {
-        let base = ann_base_name(&s.value);
-        if base.as_deref() == Some("dict") {
-            let slice: &Expr = s.slice.as_ref();
-            if let Expr::Tuple(t) = slice {
-                if t.elts.len() != 2 {
-                    return true; // malformed — treat as bare-ish
-                }
-                let mut val_parts = Vec::new();
-                ann_unwrap(&t.elts[1], &mut val_parts);
-                return val_parts
-                    .iter()
-                    .any(|p| matches!(ann_name_of(p).as_deref(), Some("Any" | "object" | "None")));
-            }
-            return true; // dict[X] single-arg
-        }
-        if matches!(base.as_deref(), Some("list" | "tuple")) {
-            let elt: &Expr = s.slice.as_ref();
-            if matches!(elt, Expr::Tuple(_)) {
-                return false; // a fixed tuple of stuff is not raw rows
-            }
-            return is_raw_json(elt);
         }
     }
     false
@@ -5068,42 +5028,6 @@ fn annotation_is_record(e: &Expr) -> bool {
         }
     }
     false
-}
-
-/// `_part_is_domain`: one return-annotation part resolving to a domain class.
-fn part_is_domain(e: &Expr) -> bool {
-    match e {
-        Expr::Name(n) => !PRIMITIVES.contains(&n.id.as_str()) && !matches!(n.id.as_str(), "dict" | "tuple" | "list"),
-        Expr::Subscript(s) => {
-            if matches!(ann_base_name(&s.value).as_deref(), Some("list" | "tuple")) {
-                let elt: &Expr = s.slice.as_ref();
-                if let Expr::Tuple(t) = elt {
-                    let parts: Vec<&Expr> = t
-                        .elts
-                        .iter()
-                        .filter(|e| !matches!(e, Expr::EllipsisLiteral(_)))
-                        .collect();
-                    return parts.len() == 1 && part_is_domain(parts[0]);
-                }
-                return part_is_domain(elt);
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
-/// `_returns_domain_class`: the function converts raw JSON into domain
-/// objects — the sanctioned deserializer boundary.
-fn returns_domain_class(f: &StmtFunctionDef) -> bool {
-    match &f.returns {
-        Some(r) => {
-            let mut parts = Vec::new();
-            ann_unwrap(r.as_ref(), &mut parts);
-            parts.iter().any(|p| part_is_domain(p))
-        }
-        None => false,
-    }
 }
 
 /// `_is_constant_value`: a literal that cannot vary at runtime (lookup
@@ -5249,7 +5173,6 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
         if let Q::N(n) = queue[qi] {
             if let AnyNodeRef::StmtFunctionDef(f) = n {
                 let def_line = line_of(source, f.name.range().start());
-                let boundary = returns_domain_class(f);
                 let mut params: Vec<(&str, Option<&Expr>)> = Vec::new();
                 for pwd in f
                     .parameters
@@ -5271,9 +5194,6 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                         if !annotation_is_record(a) {
                             continue;
                         }
-                        if boundary && is_raw_json(a) {
-                            continue; // deserializer boundary: raw JSON in, domain class out
-                        }
                         let text = source[a.range()].to_string();
                         state.findings.push(Finding {
 col: 0,
@@ -5283,7 +5203,7 @@ col: 0,
                             kind: "record-shape".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line}) — convert it to a class with named fields (wire formats at serialization boundaries are exempt)",
+                                "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — give the class a to_dict()/to_json() at the serialization edge",
                                 f.name.as_str()
                             ),
                         });
@@ -5300,7 +5220,7 @@ col: 0,
                             kind: "record-shape".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "bare record collection '{text}' as return type of {} (line {def_line}) — convert it to a class with named fields (wire formats at serialization boundaries are exempt)",
+                                "bare record collection '{text}' as return type of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — give the class a to_dict()/to_json() at the serialization edge",
                                 f.name.as_str()
                             ),
                         });
@@ -5350,7 +5270,7 @@ col: 0,
     }
     for h in unique {
         let keys = display_keys(&h.keys);
-        state.findings.push(Finding { file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("dict with constant keys {{{keys}}} is a record — make a class (fields: {keys}) — fix: extract-record-class --name <Record>") });
+        state.findings.push(Finding { file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("dict with constant keys {{{keys}}} is a record — make a class named with a domain noun (fields: {keys}); a wire payload is still a record — give the class a to_dict()/to_json() — fix: extract-record-class --name <Record>") });
     }
 }
 

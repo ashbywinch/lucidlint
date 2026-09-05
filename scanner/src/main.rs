@@ -3395,10 +3395,14 @@ mod tests {
     }
 
     #[test]
-    fn record_deserializer_boundary_is_exempt() {
-        // raw JSON in, domain class out — the sanctioned bare-dict spot
+    fn record_deserializer_boundary_is_still_a_finding() {
+        // the boundary doctrine (user ruling): a wire payload is NOT exempt —
+        // raw JSON in gets a class with named fields and a to_dict() at the
+        // serialization edge
         let f = scan_src("def parse(raw: dict[str, Any]) -> Label:\n    return Label(raw)\n");
-        assert!(!f.iter().any(|x| x.kind == "record-shape"));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("to_dict"), "{}", r[0].message);
     }
 
     #[test]
@@ -3810,8 +3814,9 @@ mod tests {
 
         let r = scan_src("def g() -> dict[str, dict[str, int]]:\n    return {}\n");
         let rs = r.iter().find(|x| x.kind == "record-shape").expect("record-shape fires");
-        assert!(rs.message.contains("class with named fields"), "{}", rs.message);
-        assert!(rs.message.contains("wire format"), "{}", rs.message);
+        assert!(rs.message.contains("class named with a domain noun"), "{}", rs.message);
+        assert!(rs.message.contains("to_dict()"), "{}", rs.message);
+        assert!(rs.message.contains("wire payload is still a record"), "{}", rs.message);
 
         let b = scan_src("def f():\n    try:\n        step()\n    except Exception:\n        return None\n");
         let be = b.iter().find(|x| x.kind == "broad-except").expect("broad-except fires");

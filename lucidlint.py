@@ -1788,7 +1788,7 @@ def _fix_refusal(kind: str, name: str | None, params: list[str] | None, file: st
         # would read as unfixable (the LSP placeholder flow depends on this)
         return (
             f"fix: {kind} needs a semantic name the tool cannot invent "
-            f"(--name <Name>) at {file}:{line} - naming is the judgement call"
+            f"(--name <Name>) at {file}:{line} - name it with a domain noun; naming is the judgement call"
         )
     return _fix_identifier_problem(kind, name, params, f"{file}:{line}") or (
         f"fix: nothing to change for {kind} at {file}:{line}"
@@ -1959,7 +1959,7 @@ class _FixCommand:
                 diff = diff[:40] + [f"... ({len(diff) - 40} more lines omitted)"]
             print("\n".join(diff))
         print(
-            f"# the name `{self.args.name or '_extracted'}` is a placeholder — pick a real one; "
+            f"# the name `{self.args.name or '_extracted'}` is a placeholder — pick a real domain noun; "
             f"apply it: lucidlint fix --kind {self.args.kind} --file {self.args.file} "
             f"--line {self.args.line} --name <name>"
         )
