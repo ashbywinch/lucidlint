@@ -2101,47 +2101,14 @@ col: 0,
     }
 }
 
-/// A class must DECLARE its members — annotated in the class body, in
-/// __slots__, or in __init__ — not assign them quietly in member functions.
-pub fn undeclared_attribute_findings(state: &mut ScanState, body: &[Stmt]) {
+/// Collect every `self.<attr> = ...` site in a top-level class — the
+/// undeclared-attribute family's raw material. Whether a site is a QUIET
+/// assignment is decided at the repo-wide merge (`undeclared_findings`):
+/// a base class in another file may declare the member, and a per-file
+/// scan cannot see it.
+pub fn collect_self_assigns(state: &mut ScanState, body: &[Stmt]) {
     for s in body {
         let Stmt::ClassDef(c) = s else { continue };
-        let mut declared: HashSet<String> = HashSet::new();
-        for m in &c.body {
-            match m {
-                Stmt::AnnAssign(a) => {
-                    if let Expr::Name(n) = a.target.as_ref() {
-                        declared.insert(n.id.to_string());
-                    }
-                }
-                Stmt::Assign(a) => {
-                    for t in &a.targets {
-                        if let Expr::Name(n) = t {
-                            if n.id.as_str() == "__slots__" {
-                                if let Some(tuple) = slot_names(&a.value) {
-                                    declared.extend(tuple);
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        for m in &c.body {
-            let Stmt::FunctionDef(f) = m else { continue };
-            if f.name.as_str() == "__init__" {
-                for st in &f.body {
-                    if let Stmt::AnnAssign(a) = st {
-                        if let Expr::Attribute(at) = a.target.as_ref() {
-                            if matches!(at.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self") {
-                                declared.insert(at.attr.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
         for m in &c.body {
             let Stmt::FunctionDef(f) = m else { continue };
             let is_init = f.name.as_str() == "__init__";
@@ -2169,37 +2136,135 @@ pub fn undeclared_attribute_findings(state: &mut ScanState, body: &[Stmt]) {
                     if !matches!(at.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self") {
                         continue;
                     }
-                    let attr = at.attr.to_string();
-                    if declared.contains(&attr) {
-                        continue;
-                    }
-                    let line = line_of(state.source, at.range().start());
-                    let msg = if is_init {
-                        format!(
-                            "'{}' assigns member '{attr}' in __init__ without a declaration — declare it: self.{attr}: <type> = ... — fix: undeclared-attribute",
-                            c.name.as_str()
-                        )
-                    } else {
-                        format!(
-                            "'{}' assigns member '{attr}' in '{}' without a declaration — declare it in __init__ (annotated) or the class body",
-                            c.name.as_str(),
-                            f.name.as_str()
-                        )
-                    };
-                    state.findings.push(Finding {
-                        col: 0,
-                        file: state.file.to_string(),
-                        line,
+                    state.self_assigns.push(crate::SelfAssign {
+                        class: c.name.to_string(),
+                        attr: at.attr.to_string(),
+                        line: line_of(state.source, at.range().start()),
                         function: f.name.to_string(),
-                        kind: "undeclared-attribute".into(),
-                        severity: "fail".into(),
-                        message: msg,
+                        is_init,
                     });
                 }
                 push_stmt_children(st, &mut stack);
             }
         }
     }
+}
+
+/// The repo-wide undeclared-attribute pass: a `self.<attr> = v` site is a
+/// finding only when neither the class NOR ANY ANCESTOR declares the member
+/// (annotated in the class body, in __slots__, or in __init__) — the houses
+/// case was `Node.display_name` declared in dag/node.py, flagged on every
+/// subclass until they re-declared it. Base resolution follows
+/// `abstraction_findings`: a `Name:` base resolves same-file first, then
+/// through the file's imports; an `Attr:` base through the alias's module.
+pub fn undeclared_findings(scans: &[crate::UndeclScan]) -> Vec<Finding> {
+    use std::collections::HashMap;
+    let mut classes: HashMap<(String, String), &crate::ClassInfo> = HashMap::new();
+    for s in scans {
+        for c in &s.classes {
+            classes.insert((s.rel.clone(), c.name.clone()), c);
+        }
+    }
+    // each class's bases resolve against ITS OWN file's imports
+    let import_maps: HashMap<&String, HashMap<&str, (&str, &str)>> = scans
+        .iter()
+        .map(|s| {
+            (
+                &s.rel,
+                s.imports
+                    .iter()
+                    .map(|i| (i.alias.as_str(), (i.module.as_str(), i.imported.as_str())))
+                    .collect(),
+            )
+        })
+        .collect();
+    /// True when `key`'s class or any ANCESTOR declares `attr`; visited
+    /// guards against base-class cycles (Python tolerates them at definition
+    /// time). A `Name:` base resolves same-file first, then through the
+    /// class's own file's imports; an `Attr:` base through the alias's
+    /// module. Each hop uses the ancestor's file imports, so multi-level
+    /// chains across files resolve correctly.
+    fn declares(
+        classes: &HashMap<(String, String), &crate::ClassInfo>,
+        import_maps: &HashMap<&String, HashMap<&str, (&str, &str)>>,
+        key: &(String, String),
+        attr: &str,
+        visited: &mut Vec<(String, String)>,
+    ) -> bool {
+        if visited.contains(key) {
+            return false;
+        }
+        visited.push(key.clone());
+        let Some(c) = classes.get(key) else {
+            return false;
+        };
+        if c.declared.iter().any(|d| d == attr) {
+            return true;
+        }
+        let empty = HashMap::new();
+        let imports_of = import_maps.get(&key.0).unwrap_or(&empty);
+        for base in &c.bases {
+            let candidates: Vec<(String, String)> = if let Some(rest) = base.strip_prefix("Name:") {
+                let mut cands = vec![(key.0.clone(), rest.to_string())];
+                if let Some((module, _name)) = imports_of.get(rest) {
+                    cands.push(((*module).to_string(), rest.to_string()));
+                }
+                cands
+            } else if let Some(rest) = base.strip_prefix("Attr:") {
+                let mut parts = rest.splitn(2, ':');
+                let alias = parts.next().unwrap_or("");
+                let attr_name = parts.next().unwrap_or("");
+                let mut cands = Vec::new();
+                if let Some((module, _name)) = imports_of.get(alias) {
+                    cands.push(((*module).to_string(), attr_name.to_string()));
+                }
+                cands
+            } else {
+                Vec::new()
+            };
+            for anc in candidates {
+                let Some(anc_key) = class_key(classes, &anc.0, &anc.1) else {
+                    continue;
+                };
+                if declares(classes, import_maps, &anc_key, attr, visited) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    let mut out = Vec::new();
+    for s in scans {
+        for a in &s.self_assigns {
+            let mut visited: Vec<(String, String)> = Vec::new();
+            let key = (s.rel.clone(), a.class.clone());
+            if declares(&classes, &import_maps, &key, &a.attr, &mut visited) {
+                continue;
+            }
+            let msg = if a.is_init {
+                format!(
+                    "'{}' assigns member '{}' in __init__ without a declaration — declare it: self.{}: <type> = ... — fix: undeclared-attribute",
+                    a.class, a.attr, a.attr
+                )
+            } else {
+                format!(
+                    "'{}' assigns member '{}' in '{}' without a declaration — declare it in __init__ (annotated) or the class body",
+                    a.class, a.attr, a.function
+                )
+            };
+            out.push(Finding {
+                col: 0,
+                file: s.rel.clone(),
+                line: a.line,
+                function: a.function.clone(),
+                kind: "undeclared-attribute".into(),
+                severity: "fail".into(),
+                message: msg,
+            });
+        }
+    }
+    out.sort_by(|x, y| (&x.file, x.line, &x.message).cmp(&(&y.file, y.line, &y.message)));
+    out
 }
 
 /// The names in a __slots__ literal (tuple or list of string literals).
@@ -5792,6 +5857,44 @@ pub fn collect_classes(body: &[Stmt], source: &str) -> Vec<crate::ClassInfo> {
             }
         }
         let mut bases: Vec<String> = Vec::new();
+        let mut declared: Vec<String> = Vec::new();
+        for m in &cls.body {
+            match m {
+                Stmt::AnnAssign(a) => {
+                    if let Expr::Name(n) = a.target.as_ref() {
+                        declared.push(n.id.to_string());
+                    }
+                }
+                Stmt::Assign(a) => {
+                    for t in &a.targets {
+                        if let Expr::Name(n) = t {
+                            if n.id.as_str() == "__slots__" {
+                                if let Some(tuple) = slot_names(&a.value) {
+                                    declared.extend(tuple);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for m in &cls.body {
+            let Stmt::FunctionDef(f) = m else { continue };
+            if f.name.as_str() == "__init__" {
+                for st in &f.body {
+                    if let Stmt::AnnAssign(a) = st {
+                        if let Expr::Attribute(at) = a.target.as_ref() {
+                            if matches!(at.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self") {
+                                declared.push(at.attr.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        declared.sort();
+        declared.dedup();
         if let Some(arguments) = &cls.arguments {
             for b in &arguments.args {
                 match b {
@@ -5818,6 +5921,7 @@ pub fn collect_classes(body: &[Stmt], source: &str) -> Vec<crate::ClassInfo> {
             line: line_of(source, cls.name.range().start()),
             abstract_,
             bases,
+            declared,
         });
     }
     out

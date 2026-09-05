@@ -661,14 +661,17 @@ mod tests {
 
     #[test]
     fn dispatch_codeaction_marks_mechanical_fixes_applicable() {
-        // undeclared-attribute needs no name: needsName false, bare token,
-        // and the title carries no caveat
+        // noop-statement needs no name: needsName false, bare token, and the
+        // title carries no caveat. (undeclared-attribute was the old sample,
+        // but it is a repo-wide-only family now — a per-buffer scan cannot
+        // resolve base classes, so its diagnostics arrive via the save-time
+        // merge, like unused.)
         let mut docs = LspState::new();
         let mut out = Vec::new();
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "textDocument/didOpen",
-            "params": {"textDocument": {"uri": "file:///tmp/buf.py", "text": "class C:\n    def __init__(self):\n        self.done = False\n"}}
+            "params": {"textDocument": {"uri": "file:///tmp/buf.py", "text": "def f():\n    x\n"}}
         });
         assert!(dispatch(&mut docs, &msg, &mut out));
         out.clear();
@@ -678,12 +681,12 @@ mod tests {
             "id": 4,
             "params": {
                 "textDocument": {"uri": "file:///tmp/buf.py"},
-                "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 25}}
+                "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}}
             }
         });
         assert!(dispatch(&mut docs, &msg, &mut out));
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("undeclared-attribute"), "the kind: {text}");
+        assert!(text.contains("noop-statement"), "the kind: {text}");
         assert!(text.contains("\"needsName\":false"), "mechanical: {text}");
         assert!(!text.contains("needs --name"), "no caveat: {text}");
     }

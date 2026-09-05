@@ -101,6 +101,9 @@ struct ScanState<'a> {
     defs: Vec<(String, usize)>,
     /// set_* methods and property setters (name, line) — repo-wide pass.
     setters: Vec<(String, usize)>,
+    /// `self.<attr> = ...` sites in top-level classes — undeclared-
+    /// attribute's repo-wide raw material.
+    self_assigns: Vec<SelfAssign>,
     /// Offsets of numeric literals in data-table collections (>= 3 same-kind
     /// siblings) — magic-number exempt.
     magic_table_exempts: HashSet<usize>,
@@ -1002,6 +1005,9 @@ pub struct ClassInfo {
     pub line: usize,
     pub abstract_: bool,
     pub bases: Vec<String>,
+    /// Declared members (class-body annotations, __slots__, annotated
+    /// __init__ self-assigns) — undeclared-attribute's declaration table.
+    pub declared: Vec<String>,
 }
 
 /// One import alias: local name -> (module, imported name).
@@ -1010,6 +1016,29 @@ pub struct ImportInfo {
     pub alias: String,
     pub module: String,
     pub imported: String,
+}
+
+/// One `self.<attr> = ...` site inside a top-level class — undeclared-
+/// attribute's raw material: the repo-wide merge decides which are quiet
+/// assignments (per-file scans cannot resolve base classes).
+#[derive(Clone)]
+pub struct SelfAssign {
+    pub class: String,
+    pub attr: String,
+    pub line: usize,
+    pub function: String,
+    pub is_init: bool,
+}
+
+/// One file's undeclared-attribute inputs: its rel, classes (declared
+/// members + bases), imports, and self-assignment sites — the per-scan
+/// slice the repo-wide pass resolves.
+#[derive(Clone, Default)]
+pub struct UndeclScan {
+    pub rel: String,
+    pub classes: Vec<ClassInfo>,
+    pub imports: Vec<ImportInfo>,
+    pub self_assigns: Vec<SelfAssign>,
 }
 
 #[derive(Clone, Default)]
@@ -1026,6 +1055,7 @@ pub struct FileScan {
     pub skeletons: Vec<SkeletonFn>,
     pub classes: Vec<ClassInfo>,
     pub imports: Vec<ImportInfo>,
+    pub self_assigns: Vec<SelfAssign>,
     /// The file's parsed `lucidlint: ignore` suppressions — the repo-wide
     /// families (duplicate/unused/docs/graph) are filtered through them at
     /// the end of the scan (per-file families apply theirs during the scan).
@@ -1078,7 +1108,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     assembly_class_findings(state, body);
     data_clump_findings(state, body);
     feature_envy_findings(state, body);
-    undeclared_attribute_findings(state, body);
+    collect_self_assigns(state, body);
     god_class_findings(state, body);
     duplicate_field_findings(state, body);
     record_shape_findings(state, body, source);
@@ -1109,7 +1139,7 @@ fn drop_repo_wide_stale_artifacts(findings: &mut Vec<Finding>) {
         f.kind != "stale-suppression"
             || !matches!(
                 sig_of_stale(&f.message).as_str(),
-                "unused" | "unused-setter" | "duplicate"
+                "unused" | "unused-setter" | "duplicate" | "undeclared-attribute"
             )
     });
 }
@@ -1229,6 +1259,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         skeletons: state.skeletons,
         classes,
         imports,
+        self_assigns: state.self_assigns,
         supps,
         supps_spent,
     }
@@ -1346,6 +1377,17 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
     let mut repo_wide_unused = checks::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
     repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
     reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
+    let undecl_scans: Vec<UndeclScan> = scans
+        .iter()
+        .map(|s| UndeclScan {
+            rel: s.rel_of(root_s),
+            classes: s.classes.clone(),
+            imports: s.imports.clone(),
+            self_assigns: s.self_assigns.clone(),
+        })
+        .collect();
+    let undeclared = checks::undeclared_findings(&undecl_scans);
+    reconcile_repo_wide(&mut additions, undeclared, &supps_by_rel, &supps_spent_by_rel);
     let mut by_file: std::collections::HashMap<String, Vec<Finding>> = std::collections::HashMap::new();
     for f in additions {
         by_file.entry(f.file.clone()).or_default().push(f);
@@ -1372,6 +1414,7 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         skeletons: rs.skeletons.clone(),
         classes: Vec::new(),
         imports: Vec::new(),
+        self_assigns: Vec::new(),
         supps,
         supps_spent: rs.supps_spent.clone(),
     }
@@ -2842,6 +2885,41 @@ mod tests {
     }
 
     #[test]
+    fn undeclared_attribute_resolves_cross_file_base() {
+        // the houses case: Node declares display_name in one file; a
+        // subclass assigning it in another is NOT a quiet member — the old
+        // per-file rule forced a redundant re-declaration on every subclass
+        let f = scan_corpus(&[
+            (
+                "base.py",
+                "class Node:\n    def __init__(self):\n        self.display_name: str = \"\"\n",
+            ),
+            (
+                "sub.py",
+                "from base import Node\n\nclass Doc(Node):\n    def refresh(self):\n        self.display_name = \"x\"\n",
+            ),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "undeclared-attribute"), "{f:?}");
+    }
+
+    #[test]
+    fn undeclared_attribute_resolves_same_file_base() {
+        let f = scan_src(
+            "class Base:\n    def __init__(self):\n        self.kind: str = \"\"\n\nclass Sub(Base):\n    def refresh(self):\n        self.kind = \"x\"\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "undeclared-attribute"), "{f:?}");
+    }
+
+    #[test]
+    fn undeclared_attribute_still_fires_when_no_base_declares() {
+        // an undeclared member is still a finding, and a base-class cycle
+        // must not hang the ancestor walk
+        let f = scan_src("class A(B):\n    def __init__(self):\n        self.x = 0\n\nclass B(A):\n    pass\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+    }
+
+    #[test]
     fn undeclared_attribute_accepts_declared_members() {
         // annotated in __init__ or the class body -> declared
         let f = scan_src(
@@ -3415,6 +3493,7 @@ mod tests {
         let mut test_refs = HashSet::new();
         let mut strings = Vec::new();
         let mut all = Vec::new();
+        let mut undecl_scans: Vec<UndeclScan> = Vec::new();
         let mut supps_by_rel: std::collections::HashMap<String, common::Suppressions> =
             std::collections::HashMap::new();
         let mut spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
@@ -3442,6 +3521,12 @@ mod tests {
             for (name, line) in &scan.setters {
                 setters.push((rel.clone(), name.clone(), *line));
             }
+            undecl_scans.push(UndeclScan {
+                rel: rel.clone(),
+                classes: scan.classes.clone(),
+                imports: scan.imports.clone(),
+                self_assigns: scan.self_assigns.clone(),
+            });
             if is_test {
                 test_refs.extend(scan.refs.iter().cloned());
             } else {
@@ -3454,6 +3539,8 @@ mod tests {
         let mut repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
         repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
         reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel, &spent_by_rel);
+        let undeclared = undeclared_findings(&undecl_scans);
+        reconcile_repo_wide(&mut all, undeclared, &supps_by_rel, &spent_by_rel);
         // the suppression census + its bulk warning mirror main()'s report
         let census = suppression_counts(supps_by_rel.values());
         all.extend(bulk_suppression_findings(&census, &supps_by_rel, 10));
