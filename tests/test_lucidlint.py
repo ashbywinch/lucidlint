@@ -682,11 +682,11 @@ def test_raw_score_uses_the_metric():
     assert ch._raw_score("complexity", 20, 30) > ch._raw_score("complexity", 20, 5)
 
 
-def test_preview_refusal_names_nothing_to_change(tmp_path, capsys):
+def test_preview_refusal_on_no_seam_is_silent(tmp_path, capsys):
     # a preview-kind fix on a target with NO seam: propose_finding returns a
-    # None source, and the message must say "nothing to change" — the
-    # missing-name refusal would send the agent on a naming chase that
-    # cannot succeed (review bot)
+    # None source, and the tool stays completely SILENT — nothing here is
+    # fixable, and the missing-name refusal would send the agent on a naming
+    # chase that cannot succeed (review bot; R28 three-shape contract)
     repo = make_repo(tmp_path, app_src="def f(a, b):\n    return a + b\n")
     (repo / "houses" / "app.py").write_text("def f(a, b):\n    return a + b\n")
     rc = run_main(
@@ -694,7 +694,7 @@ def test_preview_refusal_names_nothing_to_change(tmp_path, capsys):
     )
     out = capsys.readouterr().out
     assert rc == 0
-    assert "nothing to change" in out, out
+    assert out.strip() == "", out
     assert "needs a semantic name" not in out, out
 
 

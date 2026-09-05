@@ -240,17 +240,25 @@ rather than a number.
   than a "skipped/unavailable" wrapper, and lets the user figure it out.
   (Rationale: "we can't compute X" is noise the user cannot act on; a
   fabricated explanation hides the real failure — 2026-08-17.)
-- **R28 — Fix directives are truthful, and the tool is silent otherwise.**
+- **R28 — Fix outcomes are truthful: silent, needs-input, or applied.**
   A finding's message carries a `fix: <command>` directive if and only if
   the tool knows a fix for that finding — and then the directive is the
   exact command to run, with a name placeholder where the agent supplies
-  the semantic bit. When the tool has no good fix and is certain of that,
-  it says nothing about a fix; when a fix probably exists but the tool
-  cannot produce it, it lets the user figure it out. The tool never
-  explains that it could not figure out a fix, never explains why a
-  directive is absent (the absence is self-evident), and never offers a
-  fix it cannot apply. (Rationale: an offer that refuses wastes the
-  agent's turn; an explanation of inability is noise — 2026-08-17.)
+  the semantic bit. The `fix` command's output has exactly three shapes:
+  **silence** when nothing of that kind remains to fix (no message, no
+  error); **needs-input** when the autofix is real but requires an
+  agent-supplied parameter (a semantic name, the callee's parameter
+  names) — the message asks for exactly that input, and never claims no
+  auto-fix exists (a named or parametrized retry IS an auto-fix); and
+  **applied** — `fix: applied <kind> at <file>:<line> — <description>` —
+  stating exactly what was written. A moved anchor is not a refusal: the
+  tool re-attaches to the finding's current line when that is
+  unambiguous (announcing the move), asks which line when it is not, and
+  goes silent only when the finding is gone. The tool never explains
+  that it could not figure out a fix and never offers a fix it cannot
+  apply. (Rationale: an offer that refuses wastes the agent's turn; an
+  explanation of inability is noise — 2026-08-17; three-shape contract —
+  2026-09-05.)
 - **R27 — Agents never compute line numbers; the tool owns its own
   coordinates.** Findings are located for fixing by the finding's own
   output (the report line and the JSON `line` field are the source of

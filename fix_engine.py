@@ -116,6 +116,8 @@ class _FixRequest:
     opts: FixOptions
     max_decisions: int | None = None
     source: str | None = None
+    wrote: bool = False        # set by fix_finding: the file was actually rewritten
+    decline: str | None = None  # set by fix_finding/fixers: why nothing was written
     col: int = 0  # schema-3 anchor column; disambiguates same-line twins
 
     def _loaded_source(self) -> str:
@@ -551,6 +553,10 @@ class _FixRequest:
         if kind == "positional-literals":
             params = opts.params if opts.params is not None else self._callee_params_for_call()
             if params is None:
+                self.decline = (
+                    "the callee's parameter names could not be resolved from this file — "
+                    "pass --params entries (comma,separated,parameter,names)"
+                )
                 return None
             xform = _KeywordArgs(line, params, opts.callee)
             out = cst.MetadataWrapper(cst.parse_module(source)).visit(xform).code
@@ -910,8 +916,9 @@ class _FixRequest:
         else:
             raise ValueError(f"kind '{kind}' has no fix (mechanical or structural)")
         if new_source is None or new_source == source:
-            return None  # nothing changed — the finding is stale or unlocatable
+            return None  # nothing changed — the finding is stale or unlocatable (R28: silent)
         path.write_text(new_source, encoding="utf-8")
+        self.wrote = True
         return description
 
 
