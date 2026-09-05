@@ -557,12 +557,44 @@ class RustFinding(NamedTuple):
     metric: float = 1.0
     col: int = 0  # 1-based anchor column; 0 = line-level (schema 3)
 
+@dataclass(frozen=True)
+class RustFixRequest:
+    """The --fix payload for the Rust scan core. A record with a to_json() —
+    a wire contract is still a record (the boundary doctrine)."""
+
+    kind: str
+    file: str
+    line: int
+    name: str
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self))
+
+
+def _print_trimmed_diff(before: str, after: str, rel: str) -> None:
+    """The applied change AS A DIFF — a fix the agent cannot review is a fix
+    the agent cannot trust (the houses sweep's 'always git diff after fix'
+    advice existed because the apply confirmation was a bare line)."""
+    diff = list(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=f"{rel} (before)",
+            tofile=f"{rel} (after)",
+            lineterm="",
+        )
+    )
+    if not diff:
+        return
+    if len(diff) > 40:
+        diff = diff[:40] + [f"... ({len(diff) - 40} more diff lines omitted)"]
+    print("\n".join(diff))
+
 
 class _File(NamedTuple):
-    """The file a fix targets — its repo and repo-relative path. The
-    (rel, repo) pair travels together, and the fix operations belong on it
-    (the strewing pattern: functions sharing a domain class are its
-    methods)."""
+    """The file a fix targets — its repo and repo-relative path. The fixers
+    are methods on it: every fixer needs the same (repo, rel) pair (the
+    strewing pattern: functions sharing a domain class are its methods)."""
 
     repo: Path
     rel: str
@@ -575,9 +607,9 @@ class _File(NamedTuple):
         if binary is None:
             print("fix: the Rust scan core is required — build it with `make scanner-check`")
             return 1
-        # lucidlint: ignore record-shape the --fix request IS the wire contract
-        # with the Rust scan core's --fix mode
-        spec = json.dumps({"kind": kind, "file": str(repo / rel), "line": line, "name": name or ""})
+        target = repo / rel
+        before = target.read_text(encoding="utf-8") if target.exists() else None
+        spec = RustFixRequest(kind=kind, file=str(target), line=line, name=name or "").to_json()
         try:
             proc = subprocess.run(
                 [str(binary), "--fix", spec], capture_output=True, text=True, timeout=120, cwd=str(repo)
@@ -592,6 +624,8 @@ class _File(NamedTuple):
             if proc.stderr:
                 sys.stderr.write(proc.stderr)
             return 1
+        if before is not None:
+            _print_trimmed_diff(before, target.read_text(encoding="utf-8"), rel)
         return 0
 
     def finding_lines(self, kind: str) -> list[int]:
@@ -1149,7 +1183,9 @@ def _render_file_group(file: str, items: list[Action]) -> None:
     touched = " [in your diff]" if any(i.in_diff for i in items) else ""
     print(f"\n{file}{touched}")
     for a in items:
-        loc = f":{a.line}" + (f" ({a.function})" if a.function else "")
+        # the column anchors marker placement (schema-3): same-line twins
+        # peel inner-first, and the report names WHICH twin
+        loc = f":{a.line}" + (f":{a.col}" if a.col else "") + (f" ({a.function})" if a.function else "")
         churn = f" [churn {a.churn}x]" if a.churn else ""
         kinds = ",".join(a.kinds) if a.kinds else a.kind
         tag = f"P{a.priority:02d}" if a.severity != "warn" else "warn"
@@ -1966,6 +2002,8 @@ class _FixCommand:
         return 0
 
     def _apply(self, req, moved: bool = False) -> int:
+        target = self.repo / self.args.file
+        before = target.read_text(encoding="utf-8") if target.exists() else None
         description = req.fix_finding()
         if description is None:
             if req.decline:
@@ -1978,6 +2016,12 @@ class _FixCommand:
                 return 0
             return self._reattach_or_silence(req, moved)
         print(f"fix: applied {self.fix_kind} at {self.args.file}:{req.line} — {description}")
+        if before is not None:
+            # extract-module moves defs into a NEW module: the diff here is
+            # the origin file; the created module's content is the preview
+            # the agent already reviewed
+            _print_trimmed_diff(before, target.read_text(encoding="utf-8"), self.args.file)
+        return 0
         return 0
 
     def _reattach_or_silence(self, req, moved: bool) -> int:
