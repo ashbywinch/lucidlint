@@ -2012,7 +2012,7 @@ class _FixCommand:
                 return 0
             if self.fix_kind in _name_required_kinds() and self.args.name is None:
                 print(f"fix: {self.fix_kind} at {self.args.file}:{req.line} needs a semantic name "
-                      f"the tool cannot invent — pass --name <Name> (naming is the judgement call)")
+                      f"the tool cannot invent — pass --name <Name> (name it with a domain noun)")
                 return 0
             return self._reattach_or_silence(req, moved)
         print(f"fix: applied {self.fix_kind} at {self.args.file}:{req.line} — {description}")
