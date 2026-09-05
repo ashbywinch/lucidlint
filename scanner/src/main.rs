@@ -2920,6 +2920,63 @@ mod tests {
     }
 
     #[test]
+    fn future_import_never_changes_marker_binding() {
+        // houses review-log quirk 8 suspected `from __future__ import
+        // annotations` broke return-type marker binding ("identical
+        // patterns bind without it"). The repro disproves it: with OR
+        // without the import, binding is identical — kind + window decide.
+        // The real confusion was the KIND TOKEN: the return-type record
+        // family is `record-shape`; `tuple-record` is the positional-reads
+        // family, and a `tuple-record` marker never matched it.
+        let tuple_body = "def stats(vals) -> tuple[int, int]:\n    lo = min(vals)\n    hi = max(vals)\n    return lo, hi\n\nxs = stats([3, 1, 2])\nprint(xs[0], xs[1])\n";
+        let longparam_body = "def f(a, b, c, d, e, g) -> int:\n    return a\n";
+        let future = "from __future__ import annotations\n\n";
+        let cases: Vec<(&str, String, bool)> = vec![
+            // (label, source, marker must bind)
+            (
+                "record-shape marker",
+                format!("# lucidlint: ignore record-shape the pair is the point\n{tuple_body}"),
+                true,
+            ),
+            (
+                "record-shape marker + future",
+                format!("{future}# lucidlint: ignore record-shape the pair is the point\n{tuple_body}"),
+                true,
+            ),
+            (
+                "wrong-kind marker (tuple-record)",
+                format!("# lucidlint: ignore tuple-record the pair is the point\n{tuple_body}"),
+                false,
+            ),
+            (
+                "wrong-kind marker + future",
+                format!("{future}# lucidlint: ignore tuple-record the pair is the point\n{tuple_body}"),
+                false,
+            ),
+            (
+                "long-param-list marker",
+                format!("# lucidlint: ignore long-param-list the framework signature\n{longparam_body}"),
+                true,
+            ),
+            (
+                "long-param-list marker + future",
+                format!("{future}# lucidlint: ignore long-param-list the framework signature\n{longparam_body}"),
+                true,
+            ),
+        ];
+        for (label, src, must_bind) in &cases {
+            let f = scan_corpus(&[("prod_mod.py", src)]);
+            let target_kind = if label.starts_with("long-param") {
+                "long-param-list"
+            } else {
+                "record-shape"
+            };
+            let bound = !f.iter().any(|x| x.kind == target_kind) && !f.iter().any(|x| x.kind == "stale-suppression");
+            assert_eq!(bound, *must_bind, "{label}: {f:?}");
+        }
+    }
+
+    #[test]
     fn undeclared_attribute_accepts_declared_members() {
         // annotated in __init__ or the class body -> declared
         let f = scan_src(
