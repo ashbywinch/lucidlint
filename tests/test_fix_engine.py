@@ -112,6 +112,23 @@ def test_name_required_kinds_refuse_placeholders_and_missing_names(tmp_path):
     assert placeholder.fix_finding() is None  # refused, not applied
     assert p.read_text() == src  # nothing was rewritten
 
+
+def test_applied_reports_the_reattached_line(tmp_path, capsys):
+    """R27/R28: after 'anchor moved — ... now at F:L' the applied message
+    names L, not the stale --line from the directive — the output must never
+    contradict the announced move (review-bot finding on PR #14)."""
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text("def f():\n    x = 3 * 60\n    return x\n")
+    rc = run_main(
+        repo, "fix", "--kind", "magic-number", "--file", "houses/app.py",
+        "--line", "1", "--name", "SECONDS_PER_MINUTE",
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "anchor moved" in out and "now at houses/app.py:2" in out, out
+    assert "fix: applied magic-number at houses/app.py:2" in out, out
+    assert "houses/app.py:1" not in out, out
+
 def test_feature_envy_moves_the_envied_reads_into_a_method(tmp_path):
     # the generate_tree roots()/epic_roots() shape: the receiver's field
     # reads move onto the envied class as a method; the caller gets a call

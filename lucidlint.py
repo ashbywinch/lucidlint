@@ -612,7 +612,9 @@ class _File(NamedTuple):
                 continue
             if _FIX_ALIASES.get(directive, directive) == wanted:
                 found.append(f.line)
-        return sorted(found)
+        # two operands on one line (magic-number twins) are one ANCHOR —
+        # re-attachment must not see "live findings at 2, 2"
+        return sorted(set(found))
 
     def scan_single_file(self):
         """Scan this file, yielding its findings."""
@@ -1946,14 +1948,14 @@ class _FixCommand:
         if description is None:
             if req.decline:
                 # autofix pending agent-supplied input, at a good anchor
-                print(f"fix: {self.fix_kind} at {self.args.file}:{self.args.line} needs input — {req.decline}")
+                print(f"fix: {self.fix_kind} at {self.args.file}:{req.line} needs input — {req.decline}")
                 return 0
             if self.fix_kind in _name_required_kinds() and self.args.name is None:
-                print(f"fix: {self.fix_kind} at {self.args.file}:{self.args.line} needs a semantic name "
+                print(f"fix: {self.fix_kind} at {self.args.file}:{req.line} needs a semantic name "
                       f"the tool cannot invent — pass --name <Name> (naming is the judgement call)")
                 return 0
             return self._reattach_or_silence(req, moved)
-        print(f"fix: applied {self.fix_kind} at {self.args.file}:{self.args.line} — {description}")
+        print(f"fix: applied {self.fix_kind} at {self.args.file}:{req.line} — {description}")
         return 0
 
     def _reattach_or_silence(self, req, moved: bool) -> int:
@@ -1963,8 +1965,8 @@ class _FixCommand:
         silent when nothing of this kind remains."""
         if moved:
             return 0  # already re-attached once and it still will not write
-        lines = [l for l in _File(self.repo, self.args.file).finding_lines(self.fix_kind)
-                 if l != self.args.line]
+        lines = [ln for ln in _File(self.repo, self.args.file).finding_lines(self.fix_kind)
+                 if ln != self.args.line]
         if len(lines) == 1:
             print(f"fix: anchor moved — {self.fix_kind} now at {self.args.file}:{lines[0]}")
             req.line = lines[0]
