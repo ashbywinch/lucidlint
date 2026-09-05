@@ -1942,9 +1942,14 @@ class _FixCommand:
     def _apply(self, req) -> int:
         description = req.fix_finding()
         if description is None:
+            if req.decline:
+                # the fix declined with a known reason — say so explicitly, so
+                # the output never reads as applied (or as "no finding exists")
+                print(f"fix: {self.fix_kind} NOT APPLIED at {self.args.file}:{self.args.line} — {req.decline}")
+                return 0
             print(_fix_refusal(self.fix_kind, self.args.name, self._params(), self.args.file, self.args.line))
             return 0
-        print(f"fix: {description} — {self.args.file}:{self.args.line} ({self.args.kind})")
+        print(f"fix: applied {self.args.kind} at {self.args.file}:{self.args.line} — {description}")
         return 0
 
 
