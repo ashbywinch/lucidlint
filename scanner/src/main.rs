@@ -101,6 +101,9 @@ struct ScanState<'a> {
     defs: Vec<(String, usize)>,
     /// set_* methods and property setters (name, line) — repo-wide pass.
     setters: Vec<(String, usize)>,
+    /// `self.<attr> = ...` sites in top-level classes — undeclared-
+    /// attribute's repo-wide raw material.
+    self_assigns: Vec<SelfAssign>,
     /// Offsets of numeric literals in data-table collections (>= 3 same-kind
     /// siblings) — magic-number exempt.
     magic_table_exempts: HashSet<usize>,
@@ -1002,6 +1005,9 @@ pub struct ClassInfo {
     pub line: usize,
     pub abstract_: bool,
     pub bases: Vec<String>,
+    /// Declared members (class-body annotations, __slots__, annotated
+    /// __init__ self-assigns) — undeclared-attribute's declaration table.
+    pub declared: Vec<String>,
 }
 
 /// One import alias: local name -> (module, imported name).
@@ -1010,6 +1016,29 @@ pub struct ImportInfo {
     pub alias: String,
     pub module: String,
     pub imported: String,
+}
+
+/// One `self.<attr> = ...` site inside a top-level class — undeclared-
+/// attribute's raw material: the repo-wide merge decides which are quiet
+/// assignments (per-file scans cannot resolve base classes).
+#[derive(Clone)]
+pub struct SelfAssign {
+    pub class: String,
+    pub attr: String,
+    pub line: usize,
+    pub function: String,
+    pub is_init: bool,
+}
+
+/// One file's undeclared-attribute inputs: its rel, classes (declared
+/// members + bases), imports, and self-assignment sites — the per-scan
+/// slice the repo-wide pass resolves.
+#[derive(Clone, Default)]
+pub struct UndeclScan {
+    pub rel: String,
+    pub classes: Vec<ClassInfo>,
+    pub imports: Vec<ImportInfo>,
+    pub self_assigns: Vec<SelfAssign>,
 }
 
 #[derive(Clone, Default)]
@@ -1026,6 +1055,7 @@ pub struct FileScan {
     pub skeletons: Vec<SkeletonFn>,
     pub classes: Vec<ClassInfo>,
     pub imports: Vec<ImportInfo>,
+    pub self_assigns: Vec<SelfAssign>,
     /// The file's parsed `lucidlint: ignore` suppressions — the repo-wide
     /// families (duplicate/unused/docs/graph) are filtered through them at
     /// the end of the scan (per-file families apply theirs during the scan).
@@ -1075,10 +1105,11 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     strewing_findings(state, body);
     misplaced_method_findings(state, body);
     tuple_record_findings(state, body);
+    wide_tuple_findings(state, body);
     assembly_class_findings(state, body);
     data_clump_findings(state, body);
     feature_envy_findings(state, body);
-    undeclared_attribute_findings(state, body);
+    collect_self_assigns(state, body);
     god_class_findings(state, body);
     duplicate_field_findings(state, body);
     record_shape_findings(state, body, source);
@@ -1096,6 +1127,22 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     middle_man_findings(state, body, source);
     collect_setters(state, body);
     loop_pipeline_findings(state, body, source);
+}
+
+/// Per-buffer scans never run the repo-wide families (unused, unused-setter,
+/// duplicate) — their findings are evaluated only in repo_wide_merge — so
+/// their markers cannot bind here and a stale finding for one is a false
+/// fail artifact. The gate path keeps stale reporting: its merge consumes
+/// those markers and drops exactly the stale findings that survive it.
+// lucidlint: ignore record-shape Finding is the core finding type consumed repo-wide — one more consumer is not a new record
+fn drop_repo_wide_stale_artifacts(findings: &mut Vec<Finding>) {
+    findings.retain(|f| {
+        f.kind != "stale-suppression"
+            || !matches!(
+                sig_of_stale(&f.message).as_str(),
+                "unused" | "unused-setter" | "duplicate" | "undeclared-attribute"
+            )
+    });
 }
 
 fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
@@ -1195,6 +1242,9 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     let mut all = type_ignore_findings(source, name, tokens);
     all.extend(noqa_findings(source, name, tokens));
     all.extend(findings);
+    if !repo_wide {
+        drop_repo_wide_stale_artifacts(&mut all);
+    }
     let classes = collect_classes(&body, source);
     let imports = collect_imports(&body, source);
     FileScan {
@@ -1210,6 +1260,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         skeletons: state.skeletons,
         classes,
         imports,
+        self_assigns: state.self_assigns,
         supps,
         supps_spent,
     }
@@ -1327,6 +1378,17 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
     let mut repo_wide_unused = checks::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
     repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
     reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
+    let undecl_scans: Vec<UndeclScan> = scans
+        .iter()
+        .map(|s| UndeclScan {
+            rel: s.rel_of(root_s),
+            classes: s.classes.clone(),
+            imports: s.imports.clone(),
+            self_assigns: s.self_assigns.clone(),
+        })
+        .collect();
+    let undeclared = checks::undeclared_findings(&undecl_scans);
+    reconcile_repo_wide(&mut additions, undeclared, &supps_by_rel, &supps_spent_by_rel);
     let mut by_file: std::collections::HashMap<String, Vec<Finding>> = std::collections::HashMap::new();
     for f in additions {
         by_file.entry(f.file.clone()).or_default().push(f);
@@ -1353,6 +1415,7 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         skeletons: rs.skeletons.clone(),
         classes: Vec::new(),
         imports: Vec::new(),
+        self_assigns: Vec::new(),
         supps,
         supps_spent: rs.supps_spent.clone(),
     }
@@ -2714,6 +2777,48 @@ mod tests {
         assert_eq!(r.len(), 1, "{f:?}");
     }
 
+    #[test]
+    fn wide_tuple_fails_on_four_element_annotations() {
+        // the smoosh: a long parameter list packed into one anonymous tuple
+        // — the positions carry meaning the call site cannot see
+        let f = scan_src("def set_limits(limits: tuple[int, int, str, float]) -> None:\n    return None\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "wide-tuple").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert_eq!(r[0].severity, "fail", "{f:?}");
+        assert!(r[0].message.contains("4-tuple"), "{}", r[0].message);
+        assert!(r[0].message.contains("limits"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn wide_tuple_warns_on_three_elements() {
+        let f = scan_src("def rgb(c: tuple[int, int, int]) -> None:\n    return None\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "wide-tuple").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert_eq!(r[0].severity, "warn", "{f:?}");
+    }
+
+    #[test]
+    fn wide_tuple_exempts_pairs_variadic_and_nested_inner_tuples() {
+        // 2-tuples are idiomatic pairs; tuple[X, ...] is a homogeneous
+        // sequence, not a record; a 2-tuple nested in a 4-tuple flags the
+        // OUTER arity only
+        let f = scan_src(
+            "def a(p: tuple[int, int]) -> None: ...\ndef b(p: tuple[int, ...]) -> None: ...\ndef c(p: tuple[tuple[int, int], str, bool, float]) -> None: ...\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "wide-tuple").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert_eq!(r[0].severity, "fail", "{f:?}");
+    }
+
+    #[test]
+    fn wide_tuple_covers_returns_variables_and_methods() {
+        let f = scan_src(
+            "def stats(v) -> tuple[int, int, str, bool]:\n    return 1, 2, \"x\", True\nrow: tuple[int, str, int, int] = (1, \"a\", 2, 3)\nclass C:\n    def m(self, p: tuple[int, int, int, int]) -> None:\n        return None\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "wide-tuple").collect();
+        assert_eq!(r.len(), 3, "{f:?}");
+    }
+
     // ------------------------------------ data-clump / feature-envy / undeclared-attribute
     #[test]
     fn data_clump_fires_on_shared_param_pair() {
@@ -2731,6 +2836,40 @@ mod tests {
         // a pair shared by only two functions is not a clump
         let f = scan_src("def a(em, vm):\n    return em\n\ndef b(em, vm):\n    return vm\n");
         assert!(!f.iter().any(|x| x.kind == "data-clump"), "{f:?}");
+    }
+    #[test]
+    fn data_clump_pairs_aggregate_per_anchor() {
+        // Two pairs sharing one anchor = ONE finding naming both: per-pair
+        // findings stacked at the same def line could never be per-site
+        // suppressed (one marker consumes one finding).
+        let f = scan_src(
+            "def a(em, vm, x):\n    return em, vm, x\n\ndef b(em, vm):\n    return em\n\ndef c(em, vm, x):\n    return vm, x\n\ndef d(x, em):\n    return x, em\n",
+        );
+        let clumps: Vec<&Finding> = f.iter().filter(|x| x.kind == "data-clump").collect();
+        assert_eq!(clumps.len(), 1, "{f:?}");
+        assert!(clumps[0].message.contains("(em, vm)"), "{}", clumps[0].message);
+        assert!(clumps[0].message.contains("(em, x)"), "{}", clumps[0].message);
+        assert!(clumps[0].message.contains("pairs travel"), "{}", clumps[0].message);
+    }
+
+    #[test]
+    fn per_buffer_scan_does_not_stale_repo_wide_markers() {
+        // The repo-wide-only families never fire per-file, so their markers
+        // cannot bind in a per-buffer scan — flagging them stale there was
+        // a false fail artifact (the gate's repo-wide merge evaluates them).
+        let src = "# lucidlint: ignore duplicate cross-file twins are the point\ndef a():\n    return 1\n";
+        let per_buffer = scan_source_impl(src, "prod_mod.py", false);
+        assert!(
+            !per_buffer.findings.iter().any(|f| f.kind == "stale-suppression"),
+            "{:?}",
+            per_buffer.findings
+        );
+        let gate = scan_source_impl(src, "prod_mod.py", true);
+        assert!(
+            gate.findings.iter().any(|f| f.kind == "stale-suppression"),
+            "{:?}",
+            gate.findings
+        );
     }
 
     #[test]
@@ -2786,6 +2925,98 @@ mod tests {
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
         assert_eq!(r.len(), 1);
         assert!(r[0].message.contains("— fix: undeclared-attribute"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn undeclared_attribute_resolves_cross_file_base() {
+        // the houses case: Node declares display_name in one file; a
+        // subclass assigning it in another is NOT a quiet member — the old
+        // per-file rule forced a redundant re-declaration on every subclass
+        let f = scan_corpus(&[
+            (
+                "base.py",
+                "class Node:\n    def __init__(self):\n        self.display_name: str = \"\"\n",
+            ),
+            (
+                "sub.py",
+                "from base import Node\n\nclass Doc(Node):\n    def refresh(self):\n        self.display_name = \"x\"\n",
+            ),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "undeclared-attribute"), "{f:?}");
+    }
+
+    #[test]
+    fn undeclared_attribute_resolves_same_file_base() {
+        let f = scan_src(
+            "class Base:\n    def __init__(self):\n        self.kind: str = \"\"\n\nclass Sub(Base):\n    def refresh(self):\n        self.kind = \"x\"\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "undeclared-attribute"), "{f:?}");
+    }
+
+    #[test]
+    fn undeclared_attribute_still_fires_when_no_base_declares() {
+        // an undeclared member is still a finding, and a base-class cycle
+        // must not hang the ancestor walk
+        let f = scan_src("class A(B):\n    def __init__(self):\n        self.x = 0\n\nclass B(A):\n    pass\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+    }
+
+    #[test]
+    fn future_import_never_changes_marker_binding() {
+        // houses review-log quirk 8 suspected `from __future__ import
+        // annotations` broke return-type marker binding ("identical
+        // patterns bind without it"). The repro disproves it: with OR
+        // without the import, binding is identical — kind + window decide.
+        // The real confusion was the KIND TOKEN: the return-type record
+        // family is `record-shape`; `tuple-record` is the positional-reads
+        // family, and a `tuple-record` marker never matched it.
+        let tuple_body = "def stats(vals) -> tuple[int, int]:\n    lo = min(vals)\n    hi = max(vals)\n    return lo, hi\n\nxs = stats([3, 1, 2])\nprint(xs[0], xs[1])\n";
+        let longparam_body = "def f(a, b, c, d, e, g) -> int:\n    return a\n";
+        let future = "from __future__ import annotations\n\n";
+        let cases: Vec<(&str, String, bool)> = vec![
+            // (label, source, marker must bind)
+            (
+                "record-shape marker",
+                format!("# lucidlint: ignore record-shape the pair is the point\n{tuple_body}"),
+                true,
+            ),
+            (
+                "record-shape marker + future",
+                format!("{future}# lucidlint: ignore record-shape the pair is the point\n{tuple_body}"),
+                true,
+            ),
+            (
+                "wrong-kind marker (tuple-record)",
+                format!("# lucidlint: ignore tuple-record the pair is the point\n{tuple_body}"),
+                false,
+            ),
+            (
+                "wrong-kind marker + future",
+                format!("{future}# lucidlint: ignore tuple-record the pair is the point\n{tuple_body}"),
+                false,
+            ),
+            (
+                "long-param-list marker",
+                format!("# lucidlint: ignore long-param-list the framework signature\n{longparam_body}"),
+                true,
+            ),
+            (
+                "long-param-list marker + future",
+                format!("{future}# lucidlint: ignore long-param-list the framework signature\n{longparam_body}"),
+                true,
+            ),
+        ];
+        for (label, src, must_bind) in &cases {
+            let f = scan_corpus(&[("prod_mod.py", src)]);
+            let target_kind = if label.starts_with("long-param") {
+                "long-param-list"
+            } else {
+                "record-shape"
+            };
+            let bound = !f.iter().any(|x| x.kind == target_kind) && !f.iter().any(|x| x.kind == "stale-suppression");
+            assert_eq!(bound, *must_bind, "{label}: {f:?}");
+        }
     }
 
     #[test]
@@ -3164,10 +3395,14 @@ mod tests {
     }
 
     #[test]
-    fn record_deserializer_boundary_is_exempt() {
-        // raw JSON in, domain class out — the sanctioned bare-dict spot
+    fn record_deserializer_boundary_is_still_a_finding() {
+        // the boundary doctrine (user ruling): a wire payload is NOT exempt —
+        // raw JSON in gets a class with named fields and a to_dict() at the
+        // serialization edge
         let f = scan_src("def parse(raw: dict[str, Any]) -> Label:\n    return Label(raw)\n");
-        assert!(!f.iter().any(|x| x.kind == "record-shape"));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("to_dict"), "{}", r[0].message);
     }
 
     #[test]
@@ -3362,6 +3597,7 @@ mod tests {
         let mut test_refs = HashSet::new();
         let mut strings = Vec::new();
         let mut all = Vec::new();
+        let mut undecl_scans: Vec<UndeclScan> = Vec::new();
         let mut supps_by_rel: std::collections::HashMap<String, common::Suppressions> =
             std::collections::HashMap::new();
         let mut spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
@@ -3389,6 +3625,12 @@ mod tests {
             for (name, line) in &scan.setters {
                 setters.push((rel.clone(), name.clone(), *line));
             }
+            undecl_scans.push(UndeclScan {
+                rel: rel.clone(),
+                classes: scan.classes.clone(),
+                imports: scan.imports.clone(),
+                self_assigns: scan.self_assigns.clone(),
+            });
             if is_test {
                 test_refs.extend(scan.refs.iter().cloned());
             } else {
@@ -3401,6 +3643,8 @@ mod tests {
         let mut repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
         repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
         reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel, &spent_by_rel);
+        let undeclared = undeclared_findings(&undecl_scans);
+        reconcile_repo_wide(&mut all, undeclared, &supps_by_rel, &spent_by_rel);
         // the suppression census + its bulk warning mirror main()'s report
         let census = suppression_counts(supps_by_rel.values());
         all.extend(bulk_suppression_findings(&census, &supps_by_rel, 10));
@@ -3570,8 +3814,9 @@ mod tests {
 
         let r = scan_src("def g() -> dict[str, dict[str, int]]:\n    return {}\n");
         let rs = r.iter().find(|x| x.kind == "record-shape").expect("record-shape fires");
-        assert!(rs.message.contains("class with named fields"), "{}", rs.message);
-        assert!(rs.message.contains("wire format"), "{}", rs.message);
+        assert!(rs.message.contains("class named with a domain noun"), "{}", rs.message);
+        assert!(rs.message.contains("to_dict()"), "{}", rs.message);
+        assert!(rs.message.contains("wire payload is still a record"), "{}", rs.message);
 
         let b = scan_src("def f():\n    try:\n        step()\n    except Exception:\n        return None\n");
         let be = b.iter().find(|x| x.kind == "broad-except").expect("broad-except fires");
@@ -3700,6 +3945,23 @@ mod tests {
         assert!(!ok.iter().any(|x| x.kind == "positional-literals"));
         let ok2 = scan_src("def g():\n    range(1, 10)\n");
         assert!(!ok2.iter().any(|x| x.kind == "positional-literals")); // builtin exempt
+    }
+    #[test]
+    fn positional_directive_states_the_callee_case() {
+        // The directive states THIS site's case: a same-file callee's bare
+        // command fixes (the engine resolves the signature from the call's
+        // file); anything else carries its --params slot up front — the
+        // magic-number --name contract. No conditional for the reader.
+        let local = scan_src("def set_limits(a, b):\n    pass\n\ndef g():\n    set_limits(10, 20)\n");
+        let m = local.iter().find(|x| x.kind == "positional-literals").unwrap();
+        assert!(!m.message.contains("--params"), "{m:?}");
+        assert!(m.message.ends_with("— fix: positional-literals"), "{m:?}");
+        let ext = scan_src("def g():\n    set_limits(10, 20)\n");
+        let m = ext.iter().find(|x| x.kind == "positional-literals").unwrap();
+        assert!(
+            m.message.ends_with("— fix: positional-literals --params <names>"),
+            "{m:?}"
+        );
     }
 
     #[test]

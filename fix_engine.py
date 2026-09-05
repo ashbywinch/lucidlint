@@ -89,6 +89,11 @@ _NAME_REQUIRED_KINDS = {
     "extract-record-class",
     "extract-module",
 }
+# Every kind the fix command can actually apply. A finding message may
+# advertise "— fix: <kind>" ONLY when the kind is here (for .rs files, in
+# lucidlint.RUST_FIXABLE_KINDS) — suggesting a fix that cannot apply sends
+# agents hand-editing around working automation, or guessing at a seam.
+FIXABLE_KINDS = set(MECHANICAL_KINDS) | set(_STRUCTURAL_FIXERS) | {"extract-module"}
 
 
 class _ModuleProposal(NamedTuple):

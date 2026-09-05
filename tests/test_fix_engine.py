@@ -1200,6 +1200,7 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
                 "needs a semantic name",
                 "--name must be",
                 "--params entries",
+                "pass --params <names>",
             )
         )
         prev_applied = bool(fix_out.strip()) and not refused

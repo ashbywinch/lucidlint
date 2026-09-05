@@ -117,10 +117,10 @@ pub fn complexity_message(cc: u32, shape: &str, detail: &str) -> String {
     // tail would append a second, wrong directive to the shape-routed ones
     match shape {
         "dispatch" => format!(
-            "cyclomatic complexity {cc} (>= 15) — the function is a dispatch chain over '{detail}': every arm is a named handler — HOIST THE LATENT DATA STRUCTURE: the chain IS a (selector → action) table — collapse it into a dict of {detail} → lambda closures in Python (a match in Rust), and dispatch by lookup — fix: dispatch-registry (previews the table; apply with --confirm)"
+            "cyclomatic complexity {cc} (>= 15) — the function is a dispatch chain over '{detail}': every arm is a named handler — HOIST THE HIDDEN DATA STRUCTURE: the chain IS a (selector → action) table — collapse it into a dict of {detail} → lambda closures in Python (a match in Rust), and dispatch by lookup — fix: dispatch-registry (previews the table; apply with --confirm)"
         ),
         "rules" => format!(
-            "cyclomatic complexity {cc} (>= 15) — the function is a battery of independent checks each appending to '{detail}' — HOIST THE LATENT DATA STRUCTURE: the if/append chain IS a (condition, violation) table — collapse it into a list of such pairs whose conditions are lambdas (Python) or fn pointers (Rust), and collect the violations whose condition holds — fix: rule-table (previews the table; apply with --confirm)"
+            "cyclomatic complexity {cc} (>= 15) — the function is a battery of independent checks each appending to '{detail}' — HOIST THE HIDDEN DATA STRUCTURE: the if/append chain IS a (condition, violation) table — collapse it into a list of such pairs whose conditions are lambdas (Python) or fn pointers (Rust), and collect the violations whose condition holds — fix: rule-table (previews the table; apply with --confirm)"
         ),
         _ => format!(
             "cyclomatic complexity {cc} (>= 15) — extract part of this function into a named method (the preview shows the block) — fix: extract-method"
@@ -436,6 +436,15 @@ fn peel_assign(members: &[usize], findings: &[crate::Finding], ctx: &mut LineMar
     ok
 }
 
+/// Per-signal line index — the facts behind the stale binding reasons
+/// (finding gone / covered by another marker / outside the window).
+fn signal_line_index(findings: &[crate::Finding]) -> std::collections::HashMap<String, Vec<usize>> {
+    let mut by_signal: std::collections::HashMap<String, Vec<usize>> = Default::default();
+    for f in findings {
+        by_signal.entry(f.kind.clone()).or_default().push(f.line);
+    }
+    by_signal
+}
 /// Filter findings through the suppressions + emit the why-less suppression
 /// findings — the shared post-filter (Python `_scan_file`'s). `marker` is the
 /// comment token ('#' or "//") used in the why-less messages. `pre_used`
@@ -490,9 +499,10 @@ col: 0,
             }
         }
     }
-    // innermost-peel: markers bind inner-first, one marker per finding
     let mut exempted = vec![false; findings.len()];
     let mut taken: std::collections::HashSet<(usize, String)> = Default::default();
+    // innermost-peel: markers bind inner-first, one marker per finding
+    let by_signal = signal_line_index(&findings);
     for members in common_group_line_indices(&findings) {
         let mut ctx = LineMarkerCtx {
             supps: &supps,
@@ -523,6 +533,7 @@ col: 0,
         comments,
         file,
         marker,
+        by_signal: &by_signal,
     };
     out.extend(ctx.stale_suppression_findings());
     out
@@ -559,6 +570,10 @@ struct StaleCtx<'a> {
     comments: &'a [(usize, String)],
     file: &'a str,
     marker: &'a str,
+    /// Every finding's (kind, lines) that fired in this scan — the facts
+    /// the stale binding-reason reasons cite (gone / covered / out of
+    /// window).
+    by_signal: &'a std::collections::HashMap<String, Vec<usize>>,
 }
 
 impl<'a> StaleCtx<'a> {
@@ -568,20 +583,30 @@ impl<'a> StaleCtx<'a> {
     /// are already findings; they never match by design.
     fn stale_suppression_findings(&self) -> Vec<crate::Finding> {
         let mut out = Vec::new();
+        // The `— fix: stale-suppression` directive goes only where the fix
+        // command can actually delete the marker (the Python engine). A Rust
+        // file's stale marker has no fixer; an advertised fix that cannot
+        // run is a false suggestion (user ruling) — "remove it" IS the fix.
+        let fix_tail = if self.file.ends_with(".rs") {
+            ""
+        } else {
+            " — fix: stale-suppression"
+        };
         for (ln, entries) in &self.supps.line {
             for (sig, why) in entries {
                 if why.is_empty() || self.used_line.contains(&(*ln, sig.clone())) {
                     continue;
                 }
+                let reason = self.stale_reason(sig, *ln);
                 out.push(crate::Finding {
-col: 0,
+                    col: 0,
                     file: self.file.to_string(),
                     line: *ln,
                     function: String::new(),
                     kind: "stale-suppression".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "suppression '{} lucidlint: ignore {sig}' at line {ln} no longer fires — remove it — fix: stale-suppression",
+                        "suppression '{} lucidlint: ignore {sig}' at line {ln} no longer fires ({reason}) — remove it{fix_tail}",
                         self.marker
                     ),
                 });
@@ -596,21 +621,62 @@ col: 0,
                 .iter()
                 .find(|(_, t)| t.contains(&format!("lucidlint: ignore-file {sig}")))
             {
+                let lines = self.lines_for(sig);
+                let reason = if lines.is_empty() {
+                    "no matching finding fires in this file — it was fixed, or the kind was renamed".to_string()
+                } else {
+                    "the suppressions covered only findings that no longer fire".to_string()
+                };
                 out.push(crate::Finding {
-col: 0,
+                    col: 0,
                     file: self.file.to_string(),
                     line: *ln,
                     function: String::new(),
                     kind: "stale-suppression".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "file suppression '{} lucidlint: ignore-file {sig}' no longer fires — remove it — fix: stale-suppression",
+                        "file suppression '{} lucidlint: ignore-file {sig}' no longer fires ({reason}) — remove it{fix_tail}",
                         self.marker
                     ),
                 });
             }
         }
         out
+    }
+
+    /// Every line where a finding matching `sig` (family-aware) fired in
+    /// this scan — the facts the binding-reason diagnostics cite.
+    fn lines_for(&self, sig: &str) -> Vec<usize> {
+        let mut lines: Vec<usize> = self
+            .by_signal
+            .iter()
+            .filter(|(kind, _)| signal_matches(sig, kind))
+            .flat_map(|(_, ls)| ls.iter().copied())
+            .collect();
+        lines.sort_unstable();
+        lines
+    }
+
+    /// WHY an unused marker did not bind: the finding is gone, another
+    /// marker covers it (one marker per finding, innermost first), or the
+    /// finding sits outside the marker's 3-line window. The houses sweep
+    /// burned probe sessions on each of these before reading the source.
+    fn stale_reason(&self, sig: &str, ln: usize) -> String {
+        let lines = self.lines_for(sig);
+        if lines.is_empty() {
+            return "nothing fires in this file — the finding was fixed, or the kind was renamed".to_string();
+        }
+        if lines.iter().any(|&l| ln <= l && l - ln < 3) {
+            return "every matching finding in the marker's window already has its own marker — one marker covers one finding (innermost first)"
+                .to_string();
+        }
+        if let Some(&near) = lines.iter().min_by_key(|&&l| l.abs_diff(ln)) {
+            return format!(
+                "the nearest matching finding is at line {near}; markers bind within the 3 lines ending at it ({}..={near})",
+                near.saturating_sub(2)
+            );
+        }
+        "nothing fires in this file".to_string()
     }
 }
 
@@ -626,11 +692,11 @@ mod tests {
         // auto-fix; the prose names the more lucid shape)
         let dispatch = complexity_message(36, "dispatch", "tool");
         assert!(dispatch.contains("dispatch chain over 'tool'"), "{dispatch}");
-        assert!(dispatch.contains("HOIST THE LATENT DATA STRUCTURE"), "{dispatch}");
+        assert!(dispatch.contains("HOIST THE HIDDEN DATA STRUCTURE"), "{dispatch}");
         assert!(dispatch.contains("lambda closures"), "{dispatch}");
         assert!(dispatch.contains("fix: dispatch-registry"), "{dispatch}");
         let rules = complexity_message(42, "rules", "violations");
-        assert!(rules.contains("HOIST THE LATENT DATA STRUCTURE"), "{rules}");
+        assert!(rules.contains("HOIST THE HIDDEN DATA STRUCTURE"), "{rules}");
         assert!(rules.contains("(condition, violation) table"), "{rules}");
         assert!(rules.contains("fix: rule-table"), "{rules}");
         let plain = complexity_message(20, "plain", "");
@@ -682,6 +748,109 @@ mod tests {
         };
         let fs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books);
         assert!(fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
+    }
+    #[test]
+    fn stale_message_directive_only_where_a_fixer_exists() {
+        // The `— fix: stale-suppression` directive must appear only where
+        // the fix command can actually apply (the Python engine deletes the
+        // marker; the Rust core has no such fixer) — an advertised fix that
+        // cannot run is a false suggestion (user ruling).
+        let comments = vec![(1, "// lucidlint: ignore latent-class nothing here".to_string())];
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let rs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books);
+        let msg = rs
+            .iter()
+            .find(|f| f.kind == "stale-suppression")
+            .unwrap()
+            .message
+            .clone();
+        assert!(!msg.contains("fix:"), "{msg}");
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let py = apply_suppressions_impl(vec![], &comments, "x.py", "#", &mut books);
+        let msg = py
+            .iter()
+            .find(|f| f.kind == "stale-suppression")
+            .unwrap()
+            .message
+            .clone();
+        assert!(msg.contains("fix: stale-suppression"), "{msg}");
+    }
+
+    #[test]
+    fn stale_message_states_why_the_marker_did_not_bind() {
+        // three causes, three reasons: the finding is gone; the finding is
+        // outside the marker's window; the window's findings are already
+        // covered (one marker per finding). The houses sweep burned probe
+        // sessions on each before reading the source.
+        let mut spent = std::collections::HashSet::new();
+        let gone = apply_suppressions_impl(
+            vec![],
+            &[(1, "// lucidlint: ignore magic-number gone".to_string())],
+            "x.py",
+            "#",
+            &mut SuppressionBooks {
+                pre_used: &PreUsedSuppressions::default(),
+                spent: &mut spent,
+            },
+        );
+        let msg = gone
+            .iter()
+            .find(|f| f.kind == "stale-suppression")
+            .unwrap()
+            .message
+            .clone();
+        assert!(msg.contains("nothing fires in this file"), "{msg}");
+
+        // marker below the finding: the window of line 3 is 1..=3, so a
+        // marker at 5 cannot bind — the reason names the move
+        let mut spent = std::collections::HashSet::new();
+        let misplaced = apply_suppressions_impl(
+            vec![finding("magic-number", 3)],
+            &[(5, "// lucidlint: ignore magic-number threshold".to_string())],
+            "x.py",
+            "#",
+            &mut SuppressionBooks {
+                pre_used: &PreUsedSuppressions::default(),
+                spent: &mut spent,
+            },
+        );
+        let msg = misplaced
+            .iter()
+            .find(|f| f.kind == "stale-suppression")
+            .unwrap()
+            .message
+            .clone();
+        assert!(msg.contains("nearest matching finding is at line 3"), "{msg}");
+        assert!(msg.contains("lines ending at it"), "{msg}");
+
+        // two markers, one finding: the loser's window is fully covered
+        let mut spent = std::collections::HashSet::new();
+        let covered = apply_suppressions_impl(
+            vec![finding("magic-number", 3)],
+            &[
+                (2, "// lucidlint: ignore magic-number first".to_string()),
+                (3, "// lucidlint: ignore magic-number second".to_string()),
+            ],
+            "x.py",
+            "#",
+            &mut SuppressionBooks {
+                pre_used: &PreUsedSuppressions::default(),
+                spent: &mut spent,
+            },
+        );
+        let msgs: Vec<String> = covered
+            .iter()
+            .filter(|f| f.kind == "stale-suppression")
+            .map(|f| f.message.clone())
+            .collect();
+        assert_eq!(msgs.len(), 1, "{msgs:?}");
+        assert!(msgs[0].contains("already has its own marker"), "{}", msgs[0]);
     }
 
     #[test]

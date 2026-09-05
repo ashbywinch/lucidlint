@@ -369,7 +369,7 @@ pub fn cycle_findings_for(graph: &BTreeMap<String, Vec<String>>) -> Vec<Finding>
             sorted[0].clone()
         });
         out.push(Finding { file: anchor, line: 0, col: 0, function: String::new(), kind: "import-cycle".into(), severity: "fail".into(), message: format!(
-            "import cycle: {cycle_text} — circular imports are fixed by restructuring modules, never bodged with lazy imports: hoist the shared interface into its own module"
+            "import cycle: {cycle_text} — circular imports are fixed by restructuring modules, never hidden behind lazy imports: hoist the shared interface into its own module"
         ) });
     }
     out
@@ -411,7 +411,7 @@ pub fn large_function_findings(
         if !include_tests && is_test_rel(&rel) {
             continue;
         }
-        out.push(Finding { file: rel, line: ls as usize, col: 0, function: n.name.clone(), kind: "large-function".into(), severity: "fail".into(), message: format!("function spans {span} lines (>= {max_lines}) — Extract Function: split it into one rule per named method") });
+        out.push(Finding { file: rel, line: ls as usize, col: 0, function: n.name.clone(), kind: "large-function".into(), severity: "fail".into(), message: format!("function spans {span} lines (>= {max_lines}) — Extract Function: split it into small named functions, one job each") });
     }
     out
 }
@@ -575,7 +575,7 @@ pub fn high_risk_findings(repo: &Path, contract: &GraphContract, max_risk: f64, 
             function: n.name.clone(),
             kind: "high-risk".into(),
             severity: "fail".into(),
-            message: format!("graph risk {risk:.2} (>= {max_risk}), {caller_count} call site(s)"),
+            message: format!("high risk score {risk:.2} (>= {max_risk}) — many callers, no test coverage, or a security-sensitive name; {caller_count} call site(s)"),
         });
     }
     out
@@ -1028,7 +1028,8 @@ mod tests {
         let f = high_risk_findings(Path::new("/repo"), &c, 0.8, false);
         assert_eq!(f.len(), 1);
         // 0.3 (12 callers) + 0.3 (untested) + 0.4 (security keyword) capped at 1.0
-        assert!(f[0].message.contains("graph risk 1.00"));
+        assert!(f[0].message.contains("high risk score 1.00"));
+        assert!(f[0].message.contains("no test coverage"));
     }
 
     #[test]

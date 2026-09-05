@@ -477,6 +477,18 @@ pub fn positional_literals_findings(state: &mut ScanState, call: &ExprCall, sour
         return;
     };
     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
+    // The directive states THIS site's case — no conditional for the reader
+    // to evaluate (user ruling: never suggest a fix that cannot fix). A
+    // same-file callee resolves from the call's file alone, so the bare
+    // command fixes; anything else carries its semantic slot up front, the
+    // same contract as magic-number's --name <CONST>. A call textually
+    // above its def misclassifies toward the slot — an unnecessary
+    // placeholder, never a command that cannot fix.
+    let directive = if state.defs.iter().any(|(name, _)| *name == callee_name) {
+        " — fix: positional-literals"
+    } else {
+        " — fix: positional-literals --params <names>"
+    };
     state.findings.push(Finding {
 col: 0,
         file: state.file.to_string(),
@@ -485,7 +497,7 @@ col: 0,
         kind: "positional-literals".into(),
         severity: "warn".into(),
         message: format!(
-            "call passes {n} {kind} positionally to {callee}() — a swapped argument is a silent bug; use keyword arguments — fix: positional-literals",
+            "call passes {n} {kind} positionally to {callee}() — a swapped argument is a silent bug; use keyword arguments{directive}",
             callee = callee_name,
         ),
     });
@@ -604,7 +616,7 @@ pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
             kind: "long-param-list".into(),
             severity: "fail".into(),
             message: format!(
-                "{n} parameters — introduce a parameter object — fix: long-param-list --fix-name <Options>"
+                "{n} parameters — introduce a parameter object named with a domain noun — fix: long-param-list --fix-name <Options>"
             ),
         });
     }
@@ -661,7 +673,7 @@ col: 0,
                 kind: "swallow".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "{kind} at line {line} — logs are not surfacing: a caller exists that needs to decide; re-raise, return an error value, or mark `# lucidlint: ignore swallow <terminal-boundary reason>` only when no caller exists to propagate to"
+                    "{kind} at line {line} — logs are not surfacing: a caller exists that needs to decide; surface by return, raise, break, continue, sys.exit, or mutating a name the enclosing function returns — mark `# lucidlint: ignore swallow <terminal-boundary reason>` only when no caller exists to propagate to"
                 ),
             });
         } else if let Some(ty) = type_opt {
@@ -1607,6 +1619,140 @@ pub fn count_tuple_record_reads(
     }
 }
 
+/// Fixed element count of a `tuple[...]` annotation — None when the
+/// annotation is not a tuple, is unparameterized, or is variadic
+/// (`tuple[X, ...]`: a homogeneous sequence, not a record).
+fn fixed_tuple_arity(ann: Option<&Expr>) -> Option<usize> {
+    let Expr::Subscript(sub) = ann? else {
+        return None;
+    };
+    if !matches!(sub.value.as_ref(), Expr::Name(n) if n.id.as_str() == "tuple") {
+        return None;
+    }
+    let Expr::Tuple(t) = sub.slice.as_ref() else {
+        return None;
+    };
+    if t.elts.iter().any(|e| matches!(e, Expr::EllipsisLiteral(_))) {
+        return None;
+    }
+    let n = t.elts.len();
+    (n >= 3).then_some(n)
+}
+
+/// A tuple annotation with 3+ fixed elements — a parameter, return, or
+/// variable whose positions carry meaning the call site cannot see. The
+/// smoosh (packing a long parameter list into one tuple parameter) is THIS
+/// finding with fewer lines, not a fix for it: the rule wanted a parameter
+/// object with named fields. 2-tuples are idiomatic pairs; 4+ elements
+/// fail, 3 warns (the RGB gray zone).
+pub fn wide_tuple_findings(state: &mut ScanState, body: &[Stmt]) {
+    walk_wide_tuples(state, body, "");
+}
+
+/// The annotation walk: every scope, with the enclosing function name for
+/// attribution (module-level annotations carry an empty owner).
+fn walk_wide_tuples(state: &mut ScanState, body: &[Stmt], owner: &str) {
+    for s in body {
+        match s {
+            Stmt::FunctionDef(f) => {
+                for a in f
+                    .parameters
+                    .posonlyargs
+                    .iter()
+                    .chain(&f.parameters.args)
+                    .chain(&f.parameters.kwonlyargs)
+                {
+                    emit_wide_tuple(
+                        state,
+                        a.annotation(),
+                        &format!("parameter '{}' of '{}'", a.parameter.name, f.name),
+                        line_of(state.source, a.range().start()),
+                        f.name.as_str(),
+                    );
+                }
+                emit_wide_tuple(
+                    state,
+                    f.returns.as_deref(),
+                    &format!("the return type of '{}'", f.name),
+                    line_of(state.source, f.name.range().start()),
+                    f.name.as_str(),
+                );
+                walk_wide_tuples(state, &f.body, f.name.as_str());
+            }
+            Stmt::ClassDef(c) => walk_wide_tuples(state, &c.body, owner),
+            Stmt::Try(t) => {
+                walk_wide_tuples(state, &t.body, owner);
+                for h in &t.handlers {
+                    let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                    walk_wide_tuples(state, &eh.body, owner);
+                }
+                walk_wide_tuples(state, &t.orelse, owner);
+                walk_wide_tuples(state, &t.finalbody, owner);
+            }
+            Stmt::For(f) => {
+                walk_wide_tuples(state, &f.body, owner);
+                walk_wide_tuples(state, &f.orelse, owner);
+            }
+            Stmt::While(w) => {
+                walk_wide_tuples(state, &w.body, owner);
+                walk_wide_tuples(state, &w.orelse, owner);
+            }
+            Stmt::If(i) => {
+                walk_wide_tuples(state, &i.body, owner);
+                for clause in &i.elif_else_clauses {
+                    walk_wide_tuples(state, &clause.body, owner);
+                }
+            }
+            Stmt::With(w) => walk_wide_tuples(state, &w.body, owner),
+            Stmt::AnnAssign(a) => {
+                if let Expr::Name(n) = a.target.as_ref() {
+                    emit_wide_tuple(
+                        state,
+                        Some(a.annotation.as_ref()),
+                        &format!("'{}'", n.id.as_str()),
+                        line_of(state.source, a.target.range().start()),
+                        owner,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn emit_wide_tuple(state: &mut ScanState, ann: Option<&Expr>, what: &str, line: usize, function: &str) {
+    let Some(n) = fixed_tuple_arity(ann) else {
+        return;
+    };
+    let message = format!(
+        "{what} is a {n}-tuple — the positions carry meaning the call site cannot see; introduce a record named with a domain noun, with named fields and a to_dict() at any serialization edge (packing a long parameter list into a tuple is the same defect with fewer lines)"
+    );
+    // 4+ elements fail; exactly 3 warns (the RGB gray zone). Two pushes so
+    // the kind/severity literal pair stays adjacent — `make rules`' drift
+    // detector reads the pair from the construction.
+    if n >= 4 {
+        state.findings.push(Finding {
+            col: 0,
+            file: state.file.to_string(),
+            line,
+            function: function.to_string(),
+            kind: "wide-tuple".into(),
+            severity: "fail".into(),
+            message,
+        });
+    } else {
+        state.findings.push(Finding {
+            col: 0,
+            file: state.file.to_string(),
+            line,
+            function: function.to_string(),
+            kind: "wide-tuple".into(),
+            severity: "warn".into(),
+            message,
+        });
+    }
+}
+
 /// A dict built with same-arity tuple values, then read with constant
 /// integer indexes — an anonymous record; make it a class.
 pub fn tuple_record_findings(state: &mut ScanState, body: &[Stmt]) {
@@ -1706,7 +1852,7 @@ col: 0,
                 kind: "tuple-record".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "the values of '{name}' are {arity}-tuples read {reads} times by constant index — an anonymous record; make it a class (name it: lucidlint fix --kind tuple-record --name <N>) — fix: tuple-record"
+                    "the values of '{name}' are {arity}-tuples read {reads} times by constant index — an anonymous record; make it a class named with a domain noun (apply: lucidlint fix --kind tuple-record --name <N>) — fix: tuple-record"
                 ),
             });
         }
@@ -1835,6 +1981,13 @@ col: 0,
 // the declaration/ownership half of the family: shared parameter pairs,
 // cross-object field reads, and quiet member assignment.
 
+/// One anchor's clump: the functions sharing it and the pairs they share.
+#[derive(Default)]
+struct AnchorClump {
+    functions: Vec<String>,
+    pairs: Vec<(String, String)>,
+}
+
 /// Three or more module functions sharing the same unordered parameter
 /// pair — the pair travels together, so it is a data clump; introduce a
 /// parameter object.
@@ -1865,26 +2018,58 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
             }
         }
     }
+    // ONE finding per anchor naming every pair that shares it: per-pair
+    // findings stack at the same def line and one marker consumes one
+    // finding, so an anchor with >3 pairs could never be per-site
+    // suppressed — the whack-a-mole the houses sweep hit (suppress the
+    // visible one, the next pair surfaces).
+    let mut by_anchor: std::collections::HashMap<(usize, String), AnchorClump> = std::collections::HashMap::new();
     let mut reported: HashSet<(String, String)> = HashSet::new();
     for ((a, b), fs) in &pairs {
         if fs.len() < 3 || !reported.insert((a.clone(), b.clone())) {
             continue;
         }
         let line = line_of(state.source, fs[0].name.range().start());
-        let names: Vec<&str> = fs.iter().map(|f| f.name.as_str()).collect();
+        let entry = by_anchor.entry((line, fs[0].name.to_string())).or_default();
+        for f in fs {
+            let name = f.name.to_string();
+            if !entry.functions.contains(&name) {
+                entry.functions.push(name);
+            }
+        }
+        entry.pairs.push((a.clone(), b.clone()));
+    }
+    let mut anchors: Vec<_> = by_anchor.into_iter().collect();
+    anchors.sort_by_key(|((line, _), _)| *line);
+    for ((line, anchor), clump) in anchors {
+        let (mut names, mut group_pairs) = (clump.functions, clump.pairs);
+        names.sort();
+        group_pairs.sort();
+        let pair_text = group_pairs
+            .iter()
+            .map(|(a, b)| format!("({a}, {b})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (pair_word, verb) = if group_pairs.len() == 1 {
+            ("pair", "travels")
+        } else {
+            ("pairs", "travel")
+        };
         state.findings.push(Finding {
-col: 0,
+            col: 0,
             file: state.file.to_string(),
             line,
-            function: fs[0].name.to_string(),
+            function: anchor,
             kind: "data-clump".into(),
             severity: "fail".into(),
             message: format!(
-                "{} functions ({}) share the parameter pair ({}, {}) — a data clump: the pair travels together; introduce a parameter object",
-                fs.len(),
+                "{} functions ({}) share the parameter {} {} — a data clump: the {} {} together; introduce a parameter object named with a domain noun",
+                names.len(),
                 names.join(", "),
-                a,
-                b
+                pair_word,
+                pair_text,
+                pair_word,
+                verb
             ),
         });
     }
@@ -2037,7 +2222,7 @@ col: 0,
                     kind: "feature-envy".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "'{}' reads '{}' {} times vs its own state {} — feature envy: the logic belongs on the envied object; move the computation onto '{}' as a method — fix: feature-envy",
+                        "'{}' reads '{}' {} times vs its own state {} — feature envy: the logic belongs on the envied object; move the computation onto '{}' as a method named with a domain verb (what it does) — fix: feature-envy",
                         f.name.as_str(),
                         receiver,
                         n,
@@ -2050,47 +2235,14 @@ col: 0,
     }
 }
 
-/// A class must DECLARE its members — annotated in the class body, in
-/// __slots__, or in __init__ — not assign them quietly in member functions.
-pub fn undeclared_attribute_findings(state: &mut ScanState, body: &[Stmt]) {
+/// Collect every `self.<attr> = ...` site in a top-level class — the
+/// undeclared-attribute family's raw material. Whether a site is a QUIET
+/// assignment is decided at the repo-wide merge (`undeclared_findings`):
+/// a base class in another file may declare the member, and a per-file
+/// scan cannot see it.
+pub fn collect_self_assigns(state: &mut ScanState, body: &[Stmt]) {
     for s in body {
         let Stmt::ClassDef(c) = s else { continue };
-        let mut declared: HashSet<String> = HashSet::new();
-        for m in &c.body {
-            match m {
-                Stmt::AnnAssign(a) => {
-                    if let Expr::Name(n) = a.target.as_ref() {
-                        declared.insert(n.id.to_string());
-                    }
-                }
-                Stmt::Assign(a) => {
-                    for t in &a.targets {
-                        if let Expr::Name(n) = t {
-                            if n.id.as_str() == "__slots__" {
-                                if let Some(tuple) = slot_names(&a.value) {
-                                    declared.extend(tuple);
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        for m in &c.body {
-            let Stmt::FunctionDef(f) = m else { continue };
-            if f.name.as_str() == "__init__" {
-                for st in &f.body {
-                    if let Stmt::AnnAssign(a) = st {
-                        if let Expr::Attribute(at) = a.target.as_ref() {
-                            if matches!(at.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self") {
-                                declared.insert(at.attr.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
         for m in &c.body {
             let Stmt::FunctionDef(f) = m else { continue };
             let is_init = f.name.as_str() == "__init__";
@@ -2118,37 +2270,135 @@ pub fn undeclared_attribute_findings(state: &mut ScanState, body: &[Stmt]) {
                     if !matches!(at.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self") {
                         continue;
                     }
-                    let attr = at.attr.to_string();
-                    if declared.contains(&attr) {
-                        continue;
-                    }
-                    let line = line_of(state.source, at.range().start());
-                    let msg = if is_init {
-                        format!(
-                            "'{}' assigns member '{attr}' in __init__ without a declaration — declare it: self.{attr}: <type> = ... — fix: undeclared-attribute",
-                            c.name.as_str()
-                        )
-                    } else {
-                        format!(
-                            "'{}' assigns member '{attr}' in '{}' without a declaration — declare it in __init__ (annotated) or the class body — fix: undeclared-attribute",
-                            c.name.as_str(),
-                            f.name.as_str()
-                        )
-                    };
-                    state.findings.push(Finding {
-                        col: 0,
-                        file: state.file.to_string(),
-                        line,
+                    state.self_assigns.push(crate::SelfAssign {
+                        class: c.name.to_string(),
+                        attr: at.attr.to_string(),
+                        line: line_of(state.source, at.range().start()),
                         function: f.name.to_string(),
-                        kind: "undeclared-attribute".into(),
-                        severity: "fail".into(),
-                        message: msg,
+                        is_init,
                     });
                 }
                 push_stmt_children(st, &mut stack);
             }
         }
     }
+}
+
+/// The repo-wide undeclared-attribute pass: a `self.<attr> = v` site is a
+/// finding only when neither the class NOR ANY ANCESTOR declares the member
+/// (annotated in the class body, in __slots__, or in __init__) — the houses
+/// case was `Node.display_name` declared in dag/node.py, flagged on every
+/// subclass until they re-declared it. Base resolution follows
+/// `abstraction_findings`: a `Name:` base resolves same-file first, then
+/// through the file's imports; an `Attr:` base through the alias's module.
+pub fn undeclared_findings(scans: &[crate::UndeclScan]) -> Vec<Finding> {
+    use std::collections::HashMap;
+    let mut classes: HashMap<(String, String), &crate::ClassInfo> = HashMap::new();
+    for s in scans {
+        for c in &s.classes {
+            classes.insert((s.rel.clone(), c.name.clone()), c);
+        }
+    }
+    // each class's bases resolve against ITS OWN file's imports
+    let import_maps: HashMap<&String, HashMap<&str, (&str, &str)>> = scans
+        .iter()
+        .map(|s| {
+            (
+                &s.rel,
+                s.imports
+                    .iter()
+                    .map(|i| (i.alias.as_str(), (i.module.as_str(), i.imported.as_str())))
+                    .collect(),
+            )
+        })
+        .collect();
+    /// True when `key`'s class or any ANCESTOR declares `attr`; visited
+    /// guards against base-class cycles (Python tolerates them at definition
+    /// time). A `Name:` base resolves same-file first, then through the
+    /// class's own file's imports; an `Attr:` base through the alias's
+    /// module. Each hop uses the ancestor's file imports, so multi-level
+    /// chains across files resolve correctly.
+    fn declares(
+        classes: &HashMap<(String, String), &crate::ClassInfo>,
+        import_maps: &HashMap<&String, HashMap<&str, (&str, &str)>>,
+        key: &(String, String),
+        attr: &str,
+        visited: &mut Vec<(String, String)>,
+    ) -> bool {
+        if visited.contains(key) {
+            return false;
+        }
+        visited.push(key.clone());
+        let Some(c) = classes.get(key) else {
+            return false;
+        };
+        if c.declared.iter().any(|d| d == attr) {
+            return true;
+        }
+        let empty = HashMap::new();
+        let imports_of = import_maps.get(&key.0).unwrap_or(&empty);
+        for base in &c.bases {
+            let candidates: Vec<(String, String)> = if let Some(rest) = base.strip_prefix("Name:") {
+                let mut cands = vec![(key.0.clone(), rest.to_string())];
+                if let Some((module, _name)) = imports_of.get(rest) {
+                    cands.push(((*module).to_string(), rest.to_string()));
+                }
+                cands
+            } else if let Some(rest) = base.strip_prefix("Attr:") {
+                let mut parts = rest.splitn(2, ':');
+                let alias = parts.next().unwrap_or("");
+                let attr_name = parts.next().unwrap_or("");
+                let mut cands = Vec::new();
+                if let Some((module, _name)) = imports_of.get(alias) {
+                    cands.push(((*module).to_string(), attr_name.to_string()));
+                }
+                cands
+            } else {
+                Vec::new()
+            };
+            for anc in candidates {
+                let Some(anc_key) = class_key(classes, &anc.0, &anc.1) else {
+                    continue;
+                };
+                if declares(classes, import_maps, &anc_key, attr, visited) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    let mut out = Vec::new();
+    for s in scans {
+        for a in &s.self_assigns {
+            let mut visited: Vec<(String, String)> = Vec::new();
+            let key = (s.rel.clone(), a.class.clone());
+            if declares(&classes, &import_maps, &key, &a.attr, &mut visited) {
+                continue;
+            }
+            let msg = if a.is_init {
+                format!(
+                    "'{}' assigns member '{}' in __init__ without a declaration — declare it: self.{}: <type> = ... — fix: undeclared-attribute",
+                    a.class, a.attr, a.attr
+                )
+            } else {
+                format!(
+                    "'{}' assigns member '{}' in '{}' without a declaration — declare it in __init__ (annotated) or the class body",
+                    a.class, a.attr, a.function
+                )
+            };
+            out.push(Finding {
+                col: 0,
+                file: s.rel.clone(),
+                line: a.line,
+                function: a.function.clone(),
+                kind: "undeclared-attribute".into(),
+                severity: "fail".into(),
+                message: msg,
+            });
+        }
+    }
+    out.sort_by(|x, y| (&x.file, x.line, &x.message).cmp(&(&y.file, y.line, &y.message)));
+    out
 }
 
 /// The names in a __slots__ literal (tuple or list of string literals).
@@ -2280,7 +2530,7 @@ col: 0,
                 kind: "duplicate-field".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "'{}' and the '{}' it contains both hold {} — duplicated domain state across the containment edge; one source of truth should own it",
+                    "'{}' and the '{}' it contains both hold {} — the same data lives in two places; one of them should own it",
                     c.name.as_str(),
                     contained.name.as_str(),
                     shared.join(", ")
@@ -2455,7 +2705,7 @@ col: 0,
             kind: "strewing".into(),
             severity: "fail".into(),
             message: format!(
-                "{} free functions share leading parameter '{base}' — a {base} class is missing (function strewing is a missed class): {} — fix: extract-class",
+                "{} free functions all take '{base}' as their first argument — a '{base}' class is missing, and these functions are its methods: {} — fix: extract-class",
                 members.len(),
                 names.join(", ")
             ),
@@ -3310,7 +3560,7 @@ col: 0,
                 kind: "special-case".into(),
                 severity: "warn".into(),
                 message: format!(
-                    "{n} repeated None/empty checks on '{name}' — Introduce Special Case: give the absent case an object"
+                    "{n} repeated None/empty checks on '{name}' — Introduce Special Case: handle the missing or empty value once (a default or a stand-in object) instead of checking it at every use"
                 ),
             });
         }
@@ -3714,7 +3964,7 @@ col: 0,
                 kind: "latent-visitor".into(),
                 severity: "warn".into(),
                 message: format!(
-                    "{n} operations dispatch over the same element family ('{family}') — Replace Conditional with Visitor: the elements accept a visitor with visit_<Type> methods"
+                    "{n} operations branch on the same object type ('{family}') — Replace Conditional with Visitor: give each type a visit_<Type> method so the branches disappear"
                 ),
             });
         }
@@ -4653,13 +4903,12 @@ pub fn unused_findings(
 // =====================================================================
 // record-shape: "never a bare dict as a record" (check_records.py)
 //   - signatures: record-shaped collections in params/returns (grab-bags,
-//     collections of dicts/tuples, nested lists, fixed tuples); maps pass;
-//     deserializer boundaries (raw JSON in, domain class out) are exempt
+//     collections of dicts/tuples, nested lists, fixed tuples); maps pass.
+//     NO boundary exemption: a wire payload is still a record — the class
+//     carries a to_dict()/to_json() at the serialization edge
 //   - literals: dict literals with >= 2 keys, >= 1 constant string key,
 //     >= 1 dynamic value, in a record position (assign/return/yield)
 // =====================================================================
-
-const PRIMITIVES: [&str; 8] = ["str", "int", "float", "bool", "bytes", "Any", "object", "None"];
 
 /// `_name_of`: the bare name of an annotation (typing.Any -> Any).
 fn ann_name_of(e: &Expr) -> Option<String> {
@@ -4710,45 +4959,6 @@ fn is_variadic_tuple(e: &Expr) -> bool {
             if let Expr::Tuple(t) = s.slice.as_ref() {
                 return t.elts.iter().any(|elt| matches!(elt, Expr::EllipsisLiteral(_)));
             }
-        }
-    }
-    false
-}
-
-/// `_is_raw_json`: bare/grab-bag dict (dict, dict[str, Any], ...) or a
-/// collection of one — the deserializer-boundary exemption.
-fn is_raw_json(e: &Expr) -> bool {
-    let mut wrapped = Vec::new();
-    ann_unwrap(e, &mut wrapped);
-    if wrapped.len() != 1 {
-        return wrapped.iter().any(|p| is_raw_json(p));
-    }
-    let node = wrapped[0];
-    if let Expr::Name(n) = node {
-        return n.id.eq_ignore_ascii_case("dict");
-    }
-    if let Expr::Subscript(s) = node {
-        let base = ann_base_name(&s.value);
-        if base.as_deref() == Some("dict") {
-            let slice: &Expr = s.slice.as_ref();
-            if let Expr::Tuple(t) = slice {
-                if t.elts.len() != 2 {
-                    return true; // malformed — treat as bare-ish
-                }
-                let mut val_parts = Vec::new();
-                ann_unwrap(&t.elts[1], &mut val_parts);
-                return val_parts
-                    .iter()
-                    .any(|p| matches!(ann_name_of(p).as_deref(), Some("Any" | "object" | "None")));
-            }
-            return true; // dict[X] single-arg
-        }
-        if matches!(base.as_deref(), Some("list" | "tuple")) {
-            let elt: &Expr = s.slice.as_ref();
-            if matches!(elt, Expr::Tuple(_)) {
-                return false; // a fixed tuple of stuff is not raw rows
-            }
-            return is_raw_json(elt);
         }
     }
     false
@@ -4818,42 +5028,6 @@ fn annotation_is_record(e: &Expr) -> bool {
         }
     }
     false
-}
-
-/// `_part_is_domain`: one return-annotation part resolving to a domain class.
-fn part_is_domain(e: &Expr) -> bool {
-    match e {
-        Expr::Name(n) => !PRIMITIVES.contains(&n.id.as_str()) && !matches!(n.id.as_str(), "dict" | "tuple" | "list"),
-        Expr::Subscript(s) => {
-            if matches!(ann_base_name(&s.value).as_deref(), Some("list" | "tuple")) {
-                let elt: &Expr = s.slice.as_ref();
-                if let Expr::Tuple(t) = elt {
-                    let parts: Vec<&Expr> = t
-                        .elts
-                        .iter()
-                        .filter(|e| !matches!(e, Expr::EllipsisLiteral(_)))
-                        .collect();
-                    return parts.len() == 1 && part_is_domain(parts[0]);
-                }
-                return part_is_domain(elt);
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
-/// `_returns_domain_class`: the function converts raw JSON into domain
-/// objects — the sanctioned deserializer boundary.
-fn returns_domain_class(f: &StmtFunctionDef) -> bool {
-    match &f.returns {
-        Some(r) => {
-            let mut parts = Vec::new();
-            ann_unwrap(r.as_ref(), &mut parts);
-            parts.iter().any(|p| part_is_domain(p))
-        }
-        None => false,
-    }
 }
 
 /// `_is_constant_value`: a literal that cannot vary at runtime (lookup
@@ -4999,7 +5173,6 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
         if let Q::N(n) = queue[qi] {
             if let AnyNodeRef::StmtFunctionDef(f) = n {
                 let def_line = line_of(source, f.name.range().start());
-                let boundary = returns_domain_class(f);
                 let mut params: Vec<(&str, Option<&Expr>)> = Vec::new();
                 for pwd in f
                     .parameters
@@ -5021,9 +5194,6 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                         if !annotation_is_record(a) {
                             continue;
                         }
-                        if boundary && is_raw_json(a) {
-                            continue; // deserializer boundary: raw JSON in, domain class out
-                        }
                         let text = source[a.range()].to_string();
                         state.findings.push(Finding {
 col: 0,
@@ -5033,7 +5203,7 @@ col: 0,
                             kind: "record-shape".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line}) — convert it to a class with named fields (wire formats at serialization boundaries are exempt)",
+                                "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — give the class a to_dict()/to_json() at the serialization edge",
                                 f.name.as_str()
                             ),
                         });
@@ -5050,7 +5220,7 @@ col: 0,
                             kind: "record-shape".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "bare record collection '{text}' as return type of {} (line {def_line}) — convert it to a class with named fields (wire formats at serialization boundaries are exempt)",
+                                "bare record collection '{text}' as return type of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — give the class a to_dict()/to_json() at the serialization edge",
                                 f.name.as_str()
                             ),
                         });
@@ -5100,7 +5270,7 @@ col: 0,
     }
     for h in unique {
         let keys = display_keys(&h.keys);
-        state.findings.push(Finding { file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("dict with constant keys {{{keys}}} is a record — make a class (fields: {keys}) — fix: extract-record-class --name <Record>") });
+        state.findings.push(Finding { file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("dict with constant keys {{{keys}}} is a record — make a class named with a domain noun (fields: {keys}); a wire payload is still a record — give the class a to_dict()/to_json() — fix: extract-record-class --name <Record>") });
     }
 }
 
@@ -5261,8 +5431,8 @@ col: 0,
                 kind: "partition".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "methods split into {} field-disjoint groups ({groups_text}), connectors removed: {conn_text} — each group touches only its own fields, so each is a latent class",
-                    groups.len()
+                    "methods split into {count} field-disjoint groups ({groups_text}), connectors removed: {conn_text} — each group touches only its own fields, so the class is really {count} independent classes",
+                    count = groups.len()
                 ),
             });
         }
@@ -5383,7 +5553,7 @@ col: 0,
         kind: "monkeypatch".into(),
         severity: "fail".into(),
         message: format!(
-            "{desc} at line {line} — never monkeypatch global state; inject an object fake (a class implementing the real protocol) via parameter injection or the services container — fakes are objects, not functions"
+            "{desc} at line {line} — never monkeypatch global state; inject an object fake (a class implementing the real protocol) via parameter injection or a dependency-injection container — fakes are objects, not functions"
         ),
     });
 }
@@ -5741,6 +5911,44 @@ pub fn collect_classes(body: &[Stmt], source: &str) -> Vec<crate::ClassInfo> {
             }
         }
         let mut bases: Vec<String> = Vec::new();
+        let mut declared: Vec<String> = Vec::new();
+        for m in &cls.body {
+            match m {
+                Stmt::AnnAssign(a) => {
+                    if let Expr::Name(n) = a.target.as_ref() {
+                        declared.push(n.id.to_string());
+                    }
+                }
+                Stmt::Assign(a) => {
+                    for t in &a.targets {
+                        if let Expr::Name(n) = t {
+                            if n.id.as_str() == "__slots__" {
+                                if let Some(tuple) = slot_names(&a.value) {
+                                    declared.extend(tuple);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for m in &cls.body {
+            let Stmt::FunctionDef(f) = m else { continue };
+            if f.name.as_str() == "__init__" {
+                for st in &f.body {
+                    if let Stmt::AnnAssign(a) = st {
+                        if let Expr::Attribute(at) = a.target.as_ref() {
+                            if matches!(at.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self") {
+                                declared.push(at.attr.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        declared.sort();
+        declared.dedup();
         if let Some(arguments) = &cls.arguments {
             for b in &arguments.args {
                 match b {
@@ -5767,6 +5975,7 @@ pub fn collect_classes(body: &[Stmt], source: &str) -> Vec<crate::ClassInfo> {
             line: line_of(source, cls.name.range().start()),
             abstract_,
             bases,
+            declared,
         });
     }
     out
