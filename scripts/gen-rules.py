@@ -229,7 +229,7 @@ def render_rules_rs() -> str:
     out.append("pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {")
     out.append("    &[")
     for group in group_order:
-        members = sorted(groups.get(group, set()))
+        members = sorted(groups.kinds_in(group))
         out.append(f'        ("{group}", &[{", ".join(f'"{m}"' for m in members)}]),')
     out.append("    ]")
     out.append("}")

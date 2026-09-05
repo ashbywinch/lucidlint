@@ -1526,7 +1526,7 @@ class _GateRunner:
                 item = item.strip()
                 if item.startswith("group:"):
                     group_name = item[6:]
-                    group_signals = RULE_GROUPS.get(group_name)
+                    group_signals = RULE_GROUPS.kinds_in(group_name)
                     if group_signals:
                         result.global_ignore.update(group_signals)
                 else:
@@ -1540,7 +1540,7 @@ class _GateRunner:
                     for item in val["ignore"]:
                         item = item.strip()
                         if item.startswith("group:"):
-                            gs = RULE_GROUPS.get(item[6:])
+                            gs = RULE_GROUPS.kinds_in(item[6:])
                             if gs:
                                 path_ignores.update(gs)
                         else:

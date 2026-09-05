@@ -21,6 +21,7 @@ a rule added here but never emitted, or emitted but never registered, cannot
 silently ship. There is no second registration point to forget.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 # RULES.md display groups in order — (name, header suffix, intro note)
@@ -101,10 +102,48 @@ _CONFIG_GROUP = {
     "cross-cutting": "style",
 }
 
+@dataclass(frozen=True)
+class ConfigGroups:
+    """config group -> its kinds, in catalog order — RULE_GROUPS (the
+    gate's config expansion; the LSP's config.rs mirror derives from it).
+    A record, not a bare map: the type says what the keys mean."""
+
+    by_group: dict[str, set[str]]
+
+    def kinds_in(self, group: str) -> set[str]:
+        """The group's kinds; an unknown group has none."""
+        return self.by_group.get(group, set())
+
+    def groups(self) -> list[str]:
+        """The group names, in catalog order."""
+        return list(self.by_group)
+
+    def all_kinds(self) -> set[str]:
+        """Every kind across groups — the registration checks' universe."""
+        return set().union(*self.by_group.values())
+
+    def items(self) -> Iterable[tuple[str, set[str]]]:
+        """(group, kinds) pairs in catalog order — the generators walk."""
+        return self.by_group.items()
+
+
+@dataclass(frozen=True)
+class DisplayFamilies:
+    """display bucket -> variant kinds, in catalog order — FAMILY_VARIANTS.
+    A family is a display value that is not a kind and not "standard";
+    every rule with that display is a variant of it."""
+
+    by_display: dict[str, list[str]]
+
+    def items(self) -> Iterable[tuple[str, list[str]]]:
+        """(display, variants) pairs in catalog order — the generator walks."""
+        return self.by_display.items()
+
 
 class RuleCatalog:
     """The collection of rules — the derived views the rest of the tool
     consumes (groups, families, display buckets)."""
+
 
     def __init__(self, rules: list[Rule]) -> None:
         self.rules: list[Rule] = rules
@@ -121,21 +160,15 @@ class RuleCatalog:
             return "style"  # unknown kinds suppress with the catch-all group
         return _CONFIG_GROUP[rule.display_group]
 
-    # the derived-view map is the catalog's output wire format — one
-    # consumer each, a class is ceremony
-    # lucidlint: ignore record-shape the derived-view map is the catalog's output wire format
-    def groups(self) -> dict[str, set[str]]:
+    def groups(self) -> ConfigGroups:
         """config group -> kinds — the RULE_GROUPS map (gate + config.rs
         mirror both derive from here)."""
-        out: dict[str, set[str]] = {}
+        by_group: dict[str, set[str]] = {}
         for r in self.rules:
-            out.setdefault(self.config_group_of(r.kind), set()).add(r.kind)
-        return out
+            by_group.setdefault(self.config_group_of(r.kind), set()).add(r.kind)
+        return ConfigGroups(by_group=by_group)
 
-    # the derived-view map is the catalog's output wire format — one
-    # consumer each, a class is ceremony
-    # lucidlint: ignore record-shape the derived-view map is the catalog's output wire format
-    def families(self) -> dict[str, list[str]]:
+    def families(self) -> DisplayFamilies:
         """display bucket -> variant kinds — FAMILY_VARIANTS. A family is a
         display value that is not a kind and not "standard"; every rule with
         that display is a variant of it."""
@@ -144,7 +177,7 @@ class RuleCatalog:
         for r in self.rules:
             if r.display and r.display != "standard" and r.display not in kinds:
                 fam.setdefault(r.display, []).append(r.kind)
-        return fam
+        return DisplayFamilies(by_display=fam)
 
 
 
