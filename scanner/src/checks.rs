@@ -2530,7 +2530,7 @@ col: 0,
                 kind: "duplicate-field".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "'{}' and the '{}' it contains both hold {} — duplicated domain state across the containment edge; one source of truth should own it",
+                    "'{}' and the '{}' it contains both hold {} — the same data lives in two places; one of them should own it",
                     c.name.as_str(),
                     contained.name.as_str(),
                     shared.join(", ")
@@ -2705,7 +2705,7 @@ col: 0,
             kind: "strewing".into(),
             severity: "fail".into(),
             message: format!(
-                "{} free functions share leading parameter '{base}' — a {base} class is missing (function strewing is a missed class): {} — fix: extract-class",
+                "{} free functions all take '{base}' as their first argument — a '{base}' class is missing, and these functions are its methods: {} — fix: extract-class",
                 members.len(),
                 names.join(", ")
             ),
@@ -3560,7 +3560,7 @@ col: 0,
                 kind: "special-case".into(),
                 severity: "warn".into(),
                 message: format!(
-                    "{n} repeated None/empty checks on '{name}' — Introduce Special Case: give the absent case an object"
+                    "{n} repeated None/empty checks on '{name}' — Introduce Special Case: handle the missing or empty value once (a default or a stand-in object) instead of checking it at every use"
                 ),
             });
         }
@@ -3964,7 +3964,7 @@ col: 0,
                 kind: "latent-visitor".into(),
                 severity: "warn".into(),
                 message: format!(
-                    "{n} operations dispatch over the same element family ('{family}') — Replace Conditional with Visitor: the elements accept a visitor with visit_<Type> methods"
+                    "{n} operations branch on the same object type ('{family}') — Replace Conditional with Visitor: give each type a visit_<Type> method so the branches disappear"
                 ),
             });
         }
@@ -5431,8 +5431,8 @@ col: 0,
                 kind: "partition".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "methods split into {} field-disjoint groups ({groups_text}), connectors removed: {conn_text} — each group touches only its own fields, so each is a latent class",
-                    groups.len()
+                    "methods split into {count} field-disjoint groups ({groups_text}), connectors removed: {conn_text} — each group touches only its own fields, so the class is really {count} independent classes",
+                    count = groups.len()
                 ),
             });
         }
@@ -5553,7 +5553,7 @@ col: 0,
         kind: "monkeypatch".into(),
         severity: "fail".into(),
         message: format!(
-            "{desc} at line {line} — never monkeypatch global state; inject an object fake (a class implementing the real protocol) via parameter injection or the services container — fakes are objects, not functions"
+            "{desc} at line {line} — never monkeypatch global state; inject an object fake (a class implementing the real protocol) via parameter injection or a dependency-injection container — fakes are objects, not functions"
         ),
     });
 }

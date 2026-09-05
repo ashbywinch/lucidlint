@@ -117,10 +117,10 @@ pub fn complexity_message(cc: u32, shape: &str, detail: &str) -> String {
     // tail would append a second, wrong directive to the shape-routed ones
     match shape {
         "dispatch" => format!(
-            "cyclomatic complexity {cc} (>= 15) — the function is a dispatch chain over '{detail}': every arm is a named handler — HOIST THE LATENT DATA STRUCTURE: the chain IS a (selector → action) table — collapse it into a dict of {detail} → lambda closures in Python (a match in Rust), and dispatch by lookup — fix: dispatch-registry (previews the table; apply with --confirm)"
+            "cyclomatic complexity {cc} (>= 15) — the function is a dispatch chain over '{detail}': every arm is a named handler — HOIST THE HIDDEN DATA STRUCTURE: the chain IS a (selector → action) table — collapse it into a dict of {detail} → lambda closures in Python (a match in Rust), and dispatch by lookup — fix: dispatch-registry (previews the table; apply with --confirm)"
         ),
         "rules" => format!(
-            "cyclomatic complexity {cc} (>= 15) — the function is a battery of independent checks each appending to '{detail}' — HOIST THE LATENT DATA STRUCTURE: the if/append chain IS a (condition, violation) table — collapse it into a list of such pairs whose conditions are lambdas (Python) or fn pointers (Rust), and collect the violations whose condition holds — fix: rule-table (previews the table; apply with --confirm)"
+            "cyclomatic complexity {cc} (>= 15) — the function is a battery of independent checks each appending to '{detail}' — HOIST THE HIDDEN DATA STRUCTURE: the if/append chain IS a (condition, violation) table — collapse it into a list of such pairs whose conditions are lambdas (Python) or fn pointers (Rust), and collect the violations whose condition holds — fix: rule-table (previews the table; apply with --confirm)"
         ),
         _ => format!(
             "cyclomatic complexity {cc} (>= 15) — extract part of this function into a named method (the preview shows the block) — fix: extract-method"
@@ -692,11 +692,11 @@ mod tests {
         // auto-fix; the prose names the more lucid shape)
         let dispatch = complexity_message(36, "dispatch", "tool");
         assert!(dispatch.contains("dispatch chain over 'tool'"), "{dispatch}");
-        assert!(dispatch.contains("HOIST THE LATENT DATA STRUCTURE"), "{dispatch}");
+        assert!(dispatch.contains("HOIST THE HIDDEN DATA STRUCTURE"), "{dispatch}");
         assert!(dispatch.contains("lambda closures"), "{dispatch}");
         assert!(dispatch.contains("fix: dispatch-registry"), "{dispatch}");
         let rules = complexity_message(42, "rules", "violations");
-        assert!(rules.contains("HOIST THE LATENT DATA STRUCTURE"), "{rules}");
+        assert!(rules.contains("HOIST THE HIDDEN DATA STRUCTURE"), "{rules}");
         assert!(rules.contains("(condition, violation) table"), "{rules}");
         assert!(rules.contains("fix: rule-table"), "{rules}");
         let plain = complexity_message(20, "plain", "");
