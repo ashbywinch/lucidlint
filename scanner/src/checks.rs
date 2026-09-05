@@ -485,7 +485,7 @@ col: 0,
         kind: "positional-literals".into(),
         severity: "warn".into(),
         message: format!(
-            "call passes {n} {kind} positionally to {callee}() — a swapped argument is a silent bug; use keyword arguments — fix: positional-literals",
+            "call passes {n} {kind} positionally to {callee}() — a swapped argument is a silent bug; use keyword arguments — fix: positional-literals (--params <names> when the callee's signature is not resolvable)",
             callee = callee_name,
         ),
     });
@@ -2130,7 +2130,7 @@ pub fn undeclared_attribute_findings(state: &mut ScanState, body: &[Stmt]) {
                         )
                     } else {
                         format!(
-                            "'{}' assigns member '{attr}' in '{}' without a declaration — declare it in __init__ (annotated) or the class body — fix: undeclared-attribute",
+                            "'{}' assigns member '{attr}' in '{}' without a declaration — declare it in __init__ (annotated) or the class body",
                             c.name.as_str(),
                             f.name.as_str()
                         )

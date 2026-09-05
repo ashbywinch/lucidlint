@@ -568,20 +568,29 @@ impl<'a> StaleCtx<'a> {
     /// are already findings; they never match by design.
     fn stale_suppression_findings(&self) -> Vec<crate::Finding> {
         let mut out = Vec::new();
+        // The `— fix: stale-suppression` directive goes only where the fix
+        // command can actually delete the marker (the Python engine). A Rust
+        // file's stale marker has no fixer; an advertised fix that cannot
+        // run is a false suggestion (user ruling) — "remove it" IS the fix.
+        let fix_tail = if self.file.ends_with(".rs") {
+            ""
+        } else {
+            " — fix: stale-suppression"
+        };
         for (ln, entries) in &self.supps.line {
             for (sig, why) in entries {
                 if why.is_empty() || self.used_line.contains(&(*ln, sig.clone())) {
                     continue;
                 }
                 out.push(crate::Finding {
-col: 0,
+                    col: 0,
                     file: self.file.to_string(),
                     line: *ln,
                     function: String::new(),
                     kind: "stale-suppression".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "suppression '{} lucidlint: ignore {sig}' at line {ln} no longer fires — remove it — fix: stale-suppression",
+                        "suppression '{} lucidlint: ignore {sig}' at line {ln} no longer fires — remove it{fix_tail}",
                         self.marker
                     ),
                 });
@@ -597,14 +606,14 @@ col: 0,
                 .find(|(_, t)| t.contains(&format!("lucidlint: ignore-file {sig}")))
             {
                 out.push(crate::Finding {
-col: 0,
+                    col: 0,
                     file: self.file.to_string(),
                     line: *ln,
                     function: String::new(),
                     kind: "stale-suppression".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "file suppression '{} lucidlint: ignore-file {sig}' no longer fires — remove it — fix: stale-suppression",
+                        "file suppression '{} lucidlint: ignore-file {sig}' no longer fires — remove it{fix_tail}",
                         self.marker
                     ),
                 });
@@ -682,6 +691,38 @@ mod tests {
         };
         let fs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books);
         assert!(fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
+    }
+    #[test]
+    fn stale_message_directive_only_where_a_fixer_exists() {
+        // The `— fix: stale-suppression` directive must appear only where
+        // the fix command can actually apply (the Python engine deletes the
+        // marker; the Rust core has no such fixer) — an advertised fix that
+        // cannot run is a false suggestion (user ruling).
+        let comments = vec![(1, "// lucidlint: ignore latent-class nothing here".to_string())];
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let rs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books);
+        let msg = rs
+            .iter()
+            .find(|f| f.kind == "stale-suppression")
+            .unwrap()
+            .message
+            .clone();
+        assert!(!msg.contains("fix:"), "{msg}");
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let py = apply_suppressions_impl(vec![], &comments, "x.py", "#", &mut books);
+        let msg = py
+            .iter()
+            .find(|f| f.kind == "stale-suppression")
+            .unwrap()
+            .message
+            .clone();
+        assert!(msg.contains("fix: stale-suppression"), "{msg}");
     }
 
     #[test]

@@ -239,7 +239,7 @@ impl<'a> RsState<'a> {
                     s.line,
                     "",
                     format!(
-                        "'{}' name carries a {}-line struct with {methods} methods — the domain noun should take the name — fix: vague-name --fix-name <Name>",
+                        "'{}' name carries a {}-line struct with {methods} methods — the domain noun should take the name",
                         suffix_of(&s.name).unwrap_or(""), s.span
                     ),
                 );
@@ -288,7 +288,7 @@ impl<'a> RsState<'a> {
                 "fail",
                 line,
                 "",
-                format!("{count} free functions take the same leading parameter ({detail}) — they share data, extract a class — fix: extract-class"),
+                format!("{count} free functions take the same leading parameter ({detail}) — they share data, extract a class"),
             );
         }
         RustScan {
@@ -422,7 +422,7 @@ impl<'a> RsState<'a> {
                 "fail",
                 line,
                 &fn_name,
-                "expression statement discards its value — dead statement — fix: noop-statement".into(),
+                "expression statement discards its value — delete the dead statement".into(),
             );
         }
     }
@@ -470,7 +470,7 @@ impl<'a> RsState<'a> {
                     line,
                     &sig.ident.to_string(),
                     format!(
-                        "'{}' takes {typed} parameters — introduce a parameter object — fix: long-param-list --fix-name <Options>",
+                        "'{}' takes {typed} parameters — introduce a parameter object",
                         sig.ident
                     ),
                 );

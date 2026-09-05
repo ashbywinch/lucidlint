@@ -1246,6 +1246,10 @@ _FIX_ALIASES = {
     "complexity": "extract-method",
     "large-function": "extract-method",
 }
+# The kinds the Rust scan core's --fix dispatcher routes (main.rs);
+# tests/test_fix_directives.py parses the dispatcher arms to keep the two in
+# step. `fix` refuses any other kind on a .rs file BEFORE dispatch.
+RUST_FIXABLE_KINDS = {"extract-method", "dispatch-registry", "rule-table"}
 
 
 # the raw TOML payload handed to _merge_config — a wire-format blob, not a
@@ -1822,6 +1826,21 @@ class _FixCommand:
         if bad:
             print(bad)
             return 1
+        # An unfixable kind refuses HERE — naming the message's instruction
+        # as the fix — instead of reaching an engine that would answer
+        # "nothing to change" (which reads as already-fixed) or a dispatcher
+        # fallback guessing at a different fix.
+        if self.rel.endswith(".rs"):
+            if self.fix_kind not in RUST_FIXABLE_KINDS:
+                print(
+                    f"fix: {self.fix_kind} has no Rust fix — the finding's message carries the instruction"
+                )
+                return 1
+        elif fix_engine is not None and self.fix_kind not in fix_engine.FIXABLE_KINDS:
+            print(
+                f"fix: {self.fix_kind} has no fix — the finding's message carries the instruction"
+            )
+            return 1
         if self.args.line == 0:
             exit_code = self._resolve_line()
             if exit_code is not None:
@@ -1843,12 +1862,10 @@ class _FixCommand:
             print("fix: the Python fix engine requires libcst (a mandatory dependency) — `uv sync` installs it")
             return 1
         # schema-3 anchor: same-line twins need the finding's column — the
-        # innermost match wins, mirroring the peel binding order
-        col = 0
-        # schema-3 anchor: same-line twins need the finding's column — the
         # innermost match wins, mirroring the peel binding order. The
         # fix-kind to finding-kind mapping differs: extract-record-class is
         # the fix for record-shape findings; magic-number is its own kind.
+        col = 0
         signal = "record-shape" if self.fix_kind == "extract-record-class" else self.fix_kind
         if signal:
             anchors = [
