@@ -1619,6 +1619,140 @@ pub fn count_tuple_record_reads(
     }
 }
 
+/// Fixed element count of a `tuple[...]` annotation — None when the
+/// annotation is not a tuple, is unparameterized, or is variadic
+/// (`tuple[X, ...]`: a homogeneous sequence, not a record).
+fn fixed_tuple_arity(ann: Option<&Expr>) -> Option<usize> {
+    let Expr::Subscript(sub) = ann? else {
+        return None;
+    };
+    if !matches!(sub.value.as_ref(), Expr::Name(n) if n.id.as_str() == "tuple") {
+        return None;
+    }
+    let Expr::Tuple(t) = sub.slice.as_ref() else {
+        return None;
+    };
+    if t.elts.iter().any(|e| matches!(e, Expr::EllipsisLiteral(_))) {
+        return None;
+    }
+    let n = t.elts.len();
+    (n >= 3).then_some(n)
+}
+
+/// A tuple annotation with 3+ fixed elements — a parameter, return, or
+/// variable whose positions carry meaning the call site cannot see. The
+/// smoosh (packing a long parameter list into one tuple parameter) is THIS
+/// finding with fewer lines, not a fix for it: the rule wanted a parameter
+/// object with named fields. 2-tuples are idiomatic pairs; 4+ elements
+/// fail, 3 warns (the RGB gray zone).
+pub fn wide_tuple_findings(state: &mut ScanState, body: &[Stmt]) {
+    walk_wide_tuples(state, body, "");
+}
+
+/// The annotation walk: every scope, with the enclosing function name for
+/// attribution (module-level annotations carry an empty owner).
+fn walk_wide_tuples(state: &mut ScanState, body: &[Stmt], owner: &str) {
+    for s in body {
+        match s {
+            Stmt::FunctionDef(f) => {
+                for a in f
+                    .parameters
+                    .posonlyargs
+                    .iter()
+                    .chain(&f.parameters.args)
+                    .chain(&f.parameters.kwonlyargs)
+                {
+                    emit_wide_tuple(
+                        state,
+                        a.annotation(),
+                        &format!("parameter '{}' of '{}'", a.parameter.name, f.name),
+                        line_of(state.source, a.range().start()),
+                        f.name.as_str(),
+                    );
+                }
+                emit_wide_tuple(
+                    state,
+                    f.returns.as_deref(),
+                    &format!("the return type of '{}'", f.name),
+                    line_of(state.source, f.name.range().start()),
+                    f.name.as_str(),
+                );
+                walk_wide_tuples(state, &f.body, f.name.as_str());
+            }
+            Stmt::ClassDef(c) => walk_wide_tuples(state, &c.body, owner),
+            Stmt::Try(t) => {
+                walk_wide_tuples(state, &t.body, owner);
+                for h in &t.handlers {
+                    let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                    walk_wide_tuples(state, &eh.body, owner);
+                }
+                walk_wide_tuples(state, &t.orelse, owner);
+                walk_wide_tuples(state, &t.finalbody, owner);
+            }
+            Stmt::For(f) => {
+                walk_wide_tuples(state, &f.body, owner);
+                walk_wide_tuples(state, &f.orelse, owner);
+            }
+            Stmt::While(w) => {
+                walk_wide_tuples(state, &w.body, owner);
+                walk_wide_tuples(state, &w.orelse, owner);
+            }
+            Stmt::If(i) => {
+                walk_wide_tuples(state, &i.body, owner);
+                for clause in &i.elif_else_clauses {
+                    walk_wide_tuples(state, &clause.body, owner);
+                }
+            }
+            Stmt::With(w) => walk_wide_tuples(state, &w.body, owner),
+            Stmt::AnnAssign(a) => {
+                if let Expr::Name(n) = a.target.as_ref() {
+                    emit_wide_tuple(
+                        state,
+                        Some(a.annotation.as_ref()),
+                        &format!("'{}'", n.id.as_str()),
+                        line_of(state.source, a.target.range().start()),
+                        owner,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn emit_wide_tuple(state: &mut ScanState, ann: Option<&Expr>, what: &str, line: usize, function: &str) {
+    let Some(n) = fixed_tuple_arity(ann) else {
+        return;
+    };
+    let message = format!(
+        "{what} is a {n}-tuple — the positions carry meaning the call site cannot see; introduce a named record with fields (packing a long parameter list into a tuple is the same defect with fewer lines)"
+    );
+    // 4+ elements fail; exactly 3 warns (the RGB gray zone). Two pushes so
+    // the kind/severity literal pair stays adjacent — `make rules`' drift
+    // detector reads the pair from the construction.
+    if n >= 4 {
+        state.findings.push(Finding {
+            col: 0,
+            file: state.file.to_string(),
+            line,
+            function: function.to_string(),
+            kind: "wide-tuple".into(),
+            severity: "fail".into(),
+            message,
+        });
+    } else {
+        state.findings.push(Finding {
+            col: 0,
+            file: state.file.to_string(),
+            line,
+            function: function.to_string(),
+            kind: "wide-tuple".into(),
+            severity: "warn".into(),
+            message,
+        });
+    }
+}
+
 /// A dict built with same-arity tuple values, then read with constant
 /// integer indexes — an anonymous record; make it a class.
 pub fn tuple_record_findings(state: &mut ScanState, body: &[Stmt]) {

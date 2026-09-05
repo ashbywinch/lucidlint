@@ -215,6 +215,12 @@ CATALOG = RuleCatalog([
          "record's fields are the tuple positions).",
          display_name="tuple-record → latent-class", display="latent-class",
          fix_name_required=True),
+    Rule("wide-tuple", "fail", "architecture", "Python",
+         "A tuple annotation with 3+ fixed elements (parameter, return, or "
+         "variable) — an anonymous record: the positions carry meaning the "
+         "call site cannot see. 2-tuples are pairs; tuple[X, ...] is a "
+         "variadic sequence, not a record. 4+ elements fail, 3 warns.",
+         display_name="wide-tuple → latent-class", display="latent-class"),
     Rule("data-clump", "fail", "architecture", "Python",
          ">=3 module functions sharing the same parameter pair — the pair "
          "travels together, so it is a data clump; introduce a parameter "

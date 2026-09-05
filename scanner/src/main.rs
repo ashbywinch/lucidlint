@@ -1105,6 +1105,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     strewing_findings(state, body);
     misplaced_method_findings(state, body);
     tuple_record_findings(state, body);
+    wide_tuple_findings(state, body);
     assembly_class_findings(state, body);
     data_clump_findings(state, body);
     feature_envy_findings(state, body);
@@ -2774,6 +2775,48 @@ mod tests {
         );
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "tuple-record").collect();
         assert_eq!(r.len(), 1, "{f:?}");
+    }
+
+    #[test]
+    fn wide_tuple_fails_on_four_element_annotations() {
+        // the smoosh: a long parameter list packed into one anonymous tuple
+        // — the positions carry meaning the call site cannot see
+        let f = scan_src("def set_limits(limits: tuple[int, int, str, float]) -> None:\n    return None\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "wide-tuple").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert_eq!(r[0].severity, "fail", "{f:?}");
+        assert!(r[0].message.contains("4-tuple"), "{}", r[0].message);
+        assert!(r[0].message.contains("limits"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn wide_tuple_warns_on_three_elements() {
+        let f = scan_src("def rgb(c: tuple[int, int, int]) -> None:\n    return None\n");
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "wide-tuple").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert_eq!(r[0].severity, "warn", "{f:?}");
+    }
+
+    #[test]
+    fn wide_tuple_exempts_pairs_variadic_and_nested_inner_tuples() {
+        // 2-tuples are idiomatic pairs; tuple[X, ...] is a homogeneous
+        // sequence, not a record; a 2-tuple nested in a 4-tuple flags the
+        // OUTER arity only
+        let f = scan_src(
+            "def a(p: tuple[int, int]) -> None: ...\ndef b(p: tuple[int, ...]) -> None: ...\ndef c(p: tuple[tuple[int, int], str, bool, float]) -> None: ...\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "wide-tuple").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert_eq!(r[0].severity, "fail", "{f:?}");
+    }
+
+    #[test]
+    fn wide_tuple_covers_returns_variables_and_methods() {
+        let f = scan_src(
+            "def stats(v) -> tuple[int, int, str, bool]:\n    return 1, 2, \"x\", True\nrow: tuple[int, str, int, int] = (1, \"a\", 2, 3)\nclass C:\n    def m(self, p: tuple[int, int, int, int]) -> None:\n        return None\n",
+        );
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "wide-tuple").collect();
+        assert_eq!(r.len(), 3, "{f:?}");
     }
 
     // ------------------------------------ data-clump / feature-envy / undeclared-attribute
