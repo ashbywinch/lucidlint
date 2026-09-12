@@ -371,41 +371,11 @@ class SourceFile:
     rel: str
 
 
-def _gitignored_docs(repo: Path) -> tuple[str, ...]:
-    """Repo-relative .md paths the repo's own .gitignore excludes — private
-    docs (review-log R3). The docs-reachability scan must treat them as
-    intentionally absent: they are not shipped, so a link to one is not a
-    broken link and an orphan one is not an undiscoverable doc. Requires
-    pygit2's path_is_ignored; the no-git rglob fallback cannot know ignore
-    status and keeps the previous behavior (gitignored private docs stay
-    visible as documented findings)."""
-    if _pygit2 is None:
-        return ()
-    try:
-        r = _pygit2.Repository(str(repo))
-    except Exception:  # not a git repo — nothing is gitignored
-        return ()
-    ignored: list[str] = []
-    for root, dirs, files in os.walk(repo):
-        if ".git" in dirs:
-            dirs.remove(".git")
-        for fname in files:
-            if not fname.endswith(".md"):
-                continue
-            rel = Path(root).joinpath(fname).relative_to(repo).as_posix()
-            try:
-                if r.path_is_ignored(rel):
-                    ignored.append(rel)
-            except ValueError:  # lucidlint: ignore swallow ambiguous path — keep it visible
-                pass
-    # referenced-but-absent targets: an ignored private doc may never have
-    # been committed, so the walk cannot see it — `git check-ignore` answers
-    # for any path. Query the .md references the docs actually make (a loose
-    # over-approximation is fine — extra ignored paths only suppress more).
-    refs: set[str] = set()
-    # docs never live in venvs/caches/build output — pruning the WALK keeps
-    # it off node_modules (rglob would descend tens of thousands of files)
-    skip_dirs = {
+# dirs that never hold shipped docs — pruning the walk keeps it off
+# node_modules (thousands of .md files; rglob would descend tens of
+# thousands of entries) plus venvs/caches/build output
+_SKIP_DIRS = frozenset(
+    {
         ".git",
         ".venv",
         "venv",
@@ -424,8 +394,45 @@ def _gitignored_docs(repo: Path) -> tuple[str, ...]:
         ".tox",
         ".eggs",
     }
+)
+
+
+def _gitignored_docs(repo: Path) -> tuple[str, ...]:
+    """Repo-relative .md paths the repo's own .gitignore excludes — private
+    docs (review-log R3). The docs-reachability scan must treat them as
+    intentionally absent: they are not shipped, so a link to one is not a
+    broken link and an orphan one is not an undiscoverable doc. Requires
+    pygit2's path_is_ignored; the no-git rglob fallback cannot know ignore
+    status and keeps the previous behavior (gitignored private docs stay
+    visible as documented findings)."""
+    if _pygit2 is None:
+        return ()
+    try:
+        r = _pygit2.Repository(str(repo))
+    except Exception:  # not a git repo — nothing is gitignored
+        return ()
+    ignored: list[str] = []
+    # the walk prunes vendored/tool dirs (node_modules holds thousands of
+    # .md files; the second walk's skip set already names them — one set,
+    # one pruning rule for both walks)
     for root, dirs, files in os.walk(repo):
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+        for fname in files:
+            if not fname.endswith(".md"):
+                continue
+            rel = Path(root).joinpath(fname).relative_to(repo).as_posix()
+            try:
+                if r.path_is_ignored(rel):
+                    ignored.append(rel)
+            except ValueError:  # lucidlint: ignore swallow ambiguous path — keep it visible
+                pass
+    # referenced-but-absent targets: an ignored private doc may never have
+    # been committed, so the walk cannot see it — `git check-ignore` answers
+    # for any path. Query the .md references the docs actually make (a loose
+    # over-approximation is fine — extra ignored paths only suppress more).
+    refs: set[str] = set()
+    for root, dirs, files in os.walk(repo):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
         for fname in files:
             if not fname.endswith(".md"):
                 continue
@@ -495,7 +502,11 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
                     timeout=30,
                 )
                 if proc.returncode == 0:
-                    rels = [p for p in proc.stdout.split("\0") if p.endswith((".py", ".rs", ".md"))]
+                    rels = [
+                        p
+                        for p in proc.stdout.split("\0")
+                        if p.endswith((".py", ".rs", ".md")) and not p.startswith("tests/fixtures/")
+                    ]
                     return [SourceFile(repo / rel, rel) for rel in sorted(rels)]
             # lucidlint: ignore swallow git missing or unrunnable — degrade to the rglob walk rather than crash
             except Exception as e:
@@ -524,7 +535,7 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
                             untracked.add(rel)
                     except ValueError:  # lucidlint: ignore swallow ambiguous path — treat as untracked
                         untracked.add(rel)
-        rels = sorted(tracked | untracked)
+        rels = sorted(r for r in (tracked | untracked) if not r.startswith("tests/fixtures/"))
         return [SourceFile(repo / rel, rel) for rel in rels]
     except KeyError:
         return [
@@ -609,6 +620,12 @@ class _File(NamedTuple):
             return 1
         target = repo / rel
         before = target.read_text(encoding="utf-8") if target.exists() else None
+        if kind in _name_required_kinds() and not (name or "").strip():
+            # the scanner would get "" and either write `fn ()` or fail
+            # with "nothing to change" — both lie about a missing
+            # prerequisite. Refuse with the naming guidance instead.
+            print(_fix_refusal(kind, None, None, rel, line))
+            return 0
         spec = RustFixRequest(kind=kind, file=str(target), line=line, name=name or "").to_json()
         try:
             proc = subprocess.run(
@@ -617,7 +634,6 @@ class _File(NamedTuple):
         except subprocess.SubprocessError:
             print(f"fix: the Rust fix core failed for {rel}:{line}")
             return 1
-        sys.stdout.write(proc.stdout)
         if proc.returncode != 0:
             # the scanner exits non-zero on an unknown/malformed request — an
             # unexpected error must surface (R29), not masquerade as a success
@@ -701,14 +717,21 @@ def _scanner_build_is_stale(binary: Path) -> bool:
     they are deliberate pins, and a dev checkout's sources are legitimately
     newer than a released wheel. The source root is structural — the
     `scanner` dir two levels above the binary — so this is a pure
-    path/mtime decision, testable without make."""
+    path/mtime decision, testable without make. The walk covers `src/`
+    plus the manifests only: `target/` (build artifacts, gigabytes) never
+    decides staleness — cargo owns rebuild correctness there."""
     if len(binary.parents) < 3 or binary.parents[2].name != "scanner":
         return False
     newest = 0.0
     src_root = binary.parents[2]
-    for p in src_root.rglob("*"):
-        if p.is_file() and (p.suffix == ".rs" or p.name in ("Cargo.toml", "Cargo.lock")):
-            newest = max(newest, p.stat().st_mtime)
+    watched = [src_root / "src", src_root / "Cargo.toml", src_root / "Cargo.lock"]
+    for root in watched:
+        if root.is_dir():
+            for p in root.rglob("*"):
+                if p.is_file() and p.suffix == ".rs":
+                    newest = max(newest, p.stat().st_mtime)
+        elif root.is_file():
+            newest = max(newest, root.stat().st_mtime)
     return newest > binary.stat().st_mtime
 
 
@@ -1915,7 +1938,13 @@ class _FixCommand:
         # Python: the libcst fix engine is a mandatory dependency
         fe = fix_engine
         if fe is None:
-            print("fix: the Python fix engine requires libcst (a mandatory dependency) — `uv sync` installs it")
+            # the release bundle vendors libcst in deps/ when it can (the
+            # static musl bundle cannot); a wheel install always declares it
+            print(
+                "fix: the Python fix engine requires libcst and none is installed here — "
+                "install lucidlint from the pip wheel (libcst is a declared dependency), "
+                "or run `uv sync` in a dev checkout"
+            )
             return 1
         # schema-3 anchor: same-line twins need the finding's column — the
         # innermost match wins, mirroring the peel binding order. The

@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
-"""The pip deployment check (scripts/ is dev tooling, not shipped).
+"""The deployment check (scripts/ is dev tooling, not shipped).
 
 Generates a mini project with deliberate fixable findings, scans it with an
-INSTALLED lucidlint (the freshly built wheel in a clean venv), applies every
-fix directive the report carries, and re-scans to GATE: PASS.
+INSTALLED lucidlint (a freshly built wheel in a clean venv, or the release
+bundle's `python3 lucidlint.py`), applies every fix directive the report
+carries, and re-scans to GATE: PASS.
 
 This is the packaging smoke test: each step depends on a different part of
-the wheel, so a packaging error fails loudly instead of silently passing:
-- the scan step needs the embedded Rust binary (wheel package-data);
-- the fix step needs fix_engine.py and the libcst dependency (declared in
-  [project] dependencies — a missing declaration breaks the import);
+the package, so a packaging error fails loudly instead of silently passing:
+- the scan step needs the Rust binary (embedded wheel package-data; the
+  sibling `bin/lucidlint` next to the bundle's lucidlint.py);
+- the fix step needs fix_engine.py and the libcst dependency (a wheel
+  declares it in [project] dependencies, the release bundle vendors it in
+  `deps/` — a missing one breaks this import);
 - the verdict and fix subcommands need the entry point and every shipped
   module (the report footer imports rule_metadata.py).
 
-Usage: deploy-check.py --lucidlint <installed-binary> --project <out-dir>
+Usage: deploy-check.py --lucidlint <command-prefix> --project <out-dir>
+
+--lucidlint is the shlex-split command that RUNS lucidlint: an installed
+binary path (`.venv/bin/lucidlint`, `venv/Scripts/lucidlint.exe`) or a
+prefix like `python3 dist/lucidlint-dev-x86_64/bin/lucidlint.py` for the
+release bundle (which has no console script).
 """
 
 from __future__ import annotations
@@ -21,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -75,7 +84,6 @@ EXPECTED_FAIL_KINDS = ("stale-suppression", "unreachable", "noop-statement")
 CONST_NAME = "MAX_RETRIES"
 
 
-
 @dataclass(frozen=True)
 class Action:
     """One finding from the scan JSON contract — the fields the check uses."""
@@ -119,17 +127,21 @@ def fail(msg: str) -> int:
 class _DeployCheck:
     """The gate steps: run the scanner on the project, assert the expected
     fail findings, apply the fix directives, verify the re-scan is clean.
-    The (binary, project) pair travels together — a class holds it."""
+    The (lucidlint command, project) pair travels together — a class holds it."""
 
-    def __init__(self, binary: str, project: Path):
-        self.binary: str = binary
+    def __init__(self, cmd: list[str], project: Path):
+        self.cmd: list[str] = cmd
         self.project: Path = project
 
     def find_step(self) -> int:
-        scan = run([self.binary, "--repo", str(self.project), "--json"], cwd=self.project)
+        scan = run(self.cmd + ["--repo", str(self.project), "--json"], cwd=self.project)
         actions = parse_actions(scan.stdout)
         if actions is None:
-            return fail("the scan output was not the findings JSON contract")
+            # the command itself failed (bad path, missing interpreter,
+            # traceback) — its stderr IS the diagnosis, not the JSON
+            err = (scan.stderr or scan.stdout).strip().splitlines()
+            detail = err[0][:200] if err else f"exit {scan.returncode} with no output"
+            return fail(f"the scan output was not the findings JSON contract ({detail})")
         kinds = {a.kind for a in actions if a.severity == "fail"}
         missing = [k for k in EXPECTED_FAIL_KINDS if k not in kinds]
         if scan.returncode == 0 or missing:
@@ -137,7 +149,7 @@ class _DeployCheck:
         return 0
 
     def fix_step(self) -> int:
-        scan = run([self.binary, "--repo", str(self.project), "--json"], cwd=self.project)
+        scan = run(self.cmd + ["--repo", str(self.project), "--json"], cwd=self.project)
         actions = parse_actions(scan.stdout)
         if actions is None:
             return fail("the scan output was not the findings JSON contract")
@@ -145,7 +157,7 @@ class _DeployCheck:
             m = re.search(r"fix: (lucidlint fix --kind \S+ --file \S+ --line \d+)", a.message)
             if not m:
                 continue
-            cmd = [self.binary] + m.group(1).split()[1:]
+            cmd = self.cmd + m.group(1).split()[1:]
             if a.kind == "magic-number":
                 cmd += ["--name", CONST_NAME]
             fixed = run(cmd, cwd=self.project)
@@ -154,7 +166,7 @@ class _DeployCheck:
         return 0
 
     def verify_step(self) -> int:
-        rescan = run([self.binary, "--repo", str(self.project), "--json"], cwd=self.project)
+        rescan = run(self.cmd + ["--repo", str(self.project), "--json"], cwd=self.project)
         actions = parse_actions(rescan.stdout)
         if actions is None:
             return fail("the re-scan output was not the findings JSON contract")
@@ -167,17 +179,23 @@ class _DeployCheck:
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="deploy-check")
-    ap.add_argument("--lucidlint", required=True, help="the installed lucidlint binary")
+    ap.add_argument(
+        "--lucidlint",
+        required=True,
+        help="shlex-split command that runs lucidlint (a binary path, or `python3 <bundle>/lucidlint.py`)",
+    )
     ap.add_argument("--project", required=True, help="where to generate the mini project")
     args = ap.parse_args()
 
-    binary = str(args.lucidlint)
+    cmd = shlex.split(args.lucidlint)
+    if not cmd:
+        raise SystemExit("deploy-check: --lucidlint is empty")
     project = Path(args.project)
     project.mkdir(parents=True, exist_ok=True)
     for rel, content in PROJECT_FILES.items():
         (project / rel).write_text(content)
 
-    check = _DeployCheck(binary, project)
+    check = _DeployCheck(cmd, project)
     status = check.find_step()
     if status:
         return status

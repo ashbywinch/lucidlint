@@ -74,10 +74,16 @@ GATE: FAIL — 2 action(s) ... top P99 houses/app.py:149 (parse_netex_fares)
 
 Download the archive for your platform from the
 [releases page](https://github.com/ashbywinch/lucidlint/releases)
-(`SHA256SUMS` is published alongside for verification):
+(`SHA256SUMS` is published alongside for verification). Every artifact is
+tested post packaging: the release pipeline installs each bundle/wheel in a
+clean environment and drives `scan → fix → re-scan PASS` before upload.
 
 ```
-linux x64   lucidlint-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz
+linux x64   lucidlint-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz    (default — fixes included)
+linux musl  lucidlint-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz   (static/Alpine hosts — scan only:
+                                                                 the fix engine needs libcst, which
+                                                                 cannot load on musl, so fixes report
+                                                                 their requirement; use the wheel)
 macOS arm64 lucidlint-vX.Y.Z-aarch64-apple-darwin.tar.gz
 macOS x64   lucidlint-vX.Y.Z-x86_64-apple-darwin.tar.gz
 Windows x64 lucidlint-vX.Y.Z-x86_64-pc-windows-msvc.tar.gz

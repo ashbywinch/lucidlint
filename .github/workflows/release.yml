@@ -1,13 +1,25 @@
 # Release — build the lucidlint bundles on a version tag and publish them.
 #
 # DO NOT CHANGE:
-# - The matrix targets: linux musl (static), macos arm64 + x64, windows x64 —
-#   the four platform bundles every consumer downloads.
+# - The matrix targets: linux gnu (glibc — the DEFAULT linux bundle, ships
+#   the vendored libcst so released fixes work out of the box), linux musl
+#   (static/Alpine hosts — no libcst by design, its fix path reports the
+#   requirement, asserted degraded in the post-packaging check), macos
+#   arm64 + x64, windows x64 — the five platform bundles every consumer
+#   downloads.
+#
+# - The post-packaging checks: BEFORE upload, every artifact is exercised
+#   through scan -> fix -> re-scan PASS (scripts/deploy-check.py) — the
+#   bundle's fix path runs the vendored deps/ libcst (the v0.5.0 regression:
+#   the linux bundle shipped without it and released fixes broke), the wheel
+#   installs into a clean venv, the sdist builds its Rust core at install.
+#   The musl bundle's degraded fix path (reports the requirement) is
+#   asserted too. Never skip these without a replacement gate.
 # - CODE_HEALTH_VERSION: the tag IS the version; the binary is stamped at
 #   build time so `lucidlint --version` matches the bundle it ships in.
-# - The bundle layout: <prefix>/bin/lucidlint + lucidlint.py next to it —
-#   the orchestrator resolves its sibling binary, so the bundle is
-#   self-contained (no PATH, no env).
+# - The bundle layout: <prefix>/bin/lucidlint + lucidlint.py next to it and
+#   every shipped module — the orchestrator resolves its sibling binary, so
+#   the bundle is self-contained (no PATH, no env).
 # - The pip package: every runner also ships its platform wheel (host-target
 #   Rust core — the bundle cross-build above stays separate), the linux
 #   runner adds the platform-independent sdist. Both attach to the release
@@ -40,6 +52,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             cross: true
@@ -90,7 +104,7 @@ jobs:
             python3 -m pip install --quiet --target "dist/${dir}/deps" "libcst>=1.9.0"
           fi
           tar -C dist -czf "dist/${dir}.tar.gz" "${dir}"
-      - name: Smoke-test the bundle (imports resolve, gate runs)
+      - name: Post-packaging check — the bundle (imports resolve, gate runs, consumer flow)
         shell: bash
         run: |
           set -euo pipefail
@@ -99,10 +113,45 @@ jobs:
           python3 "dist/${dir}/lucidlint.py" --repo .
           # the documented consumer flow — `make -C <bundle> lucidlint` —
           # must work from the tarball layout (bundle Makefile present).
-          # Guarded to the linux row: the windows runner has no `make`.
-          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+          # Guarded to the non-windows rows: the windows runner has no `make`.
+          if [ "${{ matrix.target }}" != "x86_64-pc-windows-msvc" ]; then
             make -C "dist/${dir}" lucidlint REPO="$GITHUB_WORKSPACE" BASELINE=
           fi
+      - name: Post-packaging check — the bundle's fix path works end to end
+        # The regression gate for the v0.5.0 bug: the shipped linux bundle
+        # never carried the vendored libcst, so released fixes reported
+        # "requires libcst" and did nothing. deploy-check drives the
+        # PACKAGED lucidlint.py through scan -> fix -> re-scan PASS — a
+        # missing module or a deps/ libcst that fails to import fails this
+        # step loudly.
+        if: matrix.target != 'x86_64-unknown-linux-musl'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="lucidlint-${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}-${{ matrix.target }}"
+          # absolute bundle path: deploy-check runs the command with the
+          # project dir as cwd, so a checkout-relative path would resolve
+          # inside the project and fail with non-JSON output. The windows
+          # runner's GITHUB_WORKSPACE uses backslashes, which shlex treats
+          # as escapes (D:\a\... glues to D:alucidlint...) - normalize to
+          # forward slashes before the value reaches shlex.
+          bundle="${GITHUB_WORKSPACE//\\//}/dist/${dir}/lucidlint.py"
+          python3 scripts/deploy-check.py --lucidlint "python3 ${bundle}" --project "${RUNNER_TEMP}/bundle-check"
+      - name: Post-packaging check — musl bundle degrades honestly (no libcst by design)
+        # The static bundle cannot load glibc-built libcst, so it ships
+        # without deps/ and the fix path must REPORT its requirement — never
+        # crash. This pins that documented contract to the artifact.
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="lucidlint-${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}-${{ matrix.target }}"
+          set +e
+          python3 "dist/${dir}/lucidlint.py" fix --kind extract-method --file lucidlint.py --line 1 > "${RUNNER_TEMP}/musl-fix.txt" 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -eq 1 ] || { echo "musl fix must exit 1, got $rc"; cat "${RUNNER_TEMP}/musl-fix.txt"; exit 1; }
+          grep -q "requires libcst" "${RUNNER_TEMP}/musl-fix.txt"
       - uses: astral-sh/setup-uv@v5
       - name: Build the pip wheel (host-target Rust core)
         # The cross action on the musl row exports CARGO_BUILD_TARGET=...musl;
@@ -118,9 +167,41 @@ jobs:
           # widen the pip tag beyond the runner's OS: 11.0 is the arm64
           # floor (Rust's aarch64-apple-darwin minimum), 10.13 for x64
           MACOSX_DEPLOYMENT_TARGET: ${{ startsWith(matrix.os, 'macos-14') && '11.0' || startsWith(matrix.os, 'macos-15') && '10.13' || '' }}
+      - name: Post-packaging check — the pip wheel (clean-venv install, scan + fix)
+        # What a real pip user gets: the freshly built wheel installed into a
+        # CLEAN venv, driven through scan -> fix -> re-scan PASS. A wheel
+        # whose libcst dependency was never declared, whose modules are
+        # missing, or whose embedded binary is absent fails this step. The
+        # release-built wheel is tested here (PR CI tests a different build).
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          python3 -m venv "${tmp}/venv"
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then PY="${tmp}/venv/Scripts/python.exe"; else PY="${tmp}/venv/bin/python"; fi
+          "${PY}" -m pip install --quiet pip-dist/*.whl
+          "${PY}" -m lucidlint --version
+          "${PY}" scripts/deploy-check.py --lucidlint "${PY} -m lucidlint" --project "${tmp}/project"
+          rm -rf "${tmp}"
       - if: matrix.cross
         name: Build the source distribution
         run: uv build --sdist --out-dir pip-dist
+      - if: matrix.cross
+        name: Post-packaging check — the sdist (clean-venv install builds the Rust core)
+        # The sdist is the platform-independent pip artifact: it compiles the
+        # scanner at install time (cargo, present on this row). A MANIFEST
+        # gap (a shipped module or scanner source missing from the sdist)
+        # fails the install or the deploy-check that follows.
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset CARGO_BUILD_TARGET  # the cross action leaks it; see the wheel step above
+          tmp="$(mktemp -d)"
+          python3 -m venv "${tmp}/venv"
+          PY="${tmp}/venv/bin/python"
+          "${PY}" -m pip install --quiet pip-dist/*.tar.gz
+          "${PY}" scripts/deploy-check.py --lucidlint "${PY} -m lucidlint" --project "${tmp}/project"
+          rm -rf "${tmp}"
       - uses: actions/upload-artifact@v4
         with:
           name: pip-${{ matrix.target }}

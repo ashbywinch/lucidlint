@@ -1,0 +1,12 @@
+def f(a):
+    def inner(x):
+        if x:
+            return 1
+        return 0
+    class C:
+        def m(self):
+            if self:
+                return 1
+    if a:
+        return inner(a)
+    return 0

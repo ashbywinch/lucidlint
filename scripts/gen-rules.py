@@ -34,7 +34,17 @@ sys.path.insert(0, str(ROOT))
 
 import rule_metadata  # noqa: E402  # the sys.path bootstrap above precedes the import — inherent to the pattern
 
-NON_LITERAL_KINDS = {"complexity"}
+NON_LITERAL_KINDS = {
+    # the scanner never emits these as a literal kind/severity pair: the
+    # loop family's mutating/sequence variants all flow through
+    # LoopFunctionCtx.push_finding (kind is a parameter, severities warn).
+    # The severity string IS literal in the construction, but the regex
+    # needs the pair in one match — metadata is trusted for these.
+    "complexity",
+    "mutating-loop",
+    "loop-sequence",
+    "loop-hoist",
+}
 
 START = "<!-- RULES-GENERATED:START -->"
 END = "<!-- RULES-GENERATED:END -->"
@@ -238,11 +248,15 @@ def render_rules_rs() -> str:
 
 
 def _fmt_rust(code: str) -> str:
-    """Run the generated Rust through rustfmt so the committed file is
-    fmt-clean and the --check comparison is byte-stable. rustfmt is a
-    required tool (the lint gate runs cargo fmt) — a missing binary is a
-    broken environment, and a raw fallback would make --check report a
-    freshly generated file as stale (review finding)."""
+    """Run the generated Rust through rustfmt FROM scanner/ so it picks up
+    scanner/rustfmt.toml (max_width 120 — the house .editorconfig) — the
+    same config `cargo fmt` uses, which is the lint gate's formatter. A
+    generator formatting with the default config (run from the repo root)
+    disagreed with cargo fmt on tuple/array layout and made make-rules
+    output fail `cargo fmt --check` (the loop-pipeline family entry).
+    rustfmt is a required tool (the lint gate runs cargo fmt) — a missing
+    binary is a broken environment, and a raw fallback would make --check
+    report a freshly generated file as stale (review finding)."""
     try:
         proc = subprocess.run(
             ["rustfmt", "--emit", "stdout"],
@@ -250,6 +264,7 @@ def _fmt_rust(code: str) -> str:
             capture_output=True,
             text=True,
             timeout=30,
+            cwd=str(ROOT / "scanner"),
         )
     except OSError as e:
         raise SystemExit(

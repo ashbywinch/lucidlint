@@ -1,0 +1,1 @@
+x = 1  # lucidlint: ignore record-shape data table row

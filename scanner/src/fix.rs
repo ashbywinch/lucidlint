@@ -1,14 +1,18 @@
-//! The Rust fix surface — extract-method for `.rs` targets.
+//! The Rust fix surface — extract-method, dispatch-registry, rule-table,
+//! and the loop family (loop-pipeline, loop-sequence, loop-hoist) for
+//! `.rs` targets.
 //!
 //! The Python orchestrator's fix engine is libcst (Python-only). For a Rust
-//! finding the extraction runs here, as a lossless TEXT edit: syn gives
-//! spans, we slice the original source and splice the helper + call in, so
+//! finding the rewrite runs here, as a lossless TEXT edit: syn gives
+//! spans, we slice the original source and splice the replacement in, so
 //! comments and formatting survive (rustfmt remains the house formatter).
 //!
-//! Scope — refuse anything more, honestly: a seam whose free variables are
-//! a subset of the function's PARAMETERS (their types come from the
-//! signature; deriving types for locals would need a type checker) and that
-//! has no out-variables and no control-flow exit.
+//! Scope — refuse anything more, honestly: extract-method needs a seam
+//! whose free variables are a subset of the function's PARAMETERS (their
+//! types come from the signature; deriving types for locals would need a
+//! type checker) with no out-variables and no control-flow exit; the loop
+//! fixes need the detector's exact single-accumulator shape (each refusal
+//! names why, never a silent no-op).
 
 use proc_macro2::LineColumn;
 use syn::spanned::Spanned;
@@ -28,6 +32,16 @@ fn byte_offset(source: &str, lc: LineColumn) -> usize {
         }
     }
     source.len()
+}
+
+/// The fn whose span contains `line` — the loop fixes resolve by finding
+/// line, not by position in the file (a later fn's loop must not rewrite
+/// through the first fn's accumulator).
+fn enclosing_fn(file: &syn::File, line: usize) -> Option<&ItemFn> {
+    file.items.iter().find_map(|item| match item {
+        Item::Fn(f) if f.span().start().line <= line && line <= f.span().end().line => Some(f),
+        _ => None,
+    })
 }
 
 /// Collect `let`/loop/closure/match bindings in a statement set.
@@ -707,4 +721,1016 @@ fn idents_in_expr(e: &Expr) -> Vec<String> {
     let mut v = Idents(Vec::new());
     v.visit_expr(e);
     v.0
+}
+
+/// One loop's pipeline plan: the accumulator, the shape (pure-push keeps
+/// the borrowed item, an if-filter narrows it, an index store needs the
+/// position), and the source slices the combinator rewrite needs.
+struct PipelinePlan {
+    acc: String,
+    filter: Option<String>,
+    indexed: bool,
+    push_arg: String,
+    pat: String,
+    iter: String,
+}
+
+/// The loop's item binding: a plain single name (never `_` or
+/// destructuring — there is no name to rebind in the closure parameter).
+/// Returns the binding plus whether the push sits behind an if-filter.
+// lucidlint: ignore complexity the two refuses are the contract — one shape, two names for failure
+fn pipeline_loop_target(f: &syn::ExprForLoop) -> Result<(String, bool), String> {
+    let Pat::Ident(pi) = &*f.pat else {
+        return Err("the loop pattern is not a plain binding".to_string());
+    };
+    let pat = pi.ident.to_string();
+    if pat == "_" {
+        return Err("the loop binds `_` — there is no item name to map over".to_string());
+    }
+    let mut bound = Vec::new();
+    crate::rustloops::pat_idents(&f.pat, &mut bound);
+    if bound.len() != 1 {
+        return Err("the loop pattern binds more than one name".to_string());
+    }
+    let filtered = matches!(f.body.stmts.as_slice(), [Stmt::Expr(Expr::If(_), _)]);
+    Ok((pat, filtered))
+}
+
+/// The `loop-pipeline` plan for the for-loop at `loop_idx`: the body is one
+/// collection build (`rustloops::body_is_pipeline`) over a `let mut <acc>`
+/// initialised to empty DIRECTLY before the loop. The accumulator must be
+/// dead after the loop except through the fn's tail value — the rewrite
+/// moves its binding, so any other read would break. Err(why) when the
+/// shape is not losslessly rewritable.
+/// Which init the plan resolves: a single loop needs its init directly
+/// above; a chain member points at the fn-open shared init.
+#[derive(Clone, Copy)]
+enum InitScope {
+    Single,
+    Chain,
+}
+
+fn pipeline_plan(
+    source: &str,
+    target: &ItemFn,
+    stmts: &[Stmt],
+    loop_idx: usize,
+    scope: InitScope,
+) -> Result<(usize, PipelinePlan), String> {
+    let Stmt::Expr(Expr::ForLoop(f), _) = &stmts[loop_idx] else {
+        return Err("the statement at the finding line is not a for-loop".to_string());
+    };
+    let (pat, core_is_if) = pipeline_loop_target(f)?;
+    // one collection build — the detector's own predicate is the contract
+    if !crate::rustloops::body_is_pipeline(&f.body.stmts) {
+        return Err("the loop body is not a single collection build".to_string());
+    }
+    let _ = core_is_if;
+    // the accumulator: the push receiver / store base
+    let core: &Stmt = match f.body.stmts.as_slice() {
+        [s] => s,
+        _ => return Err("the loop body is not a single collection build".to_string()),
+    };
+    let core: &Stmt = match core {
+        Stmt::Expr(Expr::If(i), _) => &i.then_branch.stmts[0],
+        _ => core,
+    };
+    let acc = crate::rustloops::single_push(core)
+        .or_else(|| crate::rustloops::index_store(core))
+        .ok_or_else(|| "the loop body is not a single collection build".to_string())?;
+    let filter = match f.body.stmts.as_slice() {
+        [Stmt::Expr(Expr::If(i), _)] => Some(span_text(source, i.cond.span())?),
+        _ => None,
+    };
+    let push_arg = match core {
+        Stmt::Expr(Expr::MethodCall(m), Some(_)) => span_text(source, m.args[0].span())?,
+        Stmt::Expr(Expr::Assign(a), Some(_)) => span_text(source, a.right.span())?,
+        _ => return Err("the loop body is not a single collection build".to_string()),
+    };
+    let indexed = crate::rustloops::index_store(core).is_some();
+    let init_idx = pipeline_init_index(stmts, loop_idx, scope, &acc)?;
+    // the empty check: `Vec::new()` / `vec![]` / `HashSet::new()` — a
+    // non-empty init would be dropped by the rewrite; refuse instead
+    pipeline_empty_init(stmts, init_idx, &acc)?;
+    // the tail: the fn must END with the accumulator (possibly `return
+    // <acc>` / `<acc>` with trailing `;`?) — anything after that reads it
+    // is a second use the move would break. A bare `acc` tail or
+    // `return acc;` tail both count; other tails refuse.
+    pipeline_tail_ok(stmts, &acc)?;
+    // no other read of the accumulator between init and tail: the rewrite
+    // deletes the `let mut`, so a mid-body read would dangle. Sibling
+    // for-loops over the same accumulator are NOT reads — the sequence
+    // fixer plans each loop separately and concatenates them.
+    pipeline_no_mid_read(stmts, init_idx, loop_idx, &acc)?;
+    let iter = span_text(source, f.expr.span())?;
+    let _ = target;
+    Ok((
+        init_idx,
+        PipelinePlan {
+            acc,
+            filter,
+            indexed,
+            push_arg,
+            pat,
+            iter,
+        },
+    ))
+}
+
+/// The init index for a pipeline plan: DIRECTLY before the loop (skipping
+/// attributes), or the fn's first statement for a shared chain init.
+// lucidlint: ignore complexity the init walk is one linear scan — match-arm count, not branching
+fn pipeline_init_index(stmts: &[Stmt], loop_idx: usize, scope: InitScope, acc: &str) -> Result<usize, String> {
+    if matches!(scope, InitScope::Chain) {
+        // the chain init is the fn's FIRST non-item statement (verified by
+        // the sequence fixer) — point every member plan at it so the empty
+        // check and the tail verdict agree on one accumulator
+        return stmts
+            .iter()
+            .position(|s| !matches!(s, Stmt::Item(_)))
+            .ok_or_else(|| format!("the accumulator `{acc}` has no initialiser"));
+    }
+    let mut init_idx = loop_idx;
+    loop {
+        if init_idx == 0 {
+            return Err(format!(
+                "the accumulator `{acc}` must be initialised to an empty collection directly before the loop"
+            ));
+        }
+        init_idx -= 1;
+        match &stmts[init_idx] {
+            Stmt::Item(_) => {}
+            Stmt::Local(l) => {
+                let bound = match &l.pat {
+                    Pat::Ident(lp) => lp.ident.to_string(),
+                    Pat::Type(pt) => match pt.pat.as_ref() {
+                        Pat::Ident(lp) => lp.ident.to_string(),
+                        _ => {
+                            return Err(format!(
+                                "the statement before the loop is not `let mut {acc}` — the rewrite cannot preserve prior contents"
+                            ));
+                        }
+                    },
+                    _ => {
+                        return Err(format!(
+                            "the statement before the loop is not `let mut {acc}` — the rewrite cannot preserve prior contents"
+                        ));
+                    }
+                };
+                if bound != acc {
+                    return Err(format!(
+                        "the statement before the loop binds `{bound}` — the rewrite needs `let mut {acc}` directly above"
+                    ));
+                }
+                if l.init.is_none() {
+                    return Err(format!("the statement before the loop is not `let mut {acc} = ...`"));
+                }
+                return Ok(init_idx);
+            }
+            _ => {
+                return Err(format!(
+                    "the accumulator `{acc}` must be initialised to an empty collection directly before the loop — the rewrite cannot preserve prior contents"
+                ));
+            }
+        }
+    }
+}
+
+/// The init holds an empty collection — a non-empty init would be dropped
+/// by the rewrite; refuse instead.
+fn pipeline_empty_init(stmts: &[Stmt], init_idx: usize, acc: &str) -> Result<(), String> {
+    let Stmt::Local(init) = &stmts[init_idx] else {
+        return Err("the shared accumulator init is not a plain let binding".to_string());
+    };
+    let init_expr = init.init.as_ref().map(|b| b.expr.as_ref());
+    let empty = match init_expr {
+        Some(Expr::Call(c)) => {
+            matches!(c.func.as_ref(), Expr::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "new"))
+        }
+        Some(Expr::Macro(m)) => {
+            m.mac.path.segments.last().is_some_and(|s| s.ident == "vec") && m.mac.tokens.to_string().trim().is_empty()
+        }
+        _ => false,
+    };
+    if !empty {
+        return Err(format!(
+            "the accumulator `{acc}` must be initialised to an empty collection directly before the loop — the rewrite cannot preserve prior contents"
+        ));
+    }
+    Ok(())
+}
+
+/// The fn ENDS with the accumulator — the move preserves its only reader.
+fn pipeline_tail_ok(stmts: &[Stmt], acc: &str) -> Result<(), String> {
+    let tail_ok = match stmts.last() {
+        Some(Stmt::Expr(Expr::Path(p), _)) => p.path.segments.len() == 1 && p.path.segments[0].ident == acc,
+        Some(Stmt::Expr(Expr::Return(r), _)) => match r.expr.as_deref() {
+            Some(Expr::Path(p)) => p.path.segments.len() == 1 && p.path.segments[0].ident == acc,
+            _ => false,
+        },
+        _ => false,
+    };
+    if !tail_ok {
+        return Err(format!(
+            "the function does not end with `{acc}` — the rewrite moves its binding"
+        ));
+    }
+    Ok(())
+}
+
+/// No mid-body read of the accumulator outside the loop and tail.
+fn pipeline_no_mid_read(stmts: &[Stmt], init_idx: usize, loop_idx: usize, acc: &str) -> Result<(), String> {
+    struct ReadsAcc<'x> {
+        acc: &'x str,
+        found: bool,
+    }
+    impl syn::visit::Visit<'_> for ReadsAcc<'_> {
+        fn visit_expr_path(&mut self, node: &syn::ExprPath) {
+            if node.path.segments.len() == 1 && node.path.segments[0].ident == self.acc {
+                self.found = true;
+            }
+        }
+    }
+    for (i, s) in stmts.iter().enumerate() {
+        if i == init_idx || i == loop_idx || i == stmts.len() - 1 {
+            continue;
+        }
+        if matches!(s, Stmt::Expr(Expr::ForLoop(_), _)) {
+            continue;
+        }
+        let mut v = ReadsAcc { acc, found: false };
+        v.visit_stmt(s);
+        if v.found {
+            return Err(format!(
+                "the body reads `{acc}` outside the loop — the rewrite moves its binding"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `loop-pipeline` (mechanical): the single-push for-loop at `line`
+/// becomes the combinator that replaces it — `let <acc>: Vec<_> = <iter>
+/// .iter().map(|<pat>| <arg>).collect();` (`.filter()` when the push sits
+/// behind one if-filter). An indexed store becomes the same shape over
+/// indices. Lossless text splice: the init + loop become one `let`, the
+/// tail `return acc;`/`acc` keeps reading the new binding. Returns
+/// Err(why) when the shape is not losslessly rewritable.
+///
+/// The detector calls `loop_pipeline_fixable` (same contract, bool instead
+/// of the rewrite) before advertising `fix: loop-pipeline` — an
+/// unfixable loop gets the finding WITHOUT the directive (offer equals
+/// fix: review-bot).
+pub fn loop_pipeline_fixable(source: &str, _file: &str, line: usize) -> bool {
+    let Ok(file) = syn::parse_file(source) else {
+        return false;
+    };
+    let Some(target) = enclosing_fn(&file, line) else {
+        return false;
+    };
+    let stmts = &target.block.stmts;
+    let Some(loop_idx) = stmts
+        .iter()
+        .position(|s| s.span().start().line == line && matches!(s, Stmt::Expr(Expr::ForLoop(_), _)))
+    else {
+        return false;
+    };
+    pipeline_plan(source, target, stmts, loop_idx, InitScope::Single).is_ok()
+}
+
+pub fn fix_loop_pipeline(source: &str, line: usize) -> Result<String, String> {
+    let file = syn::parse_file(source).map_err(|_| "the file does not parse".to_string())?;
+    let target = enclosing_fn(&file, line).ok_or_else(|| format!("no function contains line {line}"))?;
+    // the loop AT the finding line — top-level statements only
+    let stmts = &target.block.stmts;
+    let loop_idx = stmts
+        .iter()
+        .position(|s| s.span().start().line == line && matches!(s, Stmt::Expr(Expr::ForLoop(_), _)))
+        .ok_or_else(|| format!("no for-loop starts at line {line}"))?;
+    let (init_idx, plan) = pipeline_plan(source, target, stmts, loop_idx, InitScope::Single)?;
+    let replacement = if plan.indexed {
+        // `out[i] = v` over `0..n` — the position IS the data; map over
+        // indices and collect back into the same shape
+        match &plan.filter {
+            Some(cond) => format!(
+                "let {}: Vec<_> = {}.filter(|{}| {}).map(|{}| {}).collect();",
+                plan.acc, plan.iter, plan.pat, cond, plan.pat, plan.push_arg
+            ),
+            None => format!(
+                "let {}: Vec<_> = {}.map(|{}| {}).collect();",
+                plan.acc, plan.iter, plan.pat, plan.push_arg
+            ),
+        }
+    } else {
+        match &plan.filter {
+            Some(cond) => format!(
+                "let {}: Vec<_> = {}.iter().filter(|{}| {}).map(|{}| {}).collect();",
+                plan.acc, plan.iter, plan.pat, cond, plan.pat, plan.push_arg
+            ),
+            None => format!(
+                "let {}: Vec<_> = {}.iter().map(|{}| {}).collect();",
+                plan.acc, plan.iter, plan.pat, plan.push_arg
+            ),
+        }
+    };
+    // splice: replace [init start .. loop end] with the one `let` (the
+    // init's own indent survives as part of the prefix — nothing to add)
+    let splice_start = byte_offset(source, stmts[init_idx].span().start());
+    let splice_end = byte_offset(source, stmts[loop_idx].span().end());
+    let mut out = String::new();
+    out.push_str(&source[..splice_start]);
+    out.push_str(&replacement);
+    out.push_str(&source[splice_end..]);
+    Ok(out)
+}
+
+/// The detector calls `loop_sequence_fixable` (same contract, bool instead
+/// of the rewrite) before advertising `fix: loop-sequence` on a shared /
+/// feed verdict — an unfixable chain gets the finding WITHOUT the
+/// directive (offer equals fix: review-bot).
+pub fn loop_sequence_fixable(source: &str, _file: &str, fn_line: usize) -> bool {
+    fix_loop_sequence(source, fn_line).is_ok()
+}
+
+pub fn fix_loop_sequence(source: &str, line: usize) -> Result<String, String> {
+    let file = syn::parse_file(source).map_err(|_| "the file does not parse".to_string())?;
+    let target = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Fn(f) if f.sig.ident.span().start().line == line => Some(f),
+            _ => None,
+        })
+        .ok_or_else(|| format!("no function starts at line {line}"))?;
+    let stmts = &target.block.stmts;
+    // the fn must OPEN with `let mut <acc> = <empty>;` — the shared init
+    // the rewrite preserves only the loops, not prior contents
+    let first = stmts
+        .iter()
+        .position(|s| !matches!(s, Stmt::Item(_)))
+        .ok_or_else(|| "the function body is empty — no shared accumulator chain".to_string())?;
+    let Stmt::Local(init) = &stmts[first] else {
+        return Err("the function does not open with the shared accumulator init".to_string());
+    };
+    let Pat::Ident(acc_pat) = &init.pat else {
+        return Err("the shared accumulator binding is not a plain name".to_string());
+    };
+    let acc = acc_pat.ident.to_string();
+    // every statement after the init must be a for-loop (no interleaving)
+    // and every loop must plan against the SAME accumulator
+    let mut comps = Vec::new();
+    let mut last_loop = first;
+    for (i, s) in stmts.iter().enumerate().skip(first + 1) {
+        if matches!(s, Stmt::Item(_)) {
+            continue;
+        }
+        if i == stmts.len() - 1 {
+            // the tail `out` / `return out;` is the accumulator read the
+            // rewrite preserves — not a chain member
+            continue;
+        }
+        let Stmt::Expr(Expr::ForLoop(_), _) = s else {
+            return Err(
+                "the chain mixes loops and other statements — reorder so the loops are consecutive".to_string(),
+            );
+        };
+        let (_, plan) = pipeline_plan(source, target, stmts, i, InitScope::Chain)?;
+        if plan.acc != acc {
+            return Err(format!(
+                "the chain mixes accumulators (`{}` vs `{}`) — every loop must build the same empty-initialized collection",
+                plan.acc, acc
+            ));
+        }
+        if plan.indexed {
+            return Err("an indexed store in the chain has no combinator concatenation".to_string());
+        }
+        let one = match &plan.filter {
+            Some(cond) => format!(
+                "{}.iter().filter(|{}| {}).map(|{}| {}).collect::<Vec<_>>()",
+                plan.iter, plan.pat, cond, plan.pat, plan.push_arg
+            ),
+            None => format!(
+                "{}.iter().map(|{}| {}).collect::<Vec<_>>()",
+                plan.iter, plan.pat, plan.push_arg
+            ),
+        };
+        comps.push(one);
+        last_loop = i;
+    }
+    if comps.len() < 2 {
+        return Err("fewer than 2 pipeline loops — not a sequence".to_string());
+    }
+    let replacement = format!("let {acc}: Vec<_> = {};", comps.join(" + "));
+    let splice_start = byte_offset(source, stmts[first].span().start());
+    let splice_end = byte_offset(source, stmts[last_loop].span().end());
+    let mut out = String::new();
+    out.push_str(&source[..splice_start]);
+    out.push_str(&replacement);
+    out.push_str(&source[splice_end..]);
+    Ok(out)
+}
+
+/// The hoist plan: the single accumulator the body appends to, plus the
+/// body's own bindings (loop pattern + `let`s — temps the helper keeps).
+struct HoistPlan {
+    acc: String,
+    push_args: Vec<proc_macro2::Span>,
+}
+/// The single accumulator the body pushes to, plus the push-receiver
+/// paths (a mid-build READ check must not mistake a receiver for a read).
+/// Any other mutating receiver on outer state refuses with its name.
+// lucidlint: ignore complexity the push scan is one visitor — match-arm count, not branching
+fn hoist_push_accum(
+    body: &[Stmt],
+    bound: &std::collections::HashSet<String>,
+) -> Result<(String, Vec<*const syn::ExprPath>, Vec<proc_macro2::Span>), String> {
+    struct PushScan<'x> {
+        bound: &'x std::collections::HashSet<String>,
+        acc: Option<String>,
+        receivers: Vec<*const syn::ExprPath>,
+        push_args: Vec<proc_macro2::Span>,
+        decline: Option<String>,
+    }
+    impl syn::visit::Visit<'_> for PushScan<'_> {
+        fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+            let method = node.method.to_string();
+            let outer_base = match node.receiver.as_ref() {
+                syn::Expr::Path(p)
+                    if p.path.segments.len() == 1 && !self.bound.contains(&p.path.segments[0].ident.to_string()) =>
+                {
+                    Some(p.path.segments[0].ident.to_string())
+                }
+                _ => None,
+            };
+            if let Some(base) = outer_base {
+                if crate::rustloops::MUTATING_METHODS.contains(&method.as_str()) {
+                    if method != "push" {
+                        self.decline = Some(format!(
+                            "`{method}` accumulation (`{base}`) keeps the loop — the hoist rewrite only expresses push"
+                        ));
+                        return;
+                    }
+                    match &self.acc {
+                        None => self.acc = Some(base),
+                        Some(a) if *a == base => {}
+                        Some(a) => {
+                            self.decline = Some(format!(
+                                "the body accumulates BOTH `{a}` and `{base}` — the hoist rewrite needs one accumulator"
+                            ));
+                            return;
+                        }
+                    }
+                    if let syn::Expr::Path(p) = node.receiver.as_ref() {
+                        self.receivers.push(p as *const syn::ExprPath);
+                    }
+                    if let Some(arg0) = node.args.first() {
+                        self.push_args.push(arg0.span());
+                    }
+                }
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+    let mut scan = PushScan {
+        bound,
+        acc: None,
+        receivers: Vec::new(),
+        push_args: Vec::new(),
+        decline: None,
+    };
+    for s in body {
+        syn::visit::Visit::visit_stmt(&mut scan, s);
+        if scan.decline.is_some() {
+            break;
+        }
+    }
+    if let Some(d) = scan.decline {
+        return Err(d);
+    }
+    let acc = scan
+        .acc
+        .ok_or_else(|| "no outer collection mutation found in the loop body".to_string())?;
+    Ok((acc, scan.receivers, scan.push_args))
+}
+
+/// No mid-build READ of the accumulator except as a push receiver.
+fn hoist_no_mid_read(body: &[Stmt], acc: &str, receivers: &[*const syn::ExprPath]) -> Result<(), String> {
+    struct AccRead<'x> {
+        acc: &'x str,
+        receivers: &'x [*const syn::ExprPath],
+        found: bool,
+    }
+    impl syn::visit::Visit<'_> for AccRead<'_> {
+        fn visit_expr_path(&mut self, node: &syn::ExprPath) {
+            if node.path.segments.len() == 1
+                && node.path.segments[0].ident == self.acc
+                && !self.receivers.contains(&(node as *const syn::ExprPath))
+            {
+                self.found = true;
+            }
+        }
+    }
+    let mut read = AccRead {
+        acc,
+        receivers,
+        found: false,
+    };
+    for s in body {
+        syn::visit::Visit::visit_stmt(&mut read, s);
+        if read.found {
+            break;
+        }
+    }
+    if read.found {
+        return Err(format!(
+            "the body READS `{acc}` mid-build — a combinator has no partial state to read; refactor by hand"
+        ));
+    }
+    Ok(())
+}
+
+/// No other outer-state WRITE besides the accumulator.
+fn hoist_no_other_write(body: &[Stmt], bound: &std::collections::HashSet<String>, acc: &str) -> Result<(), String> {
+    struct WriteScan<'x> {
+        bound: &'x std::collections::HashSet<String>,
+        acc: &'x str,
+        bad: Option<String>,
+    }
+    impl syn::visit::Visit<'_> for WriteScan<'_> {
+        fn visit_expr_assign(&mut self, node: &syn::ExprAssign) {
+            let mut base = Vec::new();
+            crate::rustloops::expr_base_path(&node.left, &mut base);
+            for b in base {
+                if b != self.acc && !self.bound.contains(&b) {
+                    self.bad = Some(b);
+                    return;
+                }
+            }
+            syn::visit::visit_expr_assign(self, node);
+        }
+        fn visit_expr_binary(&mut self, node: &syn::ExprBinary) {
+            if crate::rustscan::is_compound_op(&node.op) {
+                let mut base = Vec::new();
+                crate::rustloops::expr_base_path(&node.left, &mut base);
+                for b in base {
+                    if b != self.acc && !self.bound.contains(&b) {
+                        self.bad = Some(b);
+                        return;
+                    }
+                }
+            }
+            syn::visit::visit_expr_binary(self, node);
+        }
+    }
+    let mut writes = WriteScan { bound, acc, bad: None };
+    for s in body {
+        syn::visit::Visit::visit_stmt(&mut writes, s);
+        if writes.bad.is_some() {
+            break;
+        }
+    }
+    if let Some(b) = writes.bad {
+        return Err(format!(
+            "the body also writes `{b}` — the hoist rewrite only moves a single-accumulator loop"
+        ));
+    }
+    Ok(())
+}
+
+/// The `loop-hoist` plan for the for-loop at `loop_idx`: every outer-state
+/// write is an `acc.push(..)` on ONE accumulator, and the body never READS
+/// that accumulator mid-build (a combinator has no partial state to read).
+/// Refusals name the violation — the Python `_hoist_plan` contract.
+fn hoist_plan(source: &str, stmts: &[Stmt], loop_idx: usize) -> Result<(HoistPlan, String, String), String> {
+    let Stmt::Expr(Expr::ForLoop(f), _) = &stmts[loop_idx] else {
+        return Err("the statement at the finding line is not a for-loop".to_string());
+    };
+    let Pat::Ident(pi) = &*f.pat else {
+        return Err("the loop target must be a simple name to become the helper's parameter".to_string());
+    };
+    let target = pi.ident.to_string();
+    if target == "_" {
+        return Err("the loop binds `_` — there is no item name for the helper's parameter".to_string());
+    }
+    // the body's own bindings: the loop pattern plus every `let` in the
+    // body (nested `let`s via the visitor — a temp is a temp at any depth)
+    struct Lets(std::collections::HashSet<String>);
+    impl syn::visit::Visit<'_> for Lets {
+        fn visit_local(&mut self, node: &syn::Local) {
+            pat_bindings(&node.pat, &mut self.0);
+        }
+        fn visit_item_fn(&mut self, node: &syn::ItemFn) {
+            for p in &node.sig.inputs {
+                if let FnArg::Typed(t) = p {
+                    pat_bindings(&t.pat, &mut self.0);
+                }
+            }
+        }
+    }
+    let mut bound = std::collections::HashSet::new();
+    {
+        let mut v = Vec::new();
+        crate::rustloops::pat_idents(&f.pat, &mut v);
+        bound.extend(v);
+    }
+    for s in &f.body.stmts {
+        let mut l = Lets(std::collections::HashSet::new());
+        syn::visit::Visit::visit_stmt(&mut l, s);
+        bound.extend(l.0);
+    }
+    let (acc, receivers, push_args) = hoist_push_accum(&f.body.stmts, &bound)?;
+    hoist_no_mid_read(&f.body.stmts, &acc, &receivers)?;
+    hoist_no_other_write(&f.body.stmts, &bound, &acc)?;
+    let iter = span_text(source, f.expr.span())?;
+    Ok((HoistPlan { acc, push_args }, target, iter))
+}
+
+/// A name absent from the file — the helper-local and the flatten variable
+/// must not shadow an existing name (the Python `_fresh_loop_name`
+/// contract).
+fn fresh_name(source: &str, base: &str) -> String {
+    let mut candidate = base.to_string();
+    let mut i = 2;
+    while source.contains(&candidate) {
+        candidate = format!("{base}_{i}");
+        i += 1;
+    }
+    candidate
+}
+
+/// Retarget push receivers in place: `acc.push` -> `<local>.push`.
+fn hoist_retarget_pushes(acc: &str, helper_local: &str, moved: &mut String) {
+    let needle = format!("{acc}.push");
+    let replacement = format!("{helper_local}.push");
+    let mut out_moved = String::with_capacity(moved.len());
+    let mut rest = moved.as_str();
+    while let Some(pos) = rest.find(&needle) {
+        // the char before must not be an ident char (no `xacc.push`)
+        let ok = pos == 0
+            || !rest[..pos]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        out_moved.push_str(&rest[..pos]);
+        out_moved.push_str(if ok { &replacement } else { &needle });
+        rest = &rest[pos + needle.len()..];
+    }
+    out_moved.push_str(rest);
+    *moved = out_moved;
+}
+
+/// The empty `let mut <acc>` DIRECTLY before the loop (attributes may sit
+/// between) — the hoist cannot preserve prior contents.
+fn hoist_init_index(stmts: &[Stmt], loop_idx: usize, acc: &str) -> Result<usize, String> {
+    let mut init_idx = loop_idx;
+    loop {
+        if init_idx == 0 {
+            return Err(format!(
+                "the accumulator `{acc}` must be initialised to an empty collection directly before the loop — the hoist cannot preserve prior contents"
+            ));
+        }
+        init_idx -= 1;
+        match &stmts[init_idx] {
+            Stmt::Item(_) => {}
+            Stmt::Local(l) => match &l.pat {
+                Pat::Ident(lp) if lp.ident == *acc => return Ok(init_idx),
+                Pat::Type(pt) => match pt.pat.as_ref() {
+                    Pat::Ident(lp) if lp.ident == *acc => return Ok(init_idx),
+                    Pat::Ident(lp) => {
+                        return Err(format!(
+                            "the statement before the loop binds `{}` — the hoist needs `let mut {acc}` directly above",
+                            lp.ident
+                        ));
+                    }
+                    _ => {
+                        return Err(format!(
+                            "the statement before the loop is not `let mut {acc}` — the hoist cannot preserve prior contents"
+                        ));
+                    }
+                },
+                Pat::Ident(lp) => {
+                    return Err(format!(
+                        "the statement before the loop binds `{}` — the hoist needs `let mut {acc}` directly above",
+                        lp.ident
+                    ));
+                }
+                _ => {
+                    return Err(format!(
+                        "the statement before the loop is not `let mut {acc}` — the hoist cannot preserve prior contents"
+                    ));
+                }
+            },
+            _ => {
+                return Err(format!(
+                    "the accumulator `{acc}` must be initialised to an empty collection directly before the loop — the hoist cannot preserve prior contents"
+                ));
+            }
+        }
+    }
+}
+
+/// The helper item for the hoist: the Option shape wraps each push
+/// arg in `Some(..)` with a `None` fallthrough (conditional push); the
+/// direct shape returns the accumulator local.
+/// The helper's item type from the accumulator's `Vec<T>` annotation —
+/// guessing `_` never compiles (E0282/E0121), so a missing annotation
+/// refuses with its reason.
+fn hoist_item_ty(
+    source: &str,
+    stmts: &[Stmt],
+    init_idx: usize,
+    acc: &str,
+    target_pat: &str,
+) -> Result<(String, String), String> {
+    let Stmt::Local(init) = &stmts[init_idx] else {
+        return Err("the shared accumulator init is not a plain let binding".to_string());
+    };
+    let init_ty = match &init.pat {
+        Pat::Type(pt) => {
+            let ts = byte_offset(source, pt.ty.span().start());
+            let te = byte_offset(source, pt.ty.span().end());
+            source[ts..te].trim().to_string()
+        }
+        _ => {
+            return Err(format!(
+                "the accumulator `{acc}` needs a `Vec<T>` type annotation — the helper's signature cannot be inferred without it"
+            ));
+        }
+    };
+    let item_ty = init_ty
+        .strip_prefix("Vec<")
+        .and_then(|s| s.strip_suffix('>'))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            format!("the accumulator `{acc}` needs a `Vec<T>` type annotation — the helper's signature cannot be inferred without it")
+        })?;
+    // the pattern text (`x`, `*x`, `&x`) decides the call-site deref, not
+    // the helper param (always the plain binding)
+    let param = target_pat.trim_start_matches(['&', '*']).to_string();
+    Ok((item_ty.to_string(), param))
+}
+
+struct HelperSig {
+    helper_name: String,
+    param: String,
+    item_ty: String,
+}
+
+struct HelperBody {
+    moved: String,
+    helper_local: String,
+    conditional: bool,
+}
+
+fn hoist_helper_text(source: &str, sig: &HelperSig, body: &HelperBody, push_args: &[proc_macro2::Span]) -> String {
+    let HelperSig {
+        helper_name,
+        param,
+        item_ty,
+    } = sig;
+    let HelperBody {
+        moved,
+        helper_local,
+        conditional,
+    } = body;
+    if !conditional {
+        return format!("fn {helper_name}({param}: {item_ty}) -> {item_ty} {{\n{moved}    {helper_local}\n}}\n\n");
+    }
+    // Option shape: wrap each push arg in Some(..), append `None` as
+    // the fallthrough, return the Option. The arg text comes from the
+    // push-call spans the plan recorded — syn spans, not a paren scan, so
+    // nested calls and string literals (`format!("({})", x)`) slice exactly.
+    let needle = format!("{helper_local}.push(");
+    let mut rebuilt = String::with_capacity(moved.len() + 16);
+    let mut rest: &str = moved;
+    let mut spans = push_args.iter();
+    while let Some(pos) = rest.find(&needle) {
+        rebuilt.push_str(&rest[..pos]);
+        let arg = match spans.next() {
+            Some(span) => span_text(source, *span)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| String::new()),
+
+            // span/statement drift (should not happen — the spans were
+            // recorded from this same body): fall back to no rewrite
+            None => {
+                rebuilt.push_str(&rest[pos..]);
+                rest = "";
+                break;
+            }
+        };
+        rebuilt.push_str(&format!("return Some({arg});"));
+        // skip past this push statement: the next `;` ends it
+        let tail_start = pos + needle.len();
+        let semi = rest[tail_start..]
+            .find(';')
+            .map(|i| tail_start + i + 1)
+            .unwrap_or(rest.len());
+        rest = &rest[semi..];
+    }
+    rebuilt.push_str(rest);
+    format!("fn {helper_name}({param}: {item_ty}) -> Option<{item_ty}> {{\n{rebuilt}    None\n}}\n\n")
+}
+
+/// `loop-hoist` (mechanical): the single-accumulator for-loop at `line`
+/// whose body computes more than it pushes becomes a per-item helper + a
+/// flattening combinator. The body moves into the helper UNCHANGED except
+/// for the retargeted push receiver (see `hoist_retarget_pushes`).
+///
+/// The detector calls `loop_hoist_fixable_at` (same contract, bool instead
+/// of the rewrite) before advertising `fix: loop-hoist` — an unhoistable
+/// body gets the finding WITHOUT the directive (offer equals fix:
+/// review-bot). The name is NOT part of fixability: any name works once
+/// the shape holds, so the probe passes a placeholder.
+pub fn loop_hoist_fixable_at(source: &str, _file: &str, line: usize) -> bool {
+    fix_loop_hoist(source, line, "probe").is_ok()
+}
+
+pub fn fix_loop_hoist(source: &str, line: usize, name: &str) -> Result<String, String> {
+    if name.trim().is_empty() {
+        return Err(
+            "the hoisted helper needs a semantic name — pass --fix-name <Name> (a domain noun for what one item contributes)".to_string(),
+        );
+    }
+    let helper_name = if name.starts_with('_') {
+        name.to_string()
+    } else {
+        format!("_{name}")
+    };
+    let file = syn::parse_file(source).map_err(|_| "the file does not parse".to_string())?;
+    let target = enclosing_fn(&file, line).ok_or_else(|| format!("no function contains line {line}"))?;
+    let stmts = &target.block.stmts;
+    let loop_idx = stmts
+        .iter()
+        .position(|s| s.span().start().line == line && matches!(s, Stmt::Expr(Expr::ForLoop(_), _)))
+        .ok_or_else(|| format!("no for-loop starts at line {line}"))?;
+    let (plan, target_pat, iter) = hoist_plan(source, stmts, loop_idx)?;
+    let acc = &plan.acc;
+    let init_idx = hoist_init_index(stmts, loop_idx, acc)?;
+    // a fresh helper-local that shadows nothing in the file
+    let helper_local = fresh_name(source, "val");
+    let Stmt::Expr(Expr::ForLoop(f), _) = &stmts[loop_idx] else {
+        return Err("the statement at the finding line is not a for-loop".to_string());
+    };
+    let body_start = byte_offset(source, f.body.brace_token.span.open().start()) + 1;
+    let body_end = byte_offset(source, f.body.brace_token.span.close().end()) - 1;
+    let body_text = source[body_start..body_end].to_string();
+    let mut moved = body_text;
+    hoist_retarget_pushes(acc, &helper_local, &mut moved);
+    let (item_ty, param) = hoist_item_ty(source, stmts, init_idx, acc, &target_pat)?;
+    // the body's push ARGUMENT decides value-vs-Option: a conditional push
+    // (push behind if, or two push sites) means some items contribute
+    // nothing — the helper returns Option<T>. An unconditional single push
+    // returns T directly.
+    let push_count = moved.matches(&format!("{helper_local}.push")).count();
+    let conditional = push_count != 1
+        || matches!(
+            &stmts[loop_idx],
+            Stmt::Expr(Expr::ForLoop(f), _)
+                if !matches!(f.body.stmts.as_slice(), [_])
+        );
+    let helper = hoist_helper_text(
+        source,
+        &HelperSig {
+            helper_name: helper_name.clone(),
+            param: param.clone(),
+            item_ty,
+        },
+        &HelperBody {
+            moved,
+            helper_local,
+            conditional,
+        },
+        &plan.push_args,
+    );
+    // the loop becomes the combinator over the helper: filter_map for the
+    // Option shape, map for the direct shape
+    let new_let = if conditional {
+        format!("let {acc}: Vec<_> = {iter}.iter().filter_map(|{param}| {helper_name}({param})).collect();")
+    } else {
+        format!("let {acc}: Vec<_> = {iter}.iter().map(|{param}| {helper_name}({param})).collect();")
+    };
+    // splice 1: replace [init start .. loop end] with the new let
+    let splice_start = byte_offset(source, stmts[init_idx].span().start());
+    let splice_end = byte_offset(source, stmts[loop_idx].span().end());
+    let mut out = String::new();
+    out.push_str(&source[..splice_start]);
+    out.push_str(&new_let);
+    out.push_str(&source[splice_end..]);
+    // splice 2: insert the helper before the target fn
+    let fn_start = byte_offset(&out, target.span().start());
+    let mut final_out = String::new();
+    final_out.push_str(&out[..fn_start]);
+    final_out.push_str(&helper);
+    final_out.push_str(&out[fn_start..]);
+    Ok(final_out)
+}
+
+#[cfg(test)]
+mod hoist_tests {
+    use super::*;
+
+    fn fixture(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures")
+            .join(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing fixture {name}"))
+    }
+
+    #[test]
+    fn hoist_extracts_helper_and_flat_map() {
+        let src = fixture("loop_hoist_rs_fix.rs");
+        let out = fix_loop_hoist(&src, 3, "contribution").expect("fix applies");
+        assert!(out.contains("fn _contribution("), "{out}");
+        assert!(out.contains("filter_map"), "{out}");
+        assert!(!out.contains("for x in xs"), "{out}");
+        let file: syn::File = syn::parse_str(&out).expect("fixed source parses");
+        assert_eq!(file.items.len(), 2);
+    }
+
+    #[test]
+    fn hoist_requires_a_name_and_refuses_mid_read() {
+        let src = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
+        assert!(fix_loop_hoist(src, 3, "").is_err());
+        let read = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        let n = out.len();\n        out.push(*x + n as u32);\n    }\n    out\n}\n";
+        assert!(fix_loop_hoist(read, 3, "h").is_err());
+    }
+
+    #[test]
+    fn hoist_option_arg_with_nested_parens_and_string() {
+        // the paren scan this replaced would stop at the inner `)` of
+        // `format!("({})", x)` — the span slice keeps the whole argument
+        let src = "fn f(xs: &[u32]) -> Vec<String> {\n    let mut out: Vec<String> = Vec::new();\n    for x in xs {\n        let doubled = *x * 2;\n        if doubled > 1 {\n            out.push(format!(\"({})\", doubled));\n        }\n    }\n    out\n}\n";
+        let out = fix_loop_hoist(src, 3, "label").expect("fix applies");
+        assert!(out.contains("filter_map"), "{out}");
+        assert!(out.contains("return Some(format!(\"({})\", doubled));"), "{out}");
+        syn::parse_str::<syn::File>(&out).expect("fixed source parses");
+    }
+}
+
+#[cfg(test)]
+mod loop_tests {
+    use super::*;
+
+    fn fixture(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures")
+            .join(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing fixture {name}"))
+    }
+
+    #[test]
+    fn pipeline_plain_push_becomes_map_collect() {
+        let src = fixture("loop_pipeline_rs.rs");
+        let out = fix_loop_pipeline(&src, 3).expect("fix applies");
+        assert!(
+            out.contains("let out: Vec<_> = xs.iter().map(|x| *x).collect();"),
+            "{out}"
+        );
+        assert!(!out.contains("for x in xs"), "{out}");
+        let file: syn::File = syn::parse_str(&out).expect("fixed source parses");
+        assert_eq!(file.items.len(), 1);
+    }
+
+    #[test]
+    fn pipeline_if_filter_becomes_filter_map() {
+        let src = fixture("loop_pipeline_rs_filtered.rs");
+        let out = fix_loop_pipeline(&src, 3).expect("fix applies");
+        assert!(
+            out.contains("let out: Vec<_> = xs.iter().filter(|x| *x > 0).map(|x| *x).collect();"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn sequence_shared_accumulator_becomes_concatenation() {
+        let src = fixture("loop_sequence_rs_fix.rs");
+        let out = fix_loop_sequence(&src, 1).expect("fix applies");
+        assert!(out.contains("let out: Vec<_> = xs.iter().map(|x| *x).collect::<Vec<_>>() + xs.iter().map(|y| *y + 1).collect::<Vec<_>>();"), "{out}");
+        assert!(!out.contains("for x in xs"), "{out}");
+        let file: syn::File = syn::parse_str(&out).expect("fixed source parses");
+        assert_eq!(file.items.len(), 1);
+    }
+
+    #[test]
+    fn sequence_refuses_interleaved_statements() {
+        let src = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    let n = out.len();\n    for y in xs {\n        out.push(*y);\n    }\n    out\n}\n";
+        assert!(fix_loop_sequence(src, 1).is_err());
+    }
+
+    #[test]
+    fn pipeline_fixes_a_loop_in_a_later_function() {
+        // the review finding: the fixer resolved the FIRST fn, so a loop
+        // in a later fn rewrote through the wrong accumulator (or refused
+        // with "no for-loop at line N"). The finding line selects the
+        // enclosing fn.
+        let src = "fn first() -> u32 {\n    1\n}\n\nfn collect(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
+        let out = fix_loop_pipeline(src, 7).expect("fix applies in the later fn");
+        assert!(
+            out.contains("let out: Vec<_> = xs.iter().map(|x| *x).collect();"),
+            "{out}"
+        );
+        assert!(out.contains("fn first() -> u32"), "{out}");
+    }
 }

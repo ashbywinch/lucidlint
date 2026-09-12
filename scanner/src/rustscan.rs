@@ -93,6 +93,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         supps: common::Suppressions::default(),
         supps_spent: Default::default(),
         file: name,
+        source,
         file_name: name.to_string(),
         reason_lines,
         findings: Vec::new(),
@@ -162,8 +163,9 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
 
 // --------------------------------------------------------------------------- the walk
 
-struct RsState<'a> {
-    file: &'a str,
+pub(crate) struct RsState<'a> {
+    pub(crate) file: &'a str,
+    pub(crate) source: &'a str,
     file_name: String,
     /// Lines (and the line below) carrying a real comment — an #[allow] on
     /// one of them has its reason.
@@ -333,7 +335,7 @@ impl<'a> RsState<'a> {
         }
     }
 
-    fn finding(&mut self, kind: &str, severity: &str, line: usize, function: &str, message: String) {
+    pub(crate) fn finding(&mut self, kind: &str, severity: &str, line: usize, function: &str, message: String) {
         self.finding_col(kind, severity, line, 0, function, message);
     }
 
@@ -462,6 +464,9 @@ impl<'a> RsState<'a> {
                     ),
                 );
             }
+            // the loop family (collection-build / fold / sequential-pass
+            // verdicts) — per-function shapes, own module below
+            crate::rustloops::rust_loop_findings(self, sig, block, &sig.ident.to_string(), line);
             let typed = sig.inputs.iter().filter(|i| matches!(i, FnArg::Typed(_))).count();
             if typed > 5 && !is_trivial_rust_stub(&block.stmts) {
                 self.finding(
@@ -896,7 +901,7 @@ fn suffix_of(name: &str) -> Option<&'static str> {
     common::VAGUE_SUFFIXES.iter().find(|s| name.ends_with(**s)).copied()
 }
 
-fn is_compound_op(op: &BinOp) -> bool {
+pub(crate) fn is_compound_op(op: &BinOp) -> bool {
     use syn::BinOp::*;
     matches!(
         op,
@@ -1906,7 +1911,7 @@ fn is_trivial_rust_stub(stmts: &[syn::Stmt]) -> bool {
 /// pushing onto the SAME Vec) get shape-specific lucid guidance.
 /// The fn's typed-parameter names — the rule-battery classifier's
 /// fn-pointer capture boundary.
-fn param_names(sig: &Signature) -> std::collections::HashSet<String> {
+pub(crate) fn param_names(sig: &Signature) -> std::collections::HashSet<String> {
     sig.inputs
         .iter()
         .filter_map(|a| match a {
@@ -2032,7 +2037,7 @@ fn param_is_str(sig: &syn::Signature, name: &str) -> bool {
 }
 
 /// The bare identifiers referenced in an expression (Rust side).
-fn rust_expr_idents(e: &syn::Expr) -> Vec<String> {
+pub(crate) fn rust_expr_idents(e: &syn::Expr) -> Vec<String> {
     struct Idents(Vec<String>);
     impl syn::visit::Visit<'_> for Idents {
         fn visit_expr_path(&mut self, node: &syn::ExprPath) {
@@ -2122,6 +2127,13 @@ mod tests {
 
     fn scan(src: &str) -> Vec<Finding> {
         scan_source(src, "prod_mod.rs", true).findings
+    }
+
+    fn fixture(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures")
+            .join(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing fixture {name}"))
     }
 
     fn scan_cc(src: &str) -> Vec<FnCc> {
@@ -2603,5 +2615,102 @@ mod tests {
         assert!(skel.contains(&"Gt".to_string()));
         assert!(skel.contains(&"C".to_string()));
         assert!(skel.contains(&"N".to_string()));
+    }
+
+    // ------------------------------------------------------------- the loop family
+    #[test]
+    fn loop_pipeline_push_only_body() {
+        let fs = scan(&fixture("loop_pipeline_rs.rs"));
+        assert!(has_kind(&fs, "loop-pipeline"), "{fs:?}");
+        let f = fs.iter().find(|x| x.kind == "loop-pipeline").unwrap();
+        assert!(f.message.contains(".map()"), "{}", f.message);
+        // the fixture IS the fixer contract — the directive must be present
+        assert!(f.message.contains("fix: loop-pipeline"), "{}", f.message);
+    }
+
+    #[test]
+    fn loop_pipeline_idiomatic_combinator_passes() {
+        let fs = scan(&fixture("loop_pipeline_rs_ok.rs"));
+        assert!(!has_kind(&fs, "loop-pipeline"), "{fs:?}");
+        assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
+    }
+
+    #[test]
+    fn mutating_loop_two_surviving_writes() {
+        let fs = scan(&fixture("mutating_loop_rs.rs"));
+        assert!(has_kind(&fs, "mutating-loop"), "{fs:?}");
+    }
+
+    #[test]
+    fn loop_hoist_long_single_mutation_body() {
+        let fs = scan(&fixture("loop_hoist_rs.rs"));
+        assert!(has_kind(&fs, "loop-hoist"), "{fs:?}");
+        assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
+    }
+
+    #[test]
+    fn loop_hoist_directive_gated_on_fixability() {
+        // the fix fixture hoists (typed accumulator) — directive on;
+        // an untyped accumulator refuses the helper signature — finding
+        // without the directive, never an offered fix that cannot apply
+        let fs = scan(&fixture("loop_hoist_rs_fix.rs"));
+        let h = fs.iter().find(|x| x.kind == "loop-hoist").expect("hoist fires");
+        assert!(h.message.contains("fix: loop-hoist"), "{}", h.message);
+        let untyped = scan(
+            "fn score(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        let doubled = *x * 2;\n        let adj = doubled + 1;\n        if adj > 0 {\n            out.push(adj);\n        }\n    }\n    out\n}\n",
+        );
+        let u = untyped
+            .iter()
+            .find(|x| x.kind == "loop-hoist")
+            .expect("hoist still fires");
+        assert!(!u.message.contains("fix:"), "{}", u.message);
+    }
+
+    #[test]
+    fn loop_sequence_shared_state_is_pipeline() {
+        // the second pass reads what the first wrote — a feed chain
+        let fs = scan(&fixture("loop_sequence_rs.rs"));
+        assert!(has_kind(&fs, "loop-sequence"), "{fs:?}");
+        let s = fs.iter().find(|x| x.kind == "loop-sequence").unwrap();
+        assert!(s.message.contains("pipeline"), "{}", s.message);
+    }
+
+    #[test]
+    fn loop_sequence_directive_gated_on_chain_fixability() {
+        // the fix fixture chains (shared accumulator) — directive on;
+        // the detector fixture feeds across accumulators — finding
+        // without the directive, never an offered fix that cannot apply
+        let fs = scan(&fixture("loop_sequence_rs_fix.rs"));
+        let s = fs.iter().find(|x| x.kind == "loop-sequence").expect("sequence fires");
+        assert!(s.message.contains("fix: loop-sequence"), "{}", s.message);
+        let fed = scan(&fixture("loop_sequence_rs.rs"));
+        let f = fed
+            .iter()
+            .find(|x| x.kind == "loop-sequence")
+            .expect("feed chain fires");
+        assert!(!f.message.contains("fix:"), "{}", f.message);
+    }
+
+    #[test]
+    fn loop_while_never_pipeline_but_mutation_counts() {
+        // a while condition is not an iterator — no combinator replaces it —
+        // but its state writes still count for the stateful verdicts
+        let fs = scan("fn f() -> u32 { let mut n = 0; while n < 10 { n += 1; } n }\n");
+        assert!(!has_kind(&fs, "loop-pipeline"), "{fs:?}");
+        let multi =
+            scan("fn f(xs: &[u32]) -> u32 { let mut a = 0; let mut b = 0; while a < 10 { a += 1; b += 2; } a + b }\n");
+        assert!(has_kind(&multi, "mutating-loop"), "{multi:?}");
+    }
+
+    #[test]
+    fn loop_suppression_with_why_exempts() {
+        let src = "fn collect(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    // lucidlint: ignore loop-pipeline the order of pushes is load-bearing\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
+        assert!(
+            !has_kind(&scan(src), "loop-pipeline"),
+            "the why'd suppression must exempt"
+        );
+        let bare =
+            "fn collect(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    // lucidlint: ignore loop-pipeline\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
+        assert!(has_kind(&scan(bare), "suppression"));
     }
 }

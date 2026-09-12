@@ -180,12 +180,25 @@ without a check is a wish:
       logger.error("do_something failed: %s", e)
       raise
   ```
-  **A warning that still proceeds is wasted code** — if a condition is bad
+- **A warning that still proceeds is wasted code** — if a condition is bad
   enough to warn about, it is bad enough to fail. **Don't pre-validate before
   trying** — let code fail naturally (a missing key surfaces as the API's 403,
   not a bespoke pre-check). Exception: interactive/CLI setup flows whose
   natural failure is misleading may pre-check configuration, and must then
   emit the two-tier messages.
+- **Never offer a fix that cannot apply.** Every diagnostic is exactly one
+  of three, decided by what the tool can prove about the fix:
+  - **Deterministically fixable (modulo a name or short parameter) → offer
+    and provide the automated fix.** The directive names the exact command;
+    a missing name/parameter is `needs-input`, never a refusal — the fix
+    exists, the agent supplies the semantic bit.
+  - **Fixable but not deterministically → explain the fix, hand-applied.**
+    The message states what to change (the shape, the target, the reason)
+    and makes clear the reader implements it — no command, no placeholder
+    that cannot run.
+  - **Not fixable at all → no diagnostic.** A finding the tool can neither
+    fix nor teach is noise; silence is the signal. Never emit the
+    diagnostic, never explain the inability.
 - **Two-tier failure messages.** A fail-fast path triggered by environment,
   configuration, or user error emits two messages: a plain-language user line
   (what happened + what to do next, no internal identifiers, no stack traces)

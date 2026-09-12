@@ -16,7 +16,7 @@
 
 [project]
 name = "lucidlint"
-version = "0.5.0"
+version = "0.6.0"
 description = "Deterministic lucidlint tooling: a Rust scan core under a thin Python orchestrator"
 readme = "README.md"
 license = "MIT"
@@ -83,6 +83,7 @@ quote-style = "double"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--ignore=tests/fixtures/rust"
 
 [tool.coverage.run]
 # the fix-engine tests exec fixtures under synthetic filenames ("after.py",

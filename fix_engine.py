@@ -50,6 +50,15 @@ MECHANICAL_KINDS = {
     "restating-docstring": "delete the docstring that restates the body",
     "duplicate-block": "delete the second copy of the repeated statement block",
     "undeclared-attribute": "annotate the undeclared member: self.x: T = v (T inferred from the value)",
+    "loop-pipeline": "Replace Loop with Pipeline: the single-mutation loop becomes a comprehension",
+    "loop-sequence": (
+        "Replace Loop Sequence with Pipeline: the shared-accumulator loop chain "
+        "becomes concatenated comprehensions"
+    ),
+    "loop-hoist": (
+        "Replace Loop with Hoist + Pipeline: the loop body becomes a per-item helper, "
+        "the loop becomes a comprehension"
+    ),
 }
 
 
@@ -88,6 +97,7 @@ _NAME_REQUIRED_KINDS = {
     "feature-envy",
     "extract-record-class",
     "extract-module",
+    "loop-hoist",
 }
 # Every kind the fix command can actually apply. A finding message may
     # restrict advertising to what the fix command can actually apply: a
@@ -578,6 +588,33 @@ class _FixRequest:
         if kind == "undeclared-attribute":
             param_types = self._member_param_types(line)
             return cst.MetadataWrapper(cst.parse_module(source)).visit(_DeclareMember(line, param_types)).code
+        if kind in ("loop-pipeline", "loop-sequence"):
+            xform = _LoopsIntoComprehensions(
+                line, sequence=(kind == "loop-sequence"), fresh_name=_fresh_loop_name(source)
+            )
+            out = cst.MetadataWrapper(cst.parse_module(source)).visit(xform).code
+            if xform.decline:
+                self.decline = xform.decline
+                return None
+            return out if xform.applied else None
+        if kind == "loop-hoist":
+            if not opts.name:
+                self.decline = (
+                    "the hoisted helper needs a semantic name — pass --fix-name <Name> "
+                    "(a domain noun for what one item contributes)"
+                )
+                return None
+            xform = _LoopHoistExtractor(
+                line,
+                name=opts.name,
+                helper_local=_fresh_loop_name(source, base="val"),
+                element=_fresh_loop_name(source, base="part"),
+            )
+            out = cst.MetadataWrapper(cst.parse_module(source)).visit(xform).code
+            if xform.decline:
+                self.decline = xform.decline
+                return None
+            return out if xform.applied else None
         return None
 
     def fix_feature_envy(self) -> str | None:
@@ -1446,26 +1483,26 @@ def _stmt_analysis(stmt: cst.BaseStatement | cst.BaseSmallStatement) -> _StmtRea
         @override
         def visit_Assign(self, node) -> None:
             for t in node.targets:
-                bound.update(_target_names(t.target))
+                bound.update(_hoist_target_names(t.target))
 
         @override
         def visit_AnnAssign(self, node) -> None:
             if node.target:
-                bound.update(_target_names(node.target))
+                bound.update(_hoist_target_names(node.target))
 
         @override
         def visit_For(self, node) -> None:
-            bound.update(_target_names(node.target))
+            bound.update(_hoist_target_names(node.target))
 
         @override
         def visit_CompFor(self, node) -> None:
-            bound.update(_target_names(node.target))
+            bound.update(_hoist_target_names(node.target))
 
         @override
         def visit_With(self, node) -> None:
             for item in node.items:
                 if item.asname is not None:
-                    bound.update(_target_names(item.asname.name))
+                    bound.update(_hoist_target_names(item.asname.name))
 
     stmt.visit(_V())
     return _StmtReads(reads - bound - attr_names, bound, has_self)
@@ -1647,6 +1684,651 @@ class _KeywordArgs(cst.CSTTransformer):
                 )
             )
         return updated_node.with_changes(args=new_args)
+
+
+@dataclass
+class _LoopPipelinePlan:
+    """One loop's accumulation shape for the comprehension rewrite: the
+    accumulator, the collection kind, and the element/key/flatten exprs."""
+
+    acc: str
+    collection: str  # "list" | "set" | "dict"
+    element: cst.BaseExpression | None  # the appended/added value or the dict value
+    key: cst.BaseExpression | None  # the dict key (subscript store) or None
+    flatten: cst.BaseExpression | None  # the extend/`+= [a, b]` value whose ITEMS join
+    if_test: cst.BaseExpression | None  # the one-filter test or None
+
+
+def _call_mutation_plan(node: cst.Expr) -> _LoopPipelinePlan | None:
+    """A mutating receiver call: append/appendleft/add (direct element) or
+    extend (flatten)."""
+    value_node = node.value
+    if not isinstance(value_node, cst.Call):
+        return None
+    func = value_node.func
+    if not isinstance(func, cst.Attribute) or not isinstance(func.value, cst.Name):
+        return None
+    acc = func.value.value
+    method = func.attr.value
+    if len(value_node.args) != 1 or not isinstance(value_node.args[0], cst.Arg):
+        return None
+    value = value_node.args[0].value
+    if method in ("append", "appendleft"):
+        return _LoopPipelinePlan(acc=acc, collection="list", element=value, key=None, flatten=None, if_test=None)
+    if method == "add":
+        return _LoopPipelinePlan(acc=acc, collection="set", element=value, key=None, flatten=None, if_test=None)
+    if method == "extend":
+        return _LoopPipelinePlan(acc=acc, collection="list", element=None, key=None, flatten=value, if_test=None)
+    return None
+
+
+def _augassign_mutation_plan(node: cst.AugAssign) -> _LoopPipelinePlan | None:
+    """`name += [a, b]` (list/tuple literal concatenation): one element is
+    a direct element, several flatten through the literal."""
+    aug = node
+    if (
+        not isinstance(aug.target, cst.Name)
+        or not isinstance(aug.operator, cst.AddAssign)
+        or not isinstance(aug.value, (cst.List, cst.Tuple))
+    ):
+        return None
+    elts = aug.value.elements
+    if len(elts) == 1:
+        return _LoopPipelinePlan(
+            acc=aug.target.value, collection="list", element=elts[0].value, key=None, flatten=None, if_test=None
+        )
+    return _LoopPipelinePlan(
+        acc=aug.target.value, collection="list", element=None, key=None, flatten=aug.value, if_test=None
+    )
+
+
+def _subscript_mutation_plan(node: cst.Assign) -> _LoopPipelinePlan | None:
+    """`acc[key] = value` — a dict comprehension."""
+    if len(node.targets) != 1:
+        return None
+    target = node.targets[0].target
+    if not isinstance(target, cst.Subscript) or not isinstance(target.value, cst.Name):
+        return None
+    # this libcst models the slice as SubscriptElement(s) — a plain index
+    # unwraps to its value; anything else is not a dict key
+    sl = target.slice
+    if not isinstance(sl, tuple) or len(sl) != 1:
+        return None
+    inner = sl[0].slice
+    if not isinstance(inner, cst.Index) or inner.value is None:
+        return None
+    return _LoopPipelinePlan(
+        acc=target.value.value, collection="dict", element=node.value, key=inner.value, flatten=None, if_test=None
+    )
+
+
+def _mutation_plan(stmt: cst.BaseStatement | cst.BaseSmallStatement) -> _LoopPipelinePlan | None:
+    """The single collection mutation of a pipeline body statement, as the
+    plan the comprehension rewrite needs. None when the statement is not
+    one the rewrite expresses."""
+    if not isinstance(stmt, cst.SimpleStatementLine):
+        return None
+    body = stmt.body
+    if len(body) != 1:
+        return None
+    node = body[0]
+    if isinstance(node, cst.Expr) and isinstance(node.value, cst.Call):
+        return _call_mutation_plan(node)
+    if isinstance(node, cst.AugAssign):
+        return _augassign_mutation_plan(node)
+    if isinstance(node, cst.Assign):
+        return _subscript_mutation_plan(node)
+    return None
+
+
+class _LoopsIntoComprehensions(cst.CSTTransformer):
+    """Replace Loop with Pipeline (mechanical):
+    - kind `loop-pipeline`: the single-mutation for-loop AT `line` becomes
+      the comprehension that replaces it;
+    - kind `loop-sequence`: the enclosing function's contiguous chain of
+      pipeline loops sharing ONE empty-initialized accumulator becomes the
+      concatenated/merged comprehensions.
+    The accumulator must be initialized to an EMPTY collection literally
+    directly before the first loop — the rewrite preserves only the loop,
+    not prior contents. Unsupported or unsafe shapes set `decline`; a
+    missing target stays silent (the stale-finding protocol)."""
+
+
+    METADATA_DEPENDENCIES = (PositionProvider, ParentNodeProvider)
+
+    def __init__(self, line: int, sequence: bool, fresh_name: str = "item") -> None:
+        self.line = line
+        self.sequence = sequence
+        self.fresh = fresh_name
+        self.applied = False
+        self.decline = ""
+
+    @override
+    def leave_IndentedBlock(self, original_node, updated_node):
+        plan = self._block_plan(original_node)
+        if plan is None:
+            return updated_node
+        body, first_idx, loops, new_stmt = plan
+        new_body = list(updated_node.body)
+        new_body[first_idx : first_idx + loops] = [new_stmt]
+        self.applied = True
+        return updated_node.with_changes(body=new_body)
+
+    def _block_plan(self, block):
+        """(body, first_index, loop_count, replacement_statement) for the
+        block that owns the target loop(s), or None when this block is not
+        the one the finding points at."""
+        stmts = list(block.body)
+        if self.sequence:
+            parent = self.get_metadata(ParentNodeProvider, block)
+            if not isinstance(parent, cst.FunctionDef):
+                return None
+            def_line = _as_range(self.get_metadata(PositionProvider, parent)).start.line
+            if def_line != self.line:
+                return None
+            first = next((i for i, s in enumerate(stmts) if not isinstance(s, cst.EmptyLine)), None)
+            if first is None or not isinstance(self._small_stmt(stmts[first]), (cst.Assign, cst.AnnAssign)):
+                return None
+            first_loop = next(
+                (i for i in range(first + 1, len(stmts)) if not isinstance(stmts[i], cst.EmptyLine)),
+                None,
+            )
+            if first_loop is None or not isinstance(stmts[first_loop], cst.For):
+                return None
+            loop_count = self._chain_length(stmts, first_loop)
+            if loop_count < 2:
+                self.decline = (
+                    "the top of the function needs >=2 consecutive single-mutation loops on the "
+                    "same accumulator, straight after its empty initialization — the chain "
+                    "rewrite stops at the first incompatible statement"
+                )
+                return None
+            return self._rewrite_plan(stmts, first_loop, loop_count)
+        else:
+            first_idx = next(
+                (
+                    i
+                    for i, s in enumerate(stmts)
+                    if isinstance(s, cst.For)
+                    and _as_range(self.get_metadata(PositionProvider, s)).start.line == self.line
+                ),
+                None,
+            )
+            if first_idx is None:
+                return None
+            loop_count = 1
+        return self._rewrite_plan(stmts, first_idx, loop_count)
+
+
+    def _chain_length(self, stmts, start: int) -> int:
+        n = 0
+        for s in stmts[start:]:
+            if isinstance(s, cst.For):
+                n += 1
+                continue
+            if isinstance(s, cst.EmptyLine):
+                continue
+            break
+        return n
+
+    def _rewrite_plan(self, stmts, first_idx: int, loop_count: int):
+        """The init + rewritable loops -> the replacement statement. Declines
+        (self.decline) when the chain cannot be rewritten losslessly."""
+        loops = [s for s in stmts[first_idx : first_idx + loop_count] if isinstance(s, cst.For)]
+        if len(loops) != loop_count:
+            self.decline = (
+                "the chain mixes loops and other statements — reorder so the loops are "
+                "consecutive, or fix them one at a time"
+            )
+            return None
+        init_idx = first_idx - 1
+        while init_idx >= 0 and isinstance(stmts[init_idx], cst.EmptyLine):
+            init_idx -= 1
+        if init_idx < 0:
+            self.decline = (
+                "the accumulator must be initialized to an empty []/{} (or set()) directly "
+                "before the loop — the comprehension rewrite cannot preserve prior contents"
+            )
+            return None
+        init = stmts[init_idx]
+        init_small = self._small_stmt(init)
+        init_value = init_small.value if isinstance(init_small, (cst.Assign, cst.AnnAssign)) else None
+        if isinstance(loops[0].asynchronous, cst.Asynchronous):
+            self.decline = "an async for-loop cannot become a comprehension (comprehensions are synchronous)"
+            return None
+        raw_plans: list[_LoopPipelinePlan | None] = [self._loop_plan(f) for f in loops]
+        if any(p is None for p in raw_plans):
+            self.decline = (
+                "a loop in the chain is not a single collection mutation (append/add/extend/"
+                "`+= [..]`/subscript-store) — a comprehension cannot express it; refactor by hand"
+            )
+            return None
+        plans: list[_LoopPipelinePlan] = []
+        for p in raw_plans:
+            if p is not None:
+                plans.append(p)
+        acc = plans[0].acc
+        collection = plans[0].collection
+        if any(p.acc != acc or p.collection != collection for p in plans):
+            self.decline = (
+                f"the chain mixes accumulators or collection kinds — the rewrite needs every "
+                f"loop to build the SAME empty-initialized collection ({acc})"
+            )
+            return None
+        if not self._empty_init(init_value, collection):
+            self.decline = (
+                f"the accumulator `{acc}` must be initialized to an empty "
+                f"{'[]' if collection == 'list' else '{}' if collection == 'dict' else 'set()'}"
+                f" directly before the loop — the comprehension rewrite cannot preserve prior contents"
+            )
+            return None
+        comps = [self._comprehension(f, p) for f, p in zip(loops, plans, strict=True)]
+        value = comps[0]
+        for comp in comps[1:]:
+            op = cst.Add() if collection == "list" else cst.BitOr()
+            value = cst.BinaryOperation(left=value, operator=op, right=comp)
+        new_small = init_small.with_changes(value=value)
+        new_stmt = init.with_changes(body=[new_small])
+        return stmts, init_idx, (first_idx + loop_count) - init_idx, new_stmt
+
+
+    @staticmethod
+    def _small_stmt(stmt):
+        """The small statement inside a statement line (blocks hold
+        SimpleStatementLine wrappers) — or the statement itself when it is
+        already compound/small."""
+        if isinstance(stmt, cst.SimpleStatementLine) and len(stmt.body) == 1:
+            return stmt.body[0]
+        return stmt
+
+
+    def _loop_plan(self, for_node: cst.For) -> _LoopPipelinePlan | None:
+        if for_node.orelse:
+            return None
+        body = list(for_node.body.body)
+        stmt = body[0]
+        if_test = None
+        if isinstance(stmt, cst.If):
+            if stmt.orelse:
+                return None
+            if_body = list(stmt.body.body)
+            if len(if_body) != 1:
+                return None
+            if_test = stmt.test
+            stmt = if_body[0]
+        plan = _mutation_plan(stmt)
+        if plan is None:
+            return None
+        plan.if_test = if_test
+        return plan
+
+    def _comprehension(self, for_node: cst.For, plan: _LoopPipelinePlan):
+        comp_for = cst.CompFor(
+            target=for_node.target,
+            iter=for_node.iter,
+            ifs=[cst.CompIf(test=plan.if_test)] if plan.if_test is not None else [],
+        )
+        if plan.flatten is not None:
+            inner = cst.CompFor(target=cst.Name(self.fresh), iter=plan.flatten, inner_for_in=comp_for)
+            return cst.ListComp(elt=cst.Name(self.fresh), for_in=inner)
+        if plan.collection == "set":
+            if plan.element is None:
+                return None
+            return cst.SetComp(elt=plan.element, for_in=comp_for)
+        if plan.collection == "dict":
+            if plan.element is None or plan.key is None:
+                return None
+            return cst.DictComp(key=plan.key, value=plan.element, for_in=comp_for)
+        if plan.element is None:
+            return None
+        return cst.ListComp(elt=plan.element, for_in=comp_for)
+
+    @staticmethod
+    def _empty_init(value, collection: str) -> bool:
+        if collection == "list":
+            return isinstance(value, cst.List) and not value.elements
+        if collection == "dict":
+            return isinstance(value, cst.Dict) and not value.elements
+        return (
+            isinstance(value, cst.Call)
+            and isinstance(value.func, cst.Name)
+            and value.func.value == "set"
+            and not value.args
+        )
+
+
+
+_HOIST_MUTATORS = {
+    "append", "add", "extend", "appendleft", "update", "setdefault", "add_update", "discard", "remove",
+}
+_OTHER_MUTATORS = _HOIST_MUTATORS | {
+    "pop", "insert", "sort", "reverse", "clear", "put", "push", "enqueue", "__setitem__",
+}
+
+class _NameRewriter(cst.CSTTransformer):
+    """Rename every occurrence of one name — the hoist re-targets the
+    accumulator's mutation receiver into the helper's fresh local."""
+
+    def __init__(self, old: str, new: str) -> None:
+        self.old = old
+        self.new = new
+
+    @override
+    def leave_Name(self, original_node, updated_node):
+        if updated_node.value == self.old:
+            return updated_node.with_changes(value=self.new)
+        return updated_node
+def _iter_nodes(nodes):
+    """Every node in the subtree, parents before children; accepts a node
+    or an iterable of nodes."""
+    if isinstance(nodes, cst.CSTNode):
+        nodes = [nodes]
+    for n in nodes:
+        yield n
+        for c in n.children:
+            yield from _iter_nodes(c)
+
+
+def _iter_nodes_pruned(nodes):
+    """Like `_iter_nodes` but never descends into nested scopes — a `def`
+    or `class` inside the walked body owns its locals; their writes are
+    not the body's writes."""
+    if isinstance(nodes, cst.CSTNode):
+        nodes = [nodes]
+    for n in nodes:
+        yield n
+        if isinstance(n, (cst.FunctionDef, cst.ClassDef)):
+            continue
+        for c in n.children:
+            yield from _iter_nodes_pruned(c)
+
+
+def _hoist_target_names(t) -> set[str]:
+    """The names a binding TARGET binds — Name/Tuple/List/Starred (a
+    subscript/attribute target is a WRITE, not a binding)."""
+    if isinstance(t, cst.AssignTarget):
+        return _hoist_target_names(t.target)
+    if isinstance(t, cst.Name):
+        return {t.value}
+    if isinstance(t, (cst.Tuple, cst.List)):
+        out: set[str] = set()
+        for el in t.elements:
+            out.update(_hoist_target_names(el.value))
+        return out
+    if isinstance(t, cst.StarredElement):
+        return _hoist_target_names(t.value)
+    return set()
+
+
+def _expr_names(e) -> set[str]:
+    return {n.value for n in _iter_nodes([e]) if isinstance(n, cst.Name)}
+
+
+def _stmt_seq(x) -> list:
+    if isinstance(x, cst.IndentedBlock):
+        return list(x.body)
+    return list(x or [])
+
+
+def _bind_small(small, bound: set[str]) -> None:
+    """The names one small statement binds."""
+    if isinstance(small, cst.AnnAssign):
+        bound.update(_hoist_target_names(small.target))
+    elif isinstance(small, cst.Assign):
+        for t in small.targets:
+            bound.update(_hoist_target_names(t))
+    elif isinstance(small, cst.AugAssign):
+        bound.update(_hoist_target_names(small.target))
+
+
+def _bind_children(stmt, bound: set[str]) -> None:
+    """The names a compound statement binds across its child blocks."""
+    seqs: list = []
+    if isinstance(stmt, cst.For):
+        bound.update(_expr_names(stmt.target))
+        seqs = _stmt_seq(stmt.body) + _stmt_seq(stmt.orelse)
+    elif isinstance(stmt, (cst.While, cst.If)):
+        seqs = _stmt_seq(stmt.body) + _stmt_seq(stmt.orelse)
+    elif isinstance(stmt, cst.Try):
+        seqs = _stmt_seq(stmt.body) + _stmt_seq(stmt.orelse) + _stmt_seq(stmt.finalbody)
+        for h in stmt.handlers:
+            seqs += _stmt_seq(h.body)
+    elif isinstance(stmt, cst.With):
+        for item in stmt.items:
+            optional = getattr(item, "optional_vars", None)
+            if optional is not None:
+                bound.update(_expr_names(optional))
+        seqs = _stmt_seq(stmt.body)
+    elif isinstance(stmt, cst.Match):
+        for case in stmt.cases:
+            seqs += _stmt_seq(case.body)
+    for b in seqs:
+        _bind_names(b, bound)
+
+
+def _bind_names(stmt, bound: set[str]) -> None:
+    """The names ONE statement binds — control-flow descend, nested defs
+    excluded. `counts[x] = v` is a WRITE to counts, not a binding."""
+    if isinstance(stmt, cst.SimpleStatementLine):
+        for small in stmt.body:
+            _bind_small(small, bound)
+        return
+    _bind_children(stmt, bound)
+
+def _loop_body_bound(stmts: list[cst.BaseStatement]) -> set[str]:
+    """The names BOUND inside a loop body (temps) — the temps the hoist
+    rewrite may keep inside the helper, as opposed to outer state writes."""
+    bound: set[str] = set()
+    for s in stmts:
+        _bind_names(s, bound)
+    return bound
+
+
+class _LoopHoistExtractor(cst.CSTTransformer):
+    """loop-hoist (mechanical): a single-accumulator for-loop whose body does
+    real work becomes a per-item helper + a flattening comprehension. The
+    body moves into the helper UNCHANGED except the accumulator's mutation
+    receiver is renamed to a fresh local the helper returns:
+
+        def _per_item(item):          # the moved body, acc -> val
+            ...                        #   with every `acc` renamed to `val`
+            return val
+        acc = [x for item in items for x in _per_item(item)]
+
+    The rewrite is lossless when the body's ONLY outer state writes are
+    append/add on ONE empty-initialized accumulator and it never READS that
+    accumulator mid-build (a comprehension sees no partial state). Everything
+    else declines with a reason — not a silent no-op."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, line: int, name: str, helper_local: str = "val", element: str = "part") -> None:
+        self.line = line
+        if _extraction_is_private() and not name.startswith("_"):
+            name = "_" + name
+        self.name = name
+        self.helper_local = helper_local
+        self.element = element
+        self.applied = False
+        self.decline = ""
+
+    @override
+    def leave_IndentedBlock(self, original_node, updated_node):
+        plan = self._block_plan(original_node)
+        if plan is None:
+            return updated_node
+        init_idx, loop_idx, helper_def, new_stmt = plan
+        new_body = list(updated_node.body)
+        new_body[init_idx : loop_idx + 1] = [helper_def, new_stmt]
+        self.applied = True
+        return updated_node.with_changes(body=new_body)
+
+    def _block_plan(self, block):
+        stmts = list(block.body)
+        loop_idx = next(
+            (
+                i
+                for i, s in enumerate(stmts)
+                if isinstance(s, cst.For)
+                and _as_range(self.get_metadata(PositionProvider, s)).start.line == self.line
+            ),
+            None,
+        )
+        if loop_idx is None:
+            return None
+        loop = stmts[loop_idx]
+        if loop.orelse:
+            self.decline = "the hoist rewrite is for for-loops without an else"
+            return None
+        if not isinstance(loop.target, cst.Name):
+            self.decline = "the loop target must be a simple name to become the helper's parameter"
+            return None
+        if loop.asynchronous is not None:
+            self.decline = "an async for-loop cannot become a comprehension (comprehensions are synchronous)"
+            return None
+        init_idx = loop_idx - 1
+        while init_idx >= 0 and isinstance(stmts[init_idx], cst.EmptyLine):
+            init_idx -= 1
+        if init_idx < 0:
+            self.decline = (
+                "the accumulator must be initialized to an empty []/set() directly before "
+                "the loop — the hoist cannot preserve prior contents"
+            )
+            return None
+        init = stmts[init_idx]
+        init_small = _LoopsIntoComprehensions._small_stmt(init)
+        plan = self._hoist_plan(list(loop.body.body), loop.target.value)
+        if plan is None:
+            return None
+        acc, collection = plan
+        if acc is None or collection is None:
+            return None  # unreachable (the plan declines, never returns Nones) — the checker needs the guard
+        init_value = init_small.value if isinstance(init_small, (cst.Assign, cst.AnnAssign)) else None
+        if not _LoopsIntoComprehensions._empty_init(init_value, collection):
+            self.decline = (
+                f"the accumulator `{acc}` must be initialized to an empty "
+                f"{'[]' if collection == 'list' else 'set()'}"
+                f" directly before the loop — the hoist cannot preserve prior contents"
+            )
+            return None
+        rewriter = _NameRewriter(acc, self.helper_local)
+        moved = [s.visit(rewriter) for s in loop.body.body]
+        moved[0] = moved[0].with_changes(leading_lines=[])
+        ret = cst.SimpleStatementLine(body=[cst.Return(value=cst.Name(self.helper_local))])
+        helper_def = cst.FunctionDef(
+            name=cst.Name(self.name),
+            params=cst.Parameters(params=[cst.Param(cst.Name(loop.target.value))]),
+            body=cst.IndentedBlock(body=moved + [ret]),
+        )
+        # outer clause FIRST: [x for it in items for x in _h(it)]
+        inner = cst.CompFor(
+            target=cst.Name(self.element),
+            iter=cst.Call(cst.Name(self.name), args=[cst.Arg(cst.Name(loop.target.value))]),
+        )
+        comp_for = cst.CompFor(
+            target=cst.Name(loop.target.value),
+            iter=loop.iter,
+            inner_for_in=inner,
+        )
+        if collection == "set":
+            comp: cst.BaseComp = cst.SetComp(elt=cst.Name(self.element), for_in=comp_for)
+        else:
+            comp = cst.ListComp(elt=cst.Name(self.element), for_in=comp_for)
+        new_small = init_small.with_changes(value=comp)
+        return init_idx, loop_idx, helper_def, init.with_changes(body=[new_small])
+
+    def _hoist_plan(self, body_stmts: list[cst.BaseStatement], target_name: str):
+        """(acc, collection) when the body is rewritable: every outer-state
+        write is an append/add on ONE accumulator, never a read of it."""
+        bound = _loop_body_bound(body_stmts)
+        bound.add(target_name)
+        acc: str | None = None
+        collection: str | None = None
+        receivers: set[int] = set()  # Name node ids that ARE the append/add receiver
+        nodes = list(_iter_nodes(body_stmts))
+        for n in nodes:
+            if not isinstance(n, cst.Call) or not isinstance(n.func, cst.Attribute):
+                continue
+            base = n.func.value
+            if not isinstance(base, cst.Name) or base.value in bound:
+                continue
+            method = n.func.attr.value
+            if method not in _HOIST_MUTATORS:
+                if method in _OTHER_MUTATORS:
+                    self.decline = (
+                        f"`{method}` on `{base.value}` — only append/add accumulation can be "
+                        "hoisted into a helper; refactor by hand"
+                    )
+                    return None
+                continue  # a plain READ call on outer state is fine (the helper closes over it)
+            if method not in ("append", "add"):
+                self.decline = (
+                    f"`{method}` accumulation (`{base.value}`) keeps the loop — the hoist "
+                    "rewrite only expresses append/add"
+                )
+                return None
+            if acc is None:
+                acc = base.value
+                collection = "list" if method == "append" else "set"
+            elif base.value != acc:
+                self.decline = (
+                    f"the body accumulates BOTH `{acc}` and `{base.value}` — the hoist "
+                    "rewrite needs one accumulator"
+                )
+                return None
+            receivers.add(id(base))
+        if acc is None:
+            self.decline = "no outer collection mutation found in the loop body"
+            return None
+        for n in nodes:
+            if isinstance(n, cst.Name) and n.value == acc and id(n) not in receivers:
+                self.decline = (
+                    f"the body READS `{acc}` mid-build — a comprehension has no partial "
+                    "state to read; refactor by hand"
+                )
+                return None
+        for s in body_stmts:
+            for n in _iter_nodes_pruned([s]):
+                if isinstance(n, cst.AnnAssign):
+                    target_list: list = [n.target]
+                elif isinstance(n, cst.Assign):
+                    target_list = list(n.targets)
+                elif isinstance(n, cst.AugAssign):
+                    target_list = [n.target]
+                else:
+                    continue
+                for t in target_list:
+                    for sub in _iter_nodes(t):
+                        if isinstance(sub, cst.Name) and sub.value not in bound and sub.value != acc:
+                            self.decline = (
+                                f"the body also writes `{sub.value}` — the hoist rewrite "
+                                "only moves a single-accumulator loop"
+                            )
+                            return None
+        return acc, collection
+
+
+def _fresh_loop_name(source: str, base: str = "item") -> str:
+    """A comprehension-flatten variable absent from the module — the
+    extend / `+= [a, b]` rewrite introduces one and must not shadow an
+    existing name."""
+    names: set[str] = set()
+
+    class _Names(cst.CSTVisitor):
+        @override
+        def visit_Name(self, node) -> None:
+            names.add(node.value)
+
+    try:
+        cst.parse_module(source).visit(_Names())
+    except Exception:
+        return base
+    candidate = base
+    i = 2
+    while candidate in names:
+        candidate = f"{base}_{i}"
+        i += 1
+    return candidate
 
 
 def _params_of_any_def(source: str, callee: str) -> list[str] | None:
@@ -2160,7 +2842,7 @@ def collect_stmt_names(add_target, line_stmt, names):
                 continue  # `from x import *` binds no importable name
             for a in stmt.names:
                 if a.asname is not None:
-                    names.update(_target_names(a.asname.name))
+                    names.update( _hoist_target_names(a.asname.name))
                 elif isinstance(a.name, cst.Name) and a.name.value != "*":
                     names.add(a.name.value)
         elif isinstance(stmt, (cst.Assign, cst.AnnAssign)):
@@ -2174,7 +2856,7 @@ def collect_stmt_names(add_target, line_stmt, names):
 def _collect_alias_names(names, stmt):
     for a in stmt.names:
         if a.asname is not None:
-            names.update(_target_names(a.asname.name))
+            names.update( _hoist_target_names(a.asname.name))
         else:
             names.add(_import_base_name(a.name))
 
@@ -2897,7 +3579,7 @@ def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
             if isinstance(inner, cst.Import):
                 for alias in inner.names:
                     bound = (
-                        _target_names(alias.asname.name)
+                         _hoist_target_names(alias.asname.name)
                         if alias.asname is not None
                         else {_import_base_name(alias.name)}
                     )
@@ -2911,7 +3593,7 @@ def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
                     if not isinstance(alias.name, cst.Name):
                         continue
                     bound = (
-                        _target_names(alias.asname.name)
+                         _hoist_target_names(alias.asname.name)
                         if alias.asname is not None
                         else {alias.name.value}
                     )
@@ -2965,9 +3647,9 @@ def _module_bindings(module: cst.Module) -> set[str]:
         inner = stmt.body[0]
         if isinstance(inner, cst.Assign):
             for t in inner.targets:
-                bound |= _target_names(t.target)
+                bound |=  _hoist_target_names(t.target)
         elif isinstance(inner, cst.AnnAssign) and inner.target is not None:
-            bound |= _target_names(inner.target)
+            bound |=  _hoist_target_names(inner.target)
     return bound
 
 
@@ -3015,26 +3697,26 @@ class _FreeNames(cst.CSTVisitor):
     @override
     def visit_Assign(self, node) -> None:
         for t in node.targets:
-            self.bound.update(_target_names(t.target))
+            self.bound.update(_hoist_target_names(t.target))
 
     @override
     def visit_AnnAssign(self, node) -> None:
         if node.target:
-            self.bound.update(_target_names(node.target))
+            self.bound.update(_hoist_target_names(node.target))
 
     @override
     def visit_For(self, node) -> None:
-        self.bound.update(_target_names(node.target))
+        self.bound.update(_hoist_target_names(node.target))
 
     @override
     def visit_CompFor(self, node) -> None:
-        self.bound.update(_target_names(node.target))
+        self.bound.update(_hoist_target_names(node.target))
 
     @override
     def visit_With(self, node) -> None:
         for item in node.items:
             if item.asname is not None:
-                self.bound.update(_target_names(item.asname.name))
+                self.bound.update(_hoist_target_names(item.asname.name))
 
     @override
     def visit_ExceptHandler(self, node) -> None:
@@ -3089,35 +3771,28 @@ class _BoundNames(cst.CSTVisitor):
     @override
     def visit_Assign(self, node: cst.Assign) -> None:
         for t in node.targets:
-            self.bound.update(_target_names(t.target))
+            self.bound.update(_hoist_target_names(t.target))
 
     @override
     def visit_AnnAssign(self, node: cst.AnnAssign) -> None:
         if node.target:
-            self.bound.update(_target_names(node.target))
+            self.bound.update(_hoist_target_names(node.target))
 
     @override
     def visit_For(self, node: cst.For) -> None:
-        self.bound.update(_target_names(node.target))
+        self.bound.update(_hoist_target_names(node.target))
 
     @override
     def visit_CompFor(self, node: cst.CompFor) -> None:
-        self.bound.update(_target_names(node.target))
+        self.bound.update(_hoist_target_names(node.target))
 
     @override
     def visit_With(self, node: cst.With) -> None:
         for item in node.items:
             if item.asname is not None:
-                self.bound.update(_target_names(item.asname.name))
+                self.bound.update(_hoist_target_names(item.asname.name))
 
 
-def _target_names(target) -> set[str]:
-    """The names a (possibly tuple) assignment target binds."""
-    if isinstance(target, cst.Name):
-        return {target.value}
-    if isinstance(target, (cst.Tuple, cst.List)):
-        return {n for elt in target.elements if isinstance(elt, cst.Element) for n in _target_names(elt.value)}
-    return set()
 
 
 # ambient names a dispatch arm may read without a handler parameter: the

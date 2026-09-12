@@ -1725,7 +1725,7 @@ fn emit_wide_tuple(state: &mut ScanState, ann: Option<&Expr>, what: &str, line: 
         return;
     };
     let message = format!(
-        "{what} is a {n}-tuple — the positions carry meaning the call site cannot see; introduce a record named with a domain noun, with named fields and a to_dict() at any serialization edge (packing a long parameter list into a tuple is the same defect with fewer lines)"
+        "{what} is a {n}-tuple — the positions carry meaning the call site cannot see; introduce a record named with a domain noun, with named fields"
     );
     // 4+ elements fail; exactly 3 warns (the RGB gray zone). Two pushes so
     // the kind/severity literal pair stays adjacent — `make rules`' drift
@@ -3684,32 +3684,729 @@ pub fn unused_setter_findings(
     out
 }
 
-/// Replace Loop with Pipeline: a for-loop whose body is only a collection
-/// mutation (append/add/update or a subscript store) with at most one
-/// if-filter — the shape a comprehension replaces.
-pub fn loop_pipeline_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
-    fn is_collection_mutation(e: &Expr) -> bool {
-        match e {
-            Expr::Call(c) => matches!(c.func.as_ref(), Expr::Attribute(a)
-                if matches!(a.attr.as_str(), "append" | "add" | "extend" | "update" | "appendleft" | "add_update")),
-            Expr::Subscript(_) => true, // result[k] = v
-            _ => false,
+// =====================================================================
+// the loop family (Replace Loop with Pipeline) — Python
+
+/// The base NAME of an expression: `x` itself, `a.b.c` -> a, `a[k].b` -> a.
+fn loop_expr_base_name(e: &Expr) -> Option<String> {
+    let mut v = e;
+    loop {
+        match v {
+            Expr::Name(n) => return Some(n.id.to_string()),
+            Expr::Attribute(a) => v = &a.value,
+            Expr::Subscript(s) => v = &s.value,
+            _ => return None,
         }
     }
-    fn body_is_pipeline(stmts: &[Stmt]) -> bool {
-        match stmts {
-            [Stmt::Expr(e)] => is_collection_mutation(&e.value),
-            [Stmt::If(i), ..] => {
-                i.body.len() == 1 && matches!(&i.body[0], Stmt::Expr(e) if is_collection_mutation(&e.value))
+}
+
+/// The control-flow children of a statement — nested def/class scopes excluded.
+fn loop_stmt_children(s: &Stmt) -> Vec<&Stmt> {
+    let mut out = Vec::new();
+    match s {
+        Stmt::If(i) => {
+            for b in &i.body {
+                out.push(b);
             }
-            _ => false,
+            for cl in &i.elif_else_clauses {
+                for b in &cl.body {
+                    out.push(b);
+                }
+            }
+        }
+        Stmt::For(f) => {
+            for b in &f.body {
+                out.push(b);
+            }
+            for b in &f.orelse {
+                out.push(b);
+            }
+        }
+        Stmt::While(w) => {
+            for b in &w.body {
+                out.push(b);
+            }
+            for b in &w.orelse {
+                out.push(b);
+            }
+        }
+        Stmt::With(w) => {
+            for b in &w.body {
+                out.push(b);
+            }
+        }
+        Stmt::Try(t) => {
+            for b in &t.body {
+                out.push(b);
+            }
+            for h in &t.handlers {
+                let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                for b in &eh.body {
+                    out.push(b);
+                }
+            }
+            for b in &t.orelse {
+                out.push(b);
+            }
+            for b in &t.finalbody {
+                out.push(b);
+            }
+        }
+        Stmt::Match(m) => {
+            for case in &m.cases {
+                for b in &case.body {
+                    out.push(b);
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// A mutating receiver call (append/add/update/...): `out.append(x)`.
+fn loop_collection_mutation(e: &Expr) -> bool {
+    match e {
+        Expr::Call(c) => matches!(c.func.as_ref(), Expr::Attribute(a)
+            if matches!(a.attr.as_str(), "append" | "add" | "extend" | "update" | "appendleft" | "add_update")),
+        _ => false,
+    }
+}
+
+/// ONE collection-building mutation: a mutating receiver call, `name +=
+/// [..]` (list/tuple literal concatenation), or `container[k] = v` — the
+/// shapes a comprehension replaces. Anything else in the body makes the
+/// loop stateful, not a plain pipeline.
+fn loop_single_collection_mutation(s: &Stmt) -> bool {
+    match s {
+        Stmt::Expr(e) => loop_collection_mutation(&e.value),
+        Stmt::AugAssign(a) => {
+            matches!(a.op, Operator::Add)
+                && matches!(a.target.as_ref(), Expr::Name(_))
+                && matches!(a.value.as_ref(), Expr::List(_) | Expr::Tuple(_))
+        }
+        Stmt::Assign(a) => a.targets.len() == 1 && matches!(&a.targets[0], Expr::Subscript(_)),
+        _ => false,
+    }
+}
+
+/// A loop whose body is exactly ONE collection mutation (with at most one
+/// if-filter, no else) — the comprehension shape.
+fn loop_body_is_pipeline(stmts: &[Stmt]) -> bool {
+    match stmts {
+        [Stmt::If(i)] => {
+            i.elif_else_clauses.is_empty() && i.body.len() == 1 && loop_single_collection_mutation(&i.body[0])
+        }
+        [s] => loop_single_collection_mutation(s),
+        _ => false,
+    }
+}
+
+/// An auto-fixable pipeline loop: the single mutation is one the fix
+/// engine's comprehension rewrite expresses (append/appendleft/add/extend
+/// receivers, `name += [..]`, a subscript store). update/add_update
+/// receivers are pipeline-shaped but not rewritable — the finding must not
+/// advertise a fix that cannot apply (user ruling: never suggest a fix
+/// that cannot fix).
+fn loop_pipeline_auto_fixable(stmts: &[Stmt]) -> bool {
+    fn supported_call(e: &Expr) -> bool {
+        matches!(e, Expr::Call(c)
+            if matches!(c.func.as_ref(), Expr::Attribute(a)
+                if matches!(a.attr.as_str(), "append" | "appendleft" | "add" | "extend")))
+    }
+    match stmts {
+        [Stmt::Expr(e)] => supported_call(&e.value),
+        [Stmt::If(i)] => {
+            i.elif_else_clauses.is_empty()
+                && i.body.len() == 1
+                && matches!(&i.body[0], Stmt::Expr(e) if supported_call(&e.value))
+        }
+        _ => false, // `+= [..]` and subscript stores: the base check holds
+    }
+}
+
+/// The minimum flattened body statement count for a single-mutation loop to
+/// carry the hoist advice — the body clearly computes more than it appends
+/// (the user's "more than a couple of lines").
+const LOOP_HOIST_MIN_STMTS: usize = 4;
+
+/// The flattened statement count of a loop body — every control-flow child
+/// counts (a nested loop is one statement), nested defs are not the body's
+/// business.
+fn loop_body_stmt_count(stmts: &[&Stmt]) -> usize {
+    fn walk(stmts: &[&Stmt], n: &mut usize) {
+        for &s in stmts {
+            if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+                continue;
+            }
+            *n += 1;
+            for child in loop_stmt_children(s) {
+                walk(&[child], n);
+            }
         }
     }
-    fn walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
+    let mut n = 0;
+    walk(stmts, &mut n);
+    n
+}
+
+/// Does the body mutate `acc` via a mutating receiver call or a subscript
+/// store — a collection BUILD? The hoist advice (a helper that returns the
+/// value, then a comprehension) fits a build; a rebind/augment fold gets the
+/// measure-helper + fold advice instead.
+fn loop_mutation_is_collection_build(body: &[&Stmt], acc: &str) -> bool {
+    let mut found = false;
+    let mut stack: Vec<&Stmt> = body.to_vec();
+    while let Some(s) = stack.pop() {
+        match s {
+            Stmt::Expr(e) => {
+                walk_expr_deep(&e.value, false, &mut |x, _| {
+                    if let Expr::Call(c) = x {
+                        if let Expr::Attribute(a) = c.func.as_ref() {
+                            if MUTATING_METHODS.contains(&a.attr.as_str())
+                                && loop_expr_base_name(&a.value).as_deref() == Some(acc)
+                            {
+                                found = true;
+                            }
+                        }
+                    }
+                });
+            }
+            Stmt::Assign(a) if a.targets.len() == 1 => {
+                if let Expr::Subscript(s) = &a.targets[0] {
+                    if loop_expr_base_name(&s.value).as_deref() == Some(acc) {
+                        found = true;
+                    }
+                }
+            }
+            Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
+            _ => {
+                for child in loop_stmt_children(s) {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Can the loop-hoist FIXER rewrite this for-loop: a simple Name target
+/// whose accumulator writes are ALL append/add calls (the engine's
+/// _LoopHoistExtractor contract)? Rebind/subscript writes on the accumulator
+/// and extend/appendleft/update receivers keep the directive off (the
+/// finding still fires, the fix just does not advertise itself).
+fn loop_hoist_fixable(for_target: &Expr, body: &[Stmt], acc: &str) -> bool {
+    if !matches!(for_target, Expr::Name(_)) {
+        return false;
+    }
+    let mut found = false;
+    let mut bad = false;
+    fn walk(stmts: &[&Stmt], acc: &str, found: &mut bool, bad: &mut bool) {
+        for &s in stmts {
+            match s {
+                Stmt::Expr(e) => {
+                    walk_expr_deep(&e.value, false, &mut |x, _| {
+                        if let Expr::Call(c) = x {
+                            if let Expr::Attribute(a) = c.func.as_ref() {
+                                if loop_expr_base_name(&a.value).as_deref() == Some(acc) {
+                                    if matches!(a.attr.as_str(), "append" | "add") {
+                                        *found = true;
+                                    } else {
+                                        *bad = true;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+                Stmt::Assign(a) => {
+                    for t in &a.targets {
+                        if loop_expr_base_name(t).as_deref() == Some(acc) {
+                            *bad = true;
+                        }
+                    }
+                }
+                Stmt::AnnAssign(a) => {
+                    if loop_expr_base_name(&a.target).as_deref() == Some(acc) {
+                        *bad = true;
+                    }
+                }
+                Stmt::AugAssign(a) => {
+                    if loop_expr_base_name(&a.target).as_deref() == Some(acc) {
+                        *bad = true;
+                    }
+                }
+                Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
+                _ => {
+                    for child in loop_stmt_children(s) {
+                        walk(&[child], acc, found, bad);
+                    }
+                }
+            }
+        }
+    }
+    let refs: Vec<&Stmt> = body.iter().collect();
+    walk(&refs, acc, &mut found, &mut bad);
+    found && !bad
+}
+
+/// Record one mutated name if it is a candidate, not excluded, and not yet
+/// recorded (dedup across the body).
+fn loop_record_name(
+    name: &str,
+    candidates: &HashSet<String>,
+    excl: &HashSet<String>,
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    if candidates.contains(name) && !excl.contains(name) && !seen.contains(name) {
+        seen.insert(name.to_string());
+        out.push(name.to_string());
+    }
+}
+
+/// A write TARGET's base state name: a rebind (`x`), a container write
+/// (`counts[k]` -> counts), or an object write — bare `self.attr` stores
+/// are skipped (the object is the class, not loop state).
+fn loop_write_target(
+    t: &Expr,
+    candidates: &HashSet<String>,
+    excl: &HashSet<String>,
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    match t {
+        Expr::Name(n) => loop_record_name(n.id.as_str(), candidates, excl, out, seen),
+        Expr::Tuple(tu) => {
+            for el in &tu.elts {
+                loop_write_target(el, candidates, excl, out, seen);
+            }
+        }
+        Expr::List(li) => {
+            for el in &li.elts {
+                loop_write_target(el, candidates, excl, out, seen);
+            }
+        }
+        Expr::Starred(st) => loop_write_target(&st.value, candidates, excl, out, seen),
+        Expr::Attribute(a) => {
+            if let Some(base) = loop_expr_base_name(&a.value) {
+                if base != "self" {
+                    loop_record_name(&base, candidates, excl, out, seen);
+                }
+            }
+        }
+        _ => {
+            if let Some(base) = loop_expr_base_name(t) {
+                loop_record_name(&base, candidates, excl, out, seen);
+            }
+        }
+    }
+}
+
+/// The candidate names one statement MUTATES — rebinds, subscript/attribute
+/// stores, deletes, and mutating receiver calls. Nested defs are new scopes.
+fn loop_stmt_writes(
+    s: &Stmt,
+    candidates: &HashSet<String>,
+    excl: &HashSet<String>,
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    match s {
+        Stmt::Assign(a) => {
+            for t in &a.targets {
+                loop_write_target(t, candidates, excl, out, seen);
+            }
+        }
+        Stmt::AnnAssign(a) => loop_write_target(&a.target, candidates, excl, out, seen),
+        Stmt::AugAssign(a) => loop_write_target(&a.target, candidates, excl, out, seen),
+        Stmt::Delete(d) => {
+            for t in &d.targets {
+                loop_write_target(t, candidates, excl, out, seen);
+            }
+        }
+        Stmt::Expr(e) => {
+            walk_expr_deep(&e.value, false, &mut |x, _| {
+                if let Expr::Call(c) = x {
+                    if let Expr::Attribute(a) = c.func.as_ref() {
+                        if MUTATING_METHODS.contains(&a.attr.as_str()) {
+                            if let Some(base) = loop_expr_base_name(&a.value) {
+                                loop_record_name(&base, candidates, excl, out, seen);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
+        _ => {
+            for child in loop_stmt_children(s) {
+                loop_stmt_writes(child, candidates, excl, out, seen);
+            }
+        }
+    }
+}
+
+/// The candidate names a statement list MUTATES — the loop's own target
+/// (`excl`) is not a mutation.
+fn loop_mutated_candidates(stmts: &[&Stmt], candidates: &HashSet<String>, excl: &HashSet<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for s in stmts {
+        loop_stmt_writes(s, candidates, excl, &mut out, &mut seen);
+    }
+    out
+}
+
+/// The candidate names the loop's iterable READS — the feed signal (loop N
+/// consuming what loop N-1 built). Body reads are left out: the iterable is
+/// where the chain actually joins.
+fn loop_iter_reads(iter: &Expr, candidates: &HashSet<String>, excl: &HashSet<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    walk_expr_deep(iter, false, &mut |x, _| {
+        if let Expr::Name(n) = x {
+            loop_record_name(n.id.as_str(), candidates, excl, &mut out, &mut seen);
+        }
+    });
+    out
+}
+
+/// Every For target in the function's own scope — a loop's iteration
+/// variable is not "state the loop mutates".
+fn loop_for_targets(body: &[Stmt]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut stack: Vec<&Stmt> = body.iter().collect();
+    while let Some(s) = stack.pop() {
+        match s {
+            Stmt::For(f) => {
+                let mut t = HashSet::new();
+                expr_bindings(&f.target, &mut t);
+                out.extend(t);
+            }
+            Stmt::FunctionDef(_) | Stmt::ClassDef(_) => continue,
+            _ => {
+                for child in loop_stmt_children(s) {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The function-scope names bound OUTSIDE every loop body — the state a
+/// loop can SURVIVE: top-level statements plus non-loop control flow (an
+/// if/try/with branch that is not inside a loop). Loop bodies are NOT
+/// descended and loop targets are NOT bound: an iteration variable or a
+/// body-local temp (`item` in both loops of the completeness test,
+/// `m`/`version` in `_latest`) is not state that outlives a pass, even when
+/// an earlier loop happened to bind it.
+fn loop_surviving_bindings(body: &[Stmt]) -> HashSet<String> {
+    fn bind_stmt(s: &Stmt, out: &mut HashSet<String>) {
+        match s {
+            Stmt::FunctionDef(f) => {
+                out.insert(f.name.to_string());
+            }
+            Stmt::ClassDef(c) => {
+                out.insert(c.name.to_string());
+            }
+            Stmt::Assign(a) => {
+                for t in &a.targets {
+                    expr_bindings(t, out);
+                }
+            }
+            Stmt::AnnAssign(a) => expr_bindings(&a.target, out),
+            Stmt::AugAssign(a) => expr_bindings(&a.target, out),
+            Stmt::With(w) => {
+                for item in &w.items {
+                    if let Some(v) = &item.optional_vars {
+                        expr_bindings(v, out);
+                    }
+                }
+            }
+            Stmt::Import(i) => {
+                for a in &i.names {
+                    out.insert(a.name.as_str().split('.').next().unwrap_or("").to_string());
+                }
+            }
+            Stmt::ImportFrom(i) => {
+                for a in &i.names {
+                    if a.name.as_str() != "*" {
+                        out.insert(a.name.to_string());
+                    }
+                }
+            }
+            Stmt::For(_) | Stmt::While(_) => return,
+            _ => {}
+        }
+        for child in loop_stmt_children(s) {
+            bind_stmt(child, out);
+        }
+    }
+    let mut out = HashSet::new();
+    for s in body {
+        bind_stmt(s, &mut out);
+    }
+    out
+}
+
+/// One outermost loop's shape, for the sequence judgement.
+struct LoopSeqLoop {
+    line: usize,
+    mutated: Vec<String>,
+    reads: Vec<String>,
+    pipelined: bool,
+}
+
+/// The per-function loop pass — a flat struct holds the walk's state, so
+/// the walker is a method instead of closures. `'a` is the ctx's own
+/// borrow lifetimes (state + the per-function sets), `'b` ScanState's
+/// inner source lifetime — independent: the locals die with the function
+/// pass, the ScanState outlives it.
+struct LoopFunctionCtx<'a, 'b> {
+    state: &'a mut ScanState<'b>,
+    survivors: &'a HashSet<String>,
+    fn_targets: &'a HashSet<String>,
+    fn_name: &'a str,
+    seq: Vec<LoopSeqLoop>,
+}
+
+impl<'a, 'b> LoopFunctionCtx<'a, 'b> {
+    fn push_finding(&mut self, line: usize, kind: &str, message: String) {
+        self.state.findings.push(Finding {
+            col: 0,
+            file: self.state.file.to_string(),
+            line,
+            function: self.fn_name.to_string(),
+            kind: kind.into(),
+            severity: "warn".into(),
+            message,
+        });
+    }
+
+    /// pipeline/mutating per loop at any depth; the OUTERMOST loops are
+    /// collected for the sequence judgement.
+    fn walk_loops(&mut self, stmts: &[Stmt], in_loop: bool) {
         for s in stmts {
             match s {
                 Stmt::For(f) => {
-                    if body_is_pipeline(&f.body) {
+                    let line = line_of(self.state.source, f.range().start());
+                    let mut own_target = HashSet::new();
+                    expr_bindings(&f.target, &mut own_target);
+                    let mut body: Vec<&Stmt> = f.body.iter().collect();
+                    body.extend(f.orelse.iter());
+                    let mutated = loop_mutated_candidates(&body, self.survivors, &own_target);
+                    let auto_fixable = loop_pipeline_auto_fixable(&f.body);
+                    if loop_body_is_pipeline(&f.body) {
+                        let message = if auto_fixable {
+                            "loop builds a collection — Replace Loop with Pipeline: use a comprehension — fix: loop-pipeline"
+                        } else {
+                            "loop builds a collection — Replace Loop with Pipeline: use a comprehension"
+                        };
+                        self.push_finding(line, "loop-pipeline", message.into());
+                    } else if mutated.len() >= 2 {
+                        self.push_finding(
+                            line,
+                            "mutating-loop",
+                            format!(
+                                "loop mutates {} — Replace Loop with Pipeline: {} pieces of state survive the loop and the changes are invisible at the call site; build each output as a comprehension (or a helper that returns the new state)",
+                                mutated.join(", "),
+                                mutated.len(),
+                            ),
+                        );
+                    } else if mutated.len() == 1 {
+                        let n = loop_body_stmt_count(&body);
+                        if n >= LOOP_HOIST_MIN_STMTS {
+                            let acc = &mutated[0];
+                            let fixable = loop_hoist_fixable(&f.target, &f.body, acc);
+                            let message = if loop_mutation_is_collection_build(&body, acc) {
+                                if fixable {
+                                    format!(
+                                        "loop body is {n} statements yet builds one collection ({acc}) — hoist the calculation: name what one item contributes as a helper that RETURNS the value (a domain noun), then Replace Loop with Pipeline: {acc} = [<helper>(<target>) for <target> in <iter>] — fix: loop-hoist --fix-name <Name>"
+                                    )
+                                } else {
+                                    format!(
+                                        "loop body is {n} statements yet builds one collection ({acc}) — hoist the calculation: name what one item contributes as a helper that RETURNS the value (a domain noun), then Replace Loop with Pipeline: {acc} = [<helper>(<target>) for <target> in <iter>]"
+                                    )
+                                }
+                            } else {
+                                format!(
+                                    "loop body is {n} statements yet mutates only {acc} — hoist the per-item measure into a named helper (a domain noun for one item's value), then fold: {acc} = max/sum/min(<iter>, key=<helper>)"
+                                )
+                            };
+                            self.push_finding(line, "loop-hoist", message);
+                        }
+                    }
+                    if !in_loop {
+                        let mut excl = self.fn_targets.clone();
+                        excl.extend(own_target);
+                        self.seq.push(LoopSeqLoop {
+                            line,
+                            reads: loop_iter_reads(&f.iter, self.survivors, &excl),
+                            mutated,
+                            pipelined: auto_fixable,
+                        });
+                    }
+                    self.walk_loops(&f.body, true);
+                    self.walk_loops(&f.orelse, true);
+                }
+                Stmt::While(w) => {
+                    let line = line_of(self.state.source, w.range().start());
+                    let mut body: Vec<&Stmt> = w.body.iter().collect();
+                    body.extend(w.orelse.iter());
+                    let mutated = loop_mutated_candidates(&body, self.survivors, &HashSet::new());
+                    if mutated.len() >= 2 {
+                        self.push_finding(
+                            line,
+                            "mutating-loop",
+                            format!(
+                                "loop mutates {} — Replace Loop with Pipeline: {} pieces of state survive the loop and the changes are invisible at the call site; build each output as a comprehension (or a helper that returns the new state)",
+                                mutated.join(", "),
+                                mutated.len(),
+                            ),
+                        );
+                    } else if mutated.len() == 1 {
+                        let n = loop_body_stmt_count(&body);
+                        if n >= LOOP_HOIST_MIN_STMTS {
+                            let acc = &mutated[0];
+                            let message = if loop_mutation_is_collection_build(&body, acc) {
+                                format!(
+                                    "loop body is {n} statements yet builds one collection ({acc}) — hoist the calculation: name what one item contributes as a helper that RETURNS the value (a domain noun), then Replace Loop with Pipeline: {acc} = [<helper>(<target>) for <target> in <iter>]"
+                                )
+                            } else {
+                                format!(
+                                    "loop body is {n} statements yet mutates only {acc} — hoist the per-item measure into a named helper (a domain noun for one item's value), then fold: {acc} = max/sum/min(<iter>, key=<helper>)"
+                                )
+                            };
+                            self.push_finding(line, "loop-hoist", message);
+                        }
+                    }
+                    if !in_loop {
+                        self.seq.push(LoopSeqLoop {
+                            line,
+                            reads: loop_iter_reads(&w.test, self.survivors, self.fn_targets),
+                            mutated,
+                            pipelined: false, // while-loops are never comprehension shapes
+                        });
+                    }
+                    self.walk_loops(&w.body, true);
+                    self.walk_loops(&w.orelse, true);
+                }
+                Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
+                _ => {
+                    for child in loop_stmt_children(s) {
+                        self.walk_loops(std::slice::from_ref(child), in_loop);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The sequence verdict: loops SHARE a mutated name, or a later loop
+    /// READS what an earlier one wrote -> the sequence IS a pipeline;
+    /// independent passes -> one named helper per loop.
+    fn emit_sequence(&mut self, fn_line: usize) {
+        if self.seq.len() < 2 {
+            return;
+        }
+        let mut shared: HashSet<String> = HashSet::new();
+        for (i, a) in self.seq.iter().enumerate() {
+            for b in self.seq.iter().skip(i + 1) {
+                for m in &a.mutated {
+                    if b.mutated.contains(m) {
+                        shared.insert(m.clone());
+                    }
+                }
+            }
+        }
+        let mut fed: Vec<String> = Vec::new();
+        for (i, a) in self.seq.iter().enumerate() {
+            let earlier: HashSet<&str> = self
+                .seq
+                .iter()
+                .take(i)
+                .flat_map(|s| s.mutated.iter().map(|m| m.as_str()))
+                .collect();
+            for r in &a.reads {
+                if earlier.contains(r.as_str()) && !fed.contains(r) {
+                    fed.push(r.clone());
+                }
+            }
+        }
+        let lines: Vec<String> = self.seq.iter().map(|l| l.line.to_string()).collect();
+        if !shared.is_empty() || !fed.is_empty() {
+            // the auto-fix (`--kind loop-sequence`) rewrites a contiguous
+            // shared-accumulator chain of ONE rewriteable pipeline loop per
+            // member — advertise only when every loop in the sequence is
+            // exactly that (feed chains and multi-accumulator loops would
+            // make the engine decline). Computed before `shared` moves.
+            let chainable = shared.len() == 1
+                && self.seq.iter().all(|l| {
+                    let s = shared.iter().next().map(String::as_str).unwrap_or("");
+                    l.pipelined && l.mutated.len() == 1 && l.mutated[0] == s
+                });
+            let names: Vec<String> = shared.into_iter().collect();
+            let message = if chainable {
+                format!(
+                    "{} sequential loops at lines {} share or feed the same state ({}) — the sequence IS a pipeline: replace each loop with a comprehension and chain them, so every state change is visible in one reading — fix: loop-sequence",
+                    self.seq.len(),
+                    lines.join(", "),
+                    names.join(", "),
+                )
+            } else {
+                format!(
+                    "{} sequential loops at lines {} share or feed the same state ({}) — the sequence IS a pipeline: replace each loop with a comprehension and chain them, so every state change is visible in one reading",
+                    self.seq.len(),
+                    lines.join(", "),
+                    names.join(", "),
+                )
+            };
+            self.push_finding(fn_line, "loop-sequence", message);
+        } else {
+            self.push_finding(
+                fn_line,
+                "loop-sequence",
+                format!(
+                    "{} sequential loops at lines {} change the function's state independently — extract each loop into a named helper (one named step per loop), so the function reads as a sequence of steps",
+                    self.seq.len(),
+                    lines.join(", "),
+                ),
+            );
+        }
+    }
+}
+
+/// The per-function pass: pipeline/mutating per loop at any depth,
+/// loop-sequence for the function's OUTERMOST loops.
+fn loop_function_findings(state: &mut ScanState, f: &StmtFunctionDef, source: &str) {
+    let mut survivors: HashSet<String> = HashSet::new();
+    function_param_names(&f.parameters, &mut survivors);
+    survivors.extend(loop_surviving_bindings(&f.body));
+    let fn_name = f.name.to_string();
+    let fn_line = line_of(source, f.range().start());
+    let fn_targets = loop_for_targets(&f.body);
+    let mut ctx = LoopFunctionCtx {
+        state,
+        survivors: &survivors,
+        fn_targets: &fn_targets,
+        fn_name: &fn_name,
+        seq: Vec::new(),
+    };
+    ctx.walk_loops(&f.body, false);
+    ctx.emit_sequence(fn_line);
+}
+
+/// Module-level walk: the plain pipeline shape for module loops, and
+/// descent into class bodies (their methods are functions — analyzed by
+/// their own `loop_function_findings` run).
+fn loop_module_walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
+    fn walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
+        for s in stmts {
+            match s {
+                Stmt::FunctionDef(f) => loop_function_findings(state, f, source),
+                Stmt::For(f) => {
+                    if loop_body_is_pipeline(&f.body) {
                         let line = line_of(source, f.range().start());
                         state.findings.push(Finding {
                             col: 0,
@@ -3718,14 +4415,18 @@ pub fn loop_pipeline_findings(state: &mut ScanState, body: &[Stmt], source: &str
                             function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
                             kind: "loop-pipeline".into(),
                             severity: "warn".into(),
-                            message: "loop builds a collection — Replace Loop with Pipeline: use a comprehension"
-                                .into(),
+                            message: if loop_pipeline_auto_fixable(&f.body) {
+                                "loop builds a collection — Replace Loop with Pipeline: use a comprehension — fix: loop-pipeline"
+                            } else {
+                                "loop builds a collection — Replace Loop with Pipeline: use a comprehension"
+                            }
+                            .into(),
                         });
                     }
                     walk(state, &f.body, source);
+                    walk(state, &f.orelse, source);
                 }
                 Stmt::ClassDef(cd) => walk(state, &cd.body, source),
-                Stmt::FunctionDef(f) => walk(state, &f.body, source),
                 Stmt::While(w) => walk(state, &w.body, source),
                 Stmt::If(i) => {
                     walk(state, &i.body, source);
@@ -3739,12 +4440,38 @@ pub fn loop_pipeline_findings(state: &mut ScanState, body: &[Stmt], source: &str
                         let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
                         walk(state, &eh.body, source);
                     }
+                    walk(state, &t.orelse, source);
+                    walk(state, &t.finalbody, source);
+                }
+                Stmt::With(w) => walk(state, &w.body, source),
+                Stmt::Match(m) => {
+                    for case in &m.cases {
+                        walk(state, &case.body, source);
+                    }
                 }
                 _ => {}
             }
         }
     }
-    walk(state, body, source);
+    walk(state, stmts, source);
+}
+
+/// Replace Loop with Pipeline family (Python): the imperative loop shapes a
+/// functional pipeline replaces —
+/// - `loop-pipeline`: a loop whose body is ONLY a collection mutation
+///   (append/add/update, `name += [..]`, or a subscript store) with at most
+///   one if-filter — a comprehension in disguise;
+/// - `mutating-loop`: a loop that mutates >=2 pieces of state that SURVIVE
+///   it (accumulated collections, rebound names, object writes) — the state
+///   changes are invisible at the call site;
+/// - `loop-sequence`: >=2 sequential (non-nested) loops in one function —
+///   a hidden pipeline when they share or feed state, else separate named
+///   steps.
+///
+/// Function-scope analysis; module-level loops get only the single-loop
+/// pipeline shape (the global-state family owns module-level containers).
+pub fn loop_pipeline_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    loop_module_walk(state, body, source);
 }
 
 fn is_empty_literal(e: &Expr) -> bool {
@@ -4902,8 +5629,9 @@ pub fn unused_findings(
 // record-shape: "never a bare dict as a record" (check_records.py)
 //   - signatures: record-shaped collections in params/returns (grab-bags,
 //     collections of dicts/tuples, nested lists, fixed tuples); maps pass.
-//     NO boundary exemption: a wire payload is still a record — the class
-//     carries a to_dict()/to_json() at the serialization edge
+//     NO boundary exemption: a wire payload is still a record — serialisation
+//     is no excuse for failing to extract the class: a class serialises
+//     itself with a method
 //   - literals: dict literals with >= 2 keys, >= 1 constant string key,
 //     >= 1 dynamic value, in a record position (assign/return/yield)
 // =====================================================================
@@ -5201,7 +5929,7 @@ col: 0,
                             kind: "record-shape".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — give the class a to_dict()/to_json() at the serialization edge",
+                                "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — serialisation is no excuse for failing to extract the class: a class serialises itself with a method",
                                 f.name.as_str()
                             ),
                         });
@@ -5218,7 +5946,7 @@ col: 0,
                             kind: "record-shape".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "bare record collection '{text}' as return type of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — give the class a to_dict()/to_json() at the serialization edge",
+                                "bare record collection '{text}' as return type of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — serialisation is no excuse for failing to extract the class: a class serialises itself with a method",
                                 f.name.as_str()
                             ),
                         });
@@ -5268,7 +5996,7 @@ col: 0,
     }
     for h in unique {
         let keys = display_keys(&h.keys);
-        state.findings.push(Finding { file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("dict with constant keys {{{keys}}} is a record — make a class named with a domain noun (fields: {keys}); a wire payload is still a record — give the class a to_dict()/to_json() — fix: extract-record-class --name <Record>") });
+        state.findings.push(Finding { file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("dict with constant keys {{{keys}}} is a record — make a class named with a domain noun (fields: {keys}); a wire payload is still a record — serialisation is no excuse for failing to extract the class: a class serialises itself with a method — fix: extract-record-class --name <Record>") });
     }
 }
 

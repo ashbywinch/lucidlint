@@ -1,0 +1,3 @@
+class P:
+    def get_commute(self, origin):
+        ...

@@ -50,7 +50,7 @@ def test_python_finding_tails_name_python_fixable_kinds():
 
 
 def test_rust_finding_tails_name_rust_fixable_kinds():
-    src = (SCANNER_SRC / "rustscan.rs").read_text()
+    src = (SCANNER_SRC / "rustscan.rs").read_text() + (SCANNER_SRC / "rustloops.rs").read_text()
     fixable = rust_fixable_from_dispatch()
     offenders = [k for k in tails_of(src) if k not in fixable]
     assert offenders == [], f"fix directives with no Rust fixer: {offenders}"
@@ -90,15 +90,39 @@ def test_fix_refuses_an_unknown_kind_with_a_hint(tmp_path, capsys):
 def test_fix_refuses_unfixable_kind_on_rust_file(tmp_path, capsys):
     """`fix --kind vague-name --file x.rs` refuses — the Rust engine names
     exactly which fixes exist; nothing is written, and the previous
-    dispatcher fallback (running extract-method at that line) never fires."""
+    dispatcher fallback (running extract-method at that line) never fires.
+    (vague-name is name-required, so the naming guidance fires first with
+    rc 0 — the no-engine refusal is covered by a non-name kind below.)"""
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "lib.rs").write_text("fn main() {}\n")
     rc = run_fix(repo, "fix", "--kind", "vague-name", "--file", "lib.rs", "--line", "1")
-    assert rc == 1
+    assert rc == 0
     out = capsys.readouterr().out
-    assert "vague-name" in out and "no Rust auto-fix" in out, out
+    assert "vague-name" in out and "needs a semantic name" in out, out
     assert (repo / "lib.rs").read_text() == "fn main() {}\n"
+
+
+def test_fix_refuses_engine_less_kind_on_rust_file(tmp_path, capsys):
+    """The scanner's --fix gate refuses a kind with no engine (rc 2, the
+    engine list) — exercised at the binary itself, where no orchestrator
+    pre-dispatch can silence it. The orchestrator path (no finding at the
+    line) correctly stays R28-silent and writes nothing."""
+    import json
+    import subprocess
+
+    from test_lucidlint import make_repo
+
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    target = repo / "houses" / "lib.rs"
+    target.write_text("fn main() {}\n")
+    binary = ch.RUST_SCAN.binary(repo)
+    assert binary is not None
+    spec = json.dumps({"kind": "boolean-arg", "file": str(target), "line": 1, "name": ""})
+    proc = subprocess.run([str(binary), "--fix", spec], capture_output=True, text=True, cwd=str(repo))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "boolean-arg" in proc.stdout and "no Rust auto-fix" in proc.stdout, proc.stdout
+    assert target.read_text() == "fn main() {}\n"
 
 
 def test_fix_names_the_params_prerequisite_when_unresolvable(tmp_path, capsys):

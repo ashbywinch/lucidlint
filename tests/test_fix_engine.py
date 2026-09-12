@@ -1962,3 +1962,153 @@ def test_extract_record_class_refuses_non_identifier_keys(tmp_path):
     )
     assert out is None
     assert fixed == src  # nothing written on refusal
+
+
+# --------------------------------------------------------------------------- loop family (Replace Loop with Pipeline)
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def _fixture(name: str) -> str:
+    """A committed code fixture — code never lives in a test string literal
+    (coding-standards.md: a string literal never carries code; a fixture
+    that is code is a real file under tests/fixtures/)."""
+    return (FIXTURES / name).read_text(encoding="utf-8")
+
+
+def _fn_line(src: str, fn: str) -> int:
+    """The 1-based line of `def fn` — the loop-sequence fixer's anchor."""
+    return next(i + 1 for i, line in enumerate(src.splitlines()) if line.startswith(f"def {fn}"))
+
+
+def _loop_line(src: str, fn: str) -> int:
+    """The 1-based line of the first loop inside `def fn` — the per-loop
+    fixers' anchor."""
+    lines = src.splitlines()
+    start = _fn_line(src, fn)
+    for i in range(start, len(lines)):
+        if lines[i].lstrip().startswith(("for ", "while ")):
+            return i + 1
+    raise AssertionError(f"no loop under def {fn}")
+
+
+def test_loop_pipeline_append_becomes_comprehension(tmp_path):
+    src = _fixture("loop_pipeline.py")
+    out, fixed = _fix(tmp_path, "loop-pipeline", "houses/app.py", src, _loop_line(src, "f_append"))
+    assert out is not None
+    assert "out = [x for x in items]" in fixed
+    assert "    for x in items:\n        out.append" not in fixed  # the loop STATEMENT is gone
+    assert "return out" in fixed
+
+
+def test_loop_pipeline_if_filter_becomes_filtered_comprehension(tmp_path):
+    src = _fixture("loop_pipeline.py")
+    out, fixed = _fix(tmp_path, "loop-pipeline", "houses/app.py", src, _loop_line(src, "f_filtered"))
+    assert out is not None
+    assert "out = [x for x in items if x > 0]" in fixed
+
+
+def test_loop_pipeline_extend_becomes_flattening_comprehension(tmp_path):
+    src = _fixture("loop_pipeline.py")
+    out, fixed = _fix(tmp_path, "loop-pipeline", "houses/app.py", src, _loop_line(src, "f_extend"))
+    assert out is not None
+    # a fresh flatten name is introduced and the element order preserved
+    assert "for item in g(x)" in fixed
+
+
+def test_loop_pipeline_set_add_becomes_set_comprehension(tmp_path):
+    src = _fixture("loop_pipeline.py")
+    out, fixed = _fix(tmp_path, "loop-pipeline", "houses/app.py", src, _loop_line(src, "f_set"))
+    assert out is not None
+    assert "seen = {x for x in items}" in fixed
+
+
+def test_loop_pipeline_refuses_existing_contents_and_unsupported_mutations(tmp_path):
+    # a non-empty accumulator: the rewrite would drop prior contents
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    target = repo / "houses" / "app.py"
+    src = _fixture("loop_pipeline_bad.py")
+    target.write_text(src)
+    out = _fix_finding("loop-pipeline", "houses/app.py", repo, _loop_line(src, "f_nonempty_init"))
+    assert out is None
+    assert target.read_text() == src  # nothing written on refusal
+    # update() cannot be expressed as a comprehension — declined, untouched
+    target.write_text(src)
+    out2 = _fix_finding("loop-pipeline", "houses/app.py", repo, _loop_line(src, "f_update"))
+    assert out2 is None
+    assert target.read_text() == src
+
+
+def test_loop_sequence_shared_accumulator_becomes_concatenated_comprehensions(tmp_path):
+    src = _fixture("loop_sequence.py")
+    out, fixed = _fix(tmp_path, "loop-sequence", "houses/app.py", src, _fn_line(src, "all_text"))
+    assert out is not None
+    assert 'chunks = [p["name"] for p in people] + [q["bio"] for q in people]' in fixed
+    assert "    for p in people:\n        chunks +=" not in fixed  # the loop statements are gone
+
+
+def test_loop_sequence_refuses_interleaved_statements(tmp_path):
+    src = _fixture("loop_sequence_bad.py")
+    out, fixed = _fix(tmp_path, "loop-sequence", "houses/app.py", src, _fn_line(src, "interleaved"))
+    assert out is None
+    assert "for x in xs" in fixed  # untouched — the chain is not contiguous
+
+
+# --------------------------------------------------------------------------- loop-hoist (helper + comprehension)
+
+
+def _hoist_fix(tmp_path, fixture: str, fn: str, name="price"):
+    src = _fixture(fixture)
+    repo = tmp_path / "repo"
+    if not (repo / ".git").exists():  # one repo per test, reused across cases
+        repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    target = repo / "houses" / "app.py"
+    target.write_text(src)
+    out = _req("loop-hoist", "houses/app.py", repo, _loop_line(src, fn), fix_engine.FixOptions(name=name)).fix_finding()
+    return out, target.read_text()
+
+
+def test_loop_hoist_extracts_a_named_helper_and_comprehension(tmp_path):
+    out, fixed = _hoist_fix(tmp_path, "loop_hoist.py", "h_filtered")
+    assert out is not None
+    # the body moved into the helper with the accumulator receiver renamed
+    assert "def _price(it):" in fixed
+    assert "val.append(x)" in fixed
+    assert "return val" in fixed
+    # the loop became a flattening comprehension over the helper (the loop
+    # and its body are replaced — no `out = []` init + loop can coexist)
+    assert "out = [part for it in items for part in _price(it)]" in fixed
+    assert fixed.count("val.append") == 1  # the single append site lives in the helper only
+
+
+def test_loop_hoist_handles_multiple_sites_and_sets(tmp_path):
+    # two append sites under different branches — the helper returns both
+    out, fixed = _hoist_fix(tmp_path, "loop_hoist.py", "h_multi", name="gaps")
+    assert out is not None
+    assert "offenders = [part for person in people for part in _gaps(person)]" in fixed
+    # set.add hoists to a set comprehension
+    out2, fixed2 = _hoist_fix(tmp_path, "loop_hoist.py", "h_set", name="doubles")
+    assert out2 is not None
+    assert "seen = {part for it in items for part in _doubles(it)}" in fixed2
+
+
+def test_loop_hoist_refuses_unsafe_bodies(tmp_path):
+    # reading the accumulator mid-build has no comprehension equivalent
+    src = _fixture("loop_hoist_bad.py")
+    out, fixed = _hoist_fix(tmp_path, "loop_hoist_bad.py", "b_read")
+    assert out is None
+    assert fixed == src
+    # two accumulators
+    out2, fixed2 = _hoist_fix(tmp_path, "loop_hoist_bad.py", "b_two", name="h")
+    assert out2 is None
+    assert fixed2 == src
+    # the helper needs a name the tool cannot invent
+    out3, fixed3 = _hoist_fix(tmp_path, "loop_hoist_bad.py", "b_read", name=None)
+    assert out3 is None
+    assert fixed3 == src
+    # a nested def's locals are its own scope — their writes must not
+    # read as outer-state writes (the review finding: `got` inside
+    # `_fmt` is not an accumulator)
+    out4, fixed4 = _hoist_fix(tmp_path, "loop_hoist_bad.py", "b_nested", name="score")
+    assert out4 is not None
+    assert "def _score(it):" in fixed4

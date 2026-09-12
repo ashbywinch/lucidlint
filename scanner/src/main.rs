@@ -31,6 +31,7 @@ mod fix;
 mod graph_families;
 mod lsp;
 mod rules_gen;
+mod rustloops;
 mod rustscan;
 use checks::Q;
 use checks::*;
@@ -1650,14 +1651,27 @@ fn main() {
                 let file = v.get("file").and_then(|k| k.as_str()).unwrap_or("");
                 let line = v.get("line").and_then(|k| k.as_u64()).unwrap_or(0) as usize;
                 let name = v.get("name").and_then(|k| k.as_str()).unwrap_or("");
-                if kind != "extract-method" && kind != "dispatch-registry" && kind != "rule-table" {
-                    // the request is WELL-FORMED — the honest refusal names
-                    // the gap: this fix family has no Rust engine yet (the
-                    // Python families run through lucidlint.py's libcst path)
-                    println!("fix: {kind} has no Rust auto-fix - the Rust engine fixes extract-method, dispatch-registry, rule-table only; the report line for it says what to change");
+                if kind != "extract-method"
+                    && kind != "dispatch-registry"
+                    && kind != "rule-table"
+                    && kind != "loop-pipeline"
+                    && kind != "loop-sequence"
+                    && kind != "loop-hoist"
+                {
+                    // the request names a kind with no engine — the honest
+                    // refusal names the gap (every shipped family runs
+                    // through this gate; an unlisted kind is a typo or a
+                    // future family)
+                    println!("fix: {kind} has no Rust auto-fix - the Rust engine fixes extract-method, dispatch-registry, rule-table, loop-pipeline, loop-sequence, loop-hoist only; the report line for it says what to change");
                     std::process::exit(2);
                 }
-                if kind == "extract-method" || kind == "dispatch-registry" || kind == "rule-table" {
+                if kind == "extract-method"
+                    || kind == "dispatch-registry"
+                    || kind == "rule-table"
+                    || kind == "loop-pipeline"
+                    || kind == "loop-sequence"
+                    || kind == "loop-hoist"
+                {
                     let src = match std::fs::read_to_string(file) {
                         Ok(s) => s,
                         Err(e) => {
@@ -1673,6 +1687,12 @@ fn main() {
                         fix::fix_dispatch_registry(&src, line)
                     } else if kind == "rule-table" {
                         fix::fix_rule_table(&src, line)
+                    } else if kind == "loop-pipeline" {
+                        fix::fix_loop_pipeline(&src, line)
+                    } else if kind == "loop-sequence" {
+                        fix::fix_loop_sequence(&src, line)
+                    } else if kind == "loop-hoist" {
+                        fix::fix_loop_hoist(&src, line, name)
                     } else {
                         fix::fix_extract_method(&src, line, name)
                     };
@@ -1686,6 +1706,12 @@ fn main() {
                                 "converted the dispatch chain into a match"
                             } else if kind == "rule-table" {
                                 "hoisted the if/append checks into a (condition, violation) table"
+                            } else if kind == "loop-pipeline" {
+                                "rewrote the loop as a combinator"
+                            } else if kind == "loop-sequence" {
+                                "concatenated the loop chain into one combinator"
+                            } else if kind == "loop-hoist" {
+                                "hoisted the loop body into a helper"
                             } else {
                                 "extracted seam into a named function"
                             };
@@ -2171,14 +2197,14 @@ mod tests {
 
     #[test]
     fn cc_loops_try_assert_match_boolop() {
-        let src = "def f(xs, a, b):\n    for x in xs:\n        if x:\n            break\n    else:\n        return 0\n    try:\n        g()\n    except ValueError:\n        h()\n    else:\n        k()\n    assert a and b\n    match a:\n        case 1:\n            return 1\n        case _:\n            return 0\n";
+        let src = include_str!("../../tests/fixtures/rust/cc_loops_try_assert_match_boolop__01.py");
         let (_, cc, _) = scan_cc(src);
         assert_eq!(cc[0].cc, 8); // for+else(2) if(1) try+handler+else(3) assert(1) match-case(1) + base 1 — the boolop under assert does NOT count (radon's visit_Assert never recurses)
     }
 
     #[test]
     fn cc_nested_and_class_excluded() {
-        let src = "def f(a):\n    def inner(x):\n        if x:\n            return 1\n        return 0\n    class C:\n        def m(self):\n            if self:\n                return 1\n    if a:\n        return inner(a)\n    return 0\n";
+        let src = include_str!("../../tests/fixtures/rust/cc_nested_and_class_excluded__01.py");
         let (_, cc, _) = scan_cc(src);
         assert_eq!(cc.len(), 1);
         assert_eq!(cc[0].cc, 2); // only the outer if counts
@@ -2188,21 +2214,21 @@ mod tests {
     fn cc_assert_does_not_recurse() {
         // radon's visit_Assert short-circuits: boolop/ternary/comp inside
         // an assert contribute nothing — only the assert itself counts
-        let src = "def f(a, b, y):\n    assert a and b\n    assert [x for x in y if x]\n    return a\n";
+        let src = include_str!("../../tests/fixtures/rust/cc_assert_does_not_recurse__01.py");
         let (_, cc, _) = scan_cc(src);
         assert_eq!(cc[0].cc, 3); // base + 2 asserts; the boolop/comp/ifs do not count
     }
 
     #[test]
     fn cc_lambda_zero_but_body_walks() {
-        let src = "def f():\n    g = lambda x: 1 if x else 2\n    return g(1)\n";
+        let src = include_str!("../../tests/fixtures/rust/cc_lambda_zero_but_body_walks__01.py");
         let (_, cc, _) = scan_cc(src);
         assert_eq!(cc[0].cc, 2); // lambda +0, inner ternary +1
     }
 
     #[test]
     fn cc_comprehension_counts_each_generator() {
-        let src = "def f(xs):\n    return [x for x in xs for y in xs if y]\n";
+        let src = include_str!("../../tests/fixtures/rust/cc_comprehension_counts_each_generator__01.py");
         let (_, cc, _) = scan_cc(src);
         assert_eq!(cc[0].cc, 4); // 2 generators + 1 if + base
     }
@@ -2210,15 +2236,17 @@ mod tests {
     // ------------------------------------------------------------- magic
     #[test]
     fn magic_skips_lookup_table_and_small_literals() {
-        let f = scan_src(
-            "def f(a):\n    table = {10: 'x', 20: 'y'}\n    if a > 1:\n        return table[a]\n    return 0\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_skips_lookup_table_and_small_literals__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "magic-number")); // 10/20 in a dict literal, 1 and 0 skipped
     }
 
     #[test]
     fn magic_operand_and_index_found() {
-        let f = scan_src("def f(a):\n    return a * 60 + cols[7]\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_operand_and_index_found__01.py"
+        ));
         let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
         assert_eq!(m.len(), 2);
         assert_eq!(m[0].function, "f");
@@ -2226,7 +2254,9 @@ mod tests {
 
     #[test]
     fn magic_keyword_value_is_not_a_finding() {
-        let f = scan_src("def f():\n    raise HTTPException(status_code=403, detail='x')\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_keyword_value_is_not_a_finding__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "magic-number"));
     }
 
@@ -2276,29 +2306,39 @@ mod tests {
     fn magic_table_carve_out_exempts_data_tables_keeps_operands() {
         // statutory band ratios: same-kind ints in Div ops inside one dict —
         // the literal IS the data, naming each would destroy the table
-        let f = scan_src("BAND = {\"A\": 6 / 9, \"B\": 7 / 9, \"C\": 8 / 9, \"D\": 9 / 9}\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_table_carve_out_exempts_data_tables_keeps_operands__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "magic-number"), "{f:?}");
         // postcode bounds: negative floats in UnaryOps inside tuples inside a dict
-        let f2 = scan_src(
-            "B = {\"UB\": (51.4, 51.6, -0.5, 0.0), \"TW\": (51.4, 51.6, -0.6, 0.0), \"SE\": (51.4, 51.5, -0.2, 0.1)}\n",
-        );
+        let f2 = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_table_carve_out_exempts_data_tables_keeps_operands__02.py"
+        ));
         assert!(!f2.iter().any(|x| x.kind == "magic-number"), "{f2:?}");
         // two same-kind operands in a collection are NOT a table — still flagged
-        let f3 = scan_src("M = {\"a\": x * 1.5, \"b\": y * 2.5}\n");
+        let f3 = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_table_carve_out_exempts_data_tables_keeps_operands__03.py"
+        ));
         let m: Vec<&Finding> = f3.iter().filter(|x| x.kind == "magic-number").collect();
         assert_eq!(m.len(), 2, "{f3:?}");
         // ordinary operands outside any collection stay flagged
-        let f4 = scan_src("def f(a):\n    return a * 60\n");
+        let f4 = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_table_carve_out_exempts_data_tables_keeps_operands__04.py"
+        ));
         assert_eq!(f4.iter().filter(|x| x.kind == "magic-number").count(), 1);
         // the message names the data-table exemption so agents know the bar
-        let f5 = scan_src("def f(a):\n    return a * 60\n");
+        let f5 = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_table_carve_out_exempts_data_tables_keeps_operands__05.py"
+        ));
         let m5: Vec<&Finding> = f5.iter().filter(|x| x.kind == "magic-number").collect();
         assert!(m5[0].message.contains("data table"), "{}", m5[0].message);
     }
 
     #[test]
     fn positional_boolean_literals_are_found_keyword_exempt() {
-        let f = scan_src("def f():\n    retry(g(True), h(retry=True), False)\n    return 1\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/positional_boolean_literals_are_found_keyword_exempt__01.py"
+        ));
         let b: Vec<&Finding> = f.iter().filter(|x| x.kind == "boolean-arg").collect();
         assert_eq!(b.len(), 2); // g(True) positional and outer False; retry=True keyword exempt
         assert!(b.iter().all(|x| x.message.contains("name it")));
@@ -2306,7 +2346,9 @@ mod tests {
 
     #[test]
     fn boolean_name_and_keyword_args_pass() {
-        let f = scan_src("def f(flag):\n    run(flag, retry=True, cache=False)\n    return 1\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/boolean_name_and_keyword_args_pass__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "boolean-arg"));
     }
 
@@ -2315,16 +2357,9 @@ mod tests {
         // the boolean is the DEFAULT for a missing key/attribute — the
         // "name it: retry=True" prescription is impossible for these
         // positional-only params, so the finding is unactionable noise
-        let f = scan_src(
-            "import os\n\
-             def f(cfg):\n\
-             \x20   a = cfg.get('retryable', False)\n\
-             \x20   b = getattr(cfg, 'strict', True)\n\
-             \x20   c = os.environ.get('DEBUG', False)\n\
-             \x20   d = cfg.setdefault('cached', False)\n\
-             \x20   e = cfg.pop('stale', True)\n\
-             \x20   return a, b, c, d, e\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/boolean_lookup_defaults_are_exempt_other_calls_stay_flagged__01.py"
+        ));
         assert!(
             !f.iter().any(|x| x.kind == "boolean-arg"),
             "lookup defaults exempt: {:?}",
@@ -2333,28 +2368,40 @@ mod tests {
         // setattr is NOT a lookup-with-default: the trailing boolean is the
         // VALUE being assigned (nameable), so it stays a finding — the
         // exemption is for missing-key/attribute defaults only (review bot)
-        let f3 = scan_src("def f(cfg):\n    setattr(cfg, 'debug', True)\n    return 1\n");
+        let f3 = scan_src(include_str!(
+            "../../tests/fixtures/rust/boolean_lookup_defaults_are_exempt_other_calls_stay_flagged__02.py"
+        ));
         let b3: Vec<&Finding> = f3.iter().filter(|x| x.kind == "boolean-arg").collect();
         assert_eq!(b3.len(), 1, "setattr value must stay flagged: {:?}", f3);
         // a non-default boolean in a lookup call is still a finding
-        let f2 = scan_src("def f(cfg):\n    return cfg.get(False, 'x')\n");
+        let f2 = scan_src(include_str!(
+            "../../tests/fixtures/rust/boolean_lookup_defaults_are_exempt_other_calls_stay_flagged__03.py"
+        ));
         assert!(f2.iter().any(|x| x.kind == "boolean-arg"), "{:?}", f2);
         // a user function literally named `get`/`setdefault`/`pop` is NOT a
         // lookup-with-default — only ATTRIBUTE receivers and the bare
         // getattr builtin are exempt; a bare `get(...)` must stay flagged
         // (review bot)
-        let f4 = scan_src("def get(k):\n    return get('x', False)\n");
+        let f4 = scan_src(include_str!(
+            "../../tests/fixtures/rust/boolean_lookup_defaults_are_exempt_other_calls_stay_flagged__04.py"
+        ));
         assert!(f4.iter().any(|x| x.kind == "boolean-arg"), "{:?}", f4);
-        let f5 = scan_src("def pop(k):\n    return pop('x', True)\n");
+        let f5 = scan_src(include_str!(
+            "../../tests/fixtures/rust/boolean_lookup_defaults_are_exempt_other_calls_stay_flagged__05.py"
+        ));
         assert!(f5.iter().any(|x| x.kind == "boolean-arg"), "{:?}", f5);
         // the bare getattr builtin stays exempt (it IS a lookup)
-        let f6 = scan_src("def f(obj):\n    return getattr(obj, 'k', False)\n");
+        let f6 = scan_src(include_str!(
+            "../../tests/fixtures/rust/boolean_lookup_defaults_are_exempt_other_calls_stay_flagged__06.py"
+        ));
         assert!(!f6.iter().any(|x| x.kind == "boolean-arg"), "{:?}", f6);
     }
 
     #[test]
     fn magic_in_nested_function_attributes_to_innermost() {
-        let f = scan_src("def outer():\n    def inner():\n        return rate * 60\n    return inner()\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_in_nested_function_attributes_to_innermost__01.py"
+        ));
         let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].function, "inner");
@@ -2363,27 +2410,35 @@ mod tests {
     // ------------------------------------------------------------- noop
     #[test]
     fn noop_ternary_is_a_finding() {
-        let f = scan_src("def f(payload, postcode):\n    payload.address if is_outcode(postcode) else postcode\n    return postcode\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/noop_ternary_is_a_finding__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "noop-statement"));
     }
 
     #[test]
     fn noop_calls_and_docstrings_pass() {
-        let f = scan_src("def f():\n    \"\"\"docstring\"\"\"\n    cleanup()\n    (x := 1)\n    return x\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/noop_calls_and_docstrings_pass__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "noop-statement"));
     }
 
     // ------------------------------------------------------------- imports
     #[test]
     fn inline_import_in_function_and_method() {
-        let f = scan_src("def f():\n    import os\n    return os.path\n\nclass C:\n    def m(self):\n        import sys\n        return sys\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/inline_import_in_function_and_method__01.py"
+        ));
         let inline: Vec<&Finding> = f.iter().filter(|x| x.kind == "inline-import").collect();
         assert_eq!(inline.len(), 2);
     }
 
     #[test]
     fn private_import_both_forms_and_future_skip() {
-        let f = scan_src("from __future__ import annotations\nimport pkg._internal\nfrom houses import _secret\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/private_import_both_forms_and_future_skip__01.py"
+        ));
         let priv_imports: Vec<&Finding> = f.iter().filter(|x| x.kind == "private-import").collect();
         assert_eq!(priv_imports.len(), 2); // __future__ skipped
     }
@@ -2391,28 +2446,34 @@ mod tests {
     // ------------------------------------------------------------- unreachable
     #[test]
     fn unreachable_after_return() {
-        let f = scan_src("def f():\n    return 1\n    x = 2\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unreachable_after_return__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "unreachable" && x.line == 3));
     }
 
     #[test]
     fn unreachable_inside_nested_if_not_flagged() {
-        let f = scan_src("def f(a):\n    if a:\n        return 1\n    return 0\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unreachable_inside_nested_if_not_flagged__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "unreachable"));
     }
 
     // ------------------------------------------------------------- suppressions
     #[test]
     fn suppression_with_why_exempts() {
-        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # lucidlint: ignore swallow this is safe, logged\n        log('x')\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/suppression_with_why_exempts__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn suppression_without_why_is_a_finding() {
-        let f = scan_src(
-            "def f():\n    try:\n        g()\n    except ValueError:  # lucidlint: ignore swallow\n        log('x')\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/suppression_without_why_is_a_finding__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "suppression"));
         assert!(f.iter().any(|x| x.kind == "swallow")); // not actually exempted
     }
@@ -2421,13 +2482,15 @@ mod tests {
     fn suppression_on_line_above_exempts() {
         // the comment must sit on the finding's line or line-1 — the except
         // handler is line 5, so line 4 (the try) is the line-1 position
-        let f = scan_src("def f():\n    try:\n        g()\n    # lucidlint: ignore swallow deliberate skip\n    except ValueError:\n        log('x')\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/suppression_on_line_above_exempts__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn ignore_file_exempts() {
-        let src = "# lucidlint: ignore-file class-module helper inside a CLI utility\nclass Helper:\n    def run(self):\n        return 1\n";
+        let src = include_str!("../../tests/fixtures/rust/ignore_file_exempts__01.py");
         let f = scan_src(src);
         assert!(!f.iter().any(|x| x.kind == "class-module"));
     }
@@ -2435,31 +2498,39 @@ mod tests {
     // ------------------------------------------------------------- type-ignore
     #[test]
     fn type_ignore_without_why_is_a_finding() {
-        let f = scan_src("x: int = 1  # type: ignore\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/type_ignore_without_why_is_a_finding__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "type-ignore" && x.line == 1));
     }
 
     #[test]
     fn type_ignore_with_why_passes() {
-        let f = scan_src("x: int = 1  # type: ignore # pyright cannot see the kwarg\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/type_ignore_with_why_passes__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "type-ignore"));
     }
 
     #[test]
     fn noqa_without_why_is_a_finding() {
-        let f = scan_src("x = 1  # noqa\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/noqa_without_why_is_a_finding__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "noqa" && x.line == 1));
     }
 
     #[test]
     fn pragma_no_cover_without_why_is_a_finding() {
-        let f = scan_src("x = 1  # pragma: no cover\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/pragma_no_cover_without_why_is_a_finding__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "noqa"));
     }
 
     #[test]
     fn noqa_with_why_passes() {
-        let f = scan_src("x = 1  # noqa # mypy cannot see the overload\n");
+        let f = scan_src(include_str!("../../tests/fixtures/rust/noqa_with_why_passes__01.py"));
         assert!(!f.iter().any(|x| x.kind == "noqa"));
     }
 
@@ -2469,30 +2540,40 @@ mod tests {
         // one comment with a real reason. The rule's requirement of a SECOND
         // `#` after the marker (`# noqa: X  # reason`) rejects that natural
         // format: a reason is a reason whether or not it follows a `#`.
-        let f = scan_src("try:\n    pass\nexcept Exception:  # noqa: BLE001 — the callback must never 500\n    pass\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/noqa_reason_on_the_same_comment_line_passes__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "noqa"), "{f:?}");
         // and the no-reason form still fails
-        let g = scan_src("x = 1  # noqa: BLE001\n");
+        let g = scan_src(include_str!(
+            "../../tests/fixtures/rust/noqa_reason_on_the_same_comment_line_passes__02.py"
+        ));
         assert!(g.iter().any(|x| x.kind == "noqa"));
     }
 
     // ------------------------------------------------------------- global-state
     #[test]
     fn module_literal_assign_and_annassign_are_findings() {
-        let f = scan_src("state = []\n_oauth_states: dict = {}\ndef f():\n    return 1\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/module_literal_assign_and_annassign_are_findings__01.py"
+        ));
         let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
         assert_eq!(gs.len(), 2);
     }
 
     #[test]
     fn negative_literals_stay_constant_tables() {
-        let f = scan_src("DEFAULT_BBOX = {'lat_min': 50.1, 'lon_min': -4.0}\ndef f():\n    return DEFAULT_BBOX\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/negative_literals_stay_constant_tables__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "global-state"));
     }
 
     #[test]
     fn mutation_of_flagged_literal_not_duplicated() {
-        let f = scan_src("state = []\ndef f():\n    state.append(1)\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/mutation_of_flagged_literal_not_duplicated__01.py"
+        ));
         let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
         assert_eq!(gs.len(), 1); // the literal, not the mutation
     }
@@ -2500,7 +2581,9 @@ mod tests {
     // ------------------------------------------------------------- builtin-shadow
     #[test]
     fn shadow_params_and_locals() {
-        let f = scan_src("def f(list, id):\n    str = 'x'\n    return list\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/shadow_params_and_locals__01.py"
+        ));
         let sh: Vec<&Finding> = f.iter().filter(|x| x.kind == "builtin-shadow").collect();
         assert_eq!(sh.len(), 3);
     }
@@ -2508,7 +2591,9 @@ mod tests {
     // ------------------------------------------------------------- signature hygiene
     #[test]
     fn long_param_list_is_found() {
-        let f = scan_src("def f(a, b, c, d, e, g, h):\n    return a\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/long_param_list_is_found__01.py"
+        ));
         let lp: Vec<&Finding> = f.iter().filter(|x| x.kind == "long-param-list").collect();
         assert_eq!(lp.len(), 1);
         assert!(lp[0].message.contains("7 parameters"));
@@ -2516,7 +2601,9 @@ mod tests {
 
     #[test]
     fn long_param_list_counts_leading_self_out() {
-        let f = scan_src("class C:\n    def m(self, a, b, c, d, e, f):\n        return a\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/long_param_list_counts_leading_self_out__01.py"
+        ));
         let lp: Vec<&Finding> = f.iter().filter(|x| x.kind == "long-param-list").collect();
         assert_eq!(lp.len(), 1);
         assert!(lp[0].message.contains("6 parameters"));
@@ -2524,34 +2611,40 @@ mod tests {
 
     #[test]
     fn short_param_list_and_five_plus_self_pass() {
-        let f = scan_src(
-            "def f(a, b, c, d, e):\n    return a\n\nclass C:\n    def m(self, a, b, c, d, e):\n        return a\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/short_param_list_and_five_plus_self_pass__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "long-param-list"));
     }
 
     // ------------------------------------------------------------- except family
     #[test]
     fn bare_and_log_only_swallows() {
-        let f = scan_src("def f():\n    try:\n        g()\n    except:\n        pass\n    try:\n        h()\n    except ValueError:\n        log('x')\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/bare_and_log_only_swallows__01.py"
+        ));
         assert_eq!(f.iter().filter(|x| x.kind == "swallow").count(), 2);
     }
 
     #[test]
     fn surfaced_return_is_not_a_swallow() {
-        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:\n        return 'failed'\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/surfaced_return_is_not_a_swallow__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn accumulator_surfacing_via_returned_name() {
-        let f = scan_src("def validate(rows):\n    issues = []\n    for s in rows:\n        try:\n            parse(s)\n        except ValueError as e:\n            issues.append(str(e))\n    return issues\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/accumulator_surfacing_via_returned_name__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn sys_exit_surfaces() {
-        let f = scan_src("import sys\ndef f():\n    try:\n        data = parse()\n    except ValueError:\n        sys.stderr.write('bad')\n        sys.exit(2)\n    return data\n");
+        let f = scan_src(include_str!("../../tests/fixtures/rust/sys_exit_surfaces__01.py"));
         assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
@@ -2560,7 +2653,9 @@ mod tests {
         // the message must teach WHY a log-only handler is still a swallow:
         // a caller exists that needs to decide, and the terminal-boundary
         // escape hatch is conditional on no caller existing
-        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:\n        log('x')\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/swallow_message_names_the_antipattern_and_the_bar__01.py"
+        ));
         let s = f.iter().find(|x| x.kind == "swallow").expect("swallow fires");
         assert!(
             s.message.contains("a caller exists that needs to decide"),
@@ -2578,7 +2673,7 @@ mod tests {
     fn real_tfl_build_cost_groups_counts_two() {
         // faithful slice of houses/tfl_client.py:583 — nested def + one
         // keyword-position lambda must count 2 (Python ast.walk parity)
-        let src = "def _build_cost_groups(self, data):\n    journeys = data.get(\"journeys\", [])\n    if not journeys:\n        return []\n    best = min(journeys, key=lambda j: j.get(\"duration\", 9999))\n    mode_single_pence = {}\n    current_legs = []\n\n    def _flush_transit():\n        nonlocal current_legs\n        if not current_legs:\n            return\n        return [g for g in current_legs]\n\n    return best\n";
+        let src = include_str!("../../tests/fixtures/rust/real_tfl_build_cost_groups_counts_two__01.py");
         let parsed = ruff_python_parser::parse_module(src).unwrap();
         let body = parsed.syntax().body.clone();
         let inner = checks::inner_function_count(&body[0]);
@@ -2603,7 +2698,9 @@ mod tests {
 
     #[test]
     fn subscript_store_on_returned_name_surfaces() {
-        let f = scan_src("def to_json_value(self):\n    result = {}\n    try:\n        g()\n    except Exception:\n        logger.exception('x')\n        result['value'] = None\n    return result\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/subscript_store_on_returned_name_surfaces__01.py"
+        ));
         assert!(
             !f.iter().any(|x| x.kind == "swallow"),
             "expected no swallow, got {:?}",
@@ -2613,9 +2710,7 @@ mod tests {
 
     #[test]
     fn broad_except_is_a_warn() {
-        let f = scan_src(
-            "def f():\n    try:\n        g()\n    except Exception as e:\n        log(e)\n        return fallback\n",
-        );
+        let f = scan_src(include_str!("../../tests/fixtures/rust/broad_except_is_a_warn__01.py"));
         let b: Vec<&Finding> = f.iter().filter(|x| x.kind == "broad-except").collect();
         assert_eq!(b.len(), 1);
         assert_eq!(b[0].severity, "warn");
@@ -2643,9 +2738,9 @@ mod tests {
         // the _render shape: two small walkers that both append to the
         // enclosing function's line buffer — shared-state mutation is the
         // class-in-disguise tell even with cc < 15 and span < 60
-        let f = scan_src(
-            "def render(em, vm):\n    L = []\n    def emit_epic(cid, d):\n        L.append(cid)\n        for c in em:\n            emit_epic(c, d + 1)\n    def emit_vs(vid, d=0):\n        L.append(vid)\n        for c in vm:\n            emit_vs(c, d + 1)\n    return L\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/closures_mutating_accumulator_fires_without_cc_or_span__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "closures").collect();
         assert_eq!(r.len(), 1, "{f:?}");
         assert!(r[0].message.contains("accumulator pattern"), "{}", r[0].message);
@@ -2655,16 +2750,18 @@ mod tests {
     fn closures_pure_handler_factory_passes() {
         // a factory of handlers that only READ the captured config — the
         // legit closure idiom, not a class in disguise
-        let f = scan_src(
-            "def make_handlers(config, db):\n    def on_get(request):\n        return db.query(config.filter)\n    def on_post(request):\n        return db.read(request)\n    return on_get, on_post\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/closures_pure_handler_factory_passes__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "closures"), "{f:?}");
     }
 
     #[test]
     fn closures_single_mutating_closure_passes() {
         // one closure over an accumulator is a closure, not a class
-        let f = scan_src("def f():\n    L = []\n    def g(x):\n        L.append(x)\n    return g\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/closures_single_mutating_closure_passes__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "closures"), "{f:?}");
     }
 
@@ -2672,9 +2769,9 @@ mod tests {
     fn closures_attribute_chain_mutation_fires() {
         // the accumulator reached through an attribute of a captured name
         // (writer.lines.append) — the same latent class, a harder receiver
-        let f = scan_src(
-            "def build(writer):\n    def add_header():\n        writer.lines.append(\"h\")\n    def add_footer():\n        writer.lines.append(\"f\")\n    add_header()\n    add_footer()\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/closures_attribute_chain_mutation_fires__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "closures").collect();
         assert_eq!(r.len(), 1, "{f:?}");
     }
@@ -2684,9 +2781,9 @@ mod tests {
     fn misplaced_method_fires_when_class_state_is_passed() {
         // _superseded_lines(em, vm) called from a method holding em/vm as
         // instance state — the function is the class's method in exile
-        let f = scan_src(
-            "def _superseded_lines(em, vm):\n    return len(em) + len(vm)\n\nclass R:\n    def __init__(self, em, vm):\n        self.em = em\n        self.vm = vm\n    def render(self):\n        em, vm = self.em, self.vm\n        return _superseded_lines(em, vm)\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/misplaced_method_fires_when_class_state_is_passed__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "misplaced-method").collect();
         assert_eq!(r.len(), 1, "{f:?}");
         assert!(r[0].message.contains("R.render"), "{}", r[0].message);
@@ -2696,9 +2793,9 @@ mod tests {
     fn misplaced_method_ignores_helper_called_with_plain_locals() {
         // a helper called with locals that are NOT class attributes — no
         // instance state in exile
-        let f = scan_src(
-            "def format_line(text, width):\n    return text[:width]\n\nclass R:\n    def render(self, text):\n        width = 80\n        return format_line(text, width)\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/misplaced_method_ignores_helper_called_with_plain_locals__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "misplaced-method"), "{f:?}");
     }
 
@@ -2706,9 +2803,9 @@ mod tests {
     fn tuple_record_fires_on_positional_reads() {
         // (props, name) tuples built into dicts, read by constant index and
         // destructure — an anonymous record
-        let f = scan_src(
-            "em = {r[\"id\"]: (p, n) for r in []}\ndef f(em):\n    return em[x][1]\ndef g(em):\n    a, b = em[x]\ndef h(em):\n    return em[x][0]\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/tuple_record_fires_on_positional_reads__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "tuple-record").collect();
         assert_eq!(r.len(), 1, "{f:?}");
         assert!(r[0].message.contains("em"), "{}", r[0].message);
@@ -2717,7 +2814,9 @@ mod tests {
     #[test]
     fn tuple_record_ignores_single_read() {
         // a dict of tuples read once is not a record-shaped pattern yet
-        let f = scan_src("em = {r[\"id\"]: (p, n) for r in []}\ndef f(em):\n    return em[x][1]\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/tuple_record_ignores_single_read__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "tuple-record"), "{f:?}");
     }
 
@@ -2725,9 +2824,9 @@ mod tests {
     fn assembly_class_fires_on_threaded_build() {
         // __init__ threading em/vm through functions whose outputs feed each
         // other, storing every result — a class in waiting
-        let f = scan_src(
-            "def _epic_relations(em):\n    return {\"a\": 1}, {\"b\": 2}\ndef _vs_relations(vm, epic_vs, em):\n    return 1, 2, 3\nclass R:\n    def __init__(self, em, vm):\n        self.em = em\n        self.vm = vm\n        epic_vs, kids = _epic_relations(em)\n        vs_parent, vs_kids, vs_epics = _vs_relations(vm, epic_vs, em)\n        self.epic_vs = epic_vs\n        self.kids = kids\n        self.vs_parent = vs_parent\n        self.vs_kids = vs_kids\n        self.vs_epics = vs_epics\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/assembly_class_fires_on_threaded_build__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "assembly-class").collect();
         assert_eq!(r.len(), 1, "{f:?}");
     }
@@ -2736,23 +2835,27 @@ mod tests {
     fn assembly_class_ignores_plain_pipeline() {
         // a linear a = f(x); b = g(a) chain has no shared base — the
         // functional style is not a class in waiting
-        let f = scan_src(
-            "def f(x):\n    return x + 1\ndef g(a):\n    return a * 2\ndef h(b):\n    return b - 1\ndef main(x):\n    a = f(x)\n    b = g(a)\n    c = h(b)\n    return c\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/assembly_class_ignores_plain_pipeline__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "assembly-class"), "{f:?}");
     }
 
     // ------------------------------------------------------------- class-module
     #[test]
     fn class_module_name_mismatch() {
-        let f = scan_src("class Config:\n    pass\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_name_mismatch__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "class-module"));
     }
 
     // ------------------------------------------------------------- strewing
     #[test]
     fn strewing_three_functions_shared_param() {
-        let f = scan_src("class Record:\n    pass\n\ndef a(x: Record):\n    return x\n\ndef b(x: Record):\n    return x\n\ndef c(x: Record):\n    return x\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/strewing_three_functions_shared_param__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "strewing"));
     }
 
@@ -2760,7 +2863,9 @@ mod tests {
     #[test]
     fn duplicate_module_scope_def_is_found() {
         // the review-log guess_pages shadow: two defs, same name, module scope
-        let f = scan_src("def guess_pages():\n    return 1\n\ndef guess_pages(model):\n    return model\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_module_scope_def_is_found__01.py"
+        ));
         let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-def").collect();
         assert_eq!(d.len(), 1, "{f:?}");
         assert_eq!(d[0].line, 4, "the SECOND binding is the finding");
@@ -2770,9 +2875,9 @@ mod tests {
     fn tuple_record_counts_reads_inside_comprehensions() {
         // em[x][0] in a comprehension if, em[k][1] in a dictcomp value, and
         // a lambda sort key all count — the reads hidden inside expressions
-        let f = scan_src(
-            "em = {r[\"id\"]: (p, n) for r in []}\ndef f(em):\n    return [x for x in em if em[x][0]]\ndef g(em):\n    return {k: em[k][1] for k in em}\ndef h(em):\n    return sorted(em, key=lambda k: em[k][1])\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/tuple_record_counts_reads_inside_comprehensions__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "tuple-record").collect();
         assert_eq!(r.len(), 1, "{f:?}");
     }
@@ -2781,7 +2886,9 @@ mod tests {
     fn wide_tuple_fails_on_four_element_annotations() {
         // the smoosh: a long parameter list packed into one anonymous tuple
         // — the positions carry meaning the call site cannot see
-        let f = scan_src("def set_limits(limits: tuple[int, int, str, float]) -> None:\n    return None\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/wide_tuple_fails_on_four_element_annotations__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "wide-tuple").collect();
         assert_eq!(r.len(), 1, "{f:?}");
         assert_eq!(r[0].severity, "fail", "{f:?}");
@@ -2791,7 +2898,9 @@ mod tests {
 
     #[test]
     fn wide_tuple_warns_on_three_elements() {
-        let f = scan_src("def rgb(c: tuple[int, int, int]) -> None:\n    return None\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/wide_tuple_warns_on_three_elements__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "wide-tuple").collect();
         assert_eq!(r.len(), 1, "{f:?}");
         assert_eq!(r[0].severity, "warn", "{f:?}");
@@ -2802,9 +2911,9 @@ mod tests {
         // 2-tuples are idiomatic pairs; tuple[X, ...] is a homogeneous
         // sequence, not a record; a 2-tuple nested in a 4-tuple flags the
         // OUTER arity only
-        let f = scan_src(
-            "def a(p: tuple[int, int]) -> None: ...\ndef b(p: tuple[int, ...]) -> None: ...\ndef c(p: tuple[tuple[int, int], str, bool, float]) -> None: ...\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/wide_tuple_exempts_pairs_variadic_and_nested_inner_tuples__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "wide-tuple").collect();
         assert_eq!(r.len(), 1, "{f:?}");
         assert_eq!(r[0].severity, "fail", "{f:?}");
@@ -2812,9 +2921,9 @@ mod tests {
 
     #[test]
     fn wide_tuple_covers_returns_variables_and_methods() {
-        let f = scan_src(
-            "def stats(v) -> tuple[int, int, str, bool]:\n    return 1, 2, \"x\", True\nrow: tuple[int, str, int, int] = (1, \"a\", 2, 3)\nclass C:\n    def m(self, p: tuple[int, int, int, int]) -> None:\n        return None\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/wide_tuple_covers_returns_variables_and_methods__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "wide-tuple").collect();
         assert_eq!(r.len(), 3, "{f:?}");
     }
@@ -2823,9 +2932,9 @@ mod tests {
     #[test]
     fn data_clump_fires_on_shared_param_pair() {
         // >=3 functions taking the same (em, vm) pair — a data clump
-        let f = scan_src(
-            "def a(em, vm):\n    return em\n\ndef b(em, vm):\n    return vm\n\ndef c(em, vm):\n    return em, vm\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/data_clump_fires_on_shared_param_pair__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "data-clump").collect();
         assert_eq!(r.len(), 1, "{f:?}");
         assert!(r[0].message.contains("em"), "{}", r[0].message);
@@ -2834,7 +2943,9 @@ mod tests {
     #[test]
     fn data_clump_ignores_two_function_pair() {
         // a pair shared by only two functions is not a clump
-        let f = scan_src("def a(em, vm):\n    return em\n\ndef b(em, vm):\n    return vm\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/data_clump_ignores_two_function_pair__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "data-clump"), "{f:?}");
     }
     #[test]
@@ -2842,9 +2953,9 @@ mod tests {
         // Two pairs sharing one anchor = ONE finding naming both: per-pair
         // findings stacked at the same def line could never be per-site
         // suppressed (one marker consumes one finding).
-        let f = scan_src(
-            "def a(em, vm, x):\n    return em, vm, x\n\ndef b(em, vm):\n    return em\n\ndef c(em, vm, x):\n    return vm, x\n\ndef d(x, em):\n    return x, em\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/data_clump_pairs_aggregate_per_anchor__01.py"
+        ));
         let clumps: Vec<&Finding> = f.iter().filter(|x| x.kind == "data-clump").collect();
         assert_eq!(clumps.len(), 1, "{f:?}");
         assert!(clumps[0].message.contains("(em, vm)"), "{}", clumps[0].message);
@@ -2868,7 +2979,7 @@ mod tests {
         // The repo-wide-only families never fire per-file, so their markers
         // cannot bind in a per-buffer scan — flagging them stale there was
         // a false fail artifact (the gate's repo-wide merge evaluates them).
-        let src = "# lucidlint: ignore duplicate cross-file twins are the point\ndef a():\n    return 1\n";
+        let src = include_str!("../../tests/fixtures/rust/per_buffer_scan_does_not_stale_repo_wide_markers__01.py");
         let per_buffer = scan_source_impl(src, "prod_mod.py", false);
         assert!(
             !per_buffer.findings.iter().any(|f| f.kind == "stale-suppression"),
@@ -2887,9 +2998,9 @@ mod tests {
     fn feature_envy_fires_on_collaborator_reads() {
         // the render shape: graph = self.graph, then the method reads the
         // graph's fields more than its own state
-        let f = scan_src(
-            "class R:\n    def render(self):\n        graph = self.graph\n        a = graph.vs_parent\n        b = graph.kids\n        c = graph.epic_vs\n        d = graph.vs_kids\n        e = graph.vs_epics\n        f = graph.epic_vs\n        g = graph.vs_kids\n        x = self.lines\n        y = self.count\n        return a, b, c, d, e, f, g, x, y\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/feature_envy_fires_on_collaborator_reads__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "feature-envy").collect();
         assert_eq!(r.len(), 1, "{f:?}");
     }
@@ -2899,9 +3010,9 @@ mod tests {
         // `em, vm = graph.em, graph.vm` — the tuple's elements are field
         // reads too; a walker that stops at the Tuple would under-count to
         // 2 and the rule would miss the envy
-        let f = scan_src(
-            "class R:\n    def render(self):\n        graph = self.graph\n        em, vm = graph.em, graph.vm\n        roots = [v for v in vm if v not in graph.vs_parent]\n        done = [v for v in vm if v not in graph.kids]\n        return roots, em, done\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/feature_envy_counts_reads_inside_tuple_assignments__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "feature-envy").collect();
         assert_eq!(r.len(), 1, "{f:?}");
         assert!(r[0].message.contains("4 times"), "{}", r[0].message);
@@ -2911,9 +3022,9 @@ mod tests {
     fn feature_envy_ignores_own_inputs_and_values() {
         // a visitor callback consuming its parameter and a computed value
         // (pos = self.get_metadata(...)) are NOT envy
-        let f = scan_src(
-            "class V:\n    def leave_Node(self, original_node, updated_node):\n        pos = self.get_metadata(original_node)\n        if pos.start.line <= updated_node.end.line:\n            return updated_node\n        return updated_node\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/feature_envy_ignores_own_inputs_and_values__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "feature-envy"), "{f:?}");
     }
 
@@ -2921,9 +3032,9 @@ mod tests {
     fn undeclared_attribute_fires_on_quiet_assignment() {
         // self.done = False in a member function without a declaration, and
         // a plain __init__ assignment without a type
-        let f = scan_src(
-            "class C:\n    def __init__(self):\n        self.x = 0\n    def leave(self):\n        self.done = True\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/undeclared_attribute_fires_on_quiet_assignment__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
         assert_eq!(r.len(), 2, "{f:?}");
     }
@@ -2932,7 +3043,9 @@ mod tests {
     fn undeclared_attribute_message_carries_fix_directive() {
         // the finding's message must name the automated fix (the engine's
         // directive parser matches it)
-        let f = scan_src("class C:\n    def __init__(self):\n        self.x = 0\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/undeclared_attribute_message_carries_fix_directive__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
         assert_eq!(r.len(), 1);
         assert!(r[0].message.contains("— fix: undeclared-attribute"), "{}", r[0].message);
@@ -2946,11 +3059,11 @@ mod tests {
         let f = scan_corpus(&[
             (
                 "base.py",
-                "class Node:\n    def __init__(self):\n        self.display_name: str = \"\"\n",
+                include_str!("../../tests/fixtures/rust/undeclared_attribute_resolves_cross_file_base__01.py"),
             ),
             (
                 "sub.py",
-                "from base import Node\n\nclass Doc(Node):\n    def refresh(self):\n        self.display_name = \"x\"\n",
+                include_str!("../../tests/fixtures/rust/undeclared_attribute_resolves_cross_file_base__02.py"),
             ),
         ]);
         assert!(!f.iter().any(|x| x.kind == "undeclared-attribute"), "{f:?}");
@@ -2963,11 +3076,11 @@ mod tests {
         let f = scan_corpus(&[
             (
                 "base.py",
-                "class Node:\n    def __init__(self):\n        self.display_name: str = \"\"\n",
+                include_str!("../../tests/fixtures/rust/undeclared_attribute_resolves_aliased_imported_base__01.py"),
             ),
             (
                 "sub.py",
-                "from base import Node as BaseNode\n\nclass Doc(BaseNode):\n    def refresh(self):\n        self.display_name = \"x\"\n",
+                include_str!("../../tests/fixtures/rust/undeclared_attribute_resolves_aliased_imported_base__02.py"),
             ),
         ]);
         assert!(!f.iter().any(|x| x.kind == "undeclared-attribute"), "{f:?}");
@@ -2975,9 +3088,9 @@ mod tests {
 
     #[test]
     fn undeclared_attribute_resolves_same_file_base() {
-        let f = scan_src(
-            "class Base:\n    def __init__(self):\n        self.kind: str = \"\"\n\nclass Sub(Base):\n    def refresh(self):\n        self.kind = \"x\"\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/undeclared_attribute_resolves_same_file_base__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "undeclared-attribute"), "{f:?}");
     }
 
@@ -2985,7 +3098,9 @@ mod tests {
     fn undeclared_attribute_still_fires_when_no_base_declares() {
         // an undeclared member is still a finding, and a base-class cycle
         // must not hang the ancestor walk
-        let f = scan_src("class A(B):\n    def __init__(self):\n        self.x = 0\n\nclass B(A):\n    pass\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/undeclared_attribute_still_fires_when_no_base_declares__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
         assert_eq!(r.len(), 1, "{f:?}");
     }
@@ -2999,9 +3114,10 @@ mod tests {
         // The real confusion was the KIND TOKEN: the return-type record
         // family is `record-shape`; `tuple-record` is the positional-reads
         // family, and a `tuple-record` marker never matched it.
-        let tuple_body = "def stats(vals) -> tuple[int, int]:\n    lo = min(vals)\n    hi = max(vals)\n    return lo, hi\n\nxs = stats([3, 1, 2])\nprint(xs[0], xs[1])\n";
-        let longparam_body = "def f(a, b, c, d, e, g) -> int:\n    return a\n";
-        let future = "from __future__ import annotations\n\n";
+        let tuple_body = include_str!("../../tests/fixtures/rust/future_import_never_changes_marker_binding__01.py");
+        let longparam_body =
+            include_str!("../../tests/fixtures/rust/future_import_never_changes_marker_binding__02.py");
+        let future = include_str!("../../tests/fixtures/rust/future_import_never_changes_marker_binding__03.py");
         let cases: Vec<(&str, String, bool)> = vec![
             // (label, source, marker must bind)
             (
@@ -3050,9 +3166,9 @@ mod tests {
     #[test]
     fn undeclared_attribute_accepts_declared_members() {
         // annotated in __init__ or the class body -> declared
-        let f = scan_src(
-            "class C:\n    kind: str = \"x\"\n    def __init__(self):\n        self.x: int = 0\n    def leave(self):\n        self.done = True\n        self.kind = \"y\"\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/undeclared_attribute_accepts_declared_members__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "undeclared-attribute").collect();
         assert_eq!(r.len(), 1, "{f:?}"); // only self.done
     }
@@ -3073,7 +3189,9 @@ mod tests {
 
     #[test]
     fn god_class_ignores_small_class() {
-        let f = scan_src("class Small:\n    def a(self):\n        return 1\n    def b(self):\n        return 2\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/god_class_ignores_small_class__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "god-class"), "{f:?}");
     }
 
@@ -3081,9 +3199,9 @@ mod tests {
     fn duplicate_field_fires_across_containment() {
         // the request/options shape: the containing class and its contained
         // class both hold repo+rel — duplicated domain state
-        let f = scan_src(
-            "@dataclass\nclass Inner:\n    repo: object\n    rel: object\n\n@dataclass\nclass Outer:\n    kind: str\n    repo: object\n    rel: object\n    inner: Inner\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_field_fires_across_containment__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-field").collect();
         assert_eq!(r.len(), 1, "{f:?}");
         assert!(r[0].message.contains("repo, rel"), "{}", r[0].message);
@@ -3092,13 +3210,17 @@ mod tests {
     #[test]
     fn duplicate_field_ignores_unrelated_shared_names() {
         // same field name on classes with NO containment edge — coincidence
-        let f = scan_src("class A:\n    name: str\n\nclass B:\n    name: str\n    count: int\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_field_ignores_unrelated_shared_names__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "duplicate-field"), "{f:?}");
     }
     #[test]
     fn duplicate_class_and_function_name_is_found() {
         // def shadowing a class of the same name is the same hazard
-        let f = scan_src("class Record:\n    pass\n\ndef Record():\n    return 1\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_class_and_function_name_is_found__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "duplicate-def"));
     }
 
@@ -3107,24 +3229,26 @@ mod tests {
         // generate_tree.py shape: a script whose single class is a component
         // (module-level helpers + a build() entry) — not "a class file",
         // renaming the file after the class would be wrong
-        let f = scan_src(
-            "def helper():\n    return 1\n\nclass _TreeRenderer:\n    pass\n\ndef build():\n    return _TreeRenderer()\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_ignores_tool_script_with_one_class__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "class-module"), "{f:?}");
     }
     #[test]
     fn duplicate_def_import_shadow_is_found() {
         // a def whose name collides with an import (the def-in-imports edit
         // mistake class)
-        let f = scan_src("from x import helper\n\ndef helper():\n    return 1\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_def_import_shadow_is_found__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "duplicate-def"));
     }
 
     #[test]
     fn duplicate_def_suppressed_with_why() {
-        let f = scan_src(
-            "def a():\n    return 1\n\n# lucidlint: ignore duplicate-def the override is deliberate\n\ndef a(x):\n    return x\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_def_suppressed_with_why__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "duplicate-def"), "{f:?}");
     }
 
@@ -3132,9 +3256,9 @@ mod tests {
     fn duplicate_def_overload_battery_exempt() {
         // the @overload idiom legally binds one name several times — the
         // stubs plus the implementation; "rename one" is unfollowable there
-        let f = scan_src(
-            "from typing import overload\n\n@overload\ndef f(x: int) -> int:\n    ...\n\n@overload\ndef f(x: str) -> str:\n    ...\n\ndef f(x):\n    return x\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_def_overload_battery_exempt__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "duplicate-def"), "{f:?}");
     }
 
@@ -3142,9 +3266,9 @@ mod tests {
     fn duplicate_def_overload_aliased_decorator_exempt() {
         // the exemption resolves the BOUND name: `overload as ov` binds ov,
         // and @ov stubs + impl are the legal idiom (review finding)
-        let f = scan_src(
-            "from typing import overload as ov\n\n@ov\ndef f(x: int) -> int:\n    ...\n\n@ov\ndef f(x: str) -> str:\n    ...\n\ndef f(x):\n    return x\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_def_overload_aliased_decorator_exempt__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "duplicate-def"), "{f:?}");
     }
 
@@ -3156,9 +3280,9 @@ mod tests {
         // duplicate AFTER it is flagged, never the impl itself (the bot's
         // logic-inversion: last-def tracking flagged the impl and exempted
         // the duplicate).
-        let f = scan_src(
-            "from typing import overload\n\n@overload\ndef f(x: int) -> int:\n    ...\n\ndef f(x):\n    return x\n\ndef f(x):\n    return x + 1\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_def_overload_impl_duplicate_still_flagged__01.py"
+        ));
         let dup: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-def").collect();
         assert_eq!(dup.len(), 1, "{f:?}");
         assert_eq!(
@@ -3171,18 +3295,18 @@ mod tests {
         // the log's example: "the line's orientation must be consistent with
         // its box's aspect" beside code that says exactly that — every content
         // word is an identifier already in the body
-        let f = scan_src(
-            "def check(box, line):\n    \"\"\"the line orientation must be consistent with the box aspect\"\"\"\n    orientation = line.orientation\n    consistent = box.aspect\n    return orientation == consistent\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/restating_docstring_is_found__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "restating-docstring"), "{f:?}");
     }
 
     #[test]
     fn meaningful_docstring_passes() {
         // the docstring names what the body does not: the CONCEPT
-        let f = scan_src(
-            "def check(box, line):\n    \"\"\"admission gate: the reading order must stay on the ink axis\"\"\"\n    orient = line.orientation\n    aspect = box.aspect\n    return orient == aspect\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/meaningful_docstring_passes__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "restating-docstring"), "{f:?}");
     }
 
@@ -3193,15 +3317,15 @@ mod tests {
         // but the fix requires libcst deep_equals — the directive must
         // attach only when the two blocks are token-identical, or agents
         // chase a fix that refuses to apply (review bot)
-        let exact = scan_src(
-            "def f():\n    t = transcribe(p)\n    write(t)\n    mark(p)\n    t = transcribe(p)\n    write(t)\n    mark(p)\n",
-        );
+        let exact = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_block_directive_only_for_exact_duplicates__01.py"
+        ));
         let e: Vec<&Finding> = exact.iter().filter(|x| x.kind == "duplicate-block").collect();
         assert_eq!(e.len(), 1, "{exact:?}");
         assert!(e[0].message.contains("fix: duplicate-block"), "{}", e[0].message);
-        let renamed = scan_src(
-            "def f():\n    a = transcribe(p)\n    write(a)\n    mark(p)\n    b = transcribe(p)\n    write(b)\n    mark(p)\n",
-        );
+        let renamed = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_block_directive_only_for_exact_duplicates__02.py"
+        ));
         let r: Vec<&Finding> = renamed.iter().filter(|x| x.kind == "duplicate-block").collect();
         assert_eq!(r.len(), 1, "{renamed:?}");
         assert!(
@@ -3215,9 +3339,9 @@ mod tests {
     fn adjacent_duplicate_block_is_found() {
         // the transcribe-twice class: a replaced loop header leaves the old
         // body in place — two identical transcribe->write->mark sequences
-        let f = scan_src(
-            "def run(pages):\n    for p in pages:\n        t = transcribe(p)\n        write(t)\n        mark(p)\n    t = transcribe(p)\n    write(t)\n    mark(p)\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/adjacent_duplicate_block_is_found__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "duplicate-block"), "{f:?}");
     }
 
@@ -3225,7 +3349,9 @@ mod tests {
     fn short_duplicate_pair_passes() {
         // two identical statements are common and often fine — 3+ is the
         // edit-mistake signature
-        let f = scan_src("def f(a):\n    a = a + 1\n    a = a + 1\n    return a\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/short_duplicate_pair_passes__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "duplicate-block"), "{f:?}");
     }
 
@@ -3233,7 +3359,9 @@ mod tests {
     #[test]
     fn suppression_scoped_to_its_line() {
         // an explained ignore on one except does not exempt a second except
-        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # lucidlint: ignore swallow this one is safe, logged\n        log('a')\n    try:\n        h()\n    except ValueError:\n        log('b')\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/suppression_scoped_to_its_line__01.py"
+        ));
         let exc: Vec<&Finding> = f.iter().filter(|x| x.kind == "swallow").collect();
         assert_eq!(exc.len(), 1);
         assert_eq!(exc[0].line, 8); // the second handler (line 8) is not exempted
@@ -3241,13 +3369,15 @@ mod tests {
 
     #[test]
     fn suppression_wrong_signal_does_not_exempt() {
-        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:  # lucidlint: ignore inline-import not the right signal\n        log('skipping')\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/suppression_wrong_signal_does_not_exempt__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "swallow")); // still a swallow; an explained mis-scoped ignore emits no suppression finding
     }
 
     #[test]
     fn ignore_file_without_why_is_a_finding() {
-        let src = "# lucidlint: ignore-file except\ndef f():\n    try:\n        g()\n    except ValueError:\n        log('x')\n";
+        let src = include_str!("../../tests/fixtures/rust/ignore_file_without_why_is_a_finding__01.py");
         let f = scan_src(src);
         assert!(f.iter().any(|x| x.kind == "swallow")); // not exempted
         assert!(f.iter().any(|x| x.kind == "suppression"));
@@ -3255,46 +3385,58 @@ mod tests {
 
     #[test]
     fn type_ignore_in_docstring_is_not_a_finding() {
-        let f =
-            scan_src("def f():\n    \"\"\"Never silence: type: ignore lives in real comments.\"\"\"\n    return 1\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/type_ignore_in_docstring_is_not_a_finding__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "type-ignore"));
     }
 
     // ------------------------------------------------- except edges
     #[test]
     fn except_with_raise_is_not_a_swallow() {
-        let f =
-            scan_src("def f():\n    try:\n        g()\n    except ValueError:\n        log('bad')\n        raise\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/except_with_raise_is_not_a_swallow__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn except_returning_empty_dict_is_not_a_swallow() {
-        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:\n        return {}\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/except_returning_empty_dict_is_not_a_swallow__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn except_return_none_is_not_a_swallow() {
-        let f = scan_src("def f():\n    try:\n        g()\n    except ValueError:\n        return None\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/except_return_none_is_not_a_swallow__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn except_continue_is_not_a_swallow() {
-        let f = scan_src("def f(rows):\n    for r in rows:\n        try:\n            parse(r)\n        except ValueError:\n            continue\n    return 1\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/except_continue_is_not_a_swallow__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn empty_exception_catch_still_fails() {
-        let f = scan_src("def f():\n    try:\n        g()\n    except Exception:\n        pass\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/empty_exception_catch_still_fails__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "swallow"));
     }
 
     #[test]
     fn accumulator_not_returned_still_swallows() {
-        let f = scan_src("def f(rows):\n    issues = []\n    try:\n        parse(rows)\n    except ValueError as e:\n        issues.append(str(e))\n    return 'done'\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/accumulator_not_returned_still_swallows__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "swallow")); // issues not returned → swallow
     }
 
@@ -3303,7 +3445,9 @@ mod tests {
     fn constant_table_mutated_in_function_is_still_state() {
         // the all-constant literal passes at module level (carve-out), but a
         // function mutation of the container is still module state
-        let f = scan_src("LOOKUP = {'a': 1}\ndef f(k):\n    LOOKUP[k] = 2\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/constant_table_mutated_in_function_is_still_state__01.py"
+        ));
         let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
         assert_eq!(gs.len(), 1);
         assert_eq!(gs[0].line, 3);
@@ -3312,21 +3456,27 @@ mod tests {
     // ------------------------------------------------- class-module pass
     #[test]
     fn class_module_matching_name_and_multi_class_pass() {
-        let f = scan_src("class User:\n    def name(self):\n        return 'u'\n\nclass Team:\n    def name(self):\n        return 't'\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_matching_name_and_multi_class_pass__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "class-module"));
     }
 
     // ------------------------------------------------- shadow pass
     #[test]
     fn no_builtin_shadow_in_clean_fn() {
-        let f = scan_src("def f(a, b):\n    return a + b\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/no_builtin_shadow_in_clean_fn__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "shadow"));
     }
 
     // ------------------------------------------------- vague-name
     #[test]
     fn vague_name_thin_role_class_passes() {
-        let f = scan_src("class PaymentsHandler:\n    def __init__(self, svc):\n        self.svc = svc\n    def handle(self, evt):\n        return self.svc.process(evt)\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/vague_name_thin_role_class_passes__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "vague-name"));
     }
 
@@ -3360,8 +3510,8 @@ mod tests {
 
     #[test]
     fn abstraction_single_concrete_is_found() {
-        let src_a = "from abc import ABC, abstractmethod\n\nclass Base(ABC):\n    @abstractmethod\n    def run(self):\n        pass\n";
-        let src_b = "from a import Base\n\nclass Concrete(Base):\n    def run(self):\n        return 1\n";
+        let src_a = include_str!("../../tests/fixtures/rust/abstraction_single_concrete_is_found__01.py");
+        let src_b = include_str!("../../tests/fixtures/rust/abstraction_single_concrete_is_found__02.py");
         let scan_a = scan_source(src_a, "a.py");
         let scan_b = scan_source(src_b, "b.py");
         let scans = vec![
@@ -3375,8 +3525,8 @@ mod tests {
 
     #[test]
     fn abstraction_two_subclasses_passes() {
-        let src_a = "from abc import ABC, abstractmethod\n\nclass Base(ABC):\n    @abstractmethod\n    def run(self):\n        pass\n";
-        let src_b = "from a import Base\n\nclass One(Base):\n    def run(self):\n        return 1\n\nclass Two(Base):\n    def run(self):\n        return 2\n";
+        let src_a = include_str!("../../tests/fixtures/rust/abstraction_two_subclasses_passes__01.py");
+        let src_b = include_str!("../../tests/fixtures/rust/abstraction_two_subclasses_passes__02.py");
         let scan_a = scan_source(src_a, "a.py");
         let scan_b = scan_source(src_b, "b.py");
         let scans = vec![
@@ -3390,22 +3540,26 @@ mod tests {
     // ------------------------------------------------- record-shape
     #[test]
     fn record_grab_bag_and_collection_params_fail() {
-        let f = scan_src(
-            "def f(m: dict[str, Any]):\n    return m\n\ndef g(rows: list[dict[str, str]]):\n    return rows\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_grab_bag_and_collection_params_fail__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 2);
     }
 
     #[test]
     fn record_map_and_domain_params_pass() {
-        let f = scan_src("def f(counts: dict[str, int], items: list[Item]):\n    return counts, items\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_map_and_domain_params_pass__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "record-shape"));
     }
 
     #[test]
     fn record_return_collection_of_dicts_fails() {
-        let f = scan_src("def f() -> dict[str, dict[str, int]]:\n    return {}\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_return_collection_of_dicts_fails__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1);
         assert!(r[0].message.contains("as return type"));
@@ -3414,9 +3568,9 @@ mod tests {
     #[test]
     fn record_variadic_tuple_and_fixed_tuple() {
         // tuple[str, ...] is a sequence; tuple[str, int] is a record pair
-        let f = scan_src(
-            "def a(x: tuple[str, ...]) -> None:\n    pass\n\ndef b(pair: tuple[str, int]) -> None:\n    pass\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_variadic_tuple_and_fixed_tuple__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1);
         assert!(r[0].message.contains("pair"));
@@ -3425,17 +3579,22 @@ mod tests {
     #[test]
     fn record_deserializer_boundary_is_still_a_finding() {
         // the boundary doctrine (user ruling): a wire payload is NOT exempt —
-        // raw JSON in gets a class with named fields and a to_dict() at the
-        // serialization edge
-        let f = scan_src("def parse(raw: dict[str, Any]) -> Label:\n    return Label(raw)\n");
+        // raw JSON in gets a class with named fields and a serialisation
+        // method at the edge
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_deserializer_boundary_is_still_a_finding__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1, "{f:?}");
-        assert!(r[0].message.contains("to_dict"), "{}", r[0].message);
+        assert!(r[0].message.contains("serialisation is no excuse"), "{}", r[0].message);
+        assert!(!r[0].message.contains("to_dict"), "{}", r[0].message);
     }
 
     #[test]
     fn record_dict_literal_in_return_is_found() {
-        let f = scan_src("def f(x):\n    return {\"kind\": \"tool_call\", \"value\": x}\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_dict_literal_in_return_is_found__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1);
         assert!(r[0].message.contains("dict with constant keys"));
@@ -3446,7 +3605,9 @@ mod tests {
     fn record_inline_call_args_flagged_lookup_tables_pass() {
         // uniform descent: a wire-format dict built at a call site IS a
         // record; an all-constant lookup table still passes
-        let f = scan_src("def f(x):\n    client.post(url, headers={\"Content-Type\": \"json\", \"X\": x})\n    table = {\"a\": 1, \"b\": 2}\n    return table\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_inline_call_args_flagged_lookup_tables_pass__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1, "{f:?}");
         assert!(r[0].message.contains("{Content-Type, X}"), "{f:?}");
@@ -3454,7 +3615,9 @@ mod tests {
 
     #[test]
     fn record_spread_merge_is_not_a_record() {
-        let f = scan_src("def f(session, x):\n    return {**session, \"x\": x}\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_spread_merge_is_not_a_record__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "record-shape"));
     }
 
@@ -3462,7 +3625,9 @@ mod tests {
     fn record_dict_call_in_return_is_found() {
         // dict(a=1, b=x) is the literal's call-form twin — the bypass a
         // literal-only scan left open
-        let f = scan_src("def f(x):\n    return dict(kind=\"tool_call\", value=x)\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_dict_call_in_return_is_found__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1, "{f:?}");
         assert_eq!(r[0].line, 2);
@@ -3471,21 +3636,27 @@ mod tests {
     #[test]
     fn record_dict_call_all_constant_passes() {
         // a lookup, not a record — same exemption as the literal form
-        let f = scan_src("def f():\n    return dict(a=1, b=2)\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_dict_call_all_constant_passes__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
     }
 
     #[test]
     fn record_dict_call_as_inline_argument_is_found() {
         // uniform descent: dict(...) built as a call argument is a record
-        let f = scan_src("def f(x):\n    client.post(dict(a=1, b=x))\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_dict_call_as_inline_argument_is_found__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
     }
 
     #[test]
     fn record_dict_call_wrapping_literal_is_found() {
         // dict({"a": 1, "b": x}) — the inner literal is the record
-        let f = scan_src("def f(x):\n    return dict({\"a\": 1, \"b\": x})\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_dict_call_wrapping_literal_is_found__01.py"
+        ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1, "{f:?}");
     }
@@ -3518,82 +3689,108 @@ mod tests {
 
     #[test]
     fn partition_small_class_passes() {
-        let f = scan_src("class Small:\n    def a(self):\n        return 1\n    def b(self):\n        return 2\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/partition_small_class_passes__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "partition"));
     }
 
     #[test]
     fn monkeypatch_setattr_and_patch_decorator_found() {
-        let f = scan_src_test("from unittest import mock\n\ndef test_x(monkeypatch):\n    monkeypatch.setattr(Obj, 'x', 1)\n\n@mock.patch('y')\ndef test_y():\n    pass\n");
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/monkeypatch_setattr_and_patch_decorator_found__01.py"
+        ));
         let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "monkeypatch").collect();
         assert_eq!(m.len(), 2);
     }
 
     #[test]
     fn skipif_on_environment_is_found() {
-        let f = scan_src_test("import pytest\nimport os\n\n@pytest.mark.skipif('os.environ' in os.environ, reason='env')\ndef test_x():\n    pass\n");
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/skipif_on_environment_is_found__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "skipif"));
     }
 
     #[test]
     fn bare_pytest_mark_skip_is_found() {
-        let f = scan_src_test("import pytest\n\n@pytest.mark.skip\ndef test_x():\n    pass\n");
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/bare_pytest_mark_skip_is_found__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "skipif"));
     }
 
     #[test]
     fn pytest_mark_skip_with_parens_is_found_once() {
-        let f = scan_src_test("import pytest\n\n@pytest.mark.skip()\ndef test_x():\n    pass\n");
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/pytest_mark_skip_with_parens_is_found_once__01.py"
+        ));
         let s: Vec<&Finding> = f.iter().filter(|x| x.kind == "skipif").collect();
         assert_eq!(s.len(), 1); // the Call node and its func Attribute node dedupe
     }
 
     #[test]
     fn other_markers_and_env_free_skipif_pass() {
-        let f = scan_src_test("import pytest\n\n@pytest.mark.parametrize('x', [1, 2])\ndef test_x(x):\n    assert x\n\n@pytest.mark.skipif(True, reason='tmp')\ndef test_y():\n    pass\n");
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/other_markers_and_env_free_skipif_pass__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "skipif"));
     }
 
     #[test]
     fn fakefs_real_fs_without_pyfakefs_is_found() {
-        let f = scan_src_test("def test_x(tmp_path):\n    p = tmp_path / 'a'\n    p.write_text('hi')\n");
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/fakefs_real_fs_without_pyfakefs_is_found__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "fakefs"));
     }
 
     #[test]
     fn fakefs_sanctioned_subprocess_need_passes() {
-        let f = scan_src_test("import subprocess\n\ndef test_x(tmp_path):\n    subprocess.run(['ls'])\n");
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/fakefs_sanctioned_subprocess_need_passes__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "fakefs"));
     }
 
     // ------------------------------------------------------------- no-assert-test
     #[test]
     fn test_with_assertion_passes() {
-        let f = scan_src_test("def test_x():\n    assert 1 == 1\n");
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/test_with_assertion_passes__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "no-assert-test"));
     }
 
     #[test]
     fn test_with_pytest_raises_passes() {
-        let f = scan_src_test("import pytest\n\ndef test_x():\n    with pytest.raises(ValueError):\n        g()\n");
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/test_with_pytest_raises_passes__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "no-assert-test"));
     }
 
     #[test]
     fn test_with_fail_call_passes() {
-        let f = scan_src_test("import pytest\n\ndef test_x():\n    pytest.fail('nope')\n");
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/test_with_fail_call_passes__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "no-assert-test"));
     }
 
     #[test]
     fn test_with_assert_in_nested_function_passes() {
-        let f = scan_src_test("def test_x():\n    def check():\n        assert 1 == 1\n    check()\n");
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/test_with_assert_in_nested_function_passes__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "no-assert-test"));
     }
 
     #[test]
     fn test_without_assertion_is_found() {
-        let f = scan_src_test("def test_x():\n    setup()\n    teardown()\n");
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/test_without_assertion_is_found__01.py"
+        ));
         let na: Vec<&Finding> = f.iter().filter(|x| x.kind == "no-assert-test").collect();
         assert_eq!(na.len(), 1);
         assert_eq!(na[0].function, "test_x");
@@ -3602,13 +3799,17 @@ mod tests {
 
     #[test]
     fn record_suppression_with_why_exempts() {
-        let f = scan_src("def f(x):\n    return {\"a\": 1, \"b\": x}  # lucidlint: ignore record-shape genuine map\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_suppression_with_why_exempts__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "record-shape"));
     }
 
     #[test]
     fn magic_number_is_a_warn_never_fail() {
-        let f = scan_src("def alpha(a):\n    return a * 3\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_number_is_a_warn_never_fail__01.py"
+        ));
         let magic: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
         assert_eq!(magic.len(), 1);
         assert_eq!(magic[0].severity, "warn");
@@ -3715,27 +3916,31 @@ mod tests {
     #[test]
     fn duplicate_near_identical_functions_are_found() {
         // same shape with renamed identifiers — Dice >= 0.9
-        let f = scan_src(
-            "def price_a(items):\n    total = 0\n    for it in items:\n        total += it.cost\n    return total\n\ndef price_b(parts):\n    total = 0\n    for p in parts:\n        total += p.cost\n    return total\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_near_identical_functions_are_found__01.py"
+        ));
         let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate").collect();
         assert_eq!(d.len(), 1);
     }
 
     #[test]
     fn duplicate_different_shapes_are_not_found() {
-        let f = scan_src(
-            "def alpha(a):\n    return a * 3\n\ndef beta(b):\n    if b:\n        return [x for x in b if x]\n    return []\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_different_shapes_are_not_found__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "duplicate"));
     }
 
     #[test]
     fn test_with_unittest_assert_passes() {
         // unittest-style assertions count: self.assertEqual/assertTrue/...
-        let ok = scan_src_test("def test_x(self):\n    self.assertEqual(1, 1)\n    self.assertTrue(True)\n");
+        let ok = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/test_with_unittest_assert_passes__01.py"
+        ));
         assert!(!ok.iter().any(|x| x.kind == "no-assert-test"));
-        let ok2 = scan_src_test("def test_x(self):\n    with self.assertRaises(ValueError):\n        int('x')\n");
+        let ok2 = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/test_with_unittest_assert_passes__02.py"
+        ));
         assert!(!ok2.iter().any(|x| x.kind == "no-assert-test"));
     }
 
@@ -3743,7 +3948,9 @@ mod tests {
     fn async_def_record_shape_is_found() {
         // async def parses as FunctionDef with is_async at the ruff pin —
         // the signature pass must still see it (review: async gap)
-        let f = scan_src("from typing import Any\nasync def fetch(url: str) -> dict[str, Any]:\n    return {}\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/async_def_record_shape_is_found__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "record-shape"));
     }
 
@@ -3752,8 +3959,14 @@ mod tests {
         // a why'd `ignore duplicate` on the finding's line suppresses the
         // repo-wide duplicate AND is not itself reported stale
         let f = scan_corpus(&[
-            ("one.py", "def alpha(a, b):\n    x = a + b\n    if x > 10:\n        return x * 2\n    return x\n"),
-            ("two.py", "def alpha(a, b):  # lucidlint: ignore duplicate known pair — intentional scaffold\n    x = a + b\n    if x > 10:\n        return x * 2\n    return x\n"),
+            (
+                "one.py",
+                include_str!("../../tests/fixtures/rust/repo_wide_duplicate_suppressed_by_comment__01.py"),
+            ),
+            (
+                "two.py",
+                include_str!("../../tests/fixtures/rust/repo_wide_duplicate_suppressed_by_comment__02.py"),
+            ),
         ]);
         assert!(!f.iter().any(|x| x.kind == "duplicate"), "duplicate not suppressed");
         assert!(
@@ -3767,7 +3980,8 @@ mod tests {
         // two functions both dispatch a variable named x but over different
         // types — distinct element families, so no latent-visitor (the old
         // value-name key merged them into one family)
-        let src = "class A:\n    pass\n\nclass B:\n    pass\n\nclass C:\n    pass\n\nclass D:\n    pass\n\ndef op1(x):\n    if isinstance(x, A):\n        return 1\n    elif isinstance(x, B):\n        return 2\n    return 0\n\ndef op2(x):\n    if isinstance(x, C):\n        return 3\n    elif isinstance(x, D):\n        return 4\n    return 0\n";
+        let src =
+            include_str!("../../tests/fixtures/rust/same_variable_name_different_types_are_distinct_families__01.py");
         let f = scan_src(src);
         assert!(!f.iter().any(|x| x.kind == "latent-visitor"));
     }
@@ -3775,7 +3989,9 @@ mod tests {
     #[test]
     fn why_less_comma_suppression_reports_each_signal() {
         // `ignore sig1,sig2` without a why: BOTH signals need a reason
-        let f = scan_src("def f():\n    return 1  # lucidlint: ignore magic-number,noop-statement\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/why_less_comma_suppression_reports_each_signal__01.py"
+        ));
         let s: Vec<&Finding> = f.iter().filter(|x| x.kind == "suppression").collect();
         assert_eq!(s.len(), 2, "each signal's missing why must be reported");
     }
@@ -3802,9 +4018,9 @@ mod tests {
 
     #[test]
     fn duplicate_skips_init_and_accessors() {
-        let f = scan_src(
-            "class Box:\n    def __init__(self, x):\n        self.x = x\n\n    def get(self):\n        return self.x\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_skips_init_and_accessors__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "duplicate"));
     }
 
@@ -3812,9 +4028,9 @@ mod tests {
     fn duplicate_bfs_order_flags_the_later_class_method() {
         // module-level fn comes BEFORE class methods in ast.walk BFS — the
         // finding lands on the class method even though it has the lower line
-        let f = scan_src(
-            "def span(grid, row, c0, c1):\n    lat_min = max(grid.a, grid.a + row * grid.d)\n    lat_max = min(grid.b, grid.a + (row + 1) * grid.d)\n    lon_min = max(grid.c, grid.c + c0 * grid.e)\n    lon_max = min(grid.d, grid.c + (c1 + 1) * grid.e)\n    return Rect(lat_min, lat_max, lon_min, lon_max)\n\nclass Grid:\n    def cell_rect(self, r, c):\n        lat_min = max(self.bbox.a, self.bbox.a + r * self.lat_deg)\n        lat_max = min(self.bbox.b, self.bbox.a + (r + 1) * self.lat_deg)\n        lon_min = max(self.bbox.c, self.bbox.c + c * self.lon_deg)\n        lon_max = min(self.bbox.d, self.bbox.c + (c + 1) * self.lon_deg)\n        return Rect(lat_min, lat_max, lon_min, lon_max)\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_bfs_order_flags_the_later_class_method__01.py"
+        ));
         let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate").collect();
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].function, "cell_rect");
@@ -3836,22 +4052,31 @@ mod tests {
         // the wording must steer agents away from non-fixes (value-shaped
         // names) and bulk suppression: each message names what a real fix
         // is AND the only legitimate suppression
-        let m = scan_src("def f(a):\n    return a * 60\n");
+        let m = scan_src(include_str!(
+            "../../tests/fixtures/rust/message_wording_states_the_real_fix_and_the_exemption__01.py"
+        ));
         let mn = m.iter().find(|x| x.kind == "magic-number").expect("magic-number fires");
         assert!(mn.message.contains("domain noun"), "{}", mn.message);
 
-        let r = scan_src("def g() -> dict[str, dict[str, int]]:\n    return {}\n");
+        let r = scan_src(include_str!(
+            "../../tests/fixtures/rust/message_wording_states_the_real_fix_and_the_exemption__02.py"
+        ));
         let rs = r.iter().find(|x| x.kind == "record-shape").expect("record-shape fires");
         assert!(rs.message.contains("class named with a domain noun"), "{}", rs.message);
-        assert!(rs.message.contains("to_dict()"), "{}", rs.message);
+        assert!(rs.message.contains("serialisation is no excuse"), "{}", rs.message);
+        assert!(!rs.message.contains("to_dict()"), "{}", rs.message);
         assert!(rs.message.contains("wire payload is still a record"), "{}", rs.message);
 
-        let b = scan_src("def f():\n    try:\n        step()\n    except Exception:\n        return None\n");
+        let b = scan_src(include_str!(
+            "../../tests/fixtures/rust/message_wording_states_the_real_fix_and_the_exemption__03.py"
+        ));
         let be = b.iter().find(|x| x.kind == "broad-except").expect("broad-except fires");
         assert!(be.message.contains("blast radius"), "{}", be.message);
         assert!(be.message.contains("catch what you actually handle"), "{}", be.message);
 
-        let t = scan_src_test("def test_x(tmp_path):\n    p = tmp_path / 'a'\n    p.write_text('hi')\n");
+        let t = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/message_wording_states_the_real_fix_and_the_exemption__04.py"
+        ));
         let ff = t.iter().find(|x| x.kind == "fakefs").expect("fakefs fires");
         assert!(
             ff.message.contains("citing the standard that permits real FS here"),
@@ -3865,11 +4090,11 @@ mod tests {
         let mut files: Vec<(&str, &str)> = Vec::new();
         for i in 0..11 {
             files.push((
-                Box::leak(format!("m{i:02}.py").into_boxed_str()),
-                "x = 1  # lucidlint: ignore record-shape data table row\n",
+                Box::leak(format!("x{i}.py").into_boxed_str()),
+                include_str!("../../tests/fixtures/rust/abstraction_single_concrete_is_found__04.py"),
             ));
         }
-        let heavy = "a = 1  # lucidlint: ignore record-shape data table row\nb = 2  # lucidlint: ignore record-shape data table row\n";
+        let heavy = include_str!("../../tests/fixtures/rust/abstraction_single_concrete_is_found__03.py");
         files.push(("heavy.py", Box::leak(heavy.to_string().into_boxed_str())));
         let f = scan_corpus(&files);
         let bulk: Vec<&Finding> = f.iter().filter(|x| x.kind == "bulk-suppression").collect();
@@ -3887,7 +4112,9 @@ mod tests {
 
     #[test]
     fn unused_never_referenced_is_found() {
-        let f = scan_src("def helper():\n    return 1\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unused_never_referenced_is_found__01.py"
+        ));
         let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "unused").collect();
         assert_eq!(u.len(), 1);
         assert!(u[0].message.contains("never referenced"));
@@ -3895,19 +4122,25 @@ mod tests {
 
     #[test]
     fn unused_referenced_and_main_skip() {
-        let f = scan_src("def main():\n    return helper()\n\ndef helper():\n    return 1\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unused_referenced_and_main_skip__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "unused"));
     }
 
     #[test]
     fn unused_string_dispatch_mention_skips() {
-        let f = scan_src("COMMANDS = [\"import_places\"]\n\ndef import_places():\n    return 1\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unused_string_dispatch_mention_skips__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "unused"));
     }
 
     #[test]
     fn unused_decorated_is_referenced() {
-        let f = scan_src("@app.route(\"/x\")\ndef import_places():\n    return 1\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unused_decorated_is_referenced__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "unused"));
     }
 
@@ -3917,9 +4150,9 @@ mod tests {
         // method is a reference — the old in-class early return (a magic-number
         // suppression that swallowed the whole walk) reported helper as unused,
         // telling the agent to delete live code
-        let f = scan_src(
-            "def helper(x):\n    return x + 1\n\nclass C:\n    def m(self, xs):\n        return max(xs, key=lambda v: helper(v))\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unused_sees_calls_inside_class_method_lambdas__01.py"
+        ));
         let u: Vec<&Finding> = f
             .iter()
             .filter(|x| x.kind == "unused" && x.message.contains("'helper'"))
@@ -3930,8 +4163,14 @@ mod tests {
     #[test]
     fn unused_test_only_is_conditional() {
         let f = scan_corpus(&[
-            ("prod.py", "def seam():\n    return 1\n"),
-            ("tests/test_prod.py", "def test_seam():\n    assert seam()\n"),
+            (
+                "prod.py",
+                include_str!("../../tests/fixtures/rust/unused_test_only_is_conditional__01.py"),
+            ),
+            (
+                "tests/test_prod.py",
+                include_str!("../../tests/fixtures/rust/unused_test_only_is_conditional__02.py"),
+            ),
         ]);
         let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "unused").collect();
         assert_eq!(u.len(), 1);
@@ -3945,7 +4184,7 @@ mod tests {
         // counted only cross-file refs and flagged in-module helpers.)
         let f = scan_corpus(&[(
             "m.py",
-            "def main():\n    return f()\n\ndef _slug(s):\n    return s\n\ndef f():\n    return _slug('x')\n",
+            include_str!("../../tests/fixtures/rust/unused_in_module_helper_used_later_is_not_flagged__01.py"),
         )]);
         assert!(!f.iter().any(|x| x.kind == "unused"), "{:?}", f);
     }
@@ -3957,7 +4196,7 @@ mod tests {
         // suppression that names a real finding is used, never dead weight.
         let f = scan_corpus(&[(
             "m.py",
-            "# lucidlint: ignore unused deliberate helper\n\ndef _helper():\n    return 1\n",
+            include_str!("../../tests/fixtures/rust/unused_ignore_comment_is_not_self_defeating__01.py"),
         )]);
         assert!(!f.iter().any(|x| x.kind == "unused"), "{:?}", f);
         assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{:?}", f);
@@ -3965,13 +4204,19 @@ mod tests {
 
     #[test]
     fn positional_literals_flagged() {
-        let f = scan_src("def f():\n    pass\ndef g():\n    set_limits(10, 20)\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/positional_literals_flagged__01.py"
+        ));
         assert!(f
             .iter()
             .any(|x| x.kind == "positional-literals" && x.severity == "warn"));
-        let ok = scan_src("def f():\n    pass\ndef g():\n    set_limits(max=10, min=20)\n");
+        let ok = scan_src(include_str!(
+            "../../tests/fixtures/rust/positional_literals_flagged__02.py"
+        ));
         assert!(!ok.iter().any(|x| x.kind == "positional-literals"));
-        let ok2 = scan_src("def g():\n    range(1, 10)\n");
+        let ok2 = scan_src(include_str!(
+            "../../tests/fixtures/rust/positional_literals_flagged__03.py"
+        ));
         assert!(!ok2.iter().any(|x| x.kind == "positional-literals")); // builtin exempt
     }
     #[test]
@@ -3980,11 +4225,15 @@ mod tests {
         // command fixes (the engine resolves the signature from the call's
         // file); anything else carries its --params slot up front — the
         // magic-number --name contract. No conditional for the reader.
-        let local = scan_src("def set_limits(a, b):\n    pass\n\ndef g():\n    set_limits(10, 20)\n");
+        let local = scan_src(include_str!(
+            "../../tests/fixtures/rust/positional_directive_states_the_callee_case__01.py"
+        ));
         let m = local.iter().find(|x| x.kind == "positional-literals").unwrap();
         assert!(!m.message.contains("--params"), "{m:?}");
         assert!(m.message.ends_with("— fix: positional-literals"), "{m:?}");
-        let ext = scan_src("def g():\n    set_limits(10, 20)\n");
+        let ext = scan_src(include_str!(
+            "../../tests/fixtures/rust/positional_directive_states_the_callee_case__02.py"
+        ));
         let m = ext.iter().find(|x| x.kind == "positional-literals").unwrap();
         assert!(
             m.message.ends_with("— fix: positional-literals --params <names>"),
@@ -3998,11 +4247,17 @@ mod tests {
         // the body never names self (super().__init__(v) carries no literal
         // self); an @override's binding is the BASE class's contract, not a
         // local judgment call
-        let init = scan_src("class C(Base):\n    def __init__(self, v):\n        super().__init__(v)\n");
+        let init = scan_src(include_str!(
+            "../../tests/fixtures/rust/detached_method_exempts_init_super_and_override__01.py"
+        ));
         assert!(!init.iter().any(|x| x.kind == "detached-method"), "{init:?}");
-        let sup = scan_src("class C(Base):\n    def refresh(self):\n        super().refresh()\n");
+        let sup = scan_src(include_str!(
+            "../../tests/fixtures/rust/detached_method_exempts_init_super_and_override__02.py"
+        ));
         assert!(!sup.iter().any(|x| x.kind == "detached-method"), "{sup:?}");
-        let ovr = scan_src("class C(Base):\n    @override\n    def compute(self):\n        return 1\n");
+        let ovr = scan_src(include_str!(
+            "../../tests/fixtures/rust/detached_method_exempts_init_super_and_override__03.py"
+        ));
         assert!(!ovr.iter().any(|x| x.kind == "detached-method"), "{ovr:?}");
     }
 
@@ -4011,24 +4266,30 @@ mod tests {
         // a protocol/abstract placeholder never touches state BY DESIGN —
         // staticmethod-ing it is meaningless (houses:
         // CommuteRouterLike.get_commute, a `...`-body Protocol stub)
-        let ell = scan_src("class P:\n    def get_commute(self, origin):\n        ...\n");
+        let ell = scan_src(include_str!(
+            "../../tests/fixtures/rust/detached_method_exempts_trivial_stub__01.py"
+        ));
         assert!(!ell.iter().any(|x| x.kind == "detached-method"), "{ell:?}");
-        let rais = scan_src("class A:\n    def m(self, x):\n        raise NotImplementedError\n");
+        let rais = scan_src(include_str!(
+            "../../tests/fixtures/rust/detached_method_exempts_trivial_stub__02.py"
+        ));
         assert!(!rais.iter().any(|x| x.kind == "detached-method"), "{rais:?}");
         // a raise that computes WITHOUT self is real code, not a stub
-        let real = scan_src("class A:\n    def m(self, x):\n        y = x + 1\n        raise ValueError(y)\n");
+        let real = scan_src(include_str!(
+            "../../tests/fixtures/rust/detached_method_exempts_trivial_stub__03.py"
+        ));
         assert!(real.iter().any(|x| x.kind == "detached-method"), "{real:?}");
     }
 
     #[test]
     fn detached_method_flagged() {
-        let f = scan_src("class A:\n    def m(self, x):\n        return x + 1\n");
+        let f = scan_src(include_str!("../../tests/fixtures/rust/detached_method_flagged__01.py"));
         assert!(f.iter().any(|x| x.kind == "detached-method"));
-        let ok = scan_src("class A:\n    def m(self, x):\n        return self.x + x\n");
+        let ok = scan_src(include_str!("../../tests/fixtures/rust/detached_method_flagged__02.py"));
         assert!(!ok.iter().any(|x| x.kind == "detached-method"));
-        let cm = scan_src("class A:\n    @classmethod\n    def m(cls, x):\n        return x\n");
+        let cm = scan_src(include_str!("../../tests/fixtures/rust/detached_method_flagged__03.py"));
         assert!(!cm.iter().any(|x| x.kind == "detached-method")); // classmethod exempt
-        let st = scan_src("class A:\n    @staticmethod\n    def m(x):\n        return x\n");
+        let st = scan_src(include_str!("../../tests/fixtures/rust/detached_method_flagged__04.py"));
         assert!(!st.iter().any(|x| x.kind == "detached-method"));
     }
 
@@ -4038,17 +4299,13 @@ mod tests {
         // duplicate finding AND not be flagged stale (B3 wired for every
         // repo-wide family, not just unused — the per-file pass runs before
         // the duplicate pass)
-        let pair = |suffix: &str| {
-            format!(
-                "def span{a}(grid, row, c0, c1):\n    lat_min = max(grid.a, grid.a + row * grid.d)\n    lat_max = min(grid.b, grid.a + (row + 1) * grid.d)\n    lon_min = max(grid.c, grid.c + c0 * grid.e)\n    lon_max = min(grid.d, grid.c + (c1 + 1) * grid.e)\n    return Rect(lat_min, lat_max, lon_min, lon_max)\n",
-                a = suffix
-            )
-        };
-        let src = format!(
-            "class Rect:\n    def __init__(self, a, b, c, d):\n        self.a = a\n        self.b = b\n        self.c = c\n        self.d = d\n\n{pair1}{pair2}",
-            pair1 = pair("1"),
-            pair2 = "# lucidlint: ignore duplicate known copy-paste grid math\n".to_owned() + &pair("2"),
-        );
+        // the two near-identical bodies are real fixture files; the second
+        // variant carries the suppression comment on its first line
+        let src = [
+            include_str!("../../tests/fixtures/rust/grid_math_pair__01.py"),
+            include_str!("../../tests/fixtures/rust/grid_math_pair__03.py"),
+        ]
+        .concat();
         let f = scan_corpus(&[("prod_mod.py", &src)]);
         assert!(
             !f.iter().any(|x| x.kind == "duplicate"),
@@ -4062,7 +4319,9 @@ mod tests {
 
     #[test]
     fn record_shape_twins_carry_distinct_cols_and_keys() {
-        let f = scan_src("def deep(user):\n    return {\"a\": {\"x\": user, \"y\": user}, \"b\": 1}\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_shape_twins_carry_distinct_cols_and_keys__01.py"
+        ));
         let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(rs.len(), 2, "{f:?}");
         assert_ne!(rs[0].col, rs[1].col, "twin anchors must differ: {rs:?}");
@@ -4098,7 +4357,9 @@ mod tests {
     fn record_shape_fires_on_call_argument() {
         // uniform descent: a record built at a call site is a record — the
         // old record-position carve-out hid exactly this wire-format shape
-        let f = scan_src("def send(p):\n    pass\n\n\ndef go(u):\n    send({\"user\": u, \"stamp\": u})\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_shape_fires_on_call_argument__01.py"
+        ));
         assert!(
             f.iter()
                 .any(|x| x.kind == "record-shape" && x.message.contains("{user, stamp}")),
@@ -4136,7 +4397,7 @@ mod tests {
     fn comma_signal_suppresses_both_families() {
         // one comment, comma-separated signals — the only shape that fits the
         // line/line-1 window for two families on one def
-        let src = "class X:\n    # lucidlint: ignore long-param-list,detached-method override signature\n    def m(self, a, b, c, d, e, f):\n        return 1\n";
+        let src = include_str!("../../tests/fixtures/rust/comma_signal_suppresses_both_families__01.py");
         let f = scan_src(src);
         assert!(!f.iter().any(|x| x.kind == "long-param-list"));
         assert!(!f.iter().any(|x| x.kind == "detached-method"));
@@ -4145,22 +4406,24 @@ mod tests {
 
     #[test]
     fn guard_clauses_arrow_code_detected() {
-        let f = scan_src(
-            "def f(a, b, c):\n    if a:\n        if b:\n            if c:\n                return 1\n    return 0\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/guard_clauses_arrow_code_detected__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "guard-clauses"));
-        let ok = scan_src("def f(a, b):\n    if a:\n        if b:\n            return 1\n    return 0\n");
+        let ok = scan_src(include_str!(
+            "../../tests/fixtures/rust/guard_clauses_arrow_code_detected__02.py"
+        ));
         assert!(!ok.iter().any(|x| x.kind == "guard-clauses")); // 2 levels is fine
     }
 
     #[test]
     fn conditional_polymorphism_dispatch_detected() {
-        let src = "def f(x):\n    if x == 1:\n        return 'a'\n    elif x == 2:\n        return 'b'\n    elif x == 3:\n        return 'c'\n    elif x == 4:\n        return 'd'\n    return '?'\n";
+        let src = include_str!("../../tests/fixtures/rust/conditional_polymorphism_dispatch_detected__01.py");
         let f = scan_src(src);
         assert!(f.iter().any(|x| x.kind == "conditional-polymorphism"));
-        let ok = scan_src(
-            "def f(x, y):\n    if x == 1:\n        return 'a'\n    elif y == 2:\n        return 'b'\n    return '?'\n",
-        );
+        let ok = scan_src(include_str!(
+            "../../tests/fixtures/rust/conditional_polymorphism_dispatch_detected__02.py"
+        ));
         assert!(!ok.iter().any(|x| x.kind == "conditional-polymorphism")); // mixed keys
     }
 
@@ -4169,20 +4432,20 @@ mod tests {
         // review log §2.6: `person is None -> raise KeyError` guards are NOT
         // special-case candidates — the absence is an error, no object can
         // replace it (the fix suggestion would mask the error)
-        let f = scan_src(
-            "def g(person):\n    if person is None:\n        raise KeyError('x')\n    if person is None:\n        raise KeyError('y')\n    if person is None:\n        raise KeyError('z')\n    return person\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/special_case_skips_fail_fast_raise_guards__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "special-case"), "{:?}", f);
         // control: repeated VALUE-style null handling still fires
-        let ok = scan_src(
-            "def f(a):\n    if a is None:\n        return 1\n    if a is None:\n        return 2\n    if a is None:\n        return 3\n    return 0\n",
-        );
+        let ok = scan_src(include_str!(
+            "../../tests/fixtures/rust/special_case_skips_fail_fast_raise_guards__02.py"
+        ));
         assert!(ok.iter().any(|x| x.kind == "special-case"));
         // an ERROR-return guard (mine is None -> 401 JSONResponse) is a
         // boundary, not a special case — a NullObject would hide the 401
-        let guard = scan_src(
-            "def g(mine):\n    if mine is None:\n        return JSONResponse({'error': 'x'}, status_code=401)\n    if mine is None:\n        return JSONResponse({'error': 'y'}, status_code=401)\n    if mine is None:\n        return JSONResponse({'error': 'z'}, status_code=401)\n    return mine\n",
-        );
+        let guard = scan_src(include_str!(
+            "../../tests/fixtures/rust/special_case_skips_fail_fast_raise_guards__03.py"
+        ));
         assert!(!guard.iter().any(|x| x.kind == "special-case"), "{:?}", guard);
     }
 
@@ -4191,12 +4454,14 @@ mod tests {
         // review: urllib's redirect_request override — 6 protocol params, a
         // one-statement stub; a parameter object would BREAK the override.
         // A trivial stub is a protocol placeholder, not a param-list smell.
-        let f = scan_src(
-            "class _NoRedirect:\n    def redirect_request(self, req, fp, code, msg, headers, newurl):\n        return None\n",
-        );
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/long_param_list_skips_trivial_framework_stub__01.py"
+        ));
         assert!(!f.iter().any(|x| x.kind == "long-param-list"), "{:?}", f);
         // control: a real 6-param fn with a body still fires
-        let ok = scan_src("def f(a, b, c, d, e, g):\n    return a + b + c + d + e + g\n");
+        let ok = scan_src(include_str!(
+            "../../tests/fixtures/rust/long_param_list_skips_trivial_framework_stub__02.py"
+        ));
         assert!(ok.iter().any(|x| x.kind == "long-param-list"), "{:?}", ok);
     }
 
@@ -4205,52 +4470,57 @@ mod tests {
         // the shape classifier behind the complexity message: a chain of
         // ifs over the same selector is a dispatch chain; a battery of ifs
         // appending to the same list is a rules battery
-        let dispatch = "def route(sel):\n    if sel == \"a\":\n        return 1\n    if sel == \"b\":\n        return 2\n    if sel == \"c\":\n        return 3\n    return -1\n";
+        let dispatch = include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__01.py");
         let (shape, detail) = python_fn_shape(&first_py_fn_body(dispatch));
         assert_eq!((shape, detail.as_str()), ("dispatch", "sel"));
-        let rules = "def check(a):\n    out = []\n    if a.get(1):\n        out.append('x')\n    if a.get(2):\n        out.append('y')\n    if a.get(3):\n        out.append('z')\n    return out\n";
+        let rules = include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__02.py");
         let (shape, detail) = python_fn_shape(&first_py_fn_body(rules));
         assert_eq!((shape, detail.as_str()), ("rules", "out"));
-        let plain = "def f(a):\n    x = a + 1\n    return x\n";
+        let plain = include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__03.py");
         let (shape, _) = python_fn_shape(&first_py_fn_body(plain));
         assert_eq!(shape, "plain");
         // the OFFER equals the FIX: a battery the rule-table fix cannot
         // apply to (a check with a nested if — not a single append) is NOT
         // routed to rule-table; it is "plain" so the message offers
         // extract-method instead (no false directive)
-        let unfixable = "def check(a):\n    out = []\n    if a.get(1):\n        if a.get(2):\n            out.append('x')\n    if a.get(3):\n        out.append('y')\n    if a.get(4):\n        out.append('z')\n    return out\n";
+        let unfixable = include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__04.py");
         let (shape, _) = python_fn_shape(&first_py_fn_body(unfixable));
         assert_eq!(shape, "plain", "an unhoistable battery must not be offered rule-table");
         // a dispatch with an elif is not the fixable shape
-        let unfixable_d = "def route(sel):\n    if sel == \"a\":\n        return 1\n    elif sel == \"b\":\n        return 2\n    if sel == \"c\":\n        return 3\n    return -1\n";
+        let unfixable_d =
+            include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__05.py");
         let (shape, _) = python_fn_shape(&first_py_fn_body(unfixable_d));
         assert_eq!(shape, "plain", "an elif dispatch must not be offered dispatch-registry");
     }
 
     #[test]
     fn special_case_repeated_none_checks() {
-        let src = "def f(a):\n    if a is None:\n        return 1\n    if a is None:\n        return 2\n    if a is None:\n        return 3\n    return 0\n";
+        let src = include_str!("../../tests/fixtures/rust/special_case_repeated_none_checks__01.py");
         let f = scan_src(src);
         assert!(f.iter().any(|x| x.kind == "special-case"));
-        let ok = scan_src("def f(a):\n    if a is None:\n        return 1\n    return 0\n");
+        let ok = scan_src(include_str!(
+            "../../tests/fixtures/rust/special_case_repeated_none_checks__02.py"
+        ));
         assert!(!ok.iter().any(|x| x.kind == "special-case"));
     }
 
     #[test]
     fn middle_man_delegation_detected() {
-        let f = scan_src("class A:\n    def go(self, x):\n        return self.inner.go(x)\n");
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/middle_man_delegation_detected__01.py"
+        ));
         assert!(f.iter().any(|x| x.kind == "middle-man"));
-        let ok = scan_src("class A:\n    def go(self, x):\n        self.count += 1\n        return self.inner.go(x)\n");
+        let ok = scan_src(include_str!(
+            "../../tests/fixtures/rust/middle_man_delegation_detected__02.py"
+        ));
         assert!(!ok.iter().any(|x| x.kind == "middle-man"));
     }
 
     #[test]
     fn unused_setter_detected() {
-        let f = scan_src("class A:\n    def set_x(self, v):\n        self.x = v\n");
+        let f = scan_src(include_str!("../../tests/fixtures/rust/unused_setter_detected__01.py"));
         assert!(f.iter().any(|x| x.kind == "unused-setter"));
-        let ok = scan_src(
-            "class A:\n    def set_x(self, v):\n        self.x = v\n    def get(self):\n        return self.set_x(1)\n",
-        );
+        let ok = scan_src(include_str!("../../tests/fixtures/rust/unused_setter_detected__02.py"));
         assert!(!ok.iter().any(|x| x.kind == "unused-setter"));
     }
 
@@ -4260,14 +4530,8 @@ mod tests {
         // the message must teach that and name the imminent-caller escape; a
         // setter with zero references anywhere gets the delete message
         let f = scan_corpus(&[
-            (
-                "app.py",
-                "class A:\n    def set_scheduler(self, v):\n        self.x = v\n    def set_cache(self, v):\n        self.y = v\n",
-            ),
-            (
-                "tests/unit/test_app.py",
-                "from app import A\ndef test_sched():\n    A().set_scheduler(1)\n",
-            ),
+            ("app.py", include_str!("../../tests/fixtures/rust/setter_test_only_reference_gets_seam_message_never_referenced_gets_delete__01.py")),
+            ("tests/unit/test_app.py", include_str!("../../tests/fixtures/rust/setter_test_only_reference_gets_seam_message_never_referenced_gets_delete__02.py")),
         ]);
         let seam: Vec<&Finding> = f
             .iter()
@@ -4294,16 +4558,140 @@ mod tests {
 
     #[test]
     fn loop_pipeline_detected() {
-        let f = scan_src("def f(xs):\n    out = []\n    for x in xs:\n        out.append(x)\n    return out\n");
+        let f = scan_src(include_str!("../../tests/fixtures/rust/loop_pipeline_detected__01.py"));
         assert!(f.iter().any(|x| x.kind == "loop-pipeline"));
-        let ok = scan_src("def f(xs):\n    total = 0\n    for x in xs:\n        total += x\n    return total\n");
+        let ok = scan_src(include_str!("../../tests/fixtures/rust/loop_pipeline_detected__02.py"));
         assert!(!ok.iter().any(|x| x.kind == "loop-pipeline"));
+    }
+
+    #[test]
+    fn loop_sequence_shared_accumulator_is_a_pipeline() {
+        // the same accumulator fed by two loops is a pipeline: each pass
+        // feeds the next (review-bot, PR #274)
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_sequence_shared_accumulator_is_a_pipeline__01.py"
+        ));
+        let seq: Vec<&Finding> = f.iter().filter(|x| x.kind == "loop-sequence").collect();
+        assert_eq!(seq.len(), 1, "{f:?}");
+        assert!(seq[0].message.contains("pipeline"), "{}", seq[0].message);
+        let pipes = f.iter().filter(|x| x.kind == "loop-pipeline").count();
+        assert_eq!(pipes, 2, "{f:?}");
+    }
+
+    #[test]
+    fn loop_sequence_independent_passes_get_extraction_advice() {
+        // independent per-target loops are a sequence, but extraction advice
+        // (one helper per pass) — they are NOT one pipeline
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_sequence_independent_passes_get_extraction_advice__01.py"
+        ));
+        let seq = f
+            .iter()
+            .find(|x| x.kind == "loop-sequence")
+            .expect("loop-sequence fires");
+        assert!(seq.message.contains("named helper"), "{}", seq.message);
+        // a fold (latest-wins) with per-iteration temps is still a fold —
+        // the temps do not make it a mutating loop
+        let t = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_sequence_independent_passes_get_extraction_advice__02.py"
+        ));
+        assert!(!t.iter().any(|x| x.kind == "mutating-loop"), "{t:?}");
+        let d = t.iter().find(|x| x.kind == "loop-hoist").expect("fold advice fires");
+        assert!(d.message.contains("fold"), "{}", d.message);
+    }
+
+    #[test]
+    fn mutating_loop_requires_two_or_more_surviving_state_writes() {
+        // three surviving state writes -> mutating-loop (sequential writes
+        // to out/counts/total)
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/mutating_loop_requires_two_or_more_surviving_state_writes__01.py"
+        ));
+        assert!(f.iter().any(|x| x.kind == "mutating-loop"), "{f:?}");
+        // a single reduction is a fold, not a mutation
+        let ok = scan_src(include_str!(
+            "../../tests/fixtures/rust/mutating_loop_requires_two_or_more_surviving_state_writes__02.py"
+        ));
+        assert!(!ok.iter().any(|x| x.kind == "mutating-loop"), "{ok:?}");
+    }
+
+    #[test]
+    fn loop_sequence_feed_chain_is_a_pipeline() {
+        // the second pass consumes the first pass's output — a feed chain
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_sequence_feed_chain_is_a_pipeline__01.py"
+        ));
+        let seq = f
+            .iter()
+            .find(|x| x.kind == "loop-sequence")
+            .expect("loop-sequence fires");
+        assert!(seq.message.contains("pipeline"), "{}", seq.message);
+    }
+
+    #[test]
+    fn nested_loop_is_one_pass_not_a_sequence() {
+        // a nested loop is a single pass with a cartesian product, not a
+        // sequence of passes
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/nested_loop_is_one_pass_not_a_sequence__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "loop-sequence"), "{f:?}");
+        // two separate single-loop functions are not a sequence either
+        let g = scan_src(include_str!(
+            "../../tests/fixtures/rust/nested_loop_is_one_pass_not_a_sequence__02.py"
+        ));
+        assert!(!g.iter().any(|x| x.kind == "loop-sequence"), "{g:?}");
+    }
+
+    #[test]
+    fn module_level_loops_get_only_the_single_loop_pipeline_shape() {
+        // module-level loops get the pipeline shape; the mutating/sequence
+        // variants stay function-scoped (no enclosing function context)
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/module_level_loops_get_only_the_single_loop_pipeline_shape__01.py"
+        ));
+        assert!(f.iter().any(|x| x.kind == "loop-pipeline"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-sequence"), "{f:?}");
+        let g = scan_src(include_str!(
+            "../../tests/fixtures/rust/module_level_loops_get_only_the_single_loop_pipeline_shape__02.py"
+        ));
+        assert!(!g.iter().any(|x| x.kind == "mutating-loop"), "{g:?}");
+        assert!(!g.iter().any(|x| x.kind == "loop-sequence"), "{g:?}");
+    }
+
+    #[test]
+    fn loop_hoist_fires_on_single_mutation_long_body_loops() {
+        // a long per-item calculation feeding one accumulator is a hoist —
+        // the body becomes a helper and the loop a comprehension
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_hoist_fires_on_single_mutation_long_body_loops__01.py"
+        ));
+        let hoist = f.iter().find(|x| x.kind == "loop-hoist").expect("loop-hoist fires");
+        assert!(hoist.message.contains("hoist the calculation"), "{}", hoist.message);
+        assert!(
+            hoist.message.contains("Replace Loop with Pipeline"),
+            "{}",
+            hoist.message
+        );
+        // a multi-statement fold with a guarded assignment is still a fold
+        let g = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_hoist_fires_on_single_mutation_long_body_loops__02.py"
+        ));
+        let d = g.iter().find(|x| x.kind == "loop-hoist").expect("fold advice fires");
+        assert!(!d.message.contains("hoist the calculation"), "{}", d.message);
+        assert!(d.message.contains("fold"), "{}", d.message);
+        // a pure append loop hoists nothing — pipeline advice covers it
+        let p = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_hoist_fires_on_single_mutation_long_body_loops__03.py"
+        ));
+        assert!(!p.iter().any(|x| x.kind == "loop-hoist"), "{p:?}");
+        assert!(p.iter().any(|x| x.kind == "loop-pipeline"), "{p:?}");
     }
 
     #[test]
     fn latent_visitor_detected_and_claims_chains() {
         // two operations over the same element family — the visitor shape
-        let src = "class A:\n    pass\n\nclass B:\n    pass\n\ndef op1(x):\n    if isinstance(x, A):\n        return 1\n    elif isinstance(x, B):\n        return 2\n    return 0\n\ndef op2(x):\n    if isinstance(x, A):\n        return 3\n    elif isinstance(x, B):\n        return 4\n    return 0\n";
+        let src = include_str!("../../tests/fixtures/rust/latent_visitor_detected_and_claims_chains__01.py");
         let f = scan_src(src);
         assert!(f.iter().any(|x| x.kind == "latent-visitor"), "expected latent-visitor");
         // the claimed chains must NOT also be polymorphism — one ruling per chain
@@ -4317,7 +4705,7 @@ mod tests {
     fn single_dispatch_stays_polymorphism() {
         // ONE operation over the family (4-arm chain) — polymorphic methods,
         // not a visitor (a single 2-arm type check is idiomatic, no finding)
-        let src = "class A:\n    pass\n\nclass B:\n    pass\n\nclass C:\n    pass\n\nclass D:\n    pass\n\ndef op1(x):\n    if isinstance(x, A):\n        return 1\n    elif isinstance(x, B):\n        return 2\n    elif isinstance(x, C):\n        return 3\n    elif isinstance(x, D):\n        return 4\n    return 0\n";
+        let src = include_str!("../../tests/fixtures/rust/single_dispatch_stays_polymorphism__01.py");
         let f = scan_src(src);
         assert!(f.iter().any(|x| x.kind == "conditional-polymorphism"));
         assert!(!f.iter().any(|x| x.kind == "latent-visitor"));
@@ -4326,7 +4714,7 @@ mod tests {
     #[test]
     fn value_dispatch_is_not_a_visitor() {
         // x == 1/2/3/4 is value dispatch, not a type-tag visitor
-        let src = "def f(x):\n    if x == 1:\n        return 'a'\n    elif x == 2:\n        return 'b'\n    elif x == 3:\n        return 'c'\n    elif x == 4:\n        return 'd'\n    return '?'\n";
+        let src = include_str!("../../tests/fixtures/rust/value_dispatch_is_not_a_visitor__01.py");
         let f = scan_src(src);
         assert!(f.iter().any(|x| x.kind == "conditional-polymorphism"));
         assert!(!f.iter().any(|x| x.kind == "latent-visitor"));
@@ -4336,7 +4724,7 @@ mod tests {
     fn implemented_visitor_is_not_flagged() {
         // the real visitor: accept on the elements + visit_* on the visitor —
         // no dispatch chain remains, so nothing new fires (no thrash)
-        let src = "class A:\n    def accept(self, v):\n        return v.visit_a(self)\n\nclass B:\n    def accept(self, v):\n        return v.visit_b(self)\n\nclass Visitor:\n    def visit_a(self, e):\n        return 1\n    def visit_b(self, e):\n        return 2\n";
+        let src = include_str!("../../tests/fixtures/rust/implemented_visitor_is_not_flagged__01.py");
         let f = scan_src(src);
         assert!(!f.iter().any(|x| x.kind == "latent-visitor"));
         assert!(!f.iter().any(|x| x.kind == "conditional-polymorphism"));

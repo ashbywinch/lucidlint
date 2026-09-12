@@ -150,7 +150,7 @@ with a why).
 
 ## Group 4.5: Refactoring advice
 
-&dagger; *(all warn — detection-only) These detect the code SHAPE a Fowler refactoring targets. The fix is named in the message for the agent to hand-apply (auto-fixes exist for magic-number, vague-name, and long-param-list; see the fix engine).*
+&dagger; *(all warn) These detect the code SHAPE a Fowler refactoring targets. Auto-fixes exist for the Python loop family (`loop-pipeline`/`loop-sequence` rewrite the loop(s) into comprehensions — the Rust shapes are detection-only, the message names the combinator), magic-number, vague-name, and long-param-list; the rest are named in the message for the agent to hand-apply.*
 
 | Rule | Severity | Language | What it checks |
 |---|---|---|---|
@@ -160,7 +160,10 @@ with a why).
 | **special-case** | **warn** | Python | ≥3 repeated `None`/empty checks on one name — Introduce Special Case. |
 | **middle-man** | **warn** | Python | A method that only forwards (`return self.x.y(...)`) — Remove Middle Man. |
 | **unused-setter** | **warn** | Python | A `set_*` method or property setter never referenced — Remove Setting Method. |
-| **loop-pipeline** | **warn** | Python | A loop whose body is only a collection mutation — Replace Loop with Pipeline: use a comprehension. |
+| **loop-pipeline** | **warn** | Both | A loop whose body is only a collection mutation (Python: append/add/update, `name += [..]`, or a subscript store; Rust: `acc.push(item)` or `acc[i] = v`, plain or behind one if-filter) — Replace Loop with Pipeline: a comprehension (Python) or a combinator (Rust: .map()/.filter() to build the value, .for_each() where pushing is the whole body). |
+| **mutating-loop → loop-pipeline** | **warn** | Both | A loop that mutates >=2 pieces of state that survive it (Python: accumulated collections, rebound names, object writes; Rust: rebinds/compound-assigns of fn-scope locals, mutating receiver calls) — the changes are invisible at the call site; Replace Loop with Pipeline: compute each output from the input instead. |
+| **loop-sequence → loop-pipeline** | **warn** | Both | A function with >=2 sequential (non-nested) loops — each is a pass that changes the function's state; combine the passes or extract each loop into a named step (a pipeline of comprehensions / combinators when the loops share or feed state). |
+| **loop-hoist → loop-pipeline** | **warn** | Both | A loop that mutates exactly one surviving name but whose body is > a couple of statements — the body computes more than it adds; hoist the per-item step into a named helper that returns the value, then combine or fold. |
 
 ## Group 5: Hotspot & risk (graph-based)
 

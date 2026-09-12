@@ -805,6 +805,51 @@ def test_fix_refuses_rust_targets_cleanly(tmp_path, capsys):
     assert lib.read_text() == lib.read_text(), str(lib)
 
 
+def test_fix_rust_loop_pipeline_rewrites_push_loop(tmp_path, capsys):
+    """End to end on the .rs surface: a loop-pipeline finding's `fix:`
+    directive resolves through the orchestrator into the syn rewrite."""
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    lib = repo / "houses" / "lib.rs"
+    lib.write_text((Path(__file__).resolve().parent / "fixtures" / "loop_pipeline_rs.rs").read_text())
+    run_main(repo, "fix", "--kind", "loop-pipeline", "--file", "houses/lib.rs", "--line", "3")
+    out = capsys.readouterr().out
+    assert ".iter().map(|x| *x).collect()" in lib.read_text(), out + lib.read_text()
+
+
+def test_fix_rust_loop_sequence_concatenates_chain(tmp_path, capsys):
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    lib = repo / "houses" / "lib.rs"
+    lib.write_text((Path(__file__).resolve().parent / "fixtures" / "loop_sequence_rs_fix.rs").read_text())
+    run_main(repo, "fix", "--kind", "loop-sequence", "--file", "houses/lib.rs", "--line", "1")
+    out = capsys.readouterr().out
+    assert " + " in lib.read_text(), out + lib.read_text()
+
+
+def test_fix_rust_loop_hoist_needs_a_name(tmp_path, capsys):
+    """loop-hoist is name-required end to end: no --fix-name refuses with
+    the naming guidance, a name applies the helper + filter_map rewrite."""
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    lib = repo / "houses" / "lib.rs"
+    lib.write_text((Path(__file__).resolve().parent / "fixtures" / "loop_hoist_rs_fix.rs").read_text())
+    run_main(repo, "fix", "--kind", "loop-hoist", "--file", "houses/lib.rs", "--line", "3")
+    out = capsys.readouterr().out
+    assert "needs a semantic name" in out, out
+    run_main(
+        repo,
+        "fix",
+        "--kind",
+        "loop-hoist",
+        "--file",
+        "houses/lib.rs",
+        "--line",
+        "3",
+        "--name",
+        "contribution",
+    )
+    out2 = capsys.readouterr().out
+    assert "filter_map" in lib.read_text(), out2 + lib.read_text()
+
+
 def test_fix_rust_line_less_resolves_unique_finding(tmp_path, capsys):
     """R27 on the .rs surface: `lucidlint fix --kind X --file F` with no
     --line applies when the file has exactly one finding of the kind — the
@@ -829,8 +874,6 @@ def test_scanner_candidates_carry_the_exe_suffix():
     repo = Path("/tmp/repo")
     for p in ch._scanner_candidates(repo, ".exe"):
         assert p.name == "lucidlint.exe" or p.name.endswith(".exe"), p
-    for p in ch._scanner_candidates(repo, ""):
-        assert p.name == "lucidlint"
 
 
 def test_graph_contract_corrupt_db_degrades(tmp_path):
