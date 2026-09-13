@@ -5630,8 +5630,8 @@ pub fn unused_findings(
 //   - signatures: record-shaped collections in params/returns (grab-bags,
 //     collections of dicts/tuples, nested lists, fixed tuples); maps pass.
 //     NO boundary exemption: a wire payload is still a record — serialisation
-//     is no excuse for failing to extract the class: a class serialises
-//     itself with a method
+//     is no excuse for skipping the class: write a serialiser method on
+//     the class if the boundary needs one
 //   - literals: dict literals with >= 2 keys, >= 1 constant string key,
 //     >= 1 dynamic value, in a record position (assign/return/yield)
 // =====================================================================
@@ -5929,7 +5929,7 @@ col: 0,
                             kind: "record-shape".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — serialisation is no excuse for failing to extract the class: a class serialises itself with a method",
+                                "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — serialisation is no excuse for skipping the class: write a serialiser method on the class if the boundary needs one",
                                 f.name.as_str()
                             ),
                         });
@@ -5946,7 +5946,7 @@ col: 0,
                             kind: "record-shape".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "bare record collection '{text}' as return type of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — serialisation is no excuse for failing to extract the class: a class serialises itself with a method",
+                                "bare record collection '{text}' as return type of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — serialisation is no excuse for skipping the class: write a serialiser method on the class if the boundary needs one",
                                 f.name.as_str()
                             ),
                         });
@@ -5996,7 +5996,7 @@ col: 0,
     }
     for h in unique {
         let keys = display_keys(&h.keys);
-        state.findings.push(Finding { file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("dict with constant keys {{{keys}}} is a record — make a class named with a domain noun (fields: {keys}); a wire payload is still a record — serialisation is no excuse for failing to extract the class: a class serialises itself with a method — fix: extract-record-class --name <Record>") });
+        state.findings.push(Finding { file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("dict with constant keys {{{keys}}} is a record — make a class named with a domain noun (fields: {keys}); a wire payload is still a record — serialisation is no excuse for skipping the class: write a serialiser method on the class if the boundary needs one — fix: extract-record-class --name <Record>") });
     }
 }
 
