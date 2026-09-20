@@ -23,6 +23,18 @@ How the product in `docs/PRD.md` is built. Requirements by name: R1–R20
   the render boundary (`asdict`), never claimed as a type. Severity: "fail"
   (blocks the gate), "warn" (reported, never fails — carries the noisy
   signals), "ack" (locked in the baseline).
+  - **`in_diff` semantics** — informational, never the gate: `true` when
+    the action's file is in the branch diff against the base ref
+    (`--base`, default `origin/main` then `main`; computed by
+    `changed_files` via pygit2's merge-base walk). It prioritizes review —
+    "actions on files your branch touched" — nothing else; NEW vs
+    acknowledged is the baseline's job, not the diff's. `in_diff: false`
+    means "not in your diff" ONLY when the diff resolved; when the base
+    could not be resolved (`diff_state != "resolved"`) it means "could not
+    tell". The meta's `diff_state` disambiguates: `resolved` (a ref
+    matched and its walk completed — possibly empty), `unresolved` (no
+    configured ref exists — pass `--base <ref>`), `no-git`, or
+    `single-file` (per-file/LSP mode skips the git work).
 - **`LatentFinding`** — one unextracted-class/stdandard signal (signal,
   function, line, metric, detail, severity) before it becomes an Action;
   severity defaults to "fail", warn checks set "warn".

@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -290,11 +291,69 @@ def test_changed_files_branch_diff_and_no_git(tmp_path):
     tree = git.index.write_tree()
     sig = pygit2.Signature("Test", "test@example.com")
     git.create_commit("HEAD", sig, sig, "add x on main", tree, [git.head.target])
-    assert ch.changed_files(repo, "other") == {"houses/x.py"}
-    # no .git at all degrades to empty
+    changed = ch.changed_files(repo, "other")
+    assert changed.files == {"houses/x.py"} and changed.state == "resolved"
+    # no .git at all degrades to empty + an honest state
     plain = tmp_path / "plain"
     plain.mkdir()
-    assert ch.changed_files(plain, "main") == set()
+    changed_plain = ch.changed_files(plain, "main")
+    assert changed_plain.files == set() and changed_plain.state == "no-git"
+
+
+def test_changed_files_unresolved_ref_matches_nothing(tmp_path):
+    """A --base naming a ref that does not exist cannot resolve — the state
+    is 'unresolved', NOT a silently-empty diff (in_diff=false would
+    otherwise read as 'not in your diff' when the base never matched).
+    Issue #23."""
+    repo = materialize_test_repo(tmp_path)
+    diff_res = ch.changed_files(repo, "no-such-ref")
+    assert diff_res.files == set() and diff_res.state == "unresolved"
+
+def test_changed_files_resolved_empty_diff_is_resolved(tmp_path):
+    """A ref that resolves but has zero changed files is a REAL answer —
+    'resolved' with an empty set, never 'unresolved' (the empty walk must
+    not keep trying fallback refs and fall out as unresolved)."""
+    repo = materialize_test_repo(tmp_path)
+    git = pygit2.Repository(str(repo))
+    head = git.get(git.head.target)
+    assert head is not None
+    git.branches.create("same", head.peel(pygit2.Commit))
+    diff_res = ch.changed_files(repo, "same")
+    assert diff_res.files == set() and diff_res.state == "resolved"
+
+
+def test_summary_diff_base_unresolved_is_actionable(tmp_path, capsys):
+    """Issue #23: 'unresolved' is user-actionable — the summary names the
+    hole and the flag that fixes it instead of the bare programmer-facing
+    fallback."""
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)  # an empty .git dir never resolves
+    rc = run_main(repo, "--warn")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "diff base unresolved" in out
+    assert "--base" in out
+
+
+def test_summary_resolved_empty_diff_counts_zero_of_n(tmp_path, capsys):
+    """A resolved-but-empty diff (fresh branch, nothing changed) reports
+    '0 of N actions in files your diff touches' — the in-diff marker is off
+    because nothing is in the diff, not because the base failed."""
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    shutil.rmtree(repo / ".git")
+    git = pygit2.init_repository(str(repo), bare=False)
+    git.index.add_all()
+    tree = git.index.write_tree()
+    sig = pygit2.Signature("Test", "test@example.com")
+    git.create_commit("HEAD", sig, sig, "initial", tree, [])
+    head = git.get(git.head.target)
+    assert head is not None
+    git.branches.create("same", head.peel(pygit2.Commit))
+    rc = run_main(repo, "--warn", "--base", "same")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "0 of " in out and "actions in files your diff touches" in out
+
+
 
 
 # --------------------------------------------------------------------------- scoring/merge/baseline units
@@ -575,13 +634,27 @@ def test_render_actions_acks(tmp_path, capsys):
     assert "acknowledged in baseline (1): houses/app.py:1" in capsys.readouterr().out
 
 
-def test_render_actions_names_the_suppression_signal(capsys):
-    """A finding whose display kind differs from its marker kind says so —
-    an agent must not have to guess `latent-class` for a data-clump."""
+def test_render_latent_class_variant_shows_no_suppression_recipe(capsys):
+    """Issue #21 feedback: a latent-class finding is a class to CREATE, not
+    something to suppress — the report must not offer a suppression recipe
+    for the family variants (the finding message names the fix direction;
+    `ignore latent-class <why>` family suppression is RULES.md's business,
+    and --json still carries the raw signal)."""
     a = ch.Action("latent-class", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
     a.signal = "data-clump"
     ch._render_file_group("x.py", [a])
-    assert "suppress with: data-clump" in capsys.readouterr().out
+    assert "suppress with:" not in capsys.readouterr().out
+
+
+def test_render_standard_bucket_keeps_the_suppression_signal(capsys):
+    """A finding collapsed to the `standard` catch-all has NO display-bucket
+    suppression identity — the raw signal is the only keyword that works, so
+    the report must still name it (the display kind `standard` cannot be
+    suppressed)."""
+    a = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a.signal = "inline-import"
+    ch._render_file_group("x.py", [a])
+    assert "suppress with: inline-import" in capsys.readouterr().out
 
 
 def test_render_actions_omits_signal_when_it_matches(capsys):
@@ -1080,7 +1153,20 @@ def test_file_history(tmp_path):
     assert fh.churn["tests/unit/test_app.py"] == 1
 
 
-# --------------------------------------------------------------------------- the gate
+def test_main_json_meta(tmp_path, capsys):
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    assert data["meta"]["repo"].endswith("repo")
+    assert "thresholds" in data["meta"]
+    assert data["meta"]["thresholds"]["max_complexity"] == 15
+    # Issue #23: the meta names the diff base AND its resolution state, so
+    # a consumer can tell `in_diff: false` = "not in your diff" from
+    # "base unresolved" (make_repo's .git is an empty dir — never resolves)
+    assert data["meta"]["base_ref"] == "origin/main|main"
+    assert data["meta"]["diff_state"] == "unresolved"
+
+
 def test_main_exit_codes(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     assert run_main(repo) == 1
@@ -1140,13 +1226,6 @@ def test_main_update_baseline(tmp_path):
     assert keys and "swallow:houses/app.py" in keys[0]  # swallow has its own display bucket
 
 
-def test_main_json_meta(tmp_path, capsys):
-    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
-    run_main(repo, "--warn", "--json")
-    data = json.loads(capsys.readouterr().out)
-    assert data["meta"]["repo"].endswith("repo")
-    assert "thresholds" in data["meta"]
-    assert data["meta"]["thresholds"]["max_complexity"] == 15
 
 
 def test_main_priority_percentile(tmp_path, capsys):

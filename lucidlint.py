@@ -127,6 +127,7 @@ class _RenderCtx:
     coverage_source: str
     graph_preferred: bool
     diff: set[str]
+    diff_state: str = ""
     ignored_by_signal: Counter | None = None
     report_header: str = ""
     suppression_census: dict[str, int] | None = None
@@ -158,6 +159,7 @@ class _RenderCtx:
                         "commit": commit,
                         "generated_at": datetime.date.today().isoformat(),
                         "base_ref": args.base or "origin/main|main",
+                        "diff_state": self.diff_state,
                         "coverage_source": coverage_source,
                         "thresholds": {
                             "max_complexity": 15,
@@ -181,14 +183,20 @@ class _RenderCtx:
     def render_summary(self, fails: list[Action], warns: list[Action], acks: list[Action]) -> None:
         """Gate verdict, scope, and formula lines."""
         args = self.args
-        diff = self.diff
         coverage_source = self.coverage_source
         graph_preferred = self.graph_preferred
         top = fails[0]
         mine = sum(1 for a in fails if a.in_diff)
-        mine_txt = f"; {mine} of {len(fails)} actions in files your diff touches" if diff else "; diff base unresolved"
+        bits = []
+        if self.diff_state == "resolved":
+            bits.append(f"{mine} of {len(fails)} actions in files your diff touches")
+        elif self.diff_state == "unresolved":
+            bits.append("diff base unresolved — pass --base <ref> to mark your diff's files")
+        # no-git / single-file: nothing to say about the diff (the PRD's
+        # silent gap — absence is not a claim)
         if args.baseline is None:
-            mine_txt += " (no baseline — cannot tell what is new)"
+            bits.append("no baseline — cannot tell what is new")
+        mine_txt = ("; " + "; ".join(bits)) if bits else ""
         targets = len({(a.file, a.function) for a in fails})
         verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
         print(
@@ -267,6 +275,16 @@ class Action:
     kinds: list[str] = field(default_factory=list)
     callers: list[str] = field(default_factory=list)
     col: int = 0  # schema-3 anchor column; 0 = line-level
+
+@dataclass(frozen=True)
+class DiffResult:
+    """The branch diff against the base ref: the changed files plus the
+    resolution state. `in_diff` is only meaningful when state ==
+    "resolved" — any other state reads as "could not tell", never as
+    "not in your diff" (issue #23)."""
+
+    files: set[str]
+    state: str
 
 
 @dataclass
@@ -922,6 +940,18 @@ RULE_GROUPS = rule_metadata.CATALOG.groups()
 # a real check that happens to have no auto-fix from a mistyped name
 _ALL_RULE_KINDS = frozenset(rule_metadata.CATALOG.kinds())
 
+# variant kind -> its display family (latent-class, loop-pipeline). A
+# finding whose display kind IS its suppression family needs no recipe —
+# `ignore latent-class <why>` covers every variant (RULES.md); offering
+# "suppress with: <raw kind>" beside a report that says "create the class"
+# invites hiding the defect (issue #21). The `standard` catch-all is NOT a
+# suppression identity, so its findings keep the raw-signal note.
+_FAMILY_OF_VARIANT = {
+    variant: family
+    for family, variants in rule_metadata.CATALOG.families().items()
+    for variant in variants
+}
+
 # Cache for config loading
 # lucidlint: ignore global-state per-repo cache of the config file — one entry per repo per run
 _CONFIG_CACHE: dict[Path, _LucidlintConfig] = {}
@@ -1139,7 +1169,6 @@ def _version() -> str:
         except Exception:
             return "0.0.0.dev"
 
-
 _VERSION = _version()
 
 
@@ -1147,10 +1176,16 @@ def action_key(a: Action) -> str:
     return f"{a.kind}:{a.file}:{a.line}:{a.function}"
 
 
-def changed_files(repo: Path, base: str) -> set[str]:
-    """Files touched by the current branch vs base ref (best-effort)."""
+def changed_files(repo: Path, base: str) -> DiffResult:
+    """Files touched by the current branch vs base ref (best-effort).
+    The state is "resolved" once a ref matches and its walk completes
+    (possibly with ZERO files — a real answer), "no-git" when there is no
+    repository to diff against, or "unresolved" when no configured ref
+    exists. `in_diff` is only meaningful when the state is "resolved" — an
+    unresolved run must be read as "could not tell", never as "not in your
+    diff" (issue #23)."""
     if _pygit2 is None or not (repo / ".git").exists():
-        return set()  # no git — certain: silent
+        return DiffResult(set(), "no-git")
     refs = [base] if base else ["origin/main", "main"]
     for ref in refs:
         try:
@@ -1171,14 +1206,15 @@ def changed_files(repo: Path, base: str) -> set[str]:
                         if delta is None or not delta.new_file.path:
                             continue
                         changed.add(delta.new_file.path)
-            if changed:
-                return changed
+            # the first ref that resolves IS the answer — an empty walk is
+            # a resolved diff with nothing changed, not a failure to look
+            return DiffResult(changed, "resolved")
         except KeyError:
             continue  # the ref does not exist here — certain: silent
         except Exception as e:
             log(f"diff against {ref}: {e}")  # unexpected — show the actual error
             continue
-    return set()
+    return DiffResult(set(), "unresolved")
 
 
 def _coverage_context(repo: Path, covered, coverage_source: str) -> CoverageContext:
@@ -1246,9 +1282,17 @@ def _render_file_group(file: str, items: list[Action]) -> None:
         churn = f" [churn {a.churn}x]" if a.churn else ""
         kinds = ",".join(a.kinds) if a.kinds else a.kind
         tag = f"P{a.priority:02d}" if a.severity != "warn" else "warn"
+        # a latent-class variant's display kind (latent-class) IS its
+        # suppression family — nothing to teach, and a suppression recipe
+        # beside "create the class" invites hiding the defect. Only a
+        # display identity that cannot be suppressed (standard) names the
+        # raw signal.
         suppress = (
             f" — suppress with: {a.signal}"
-            if a.signal and a.signal != a.kind and a.signal not in a.kinds
+            if a.signal
+            and a.signal != a.kind
+            and a.signal not in a.kinds
+            and a.signal not in _FAMILY_OF_VARIANT
             else ""
         )
         print(f"  [{tag}][{kinds}]{suppress} {loc}{churn} — {a.message}")
@@ -1377,6 +1421,7 @@ class _GateRunner:
         self.cr: CoverageResult | None = None
         self.cc: CoverageContext | None = None
         self.diff: set[str] = set()
+        self.diff_state: str = ""
         self.actions: list[Action] = []
         self.report_header: str = ""
         self.suppression_census: dict[str, int] = {}
@@ -1397,13 +1442,15 @@ class _GateRunner:
             self.cr = CoverageResult(None, "")
             self.cc = _coverage_context(self.repo, None, "")
             self.diff = set()
+            self.diff_state = "single-file"
             return
         if self.args.refresh_coverage:
             self._refresh_coverage()
         self.fh = self.file_history()
         self.cr = self.load_coverage()
         self.cc = _coverage_context(self.repo, self.cr.lines, self.cr.source)
-        self.diff = changed_files(self.repo, self.args.base)
+        diff_res = changed_files(self.repo, self.args.base)
+        self.diff, self.diff_state = diff_res.files, diff_res.state
 
     def collect(self) -> None:
         """The finding actions for the repo, plus the scan core's report
@@ -1786,6 +1833,7 @@ class _GateRunner:
             cc.label,
             cc.graph_preferred,
             self.diff,
+            diff_state=self.diff_state,
             ignored_by_signal=self.ignored_by_signal,
             report_header=self.report_header,
             suppression_census=self.suppression_census,

@@ -162,7 +162,13 @@ python3 lucidlint.py --repo . --baseline lucidlint.json || exit 1
 ```
 
 `--json` emits the full action model (kind, severity, file, line,
-function, message, metric, churn, priority) for other tooling.
+function, message, metric, churn, priority) for other tooling. Each action
+carries `in_diff` — `true` when its file is in your branch's diff against
+the base ref (`--base <ref>`, default `origin/main` then `main`). It is a
+review-priority marker, never the gate — newness is the baseline's job —
+and the meta's `diff_state` names the resolution state (`resolved`,
+`unresolved`, `no-git`, `single-file`), so `in_diff: false` is readable:
+"not in your diff" when resolved, "could not tell" otherwise.
 
 ### First run and a baseline
 

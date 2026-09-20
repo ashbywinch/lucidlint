@@ -2973,6 +2973,21 @@ mod tests {
             clumps[0].message
         );
     }
+    #[test]
+    fn data_clump_suggests_folding_into_existing_class() {
+        // Issue #22: the clump's parameter set matches an existing class's
+        // fields (exact `lines`, derived `unit` via `scale: PageScale` whose
+        // class declares `unit`) — the suggestion must make the functions
+        // methods of that class, NEVER "split out a class" (the fixer would
+        // invent a verb-named class review rejects on the noun principle).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/data_clump_suggests_existing_class__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "data-clump").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("methods of Writing"), "{}", r[0].message);
+        assert!(!r[0].message.contains("split out a class"), "{}", r[0].message);
+    }
 
     #[test]
     fn per_buffer_scan_does_not_stale_repo_wide_markers() {
