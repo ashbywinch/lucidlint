@@ -2129,8 +2129,10 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
         }
         params.sort();
         params.dedup();
-        // a clump whose parameter set IS an existing class's fields is that
-        // class's method group in exile — name the class, never re-invent it
+        // a clump whose parameter set is accounted for by an existing
+        // class's fields gets BOTH directions: fold into that class, or —
+        // the clump may be a legit subset of the class that travels on its
+        // own — its own class (a domain noun for the subset)
         let fix_direction = match class_for_clump(&classes, &params) {
             Some((class_name, reads)) => {
                 let reads_text = reads
@@ -2138,7 +2140,10 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
                     .map(|r| format!("{class_name}.{r}"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("make these functions methods of {class_name} (the state reads as {reads_text})")
+                format!(
+                    "either make these functions methods of {class_name} (the state reads as {reads_text}), \
+                     or give the clump its own class named with a domain noun (a subset that travels together may be its own value)"
+                )
             }
             None => "split out a class per clump, each named with a domain noun".to_string(),
         };
