@@ -152,11 +152,9 @@ rather than a number.
   acknowledges current actions so the gate fails only on new ones — and on
   STALE ones (see below); the report states exactly how many are
   acknowledged.
-- **R10 — Diff awareness, honestly worded.** Actions in files the current
-  branch touches are marked; the header says "actions in files your diff
-  touches" and admits when no baseline means "cannot tell what is new". The
-  lock is both-direction (the pyrefly-lock rule): a stale baseline entry —
-  a finding the code no longer produces — fails the run with "run
+- **R10 — Stale baseline entries fail the run.** The lock is
+  both-direction (the pyrefly-lock rule): a stale baseline entry — a
+  finding the code no longer produces — fails the run with "run
   --update-baseline", so paying debt without shrinking the baseline is
   drift, never silent. Staleness is compared on (kind, file, function) —
   the location dimension is excluded, because an edit that shifts a

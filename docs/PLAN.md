@@ -30,12 +30,12 @@ never depend on a later phase.
   report as a workable fix list; coverage field never contradicts the
   prose; stale snapshots say "verify".
 
-## Phase 3 — Baselines and diff awareness
+## Phase 3 — Baselines
 
-- **Inputs:** Phase 2 report, git branch, baseline file.
-- **Outputs:** `--baseline`/`--update-baseline` locking; in-diff marking;
-  "no baseline — cannot tell what is new" honesty; lifecycle facts for
-  low-churn scripts.
+- **Inputs:** Phase 2 report, baseline file.
+- **Outputs:** `--baseline`/`--update-baseline` locking; "no baseline —
+  cannot tell what is new" honesty; lifecycle facts for low-churn
+  scripts.
 - **Quality gate:** a repo can lock today's debt and go green on NEW
   actions only; the gate's own repo demonstrates it.
 

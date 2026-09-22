@@ -126,8 +126,6 @@ class _RenderCtx:
     commit: str
     coverage_source: str
     graph_preferred: bool
-    diff: set[str]
-    diff_state: str = ""
     ignored_by_signal: Counter | None = None
     report_header: str = ""
     suppression_census: dict[str, int] | None = None
@@ -158,8 +156,6 @@ class _RenderCtx:
                         "branch": branch,
                         "commit": commit,
                         "generated_at": datetime.date.today().isoformat(),
-                        "base_ref": args.base or "origin/main|main",
-                        "diff_state": self.diff_state,
                         "coverage_source": coverage_source,
                         "thresholds": {
                             "max_complexity": 15,
@@ -186,14 +182,8 @@ class _RenderCtx:
         coverage_source = self.coverage_source
         graph_preferred = self.graph_preferred
         top = fails[0]
-        mine = sum(1 for a in fails if a.in_diff)
         bits = []
-        if self.diff_state == "resolved":
-            bits.append(f"{mine} of {len(fails)} actions in files your diff touches")
-        elif self.diff_state == "unresolved":
-            bits.append("diff base unresolved — pass --base <ref> to mark your diff's files")
-        # no-git / single-file: nothing to say about the diff (the PRD's
-        # silent gap — absence is not a claim)
+        # without a baseline nothing is acknowledged — say so plainly
         if args.baseline is None:
             bits.append("no baseline — cannot tell what is new")
         mine_txt = ("; " + "; ".join(bits)) if bits else ""
@@ -271,20 +261,10 @@ class Action:
     note: str = ""
     raw: float = 0.0
     priority: int = 0
-    in_diff: bool = False
     kinds: list[str] = field(default_factory=list)
     callers: list[str] = field(default_factory=list)
     col: int = 0  # schema-3 anchor column; 0 = line-level
 
-@dataclass(frozen=True)
-class DiffResult:
-    """The branch diff against the base ref: the changed files plus the
-    resolution state. `in_diff` is only meaningful when state ==
-    "resolved" — any other state reads as "could not tell", never as
-    "not in your diff" (issue #23)."""
-
-    files: set[str]
-    state: str
 
 
 @dataclass
@@ -1098,15 +1078,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="write all current action keys to --baseline and exit 0 (lock the list, like pyrefly baselines)",
     )
-    p.add_argument(
-        "--base",
-        type=str,
-        default="",
-        help=(
-            "git ref to diff against; actions in files your branch changed are marked "
-            "'in your diff' (default: origin/main, then main)"
-        ),
-    )
     p.add_argument("--json", action="store_true", help="emit actions as JSON object (meta + actions) on stdout")
     p.add_argument(
         "--refresh-coverage",
@@ -1176,45 +1147,6 @@ def action_key(a: Action) -> str:
     return f"{a.kind}:{a.file}:{a.line}:{a.function}"
 
 
-def changed_files(repo: Path, base: str) -> DiffResult:
-    """Files touched by the current branch vs base ref (best-effort).
-    The state is "resolved" once a ref matches and its walk completes
-    (possibly with ZERO files — a real answer), "no-git" when there is no
-    repository to diff against, or "unresolved" when no configured ref
-    exists. `in_diff` is only meaningful when the state is "resolved" — an
-    unresolved run must be read as "could not tell", never as "not in your
-    diff" (issue #23)."""
-    if _pygit2 is None or not (repo / ".git").exists():
-        return DiffResult(set(), "no-git")
-    refs = [base] if base else ["origin/main", "main"]
-    for ref in refs:
-        try:
-            r = _pygit2.Repository(str(repo))
-            try:
-                ref_oid = r.lookup_reference(f"refs/remotes/{ref}").target
-            except KeyError:  # lucidlint: ignore swallow ref missing — fall back to the local branch
-                ref_oid = r.lookup_reference(f"refs/heads/{ref}").target
-            base_oid = r.merge_base(r.head.target, ref_oid)
-            changed = set()
-            w = r.walk(r.head.target, SortMode.TOPOLOGICAL)
-            w.hide(base_oid)
-            for commit in w:
-                if commit.parents:
-                    diff = commit.tree.diff_to_tree(commit.parents[0].tree)
-                    for patch in diff:
-                        delta = patch.delta if patch is not None else None
-                        if delta is None or not delta.new_file.path:
-                            continue
-                        changed.add(delta.new_file.path)
-            # the first ref that resolves IS the answer — an empty walk is
-            # a resolved diff with nothing changed, not a failure to look
-            return DiffResult(changed, "resolved")
-        except KeyError:
-            continue  # the ref does not exist here — certain: silent
-        except Exception as e:
-            log(f"diff against {ref}: {e}")  # unexpected — show the actual error
-            continue
-    return DiffResult(set(), "unresolved")
 
 
 def _coverage_context(repo: Path, covered, coverage_source: str) -> CoverageContext:
@@ -1273,8 +1205,7 @@ def _load_baseline(path) -> _Baseline:
 
 def _render_file_group(file: str, items: list[Action]) -> None:
     """One file's actions, priority-ordered, with notes."""
-    touched = " [in your diff]" if any(i.in_diff for i in items) else ""
-    print(f"\n{file}{touched}")
+    print(f"\n{file}")
     for a in items:
         # the column anchors marker placement (schema-3): same-line twins
         # peel inner-first, and the report names WHICH twin
@@ -1420,8 +1351,6 @@ class _GateRunner:
         self.fh: FileHistory | None = None
         self.cr: CoverageResult | None = None
         self.cc: CoverageContext | None = None
-        self.diff: set[str] = set()
-        self.diff_state: str = ""
         self.actions: list[Action] = []
         self.report_header: str = ""
         self.suppression_census: dict[str, int] = {}
@@ -1434,23 +1363,18 @@ class _GateRunner:
         self.rc: _RenderCtx | None = None
 
     def gather(self) -> None:
-        """History/coverage/diff context (per-file mode skips the git work)."""
+        """History/coverage context (per-file mode skips the git work)."""
         if self.args.file:
-            # Single-file / LSP mode: no git history, coverage, or diff — the
             # per-file findings are what an editor shows on save.
             self.fh = FileHistory(Counter(), {})
             self.cr = CoverageResult(None, "")
             self.cc = _coverage_context(self.repo, None, "")
-            self.diff = set()
-            self.diff_state = "single-file"
             return
         if self.args.refresh_coverage:
             self._refresh_coverage()
         self.fh = self.file_history()
         self.cr = self.load_coverage()
         self.cc = _coverage_context(self.repo, self.cr.lines, self.cr.source)
-        diff_res = changed_files(self.repo, self.args.base)
-        self.diff, self.diff_state = diff_res.files, diff_res.state
 
     def collect(self) -> None:
         """The finding actions for the repo, plus the scan core's report
@@ -1721,15 +1645,12 @@ class _GateRunner:
         except Exception:
             return GitHead(branch="", commit="")
 
-    def _dedupe_merge(self, actions: list[Action], diff: set[str]) -> list[Action]:
+    def _dedupe_merge(self, actions: list[Action]) -> list[Action]:
         """Dedupe, rank, merge per-target kinds, then lifecycle notes."""
         unique = self._dedupe(actions)
-        self._percentile_rank(unique, diff)
+        self._percentile_rank(unique)
         unique = self._merge_targets(unique)
-        # Re-rank on the merged raw values, but KEEP the diff marking — the
-        # merged actions must still show "[in your diff]" (PRD R10).
-        self._percentile_rank(unique, diff)
-        unique.sort(key=lambda a: (-a.priority, a.file, a.line))
+        self._percentile_rank(unique)
         self._lifecycle_notes(unique)
         return unique
 
@@ -1755,14 +1676,13 @@ class _GateRunner:
                 seen[key] = a
         return list(seen.values())
 
-    def _percentile_rank(self, unique: list[Action], diff: set[str]) -> None:
-        """Rank raw risk 1-99 (percentile) so the list spreads; tag in-diff actions."""
+    def _percentile_rank(self, unique: list[Action]) -> None:
+        """Rank raw risk 1-99 (percentile) so the list spreads."""
         if not unique:
             return
         lo, hi = min(a.raw for a in unique), max(a.raw for a in unique)
         for a in unique:
             a.priority = 99 if hi <= lo else max(1, round(1 + 98 * (a.raw - lo) / (hi - lo)))
-            a.in_diff = a.file in diff
 
     def _merge_targets(self, unique: list[Action]) -> list[Action]:
         """Per-target merge: complexity + large-function on the same function is one fix."""
@@ -1800,7 +1720,7 @@ class _GateRunner:
         self.gather()
         self.collect()
         self.apply_config()
-        self.unique = self._dedupe_merge(self.actions, self.diff)
+        self.unique = self._dedupe_merge(self.actions)
 
         if self.args.update_baseline:
             return self._write_baseline(self.unique, self.ignored_by_signal)
@@ -1832,8 +1752,6 @@ class _GateRunner:
             head.commit,
             cc.label,
             cc.graph_preferred,
-            self.diff,
-            diff_state=self.diff_state,
             ignored_by_signal=self.ignored_by_signal,
             report_header=self.report_header,
             suppression_census=self.suppression_census,

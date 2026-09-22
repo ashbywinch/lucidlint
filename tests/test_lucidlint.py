@@ -13,7 +13,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -21,8 +20,6 @@ import tarfile
 from collections import Counter
 from pathlib import Path
 from typing import Any, cast
-
-import pygit2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import lucidlint as ch
@@ -173,7 +170,6 @@ def gate_args() -> argparse.Namespace:
         include_tests=False,
         baseline=None,
         update_baseline=False,
-        base="",
         json=False,
         refresh_coverage=False,
         warn=False,
@@ -278,81 +274,23 @@ def test_file_history_timeout_and_nonzero(tmp_path):
     assert fh.churn == {}  # nonzero exit degrades to empty history
 
 
-def test_changed_files_branch_diff_and_no_git(tmp_path):
-    repo = materialize_test_repo(tmp_path)
-    git = pygit2.Repository(str(repo))
-    # pin "other" at HEAD, then commit a change on main (the HEAD side of the
-    # three-dot diff) — real pygit2 ops on the materialized fixture
-    head = git.get(git.head.target)
-    assert head is not None
-    git.branches.create("other", head.peel(pygit2.Commit))
-    (repo / "houses" / "x.py").write_text("def g():\n    pass\n")
-    git.index.add_all()
-    tree = git.index.write_tree()
-    sig = pygit2.Signature("Test", "test@example.com")
-    git.create_commit("HEAD", sig, sig, "add x on main", tree, [git.head.target])
-    changed = ch.changed_files(repo, "other")
-    assert changed.files == {"houses/x.py"} and changed.state == "resolved"
-    # no .git at all degrades to empty + an honest state
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    changed_plain = ch.changed_files(plain, "main")
-    assert changed_plain.files == set() and changed_plain.state == "no-git"
-
-
-def test_changed_files_unresolved_ref_matches_nothing(tmp_path):
-    """A --base naming a ref that does not exist cannot resolve — the state
-    is 'unresolved', NOT a silently-empty diff (in_diff=false would
-    otherwise read as 'not in your diff' when the base never matched).
-    Issue #23."""
-    repo = materialize_test_repo(tmp_path)
-    diff_res = ch.changed_files(repo, "no-such-ref")
-    assert diff_res.files == set() and diff_res.state == "unresolved"
-
-def test_changed_files_resolved_empty_diff_is_resolved(tmp_path):
-    """A ref that resolves but has zero changed files is a REAL answer —
-    'resolved' with an empty set, never 'unresolved' (the empty walk must
-    not keep trying fallback refs and fall out as unresolved)."""
-    repo = materialize_test_repo(tmp_path)
-    git = pygit2.Repository(str(repo))
-    head = git.get(git.head.target)
-    assert head is not None
-    git.branches.create("same", head.peel(pygit2.Commit))
-    diff_res = ch.changed_files(repo, "same")
-    assert diff_res.files == set() and diff_res.state == "resolved"
-
-
-def test_summary_diff_base_unresolved_is_actionable(tmp_path, capsys):
-    """Issue #23: 'unresolved' is user-actionable — the summary names the
-    hole and the flag that fixes it instead of the bare programmer-facing
-    fallback."""
-    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)  # an empty .git dir never resolves
+def test_gate_output_has_no_diff_talk(tmp_path, capsys):
+    """The diff marker was removed (issue #23 discussion: the baseline owns
+    newness; a diff has no role in the output). The summary never mentions a
+    diff or --base, and the JSON meta carries no diff state; the baseline
+    honesty clause — without one, nothing is acknowledged — is kept."""
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     rc = run_main(repo, "--warn")
     assert rc == 0
     out = capsys.readouterr().out
-    assert "diff base unresolved" in out
-    assert "--base" in out
-
-
-def test_summary_resolved_empty_diff_counts_zero_of_n(tmp_path, capsys):
-    """A resolved-but-empty diff (fresh branch, nothing changed) reports
-    '0 of N actions in files your diff touches' — the in-diff marker is off
-    because nothing is in the diff, not because the base failed."""
-    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
-    shutil.rmtree(repo / ".git")
-    git = pygit2.init_repository(str(repo), bare=False)
-    git.index.add_all()
-    tree = git.index.write_tree()
-    sig = pygit2.Signature("Test", "test@example.com")
-    git.create_commit("HEAD", sig, sig, "initial", tree, [])
-    head = git.get(git.head.target)
-    assert head is not None
-    git.branches.create("same", head.peel(pygit2.Commit))
-    rc = run_main(repo, "--warn", "--base", "same")
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "0 of " in out and "actions in files your diff touches" in out
-
+    assert "in your diff" not in out
+    assert "diff base" not in out
+    assert re.search(r"--base\b", out) is None  # --baseline legitimately contains the prefix
+    assert "no baseline — cannot tell what is new" in out
+    run_main(repo, "--warn", "--json")
+    meta = json.loads(capsys.readouterr().out)["meta"]
+    assert "diff_state" not in meta and "base_ref" not in meta
+    assert "in_diff" not in json.dumps(meta)
 
 
 
@@ -385,7 +323,7 @@ def test_merge_warn_into_fail_target():
     # same target (file+function+kind-group) but a different line — distinct dedupe keys,
     # same merge key: the merge path (not the dedupe path) must handle the warn
     warn = ch.Action("complexity", "warn", "houses/app.py", 5, "alpha", "m2", 1, 0, "", "", note="n2", raw=1)
-    out = ch._GateRunner(Path("."), gate_args())._dedupe_merge([fail, warn], set())
+    out = ch._GateRunner(Path("."), gate_args())._dedupe_merge([fail, warn])
     assert len(out) == 1
     assert out[0].severity == "fail"  # a warn merged into a fail target keeps the gate
     assert "n2" in out[0].note
@@ -1153,18 +1091,6 @@ def test_file_history(tmp_path):
     assert fh.churn["tests/unit/test_app.py"] == 1
 
 
-def test_main_json_meta(tmp_path, capsys):
-    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
-    run_main(repo, "--warn", "--json")
-    data = json.loads(capsys.readouterr().out)
-    assert data["meta"]["repo"].endswith("repo")
-    assert "thresholds" in data["meta"]
-    assert data["meta"]["thresholds"]["max_complexity"] == 15
-    # Issue #23: the meta names the diff base AND its resolution state, so
-    # a consumer can tell `in_diff: false` = "not in your diff" from
-    # "base unresolved" (make_repo's .git is an empty dir — never resolves)
-    assert data["meta"]["base_ref"] == "origin/main|main"
-    assert data["meta"]["diff_state"] == "unresolved"
 
 
 def test_main_exit_codes(tmp_path, capsys):
@@ -1217,13 +1143,16 @@ def test_main_baseline_ack(tmp_path, capsys):
     assert "acknowledged in baseline" in out
 
 
-def test_main_update_baseline(tmp_path):
+def test_main_json_meta(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
-    baseline = tmp_path / "lucidlint.json"
-    assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
-    assert baseline.exists()
-    keys = json.loads(baseline.read_text())["actions"]
-    assert keys and "swallow:houses/app.py" in keys[0]  # swallow has its own display bucket
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    assert data["meta"]["repo"].endswith("repo")
+    assert "thresholds" in data["meta"]
+    assert data["meta"]["thresholds"]["max_complexity"] == 15
+    # the diff feature is gone — the meta names no base and no diff state
+    assert "base_ref" not in data["meta"]
+    assert "diff_state" not in data["meta"]
 
 
 
