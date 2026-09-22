@@ -1988,10 +1988,81 @@ struct AnchorClump {
     pairs: Vec<(String, String)>,
 }
 
+/// The class whose declared fields account for EVERY clump parameter —
+/// exact field names, or derived properties (`unit` -> `scale.unit` when
+/// the field `scale: PageScale` is annotated with a class that declares
+/// `unit`). Returns (class name, per-param read path on the class) for the
+/// message; None when no class accounts for the whole clump (the fallback
+/// message stays "split out a class"). Issue #22: a latent class the tool
+/// already knows must be suggested BY NAME, not re-invented — inventing a
+/// verb-named class is the wrong fix review rejects on the noun principle.
+fn class_for_clump(classes: &[&StmtClassDef], params: &[String]) -> Option<(String, Vec<String>)> {
+    let declared: Vec<(String, std::collections::HashSet<String>)> = classes
+        .iter()
+        .map(|c| {
+            let fields: std::collections::HashSet<String> =
+                class_field_names(c).iter().map(|(f, _)| f.clone()).collect();
+            (c.name.to_string(), fields)
+        })
+        .collect();
+    // best = (exact matches, covered params, source order, name, reads)
+    let mut best: Option<(usize, usize, usize, String, Vec<String>)> = None;
+    for (ci, c) in classes.iter().enumerate() {
+        let fields = class_field_names(c);
+        let mut reads: Vec<String> = Vec::new();
+        let mut exact = 0usize;
+        let mut ok = true;
+        for p in params {
+            if fields.iter().any(|(f, _)| f == p) {
+                reads.push(p.clone());
+                exact += 1;
+            } else {
+                // derived: p is a member of some field's annotated class
+                let derived = fields.iter().find_map(|(f, ty)| {
+                    let ty = ty.as_deref()?;
+                    if declared.iter().any(|(n, attrs)| n == ty && attrs.contains(p)) {
+                        Some(format!("{f}.{p}"))
+                    } else {
+                        None
+                    }
+                });
+                match derived {
+                    Some(path) => reads.push(path),
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        let score = (exact, reads.len(), ci);
+        let better = match &best {
+            Some((be, bc, bi, ..)) => {
+                score.0 > *be || (score.0 == *be && (score.1 > *bc || (score.1 == *bc && score.2 < *bi)))
+            }
+            None => true,
+        };
+        if better {
+            best = Some((score.0, score.1, score.2, c.name.to_string(), reads));
+        }
+    }
+    best.map(|(_, _, _, name, reads)| (name, reads))
+}
+
 /// Three or more module functions sharing the same unordered parameter
 /// pair — the pair travels together, so it is a data clump; introduce a
 /// parameter object.
 pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
+    let classes: Vec<&StmtClassDef> = body
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::ClassDef(c) => Some(c),
+            _ => None,
+        })
+        .collect();
     let mut funcs: Vec<(&StmtFunctionDef, Vec<String>)> = Vec::new();
     for s in body {
         let Stmt::FunctionDef(f) = s else { continue };
@@ -2051,6 +2122,31 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
             .collect::<Vec<_>>()
             .join(", ");
         let pair_word = if group_pairs.len() == 1 { "pair" } else { "pairs" };
+        let mut params: Vec<String> = Vec::new();
+        for (a, b) in &group_pairs {
+            params.push(a.clone());
+            params.push(b.clone());
+        }
+        params.sort();
+        params.dedup();
+        // a clump whose parameter set is accounted for by an existing
+        // class's fields gets BOTH directions: fold into that class, or —
+        // the clump may be a legit subset of the class that travels on its
+        // own — its own class (a domain noun for the subset)
+        let fix_direction = match class_for_clump(&classes, &params) {
+            Some((class_name, reads)) => {
+                let reads_text = reads
+                    .iter()
+                    .map(|r| format!("{class_name}.{r}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "either make these functions methods of {class_name} (the state reads as {reads_text}), \
+                     or give the clump its own class named with a domain noun (a subset that travels together may be its own value)"
+                )
+            }
+            None => "split out a class per clump, each named with a domain noun".to_string(),
+        };
         state.findings.push(Finding {
             col: 0,
             file: state.file.to_string(),
@@ -2061,7 +2157,7 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
             // each listed pair has its OWN >= 3 functions — do not claim
             // one function set shares them all (review-bot, PR #15)
             message: format!(
-                "{names_count} functions near here ({names}) sit in data clumps: the parameter {pw} {pairs} — split out a class per clump, each named with a domain noun",
+                "{names_count} functions near here ({names}) sit in data clumps: the parameter {pw} {pairs} — {fix_direction}",
                 names_count = names.len(),
                 names = names.join(", "),
                 pw = pair_word,

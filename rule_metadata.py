@@ -261,8 +261,12 @@ CATALOG = RuleCatalog([
          display_name="wide-tuple → latent-class", display="latent-class"),
     Rule("data-clump", "fail", "architecture", "Python",
          ">=3 module functions sharing the same parameter pair — the pair "
-         "travels together, so it is a data clump; introduce a parameter "
-         "object that holds it.",
+         "travels together, so it is a data clump. Two directions: give the "
+         "clump its own class named with a domain noun (a subset of a "
+         "larger record may legitimately be its own value), or — when an "
+         "existing class's fields already account for the clump (exact "
+         "names, or derived properties like `scale.unit`) — make the "
+         "functions methods of that class.",
          display_name="data-clump → latent-class", display="latent-class",
          fix_name_required=True),
     Rule("feature-envy", "fail", "architecture", "Python",

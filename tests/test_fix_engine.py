@@ -746,6 +746,59 @@ def test_extract_method_descends_into_loop_body(tmp_path):
     assert ns["grade_all"](rows, "debug") == ["A+", "x", "D+", "y"]
     assert ns["grade_all"](rows, "quiet") == ["A+", "D+"]
 
+def test_extract_method_refuses_seam_with_block_local_accumulator(tmp_path):
+    """Issue #21: a block-local accumulator (created inside the extracted
+    block, filled, and read AFTER it in the same loop iteration) must not be
+    discarded — the engine cannot wire the value back, so the seam must
+    refuse rather than emit a bare call that leaves an undefined name
+    (F821). Regression: the same-container after-read was skipped as
+    'iteration-scoped', so `_segments_for(lines)` replaced the accumulator
+    creation and the later `for segment in segments` broke. The `continue`
+    in the loop body is what forces the seam down into the inner chunk
+    (the whole-loop seam is a control-flow refusal)."""
+    src = (
+        "def split(shapes, lines, unit):\n"
+        "    out = []\n"
+        "    for shape in shapes:\n"
+        "        segments = []\n"
+        "        for y in sorted(lines):\n"
+        "            nearest = y % max(len(lines), 1)\n"
+        "            if segments and segments[-1][0] == nearest and y - segments[-1][2] <= 2:\n"
+        "                segments[-1][2] = y\n"
+        "            elif segments and segments[-1][0] != nearest and y % 3 != 0:\n"
+        "                segments[-1] = [segments[-1][0], segments[-1][1], y]\n"
+        "            else:\n"
+        "                segments.append([nearest, y, y])\n"
+        "        groups = []\n"
+        "        for segment in segments:\n"
+        "            if groups and not segment[1] > shape:\n"
+        "                groups[-1][2] = segment[2]\n"
+        "            else:\n"
+        "                groups.append(list(segment))\n"
+        "        if len(groups) == 1:\n"
+        "            out.append(groups)\n"
+        "            continue\n"
+        "        for group in groups:\n"
+        "            if len(group) >= 3 and group[0] <= shape:\n"
+        "                out.append(group)\n"
+        "    return out\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    new_source, _ = _propose_finding(
+        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="segments_for")
+    )
+    if new_source is None:
+        return  # refusal is the honest contract — the value cannot be wired back
+    # any seam the engine DOES take must preserve behavior: the fixed source
+    # runs and matches the original (a dropped accumulator raises NameError)
+    before, after = {}, {}
+    exec(compile(src, "before.py", "exec"), before)
+    exec(compile(new_source, "after.py", "exec"), after)
+    args = ([0, 5, 2], [1, 5, 3, 8], 1.0)
+    assert after["split"](*args) == before["split"](*args)
+
 
 def test_extract_method_keyword_args_are_not_phantom_params(tmp_path):
     """The 2026-08-16 self-fix regression: a keyword-argument name

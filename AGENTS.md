@@ -13,6 +13,12 @@ fetch a tool at run time, pinned to a tag — never `main`.
 - `make lucidlint REPO=<path>` — run the gate on a repo (default `..`)
 - `make coverage` — pytest with coverage report (XML for CI)
 
+## Before you edit code
+
+- Read `docs/coding-standards.md` and `docs/testing-standards.md` first —
+  they bind THIS repo's code too. Tests come before the code (TDD: a
+  failing test first, then the change that makes it pass).
+
 Toolchain: uv, ruff (E,F,I,UP,B,SIM,N, no ignores), pyrefly with a
 both-direction baseline lock (`scripts/pyrefly-lock.py`; refresh with
 `make typecheck-update-baseline`). Raw git hooks in `scripts/`, installed

@@ -21,8 +21,6 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, cast
 
-import pygit2
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import lucidlint as ch
 
@@ -172,7 +170,6 @@ def gate_args() -> argparse.Namespace:
         include_tests=False,
         baseline=None,
         update_baseline=False,
-        base="",
         json=False,
         refresh_coverage=False,
         warn=False,
@@ -277,24 +274,24 @@ def test_file_history_timeout_and_nonzero(tmp_path):
     assert fh.churn == {}  # nonzero exit degrades to empty history
 
 
-def test_changed_files_branch_diff_and_no_git(tmp_path):
-    repo = materialize_test_repo(tmp_path)
-    git = pygit2.Repository(str(repo))
-    # pin "other" at HEAD, then commit a change on main (the HEAD side of the
-    # three-dot diff) — real pygit2 ops on the materialized fixture
-    head = git.get(git.head.target)
-    assert head is not None
-    git.branches.create("other", head.peel(pygit2.Commit))
-    (repo / "houses" / "x.py").write_text("def g():\n    pass\n")
-    git.index.add_all()
-    tree = git.index.write_tree()
-    sig = pygit2.Signature("Test", "test@example.com")
-    git.create_commit("HEAD", sig, sig, "add x on main", tree, [git.head.target])
-    assert ch.changed_files(repo, "other") == {"houses/x.py"}
-    # no .git at all degrades to empty
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    assert ch.changed_files(plain, "main") == set()
+def test_gate_output_has_no_diff_talk(tmp_path, capsys):
+    """The diff marker was removed (issue #23 discussion: the baseline owns
+    newness; a diff has no role in the output). The summary never mentions a
+    diff or --base, and the JSON meta carries no diff state; the baseline
+    honesty clause — without one, nothing is acknowledged — is kept."""
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    rc = run_main(repo, "--warn")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "in your diff" not in out
+    assert "diff base" not in out
+    assert re.search(r"--base\b", out) is None  # --baseline legitimately contains the prefix
+    assert "no baseline — cannot tell what is new" in out
+    run_main(repo, "--warn", "--json")
+    meta = json.loads(capsys.readouterr().out)["meta"]
+    assert "diff_state" not in meta and "base_ref" not in meta
+    assert "in_diff" not in json.dumps(meta)
+
 
 
 # --------------------------------------------------------------------------- scoring/merge/baseline units
@@ -326,7 +323,7 @@ def test_merge_warn_into_fail_target():
     # same target (file+function+kind-group) but a different line — distinct dedupe keys,
     # same merge key: the merge path (not the dedupe path) must handle the warn
     warn = ch.Action("complexity", "warn", "houses/app.py", 5, "alpha", "m2", 1, 0, "", "", note="n2", raw=1)
-    out = ch._GateRunner(Path("."), gate_args())._dedupe_merge([fail, warn], set())
+    out = ch._GateRunner(Path("."), gate_args())._dedupe_merge([fail, warn])
     assert len(out) == 1
     assert out[0].severity == "fail"  # a warn merged into a fail target keeps the gate
     assert "n2" in out[0].note
@@ -575,13 +572,27 @@ def test_render_actions_acks(tmp_path, capsys):
     assert "acknowledged in baseline (1): houses/app.py:1" in capsys.readouterr().out
 
 
-def test_render_actions_names_the_suppression_signal(capsys):
-    """A finding whose display kind differs from its marker kind says so —
-    an agent must not have to guess `latent-class` for a data-clump."""
+def test_render_latent_class_variant_shows_no_suppression_recipe(capsys):
+    """Issue #21 feedback: a latent-class finding is a class to CREATE, not
+    something to suppress — the report must not offer a suppression recipe
+    for the family variants (the finding message names the fix direction;
+    `ignore latent-class <why>` family suppression is RULES.md's business,
+    and --json still carries the raw signal)."""
     a = ch.Action("latent-class", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
     a.signal = "data-clump"
     ch._render_file_group("x.py", [a])
-    assert "suppress with: data-clump" in capsys.readouterr().out
+    assert "suppress with:" not in capsys.readouterr().out
+
+
+def test_render_standard_bucket_keeps_the_suppression_signal(capsys):
+    """A finding collapsed to the `standard` catch-all has NO display-bucket
+    suppression identity — the raw signal is the only keyword that works, so
+    the report must still name it (the display kind `standard` cannot be
+    suppressed)."""
+    a = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a.signal = "inline-import"
+    ch._render_file_group("x.py", [a])
+    assert "suppress with: inline-import" in capsys.readouterr().out
 
 
 def test_render_actions_omits_signal_when_it_matches(capsys):
@@ -1080,7 +1091,8 @@ def test_file_history(tmp_path):
     assert fh.churn["tests/unit/test_app.py"] == 1
 
 
-# --------------------------------------------------------------------------- the gate
+
+
 def test_main_exit_codes(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     assert run_main(repo) == 1
@@ -1131,15 +1143,6 @@ def test_main_baseline_ack(tmp_path, capsys):
     assert "acknowledged in baseline" in out
 
 
-def test_main_update_baseline(tmp_path):
-    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
-    baseline = tmp_path / "lucidlint.json"
-    assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
-    assert baseline.exists()
-    keys = json.loads(baseline.read_text())["actions"]
-    assert keys and "swallow:houses/app.py" in keys[0]  # swallow has its own display bucket
-
-
 def test_main_json_meta(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     run_main(repo, "--warn", "--json")
@@ -1147,6 +1150,11 @@ def test_main_json_meta(tmp_path, capsys):
     assert data["meta"]["repo"].endswith("repo")
     assert "thresholds" in data["meta"]
     assert data["meta"]["thresholds"]["max_complexity"] == 15
+    # the diff feature is gone — the meta names no base and no diff state
+    assert "base_ref" not in data["meta"]
+    assert "diff_state" not in data["meta"]
+
+
 
 
 def test_main_priority_percentile(tmp_path, capsys):

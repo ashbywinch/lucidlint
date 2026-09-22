@@ -2973,6 +2973,33 @@ mod tests {
             clumps[0].message
         );
     }
+    #[test]
+    fn data_clump_presents_both_fold_and_own_class() {
+        // Issue #22: the clump's parameter set is accounted for by an
+        // existing class's fields (exact `lines`, derived `unit` via
+        // `scale: PageScale` whose class declares `unit`). The suggestion
+        // presents BOTH directions: fold into that class (never re-invent a
+        // verb-named class review rejects on the noun principle), OR give
+        // the clump its own class — a subset of the larger record may be a
+        // legit value that travels on its own. The no-match fallback
+        // ("split out a class per clump") is not the matched message.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/data_clump_suggests_existing_class__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "data-clump").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("methods of Writing"), "{}", r[0].message);
+        assert!(
+            r[0].message.contains("its own class named with a domain noun"),
+            "{}",
+            r[0].message
+        );
+        assert!(
+            !r[0].message.contains("split out a class per clump"),
+            "{}",
+            r[0].message
+        );
+    }
 
     #[test]
     fn per_buffer_scan_does_not_stale_repo_wide_markers() {

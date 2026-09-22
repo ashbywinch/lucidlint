@@ -2531,6 +2531,28 @@ class _InsertExtractedFn(cst.CSTTransformer):
         )
 
 
+def _for_target_names(node) -> set[str]:
+    """The names a for-loop's target binds (single name, tuple/starred
+    destructuring) — the ONLY names the loop statement re-binds each pass.
+    A container that is not a for-loop binds nothing here."""
+    if not isinstance(node, cst.For):
+        return set()
+    return _target_bound_names(node.target)
+
+
+def _target_bound_names(t) -> set[str]:
+    """Recursively collect the names an assignment target binds."""
+    if isinstance(t, cst.Name):
+        return {t.value}
+    if isinstance(t, (cst.Tuple, cst.List)):
+        out: set[str] = set()
+        for el in t.elements:
+            elem = el.value if isinstance(el, cst.StarredElement) else el
+            out |= _target_bound_names(elem)
+        return out
+    return set()
+
+
 class _FnBodyState:
     """The extract-method analysis state: the target function's body
     statements with per-statement spans, first-use contexts, writes, and
@@ -2616,25 +2638,30 @@ class _FnBodyState:
 
     def _window_has_outvars(self, i: int, j: int, writes_all: set[str]) -> bool:
         """Does any name written in the window get read after it — in the
-        SEQUENTIAL sense? Reads inside the window's own container (a loop's
-        other body statements) are iteration-scoped and not out-variables:
-        the loop target re-binds each pass. Only reads in LATER flat
-        positions outside the window's container count."""
+        SEQUENTIAL sense? A read in a LATER statement of the window's own
+        container is a real same-iteration dependency — the extracted helper
+        cannot hand its locals back — EXCEPT for the container loop's OWN
+        targets, which the loop statement re-binds each pass (a `for shape`
+        target read after a window inside the body sees the loop's binding,
+        not the window's). Only reads in LATER flat positions outside the
+        window's container are iteration-scoped.
+        (0c8bedc's blanket skip exempted EVERY same-container after-read; it
+        let a block-local accumulator be extracted and dropped — issue #21.)"""
         container = self.flat[i][1]
         container_node = self.nodes.get(container)
-        loop_scoped = isinstance(container_node, (cst.For, cst.While))
+        re_bound = _for_target_names(container_node)
         window_subtree = set(self._window_sids(i, j))
         after: set[str] = set()
         for k in range(j + 1, len(self.flat)):
             sid = self.flat[k][0]
             if sid in window_subtree:
                 continue  # inside the window's own subtree, not sequential-after
-            if loop_scoped and self.flat[k][1] == container:
-                continue  # a loop's later body stmts re-bind per iteration
+            same_container = self.flat[k][1] == container
             for dsid in self._subtree_sids(sid):
                 for name, ctx in self.first_use[dsid].items():
-                    if ctx == "read":
-                        after.add(name)
+                    if ctx == "read" and same_container and name in re_bound:
+                        continue  # the loop re-binds it each pass — no dependency
+                    after.add(name)
         return bool(writes_all & after)
 
     def best_seam(

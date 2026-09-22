@@ -19,10 +19,12 @@ How the product in `docs/PRD.md` is built. Requirements by name: R1–R20
 
 - **`Action`** — one finding: kind, severity (fail/warn/ack), file, line,
   function, message, metric, churn, last_modified, tested, note, raw,
-  priority, in_diff, kinds (merged), callers. The wire format is produced at
+  priority, kinds (merged), callers. The wire format is produced at
   the render boundary (`asdict`), never claimed as a type. Severity: "fail"
   (blocks the gate), "warn" (reported, never fails — carries the noisy
-  signals), "ack" (locked in the baseline).
+  signals), "ack" (locked in the baseline). New vs acknowledged is the
+  baseline's question — the report carries no diff notion; the baseline
+  owns "what is new".
 - **`LatentFinding`** — one unextracted-class/stdandard signal (signal,
   function, line, metric, detail, severity) before it becomes an Action;
   severity defaults to "fail", warn checks set "warn".

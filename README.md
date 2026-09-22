@@ -165,7 +165,6 @@ python3 lucidlint.py --repo . --baseline lucidlint.json || exit 1
 function, message, metric, churn, priority) for other tooling.
 
 ### First run and a baseline
-
 ```bash
 lucidlint --repo .                 # see today's debt
 lucidlint --repo . --update-baseline --baseline lucidlint.json   # acknowledge it
