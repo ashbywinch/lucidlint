@@ -147,17 +147,23 @@ fix the stale `partition` description in the same catalog edit.
   - **PACKAGE layout** — convert `mod.py` -> `mod/` package: `<class>.py` per public
     class (statically-computed import set) and `__init__.py` re-exporting every class
     (`from .row import Row`); `from mod import Row` / `mod.Row` keep resolving with
-    ZERO caller rewrites. Shared module-level constants move into `__init__.py`.
+    ZERO caller rewrites. (No constants in `__init__.py` — third-pass 5: they move
+    into the owning class.)
   - **FLAT layout** — the issue's original spec: `<class>.py` siblings next to the
     module; rewrite `from old import Cls` -> `from new import Cls` and `old.Cls` ->
     `new.Cls` repo-wide to a fixed point.
-  DECISION RULE (correctness): compute cross-class cohesion — any class referencing
-  another class's members, or shared module-level constants used by >=2 classes. The
-  stem is a CONTAINER word (utils, helpers, models, widgets, common, core, misc, base,
-  services, tools, lib) or not.
-  - cohesive group AND non-container stem -> the stem is a domain noun owning the
-    classes as its members -> **PACKAGE**;
-  - otherwise (independent concepts sharing a file, or a container stem) -> **FLAT**.
+  DECISION RULE (correctness, 2026-09-29 — cohesion ONLY, no container-word test):
+  cluster the classes by edges = cross-class member references OR shared class-level
+  attributes (module-level constants do not exist as a signal — third-pass 3 forbids
+  them). The stem's part of speech is irrelevant; what matters is whether the CLASSES
+  belong together.
+  - all public classes form ONE cluster -> the stem names the whole module's cluster
+    -> **PACKAGE** (named by the stem);
+  - a cohesive SUBSET clusters while others are independent -> that subset ->
+    **PACKAGE**, named via `--name <package>` (never flat-for-convenience; the name
+    is the commitment);
+  - independent singletons (no edges anywhere) -> **FLAT**, each file named after its
+    class.
   (The existing "closely related models" carve-out in the message stays.)
   REFUSE (refusals are transform-safety only — the fixer declines with a reason and
   the agent applies by hand): an existing `mod/` directory when flat is also
@@ -392,7 +398,8 @@ Phase text where they conflict.
    `wide-tuple`. Message directives NOT changed this round; the flag-without-directive
    state is accepted (data-clump precedent, verified: flag set, message prose-only).
 2. **Package layout never flattens for convenience.** A cohesive sub-cluster (subset
-   shares constants/class attributes or cross-references) also gets a package; when
+   holds cross-class member references or shared class-level attributes) also gets a
+   package; when
    the package name is not derivable (sub-cluster), the split fixer takes it via
    `--name <package>` — the "name is the commitment" mechanism — and DECLINES when
    the name is absent. Flat layout ONLY for non-cohesive modules (independent
