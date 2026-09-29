@@ -36,6 +36,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | How the tool is built | `docs/TECHSPEC.md` |
 | Phased delivery and gates | `docs/PLAN.md` |
 | Suppression-guardrails workstream (decisions, remaining steps, anti-goals) | `docs/plan-suppression-guardrails.md` |
+| Plan for resolving issues #26–#34 (branch `fix/github-issues-26-34`) | `docs/plans/plan-github-issues-26-34.md` |
 | Coding standards (canonical + language conventions) | `docs/coding-standards.md` |
 | Testing standards | `docs/testing-standards.md` |
 | UX standards | `docs/ux-standards.md` |
