@@ -43,15 +43,25 @@ verification are called out below. Judgment calls pending user ruling live in th
 
 New families (severities per Open decisions 1 and 5):
 
-| Issue | Kind | display value | Fix kind |
+| Issue | Kind | display_group | Fix kind |
 |---|---|---|---|
-| #26 | `duplicate-module` | `display=None` | none (reconciliation is judgment) |
-| #27 | `static-husk` | `display=None` | none |
-| #27 | `delegating-husk` | `display=None` | dissolve-husk (rewire callers) |
-| #28 | `single-use-class` | `display=None` | none (a question, not a transform) |
-| #30 | `forwarding-chain` | `display=None` | collapse-chain (multi-file, identity-gated) |
+| #26 | `duplicate-module` | `None` (standalone — its own name is the group) | none (reconciliation is judgment) |
+| #27 | `static-husk` | `None` | none |
+| #27 | `delegating-husk` | `None` | dissolve-husk (rewire callers) |
+| #28 | `single-use-class` | `None` | none (a question, not a transform) |
+| #30 | `forwarding-chain` | `None` | collapse-chain (multi-file, identity-gated) |
 | #31 | extend `class-module` (no new kind) | existing (`"standard"`) | split-module (new multi-file fixer) |
-| #32 | `closure-cluster` | `display="latent-class"` (FAMILY_VARIANTS is DERIVED, not joined) | none (extraction refused by design) |
+| #32 | `closure-cluster` | `"latent-class"` (FAMILY_VARIANTS is DERIVED, not joined) | none (extraction refused by design) |
+
+Naming (2026-09-29): the bucket field is `display_group` — `None` means the rule
+belongs to no display group and stands alone under its own kind; `"standard"` is the
+catch-all group; any other value is a family group (`latent-class`, `docs`,
+`loop-pipeline`). The RULES.md-section field yields the name: `Rule.display_group`
+(section: architecture/style/...) becomes `Rule.section`; `Rule.display` (bucket)
+becomes `Rule.display_group`. Field-rename touches: the catalog rows' kwarg names,
+`gen-rules.py` (bucket = display_group or kind; group indexing by section), the
+`_CONFIG_GROUP` map, RULES.md static text, and the generated artifacts via `make
+rules`.
 
 Also register `Rule.judgement`-free stamp: judgement is DERIVED from the existing
 `fix_name_required` flag (ruling 2026-09-29, Open decisions 5 — no new metadata), and
