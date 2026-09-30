@@ -710,3 +710,84 @@ links to its fix; "requires a name" is a property of the fix's parameter list.
    params — one place; a fix taking `--name` tomorrow makes its findings judge-true
    with no second registration; the drift test fails on any directive/fix
    mismatch.
+## Sixth-pass — third review resolutions (2026-09-30) — supersede where conflicts
+
+1. **fix_kind is structured data (BQ1).** The directive has no parameters of its
+   own — the FIX KIND carries them, and the scanner already chooses the fix kind
+   per finding (shape-routing: complexity -> extract-method | dispatch-registry |
+   rule-table) and renders it into the directive tail. Emit that value as a
+   structured finding field `fix_kind` (schema 4, same wire change as
+   `seam_members`). Judge-true := `Fix(fix_kind).params` declares a required `name`
+   param — per finding, on the kind actually offered. Notice trigger and stamps
+   read the same field. The directive is the agent-facing rendering of that value;
+   no parsing, no linked-vs-offered divergence. The registry registers every fix
+   kind the scanner can offer, including dispatch-registry and rule-table with
+   their real params. DRIFT GATE (reworded): a directive, when present, names a
+   REGISTERED fix kind; offer-equals-fix stands (a directive exists iff a fixer
+   exists); the "directive equals Rule.fix" equality is dropped — Rule.fix remains
+   the default link for rules without shape-routing.
+2. **Registry uses the engine's real names (BQ2).** vague-name's fix kind is
+   `vague-name` (fixer fix_rename) — NOT "rename"; `feature-envy` is registered
+   (directive `— fix: feature-envy`); the full mechanical set is registered by its
+   real kinds (loop-pipeline, loop-sequence, positional-literals,
+   stale-suppression, noop-statement, unreachable, duplicate-def,
+   restating-docstring, duplicate-block, undeclared-attribute, magic-number,
+   tuple-record, long-param-list, extract-class, extract-record-class,
+   extract-module). `FixParam("name", required=True)` on: extract-method,
+   extract-class, extract-record-class, extract-module, vague-name, tuple-record,
+   long-param-list, magic-number, loop-hoist, feature-envy.
+3. **extract-class fixer covers the clump shapes (BQ3 — approved 2026-09-30).**
+   Phase 3 extends `fix_extract_class` to data-clump (shared parameter pair ->
+   class), partition (method group -> class), wide-tuple (tuple annotation ->
+   record), test-first per shape; the `— fix: extract-class` directives on those
+   three kinds land in the same phase. An advertised directive whose fixer cannot
+   clear its finding is a hard failure (test_fix_directives.py). The Phase 4 #33(a)
+   acceptance "scanner message text is byte-identical" is SUPERSEDED: machine
+   tails are amended by this item; message prose stays untouched.
+4. **seam_members wire (BQ4).** Always emitted, empty list on non-carriers
+   (serde_json::json! cannot omit a key; the reader maps the field directly — no
+   branch, no `.get` default issue since it is always present). Content = the
+   CLUMP IDENTITY: data-clump = the shared parameter-pair names (fingerprint,
+   folder, ... — the element that overlaps across findings at DIFFERENT functions,
+   which is the issue's marquee merge case); partition = the method-group member
+   names; strewing = the function names.
+5. **Atomic landing (BQ5).** Phase 1 catalog rows and Phase 2 emissions land in
+   ONE commit; `make rules` runs after both (gen-rules.py validate() raises
+   SystemExit on registered-but-unemitted kinds — "expected red mid-round" covers
+   drift/checks, not generation abort). The three new fixers (dissolve-husk,
+   collapse-chain, split-module) register `fix=None` in Phase 1; Phase 3 sets
+   their `fix=` links when the fixers land; the drift gate is knowingly red for
+   those directives (class-module's `— fix: split-module`, delegating-husk's
+   `— fix: dissolve-husk`) from Phase 2 until Phase 3.
+6. **Splits leave no module-level constants (BQ6 — supersedes R11's constant
+   sentences).** No residual module-level value in either layout. FLAT residual =
+   module-level functions, private classes, stem-matching class ONLY; every
+   module-level constant moves into the class that uses it (class attribute)
+   during the split. PACKAGE `__init__.py` holds re-exports + private classes
+   only — no constants; the "(constants-first ordering)" refusal parenthetical is
+   deleted; `from mod import CONST` from class files does not survive. The
+   deleted-if-empty rule stays.
+7. **split-module's conditional name (BQ7).** `Fix("split-module",
+   params=(FixParam("name", required=False),))` — not judge-true via the
+   required-param rule; no global CLI --name gate for it. The FIXER declines when
+   the package name is not derivable and none was supplied: "name the package with
+   a domain noun" (the naming notice still governs the report when other judged
+   findings exist).
+8. **Smaller corrections**: (a) #33(b) trigger wording = "any finding whose
+   `Fix(fix_kind).params` declares a required name"; (b) Second-critique R6's
+   mechanism sentence (fix_kind_of/NAME_REQUIRED_KINDS render-time lookup) is
+   superseded by items 1-2; R6's directive-addition sentence is retained via item
+   3; (c) Phase 1.2 "existing name-required rows" -> "rows that must BECOME
+   judge-true via their fix links: large-function fix="extract-method",
+   partition/strewing/wide-tuple fix="extract-class""; (d) #34 grouping covers
+   data-clump/partition/strewing this round; feature-envy, tuple-record, wide-tuple
+   and record-shape are deliberately out of scope; (e) the `Finding` struct lives
+   at scanner/src/main.rs:46 (rustscan.rs shares it) — not common.rs; (f) the
+   multi-file `deletes` fires only when a module ends up empty AND no import
+   statement names it anywhere in the repo; collapse-chain and split-module are
+   wired into _STRUCTURAL_FIXERS/KIND_ALIASES/fix-command acceptance alongside
+   dissolve-husk (R10); (g) the partition description fix = ONE catalog-row edit,
+   regenerated into RULES.md; (h) the Phase 1 table gains a SEVERITY column
+   (fail/warn per OD1 and the rulings: duplicate-module fail, forwarding-chain fail
+   (boundary-gated), closure-cluster warn, process-class fail, dead-class arm warn,
+   husks warn); (i) the "byte-identical acceptance" is superseded per item 3.
