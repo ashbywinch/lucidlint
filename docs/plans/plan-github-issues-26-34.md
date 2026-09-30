@@ -5,6 +5,12 @@ verified against the actual code before acceptance; findings that failed
 verification are called out below. Judgment calls pending user ruling live in the
 "Open decisions" section; rulings already made are recorded there as decided.
 
+WRITING RULE (2026-09-30): every Phase bullet is a task, not a concept — state
+the concrete action (which file/function to change, what to add/emit/read, what
+the acceptance check is), then the constraints. A bullet that only names data or
+intent without the action is a finding; rewrite it. (docs/writing-documentation.md
+task-shaped sections.)
+
 ## Verified facts (grounding)
 
 - `duplicate` (checks.rs:5597) pairs **functions** only — modules/classes invisible (#26 real).
@@ -132,14 +138,29 @@ fix the stale `partition` description in the same catalog edit.
   other's classes) — NO finding, NO message. (No finding means no message: the
   flagged finding fires only in the coupled case, where the boundary rationale does
   not apply and no caveat belongs in its message.)
-- **#34 structured seam** — new finding field carrying clump members: data-clump's
-  function names + parameter pairs, partition's groups, strewing's names. NO message
-  parsing (agreed seam source). NO compatibility seam: the scan contract bumps to
-  schema_version 4 (ruling 2026-09-29 — backwards compatibility is NOT supported); the
-  field is part of the new contract, and the orchestrator's existing strict version
-  check (lucidlint.py:825) rejects old-schema output loudly — never silently
-  defaulted. Bump touches: the version check constant, its pinning test, and any
-  schema doc.
+- **#34 structured seam — the implementation steps**:
+  1. In the Rust scanner, add a `seam_members: Vec<String>` field to the `Finding`
+     struct (scanner/src/common.rs). In `data_clump_findings` (checks.rs ~2150),
+     `partition_findings` (~6232), and `strewing_findings` (~2790), populate it:
+     data-clump = the function names currently joined into the message's names list
+     (plus each pair's member names); partition = the method names in the disjoint
+     groups; strewing = the function names sharing the leading parameter. All other
+     emitters leave it empty.
+  2. Serialize it: `main.rs`'s per-finding `json!` block adds
+     `"seam_members": <field>`; no other field changes.
+  3. Orchestrator (lucidlint.py): bump the scan contract check from 3 to 4
+     (lucidlint.py:825 `expected 3`), update its pinning test (test_lucidlint.py
+     pins schema_version 3 inline), and fix the stale "schema 2" mentions in
+     docs/TECHSPEC.md and docs/PLAN.md. The reader maps `seam_members` into the
+     Action; required on the three carrier kinds (data-clump/partition/strewing),
+     absent elsewhere — branch on the kind; no `.get` default (no-backwards-compat
+     ruling).
+  4. Acceptance: a scan of a repo containing a data-clump emits its findings with
+     non-empty `seam_members` in `--json`; the grouping layer (Phase 4 #34) groups
+     on that field.
+  Constraints: NO message parsing — the seam data comes from this field, never from
+  scraping the message text. The schema bump is deliberate (backwards compatibility
+  is not supported); old-schema output must be rejected loudly, not defaulted.
 
 ## Phase 3 — Fix engine (Python, libcst; fix.rs for Rust where shape applies)
 
