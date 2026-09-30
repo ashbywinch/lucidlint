@@ -8,8 +8,9 @@ verification are called out below. Judgment calls pending user ruling live in th
 ## Verified facts (grounding)
 
 - `duplicate` (checks.rs:5597) pairs **functions** only — modules/classes invisible (#26 real).
-- `class_module_findings` (checks.rs:2675) returns when `classes.len() != 1` — multi-class
-  modules with no matching stem pass silently (#31 real; fixture `class_module_matching_name_and_multi_class_pass` pins it).
+- `class_module_findings` (checks.rs:2675) returns when `classes.len() != 1` — a
+  multi-class module never checks whether its classes live in files named after them
+  (#31 real; fixture `class_module_matching_name_and_multi_class_pass` pins it).
 - extract-method refuses nested targets (`fix_engine.py:260`, `_is_nested_target`) —
   nested-closure shape is invisible to the fix engine (#32 detection gap real).
 - `god_class_findings` (checks.rs:2524) is pure size (warn): >=20 methods or >=12 over >=250
@@ -98,13 +99,18 @@ fix the stale `partition` description in the same catalog edit.
   existing reference machinery; test-used is not dead).
 - **#31 class-module multi** — remove the `classes.len() != 1` returns (also the
   DUPLICATED `__init__.py`/len block at checks.rs:2687-2693 — a merge artifact, clean
-  it while here); add condition: >=2 public classes AND no class name matches the stem
-  (case-insensitive, plural-underscore form ok). Keep tool-script/test/exceptions.
-  fail (matches existing). Fix directive: `— fix: split-module`. Fixture migration:
-  `class_module_matching_name_and_multi_class_pass` (main.rs:3485) is INVERTED into
-  the new arm's finding test; add a pass fixture where a class name DOES match the
-  stem (PlanCritique BQ6 — the plan's original evidence fixture contradicts its own
-  rule).
+  it while here); add condition: module (non-test, not `__init__`) with >=2 public
+  classes where AT LEAST ONE public class's name doesn't match the stem
+  (case-insensitive, plural-underscore form ok). A matching class EXCUSES NOTHING
+  (ruling 2026-09-30): the finding names the MISPLACED classes — a class belongs in
+  a file named after it, regardless of whether a sibling already matches the stem.
+  Keep tool-script/test/exceptions. fail (matches existing). Fix directive:
+  `— fix: split-module`. Fix operates on the misplaced classes only: the stem-named
+  class (if any) STAYS in the origin module. Fixture migration:
+  `class_module_matching_name_and_multi_class_pass` (main.rs:3485, User/Team, neither
+  matches) is INVERTED into the new arm's finding test; add a PASS fixture where
+  EVERY class matches the stem (PlanCritique BQ6 — the plan's original evidence
+  fixture contradicts its own rule).
 - **#32 closure-cluster** — local-var x nested-fn bipartite graph per method; >=2
   connected components each >=2 nested fns and >=1 distinct local ⇒ cluster. Degenerate
   arm: empty-param method >=150 lines with nested defs. warn (severity ruling
@@ -160,18 +166,20 @@ fix the stale `partition` description in the same catalog edit.
   - **FLAT layout** — the issue's original spec: `<class>.py` siblings next to the
     module; rewrite `from old import Cls` -> `from new import Cls` and `old.Cls` ->
     `new.Cls` repo-wide to a fixed point.
-  DECISION RULE (correctness, 2026-09-29 — cohesion ONLY, no container-word test):
-  cluster the classes by edges = cross-class member references OR shared class-level
-  attributes (module-level constants do not exist as a signal — third-pass 3 forbids
-  them). The stem's part of speech is irrelevant; what matters is whether the CLASSES
-  belong together.
-  - all public classes form ONE cluster -> the stem names the whole module's cluster
-    -> **PACKAGE** (named by the stem);
-  - a cohesive SUBSET clusters while others are independent -> that subset ->
-    **PACKAGE**, named via `--name <package>` (never flat-for-convenience; the name
-    is the commitment);
-  - independent singletons (no edges anywhere) -> **FLAT**, each file named after its
-    class.
+  DECISION RULE (correctness — cohesion ONLY, no container-word test, 2026-09-29):
+  the split's SUBJECT is the public classes whose names don't match the stem (the
+  misplaced classes; a stem-matching class, if any, STAYS in the origin — it is
+  home, and excuses nothing for the others). Cluster the subject by edges =
+  cross-class member references OR shared class-level attributes (module-level
+  constants do not exist as a signal — third-pass 3 forbids them). The stem's part
+  of speech is irrelevant; what matters is whether the CLASSES belong together.
+  Per cluster of the subject:
+  - all misplaced classes form ONE cluster -> **PACKAGE**; named by the stem when no
+    class matches it (the stem is free), else via `--name <package>` (the stem
+    belongs to the staying class);
+  - a cohesive sub-cluster (>=2 misplaced classes, edges among them) -> **PACKAGE**
+    via `--name <package>` (never flat-for-convenience; the name is the commitment);
+  - a singleton misplaced class (no edges) -> **FLAT** file named after it.
   (The existing "closely related models" carve-out in the message stays.)
   REFUSE (refusals are transform-safety only — the fixer declines with a reason and
   the agent applies by hand): an existing `mod/` directory when flat is also
@@ -321,8 +329,9 @@ Phase text where they conflict.
    annotations count as references). No construction counting exists or is added.
 3. **#31 public + exemptions (R3)** — "public" = name not starting with `_`. The
    tool-script exemption (`has_module_fns`) applies to BOTH arms. split-module moves
-   public classes only; private classes stay in the origin (in FLAT: `mod.py` keeps
-   them; in PACKAGE: they live in `__init__.py`).
+   the MISPLACED public classes only (those whose names don't match the stem); the
+   stem-matching public class and private classes stay in the origin (in FLAT:
+   `mod.py` keeps them; in PACKAGE: they live in `__init__.py`).
 4. **#26 skeletons + matched members (R4)** — Constant token = `NAME:norm(type)`
    (numeric literals normalised, strings stripped, bools canonical). Bigrams never
    cross member boundaries. Module-class pair: a module whose non-import top-level
@@ -381,14 +390,15 @@ Phase text where they conflict.
     `— fix: dissolve-husk`; wire into _FIX_ALIASES/STRUCTURAL_KINDS + fix-command
     acceptance. Callers in test files are rewired too (repo-wide).
 11. **#31 layout fate + constants + relative imports (R11)** — FLAT: `mod.py` REMAINS
-    as the residual module (module-level functions, constants, private classes);
-    deleted iff it becomes empty; `from mod import CONST` from class files still
-    resolves; `from mod import Cls` sites rewritten. PACKAGE: `__init__.py` holds
-    constants + private classes + re-exports, constants FIRST so class-file
-    `from . import CONST` binds; the import-cycle REFUSAL covers cycles among the
-    produced class files ONLY — the __init__ re-export/constant edge is exempt by
-    construction. REFUSE package layout (fall to flat) when `mod.py` contains relative
-    imports (`from .x import ...`) — path root changes under a package.
+    as the residual module (module-level functions, constants, private classes, and
+    any stem-matching class); deleted iff it becomes empty; `from mod import CONST`
+    from class files still resolves; `from mod import Cls` sites rewritten. PACKAGE:
+    `__init__.py` holds constants + private classes + re-exports, constants FIRST so
+    class-file `from . import CONST` binds; the import-cycle REFUSAL covers cycles
+    among the produced class files ONLY — the __init__ re-export/constant edge is
+    exempt by construction. REFUSE package layout (fall to flat) when `mod.py`
+    contains relative imports (`from .x import ...`) — path root changes under a
+    package.
 12. **#32 refusal + LSP note (R12)** — Decline text: "nested target with >=2 closures
     (closure-cluster shape) — extract by hand"; the proxy being weaker than the rule
     condition is ACCEPTED and stated (the citation is a hint, not a claim the rule
