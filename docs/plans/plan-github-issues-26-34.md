@@ -133,8 +133,10 @@ Rust-shaped), is registered per Phase 1, and has a fixture in
   MESSAGE makes the fix direction explicit (2026-09-30): "Class X has no state of
   its own and only staticmethods — a namespace wearing a domain noun. The fix:
   find the state these operations work on and put it IN the class (fields + method
-  bodies reading them); if there is no such state, reconsider whether the class is
-  the correct abstraction at all — the operations may simply be functions."
+  bodies reading them); if there is no such state, the operations still belong
+  with SOME abstraction or another — possibly more than one: the class(es) that
+  own the state they work on. Finding it is the task; reconsider whether THIS
+  class is the correct abstraction."
   Exclusions (none of these fire): inherited base (state may live in the base), ABC/
   Protocol (pure interfaces), `pass`-only subclass (re-export marker),
   `*Error`/`*Exception` (exception namespace).
@@ -351,7 +353,8 @@ Rust-shaped), is registered per Phase 1, and has a fixture in
   finding references it via its `JUDGEMENT` stamp — no message copies. Text: the
   four-point NAMING notice (2026-09-29 draft, research-sourced): names must be what
   the domain calls the THING; verb names (-er/-or) name a process — stateful
-  process = name the state, stateless = functions; an -er/-or is honest only when
+  process = name the state; stateless = the operations belong to the abstraction
+  that owns their state — find it; an -er/-or is honest only when
   the domain calls a stateful component that and no existing type already is it;
   generic containers (Options/Context/Parameters/Config) and tool jargon
   (Seam/Clump/Accumulator) name the means, not the thing. JSON:
@@ -642,10 +645,10 @@ is runtime output):
 4. **process-class message (supersedes the #28 reframe — single-callsite dropped
    2026-09-30)**:
    "class X is a process (-er/-or name), not a thing: the work belongs on the
-   domain objects it operates on, or in functions. A process class is the best
-   idea only when ALL hold — (1) the domain itself names it (the parser, the
-   scheduler); (2) its state is its own and substantial, no actual noun can
-   carry it; (3) no existing type already carries this work (extend or fold,
-   never mint a twin); (4) it is not one owner's private device (a single
-   consumer with no own state is a function, not a class). Mostly one fails:
-   fold, rename, or delete."
+   domain objects it operates on. A process class is the best idea only when ALL
+   hold — (1) the domain itself names it (the parser, the scheduler); (2) its
+   state is its own and substantial, no actual noun can carry it; (3) no existing
+   type already carries this work (extend or fold, never mint a twin); (4) it is
+   not one owner's private device — a single consumer with no own state means the
+   operations belong to the domain abstraction that owns their work, not to a
+   class of their own. Mostly one fails: fold, rename, or delete."
