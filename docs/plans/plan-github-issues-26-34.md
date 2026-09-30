@@ -461,12 +461,11 @@ Acceptance: 1-4 all green; coverage refreshed; PR opened against main.
    judgment call the tool must not second-guess") governs. The nudge's ropey-name
    triage is instead the notice's content, issued before the name exists.
 5. **Judgement set — DECIDED (2026-09-29): anything where the user must provide a
-   name. [The mechanism is SUPERSEDED by the Fifth-pass fix registry — params, not
-   flags; the ruling's SET survives.]** Original: Judgement := the finding's
-   fix kind is in NAME_REQUIRED_KINDS (derived from the existing catalog flag).
-   Includes feature-envy, magic-number, loop-hoist (name-required — the earlier
-   "name-required but mechanical" carve-out is gone); mechanical := fixable without
-   a user-supplied name; unstamped := no fix directive. See Phase 4 #33(a).
+   name.** Implemented via the fix registry (Fifth-pass): judge-true iff the rule's
+   linked fix declares a required `name` param. Includes feature-envy, magic-number,
+   loop-hoist (the "name-required but mechanical" carve-out does not exist);
+   mechanical := fixable without a user-supplied name; unstamped := fix-less. See
+   Phase 4 #33(a).
 6. **Backward compatibility — DECIDED (2026-09-29): NOT supported.** The scan
    contract is strictly versioned (existing pattern: `lucidlint.py:825` rejects a
    mismatched `schema_version`); contract changes bump the schema and old output is
@@ -572,17 +571,13 @@ Phase text where they conflict.
     round.
 ## Third-pass rulings (2026-09-29) — amend the sections above
 
-1. **Judgement — SUPERSEDED by the Fifth-pass fix registry (params, not flags);
-   retained as history.** Original ruling: the catalog `fix_name_required` flag,
-   one read, no derivation tables; the fix_kind_of/message-directive machinery is
-   DROPPED. Set the flag on the rows that semantically require a name but lack it:
-   `large-function` (real existing drift — its extract-method fix demands a name
-   yet the flag is absent, so derived NAME_REQUIRED_KINDS + LSP needsName miss it),
-   `partition`, `strewing`, `wide-tuple`. Message directives NOT changed this
-   round; the flag-without-directive state is accepted (data-clump precedent,
-   verified: flag set, message prose-only). [Superseded 2026-09-30: the registry
-   replaces the flag; the drift gate now REQUIRES the directives to match
-   `Rule.fix`, so the flag-without-directive acceptance dies with it.]
+1. **Judgement mechanism — the linked fix's params (Fifth-pass).** The boolean flag
+   is replaced because parallel facts drifted (data-clump: flag without a fix;
+   large-function: fix without a flag); the registry makes the mismatch impossible.
+   The judgement SET (above) is unchanged. Consequence of the registry's drift gate:
+   the directives must now match `Rule.fix` — the flag-without-directive state is
+   replaced by the gate requiring `— fix: extract-class` on data-clump, partition,
+   wide-tuple.
 2. **Package layout never flattens for convenience.** A cohesive sub-cluster (subset
    holds cross-class member references or shared class-level attributes) also gets a
    package; when
