@@ -130,6 +130,11 @@ Rust-shaped), is registered per Phase 1, and has a fixture in
   Actions: new emitter — class where (no `self.X =` anywhere, no dataclass fields,
   no properties) AND every member is a `@staticmethod`, with >=1 method -> kind
   `static-husk`, `warn`.
+  MESSAGE makes the fix direction explicit (2026-09-30): "Class X has no state of
+  its own and only staticmethods — a namespace wearing a domain noun. The fix:
+  find the state these operations work on and put it IN the class (fields + method
+  bodies reading them); if there is no such state, reconsider whether the class is
+  the correct abstraction at all — the operations may simply be functions."
   Exclusions (none of these fire): inherited base (state may live in the base), ABC/
   Protocol (pure interfaces), `pass`-only subclass (re-export marker),
   `*Error`/`*Exception` (exception namespace).
