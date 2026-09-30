@@ -11,6 +11,13 @@ the acceptance check is), then the constraints. A bullet that only names data or
 intent without the action is a finding; rewrite it. (docs/writing-documentation.md
 task-shaped sections.)
 
+TEST-FIRST RULE (docs/testing-standards.md "Write the test before the code"): every
+change ships with its failing test written FIRST — run it red, then implement, then
+green. Phase 5 is the final GATE, not the testing phase: the per-change tests are
+written inside Phases 2-4, one red->green per rule/fixer/render change. No
+project-wide test runs mid-round (they cannot be green until the round's changes
+land); the gate runs them once at the end.
+
 ## Verified facts (grounding)
 
 - `duplicate` (checks.rs:5597) pairs **functions** only — modules/classes invisible (#26 real).
@@ -101,8 +108,13 @@ Phase 2 emission before `make rules --check` passes — expected to fail mid-rou
 ## Phase 2 — Scanner (Rust)
 
 Each emission lives in `scanner/src/checks.rs` (or `rustscan.rs` where it is
-Rust-shaped), is registered per Phase 1, and has a fixture in
-`tests/fixtures/rust/` + a unit test.
+Rust-shaped), is registered per Phase 1, and ships TEST-FIRST: for each rule write
+the failing test first — the fixture in `tests/fixtures/rust/` (the include_str!
+convention; NOT `scanner/tests/fixtures/`, which does not exist), the scanner unit
+test asserting the emission, the suppression test (`lucidlint: ignore` + config
+`ignore`), and the orchestrator test where gate behavior changes — run it RED, then
+implement the emitter, then GREEN. The same red->green order applies to the Phase 3
+fixers and the Phase 4 render changes.
 
 - **#26 duplicate-module** — Point: a fork — two modules or classes with the same
   structural skeleton — is drift waiting to happen: a fix lands in one copy and the
@@ -394,18 +406,17 @@ Rust-shaped), is registered per Phase 1, and has a fixture in
   Acceptance: the issue's 6-clump scenario renders one heading; `--json` `groups`
   contains the cluster; two runs produce identical output.
 
-## Phase 5 — Verification
+## Phase 5 — The final gate
 
-Point: proof, not ceremony — every new family's behavior is pinned by tests, and the
-gate, suites, and self-check are green before the PR.
+Point: everything the round touched is proven green TOGETHER for the first time —
+the per-change red->green already happened inside Phases 2-4 (TEST-FIRST RULE). This
+phase runs the full suite once, applies the self-check hygiene, and opens the PR.
 
-1. Per rule: scanner unit test (fixture in `tests/fixtures/rust/` — the include_str!
-   convention; NOT `scanner/tests/fixtures/`, which does not exist), suppression
-   test (`lucidlint: ignore` + config `ignore`), orchestrator test where gate
-   behavior changes.
-2. `cargo test` green; `make rules --check` (drift — run AFTER every Phase 2
-   emission and the Phase 1 catalog land together; expected red mid-round); `make
-   check` (ruff + pyrefly); `pytest` green.
+1. `cargo test` green — includes every per-rule scanner unit test written first in
+   Phase 2.
+2. `make rules --check` (drift — run AFTER every Phase 2 emission and the Phase 1
+   catalog land together; expected red mid-round); `make check` (ruff + pyrefly);
+   `pytest` green — includes the per-rule suppression + orchestrator tests.
 3. `make self-check` — the new families scan lucidlint's own repo; expect hits
    (process-named classes in lucidlint.py/fix_engine.py; closure-cluster/static-husk
    on fix_engine.py). Hygiene: suppress each hit with a
