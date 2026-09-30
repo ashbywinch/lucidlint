@@ -459,8 +459,9 @@ is runtime output):
    its message and suggested fix state the reasoning and exist to make the
    reader reflect. Judge each with common sense: what is the best way to
    make this code more maintainable, lucid, and obviously correct? When
-   the suggested fix isn't right, draw on your knowledge of good class
-   design to devise a better one. Suppress only where the finding itself
+   the suggested fix isn't the optimal class design for maintainability,
+   draw on your knowledge of good class design to devise a better one.
+   Suppress only where the finding itself
    does not apply — and give the why a reviewer can check."
 3. **AGENTS.md Rules** — one rule, link, no copy: the tool exists for code
    lucidity; never design from mechanics (dedup, size, call counts);
