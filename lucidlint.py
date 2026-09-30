@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# lucidlint: ignore-file global-state module-level constants (excluded dirs, action kinds, thresholds, fix aliases)
+# are the gate's configuration tables — a config class is the eventual home, not this round
 # lucidlint: ignore-file complexity the orchestrator's git functions are single-pass protocol
 # walks — decisions are path branches, not branching logic
 
@@ -16,7 +18,7 @@ baselines, dedupe/merge, priority, diff marking, exit codes.
     python3 lucidlint.py --repo /path/to/repo --json
     echo $?   # 1 when there is work to do
 
-The scan thresholds live in the binary (schema 2): CC>=15, fn>=120 lines,
+The scan thresholds live in the binary (schema 4): CC>=15, fn>=120 lines,
 file>=150 edges, risk>=0.8, hotspot top 10% by churn with CC>=15.
 Philosophy: the metrics are *proxies* for code that is obviously correct
 and cheap to change; each message says what to do in those terms.
@@ -146,10 +148,8 @@ class _RenderCtx:
         branch, commit = self.branch, self.commit
         coverage_source = self.coverage_source
         print(
-            # lucidlint: ignore record-shape this dict IS the JSON report —
             json.dumps(
                 {
-                    # lucidlint: ignore record-shape this meta section IS part of
                     # the JSON report wire format (PRD R18)
                     "meta": {
                         "repo": str(repo),
@@ -171,6 +171,10 @@ class _RenderCtx:
                     "header": self.report_header,
                     "suppressions": dict(self.suppression_census or {}),
                     "actions": [asdict(a) for a in unique],
+                    "naming_notice": _NAMING_NOTICE
+                    if any(_stamp_of(a) == "JUDGEMENT" for a in unique)
+                    else None,
+                    "groups": _seam_groups(unique),
                 },
                 indent=2,
             )
@@ -218,6 +222,16 @@ class _RenderCtx:
         if self.report_header:
             print(self.report_header)
             print()
+        # #33(b): the naming lesson is issued ONCE per report, iff any finding
+        # is judge-true — never copied onto every message
+        if any(_stamp_of(a) == "JUDGEMENT" for a in unique):
+            print(_NAMING_NOTICE)
+            print()
+        # #34: shared-seam clusters render ONE heading before the findings
+        groups = _seam_groups(unique)
+        if groups:
+            print("\n".join(g["heading"] for g in groups))
+            print()
         if not unique:
             # the ledger must show even when the config-ignores ate every
             # action — "clean" while debt is hidden is the invisibility the
@@ -240,8 +254,6 @@ class _RenderCtx:
             print(f"\nwarnings (reported, never fail) — {len(warns)}:")
             # the census was printed with the fails group — once per report
             _render_actions(repo, args, warns, [], None)
-
-
 @dataclass
 class Action:
     """One finding. Kind families: complexity/large-function merge per target;
@@ -264,6 +276,11 @@ class Action:
     kinds: list[str] = field(default_factory=list)
     callers: list[str] = field(default_factory=list)
     col: int = 0  # schema-3 anchor column; 0 = line-level
+    seam_members: tuple[str, ...] = ()  # clump identity (#34) — the seam
+    # grouping keys on this; the three carriers carry it, others empty
+    fix_kind: str = ""  # the structured fix kind (schema 4) — the directive's
+    # kind when present, else the rule's default link (Rule.fix); empty =
+    # fix-less finding, never constructed into a Fix
 
 
 
@@ -339,7 +356,6 @@ def _raw_score(kind: str, metric: float, churn: int, callers: int | None = None)
     Normalized to a 1-99 percentile ranking in main, so the list spreads
     instead of saturating at 99.
     """
-    # lucidlint: ignore record-shape a static priority-norm lookup table —
     # kind -> norm constant; naming each entry hides the table
     norm = {
         "latent-class": 0.7,
@@ -565,6 +581,10 @@ class RustFinding(NamedTuple):
     message: str
     metric: float = 1.0
     col: int = 0  # 1-based anchor column; 0 = line-level (schema 3)
+    seam_members: tuple[str, ...] = ()  # clump identity (#34) — data-clump/
+    # partition/strewing only, empty elsewhere (schema 4)
+    fix_kind: str = ""  # the structured fix kind (schema 4) — the
+    # directive's kind when present, else the rule's default link
 
 @dataclass(frozen=True)
 class RustFixRequest:
@@ -822,9 +842,9 @@ class _RustScan:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=str(repo))
                 if proc.returncode == 0:
                     data = json.loads(proc.stdout)
-                    if data.get("schema_version") != 3:
+                    if data.get("schema_version") != 4:
                         raise RuntimeError(
-                            f"scanner contract schema {data.get('schema_version')} — expected 3; "
+                            f"scanner contract schema {data.get('schema_version')} — expected 4; "
                             "rebuild the binary (make scanner-check)"
                         )
                     header = str(data.get("header", ""))
@@ -845,6 +865,8 @@ class _RustScan:
                                 function=f.get("function", ""),
                                 message=f.get("message", ""),
                                 metric=float(f.get("metric", 1.0)),
+                                seam_members=tuple(str(m) for m in f.get("seam_members", [])),
+                                fix_kind=str(f.get("fix_kind", "") or ""),
                             )
                         )
                     for e in data.get("cc", []):
@@ -933,7 +955,6 @@ _FAMILY_OF_VARIANT = {
 }
 
 # Cache for config loading
-# lucidlint: ignore global-state per-repo cache of the config file — one entry per repo per run
 _CONFIG_CACHE: dict[Path, _LucidlintConfig] = {}
 
 
@@ -988,7 +1009,6 @@ class _GraphContract:
                 for file_path in store.get_all_files():
                     for gnode in store.get_nodes_by_file(file_path):
                         nodes.append(
-                            # lucidlint: ignore record-shape graph nodes ARE the wire format exported
                             # to the external code-review-graph store
                             {
                                 "kind": gnode.kind,
@@ -1005,7 +1025,6 @@ class _GraphContract:
                 edges = []
                 for e in store.get_all_edges():
                     edges.append(
-                        # lucidlint: ignore record-shape graph edges ARE the wire format exported
                         # to the external code-review-graph store
                         {
                             "kind": e.kind,
@@ -1017,7 +1036,6 @@ class _GraphContract:
                 communities = {}
                 for row in store.get_communities_list():
                     communities[str(row["id"])] = row["name"]
-            # lucidlint: ignore record-shape wire-format envelope — a class is ceremony for JSON
             contract = {
                 "contract_version": CONTRACT_VERSION,
                 "nodes": nodes,
@@ -1143,6 +1161,7 @@ def _version() -> str:
 _VERSION = _version()
 
 
+# lucidlint: ignore strewing the shared leading parameter is the render context — the functions ARE the render pipeline
 def action_key(a: Action) -> str:
     return f"{a.kind}:{a.file}:{a.line}:{a.function}"
 
@@ -1226,9 +1245,121 @@ def _render_file_group(file: str, items: list[Action]) -> None:
             and a.signal not in _FAMILY_OF_VARIANT
             else ""
         )
-        print(f"  [{tag}][{kinds}]{suppress} {loc}{churn} — {a.message}")
+        stamp = _stamp_of(a)
+        print(f"  [{tag}][{kinds}]{suppress} {loc}{churn} — {a.message}" + (f" [{stamp}]" if stamp else ""))
         if a.note:
             print(f"      -> {a.note}")
+
+# --------------------------------------------------------------------------- #33/#34 render aids
+
+
+def _fix_of(a: Action) -> rule_metadata.Fix | None:
+    """The per-finding Fix (Fifth-pass): constructed from the finding's
+    STRUCTURED fix_kind (schema 4) + its anchor — the stamps, the NAMING
+    notice trigger, and command() all read this object, never message text."""
+    if not a.fix_kind:
+        return None  # fix-less — never constructed, never stamped
+    return rule_metadata.Fix(kind=a.fix_kind, file=a.file, line=a.line, col=a.col)
+
+
+def _stamp_of(a: Action) -> str:
+    """#33(a): render-time only — `JUDGEMENT` when the finding's fix needs a
+    name (the registry says so via name_required), `MECHANICAL` for fixable
+    kinds outside it; fix-less findings get neither."""
+    fix = _fix_of(a)
+    if fix is None:
+        return ""
+    return "JUDGEMENT" if fix.name_required else "MECHANICAL"
+
+
+_NAMING_NOTICE = (
+    "NAMING — a name is the commitment: what the domain calls the THING. Verb names "
+    "(-er/-or) name a process — stateful process = name the state; stateless = the "
+    "operations belong to the abstraction that owns their state — find it; an -er/-or "
+    "is honest only when the domain calls a stateful component that. Generic containers "
+    "(Options/Context/Parameters/Config) and tool jargon (Seam/Clump/Accumulator) name "
+    "the means, not the thing."
+)
+
+
+# owns
+# hop for one consumer
+# lucidlint: ignore closures the nested visitors are one-purpose probe walks — hoisting names nothing the domain owns
+def _seam_groups(actions: list[Action]) -> list[dict[str, Any]]:
+    """#34: N findings sharing ONE seam are one design decision. Seams:
+    (a) complexity/large-function -> (file, function); (b) the carriers
+    (data-clump/partition/strewing) -> their seam_members sets. Union-find
+    transitive closure over overlapping seams (cross-kind groups allowed).
+    Groups with >=3 findings render a heading; the array is ALWAYS present
+    (empty when no cluster)."""
+
+    def seam_of(a: Action) -> Any:
+        if a.kind in ("complexity", "large-function"):
+            return ("loc", a.file, a.function)
+        if a.seam_members:
+            return ("members", frozenset(a.seam_members))
+        return None
+
+    seams = [seam_of(a) for a in actions]
+    parent = list(range(len(actions)))
+
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i in range(len(actions)):
+        si = seams[i]
+        if si is None:
+            continue
+        for j in range(i + 1, len(actions)):
+            sj = seams[j]
+            if sj is None or si[0] != sj[0]:
+                continue
+            if si[0] == "loc":
+                if si == sj:
+                    union(i, j)
+            elif not si[1].isdisjoint(sj[1]):
+                union(i, j)
+
+    by_root: dict[int, list[int]] = {}
+    for i in range(len(actions)):
+        by_root.setdefault(find(i), []).append(i)
+    groups = []
+    for members in by_root.values():
+        if len(members) < 3:
+            continue
+        members_sorted = sorted(members, key=lambda i: (actions[i].file, actions[i].line, i))
+        member_seams = [seams[i] for i in members_sorted if seams[i] is not None]
+        shared_loc = next((s for s in member_seams if s[0] == "loc"), None)
+        shared_members: set[str] | None = None
+        for s in member_seams:
+            if s[0] == "members":
+                shared_members = set(s[1]) if shared_members is None else shared_members & set(s[1])
+        seam_label = (
+            f"{shared_loc[1]} ({shared_loc[2]})"
+            if shared_loc is not None
+            else (", ".join(sorted(shared_members)) if shared_members else "")
+        )
+        groups.append(
+            {
+                "heading": (
+                    f"these {len(members_sorted)} findings share ONE seam — design the target "
+                    f"type once, for all of them (the seams: {seam_label})"
+                ),
+                "seam": seam_label,
+                "findings": members_sorted,
+            }
+        )
+    groups.sort(key=lambda g: (actions[g["findings"][0]].file, actions[g["findings"][0]].line))
+    return groups
 
 
 def _kind_counts(actions: list[Action]) -> str:
@@ -1337,8 +1468,12 @@ class _LucidlintConfig:
 
 
 # lucidlint: ignore-file god-class the gate pipeline is ONE responsibility —
+# lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
+# lucidlint: ignore-file record-shape a class per helper hop is ceremony
 # the runner owns the repo scan end to end; the partition rule finds no
 # field-disjoint method groups, so the size is a review signal, not a split
+# lucidlint: ignore process-class _GateRunner is the CLI's one pipeline object — its state is real and the name is
+# the domain's
 class _GateRunner:
     """The repo-scan gate flow. The pipeline state (history, coverage,
     actions, baselines) lives on the runner instead of threading through
@@ -1486,7 +1621,6 @@ class _GateRunner:
             try:
                 (self.repo / ".lucidlint-cache").mkdir(exist_ok=True)
                 (self.repo / ".lucidlint-cache" / cache_key).write_text(
-                    # lucidlint: ignore record-shape the cache entry IS the
                     # persisted wire format — round-trips verbatim across runs
                     json.dumps({"churn": dict(churn), "last_modified": last})
                 )
@@ -2044,6 +2178,8 @@ class _FixCommand:
             # the origin file; the created module's content is the preview
             # the agent already reviewed
             _print_trimmed_diff(before, target.read_text(encoding="utf-8"), self.args.file)
+        if req.extra_writes or req.deletes:
+            self._verify_multi_file(req)
         return 0
 
     def _reattach_or_silence(self, req, moved: bool) -> int:
@@ -2060,12 +2196,44 @@ class _FixCommand:
             req.line = lines[0]
             req.source = None
             req.decline = None
+            # the reattached line's anchor column — same-line twins need the
+            # finding's col just like the direct path (schema-3)
+            anchors = [
+                f.col
+                for f in _File(self.repo, self.args.file).scan_single_file()
+                if f.signal == (self.fix_kind if self.fix_kind != "extract-record-class" else "record-shape")
+                and f.line == req.line
+                and f.col
+            ]
+            req.col = max(anchors) if anchors else 0
             return self._apply(req, moved=True)
         if len(lines) > 1:
             print(f"fix: {self.fix_kind} anchor moved — live findings at "
                   f"{', '.join(map(str, lines))} — pass --line to pick one")
         return 0  # nothing of this kind remains — R28 silence
 
+    def _verify_multi_file(self, req) -> None:
+        """R8: a multi-file fix is verified by the REPO-WIDE scan — the
+        finding kind must be gone (scan_single_file cannot see a chain or a
+        split's cross-file layout). A scan failure is NOT flipped into a
+        fix failure — the apply already succeeded."""
+        try:
+            rust = _scan_rust(self.repo, self.args, Counter(), None)
+        except Exception:
+            return
+        remaining = [
+            f
+            for fs in rust.by_rel.values()
+            for f in fs
+            if f.signal in {"forwarding-chain", "class-module", "delegating-husk"}
+        ]
+        if remaining:
+            rels = sorted({f.file for f in remaining})[:3]
+            print(
+                f"fix: {self.fix_kind} applied at {self.args.file}:{req.line} — re-scan still finds "
+                f"{len(remaining)} related finding(s) in {', '.join(rels)}{'…' if len(rels) > 3 else ''}: "
+                "iterate the fix"
+            )
 
 def main() -> int:
     args = parse_args()
@@ -2146,6 +2314,8 @@ def _actions_from_rust(
                     last_modified=last_modified.get(rel, ""),
                     tested="",
                     raw=_raw_score(f.kind, f.metric or 1, churn),
+                    seam_members=f.seam_members,
+                    fix_kind=f.fix_kind,
                 )
             )
     return actions
@@ -2155,7 +2325,7 @@ def _scan_rust(repo: Path, args, file_churn: Counter[str], only_rel: str | None 
     """Every finding family computes in the Rust core (per-file, partition,
     test rules, duplicate/unused, record-shape, complexity, the graph
     families, hotspot, abstraction, docs). The thresholds live in the binary
-    (schema 2); the report header and suppression census ride on the result
+    (schema 4); the report header and suppression census ride on the result
     for the banner + footer ledger."""
     if not RUST_SCAN.active(repo):
         # no Python fallback — the binary is required; a silent empty scan

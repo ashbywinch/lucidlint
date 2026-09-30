@@ -32,6 +32,7 @@ Usage:
   scripts/pyrefly-lock.py check [--baseline FILE] [--pyrefly-config TOML]
   scripts/pyrefly-lock.py update-baseline [--baseline FILE] [--pyrefly-config TOML]
 """
+# lucidlint: ignore-file global-state the lock script's constants are its configuration
 
 from __future__ import annotations
 

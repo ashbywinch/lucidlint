@@ -515,6 +515,7 @@ mod tests {
     #[test]
     fn severity_mapping() {
         let warn = Finding {
+            seam_members: Vec::new(),
             file: "x.py".into(),
             line: 1,
             col: 0,
@@ -524,6 +525,7 @@ mod tests {
             message: "m".into(),
         };
         let fail = Finding {
+            seam_members: Vec::new(),
             file: "x.py".into(),
             line: 2,
             col: 0,

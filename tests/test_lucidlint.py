@@ -492,7 +492,7 @@ def test_scanner_failure_raises(tmp_path):
 def test_scanner_garbage_findings_dropped(tmp_path, capsys):
     repo = make_repo(tmp_path)
     scan_json = json.dumps({
-        "schema_version": 3,
+        "schema_version": 4,
         "findings": [{
             "kind": "standard", "signal": "standard", "severity": "fail",
             "file": "/elsewhere/x.py", "line": 1, "function": "", "message": "drop me",
@@ -583,6 +583,86 @@ def test_render_latent_class_variant_shows_no_suppression_recipe(capsys):
     ch._render_file_group("x.py", [a])
     assert "suppress with:" not in capsys.readouterr().out
 
+
+
+def test_render_stamps_judgement_and_mechanical(capsys):
+    # #33(a): a name-required fix renders [JUDGEMENT]; a fixable kind outside
+    # it renders [MECHANICAL]; fix-less findings get neither — the stamp is
+    # render-time, computed from the structured fix_kind
+    judge = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 1, 0, "", "", fix_kind="extract-method")
+    mech = ch.Action("standard", "fail", "y.py", 4, "g", "m", 1, 0, "", "", fix_kind="loop-pipeline")
+    plain = ch.Action("standard", "fail", "z.py", 5, "h", "m", 1, 0, "", "")
+    ch._render_file_group("x.py", [judge, mech, plain])
+    out = capsys.readouterr().out
+    assert "[JUDGEMENT]" in out, out
+    assert "[MECHANICAL]" in out, out
+    assert out.count("[JUDGEMENT]") == 1, out
+    assert out.count("[MECHANICAL]") == 1, out
+
+
+def test_naming_notice_printed_once_iff_judge_true(tmp_path, capsys):
+    # #33(b): the lesson is issued ONCE per report, only when a judge-true
+    # finding exists — never repeated per finding
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "def f(a):\n"
+        "    if a:\n        return 1\n"
+        "    if a:\n        return 2\n"
+        "    if a:\n        return 3\n"
+        "    if a:\n        return 4\n"
+        "    if a:\n        return 5\n"
+        "    if a:\n        return 6\n"
+        "    if a:\n        return 7\n"
+        "    if a:\n        return 8\n"
+        "    if a:\n        return 9\n"
+        "    if a:\n        return 10\n"
+        "    if a:\n        return 11\n"
+        "    if a:\n        return 12\n"
+        "    if a:\n        return 13\n"
+        "    if a:\n        return 14\n"
+        "    if a:\n        return 15\n"
+        "    if a:\n        return 16\n"
+        "    return 0\n"
+    )
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert out.count("NAMING —") == 1, out
+    assert "what the domain calls the THING" in out, out
+
+    # a report with no judge-true finding prints no notice
+    (
+        repo / "houses" / "app.py"
+    ).write_text("def g(items):\n    out = []\n    for i in items:\n        out.append(i)\n    return out\n")
+    run_main(repo, "--warn")
+    assert "NAMING —" not in capsys.readouterr().out
+
+
+def test_seam_groups_combine_overlapping_member_sets():
+    # #34: union-find over overlapping seam_members sets — the issue's
+    # 62-findings case renders ONE heading; the groups array is always present
+    actions = [
+        ch.Action("latent-class", "fail", "a.py", i, f"f{i}", "m", 1, 0, "", "",
+                  seam_members=("fingerprint", "folder"), fix_kind="extract-class")
+        for i in (1, 2, 3)
+    ]
+    groups = ch._seam_groups(actions)
+    assert len(groups) == 1, groups
+    findings = cast(list[int], groups[0]["findings"])
+    assert len(findings) == 3
+    heading = cast(str, groups[0]["heading"])
+    assert "share ONE seam" in heading
+    assert ch._seam_groups(actions[:1]) == []  # below the >=3 bar
+
+
+def test_json_carries_naming_notice_and_groups(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "def f(a):\n" + "    if a:\n        return 1\n" * 16 + "    return 0\n"
+    )
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    assert data["naming_notice"] is not None, (data["naming_notice"] is not None)
+    assert "groups" in data and data["groups"] == []
 
 def test_render_standard_bucket_keeps_the_suppression_signal(capsys):
     """A finding collapsed to the `standard` catch-all has NO display-bucket
@@ -757,15 +837,12 @@ def test_preview_refusal_on_no_seam_is_silent(tmp_path, capsys):
 
 
 def test_magic_fix_cli_derives_anchor_column(tmp_path, capsys):
-    # the schema-3 col reaches the fix engine for magic-number too — two
-    # literals on one line, the CLI must rewrite the ANCHORED one, not the
-    # first (the anchor scan only ran for extract-record-class) (review bot)
-    src = "def f():\n    return a * 60 + b * 90\n"
+    src = "class W:\n    def f(self):\n        return a * 60 + b * 90\n"
     repo = make_repo(tmp_path, app_src=src)
     (repo / "houses" / "app.py").write_text(src)
     rc = run_main(
         repo, "fix", "--kind", "magic-number", "--file", "houses/app.py",
-        "--line", "2", "--name", "NINETY",
+        "--line", "3", "--name", "NINETY",
     )
     assert rc == 0
     fixed = (repo / "houses" / "app.py").read_text()
@@ -1191,7 +1268,8 @@ def test_text_report_opens_with_header_banner(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     run_main(repo)
     out = capsys.readouterr().out
-    assert "readable, maintainable, and obviously correct" in out.splitlines()[0]
+    assert "maintainable, lucid, and obviously correct" in out.splitlines()[0]
+    assert "pointers, not orders" in out.splitlines()[0]
     assert out.index("obviously correct") < out.index("GATE:")
 
 

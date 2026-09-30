@@ -343,6 +343,7 @@ impl<'a> RsState<'a> {
     // lucidlint: ignore long-param-list one caller — the struct would be ceremony for a single call site
     fn finding_col(&mut self, kind: &str, severity: &str, line: usize, col: usize, function: &str, message: String) {
         self.findings.push(Finding {
+            seam_members: Vec::new(),
             col,
             file: self.file.to_string(),
             line,
@@ -1148,6 +1149,7 @@ fn walk_test_fns(item: &Item, out: &mut Vec<Finding>, file_name: &str) {
                 && !block_asserts(&f.block)
             {
                 out.push(Finding {
+                    seam_members: Vec::new(),
                     file: file_name.to_string(),
                     line: f.sig.span().start().line,
                     col: 0,
@@ -1241,6 +1243,7 @@ fn ignored_test_findings(file: &File, file_name: &str) -> Vec<Finding> {
         fn visit_item_fn(&mut self, f: &'ast ItemFn) {
             if has_attr(&f.attrs, "test") && has_attr(&f.attrs, "ignore") {
                 self.findings.push(Finding {
+                    seam_members: Vec::new(),
                     file: self.file.clone(),
                     line: f.sig.span().start().line,
                     col: 0,

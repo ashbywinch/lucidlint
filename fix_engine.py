@@ -17,9 +17,12 @@ here — those are agent-furnished (`--name`) and hand-verified.
 from __future__ import annotations
 
 import builtins
+import keyword
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple, override
+from typing import NamedTuple, TypeGuard, cast, override
 
 import libcst as cst
 import libcst.matchers as m
@@ -79,6 +82,13 @@ class FixOptions:
 _STRUCTURAL_FIXERS = {
     "extract-method": "fix_extract_method",
     "extract-class": "fix_extract_class",
+    # the three shape-routed extract-class arms: the finding's SHAPE selects
+    # the transform (a wide tuple -> a record, a shared param pair -> a
+    # parameter object, a field-disjoint class -> a split), so no semantic
+    # name is required — the name defaults from the shape and --name overrides.
+    "wide-tuple": "fix_extract_class",
+    "data-clump": "fix_extract_class",
+    "partition": "fix_extract_class",
     "magic-number": "fix_magic_literal",
     "vague-name": "fix_rename",
     "long-param-list": "fix_parameter_object",
@@ -87,9 +97,12 @@ _STRUCTURAL_FIXERS = {
     "tuple-record": "fix_tuple_record",
     "extract-record-class": "fix_extract_record_class",
     "feature-envy": "fix_feature_envy",
+    # the #27/#30/#31 house fixers — multi-file transactions (R8)
+    "dissolve-husk": "fix_dissolve_husk",
+    "collapse-chain": "fix_collapse_chain",
+    "split-module": "fix_split_module",
 }
 _NAME_REQUIRED_KINDS = {
-    "extract-method",
     "magic-number",
     "vague-name",
     "long-param-list",
@@ -118,6 +131,12 @@ class _ModuleProposal(NamedTuple):
 
 
 # lucidlint: ignore-file god-class the fix engine is ONE responsibility — 20
+# lucidlint: ignore-file global-state the module constants are this tool's configuration tables —
+# lucidlint: ignore-file global-state a config class is the eventual home
+# lucidlint: ignore-file misplaced-method the repo helpers serve module-level callers too — moving them
+# lucidlint: ignore-file misplaced-method onto _FixRequest would strand half
+# lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
+# lucidlint: ignore-file record-shape a class per helper hop is ceremony
 # cohesive methods over the request state; the partition rule finds no
 # field-disjoint split, so the size is a review signal, not a split order
 @dataclass
@@ -137,6 +156,12 @@ class _FixRequest:
     wrote: bool = False        # set by fix_finding: the file was actually rewritten
     decline: str | None = None  # set by fix_finding/fixers: why nothing was written
     col: int = 0  # schema-3 anchor column; disambiguates same-line twins
+    # Multi-file transactions (R8): the fixer's OTHER writes beyond the
+    # origin — (repo-relative path, new source) — and files to delete.
+    # Applied by fix_finding after the origin write; the orchestrator then
+    # verifies via the REPO-WIDE scan that the finding kind is gone.
+    extra_writes: list[tuple[str, str]] = field(default_factory=list)
+    deletes: list[str] = field(default_factory=list)
 
     def _loaded_source(self) -> str:
         """The file's text. propose_finding/fix_finding fill `source` from the
@@ -146,6 +171,15 @@ class _FixRequest:
         return self.source
 
     def fix_extract_class(self) -> str | None:
+        # the shape-routed arms: the finding's SHAPE (recovered from the
+        # source at the anchor line — the wire record carries only
+        # kind/file/line) selects the transform through this same entry point
+        if self.kind == "wide-tuple":
+            return _wide_tuple_fix(self)
+        if self.kind == "data-clump":
+            return _data_clump_fix(self)
+        if self.kind == "partition":
+            return _partition_fix(self)
         source, line = self._loaded_source(), self.line
         name = self.opts.name
         """Move the strewing group into a class named `name` (default: the shared
@@ -155,6 +189,16 @@ class _FixRequest:
         wrapper = cst.MetadataWrapper(module)
         found = _strewing_group(source, line)
         if found is None:
+            if self.kind == "extract-class":
+                # the wide-tuple/data-clump/partition directives ALSO name
+                # extract-class (one entry point per family), and nothing but
+                # the anchor's shape can tell them apart — try each arm in turn
+                for arm in (_wide_tuple_fix, _data_clump_fix, _partition_fix):
+                    self.decline = None
+                    shaped = arm(self)
+                    if shaped is not None:
+                        return shaped
+                self.decline = None  # a probe's reason is not this finding's
             return None
         shared = found.shared
         fns = found.fns
@@ -308,7 +352,11 @@ class _FixRequest:
         # the dispatch gate (_fix_structural) refuses name-required kinds without one
         assert isinstance(name, str)
         """Replace Magic Literal: `f(10, ...)` -> `f(MAX_RETRIES, ...)` with
-        `MAX_RETRIES = 10` inserted at module top."""
+        `MAX_RETRIES = 10` inserted as a CLASS ATTRIBUTE of the enclosing
+        class (third-pass 4: a module-top constant would be its own
+        global-state finding — values are a class's private internals).
+        A literal with no class to own its constant (module-level function)
+        is REFUSED, never parked at module top."""
         module = cst.parse_module(source)
         wrapper = cst.MetadataWrapper(module)
         value: str | None = None
@@ -322,6 +370,17 @@ class _FixRequest:
         if replaced == source:
             return None
         module2 = cst.parse_module(replaced)
+        # the refusal probe must run on a class OWNING the literal — the
+        # replaced tree has the same line map, so one probe serves both
+        probe = _ClassOwningLine(line)
+        cst.MetadataWrapper(module2).visit(probe)
+        if probe.owner is None:
+            # no class to own the constant — refuse loudly (never module top)
+            self.decline = (
+                f"the literal at {self.rel}:{line} has no class to own its constant — "
+                "move the function into a class first"
+            )
+            return None
         assignment = cst.SimpleStatementLine(
             body=[
                 cst.Assign(
@@ -330,13 +389,9 @@ class _FixRequest:
                 )
             ]
         )
-        body = list(module2.body)
-        first = next(
-            (i for i, s in enumerate(body) if isinstance(s, (cst.FunctionDef, cst.ClassDef))),
-            len(body),
-        )
-        body.insert(first, assignment)
-        return module2.with_changes(body=body).code
+        wrapped = cst.MetadataWrapper(module2)
+        result = wrapped.visit(_InsertClassConstant(line, assignment))
+        return result.code
 
     def fix_rename(self) -> str | None:
         source, line = self._loaded_source(), self.line
@@ -363,6 +418,630 @@ class _FixRequest:
             return None
         renamed = wrapper.visit(_RenameClass(line, old, name)).code
         return None if renamed == source else renamed
+
+# lucidlint: ignore closures the nested visitors are one-purpose probe walks — hoisting names nothing the domain owns
+    def fix_dissolve_husk(self) -> str | None:
+        source, line = self._loaded_source(), self.line
+        """Dissolve a delegating-husk (#27): every method is exactly
+        `return F(<all params>)` with F a module-level function. REWIRES the
+        stateless call sites to the module functions (`Husk().m(x)` /
+        `h.m(x)` -> `m(x)`), deletes the husk, and refuses when any reference
+        or constructed instance escapes (imports, isinstance, annotations,
+        subclassing, stored/passed instances) — never inlines."""
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
+
+        class _FindHusk(cst.CSTVisitor):
+            METADATA_DEPENDENCIES = (PositionProvider,)
+
+            def __init__(self, target_line):
+                self.target_line = target_line
+                self.cls: cst.ClassDef | None = None
+
+            @override
+            def visit_ClassDef(self, node):
+                if (
+                    self.cls is None
+                    and _as_range(self.get_metadata(PositionProvider, node)).start.line == self.target_line
+                ):
+                    self.cls = node
+
+        probe = _FindHusk(line)
+        wrapper.visit(probe)
+        cls = probe.cls
+        if cls is None:
+            return None  # stale anchor — R28 silence
+        methods = [s for s in cls.body.body if isinstance(s, cst.FunctionDef)]
+        if not methods:
+            return None
+        method_fns: dict[str, str] = {}
+        for method in methods:
+            callee = _forwarder_callee_of(method)
+            if callee is None:
+                return None  # not a pure forwarder — not the husk shape
+            method_fns[method.name.value] = callee
+        husk = cls.name.value
+        # repo-wide analysis: every file's references must be rewireable
+        # (direct `Husk().m(...)` calls or a `h = Husk()` + `h.m(...)` pattern)
+        files = _py_files(self.repo)
+        new_sources: dict[str, str] = {}
+        for path in files:
+            rel = path.relative_to(self.repo).as_posix()
+            fs = path.read_text(encoding="utf-8")
+            mod = cst.parse_module(fs)
+            rewired = _rewire_husk_sites(mod, husk, method_fns)
+            if rewired is None:
+                self.decline = (
+                    f"a reference to '{husk}' (or a constructed instance) escapes the rewireable "
+                    "call pattern — imports, isinstance, annotations, subclassing, or a stored/passed "
+                    "instance; dissolve by hand"
+                )
+                return None
+            if rewired != fs:
+                new_sources[rel] = rewired
+        # build the origin's new source: removed husk class + rewired sites
+        origin_rewired = new_sources.pop(self.rel, source)
+        origin_mod = cst.parse_module(origin_rewired)
+        removed = _RemoveHuskClass(husk)
+        origin_new = origin_mod.visit(removed).code
+        if origin_new == source and not new_sources:
+            return None  # nothing rewired and nothing deleted — stale
+        for rel, ns in new_sources.items():
+            self.extra_writes.append((rel, ns))
+        return origin_new
+
+# lucidlint: ignore assembly-class the chain facts thread through module helpers — _FixRequest is the boundary
+# lucidlint: ignore closures the nested visitors are one-purpose probe walks — hoisting names nothing owned
+    def fix_collapse_chain(self) -> str | None:
+        source, line = self._loaded_source(), self.line
+        """Collapse a forwarding chain (#30): method M (class C) whose body is
+        exactly `return F(<all params>)`, module fn F whose body is exactly
+        `return N(<all F params>)`, N a method on ANOTHER class D (or a
+        module fn at depth >= 2). REWIRE M to reach D.N directly and delete F
+        when D is real (has state or non-forwarding members); PROMOTE N to a
+        sibling method of M when D has no identity and dissolves. REFUSES
+        when the modules are independent (the deliberate boundary), when F
+        has other callers, on *args/**kwargs passthrough, on a
+        `from mod import F` re-export, or when N has other callers — never
+        blind inlining."""
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
+
+        class _FindMethod(cst.CSTVisitor):
+            METADATA_DEPENDENCIES = (PositionProvider,)
+
+            def __init__(self, target_line):
+                self.target_line = target_line
+                self.owner: tuple[str, cst.ClassDef, cst.FunctionDef] | None = None
+
+            @override
+            def visit_ClassDef(self, node):
+                for stmt in node.body.body:
+                    if not isinstance(stmt, cst.FunctionDef):
+                        continue
+                    pos = _as_range(self.get_metadata(PositionProvider, stmt))
+                    if pos.start.line == self.target_line:
+                        self.owner = (node.name.value, node, stmt)
+                        return
+
+        probe = _FindMethod(line)
+        wrapper.visit(probe)
+        if probe.owner is None:
+            return None  # stale or not a method — R28 silence
+        c_name, cls_node, method = probe.owner
+        head_params = [p.name.value for p in method.params.params if p.name.value not in ("self", "cls")]
+        head_callee, head_args = _pure_forward_of(method)
+        if head_callee is None or head_args != head_params:
+            return None  # M is not a pure forwarder to a module fn
+        if not head_callee.is_name:
+            return None
+        # find F's definition repo-wide
+        f_name = head_callee.name
+        f_holder = _module_fn_definition(self.repo, f_name)
+        if f_holder is None:
+            return None
+        f_rel, f_module = f_holder
+        f_fn = _module_fn_node(f_module, f_name)
+        if f_fn is None:
+            return None
+        f_params = [p.name.value for p in f_fn.params.params]
+        target = _pure_forward_of(f_fn)
+        if target is None:
+            return None  # F does not forward — not a chain
+        mid_callee, mid_args = target
+        if not isinstance(mid_callee, _ForwardTarget):
+            return None
+        # a method callee absorbs the receiver param (`store.load(key)` passes
+        # only `key`); a module-fn callee takes all params
+        expected_args = (
+            [p for p in f_params if p != mid_callee.attr_method[0]]
+            if mid_callee.attr_method is not None
+            else f_params
+        )
+        if mid_args != expected_args:
+            return None
+        # +1 caller check for F: the ONLY call must be M's
+        if _call_sites(self.repo, f_name) != 1:
+            self.decline = f"'{f_name}' has more than one caller — collapse by hand"
+            return None
+        if any("*" in p for p in f_params) or any("*" in p for p in head_params):
+            self.decline = "the chain passes *args/**kwargs — collapse by hand"
+            return None
+        if _reexported(self.repo, f_name):
+            self.decline = f"'from ... import {f_name}' re-exports the forwarder — collapse by hand"
+            return None
+        if mid_callee.is_name:
+            # M -> F -> G at depth >= 2: G is a module fn terminal
+            if not _depends_on(self.repo, self.rel, f_rel):
+                self.decline = "the chain is the only coupling between the modules — a boundary; leave it"
+                return None
+            body = cst.SimpleStatementLine(
+                body=[
+                    cst.Return(
+                        cst.Call(
+                            func=cst.Name(mid_callee.name),
+                            args=[cst.Arg(cst.Name(p)) for p in head_params],
+                        )
+                    )
+                ]
+            )
+            origin_new = _replace_method_body(module, method, body).code
+            self.extra_writes.append((f_rel, _remove_fn(f_module, f_name)))
+            return origin_new
+        # N is a method on another class D — resolve uniquely
+        if mid_callee.attr_method is None:
+            return None
+        recv, n_name = mid_callee.attr_method
+        arg_params = [p for p in f_params if p != recv]
+        candidates = _methods_named(self.repo, n_name)
+        matches = [
+            (d_rel, d_cls, d_method)
+            for d_rel, d_cls, d_method in candidates
+            if d_cls != c_name
+            and [p.name.value for p in d_method.params.params if p.name.value not in ("self", "cls")] == arg_params
+        ]
+        if len(matches) != 1:
+            return None  # ambiguous — no structural certainty
+        d_rel, d_cls, d_method = matches[0]
+        if not _depends_on(self.repo, self.rel, d_rel):
+            self.decline = "the chain is the only coupling between the modules — a boundary; leave it"
+            return None
+        if _call_sites(self.repo, n_name) > 1:
+            self.decline = f"'{n_name}' has other callers beyond the chain — collapse by hand"
+            return None
+        d_has_state = _class_has_identity(d_cls)
+        if d_has_state:
+            # REWIRE: M reaches D.N directly; F deleted
+            body = cst.SimpleStatementLine(
+                body=[
+                    cst.Return(
+                        cst.Call(
+                            func=cst.Attribute(value=cst.Name(recv), attr=cst.Name(n_name)),
+                            args=[cst.Arg(cst.Name(p)) for p in head_params if p != recv],
+                        )
+                    )
+                ]
+            )
+            origin_new = _replace_method_body(module, method, body, line).code
+            if f_rel == self.rel:
+                origin_new = cst.parse_module(origin_new).visit(_RemoveFn(f_name)).code
+            else:
+                self.extra_writes.append((f_rel, _remove_fn(f_module, f_name)))
+            return origin_new
+        # PROMOTE: N becomes a sibling method of M on C; D dissolves
+        if not _zero_external_refs(self.repo, d_cls.name.value):
+            self.decline = f"'{d_cls.name.value}' still has external references — dissolve D by hand"
+            return None
+        if _method_uses_self(d_method):
+            self.decline = f"'{n_name}' touches its own instance state — promote by hand"
+            return None
+        promoted = d_method.with_changes(name=cst.Name(n_name))
+        new_class = cls_node.with_changes(
+            body=cls_node.body.with_changes(
+                body=[*cls_node.body.body, promoted]
+            )
+        )
+        origin_new = _replace_class_body(module, line, new_class).code
+        # M's body becomes `return self.N(<args minus the recv param>)`
+        m_body = cst.SimpleStatementLine(
+            body=[
+                cst.Return(
+                    cst.Call(
+                        func=cst.Attribute(value=cst.Name("self"), attr=cst.Name(n_name)),
+                        args=[cst.Arg(cst.Name(p)) for p in head_params if p != recv],
+                    )
+                )
+            ]
+        )
+        origin_new = _replace_method_body(cst.parse_module(origin_new), method, m_body, line).code
+        if f_rel == self.rel:
+            origin_new = cst.parse_module(origin_new).visit(_RemoveFn(f_name)).code
+        else:
+            self.extra_writes.append((f_rel, _remove_fn(f_module, f_name)))
+        if d_rel != self.rel:
+            d_new = _remove_class(_module_of(self.repo, d_rel), d_cls.name.value)
+            if _module_empty(d_new):
+                self.deletes.append(d_rel)
+            else:
+                self.extra_writes.append((d_rel, d_new))
+        else:
+            # D dissolves in the origin too (zero external refs by the gate)
+            origin_new = cst.parse_module(origin_new).visit(_RemoveClass(d_cls.name.value)).code
+        return origin_new
+
+# lucidlint: ignore closures the nested visitors are one-purpose probe walks — hoisting names nothing the domain owns
+    def fix_split_module(self) -> str | None:
+        """Split a multi-class module (#31): the misplaced public classes move
+        to files named after them — flat siblings when independent, a package
+        when cohesive; the residual (module functions, ownerless constants,
+        private classes, the stem-matching class) stays in the origin (FLAT)
+        or in `mod/__init__.py` (PACKAGE); an origin that becomes empty is
+        deleted. REFUSES (self.decline) on target collisions, import cycles
+        in the produced layout, and executable statements between the
+        classes; package layouts are refused when a module-level constant
+        cannot move into a class (the __init__ holds no constants, BQ6), and
+        relative imports in the origin refuse the package layout and fall
+        the split back to flat."""
+        rel = self.rel
+        if not rel.endswith(".py") or rel.endswith("__init__.py"):
+            return None  # the scanner never flags __init__ — nothing to split
+        source = self._loaded_source()
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
+        # MetadataWrapper deep-copies the tree — every node MUST come from the
+        # wrapper's copy or ParentNodeProvider lookups miss (the fixers hold
+        # nodes across transforms; identity must stay within one tree)
+        module = wrapper.module
+        top = module.body
+        origin_dir = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        dirs = origin_dir.split("/") if origin_dir else []
+        in_package = bool(dirs)
+        stem = rel.rsplit("/", 1)[-1][:-3]
+        subjects = [
+            s
+            for s in top
+            if isinstance(s, cst.ClassDef)
+            and not s.name.value.startswith("_")
+            and not _class_matches_stem(s.name.value, stem)
+        ]
+        if not subjects:
+            return None  # stale — no misplaced public class remains
+        subject_ids = {id(s) for s in subjects}
+        subject_names = {s.name.value for s in subjects}
+        origin_path = dirs + [stem]
+
+        # REFUSAL: module-level executable statements BETWEEN the first and
+        # last subject class would be reordered by the split (their original
+        # position sits relative to the classes) — decline, never reorder
+        bounds = [i for i, s in enumerate(top) if id(s) in subject_ids]
+        for stmt in top[bounds[0] : bounds[-1] + 1]:
+            if id(stmt) in subject_ids or isinstance(stmt, cst.EmptyLine):
+                continue
+            if isinstance(stmt, (cst.ClassDef, cst.FunctionDef)):
+                continue
+            if _stmt_is_plain_assign(stmt):
+                continue
+            self.decline = (
+                "module-level executable statements between classes would be "
+                "reordered by the split — split by hand"
+            )
+            return None
+
+        # the constants the split can move: module-level assignments to plain
+        # names, and their readers (per subject class / per residual statement)
+        const_stmts = _module_constants(top)
+        const_def_ids = {id(s) for _n, s in const_stmts}
+        const_names = {n for n, _s in const_stmts}
+        class_refs: dict[int, set[str]] = {}
+        residual_refs: set[str] = set()
+        for stmt in top:
+            if id(stmt) in const_def_ids:
+                continue
+            names = _free_names_of(stmt) & const_names
+            if isinstance(stmt, cst.ClassDef) and id(stmt) in subject_ids:
+                class_refs[id(stmt)] = names
+            else:
+                residual_refs |= names
+        external_consts = {
+            k for k in const_names if _const_imported_elsewhere(self.repo, rel, module, k)
+        }
+        moved_consts: dict[int, set[str]] = {}
+        for c in subjects:
+            moved_consts[id(c)] = _consts_moving_into(
+                const_stmts, class_refs, residual_refs, external_consts, c
+            )
+        moved_all = set().union(*moved_consts.values()) if moved_consts else set()
+
+        # the residual: everything that stays behind, and the module-level
+        # names the moved classes may need to import from the origin
+        residual = [s for s in top if id(s) not in subject_ids and id(s) not in const_def_ids]
+        residual_def_names = {
+            s.name.value
+            for s in residual
+            if isinstance(s, (cst.FunctionDef, cst.ClassDef))
+        }
+        residual_def_names |= const_names - moved_all
+        residual_subject_refs: set[str] = set()
+        for s in residual:
+            if isinstance(s, cst.SimpleStatementLine) and any(
+                isinstance(i, (cst.Import, cst.ImportFrom)) for i in s.body
+            ):
+                continue  # imports bind their own names — not class references
+            residual_subject_refs |= _free_names_of(s) & subject_names
+
+        # cluster the subjects by cohesion edges: cross-class member
+        # references OR shared class-level attributes
+        free_of = {id(c): _class_free_names(c) for c in subjects}
+        attrs_of = {id(c): _class_attr_names(c) for c in subjects}
+        # a constant's VALUE may reference a moved class (`CACHE = {User: []}`)
+        # — the residual keeps the constant, so the origin also imports the class
+        for _n, stmt in const_stmts:
+            residual_subject_refs |= _expr_names(_const_value(stmt)) & subject_names
+        parent = {id(c): id(c) for c in subjects}
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for i, a in enumerate(subjects):
+            for b in subjects[i + 1 :]:
+                if (
+                    b.name.value in free_of[id(a)]
+                    or a.name.value in free_of[id(b)]
+                    or attrs_of[id(a)] & attrs_of[id(b)]
+                ):
+                    parent[find(id(a))] = find(id(b))
+        class_index = {id(s): i for i, s in enumerate(top)}
+        comps: dict[int, list[cst.ClassDef]] = {}
+        for c in subjects:
+            comps.setdefault(find(id(c)), []).append(c)
+        components = sorted(
+            comps.values(), key=lambda cs: min(class_index[id(c)] for c in cs)
+        )
+        total = len(subjects)
+        layouts: list[tuple[list[cst.ClassDef], str | None]] = []
+        for comp in components:
+            if len(comp) == 1:
+                layouts.append((comp, None))
+            elif len(comp) == total:
+                layouts.append((comp, self.opts.name or stem))
+            else:
+                name = self.opts.name
+                if not name:
+                    self.decline = (
+                        "the cohesive sub-cluster needs a package name — name the "
+                        "package with a domain noun (--name)"
+                    )
+                    return None
+                layouts.append((comp, name))
+        any_pkg = any(name is not None for _comp, name in layouts)
+        # relative imports in the origin change their resolution when the
+        # module becomes a package (the path root moves) — refuse PACKAGE,
+        # split flat (the class files are siblings, the imports stay valid)
+        if any_pkg and _module_has_relative_imports(module):
+            layouts = [(comp, None) for comp, _name in layouts]
+            any_pkg = False
+        whole_pkg = (
+            len(layouts) == 1
+            and layouts[0][1] is not None
+            and len(layouts[0][0]) == total
+        )
+
+        # package layouts: no module-level constant may survive (BQ6) and no
+        # residual code may evaluate a moved class at import time (the __init__
+        # evaluates before its re-exports)
+        if any_pkg and (const_names - moved_all):
+            names = ", ".join(sorted(const_names - moved_all))
+            self.decline = (
+                f"the constant(s) {names} cannot move into a class; a package "
+                "__init__ may hold no constants — split by hand"
+            )
+            return None
+        if whole_pkg:
+            for s in residual:
+                refs = _exec_time_names(wrapper, s) & subject_names
+                if refs:
+                    self.decline = (
+                        "module-level code evaluates " + ", ".join(sorted(refs))
+                        + " at import time — the package __init__ runs before the "
+                        "re-exports — split by hand"
+                    )
+                    return None
+
+        # the new modules: flat files are snake_cased siblings; package members
+        # live in `<pkg>/<Class>.py` and load via the package
+        snake = {c.name.value: _snake_name(c.name.value) for c in subjects}
+        targets: dict[str, list[str]] = {}
+        for comp, name in layouts:
+            for c in comp:
+                targets[c.name.value] = [name] if name is not None else [snake[c.name.value]]
+
+        # REFUSAL: target collisions (an existing sibling file, an existing
+        # package dir — the stem package needs --name when taken)
+        seen_files: set[str] = set()
+        for comp, name in layouts:
+            if name is None:
+                for c in comp:
+                    t = origin_dir + "/" + snake[c.name.value] + ".py" if origin_dir else snake[c.name.value] + ".py"
+                    if t in seen_files:
+                        self.decline = f"the split target '{t}' would collide — split by hand"
+                        return None
+                    seen_files.add(t)
+                    if (self.repo / t).exists():
+                        self.decline = f"'{t}' already exists — split by hand"
+                        return None
+            else:
+                pkg_dir = origin_dir + "/" + name if origin_dir else name
+                # the origin file itself is being replaced — only a DIFFERENT
+                # `name.py` or an existing `name/` directory blocks the package
+                if (self.repo / pkg_dir).exists() or (
+                    (self.repo / f"{pkg_dir}.py").exists() and f"{pkg_dir}.py" != rel
+                ):
+                    if name == stem and self.opts.name is None:
+                        self.decline = (
+                            f"a package named '{name}' already exists — pass --name <name>"
+                        )
+                    else:
+                        self.decline = (
+                            f"the package name '{name}' is taken — pick another --name"
+                        )
+                    return None
+
+        # REFUSAL: an import cycle in the produced layout — between the produced
+        # class files (the __init__ re-export edge is exempt by construction),
+        # or between a class file and the residual origin module (FLAT/sub)
+        if any_pkg:
+            for comp, name in layouts:
+                if name is None:
+                    continue
+                nodes = [c.name.value for c in comp]
+                edges = {n: set() for n in nodes}
+                for c in comp:
+                    for d in comp:
+                        if d is not c and d.name.value in free_of[id(c)]:
+                            edges[c.name.value].add(d.name.value)
+                cyc = _graph_cycle(nodes, edges)
+                if cyc:
+                    self.decline = (
+                        "the split would create an import cycle ("
+                        + " -> ".join(cyc)
+                        + ") — split by hand"
+                    )
+                    return None
+        if not whole_pkg:
+            bad = [
+                c.name.value
+                for c in subjects
+                if (free_of[id(c)] & residual_def_names)
+                and c.name.value in residual_subject_refs
+            ]
+            if bad:
+                self.decline = (
+                    "the split would create an import cycle between '"
+                    + bad[0]
+                    + "' and the origin module — split by hand"
+                )
+                return None
+            if _module_star_imported(self.repo, rel, module):
+                self.decline = (
+                    "a file does 'from ... import *' on the origin — the split "
+                    "cannot retarget it — split by hand"
+                )
+                return None
+
+        # ---- build the new sources (pure — fix_finding applies the writes) ----
+        extra_writes: list[tuple[str, str]] = []
+        for comp, name in layouts:
+            if name is None:
+                for c in comp:
+                    t = origin_dir + "/" + snake[c.name.value] + ".py" if origin_dir else snake[c.name.value] + ".py"
+                    extra_writes.append(
+                        (
+                            t,
+                            _split_class_source(
+                                module,
+                                wrapper,
+                                c,
+                                _SplitCtx(
+                                    stem=stem,
+
+                                    subjects=subject_names,
+                                    residual_def_names=residual_def_names,
+                                    moved=moved_consts.get(id(c), set()),
+                                    package=None,
+                                    origin_dots=1 if in_package else 0,
+                                    member_dots=0,
+                                ),
+                            ),
+                        )
+                    )
+            else:
+                pkg_dir = origin_dir + "/" + name if origin_dir else name
+                init_body = list(residual) + [
+                    cst.SimpleStatementLine(body=[_from_import_node([c.name.value], [c.name.value], 1)])
+                    for c in comp
+                ]
+                extra_writes.append((f"{pkg_dir}/__init__.py", cst.Module(body=init_body).code))
+                for c in comp:
+                    extra_writes.append(
+                        (
+                            f"{pkg_dir}/{c.name.value}.py",
+                            _split_class_source(
+                                module,
+                                wrapper,
+                                c,
+                                _SplitCtx(
+                                    stem=stem,
+
+                                    subjects=subject_names,
+                                    residual_def_names=residual_def_names,
+                                    moved=moved_consts.get(id(c), set()),
+                                    package=name,
+                                    origin_dots=2 if in_package else 0,
+                                    member_dots=1,
+                                ),
+                            ),
+                        )
+                    )
+
+        # the origin residual: the kept statements in their original order plus
+        # the from-imports the residual needs for the moved classes it uses
+        moved_def_ids = {
+            id(s) for n, s in const_stmts if n in moved_all
+        }
+        origin_kept = [s for s in top if id(s) not in subject_ids and id(s) not in moved_def_ids]
+        origin_additions = [
+            cst.SimpleStatementLine(body=[_from_import_node(targets[n], [n], 1 if in_package else 0)])
+            for n in sorted(residual_subject_refs)
+        ]
+        origin_source = cst.Module(body=_insert_header_imports(origin_kept, origin_additions)).code
+
+        # repo-wide rewrites for the layouts that move classes out of the
+        # reachable origin (FLAT + sub-package): from-imports and `old.Cls`
+        # attribute chains retarget to the class's new module
+        rewritten: dict[str, str] = {}
+        if not whole_pkg:
+            for path in _py_files(self.repo):
+                p_rel = path.relative_to(self.repo).as_posix()
+                text = origin_source if p_rel == rel else path.read_text(encoding="utf-8")
+                new = _split_rewrite_source(text, p_rel, origin_path, targets)
+                if new is not None:
+                    rewritten[p_rel] = new
+            if rel in rewritten:
+                origin_source = rewritten[rel]
+            for p_rel, new in rewritten.items():
+                if p_rel != rel:
+                    extra_writes.append((p_rel, new))
+
+        # safety: every produced file must parse, and every NEW target must not
+        # exist (a rewritten file exists by definition — it is being edited)
+        self.extra_writes = extra_writes
+        for t, src in [(rel, origin_source)] + extra_writes:
+            try:
+                cst.parse_module(src)
+            except Exception:
+                self.decline = f"the computed split for '{t}' does not parse — split by hand"
+                return None
+            if t != rel and t not in rewritten and (self.repo / t).exists():
+                self.decline = f"the split target '{t}' already exists — split by hand"
+                return None
+
+        # an origin that became empty is deleted only when no import names it
+        # anywhere in the produced repo (BQ6(f)); a whole-module package always
+        # replaces its origin file (the imports resolve through the package)
+        if whole_pkg:
+            self.deletes.append(rel)
+            return ""
+        final_sources = {p: s for p, s in rewritten.items()}
+        final_sources.update({t: s for t, s in extra_writes})
+        if _module_empty(origin_source) and not _origin_imported_anywhere(
+            self.repo, final_sources, rel, origin_path
+        ):
+            self.deletes.append(rel)
+            return ""
+        return origin_source
 
     def _fn_seam_analysis(self):
         source, line = self._loaded_source(), self.line
@@ -964,24 +1643,34 @@ class _FixRequest:
             return None  # nothing changed — the finding is stale or unlocatable (R28: silent)
         path.write_text(new_source, encoding="utf-8")
         self.wrote = True
+        # multi-file transaction (R8): extra writes + deletes apply after the
+        # origin, so partial failure leaves the origin... nothing is
+        # transactional yet — writes are applied in order and a failure
+        # surfaces loudly (fail-fast) rather than being swallowed
+        for rel, extra_source in self.extra_writes:
+            extra_path = repo / rel
+            extra_path.parent.mkdir(parents=True, exist_ok=True)
+            extra_path.write_text(extra_source, encoding="utf-8")
+        for rel in self.deletes:
+            dele = repo / rel
+            if dele.exists() and not dele.is_dir():
+                dele.unlink()
         return description
-
-
-@dataclass
-class StrewingGroup:
-    """The free-function group extract-class moves — shared leading type,
-    the fn names in source order, the anchor line."""
-
-    shared: str
-    fns: list[str] = field(default_factory=list)
-    anchor: int = 0
-
-
-# structural kinds need a name (agent-supplied via --fix-name, or defaulted to
-# the shared leading type) — they are never applied blindly
 STRUCTURAL_KINDS = {
     "extract-method": "extract the seam into a private function (preview without a name, apply with --fix-name)",
     "extract-class": "move the strewing free functions into a class, rewriting call sites",
+    "wide-tuple": (
+        "introduce a record class for the fixed-arity tuple (--name overrides the name "
+        "derived from the annotated variable), rewriting the annotations and build sites"
+    ),
+    "data-clump": (
+        "thread the shared parameter pair as one parameter object (--name overrides the "
+        "name derived from the pair), rewriting the clump's signatures, bodies, and call sites"
+    ),
+    "partition": (
+        "split the field-disjoint class into one class per method group (--name is the "
+        "shared prefix), each keeping the shared base and its own fields"
+    ),
     "extract-module": (
         "move the named module-scope defs (--params) into a new module (--name), re-exported from the origin"
     ),
@@ -997,7 +1686,19 @@ STRUCTURAL_KINDS = {
     "long-param-list": "Introduce Parameter Object: bundle the params into a dataclass",
     "dispatch-registry": "convert the if/elif dispatch chain into a dict of selector -> handler functions",
     "rule-table": "hoist the latent data structure: the if/append battery becomes a (condition, violation) table",
+    "dissolve-husk": (
+        "dissolve the delegating-husk: rewire its callers to the module functions, delete the husk"
+    ),
+    "collapse-chain": (
+        "collapse the forwarding chain: rewire the head method to the terminal (rewire or promote, "
+        "never blind inline), delete the middle forwarder"
+    ),
+    "split-module": (
+        "split the module so every public class lives in a file named after it (flat files, or a "
+        "package when the misplaced classes are cohesive)"
+    ),
 }
+
 
 # structural fixes whose result is genuinely novel (a class split, a new
 # function, a bundled signature) preview a diff before --confirm; the
@@ -1005,11 +1706,18 @@ STRUCTURAL_KINDS = {
 PREVIEW_KINDS = {
     "extract-method",
     "extract-class",
+    "wide-tuple",
+    "data-clump",
+    "partition",
     "extract-module",
     "long-param-list",
     "dispatch-registry",
     "rule-table",
+    "dissolve-husk",
+    "collapse-chain",
+    "split-module",
 }
+
 
 # the gate reports DISPLAY kinds (final_kind output: strewing shows as
 # latent-class); the fix command accepts either and normalizes here — the
@@ -2407,10 +3115,15 @@ def _annotation_base(node) -> str | None:
     ann = node.annotation.annotation
     if isinstance(ann, cst.Name):
         return ann.value
-    if isinstance(ann, cst.Subscript) and isinstance(ann.value, cst.Name):
-        return ann.value.value
     return None
+@dataclass
+class StrewingGroup:
+    """The free-function group extract-class moves — shared leading type,
+    the fn names in source order, the anchor line."""
 
+    shared: str
+    fns: list[str] = field(default_factory=list)
+    anchor: int = 0
 
 def _strewing_group(source: str, anchor_line: int) -> StrewingGroup | None:
     """The (shared type, fn names, fn source of the anchor) for the strewing
@@ -3220,6 +3933,33 @@ class _FnBodyRewrite(cst.CSTTransformer):
         )
 
 
+
+class _ClassOwningLine(cst.CSTVisitor):
+    """The innermost ClassDef whose span contains `line` — magic-number's
+    constant home (third-pass 4). None when the literal lives outside any
+    class (module-level function): the fixer refuses instead of parking the
+    constant at module top (its own global-state finding)."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, line: int) -> None:
+        self.line: int = line
+        self.depth: int = 0
+        self.owner: cst.ClassDef | None = None
+        self.owner_depth: int = -1
+
+    @override
+    def visit_ClassDef(self, node) -> None:
+        self.depth += 1
+        pos = _as_range(self.get_metadata(PositionProvider, node))
+        if pos.start.line <= self.line <= pos.end.line and self.depth > self.owner_depth:
+            self.owner = node
+            self.owner_depth = self.depth
+
+    @override
+    def leave_ClassDef(self, original_node) -> None:
+        self.depth -= 1
+
 class _FindLiteral(cst.CSTVisitor):
     """The numeric literal anchored at (line, col) — the schema-3 col pins
     same-line twins so the fix never rewrites the wrong operand."""
@@ -3249,6 +3989,41 @@ class _FindLiteral(cst.CSTVisitor):
     @override
     def visit_Float(self, node) -> None:
         self._match(node)
+
+
+class _InsertClassConstant(cst.CSTTransformer):
+    """Insert the magic-number constant as a CLASS ATTRIBUTE of the
+    innermost class owning the literal — after the docstring, opens the real
+    body. Leaves the innermost owner only (leave order is innermost-first),
+    so nested classes do not double-receive."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, line: int, assignment: cst.SimpleStatementLine) -> None:
+        self.line: int = line
+        self.assignment: cst.SimpleStatementLine = assignment
+        self.done: bool = False
+
+    @override
+    def leave_ClassDef(self, original_node, updated_node):
+        if self.done:
+            return updated_node
+        pos = _as_range(self.get_metadata(PositionProvider, original_node))
+        if not (pos.start.line <= self.line <= pos.end.line):
+            return updated_node
+        self.done = True
+        class_body = list(updated_node.body.body)
+        insert_at = 0
+        if (
+            class_body
+            and isinstance(class_body[0], cst.SimpleStatementLine)
+            and len(class_body[0].body) == 1
+            and isinstance(class_body[0].body[0], cst.Expr)
+            and isinstance(class_body[0].body[0].value, cst.SimpleString)
+        ):
+            insert_at = 1
+        class_body.insert(insert_at, self.assignment)
+        return updated_node.with_changes(body=updated_node.body.with_changes(body=class_body))
 
 
 class _ReplaceLiteral(cst.CSTTransformer):
@@ -3452,6 +4227,8 @@ class _NameCount(cst.CSTVisitor):
             self.n += 1
 
 
+# lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
+# the orchestrator
 def _name_occurrences(repo: Path, name: str) -> int:
     """Name-node occurrences of `name` across the repo's .py files — the
     duplicate-def safety check: a delete is only offered when the shadowing
@@ -3583,14 +4360,150 @@ def _flatten_stmts(stmts, out: list) -> None:
                 _flatten_stmts(list(h.body.body), out)
             if s.orelse is not None:
                 _flatten_stmts(list(s.orelse.body.body), out)
-            if s.finalbody is not None:
-                _flatten_stmts(list(s.finalbody.body.body), out)
         elif isinstance(s, cst.With):
             _flatten_stmts(list(s.body.body), out)
         elif isinstance(s, cst.Match):
             for case in s.cases:
                 _flatten_stmts(list(case.body.body), out)
 
+# lucidlint: ignore complexity the dispatch is a parser-shape table, not branch decision logic
+def _forwarder_callee_of(method: cst.FunctionDef) -> str | None:
+    """The module function a method's body exactly forwards to:
+    body == `return F(<all params minus the receiver>)` -> F. None otherwise
+    (not the pure-forwarder shape the husk rules demand)."""
+    params = [p for p in method.params.params if p.name is not None and p.name.value not in ("self", "cls")]
+    body = method.body.body if isinstance(method.body, cst.IndentedBlock) else []
+    if len(body) != 1 or not isinstance(body[0], cst.SimpleStatementLine):
+        return None
+    stmts = body[0].body
+    if len(stmts) != 1 or not isinstance(stmts[0], cst.Return):
+        return None
+    ret = stmts[0]
+    if not isinstance(ret.value, cst.Call) or not isinstance(ret.value.func, cst.Name):
+        return None
+    args = list(ret.value.args)
+    if len(args) != len(params):
+        return None
+    for arg, p in zip(args, params, strict=True):
+        if not isinstance(arg.value, cst.Name) or arg.value.value != p.name.value:
+            return None
+    return ret.value.func.value
+
+
+# lucidlint: ignore closures the nested visitors are one-purpose probe walks — hoisting names nothing the domain owns
+def _rewire_husk_sites(module: cst.Module, husk: str, method_fns: dict[str, str]) -> str | None:
+    """Rewrite a file's rewireable husk sites (`Husk().m(x)` / `h.m(x)` ->
+    `m(x)`, `h = Husk()` deleted). None when any reference or constructed
+    instance escapes the rewireable pattern — dissolve by hand."""
+
+    class _HuskProbe(cst.CSTVisitor):
+        """Collect instance variables (`h = Husk()`) and flag escapes."""
+
+        def __init__(self):
+            self.instances: set[str] = set()
+            self.statements: list[cst.SimpleStatementLine] = []
+            self.refused: str | None = None
+
+        @override
+        def visit_SimpleStatementLine(self, node):
+            for stmt in node.body:
+                if (
+                    isinstance(stmt, cst.Assign)
+                    and len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0].target, cst.Name)
+                    and isinstance(stmt.value, cst.Call)
+                    and isinstance(stmt.value.func, cst.Name)
+                    and stmt.value.func.value == husk
+                    and not stmt.value.args
+                ):
+                    self.instances.add(stmt.targets[0].target.value)
+                    self.statements.append(node)
+            return True
+
+    probe = _HuskProbe()
+    module.visit(probe)
+    instances = probe.instances
+
+    class _HuskRewire(cst.CSTTransformer):
+        def __init__(self):
+            self.bad: str | None = None
+
+        @override
+        def leave_Call(self, original_node, updated_node):
+            func = updated_node.func
+            if isinstance(func, cst.Attribute) and isinstance(func.value, cst.Call):
+                # Husk().m(<args>) -> Fm(<args>)
+                inner = func.value
+                if (
+                    isinstance(inner.func, cst.Name)
+                    and inner.func.value == husk
+                    and not inner.args
+                    and func.attr.value in method_fns
+                ):
+                    return updated_node.with_changes(func=cst.Name(method_fns[func.attr.value]))
+            # h.m(<args>) -> Fm(<args>) for a proven instance variable
+            if (
+                isinstance(func, cst.Attribute)
+                and isinstance(func.value, cst.Name)
+                and func.value.value in instances
+                and func.attr.value in method_fns
+            ):
+                return updated_node.with_changes(func=cst.Name(method_fns[func.attr.value]))
+            return updated_node
+
+    rewired = module.visit(_HuskRewire())
+
+    class _Leftover(cst.CSTVisitor):
+        """Any remaining reference to the husk or an instance variable —
+        EXCEPT inside the husk class's own subtree (deleted afterwards)."""
+
+        def __init__(self):
+            self.names: list[str] = []
+            self.in_husk: int = 0
+
+        @override
+        def visit_ClassDef(self, node):
+            if node.name.value == husk:
+                self.in_husk += 1
+
+        @override
+        def leave_ClassDef(self, original_node):
+            if original_node.name.value == husk:
+                self.in_husk -= 1
+
+        @override
+        def visit_Name(self, node):
+            if self.in_husk == 0 and (node.value == husk or node.value in instances):
+                self.names.append(node.value)
+
+    # drop the `h = Husk()` assignments: identity removal needs nodes OF the
+    # rewired tree (the rewire produced new objects), so re-probe it
+    drop_probe = _HuskProbe()
+    rewired.visit(drop_probe)
+    if drop_probe.statements:
+        rewired = rewired.visit(_RemoveNodes(drop_probe.statements))
+    # the husk class itself is deleted by the caller — scan leftovers on the
+    # tree WITHOUT it (the class's own subtree must not count as a reference)
+    scanned = rewired.visit(_RemoveHuskClass(husk))
+    left_scan = _Leftover()
+    scanned.visit(left_scan)
+    leftover_names = list(left_scan.names)
+    if leftover_names:
+        return None  # a reference escaped the rewireable pattern
+    return rewired.code
+
+
+class _RemoveHuskClass(cst.CSTTransformer):
+    """Delete the husk class (by name) from the origin after rewiring."""
+
+    def __init__(self, husk: str) -> None:
+        self.husk: str = husk
+
+    @override
+    def leave_ClassDef(self, original_node, updated_node):
+        if original_node.name.value == self.husk:
+            return cst.RemoveFromParent()
+        return updated_node
 
 def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
     """The origin's module-level imports binding a referenced name — what the
@@ -3630,6 +4543,8 @@ def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
     return moved
 
 
+# lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
+# the orchestrator
 def _origin_after_move(module: cst.Module, move: set[str], opts, rel: str) -> list:
     """The origin's body after the split: the moved defs dropped, the
     re-export import inserted after the last import — every other file's
@@ -3662,6 +4577,1010 @@ def _origin_after_move(module: cst.Module, move: set[str], opts, rel: str) -> li
     remaining.insert(insert_at, reexport)
     return remaining
 
+
+@dataclass(frozen=True)
+class _ForwardTarget:
+    """F/M's forwarder callee: a module fn (is_name) or a method on another
+    object ((recv-param, method))."""
+
+    is_name: bool
+    name: str = ""
+    attr_method: tuple[str, str] | None = None
+
+
+def _pure_forward_of(fn: cst.FunctionDef) -> tuple[_ForwardTarget | None, list[str]]:
+    """The forwarder call + arg names when `fn`'s body is exactly
+    `return <callee>(<arg names>)` — the #30 re-derivation of the pure
+    forwarder shape (pinned by the scanner's own rule tests)."""
+    if not isinstance(fn.body, cst.IndentedBlock) or len(fn.body.body) != 1:
+        return None, []
+    line = fn.body.body[0]
+    if not isinstance(line, cst.SimpleStatementLine) or len(line.body) != 1:
+        return None, []
+    ret = line.body[0]
+    if not isinstance(ret, cst.Return) or not isinstance(ret.value, cst.Call):
+        return None, []
+    call = ret.value
+    argnames = []
+    for a in call.args:
+        if not isinstance(a.value, cst.Name):
+            return None, []
+        argnames.append(a.value.value)
+    if isinstance(call.func, cst.Name):
+        return _ForwardTarget(is_name=True, name=call.func.value), argnames
+    if isinstance(call.func, cst.Attribute) and isinstance(call.func.value, cst.Name):
+        return _ForwardTarget(is_name=False, attr_method=(call.func.value.value, call.func.attr.value)), argnames
+    return None, []
+
+
+# lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
+# the orchestrator
+def _module_fn_node(module: cst.Module, name: str) -> cst.FunctionDef | None:
+    for stmt in module.body:
+        if isinstance(stmt, cst.FunctionDef) and stmt.name.value == name:
+            return stmt
+    return None
+
+
+def _module_fn_definition(repo: Path, name: str) -> tuple[str, cst.Module] | None:
+    for path in _py_files(repo):
+        mod = cst.parse_module(path.read_text(encoding="utf-8"))
+        if _module_fn_node(mod, name) is not None:
+            return path.relative_to(repo).as_posix(), mod
+    return None
+
+
+def _call_sites(repo: Path, name: str) -> int:
+    total = 0
+    for path in _py_files(repo):
+        mod = cst.parse_module(path.read_text(encoding="utf-8"))
+
+        class _Count(cst.CSTVisitor):
+            def __init__(self):
+                self.n = 0
+
+            @override
+            def visit_Call(self, node):
+                if isinstance(node.func, cst.Name) and node.func.value == name:
+                    self.n += 1
+
+        c = _Count()
+        mod.visit(c)
+        total += c.n
+    return total
+
+
+def _reexported(repo: Path, name: str) -> bool:
+    for path in _py_files(repo):
+        mod = cst.parse_module(path.read_text(encoding="utf-8"))
+        for stmt in mod.body:
+            if isinstance(stmt, cst.SimpleStatementLine):
+                for inner in stmt.body:
+                    if not isinstance(inner, cst.ImportFrom) or isinstance(inner.names, cst.ImportStar):
+                        continue
+                    for alias in inner.names:
+                        if isinstance(alias.name, cst.Name) and alias.name.value == name:
+                            return True
+    return False
+
+
+# lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
+# the orchestrator
+def _depends_on(repo: Path, rel: str, d_rel: str) -> bool:
+    if rel == d_rel:
+        return True
+    mod = cst.parse_module((repo / rel).read_text(encoding="utf-8"))
+    target_stem = Path(d_rel).stem
+    for stmt in mod.body:
+        if not isinstance(stmt, cst.SimpleStatementLine):
+            continue
+        for inner in stmt.body:
+            if isinstance(inner, cst.ImportFrom) and inner.module is not None:
+                mod_name = inner.module if isinstance(inner.module, str) else (
+                    inner.module.value if hasattr(inner.module, "value") else ""
+                )
+                if str(mod_name).split(".")[-1] == target_stem:
+                    return True
+    return False
+
+
+def _methods_named(repo: Path, name: str) -> list[tuple[str, cst.ClassDef, cst.FunctionDef]]:
+    out: list[tuple[str, cst.ClassDef, cst.FunctionDef]] = []
+    for path in _py_files(repo):
+        mod = cst.parse_module(path.read_text(encoding="utf-8"))
+        for stmt in mod.body:
+            if not isinstance(stmt, cst.ClassDef):
+                continue
+            for mem in stmt.body.body:
+                if isinstance(mem, cst.FunctionDef) and mem.name.value == name:
+                    out.append((path.relative_to(repo).as_posix(), stmt, mem))
+    return out
+
+
+def _class_has_identity(cls: cst.ClassDef) -> bool:
+    writes_self = False
+
+    class _Scan(cst.CSTVisitor):
+        @override
+        def visit_Assign(self, node):
+            nonlocal writes_self
+            for t in node.targets:
+                if (
+                    isinstance(t.target, cst.Attribute)
+                    and isinstance(t.target.value, cst.Name)
+                    and t.target.value.value == "self"
+                ):
+                    writes_self = True
+
+        @override
+        def visit_AnnAssign(self, node):
+            nonlocal writes_self
+            if (
+                isinstance(node.target, cst.Attribute)
+                and isinstance(node.target.value, cst.Name)
+                and node.target.value.value == "self"
+            ):
+                writes_self = True
+
+    cls.visit(_Scan())
+    for stmt in cls.body.body:
+        if isinstance(stmt, cst.AnnAssign):
+            return True  # declared class-level field
+        if isinstance(stmt, cst.FunctionDef) and _pure_forward_of(stmt)[0] is None:
+            return True  # a non-forwarding member — D is real
+    return writes_self
+
+
+def _method_uses_self(method: cst.FunctionDef) -> bool:
+    uses = False
+
+    class _Scan(cst.CSTVisitor):
+        @override
+        def visit_Attribute(self, node):
+            nonlocal uses
+            if isinstance(node.value, cst.Name) and node.value.value == "self":
+                uses = True
+
+    method.visit(_Scan())
+    return uses
+
+
+def _zero_external_refs(repo: Path, class_name: str) -> bool:
+    total = 0
+    for path in _py_files(repo):
+        mod = cst.parse_module(path.read_text(encoding="utf-8"))
+        for node in _module_name_nodes(mod):
+            if node.value == class_name:
+                total += 1
+    return total <= 1  # only the definition itself
+
+
+def _module_name_nodes(module: cst.Module) -> list[cst.Name]:
+    class _AllNames(cst.CSTVisitor):
+        def __init__(self):
+            self.names: list[cst.Name] = []
+        @override
+        def visit_Name(self, node):
+            self.names.append(node)
+
+    v = _AllNames()
+    module.visit(v)
+    return v.names
+
+
+class _MethodBodyRewriteByLine(cst.CSTTransformer):
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, line: int, name: str, body: list) -> None:
+        self.line = line
+        self.name = name
+        self.body = body
+
+    @override
+    def leave_FunctionDef(self, original_node, updated_node):
+        if updated_node.name.value == self.name:
+            pos = _as_range(self.get_metadata(PositionProvider, original_node))
+            if pos.start.line == self.line:
+                return updated_node.with_changes(body=updated_node.body.with_changes(body=self.body))
+        return updated_node
+
+
+# lucidlint: ignore data-clump the (module, positions, line) triple is the analyzer's input record
+def _replace_method_body(
+    module: cst.Module, method: cst.FunctionDef, body: cst.SimpleStatementLine, line: int | None = None
+) -> cst.Module:
+    if line is None:
+        line = _as_range(cst.MetadataWrapper(module).resolve(PositionProvider)[method]).start.line
+    return cst.MetadataWrapper(module).visit(_MethodBodyRewriteByLine(line, method.name.value, [body]))
+
+
+class _ReplaceClassByLine(cst.CSTTransformer):
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, line: int, new_class: cst.ClassDef) -> None:
+        self.line = line
+        self.new_class = new_class
+        self.done = False
+
+    @override
+    def leave_ClassDef(self, original_node, updated_node):
+        if self.done:
+            return updated_node
+        pos = _as_range(self.get_metadata(PositionProvider, original_node))
+        if pos.start.line == self.line:
+            self.done = True
+            return self.new_class
+        return updated_node
+
+
+def _replace_class_body(module: cst.Module, line: int, new_class: cst.ClassDef) -> cst.Module:
+    return cst.MetadataWrapper(module).visit(_ReplaceClassByLine(line, new_class))
+
+
+class _RemoveFn(cst.CSTTransformer):
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    @override
+    def leave_FunctionDef(self, original_node, updated_node):
+        if updated_node.name.value == self.name and not updated_node.decorators:
+            return cst.RemoveFromParent()
+        return updated_node
+
+
+def _remove_fn(module: cst.Module, name: str) -> str:
+    return module.visit(_RemoveFn(name)).code
+
+
+class _RemoveClass(cst.CSTTransformer):
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    @override
+    def leave_ClassDef(self, original_node, updated_node):
+        if updated_node.name.value == self.name:
+            return cst.RemoveFromParent()
+        return updated_node
+
+
+def _remove_class(module: cst.Module, name: str) -> str:
+    return module.visit(_RemoveClass(name)).code
+
+
+def _module_of(repo: Path, rel: str) -> cst.Module:
+    return cst.parse_module((repo / rel).read_text(encoding="utf-8"))
+
+
+# --------------------------------------------------------------------------- split-module (#31) helpers
+
+
+def _class_matches_stem(name: str, stem: str) -> bool:
+    """A class name matches the file stem case-insensitively, with the
+    plural-underscore form tolerated (`APIKey` in api_key.py)."""
+    n = name.lower()
+    return n == stem or n == stem.replace("_", "")
+
+
+def _snake_name(name: str) -> str:
+    """CamelCase -> snake_case, acronym-aware (`APIKey` -> api_key, not
+    a_p_i_key) — the flat sibling file's stem for a moved class."""
+    s = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name)
+    s = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", s)
+    return s.lower()
+
+
+def _class_free_names(cls: cst.ClassDef) -> set[str]:
+    """The names a class READS from the enclosing module: every Name in its
+    subtree minus the names bound inside it and minus its own name."""
+    probe = _FreeNames()
+    cls.visit(probe)
+    return probe.names - probe.bound - {cls.name.value}
+
+
+def _free_names_of(stmt) -> set[str]:
+    """The names one module-level statement reads from the module scope
+    (bindings inside it excluded) — the residual's references to moved
+    classes and constants."""
+    probe = _FreeNames()
+    stmt.visit(probe)
+    return probe.names - probe.bound
+
+
+def _class_attr_names(cls: cst.ClassDef) -> set[str]:
+    """The class-level attribute names a class binds directly in its body —
+    the shared-class-level-attribute cohesion edge."""
+    names: set[str] = set()
+    for stmt in cls.body.body:
+        if not isinstance(stmt, cst.SimpleStatementLine):
+            continue
+        for inner in stmt.body:
+            if isinstance(inner, cst.Assign):
+                for t in inner.targets:
+                    if isinstance(t.target, cst.Name):
+                        names.add(t.target.value)
+            elif isinstance(inner, cst.AnnAssign) and isinstance(inner.target, cst.Name):
+                names.add(inner.target.value)
+    return names
+
+
+def _stmt_is_plain_assign(stmt) -> bool:
+    """An import / pass / plain-name assignment (a constant) — the module
+    statements allowed between the classes of a module being split."""
+    if not isinstance(stmt, cst.SimpleStatementLine):
+        return False
+    for inner in stmt.body:
+        if isinstance(inner, (cst.Import, cst.ImportFrom, cst.Pass)):
+            continue
+        if isinstance(inner, cst.Assign) and all(
+            isinstance(t.target, cst.Name) for t in inner.targets
+        ):
+            continue
+        if isinstance(inner, cst.AnnAssign) and isinstance(inner.target, cst.Name):
+            continue
+        return False
+    return True
+
+
+def _module_constants(top: Sequence) -> list[tuple[str, cst.SimpleStatementLine]]:
+    """The module-level constants in source order: single-target Assign /
+    AnnAssign to plain names (the BQ6 subject set)."""
+    out: list[tuple[str, cst.SimpleStatementLine]] = []
+    for stmt in top:
+        if not isinstance(stmt, cst.SimpleStatementLine) or len(stmt.body) != 1:
+            continue
+        inner = stmt.body[0]
+        if isinstance(inner, cst.Assign) and len(inner.targets) == 1 and isinstance(
+            inner.targets[0].target, cst.Name
+        ):
+            out.append((inner.targets[0].target.value, stmt))
+        elif isinstance(inner, cst.AnnAssign) and inner.value is not None and isinstance(
+            inner.target, cst.Name
+        ):
+            out.append((inner.target.value, stmt))
+    return out
+
+
+def _const_value(stmt: cst.SimpleStatementLine) -> cst.BaseExpression:
+    inner = stmt.body[0]
+    if isinstance(inner, cst.Assign):
+        return inner.value
+    if isinstance(inner, cst.AnnAssign) and inner.value is not None:
+        return inner.value
+    return cst.Name("")
+
+
+def _module_has_relative_imports(module: cst.Module) -> bool:
+    return any(
+        isinstance(s, cst.SimpleStatementLine)
+        and any(isinstance(i, cst.ImportFrom) and i.relative for i in s.body)
+        for s in module.body
+    )
+
+
+def _class_body_binds(cls: cst.ClassDef, name: str) -> bool:
+    """Does the class's body bind `name` at class-body level (an attribute
+    with the same name as the constant about to move in)?"""
+    for stmt in cls.body.body:
+        if isinstance(stmt, (cst.FunctionDef, cst.ClassDef)):
+            if stmt.name.value == name:
+                return True
+        elif isinstance(stmt, cst.SimpleStatementLine):
+            for inner in stmt.body:
+                if isinstance(inner, cst.Assign) and any(
+                    name in _hoist_target_names(t.target) for t in inner.targets
+                ):
+                    return True
+                if isinstance(inner, cst.AnnAssign) and inner.target and name in _hoist_target_names(
+                    inner.target
+                ):
+                    return True
+                if isinstance(inner, (cst.Import, cst.ImportFrom)):
+                    bound: set[str] = set()
+                    _collect_alias_names(bound, inner)
+                    if name in bound:
+                        return True
+    return False
+
+
+
+# lucidlint: ignore complexity the dispatch is a parser-shape table, not branch decision logic
+def _name_ref_kind(wrapper: cst.MetadataWrapper, node: cst.Name) -> str:
+    """A Name reference's execution context: 'skip' (a binding or a
+    non-reference position), 'deferred' (evaluates at call time — inside a
+    function body), or 'immediate' (evaluates at import/class-definition
+    time — module statements, class bodies, defaults, decorators)."""
+    parents = wrapper.resolve(ParentNodeProvider)
+    parent = parents.get(node)
+    if parent is None:
+        return "skip"
+    if isinstance(parent, cst.AssignTarget):
+        return "skip"
+    if isinstance(parent, cst.AnnAssign) and parent.target is node:
+        return "skip"
+    if isinstance(parent, cst.Param) and parent.name is node:
+        return "skip"
+    if isinstance(parent, cst.For) and parent.target is node:
+        return "skip"
+    if isinstance(parent, cst.CompFor) and parent.target is node:
+        return "skip"
+    if isinstance(parent, cst.AsName):
+        return "skip"
+    if isinstance(parent, cst.ImportAlias):
+        return "skip"
+    if isinstance(parent, cst.NamedExpr) and parent.target is node:
+        return "skip"
+    if isinstance(parent, cst.Arg) and parent.keyword is node:
+        return "skip"
+    if isinstance(parent, cst.Attribute) and parent.attr is node:
+        return "skip"
+    if isinstance(parent, cst.ClassDef) and parent.name is node:
+        return "skip"
+    if isinstance(parent, cst.FunctionDef) and parent.name is node:
+        return "skip"
+    cur = parent
+    while cur is not None:
+        if isinstance(cur, cst.IndentedBlock):
+            p = parents.get(cur)
+            if isinstance(p, cst.FunctionDef) and p.body is cur:
+                return "deferred"
+        if isinstance(cur, cst.FunctionDef):
+            return "immediate"
+        cur = parents.get(cur)
+    return "immediate"
+
+
+def _exec_time_names(wrapper: cst.MetadataWrapper, node) -> set[str]:
+    """The names `node` reads at evaluation time (function bodies deferred) —
+    the residual check that refuses package layouts whose import-time code
+    touches a moving class."""
+
+    class _ExecNames(cst.CSTVisitor):
+        def __init__(self) -> None:
+            self.names: set[str] = set()
+
+        @override
+        def visit_Name(self, node) -> None:
+            if _name_ref_kind(wrapper, node) == "immediate":
+                self.names.add(node.value)
+
+    probe = _ExecNames()
+    node.visit(probe)
+    return probe.names
+
+# lucidlint: ignore complexity the dispatch is a parser-shape table, not branch decision logic
+def _consts_moving_into(
+    const_stmts: list[tuple[str, cst.SimpleStatementLine]],
+    class_refs: dict[int, set[str]],
+    residual_refs: set[str],
+    external_consts: set[str],
+    cls: cst.ClassDef,
+) -> set[str]:
+    """The constants that may move INTO this class as class attributes (BQ6):
+    every reader is inside the class's own subtree (a residual or foreign
+    reader, or an external `from mod import CONST`, keeps it in the origin),
+    the class does not already bind the name, and the value references only
+    literals, builtins, or earlier co-moving constants (a class body
+    evaluates sequentially — a later constant is not yet bound, and a
+    constant that STAYS in the origin must not read a moved one)."""
+    cls_id = id(cls)
+    own = class_refs.get(cls_id, set())
+    others = {n for cid, refs in class_refs.items() if cid != cls_id for n in refs}
+    order = {n: i for i, (n, _s) in enumerate(const_stmts)}
+    value_of = {n: _const_value(s) for n, s in const_stmts}
+    value_refs_of = {n: _expr_names(v) - _BUILTINS for n, v in value_of.items()}
+    readers_via_value: dict[str, set[str]] = {}
+    for reader, vrefs in value_refs_of.items():
+        for k in vrefs:
+            readers_via_value.setdefault(k, set()).add(reader)
+    candidates = {
+        n
+        for n, _s in const_stmts
+        if n in own
+        and n not in residual_refs
+        and n not in others
+        and n not in external_consts
+        and not _class_body_binds(cls, n)
+    }
+    while True:
+        changed = False
+        for n in list(candidates):
+            # every constant that READS n through its value must co-move
+            if any(m not in candidates for m in readers_via_value.get(n, ())):
+                candidates.discard(n)
+                changed = True
+                continue
+            vrefs = value_refs_of[n]
+            if not vrefs <= candidates or any(order.get(m, -1) >= order[n] for m in vrefs):
+                candidates.discard(n)
+                changed = True
+        if not changed:
+            break
+    if not (candidates & own):
+        return set()  # nothing the class directly reads — ownerless constants stay
+    return candidates
+
+
+class _RewriteMovedConstRefs(cst.CSTTransformer):
+    """Method-body references to a constant that moved into the class become
+    `Cls.CONST` (a bare name does not resolve through the method scope);
+    class-body references stay bare (the class scope resolves them), and
+    binding positions are never touched."""
+
+    def __init__(self, wrapper: cst.MetadataWrapper, moved: set[str], cls_name: str) -> None:
+        self.wrapper = wrapper
+        self.moved = moved
+        self.cls_name = cls_name
+
+    @override
+    def leave_Name(self, original_node, updated_node) -> cst.BaseExpression:
+        if updated_node.value not in self.moved:
+            return updated_node
+        try:
+            kind = _name_ref_kind(self.wrapper, original_node)
+        except KeyError:
+            return updated_node  # a freshly inserted node — not a pre-split reference
+        if kind != "deferred":
+            return updated_node
+        return cst.Attribute(value=cst.Name(self.cls_name), attr=updated_node)
+
+
+def _is_docstring_stmt(
+    stmt: cst.BaseSmallStatement | cst.BaseStatement,
+) -> TypeGuard[cst.SimpleStatementLine]:
+    return (
+        isinstance(stmt, cst.SimpleStatementLine)
+        and len(stmt.body) == 1
+        and isinstance(stmt.body[0], cst.Expr)
+        and isinstance(stmt.body[0].value, (cst.SimpleString, cst.ConcatenatedString))
+    )
+
+
+def _class_with_moved_consts(
+    wrapper: cst.MetadataWrapper, cls: cst.ClassDef, moved: set[str], cls_name: str
+) -> cst.ClassDef:
+    """Insert the moved constants as class attributes (in their original
+    source order, after the docstring) and rewrite the method-body references
+    to them as `Cls.CONST`."""
+    if not moved:
+        return cls
+    attrs = [s for n, s in _module_constants(wrapper.module.body) if n in moved]
+    body = list(cls.body.body)
+    insert = 1 if body and _is_docstring_stmt(body[0]) else 0
+    new_body = body[:insert] + attrs + body[insert:]
+    cls2 = cls.with_changes(body=cls.body.with_changes(body=new_body))
+    return cast(cst.ClassDef, cls2.visit(_RewriteMovedConstRefs(wrapper, moved, cls_name)))
+
+
+class _SplitCtx(NamedTuple):
+    """Everything a class-file build needs to route the class's free names to
+    the right imports: the origin identity, the other subjects, the residual
+    members, the constants moving in — and the layout's import forms."""
+
+    stem: str
+
+    subjects: set[str]
+    residual_def_names: set[str]
+    moved: set[str]
+    package: str | None  # None = flat sibling; else the package directory
+    origin_dots: int     # relative dots for `from <origin> import X`
+    member_dots: int     # relative dots for `from .<Class> import <Class>`
+
+
+def _from_import_node(
+    module_comps: list[str], names: list[str] | list[cst.ImportAlias], dots: int
+) -> cst.ImportFrom:
+    """`from <module> import <names>` with `dots` relative dots; module
+    components are a dotted Name/Attribute chain when present."""
+    module: cst.BaseExpression | None = None
+    if module_comps:
+        module = cst.Name(module_comps[0])
+        for part in module_comps[1:]:
+            module = cst.Attribute(value=module, attr=cst.Name(part))
+    aliases = [
+        a if isinstance(a, cst.ImportAlias) else cst.ImportAlias(name=cst.Name(a))
+        for a in names
+    ]
+    if not isinstance(module, (cst.Name, cst.Attribute)):
+        module = cst.Name(str(module))
+    return cst.ImportFrom(
+        module=module,
+        names=aliases,
+        relative=[cst.Dot()] * dots,
+        lpar=None,
+        rpar=None,
+    )
+
+
+def _split_class_source(
+    module: cst.Module,
+    wrapper: cst.MetadataWrapper,
+    cls: cst.ClassDef,
+    ctx: _SplitCtx,
+) -> str:
+    """One moved class's new file: the imports it needs (verbatim copies of
+    the origin's imports binding its free names; a from-origin import for a
+    residual member; a from-`.Class` import for a sibling subject) + the
+    class itself with its constants and references rewritten."""
+    free = _class_free_names(cls) - ctx.moved - _BUILTINS
+    imports = _moved_imports(module, free)  # verbatim copies for import-bound names
+    constructed: list = []
+    for n in sorted(free):
+        if n in ctx.subjects and n != cls.name.value:
+            if ctx.package is None:
+                # unreachable via the cohesion edges (a reference would merge
+                # the components) — emit the sibling-file form anyway
+                constructed.append(_from_import_node([_snake_name(n)], [n], ctx.origin_dots))
+            else:
+                constructed.append(_from_import_node([n], [n], ctx.member_dots))
+        elif n in ctx.residual_def_names:
+            if ctx.package is None:
+                constructed.append(_from_import_node([ctx.stem], [n], ctx.origin_dots))
+            else:
+                constructed.append(_from_import_node([], [n], 1))  # from . import X
+    seen: set[str] = set()
+    body: list = []
+    for stmt in imports + [cst.SimpleStatementLine(body=[i]) for i in constructed]:
+        code = cst.Module(body=[stmt]).code
+        if code in seen:
+            continue
+        seen.add(code)
+        body.append(stmt)
+    cls_node = _class_with_moved_consts(wrapper, cls, ctx.moved, cls.name.value)
+    return cst.Module(body=body + [cls_node]).code
+
+
+def _dotted_expr(parts: list[str]) -> cst.Name | cst.Attribute:
+    if len(parts) == 1:
+        return cst.Name(parts[0])
+    expr: cst.Name | cst.Attribute = cst.Name(parts[0])
+    for part in parts[1:]:
+        expr = cst.Attribute(value=expr, attr=cst.Name(part))
+    return expr
+
+
+def _resolve_dotted(expr) -> list[str] | None:
+    """A plain Name/Attribute chain's dotted components, or None."""
+    parts: list[str] = []
+    cur = expr
+    while isinstance(cur, cst.Attribute):
+        parts.append(cur.attr.value)
+    if isinstance(cur, cst.Name):
+        parts.append(cur.value)
+        return list(reversed(parts))
+    return None
+
+
+def _module_alias_map(module: cst.Module, origin_path: list[str]) -> dict[str, list[str]]:
+    """`import <origin> [as x]` bindings in one file: the bound name -> the
+    origin's dotted path (for attribute-base resolution)."""
+    out: dict[str, list[str]] = {}
+    for stmt in module.body:
+        if not isinstance(stmt, cst.SimpleStatementLine):
+            continue
+        for inner in stmt.body:
+            if not isinstance(inner, cst.Import):
+                continue
+            for alias in inner.names:
+                parts = _resolve_dotted(alias.name)
+                if parts is None:
+                    continue
+                if parts != origin_path:
+                    continue
+                bound = alias.asname.name if alias.asname is not None else parts[0]
+                out[str(bound)] = list(parts)
+    return out
+
+
+def _import_refers_to_origin(
+    ifrom: cst.ImportFrom, importer_dir: list[str], origin_path: list[str]
+) -> bool:
+    """Does this ImportFrom resolve to the origin module (absolute full path,
+    relative dots resolving to the origin's directory)?"""
+    comps = _resolve_dotted(ifrom.module) if ifrom.module is not None else []
+    if comps is None:
+        return False
+    if ifrom.relative:
+        dots = len(ifrom.relative)
+        prefix = len(importer_dir) - (dots - 1)
+        if prefix < 0:
+            return False
+        return importer_dir[:prefix] + comps == origin_path
+    return comps == origin_path
+
+
+class _SplitImportRewrite(cst.CSTTransformer):
+    """The FLAT/sub-package repo-wide rewrite: `from prod_mod import Cls`
+    splices per subject into `from <new> import Cls` (the other aliases stay
+    on the origin), and `prod_mod.Cls` attribute chains become `<new>.Cls`,
+    registering the retargeted modules for `import <new>` injection."""
+
+    def __init__(
+        self,
+        origin_path: list[str],
+        targets: dict[str, list[str]],
+        alias_map: dict[str, list[str]],
+        importer_dir: list[str],
+    ) -> None:
+        self.origin_path = origin_path
+        self.targets = targets
+        self.alias_map = alias_map
+        self.importer_dir = importer_dir
+        self.added: set[str] = set()
+
+    def _base_is_origin(self, parts: list[str]) -> bool:
+        if parts == self.origin_path:
+            return True
+        return (
+            len(parts) == 1
+            and parts[0] in self.alias_map
+            and self.alias_map[parts[0]] == self.origin_path
+        )
+
+    @override
+    def leave_SimpleStatementLine(self, original_node, updated_node):
+        new_inners: list[cst.BaseSmallStatement] = []
+        changed = False
+        for inner in updated_node.body:
+            if isinstance(inner, cst.ImportFrom) and not isinstance(inner.names, cst.ImportStar):
+                spliced = self._splice_import_from(inner)
+                if spliced is not None:
+                    new_inners.extend(spliced)
+                    changed = True
+                    continue
+            new_inners.append(inner)
+        if not changed:
+            return updated_node
+        return updated_node.with_changes(body=new_inners)
+
+    def _splice_import_from(self, ifrom: cst.ImportFrom) -> list[cst.ImportFrom] | None:
+        if not _import_refers_to_origin(ifrom, self.importer_dir, self.origin_path):
+            return None
+        if isinstance(ifrom.names, cst.ImportStar):
+            return None
+        keep: list[cst.ImportAlias] = []
+        subj: list[cst.ImportAlias] = []
+        for alias in ifrom.names:
+            if isinstance(alias.name, cst.Name) and alias.name.value in self.targets:
+                subj.append(alias)
+            else:
+                keep.append(alias)
+        if not subj:
+            return None
+        out: list[cst.ImportFrom] = []
+        if keep:
+            out.append(ifrom.with_changes(names=keep))
+        for alias in subj:
+            if not isinstance(alias.name, cst.Name):
+                continue
+            comps = self.targets[alias.name.value]
+            module_comps = comps if ifrom.relative else self.origin_path[:-1] + comps
+            # a FRESH alias: the original carries its comma/whitespace from the
+            # multi-alias line (`User, Team`) — reusing it renders `User, ` alone
+            fresh = cst.ImportAlias(name=alias.name, asname=alias.asname)
+            out.append(_from_import_node(module_comps, [fresh], len(ifrom.relative)))
+        return out
+
+    @override
+    def leave_Attribute(self, original_node, updated_node):
+        attr = updated_node.attr.value
+        if attr not in self.targets:
+            return updated_node
+        parts = _resolve_dotted(updated_node.value)
+        if parts is None or not self._base_is_origin(parts):
+            return updated_node
+        full = self.origin_path[:-1] + self.targets[attr]
+        self.added.add(".".join(full))
+        return updated_node.with_changes(value=_dotted_expr(full))
+
+
+def _insert_header_imports(body: list, additions: list) -> list:
+    """Insert the added imports after any module docstring — imports must sit
+    before the statements that reference the names they bind."""
+    i = 1 if body and _is_docstring_stmt(body[0]) else 0
+    return body[:i] + additions + body[i:]
+
+
+def _split_rewrite_source(
+    text: str,
+    p_rel: str,
+    origin_path: list[str],
+    targets: dict[str, list[str]],
+) -> str | None:
+    """One file's rewrite for the split: retargeted from-imports, retargeted
+    `old.Cls` attribute chains, and the `import <new>` injection for those
+    chains. None when the file is unchanged."""
+    try:
+        module = cst.parse_module(text)
+    except Exception:  # parse errors in other files are their own findings
+        return None
+    alias_map = _module_alias_map(module, origin_path)
+    importer_dir = p_rel.split("/")[:-1]
+    tx = _SplitImportRewrite(origin_path, targets, alias_map, importer_dir)
+    new = module.visit(tx).code
+    if tx.added:
+        existing: set[str] = set()
+        for stmt in module.body:
+            if not isinstance(stmt, cst.SimpleStatementLine):
+                continue
+            for inner in stmt.body:
+                if isinstance(inner, cst.Import):
+                    for alias in inner.names:
+                        parts = _resolve_dotted(alias.name)
+                        if parts is not None:
+                            existing.add(".".join(parts))
+        if tx.added - existing:
+            new = _add_module_imports(cst.parse_module(new), tx.added - existing).code
+    return new if new != text else None
+
+
+def _add_module_imports(module: cst.Module, dotted_paths: set[str]) -> cst.Module:
+    """`import <dotted>` statements for the retargeted attribute-chain bases,
+    inserted after the docstring — `prod_mod.User` became `user.User`, which
+    needs the module binding."""
+    lines = [
+        cst.SimpleStatementLine(
+            body=[cst.Import(names=[cst.ImportAlias(name=_dotted_expr(p.split(".")))])]
+        )
+        for p in sorted(dotted_paths)
+    ]
+    return module.with_changes(body=_insert_header_imports(list(module.body), lines))
+
+
+
+def _const_imported_elsewhere(
+    repo: Path, rel: str, module: cst.Module, name: str
+) -> bool:
+    """Is the constant imported or attribute-read from another file? A moved
+    constant must be sole-owned by its class (BQ6) — an external reader would
+    break."""
+    origin_path = rel.split("/")[:-1] + [rel.rsplit("/", 1)[-1][:-3]]
+    for path in _py_files(repo):
+        if path.relative_to(repo).as_posix() == rel:
+            continue
+        try:
+            mod = cst.parse_module(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        importer_dir = path.relative_to(repo).as_posix().split("/")[:-1]
+        alias_map = _module_alias_map(mod, origin_path)
+
+        probe = _ConstImportScan(importer_dir, alias_map, origin_path, name)
+        mod.visit(probe)
+        if probe.hit:
+            return True
+    return False
+
+
+class _ConstImportScan(cst.CSTVisitor):
+    """One file's external readers of a constant: `from <origin> import C`
+    (or a star import) and `<origin>.C` attribute chains."""
+
+    def __init__(
+        self,
+        importer_dir: list[str],
+        alias_map: dict[str, list[str]],
+        origin_path: list[str],
+        name: str,
+    ) -> None:
+        self.importer_dir = importer_dir
+        self.alias_map = alias_map
+        self.origin_path = origin_path
+        self.name = name
+        self.hit = False
+
+    @override
+    def visit_ImportFrom(self, node) -> None:
+        if not _import_refers_to_origin(node, self.importer_dir, self.origin_path):
+            return
+        if isinstance(node.names, cst.ImportStar) or any(
+            isinstance(a.name, cst.Name) and a.name.value == self.name
+            for a in node.names
+        ):
+            self.hit = True
+
+    @override
+    def visit_Attribute(self, node) -> None:
+        if node.attr.value != self.name:
+            return
+        parts = _resolve_dotted(node.value)
+        if parts is None:
+            return
+        if parts == self.origin_path or (
+            len(parts) == 1
+            and parts[0] in self.alias_map
+            and self.alias_map[parts[0]] == self.origin_path
+        ):
+            self.hit = True
+
+
+def _module_star_imported(repo: Path, rel: str, module: cst.Module) -> bool:
+    """Does any other file `from <origin> import *`? The flat rewrite cannot
+    retarget a star import — the moved classes would silently vanish from it."""
+    origin_path = rel.split("/")[:-1] + [rel.rsplit("/", 1)[-1][:-3]]
+    for path in _py_files(repo):
+        if path.relative_to(repo).as_posix() == rel:
+            continue
+        try:
+            mod = cst.parse_module(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        importer_dir = path.relative_to(repo).as_posix().split("/")[:-1]
+        for stmt in mod.body:
+            if not isinstance(stmt, cst.SimpleStatementLine):
+                continue
+            for inner in stmt.body:
+                if (
+                    isinstance(inner, cst.ImportFrom)
+                    and isinstance(inner.names, cst.ImportStar)
+                    and _import_refers_to_origin(inner, importer_dir, origin_path)
+                ):
+                    return True
+    return False
+
+
+def _origin_imported_anywhere(
+    repo: Path, sources: dict[str, str], rel: str, origin_path: list[str]
+) -> bool:
+    """BQ6(f): an emptied origin is deleted only when no import statement in
+    the produced repo names it anymore."""
+    for p_rel, source in sources.items():
+        if p_rel == rel:
+            continue
+        try:
+            mod = cst.parse_module(source)
+        except Exception:
+            continue
+        importer_dir = p_rel.split("/")[:-1]
+        for stmt in mod.body:
+            if not isinstance(stmt, cst.SimpleStatementLine):
+                continue
+            for inner in stmt.body:
+                if isinstance(inner, cst.ImportFrom) and not isinstance(
+                    inner.names, cst.ImportStar
+                ):
+                    if _import_refers_to_origin(inner, importer_dir, origin_path):
+                        return True
+                elif isinstance(inner, cst.Import):
+                    for alias in inner.names:
+                        parts = _resolve_dotted(alias.name)
+                        if parts == origin_path:
+                            return True
+    return False
+
+
+def _graph_cycle(nodes: list[str], edges: dict[str, set[str]]) -> list[str] | None:
+    """A directed cycle as the node path, or None — the import-cycle refusal
+    for the produced class files."""
+    state: dict[str, int] = {}
+
+    def dfs(n: str, path: list[str]) -> list[str] | None:
+        state[n] = 1
+        path.append(n)
+        for nxt in sorted(edges[n]):
+            if state.get(nxt) == 1:
+                cyc = path[path.index(nxt) :] + [nxt]
+                return cyc
+            if state.get(nxt) is None:
+                r = dfs(nxt, path)
+                if r:
+                    return r
+        path.pop()
+        state[n] = 2
+        return None
+
+    for n in nodes:
+        if state.get(n) is None:
+            r = dfs(n, [])
+            if r:
+                return r
+    return None
+
+
+def _module_empty(new_source: str) -> bool:
+    mod = cst.parse_module(new_source)
+    return all(
+        not isinstance(s, (cst.FunctionDef, cst.ClassDef, cst.SimpleStatementLine)) for s in mod.body
+    )
 
 def _module_bindings(module: cst.Module) -> set[str]:
     """The names module-level assignments/constants bind — the extract-module
@@ -4311,3 +6230,816 @@ def _rule_table_build(acc: str, checks: list) -> _RuleTableBuild:
         ]
     )
     return table, collector
+
+
+# ===========================================================================
+# The shape-routed extract-class arms: wide-tuple / data-clump / partition.
+#
+# Their wire record carries only (kind, file, line) — no seam_members, no
+# message — so each arm RECOVERS the shape from the source at the anchor line
+# and declines with a specific reason when it cannot be resolved safely:
+# never a silent no-op, never a partial write.
+# ===========================================================================
+
+
+def _pascal_case(text: str) -> str:
+    """`folder_fingerprint` -> `FolderFingerprint` (the derived class name)."""
+    return "".join(part[:1].upper() + part[1:] for part in re.split(r"[^0-9A-Za-z]+", text) if part)
+
+
+def _snake_case(text: str) -> str:
+    """`FolderFingerprint` -> `folder_fingerprint` (the threaded parameter)."""
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", text).lower()
+
+
+def _annotation_text(expr: cst.BaseExpression) -> str:
+    """The annotation's generated text, so two spellings of one shape compare
+    equal."""
+    return cst.Module(body=[]).code_for_node(expr)
+class _BindsName(cst.CSTVisitor):
+    """Does the module already bind `name` (class, def, or assignment target)?
+    A generated class of that name would shadow or duplicate it."""
+
+    def __init__(self, name: str) -> None:
+        self.name: str = name
+        self.found: bool = False
+
+    @override
+    def visit_ClassDef(self, node) -> None:
+        if node.name.value == self.name:
+            self.found = True
+
+    @override
+    def visit_FunctionDef(self, node) -> None:
+        if node.name.value == self.name:
+            self.found = True
+
+    @override
+    def visit_Assign(self, node) -> None:
+        for target in node.targets:
+            if isinstance(target.target, cst.Name) and target.target.value == self.name:
+                self.found = True
+
+
+def _binds_name(module: cst.Module, name: str) -> bool:
+    finder = _BindsName(name)
+    module.visit(finder)
+    return finder.found
+
+
+# --------------------------------------------------------------------------- wide-tuple
+
+
+class _WideTupleSite(NamedTuple):
+    """One fixed-arity tuple annotation on the anchor line: where it lives,
+    the annotated name, its arity, and the build site's element expressions
+    (None when the annotation has no matching tuple literal)."""
+
+    where: str
+    var: str
+    arity: int
+    annotation: cst.BaseExpression
+    elements: tuple[cst.BaseExpression, ...] | None
+
+
+class _FindWideTuples(cst.CSTVisitor):
+    """Every wide-tuple annotation anchored on the finding's line — the fixer
+    declines when the line carries more than one (it cannot pick)."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, line: int) -> None:
+        self.line: int = line
+        self.sites: list[_WideTupleSite] = []
+
+    @override
+    def visit_AnnAssign(self, node) -> None:
+        if _as_range(self.get_metadata(PositionProvider, node)).start.line != self.line:
+            return
+        if not isinstance(node.target, cst.Name):
+            return
+        arity = _fixed_tuple_arity(node.annotation.annotation)
+        if arity is None or arity < 3:
+            return
+        elements = None
+        if isinstance(node.value, cst.Tuple) and len(node.value.elements) == arity and all(
+            isinstance(element, cst.Element) for element in node.value.elements
+        ):
+            elements = tuple(element.value for element in node.value.elements)
+        self.sites.append(
+            _WideTupleSite("assign", node.target.value, arity, node.annotation.annotation, elements)
+        )
+
+    @override
+    def visit_FunctionDef(self, node) -> None:
+        if _as_range(self.get_metadata(PositionProvider, node)).start.line != self.line:
+            return
+        for param in [*node.params.posonly_params, *node.params.params, *node.params.kwonly_params]:
+            if param.annotation is None:
+                continue
+            arity = _fixed_tuple_arity(param.annotation.annotation)
+            if arity is not None and arity >= 3:
+                self.sites.append(
+                    _WideTupleSite("param", param.name.value, arity, param.annotation.annotation, None)
+                )
+        if node.returns is not None:
+            arity = _fixed_tuple_arity(node.returns.annotation)
+            if arity is not None and arity >= 3:
+                self.sites.append(
+                    _WideTupleSite("return", node.name.value, arity, node.returns.annotation, None)
+                )
+
+
+def _fixed_tuple_arity(node: cst.BaseExpression | None) -> int | None:
+    """The arity of a fixed-arity `tuple[...]`/`Tuple[...]` annotation; None
+    for anything else (including the variadic `tuple[int, ...]`)."""
+    if not isinstance(node, cst.Subscript) or not (
+        isinstance(node.value, cst.Name) and node.value.value in ("tuple", "Tuple")
+    ):
+        return None
+    elements = node.slice if isinstance(node.slice, tuple) else (node.slice,)
+    for element in elements:
+        if not isinstance(element, cst.SubscriptElement):
+            return None
+        index = element.slice
+        if not isinstance(index, cst.Index) or isinstance(index.value, cst.Ellipsis):
+            return None
+    return len(elements)
+
+
+def _record_field_names(elements: tuple[cst.BaseExpression, ...] | None, arity: int) -> list[str]:
+    """The record's field names: a Name element keeps its name, an attribute
+    access takes the attribute (the value IS that field), and a literal, a
+    keyword, or a duplicate falls back to `f<i>` — the agent renames what the
+    shape alone cannot name."""
+    names: list[str] = []
+    for i in range(arity):
+        element = elements[i] if elements is not None and i < len(elements) else None
+        name = ""
+        if isinstance(element, cst.Name):
+            name = element.value
+        elif isinstance(element, cst.Attribute):
+            name = element.attr.value
+        if not name.isidentifier() or keyword.iskeyword(name) or name in names:
+            name = f"f{i}"
+        names.append(name)
+    return names
+
+
+class _WideTupleToRecord(cst.CSTTransformer):
+    """Retarget every annotation in the file spelling the same tuple shape at
+    the record class, and every matching tuple build site at its constructor
+    — the shape (arity + element types) is the proof of sameness. A function
+    annotated as returning the tuple has its own matching return/assignment
+    literals retargeted too (position proves them); elsewhere nothing
+    changes."""
+
+    METADATA_DEPENDENCIES = (ParentNodeProvider,)
+
+    def __init__(self, ann_text: str, arity: int, class_name: str) -> None:
+        self.ann_text: str = ann_text
+        self.arity: int = arity
+        self.class_name: str = class_name
+        self._returns_shape: list[bool] = []
+
+    def _matches(self, annotation: cst.Annotation) -> bool:
+        return _annotation_text(annotation.annotation) == self.ann_text
+
+    def _retarget(self, annotation: cst.Annotation) -> cst.Annotation:
+        return annotation.with_changes(annotation=cst.Name(self.class_name))
+
+    def _constructor(self, value: cst.BaseExpression) -> cst.BaseExpression | None:
+        if not isinstance(value, cst.Tuple) or len(value.elements) != self.arity:
+            return None
+        args = [cst.Arg(element.value) for element in value.elements if isinstance(element, cst.Element)]
+        if len(args) != self.arity:
+            return None
+        return cst.Call(func=cst.Name(self.class_name), args=args)
+
+    @override
+    def leave_AnnAssign(self, original_node, updated_node):
+        if not self._matches(updated_node.annotation):
+            return updated_node
+        annotation = self._retarget(updated_node.annotation)
+        if updated_node.value is None:
+            return updated_node.with_changes(annotation=annotation)
+        value = self._constructor(updated_node.value)
+        if value is None:
+            return updated_node.with_changes(annotation=annotation)
+        return updated_node.with_changes(annotation=annotation, value=value)
+
+    @override
+    def leave_Param(self, original_node, updated_node):
+        if updated_node.annotation is None or not self._matches(updated_node.annotation):
+            return updated_node
+        return updated_node.with_changes(annotation=self._retarget(updated_node.annotation))
+
+    @override
+    def visit_FunctionDef(self, node) -> None:
+        self._returns_shape.append(node.returns is not None and self._matches(node.returns))
+
+    @override
+    def leave_FunctionDef(self, original_node, updated_node):
+        self._returns_shape.pop()
+        if updated_node.returns is None or not self._matches(updated_node.returns):
+            return updated_node
+        return updated_node.with_changes(returns=self._retarget(updated_node.returns))
+
+    @override
+    def leave_Tuple(self, original_node, updated_node):
+        if not self._returns_shape or not self._returns_shape[-1]:
+            return updated_node
+        parent = self.get_metadata(ParentNodeProvider, original_node)
+        if not isinstance(parent, (cst.Return, cst.Assign, cst.AnnAssign)):
+            return updated_node
+        return self._constructor(updated_node) or updated_node
+
+
+# lucidlint: ignore strewing these free functions ARE the shape router: one per family, dispatched by kind
+def _wide_tuple_fix(req: _FixRequest) -> str | None:
+    """Introduce the record class for the flagged fixed-arity tuple: the
+    annotation (and every same-shape annotation in the file) becomes the
+    class, matching tuple build sites construct it, and the class is
+    prepended. Declines on an ambiguous anchor, an unusable name, or a name
+    the file already binds."""
+    source, line = req._loaded_source(), req.line
+    wrapper = cst.MetadataWrapper(cst.parse_module(source))
+    finder = _FindWideTuples(line)
+    wrapper.visit(finder)
+    if not finder.sites:
+        req.decline = (
+            f"no fixed-arity tuple annotation (3+ named positions) at {req.rel}:{line} — "
+            "the anchor is stale, or the annotation is variadic (tuple[T, ...])"
+        )
+        return None
+    if len(finder.sites) > 1:
+        req.decline = (
+            f"{len(finder.sites)} wide-tuple annotations anchor at {req.rel}:{line} — the "
+            "anchor is ambiguous; put each on its own line, or retarget one by hand"
+        )
+        return None
+    site = finder.sites[0]
+    # a bare ANNOTATION carries no variable to name the record after: the
+    # parameter's own name, or `<Fn>Result` for a return annotation
+    derived = _pascal_case(site.var) + ("" if site.where != "return" else "Result")
+    class_name = req.opts.name or derived
+    if not class_name.isidentifier() or keyword.iskeyword(class_name):
+        req.decline = f"'{class_name}' is not a usable record class name — pass --name <Name>"
+        return None
+    if _binds_name(wrapper.module, class_name):
+        req.decline = f"'{class_name}' is already bound in {req.rel} — pass another --name"
+        return None
+    fields = _record_field_names(site.elements, site.arity)
+    transformed = wrapper.visit(_WideTupleToRecord(_annotation_text(site.annotation), site.arity, class_name))
+    body: list = [_record_class_def(class_name, fields), cst.EmptyLine(), *transformed.body]
+    return cst.Module(body=body).code
+
+
+# --------------------------------------------------------------------------- data-clump
+
+
+class _Clump(NamedTuple):
+    """The recovered clump: the shared pair (in the anchor's signature order)
+    and the module-level defs carrying it, in source order."""
+
+    pair: tuple[str, str]
+    fns: tuple[cst.FunctionDef, ...]
+
+
+class _ImportedNames(cst.CSTVisitor):
+    """The names a module binds through `from m import a, b`."""
+
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    @override
+    def visit_ImportFrom(self, node) -> None:
+        if isinstance(node.names, cst.ImportStar):
+            return
+        for alias in node.names:
+            if not isinstance(alias.name, cst.Name):
+                continue
+            asname = alias.asname
+            if asname is None:
+                self.names.add(alias.name.value)
+                continue
+            if isinstance(asname.name, cst.Name):
+                self.names.add(asname.name.value)
+
+
+def _imported_elsewhere(repo: Path, rel: str, names: set[str]) -> str | None:
+    """The repo-relative path of another module importing any of `names` —
+    that caller's call site is outside the fixer's reach. None when the names
+    are module-local."""
+    for path in sorted(p for p in repo.rglob("*.py") if p.is_file()):
+        if path == repo / rel:
+            continue
+        try:
+            tree = cst.parse_module(path.read_text(encoding="utf-8"))
+        except (OSError, cst.ParserSyntaxError):
+            continue
+        finder = _ImportedNames()
+        tree.visit(finder)
+        if finder.names & names:
+            return str(path.relative_to(repo))
+    return None
+
+
+def _plain_args(fn: cst.FunctionDef) -> list[str]:
+    """The regular positional parameter names — the only set the scanner's
+    data-clump rule pairs over."""
+    return [param.name.value for param in fn.params.params]
+
+
+# lucidlint: ignore complexity the shape analyzers dispatch over libcst node kinds — splitting scatters one table
+def _clump_at(module: cst.Module, line: int, positions) -> _Clump | None:
+    """The clump anchored at `line`: the module-level defs sharing a regular-
+    parameter pair (>= 3 of them, the scanner's rule), the pair in the
+    anchor's signature order. None when no pair qualifies there (a stale
+    anchor)."""
+    fns = [stmt for stmt in module.body if isinstance(stmt, cst.FunctionDef)]
+    pairs: dict[tuple[str, str], list[cst.FunctionDef]] = {}
+    for fn in fns:
+        names = _plain_args(fn)
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                left, right = names[i], names[j]
+                key: tuple[str, str] = (left, right) if left <= right else (right, left)
+                pairs.setdefault(key, []).append(fn)
+    anchor = next((f for f in fns if _as_range(positions[f]).start.line == line), None)
+    if anchor is None:
+        return None
+    qualifying = sorted(pair for pair, group in pairs.items() if len(group) >= 3 and anchor in group)
+    if not qualifying:
+        return None
+    pair = qualifying[0]
+    order = _plain_args(anchor)
+    kept = {id(f) for f in pairs[pair]}
+    ordered = tuple(sorted(pair, key=order.index))
+    return _Clump((ordered[0], ordered[1]), tuple(f for f in fns if id(f) in kept))
+
+
+class _DataClumpToRecord(cst.CSTTransformer):
+    """Thread the clump's pair as one parameter object: a body read of either
+    name becomes `<instance>.<name>`, each clump signature drops the two
+    params for the single instance, and the module's calls to the clump build
+    the instance where they passed the two values."""
+
+    METADATA_DEPENDENCIES = (ExpressionContextProvider, ParentNodeProvider)
+
+    def __init__(
+        self,
+        pair: tuple[str, str],
+        class_name: str,
+        param_name: str,
+        stores: StoredNames,
+        index: dict[str, tuple[int, int]],
+    ) -> None:
+        self.pair: tuple[str, str] = pair
+        self.class_name: str = class_name
+        self.param_name: str = param_name
+        self.stores: StoredNames = stores
+        self.index: dict[str, tuple[int, int]] = index
+        self.decline: str = ""
+        self._current: str | None = None
+        self._fn_stack: list[str | None] = []
+        self._shadow_stack: list[set[str]] = []
+
+    def _own_params(self, node: cst.FunctionDef) -> set[str]:
+        return {
+            p.name.value
+            for p in [*node.params.posonly_params, *node.params.params, *node.params.kwonly_params]
+        }
+
+    @override
+    def visit_FunctionDef(self, node) -> None:
+        self._fn_stack.append(self._current)
+        self._current = node.name.value
+        shadow = set(self.stores.get(node.name.value, set()))
+        if node.name.value not in self.index:
+            # a non-clump scope's own params (a nested def's `folder`) are its
+            # locals — its reads must not be retargeted at the instance
+            shadow |= self._own_params(node)
+        self._shadow_stack.append(shadow)
+
+    @override
+    def leave_FunctionDef(self, original_node, updated_node):
+        self._current = self._fn_stack.pop()
+        self._shadow_stack.pop()
+        fn = updated_node.name.value
+        if fn not in self.index:
+            return updated_node
+        params = [p for p in updated_node.params.params if p.name.value not in self.pair]
+        if len(params) != len(updated_node.params.params) - 2:
+            self.decline = f"'{fn}' does not carry the pair in its plain parameters — thread it by hand"
+            return updated_node
+        if params and isinstance(params[-1].comma, cst.Comma):
+            # the removed pair carried the list's tail; a stray comma would
+            # render as `def f(x, )`
+            params[-1] = params[-1].with_changes(comma=cst.MaybeSentinel.DEFAULT)
+        return updated_node.with_changes(
+            params=updated_node.params.with_changes(
+                params=[cst.Param(cst.Name(self.param_name)), *params]
+            )
+        )
+
+    @override
+    def leave_Name(self, original_node, updated_node):
+        fn = self._current or ""
+        if fn not in self.index or updated_node.value not in self.pair:
+            return updated_node
+        if updated_node.value in self._shadow_stack[-1]:
+            return updated_node
+        parent = self.get_metadata(ParentNodeProvider, original_node)
+        if _is_keyword_name(original_node, parent):
+            return updated_node
+        try:
+            ctx = self.get_metadata(ExpressionContextProvider, original_node)
+        except KeyError:
+            return updated_node
+        if ctx is not cst.metadata.ExpressionContext.LOAD:
+            return updated_node
+        return cst.Attribute(value=cst.Name(self.param_name), attr=cst.Name(updated_node.value))
+
+    @override
+    def leave_Call(self, original_node, updated_node):
+        if not isinstance(updated_node.func, cst.Name) or updated_node.func.value not in self.index:
+            return updated_node
+        fn = updated_node.func.value
+        idx_a, idx_b = self.index[fn]
+        if any(arg.star for arg in updated_node.args):
+            self.decline = f"the call to '{fn}' unpacks its arguments — thread the pair by hand"
+            return updated_node
+        pos_args = [arg for arg in updated_node.args if arg.keyword is None]
+        keywords = {arg.keyword.value: arg for arg in updated_node.args if arg.keyword is not None}
+        a_arg = pos_args[idx_a] if idx_a < len(pos_args) else keywords.get(self.pair[0])
+        b_arg = pos_args[idx_b] if idx_b < len(pos_args) else keywords.get(self.pair[1])
+        if a_arg is None or b_arg is None:
+            self.decline = (
+                f"the call to '{fn}' does not pass both '{self.pair[0]}' and '{self.pair[1]}' "
+                "— thread the pair by hand"
+            )
+            return updated_node
+        a_val, b_val = a_arg.value, b_arg.value
+        if (
+            isinstance(a_val, cst.Attribute)
+            and isinstance(b_val, cst.Attribute)
+            and isinstance(a_val.value, cst.Name)
+            and isinstance(b_val.value, cst.Name)
+            and a_val.value.value == self.param_name
+            and b_val.value.value == self.param_name
+            and (a_val.attr.value, b_val.attr.value) == self.pair
+        ):
+            # the caller already holds the instance (a forwarded pair) — pass
+            # it on instead of rebuilding it from its own fields
+            replacement: cst.BaseExpression = cst.Name(self.param_name)
+        else:
+            replacement = cst.Call(
+                func=cst.Name(self.class_name), args=[cst.Arg(a_val), cst.Arg(b_val)]
+            )
+        # the untouched args keep their own nodes: their comments and
+        # formatting survive the rewrite
+        kept = [arg for i, arg in enumerate(pos_args) if i not in (idx_a, idx_b)]
+        kept.insert(min(idx_a, idx_b), cst.Arg(replacement))
+        new_args = list(kept)
+        new_args.extend(
+            arg
+            for arg in updated_node.args
+            if arg.keyword is not None and arg.keyword.value not in self.pair
+        )
+        return updated_node.with_changes(args=new_args)
+
+
+# lucidlint: ignore complexity the shape analyzers dispatch over libcst node kinds — splitting scatters one table
+def _data_clump_fix(req: _FixRequest) -> str | None:
+    """Thread the clump's shared pair through one parameter object: the class
+    is prepended, the clump's signatures and bodies change, and module-scope
+    call sites construct the instance. Declines when the pair cannot be
+    recovered, a caller lives in another module, or a call cannot be
+    resolved."""
+    source, line = req._loaded_source(), req.line
+    # the wrapper's own tree: metadata resolves by NODE IDENTITY, so the
+    # module inspected here must be the wrapper's copy, not a parallel parse
+    wrapper = cst.MetadataWrapper(cst.parse_module(source))
+    module = wrapper.module
+    clump = _clump_at(module, line, wrapper.resolve(PositionProvider))
+    if clump is None:
+        req.decline = (
+            f"no parameter pair shared by 3+ module functions is anchored at {req.rel}:{line} "
+            "— the anchor is stale, or the clump is gone"
+        )
+        return None
+    pair_a, pair_b = clump.pair
+    index: dict[str, tuple[int, int]] = {}
+    for fn in clump.fns:
+        if fn.params.posonly_params or isinstance(fn.params.star_arg, cst.Param) or fn.params.star_kwarg:
+            req.decline = (
+                f"'{fn.name.value}' has positional-only or variadic parameters — the pair "
+                "cannot be threaded mechanically; do it by hand"
+            )
+            return None
+        if any(p.default is not None for p in fn.params.params if p.name.value in clump.pair):
+            req.decline = (
+                f"'{fn.name.value}' defaults '{pair_a}'/'{pair_b}' — threading would change the "
+                "call contract; do it by hand"
+            )
+            return None
+        args = _plain_args(fn)
+        if pair_a not in args or pair_b not in args:
+            req.decline = f"'{fn.name.value}' does not carry the pair in its plain parameters — thread it by hand"
+            return None
+        index[fn.name.value] = (args.index(pair_a), args.index(pair_b))
+    class_name = req.opts.name or _pascal_case(f"{pair_a}_{pair_b}")
+    if not class_name.isidentifier() or keyword.iskeyword(class_name):
+        req.decline = f"'{class_name}' is not a usable class name — pass --name <Name>"
+        return None
+    parameter = _snake_case(class_name)
+    if parameter in clump.pair:
+        req.decline = f"the threaded parameter '{parameter}' collides with the pair — pass another --name"
+        return None
+    if _binds_name(module, class_name):
+        req.decline = f"'{class_name}' is already bound in {req.rel} — pass another --name"
+        return None
+    culprit = _imported_elsewhere(req.repo, req.rel, {fn.name.value for fn in clump.fns})
+    if culprit:
+        req.decline = (
+            f"'{culprit}' imports a clump function — its call site is outside this module; "
+            "thread the pair by hand"
+        )
+        return None
+    stores = _CollectStores()
+    wrapper.visit(stores)
+    transformer = _DataClumpToRecord(clump.pair, class_name, parameter, stores.per_fn, index)
+    transformed = wrapper.visit(transformer)
+    if transformer.decline:
+        req.decline = transformer.decline
+        return None
+    body: list = [_record_class_def(class_name, [pair_a, pair_b]), cst.EmptyLine(), *transformed.body]
+    return cst.Module(body=body).code
+
+
+# --------------------------------------------------------------------------- partition
+
+
+class _PartitionGroup(NamedTuple):
+    """One field-disjoint method group: its methods in source order and the
+    fields only they touch."""
+
+    methods: tuple[cst.FunctionDef, ...]
+    fields: tuple[str, ...]
+
+
+class _PartitionPlan(NamedTuple):
+    groups: tuple[_PartitionGroup, ...]
+    init_fields: tuple[tuple[str, cst.BaseExpression], ...]
+    init_docstring: cst.BaseStatement | None
+
+
+class _PartitionAttempt(NamedTuple):
+    """The plan, or the specific reason it cannot be computed."""
+
+    plan: _PartitionPlan | None
+    decline: str
+
+
+def _self_field_reads(node: cst.CSTNode) -> set[str]:
+    """The `self.<attr>` fields a node touches (nested bodies included — the
+    scanner's rule counts them too)."""
+    found: set[str] = set()
+
+    class _Attrs(cst.CSTVisitor):
+        @override
+        def visit_Attribute(self, node) -> None:
+            if isinstance(node.value, cst.Name) and node.value.value == "self":
+                found.add(node.attr.value)
+
+    node.visit(_Attrs())
+    return found
+
+
+def _reads_self(expr: cst.BaseExpression) -> bool:
+    """Does the expression read `self.<attr>`? An initializer that does would
+    have to move between classes in order — not mechanical."""
+    return bool(_self_field_reads(expr))
+
+
+# the __init__ plan: the field initializers in order + the docstring statement
+_InitPlan = tuple[list[tuple[str, cst.BaseExpression]], cst.BaseStatement | None]
+
+
+# lucidlint: ignore complexity the shape analyzers dispatch over libcst node kinds — splitting scatters one table
+def _init_plan(init: cst.FunctionDef | None) -> _InitPlan | None:
+    """__init__'s `self.x = <expr>` statements (plus its docstring) in order;
+    None when the body does anything else — a split would have to reorder or
+    retarget that statement."""
+    if init is None:
+        return [], None
+    assigns: list[tuple[str, cst.BaseExpression]] = []
+    docstring: cst.SimpleStatementLine | None = None
+    for stmt in init.body.body:
+        small = stmt.body[0] if isinstance(stmt, cst.SimpleStatementLine) and len(stmt.body) == 1 else None
+        if small is None:
+            return None
+        if isinstance(small, cst.Expr) and isinstance(small.value, (cst.SimpleString, cst.ConcatenatedString)):
+            assert isinstance(stmt, cst.SimpleStatementLine)
+            docstring = stmt
+            continue
+        target = small.targets[0].target if isinstance(small, cst.Assign) and len(small.targets) == 1 else None
+        if (
+            not isinstance(target, cst.Attribute)
+            or not isinstance(target.value, cst.Name)
+            or target.value.value != "self"
+            or not isinstance(small, cst.Assign)
+            or _reads_self(small.value)
+        ):
+            return None
+        assigns.append((target.attr.value, small.value))
+    return assigns, docstring
+
+
+# lucidlint: ignore complexity the shape analyzers dispatch over libcst node kinds — splitting scatters one table
+def _partition_plan(cls: cst.ClassDef) -> _PartitionAttempt:
+    """The field-disjoint split of `cls`, or the reason it cannot be split —
+    connector methods merge the groups and produce the refusal."""
+    methods = [stmt for stmt in cls.body.body if isinstance(stmt, cst.FunctionDef)]
+    extra = [
+        stmt
+        for stmt in cls.body.body
+        if not isinstance(stmt, cst.FunctionDef) and not _is_docstring_stmt(stmt)
+    ]
+    if extra:
+        return _PartitionAttempt(
+            None,
+            "the class carries statements besides a docstring — they cannot be attributed to "
+            "one group; split by hand",
+        )
+    if len(methods) < 6:
+        return _PartitionAttempt(
+            None,
+            f"the class has only {len(methods)} methods — not the latent-partition shape (6+); "
+            "the anchor is stale",
+        )
+    init = next((method for method in methods if method.name.value == "__init__"), None)
+    parsed = _init_plan(init)
+    if parsed is None:
+        return _PartitionAttempt(
+            None,
+            "the class's __init__ does more than assign self fields — a split would reorder or "
+            "retarget a statement; split by hand",
+        )
+    init_fields, init_docstring = parsed
+    fielded = [(method, _self_field_reads(method)) for method in methods if method is not init]
+    fieldless = [method.name.value for method, fields in fielded if not fields]
+    if fieldless:
+        return _PartitionAttempt(
+            None,
+            f"'{fieldless[0]}' touches no self fields — it belongs to no group; split by hand",
+        )
+    fields_of = {method.name.value: fields for method, fields in fielded}
+    order = {method.name.value: i for i, (method, _) in enumerate(fielded)}
+    groups: list[list[str]] = []
+    seen: set[str] = set()
+    for method, _ in fielded:
+        if method.name.value in seen:
+            continue
+        component: list[str] = []
+        stack = [method.name.value]
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            component.append(current)
+            for other, other_fields in fielded:
+                if other.name.value not in seen and not fields_of[current].isdisjoint(other_fields):
+                    stack.append(other.name.value)
+        groups.append(component)
+    if len(groups) < 2:
+        return _PartitionAttempt(
+            None,
+            "the methods share fields across the whole class (a connector method ties the "
+            "groups together) — the split would not be field-disjoint; split by hand",
+        )
+    group_fields = [tuple(sorted({f for name in group for f in fields_of[name]})) for group in groups]
+    if any(len(group) < 2 or len(fields) < 2 for group, fields in zip(groups, group_fields, strict=True)):
+        return _PartitionAttempt(
+            None,
+            "a method group is too small (needs 2+ methods and 2+ fields) — the split would not "
+            "produce classes; split by hand",
+        )
+    all_fields = {field for _, fields in fielded for field in fields} | {field for field, _ in init_fields}
+    attributed = {field for fields in group_fields for field in fields}
+    orphan = sorted(all_fields - attributed)
+    if orphan:
+        return _PartitionAttempt(
+            None,
+            f"'{orphan[0]}' is initialized but touched by no method — it belongs to no group; "
+            "split by hand",
+        )
+    plan = _PartitionPlan(
+        groups=tuple(
+            _PartitionGroup(tuple(fielded[i][0] for i in sorted(order[name] for name in group)), fields)
+            for group, fields in zip(groups, group_fields, strict=True)
+        ),
+        init_fields=tuple(init_fields),
+        init_docstring=init_docstring,
+    )
+    return _PartitionAttempt(plan, "")
+
+
+def _init_stmt(field: str, value: cst.BaseExpression) -> cst.BaseStatement:
+    """One `self.<field> = <value>` line for a group's synthesized __init__."""
+    return cst.SimpleStatementLine(
+        body=[
+            cst.Assign(
+                targets=[cst.AssignTarget(cst.Attribute(cst.Name("self"), cst.Name(field)))],
+                value=value,
+            )
+        ]
+    )
+
+
+def _group_class(
+    name: str,
+    template: cst.ClassDef,
+    methods: list[cst.FunctionDef],
+    init_stmts: list[cst.BaseStatement],
+    head: list[cst.BaseStatement],
+) -> cst.ClassDef:
+    """One group's class: the template's decorators, bases, and keywords, a
+    synthesized __init__ over its own fields, then its methods."""
+    body: list[cst.BaseStatement] = list(head)
+    if init_stmts:
+        body.append(
+            cst.FunctionDef(
+                name=cst.Name("__init__"),
+                params=cst.Parameters(params=[cst.Param(cst.Name("self"))]),
+                body=cst.IndentedBlock(body=init_stmts),
+            )
+        )
+    body.extend(methods)
+    if isinstance(body[0], (cst.FunctionDef, cst.ClassDef)) and body[0].leading_lines:
+        body[0] = body[0].with_changes(leading_lines=[])
+    return template.with_changes(name=cst.Name(name), body=cst.IndentedBlock(body=body))
+
+
+# lucidlint: ignore complexity the shape analyzers dispatch over libcst node kinds — splitting scatters one table
+def _partition_fix(req: _FixRequest) -> str | None:
+    """Split the field-disjoint class into one class per method group: the
+    group's fields move into its synthesized __init__, the first group keeps
+    the class's name, and every group keeps the shared bases. Declines when a
+    connector method (or unattributable __init__ logic) ties the groups
+    together."""
+    source, line = req._loaded_source(), req.line
+    # the wrapper's own tree: the visitor's nodes must be the ones spliced
+    # back into `module.body`, and metadata resolves by NODE IDENTITY
+    wrapper = cst.MetadataWrapper(cst.parse_module(source))
+    module = wrapper.module
+    finder = _EnclosingClass(line)
+    wrapper.visit(finder)
+    cls = finder.found
+    if cls is None or not any(stmt is cls for stmt in module.body):
+        req.decline = f"no module-level class anchored at {req.rel}:{line} — the anchor is stale"
+        return None
+    attempt = _partition_plan(cls)
+    if attempt.plan is None:
+        req.decline = attempt.decline
+        return None
+    plan = attempt.plan
+    base = req.opts.name or cls.name.value
+    if not base.isidentifier() or keyword.iskeyword(base):
+        req.decline = f"'{base}' is not a usable class-name prefix — pass --name <Prefix>"
+        return None
+    class_names = [base]
+    for group in plan.groups[1:]:
+        class_names.append(base + _pascal_case(group.fields[0]))
+    if len(set(class_names)) != len(class_names):
+        req.decline = "two groups derive the same class name — pass --name <Prefix> to disambiguate"
+        return None
+    for name in class_names:
+        if name != cls.name.value and _binds_name(module, name):
+            req.decline = f"'{name}' is already bound in {req.rel} — pass another --name"
+            return None
+    class_docstring = next(
+        (stmt for stmt in cls.body.body if isinstance(stmt, cst.SimpleStatementLine) and _is_docstring_stmt(stmt)),
+        None,
+    )
+    replacements: list[cst.BaseStatement] = []
+    for i, group in enumerate(plan.groups):
+        init_stmts: list[cst.BaseStatement] = []
+        if i == 0 and plan.init_docstring is not None:
+            init_stmts.append(plan.init_docstring)
+        init_stmts.extend(
+            _init_stmt(field, value) for field, value in plan.init_fields if field in group.fields
+        )
+        head: list[cst.BaseStatement] = []
+        if i == 0 and class_docstring is not None:
+            head.append(class_docstring)
+        group_cls = _group_class(class_names[i], cls, list(group.methods), init_stmts, head)
+        if i:
+            group_cls = group_cls.with_changes(leading_lines=[cst.EmptyLine()])
+        replacements.append(group_cls)
+    body: list[cst.BaseStatement] = list(module.body)
+    index = next(i for i, stmt in enumerate(body) if stmt is cls)
+    body[index : index + 1] = replacements
+    return module.with_changes(body=body).code

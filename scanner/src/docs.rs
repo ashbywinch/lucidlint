@@ -123,6 +123,7 @@ fn check_target(
     }
     if !abs.exists() {
         out.push(Finding {
+            seam_members: Vec::new(),
             file: rel.to_string(),
             line: 0,
             col: 0,
@@ -311,6 +312,7 @@ fn docs_reachability(repo: &Path, gitignored: &HashSet<String>) -> Vec<Finding> 
     message.push_str(&unreachable.join(", "));
     message.push_str(". Link each from its group's index");
     out.push(Finding {
+        seam_members: Vec::new(),
         file: "AGENTS.md".into(),
         line: 0,
         col: 0,

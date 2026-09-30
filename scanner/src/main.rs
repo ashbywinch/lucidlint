@@ -14,6 +14,8 @@
 //! functions report cyclomatic complexity, exactly as radon does (nested
 //! functions and class bodies contribute no decisions to their parent).
 
+// lucidlint: ignore-file large-function scan_source_impl is the CLI's one-pass pipeline — extracting
+// helpers would thread six collections through a parameter object for no reader gain
 use rayon::prelude::*;
 use ruff_python_ast::visitor::source_order::{walk_expr, walk_stmt, SourceOrderVisitor};
 use ruff_python_ast::{AnyNodeRef, Expr, ModModule, Stmt, StmtIf};
@@ -56,6 +58,11 @@ pub struct Finding {
     kind: String,
     severity: String,
     message: String,
+    /// The clump identity for seam grouping (#34): the shared parameter-pair
+    /// names (data-clump), the disjoint method-group members (partition),
+    /// the functions sharing a leading parameter (strewing). Always emitted
+    /// (empty on non-carriers — BQ4); never scraped from message prose.
+    pub seam_members: Vec<String>,
 }
 
 /// One function's cyclomatic complexity — radon-equivalent counting.
@@ -92,12 +99,6 @@ struct ScanState<'a> {
     /// Parent chain for the magic-number position check — exprs plus the
     /// non-expr layers (stmt, keyword) that break the direct-parent link.
     parent_stack: Vec<ParentEntry>,
-    /// Module-scope container names (List/Dict/Set) — mutations of these
-    /// inside functions are global-state findings.
-    module_mutables: HashSet<String>,
-    /// Module containers whose literal was flagged (non-constant) — their
-    /// in-function mutations are not double-reported (Python's `flagged`).
-    module_flagged: HashSet<String>,
     /// Module-level function definitions (name, line) — non-test files.
     defs: Vec<(String, usize)>,
     /// set_* methods and property setters (name, line) — repo-wide pass.
@@ -105,8 +106,16 @@ struct ScanState<'a> {
     /// `self.<attr> = ...` sites in top-level classes — undeclared-
     /// attribute's repo-wide raw material.
     self_assigns: Vec<SelfAssign>,
-    /// Offsets of numeric literals in data-table collections (>= 3 same-kind
-    /// siblings) — magic-number exempt.
+    /// Module-level CLASS definitions (name, line) — the unused scan's
+    /// dead-class arm (#28).
+    class_defs: Vec<(String, usize)>,
+    /// Duplicate-module identities (#26) — modules + top-level classes with
+    /// their structural skeletons and constant tokens.
+    skeleton_modules: Vec<checks::SkeletonModule>,
+    /// Forwarding-chain raw material (#30) — see collect_forwarders.
+    forwarder_fns: Vec<checks::ForwarderFn>,
+    forwarder_methods: Vec<checks::ForwarderMethod>,
+    repo_methods: Vec<checks::RepoMethod>,
     magic_table_exempts: HashSet<usize>,
     /// Every referenced name (Name nodes + import aliases) in this file.
     refs: HashSet<String>,
@@ -308,10 +317,14 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 self.current_fn = was_fn;
                 return;
             }
-            Stmt::ClassDef(_) => {
+            Stmt::ClassDef(cls) => {
+                self.in_class += 1;
                 // class bodies: no decisions, but walked (imports/exprs inside
                 // still get visited with their function attribution)
-                self.in_class += 1;
+                if module_level && !self.is_test {
+                    let def_line = line_of(self.source, cls.name.range().start());
+                    self.class_defs.push((cls.name.to_string(), def_line));
+                }
                 walk_stmt(self, stmt);
                 self.in_class -= 1;
                 return;
@@ -337,11 +350,9 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             Stmt::Assign(_) => {
                 global_state_findings(self, stmt, module_level);
                 shadow_findings(self, stmt);
-                mutation_findings(self, stmt);
             }
             Stmt::AugAssign(_) | Stmt::AnnAssign(_) | Stmt::Delete(_) => {
                 global_state_findings(self, stmt, module_level);
-                mutation_findings(self, stmt);
             }
             _ => {}
         }
@@ -383,6 +394,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             {
                 let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
                 self.findings.push(Finding {
+                    seam_members: Vec::new(),
                     file: self.file.to_string(),
                     line: line_of(source, call.range().start()),
                     col: 0,
@@ -405,16 +417,13 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             self.parent_stack.pop();
             return;
         }
-        // magic numbers (a warn finding — distinct from the CC that radonc owns)
-        // Class BODIES are not reported for magic numbers (matching the
-        // pre-radonc behavior) — but ONLY the report is skipped here, never
-        // the descent: an early return cut every class-body expression walk
-        // (lambda bodies, attribute reads, strings), so the reference scan
-        // went blind inside methods and live code read as unused.
+        // magic numbers (a warn finding — distinct from the CC that radonc owns).
+        // Magic fires ANYWHERE expressions are walked — class bodies and
+        // methods included (radon/reference parity): the fixer's constant
+        // becomes a CLASS ATTRIBUTE of the enclosing class, so a class-body
+        // finding is the rule's primary case (third-pass 4).
         if let Expr::NumberLiteral(n) = expr {
-            if self.in_class == 0 {
-                self.magic_check(n);
-            }
+            self.magic_check(n);
         }
         self.parent_stack.push(ParentEntry::Expr(parent_kind(expr)));
         walk_expr(self, expr);
@@ -747,7 +756,7 @@ impl<'a> ScanState<'a> {
             return; // data-table entry: >= 3 same-kind numeric siblings in one collection literal
         }
         let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-        self.findings.push(Finding { file: self.file.to_string(), line: line_of(self.source, n.range.start()), col: col_of(self.source, n.range.start()), function: fn_name, kind: "magic-number".into(), severity: "warn".into(), message: format!("magic number {value} — name it with a domain noun (what it means here), never its value spelled out; collection-literal data tables (>= 3 same-kind numeric siblings) are exempt — fix: magic-number --fix-name <CONST>") });
+        self.findings.push(Finding { seam_members: Vec::new(), file: self.file.to_string(), line: line_of(self.source, n.range.start()), col: col_of(self.source, n.range.start()), function: fn_name, kind: "magic-number".into(), severity: "warn".into(), message: format!("magic number {value} — name it with a domain noun (what it means here), never its value spelled out; collection-literal data tables (>= 3 same-kind numeric siblings) are exempt — fix: magic-number --fix-name <CONST>") });
     }
 
     /// No-op statements: expression statements that discard their value.
@@ -770,6 +779,7 @@ impl<'a> ScanState<'a> {
         if !harmless {
             let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
             self.findings.push(Finding {
+                seam_members: Vec::new(),
                 file: self.file.to_string(),
                 line: line_of(self.source, v.range().start()),
                 col: 0,
@@ -789,6 +799,7 @@ impl<'a> ScanState<'a> {
         if !self.fn_stack.is_empty() {
             let line = stmt_line(self.source, stmt);
             self.findings.push(Finding {
+                seam_members: Vec::new(),
                 col: 0,
                 file: self.file.to_string(),
                 line,
@@ -817,6 +828,7 @@ impl<'a> ScanState<'a> {
                             format!("{}.{}", im.module.as_ref().map(|m| m.as_str()).unwrap_or(""), name)
                         };
                         self.findings.push(Finding {
+                            seam_members: Vec::new(),
                             file: self.file.to_string(),
                             line: stmt_line(self.source, stmt),
                             col: 0,
@@ -833,6 +845,7 @@ impl<'a> ScanState<'a> {
                     let name = alias.name.as_str();
                     if name.split('.').any(|seg| seg.starts_with('_')) {
                         self.findings.push(Finding {
+                            seam_members: Vec::new(),
                             file: self.file.to_string(),
                             line: stmt_line(self.source, stmt),
                             col: 0,
@@ -866,6 +879,7 @@ impl<'a> ScanState<'a> {
                     if let Some(dead) = list.get(i + 1) {
                         let line = stmt_line(self.source, dead);
                         self.findings.push(Finding {
+                            seam_members: Vec::new(),
                             col: 0,
                             file: self.file.to_string(),
                             line,
@@ -1049,11 +1063,13 @@ pub struct FileScan {
     pub cc: Vec<FnCc>,
     pub errors: usize,
     pub defs: Vec<(String, usize)>,
+    pub class_defs: Vec<(String, usize)>,
     pub setters: Vec<(String, usize)>,
     pub refs: HashSet<String>,
     pub strings: Vec<String>,
-    pub decorated: HashSet<String>,
     pub skeletons: Vec<SkeletonFn>,
+    pub skeleton_modules: Vec<SkeletonModule>,
+    pub decorated: HashSet<String>,
     pub classes: Vec<ClassInfo>,
     pub imports: Vec<ImportInfo>,
     pub self_assigns: Vec<SelfAssign>,
@@ -1064,6 +1080,9 @@ pub struct FileScan {
     /// (line, signal) pairs the per-file pass consumed — stage-2 repo-wide
     /// re-honoring must not spend them again (innermost-peel capacity).
     pub supps_spent: HashSet<(usize, String)>,
+    pub forwarder_fns: Vec<checks::ForwarderFn>,
+    pub forwarder_methods: Vec<checks::ForwarderMethod>,
+    pub repo_methods: Vec<checks::RepoMethod>,
 }
 
 impl FileScan {
@@ -1112,6 +1131,10 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     feature_envy_findings(state, body);
     collect_self_assigns(state, body);
     god_class_findings(state, body);
+    static_husk_findings(state, body);
+    delegating_husk_findings(state, body);
+    process_class_findings(state, body);
+    closure_cluster_findings(state, body, source);
     duplicate_field_findings(state, body);
     record_shape_findings(state, body, source);
     partition_findings(state, body, source);
@@ -1128,6 +1151,8 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     middle_man_findings(state, body, source);
     collect_setters(state, body);
     loop_pipeline_findings(state, body, source);
+    collect_skeleton_modules(state, body, name);
+    collect_forwarders(state, body);
 }
 
 /// Per-buffer scans never run the repo-wide families (unused, unused-setter,
@@ -1163,8 +1188,6 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     let mut state = ScanState {
         file: name,
         source,
-        module_mutables: module_container_names(&body),
-        module_flagged: module_flagged_names(&body),
         magic_table_exempts: checks::magic_table_exempt_offsets(&body),
         is_test: is_test_path(name),
         ..Default::default()
@@ -1254,6 +1277,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         cc: state.cc,
         errors,
         defs: state.defs,
+        class_defs: state.class_defs,
         setters: state.setters,
         refs: state.refs,
         strings: state.strings,
@@ -1264,6 +1288,10 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         self_assigns: state.self_assigns,
         supps,
         supps_spent,
+        skeleton_modules: state.skeleton_modules,
+        forwarder_fns: state.forwarder_fns,
+        forwarder_methods: state.forwarder_methods,
+        repo_methods: state.repo_methods,
     }
 }
 
@@ -1339,7 +1367,7 @@ pub(crate) fn repo_files(root: &Path) -> Vec<PathBuf> {
 /// scans and re-runs only this pure in-memory aggregation on save.
 pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collections::HashMap<String, Vec<Finding>> {
     let mut skeletons = Vec::new();
-    let mut definitions: Vec<(String, String, usize)> = Vec::new();
+    let mut definitions: Vec<(String, String, usize, bool)> = Vec::new();
     let mut setters: Vec<(String, String, usize)> = Vec::new();
     let mut prod_refs = HashSet::new();
     let mut test_refs = HashSet::new();
@@ -1359,7 +1387,10 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
             });
         }
         for (name, line) in &scan.defs {
-            definitions.push((rel.clone(), name.clone(), *line));
+            definitions.push((rel.clone(), name.clone(), *line, false));
+        }
+        for (name, line) in &scan.class_defs {
+            definitions.push((rel.clone(), name.clone(), *line, true));
         }
         for (name, line) in &scan.setters {
             setters.push((rel.clone(), name.clone(), *line));
@@ -1374,8 +1405,27 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         supps_by_rel.insert(rel.clone(), scan.supps.clone());
         supps_spent_by_rel.insert(rel.clone(), scan.supps_spent.clone());
     }
+    let mut module_entities = Vec::new();
+    let mut heads = Vec::new();
+    let mut fns = Vec::new();
+    let mut repo_methods = Vec::new();
+    let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
+    for scan in scans {
+        module_entities.extend(scan.skeleton_modules.iter().cloned());
+        heads.extend(scan.forwarder_methods.iter().cloned());
+        fns.extend(scan.forwarder_fns.iter().cloned());
+        repo_methods.extend(scan.repo_methods.iter().cloned());
+        imports_by_rel.insert(scan.rel_of(root_s), scan.imports.clone());
+    }
     let mut additions: Vec<Finding> = Vec::new();
     additions.extend(checks::duplicate_findings(&skeletons));
+    additions.extend(checks::duplicate_module_findings(&module_entities));
+    additions.extend(checks::forwarding_chain_findings(
+        &heads,
+        &fns,
+        &repo_methods,
+        &imports_by_rel,
+    ));
     let mut repo_wide_unused = checks::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
     repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
     reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
@@ -1409,11 +1459,16 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         cc: rs.cc.clone(),
         errors: rs.errors,
         defs: Vec::new(),
+        class_defs: Vec::new(),
         setters: Vec::new(),
         refs: HashSet::new(),
         strings: Vec::new(),
         decorated: HashSet::new(),
         skeletons: rs.skeletons.clone(),
+        skeleton_modules: Vec::new(),
+        forwarder_fns: Vec::new(),
+        forwarder_methods: Vec::new(),
+        repo_methods: Vec::new(),
         classes: Vec::new(),
         imports: Vec::new(),
         self_assigns: Vec::new(),
@@ -1421,8 +1476,6 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         supps_spent: rs.supps_spent.clone(),
     }
 }
-
-///
 /// The finding model's final action kind — the JSON contract carries it so
 /// the Python orchestrator consumes findings without further mapping.
 ///
@@ -1617,7 +1670,7 @@ fn bulk_suppression_findings(
                 top = Some((rel, sites));
             }
         }
-        out.push(Finding { file: top.map(|(r, _)| r.clone()).unwrap_or_default(), line: 1, col: 0, function: String::new(), kind: "bulk-suppression".into(), severity: "warn".into(), message: format!(
+        out.push(Finding { seam_members: Vec::new(), file: top.map(|(r, _)| r.clone()).unwrap_or_default(), line: 1, col: 0, function: String::new(), kind: "bulk-suppression".into(), severity: "warn".into(), message: format!(
             "{kind} suppressed at {n} sites - repeated identical whys are POLICY, not per-site judgment: \
         move the rule into [lucidlint.guidance] config guidance or a documented config ignore, or fix the recurring cause"
         ) });
@@ -1793,7 +1846,7 @@ fn main() {
     // (Python reference scan; Rust's dead code is rustc's, so Rust scans
     // carry no defs/refs and never fire the unused family)
     let mut skeletons = Vec::new();
-    let mut definitions: Vec<(String, String, usize)> = Vec::new();
+    let mut definitions: Vec<(String, String, usize, bool)> = Vec::new();
     let mut setters: Vec<(String, String, usize)> = Vec::new();
     let mut prod_refs = HashSet::new();
     let mut test_refs = HashSet::new();
@@ -1811,7 +1864,10 @@ fn main() {
         }
 
         for (name, line) in &scan.defs {
-            definitions.push((rel.clone(), name.clone(), *line));
+            definitions.push((rel.clone(), name.clone(), *line, false));
+        }
+        for (name, line) in &scan.class_defs {
+            definitions.push((rel.clone(), name.clone(), *line, true));
         }
         for (name, line) in &scan.setters {
             setters.push((rel.clone(), name.clone(), *line));
@@ -1843,10 +1899,20 @@ fn main() {
         .collect();
     let suppression_census = suppression_counts(scans.iter().map(|s| &s.supps));
     let bulk_suppressions = bulk_suppression_findings(&suppression_census, &supps_by_rel, 10);
-    for scan in scans {
-        all_findings.extend(scan.findings);
-        all_cc.extend(scan.cc);
+    let mut module_entities = Vec::new();
+    let mut heads = Vec::new();
+    let mut fns = Vec::new();
+    let mut repo_methods = Vec::new();
+    let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
+    for scan in &scans {
+        all_findings.extend(scan.findings.clone());
+        all_cc.extend(scan.cc.clone());
         total_errors += scan.errors;
+        module_entities.extend(scan.skeleton_modules.iter().cloned());
+        heads.extend(scan.forwarder_methods.iter().cloned());
+        fns.extend(scan.forwarder_fns.iter().cloned());
+        repo_methods.extend(scan.repo_methods.iter().cloned());
+        imports_by_rel.insert(rel_of(&scan.file_name, &root), scan.imports.clone());
     }
     all_findings.extend(bulk_suppressions);
     // per-language duplicate pools: a Python fn and a Rust fn with the same
@@ -1862,6 +1928,13 @@ fn main() {
     }
     all_findings.extend(duplicate_findings(&py_skeletons));
     all_findings.extend(duplicate_findings(&rs_skeletons));
+    all_findings.extend(checks::duplicate_module_findings(&module_entities));
+    all_findings.extend(checks::forwarding_chain_findings(
+        &heads,
+        &fns,
+        &repo_methods,
+        &imports_by_rel,
+    ));
     // unused is a repo-wide family computed AFTER the per-file suppression
     // pass — reconcile it through those suppressions so an `ignore unused <why>`
     // comment suppresses the finding and is not reported stale (review-log B3)
@@ -1996,12 +2069,13 @@ fn main() {
                 "function": e.function,
                 "kind": "complexity",
                 "severity": "fail",
-                "metric": e.cc,
                 "message": common::full_fix_command(
                     &e.file,
                     e.line,
                     &common::complexity_message(e.cc, e.shape, &e.shape_detail),
                 ),
+                "fix_kind": checks::fix_kind_of_message(&common::complexity_message(e.cc, e.shape, &e.shape_detail))
+                    .unwrap_or("extract-method"),
             }));
         }
     }
@@ -2065,11 +2139,13 @@ fn main() {
                 "signal": f.kind,
                 "severity": f.severity,
                 "message": common::full_fix_command(&f.file, f.line, &f.message),
+                "seam_members": f.seam_members,
+                "fix_kind": fix_kind_of_message(&f.message).unwrap_or_else(|| kind_fix_default(&f.kind)),
             })
         })
         .collect();
     let out = serde_json::json!({
-        "schema_version": 3,
+        "schema_version": 4,
         "header": common::REPORT_HEADER,
         "suppressions": suppression_census,
         "files": paths.len(),
@@ -2562,11 +2638,16 @@ mod tests {
     }
 
     #[test]
-    fn negative_literals_stay_constant_tables() {
+    fn constant_table_is_a_module_level_variable() {
+        // third-pass ruling 3: ANY module-level variable assignment fires —
+        // a constant table is still a module-level variable; the negative
+        // literals INSIDE it stay magic-number-exempt
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/negative_literals_stay_constant_tables__01.py"
         ));
-        assert!(!f.iter().any(|x| x.kind == "global-state"));
+        let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
+        assert_eq!(gs.len(), 1, "{f:?}");
+        assert_eq!(gs[0].line, 1);
     }
 
     #[test]
@@ -3470,23 +3551,16 @@ mod tests {
     // ------------------------------------------------- global-state edges
     #[test]
     fn constant_table_mutated_in_function_is_still_state() {
-        // the all-constant literal passes at module level (carve-out), but a
-        // function mutation of the container is still module state
+        // the all-constant literal fires AT THE ASSIGNMENT (the expanded
+        // rule: any module-level variable), and the machine inside the
+        // function is not double-reported — the mutation arm merged into the
+        // assignment finding (one family, one message)
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/constant_table_mutated_in_function_is_still_state__01.py"
         ));
         let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
         assert_eq!(gs.len(), 1);
-        assert_eq!(gs[0].line, 3);
-    }
-
-    // ------------------------------------------------- class-module pass
-    #[test]
-    fn class_module_matching_name_and_multi_class_pass() {
-        let f = scan_src(include_str!(
-            "../../tests/fixtures/rust/class_module_matching_name_and_multi_class_pass__01.py"
-        ));
-        assert!(!f.iter().any(|x| x.kind == "class-module"));
+        assert_eq!(gs[0].line, 1);
     }
 
     // ------------------------------------------------- shadow pass
@@ -3562,6 +3636,124 @@ mod tests {
         ];
         let f = checks::abstraction_findings(&scans);
         assert!(f.is_empty());
+    }
+
+    // ------------------------------------------------- class-module multi
+    #[test]
+    fn class_module_multi_misplaced_public_class_fails() {
+        // User/Team in prod_mod.py: neither matches the stem — the multi arm
+        // fires even though no single class "is" the module (was the old
+        // multi-class PASS fixture; inverted per plan #31)
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_multi_misplaced_fails__01.py"
+        ));
+        assert!(
+            f.iter()
+                .any(|x| x.kind == "class-module" && x.message.contains("fix: split-module")),
+            "{f:?}"
+        );
+        let hit = f.iter().find(|x| x.kind == "class-module").unwrap();
+        assert!(
+            hit.message.contains("User, Team"),
+            "names the misplaced: {}",
+            hit.message
+        );
+    }
+
+    // ------------------------------------------- #27 husks, #28 process, #32 closures
+    #[test]
+    fn static_husk_fires_on_stateless_static_only_class() {
+        let f = scan_src(include_str!("../../tests/fixtures/rust/static_husk_fires__01.py"));
+        let hits: Vec<_> = f.iter().filter(|x| x.kind == "static-husk").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("no state of its own"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("put it IN the class"), "{}", hits[0].message);
+    }
+    #[test]
+    fn static_husk_exclusions_do_not_fire() {
+        for (fx, src) in [
+            (
+                "static_husk_inherited_base_exempt__01.py",
+                include_str!("../../tests/fixtures/rust/static_husk_inherited_base_exempt__01.py"),
+            ),
+            (
+                "static_husk_abc_exempt__01.py",
+                include_str!("../../tests/fixtures/rust/static_husk_abc_exempt__01.py"),
+            ),
+            (
+                "static_husk_error_name_exempt__01.py",
+                include_str!("../../tests/fixtures/rust/static_husk_error_name_exempt__01.py"),
+            ),
+        ] {
+            let f = scan_src(src);
+            assert!(!f.iter().any(|x| x.kind == "static-husk"), "{fx}: {f:?}");
+        }
+    }
+    #[test]
+    fn delegating_husk_fires_on_pure_forwarder_class() {
+        let f = scan_src(include_str!("../../tests/fixtures/rust/delegating_husk_fires__01.py"));
+        let hits: Vec<_> = f.iter().filter(|x| x.kind == "delegating-husk").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("fix: dissolve-husk"), "{}", hits[0].message);
+    }
+    #[test]
+    fn delegating_husk_depth2_hands_off_to_forwarding_chain() {
+        // Facade.fetch -> get_stored -> Store.load: the depth-2 chain is #30's
+        // shape, NOT a husk — the forwarder target itself forwards
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/delegating_husk_depth2_hands_off__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "delegating-husk"), "{f:?}");
+    }
+    #[test]
+    fn process_class_fires_with_honesty_test_message() {
+        let f = scan_src(include_str!("../../tests/fixtures/rust/process_class_fires__01.py"));
+        let hits: Vec<_> = f.iter().filter(|x| x.kind == "process-class").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        for part in [
+            "(1) the domain itself names it",
+            "(2) its state is its own",
+            "(3) no existing type",
+            "(4) it is not one owner",
+        ] {
+            assert!(hits[0].message.contains(part), "missing {part}: {}", hits[0].message);
+        }
+    }
+    #[test]
+    fn process_class_gof_names_pass() {
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/process_class_gof_exempt__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "process-class"), "{f:?}");
+    }
+    #[test]
+    fn closure_cluster_fires_on_disjoint_local_closure_groups() {
+        let f = scan_src(include_str!("../../tests/fixtures/rust/closure_cluster_fires__01.py"));
+        let hits: Vec<_> = f.iter().filter(|x| x.kind == "closure-cluster").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("class-in-a-method"), "{}", hits[0].message);
+        assert_eq!(hits[0].function, "main", "{:?}", hits[0]);
+    }
+    #[test]
+    fn class_module_multi_each_public_class_matches_stem_passes() {
+        // ProdMod in prod_mod.py matches the stem; _Helper is private — the
+        // module's public identity is findable, no finding
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_multi_each_class_matches_stem_pass__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "class-module"), "{f:?}");
+    }
+    #[test]
+    fn class_module_mixed_names_only_the_misplaced() {
+        // User matches nothing, ProdMod matches prod_mod — the finding names
+        // ONLY the misplaced class
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_mixed_names_only_misplaced__01.py"
+        ));
+        let hits: Vec<_> = f.iter().filter(|x| x.kind == "class-module").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("User"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("ProdMod"), "{}", hits[0].message);
     }
 
     // ------------------------------------------------- record-shape
@@ -3859,6 +4051,11 @@ mod tests {
         let mut spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
             std::collections::HashMap::new();
         let root = "repo";
+        let mut module_entities = Vec::new();
+        let mut heads = Vec::new();
+        let mut fns = Vec::new();
+        let mut repo_methods = Vec::new();
+        let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
         for (name, src) in files {
             let mut scan = scan_source(src, name);
             scan.file_name = name.to_string();
@@ -3875,8 +4072,16 @@ mod tests {
                     skeleton: s.skeleton.clone(),
                 });
             }
+            module_entities.extend(scan.skeleton_modules.iter().cloned());
+            heads.extend(scan.forwarder_methods.iter().cloned());
+            fns.extend(scan.forwarder_fns.iter().cloned());
+            repo_methods.extend(scan.repo_methods.iter().cloned());
+            imports_by_rel.insert(name.to_string(), scan.imports.clone());
             for (fn_name, line) in &scan.defs {
-                definitions.push((rel.clone(), fn_name.clone(), *line));
+                definitions.push((rel.clone(), fn_name.clone(), *line, false));
+            }
+            for (cls_name, line) in &scan.class_defs {
+                definitions.push((rel.clone(), cls_name.clone(), *line, true));
             }
             for (name, line) in &scan.setters {
                 setters.push((rel.clone(), name.clone(), *line));
@@ -3902,7 +4107,9 @@ mod tests {
         let undeclared = undeclared_findings(&undecl_scans);
         reconcile_repo_wide(&mut all, undeclared, &supps_by_rel, &spent_by_rel);
         // the suppression census + its bulk warning mirror main()'s report
+        all.extend(duplicate_module_findings(&module_entities));
         let census = suppression_counts(supps_by_rel.values());
+        all.extend(forwarding_chain_findings(&heads, &fns, &repo_methods, &imports_by_rel));
         all.extend(bulk_suppression_findings(&census, &supps_by_rel, 10));
         // mirror the production finalize: repo-wide findings honor per-file
         // suppressions too (family-aware, widened window), and a suppression
@@ -4064,6 +4271,38 @@ mod tests {
         assert_eq!(d[0].line, 9);
     }
 
+    // ------------------------------------------------- forwarding-chain (#30)
+    #[test]
+    fn forwarding_chain_coupled_chain_fires() {
+        // Facade.fetch -> get_stored -> Store.load all in one module: C's
+        // module already depends on D's module (same file) — the dead
+        // indirection is flagged
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/delegating_husk_depth2_hands_off__01.py"
+        ));
+        let hits: Vec<_> = f.iter().filter(|x| x.kind == "forwarding-chain").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("fix: collapse-chain"), "{}", hits[0].message);
+        assert_eq!(hits[0].function, "fetch", "{:?}", hits[0]);
+    }
+    #[test]
+    fn forwarding_chain_boundary_between_independent_modules_is_silent() {
+        // Server in server.py never imports store.py — the chain is the ONLY
+        // coupling between the modules: a deliberate boundary, NO finding and
+        // NO message (severity principle, 2026-09-30)
+        let f = scan_corpus(&[
+            (
+                "server.py",
+                include_str!("../../tests/fixtures/rust/forwarding_chain_boundary_silent__01.py"),
+            ),
+            (
+                "store.py",
+                include_str!("../../tests/fixtures/rust/forwarding_chain_boundary_silent__02.py"),
+            ),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "forwarding-chain"), "{f:?}");
+    }
+
     #[test]
     fn dice_partial_similarity_below_threshold() {
         let a: Vec<String> = "A B C D E".split(' ').map(str::to_string).collect();
@@ -4071,6 +4310,65 @@ mod tests {
         assert!(common::dice_similarity(&a, &b) < 0.9);
         let same: Vec<String> = "A B C D E".split(' ').map(str::to_string).collect();
         assert_eq!(common::dice_similarity(&a, &same), 1.0);
+    }
+
+    // ------------------------------------------------- duplicate-module (#26)
+    #[test]
+    fn duplicate_module_fork_pair_fires_with_matched_members() {
+        let f = scan_corpus(&[
+            (
+                "config_a.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_fork_pair__01.py"),
+            ),
+            (
+                "config_b.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_fork_pair__02.py"),
+            ),
+        ]);
+        let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-module").collect();
+        assert_eq!(d.len(), 1, "{f:?}");
+        assert!(d[0].message.contains("identical constants"), "{}", d[0].message);
+        assert!(
+            d[0].message.contains("matched members: close, connect"),
+            "{}",
+            d[0].message
+        );
+    }
+    #[test]
+    fn duplicate_module_three_statement_floor_never_fires() {
+        // the small file is a fragment of the fork (same constants) but its
+        // <3 statements keep it out of the pairing entirely
+        let f = scan_corpus(&[
+            (
+                "config_a.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_fork_pair__01.py"),
+            ),
+            (
+                "config_b.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_fork_pair__02.py"),
+            ),
+            (
+                "frag.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_small_file_never_fires__01.py"),
+            ),
+        ]);
+        let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-module").collect();
+        assert_eq!(d.len(), 1, "{f:?}");
+        assert!(!d[0].file.ends_with("frag.py"), "{}", d[0].file);
+    }
+    #[test]
+    fn duplicate_module_ignore_file_silences() {
+        let f = scan_corpus(&[
+            (
+                "config_a.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_fork_pair__01.py"),
+            ),
+            (
+                "config_b.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_ignored_file__02.py"),
+            ),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "duplicate-module"), "{f:?}");
     }
 
     // ------------------------------------------------- unused
@@ -4145,6 +4443,24 @@ mod tests {
         let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "unused").collect();
         assert_eq!(u.len(), 1);
         assert!(u[0].message.contains("never referenced"));
+    }
+    #[test]
+    fn unused_class_arm_finds_never_referenced_class() {
+        // #28 dead-class arm: a class defined in production code that
+        // nothing references is as dead as an unreferenced function
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unused_class_never_referenced_is_found__01.py"
+        ));
+        let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "unused").collect();
+        assert_eq!(u.len(), 1, "{f:?}");
+        assert!(u[0].message.contains("class 'Orphan'"), "{}", u[0].message);
+    }
+    #[test]
+    fn unused_class_arm_passes_when_referenced() {
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unused_class_referenced_not_flagged__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "unused"), "{f:?}");
     }
 
     #[test]

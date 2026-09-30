@@ -65,6 +65,63 @@ pub struct SkeletonFn {
     pub skeleton: Vec<String>,
 }
 
+/// One duplicate-module candidate (#26): a module or top-level class
+/// identity with its structural skeleton, constant tokens, and member-name
+/// set. Built per file in the Python layer; the repo-wide pass pairs
+/// identities with >= 0.9 Dice AND identical constant sets.
+#[derive(Clone)]
+pub struct SkeletonModule {
+    pub rel: String,
+    pub name: String,
+    pub line: usize,
+    pub skeleton: Vec<String>,
+    /// `NAME:norm(type)` tokens for the identity's `NAME = literal` constants
+    /// (numeric literals normalised, strings stripped, bools canonical).
+    pub consts: Vec<String>,
+    /// Sorted member names — the issue's "matched members:" intersection.
+    pub members: Vec<String>,
+    /// "module" | "class" | "module-class" (a module whose non-import
+    /// top-levels are exactly one class def — pairs as both).
+    pub entity: &'static str,
+}
+
+/// A module-level function whose body is exactly `return <callee>(<all
+/// params>)` — the middle edge of a forwarding chain (#30).
+#[derive(Clone)]
+pub struct ForwarderFn {
+    pub rel: String,
+    pub name: String,
+    pub line: usize,
+    pub params: Vec<String>,
+    /// "Fn:<name>" for a module-fn callee, "Method:<recv-param>:<method>" for
+    /// a method callee on another class.
+    pub callee: String,
+}
+
+/// A class method whose body is exactly `return F(<all params>)` with F a
+/// module-level function — the head of a forwarding chain (#30).
+#[derive(Clone)]
+pub struct ForwarderMethod {
+    pub rel: String,
+    pub class: String,
+    pub name: String,
+    pub line: usize,
+    pub params: Vec<String>, // minus self/cls
+    pub fn_callee: String,
+}
+
+/// Every method of every top-level class (params minus receiver) — the
+/// terminal pool the forwarding-chain detector resolves `recv.method(...)`
+/// callees against (#30, R9).
+#[derive(Clone)]
+pub struct RepoMethod {
+    pub rel: String,
+    pub class: String,
+    pub name: String,
+    pub line: usize,
+    pub params: Vec<String>,
+}
+
 /// Rewrite a finding message's `fix:` directive into the FULL runnable
 /// command. The scanner messages say `— fix: <kind> [--fix-name <N>]`; that
 /// reads as if a command named `<kind>` existed. The real surface is the
@@ -465,17 +522,15 @@ pub fn apply_suppressions_impl(
     for (ln, entries) in &supps.line {
         for (sig, why) in entries {
             if why.is_empty() && seen_invalid.insert((*ln, sig.clone())) {
-                out.push(crate::Finding {
-col: 0,
-                file: file.to_string(),
-                line: *ln,
-                function: String::new(),
-                kind: "suppression".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "suppression '{marker} lucidlint: ignore {sig}' at line {ln} without a why — exemptions only apply with an explanation"
-                ),
-            });
+                out.push(crate::Finding { seam_members: Vec::new(), col: 0,
+                                file: file.to_string(),
+                                line: *ln,
+                                function: String::new(),
+                                kind: "suppression".into(),
+                                severity: "fail".into(),
+                                message: format!(
+                                    "suppression '{marker} lucidlint: ignore {sig}' at line {ln} without a why — exemptions only apply with an explanation"
+                                ), });
             }
         }
     }
@@ -485,17 +540,15 @@ col: 0,
                 .iter()
                 .find(|(_, t)| t.contains(&format!("lucidlint: ignore-file {sig}")))
             {
-                out.push(crate::Finding {
-col: 0,
-                    file: file.to_string(),
-                    line: *ln,
-                    function: String::new(),
-                    kind: "suppression".into(),
-                    severity: "fail".into(),
-                    message: format!(
-                        "file suppression '{marker} lucidlint: ignore-file {sig}' at line {ln} without a why — exemptions only apply with an explanation"
-                    ),
-                });
+                out.push(crate::Finding { seam_members: Vec::new(), col: 0,
+                                    file: file.to_string(),
+                                    line: *ln,
+                                    function: String::new(),
+                                    kind: "suppression".into(),
+                                    severity: "fail".into(),
+                                    message: format!(
+                                        "file suppression '{marker} lucidlint: ignore-file {sig}' at line {ln} without a why — exemptions only apply with an explanation"
+                                    ), });
             }
         }
     }
@@ -598,18 +651,16 @@ impl<'a> StaleCtx<'a> {
                     continue;
                 }
                 let reason = self.stale_reason(sig, *ln);
-                out.push(crate::Finding {
-                    col: 0,
-                    file: self.file.to_string(),
-                    line: *ln,
-                    function: String::new(),
-                    kind: "stale-suppression".into(),
-                    severity: "fail".into(),
-                    message: format!(
-                        "suppression '{} lucidlint: ignore {sig}' at line {ln} no longer fires ({reason}) — remove it{fix_tail}",
-                        self.marker
-                    ),
-                });
+                out.push(crate::Finding { seam_members: Vec::new(), col: 0,
+                file: self.file.to_string(),
+                line: *ln,
+                function: String::new(),
+                kind: "stale-suppression".into(),
+                severity: "fail".into(),
+                message: format!(
+                    "suppression '{} lucidlint: ignore {sig}' at line {ln} no longer fires ({reason}) — remove it{fix_tail}",
+                    self.marker
+                ), });
             }
         }
         for (sig, why) in &self.supps.file {
@@ -630,18 +681,16 @@ impl<'a> StaleCtx<'a> {
                 } else {
                     "matching findings exist but the file suppression was never consumed — one of them should have matched it".to_string()
                 };
-                out.push(crate::Finding {
-                    col: 0,
-                    file: self.file.to_string(),
-                    line: *ln,
-                    function: String::new(),
-                    kind: "stale-suppression".into(),
-                    severity: "fail".into(),
-                    message: format!(
-                        "file suppression '{} lucidlint: ignore-file {sig}' no longer fires ({reason}) — remove it{fix_tail}",
-                        self.marker
-                    ),
-                });
+                out.push(crate::Finding { seam_members: Vec::new(), col: 0,
+                file: self.file.to_string(),
+                line: *ln,
+                function: String::new(),
+                kind: "stale-suppression".into(),
+                severity: "fail".into(),
+                message: format!(
+                    "file suppression '{} lucidlint: ignore-file {sig}' no longer fires ({reason}) — remove it{fix_tail}",
+                    self.marker
+                ), });
             }
         }
         out
@@ -712,6 +761,7 @@ mod tests {
 
     fn finding(kind: &str, line: usize) -> Finding {
         Finding {
+            seam_members: Vec::new(),
             file: "x.rs".into(),
             line,
             col: 0,
@@ -906,6 +956,7 @@ mod tests {
             spent: &mut std::collections::HashSet::new(),
         };
         let deep_magic = Finding {
+            seam_members: Vec::new(),
             col: 5,
             ..finding("magic-number", 2)
         };
@@ -954,9 +1005,9 @@ mod tests {
 
 /// The report header — printed on every CLI run (text banner AND a `header`
 /// field in --json; never under the LSP). It states the AIM so agents read
-/// the intent before the findings: fix rather than suppress, and make every
-/// suppression reviewer-checkable.
-pub const REPORT_HEADER: &str = "lucidlint - the aim is code that is readable, maintainable, and obviously correct: fix findings instead of suppressing them, and give every suppression a why a reviewer can check";
+/// the intent before the findings: findings are pointers, fix rather than
+/// suppress, and make every suppression reviewer-checkable (Fourth-pass).
+pub const REPORT_HEADER: &str = "lucidlint — the aim is code that is maintainable, lucid, and obviously correct. Findings and suggested fixes are pointers, not orders: for each, judge the best way to make this code more maintainable, lucid, and obviously correct. Fix findings instead of suppressing them; give every suppression a why a reviewer can check";
 
 #[cfg(test)]
 mod header_tests {
@@ -964,9 +1015,9 @@ mod header_tests {
 
     #[test]
     fn report_header_names_the_three_aims() {
-        assert!(REPORT_HEADER.contains("readable"));
-        assert!(REPORT_HEADER.contains("maintainable"));
+        assert!(REPORT_HEADER.contains("lucid"));
         assert!(REPORT_HEADER.contains("obviously correct"));
         assert!(REPORT_HEADER.contains("why a reviewer can check"));
+        assert!(REPORT_HEADER.contains("pointers, not orders"));
     }
 }

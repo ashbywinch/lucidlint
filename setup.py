@@ -10,6 +10,9 @@ The binary is platform-specific, so the wheel is forced to a platform tag
 (``py3-none-<plat>``) — never the misleading ``py3-none-any`` a data-only
 wheel would otherwise get.
 """
+# lucidlint: ignore-file global-state setup.py is single-purpose packaging glue — its constants are the wheel metadata
+# lucidlint: ignore-file class-module the wheel's build commands are packaging glue, not a class file — the
+# filename is the wheel, not any one command class
 
 import os
 import shutil

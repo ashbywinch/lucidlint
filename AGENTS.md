@@ -60,6 +60,11 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 - Never commit to main; branch + PR.
 - Every behavior change ships with a test — fakes only, no monkeypatch.
 - The tool passes itself: `make self-check` is green before any PR.
+- The tool exists for code lucidity. Never design a rule, threshold, or
+  message from mechanics (deduplication, size, call counts); findings are
+  pointers for the reader's judgment. The question is always: what is the
+  best way to make this code more maintainable, lucid, and obviously
+  correct? (stated in RULES.md's preamble)
 
 ## Repo self-checks
 

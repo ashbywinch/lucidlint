@@ -1,5 +1,14 @@
 # lucidlint rule reference
 
+Every rule below exists for one reason: code that is maintainable, lucid,
+and obviously correct. A finding is a pointer, not a verdict — its message
+and suggested fix state the reasoning and exist to make the reader reflect.
+Judge each with common sense: what is the best way to make this code more
+maintainable, lucid, and obviously correct? When the suggested fix isn't the
+optimal class design for maintainability, draw on your knowledge of good
+class design to devise a better one. Suppress only where the finding itself
+does not apply — and give the why a reviewer can check.
+
 Every finding is one of two severities:
 
 | Severity | Meaning |
@@ -77,14 +86,13 @@ with a why).
 ## Group 1: Architecture & design
 
 &dagger; *More likely to conflict with existing conventions. The threshold values (15 CC, 120 lines, 5 fields, 0.9 dice) are opinionated — adjust by suppressing specific findings with a why.*
-
 | Rule | Severity | Language | What it checks |
 |---|---|---|---|
 | **complexity** | fail | Both | Cyclomatic complexity ≥ 15 (radon-equivalent rules: `if`/`elif` count, `match` arms minus wildcard, `&&`/`||`, ternary, loops, `assert!`, closures +0 walked) — Extract Function: `lucidlint fix --kind extract-method --file <F> --line <L>` previews the best self-contained seam (placeholder name — the extracted function is private by construction, so the fix underscores it); apply with `--name <N>` (the name IS the commitment — no `--confirm`). |
 | **long-param-list** | fail | Both | A function with > 5 parameters (receiver/`self` excluded) — introduce a parameter object. |
 | **large-function** | fail | Both | Function spans ≥ 120 lines — split it: one rule per function. |
 | **closures → latent-class** | fail | Both | A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line span) — the nested structure is a class waiting to be extracted. |
-| **partition → latent-class** | fail | Python | The field-partition variant of latent-class: free functions partition a struct's fields (each touches a disjoint subset) — the fields and their functions belong together as a class. |
+| **partition → latent-class** | fail | Python | The field-partition variant of latent-class: a class's methods partition its fields (each group touches a disjoint subset) — the class is really that many independent classes. |
 | **strewing → latent-class** | fail | Both | ≥3 free functions sharing the same leading parameter — they share data, they're a class. |
 | **misplaced-method → latent-class** | fail | Python | A module-level function called from a method with `self.<attr>` arguments matching every parameter — the class already holds the data, so the function is that class's method in exile; move it onto the class. |
 | **assembly-class → latent-class** | fail | Python | A function assembles >=3 structures by threading the same data through module-level functions whose outputs feed each other's inputs — a class in waiting: the threaded state belongs on an object, the module functions are its methods. |
@@ -99,11 +107,16 @@ with a why).
 | **record-shape** | fail | Both | A function takes a struct/class with ≥5 fields and no methods — the struct's rules belong as methods on it. |
 | **detached-method** | **warn** | Both | A method that never touches its receiver — a classmethod should always use `cls`; a plain method should use `self` or move out — it doesn't use instance state; make it a `@staticmethod`/associated fn or move it out of the class. |
 | **duplicate** | **warn** | Both | Dice similarity ≥ 0.9 (structural skeleton bigrams) — copy-paste; extract the shared logic. |
+| **duplicate-module** | fail | Both | Two modules or classes with the same structural skeleton (>= 0.9 Dice) and identical constants — a fork: a fix lands in one copy while the other silently keeps the old behavior; reconcile the copies into one. |
+| **static-husk** | **warn** | Python | A class with no state of its own (no `self.X =` anywhere, no dataclass fields, no properties) whose members are all staticmethods — a namespace wearing a domain noun: it presents an object's shape while owning nothing. |
+| **delegating-husk** | **warn** | Python | A class where every instance method's body is exactly `return F(<all params>)` with F a module-level function — an indirection layer with no behavior; callers could reach the functions directly (dissolve the husk — never inline). |
+| **process-class** | fail | Python | A top-level class whose name is a process noun (Builder, Validator, Importer, ...) — a verb wearing a noun: the work belongs on the domain objects it operates on; the four-part honesty test decides (fold, rename, or delete). |
+| **forwarding-chain** | fail | Python | A method whose body exactly forwards to a module function that forwards to another class's method (depth >= 2) — dead indirection inside an already-coupled module; collapse the chain (never when the chain is the only coupling between two otherwise-independent modules — then it is a deliberate boundary). |
+| **closure-cluster → latent-class** | **warn** | Python | A method whose nested closures partition its locals — a class-in-a-method; the split is structurally visible but often a deliberate cohesive serving method, so a warning, not a demand. |
 | **layer-mix** | fail | Graph | A file calls into multiple architectural layers (determined via the code-review-graph contract) — files belong in one layer. |
 | **folder-mix** | fail | Graph | Files in a directory are split across graph communities — they belong together. |
 
 ## Group 2: Style & correctness
-
 | Rule | Severity | Language | What it checks |
 |---|---|---|---|
 | **magic-number** | **warn** | Both | Numeric literal (outside 0/1/2) used as an operand — name it as a constant. |
@@ -111,7 +124,7 @@ with a why).
 | **noop-statement** | fail | Both | Expression statement that discards its value (`x;`, `a + b;`) — dead statement. |
 | **unreachable** | fail | Both | Statement after an unconditional `return`/`break`/`continue`/`panic!` — dead code is deleted. |
 | **vague-name** | fail | Both | Type ending in Manager, Handler, Store, Repository, Controller, Utils, or Info with significant size/methods — the domain concept should name it. |
-| **class-module** | fail | Python | A Python module holding exactly one class whose name doesn't match the filename — rename the file to match. |
+| **class-module** | fail | Python | A Python module whose public class(es) aren't findable by name: exactly one class whose name doesn't match the filename, or >=2 public classes where any name doesn't match the stem — rename the file to match, or split the module so every public class lives in a file named after it. |
 | **builtin-shadow** | fail | Python | A variable/parameter that shadows a Python builtin (`list`, `dict`, `str`, `id`...). |
 | **broad-except** | **warn** | Python | Bare `except:` — catch specific exceptions. |
 | **boolean-arg** | fail | Both | A boolean literal passed as a call argument (`connect(host, True)`) — name the flag at the call site. |
@@ -119,8 +132,8 @@ with a why).
 | **swallow** | fail | Both | A catch that neither re-raises nor exits with control flow (no return/break/continue); in Rust, a `Result`/`Option` discarded with `let _ =` — the error vanishes, re-raise or handle it. |
 | **inline-import** | fail | Python | `import` inside a function body (Python) — imports belong at module top. |
 | **private-import** | fail | Both | Importing an underscore-prefixed symbol from another module. |
-| **global-state** | fail | Both | Module-level mutable container mutated inside a function — put state in a class. |
-| **unused** | **warn** | Python | A function defined in production code that's never referenced anywhere in the repo (same-file references count — Python only). |
+| **global-state** | fail | Both | Any module-level variable assignment — mutable or constant, mutated or not: values are a class's private internals, the variable belongs as that class's attribute/member. Exception: global services containers and framework-required globals (`app = Flask(...)`, DI registries). |
+| **unused** | **warn** | Python | A function or class defined in production code that's never referenced anywhere in the repo (same-file references count — Python only). |
 | **duplicate-def** | fail | Both | A module-scope def/class/import that shadows an earlier module-scope binding of the same name — the later definition wins legally, but it is a shadowing hazard (dispatch or edit mistake); rename one. |
 | **restating-docstring** | **warn** | Both | A docstring whose content words all appear in the body's own tokens — it restates the code; name the concept instead. |
 | **duplicate-block** | **warn** | Both | An identical statement block (≥3 statements) appearing twice in one function — duplicated work (an edit mistake?); delete the second copy. |
@@ -129,7 +142,6 @@ with a why).
 | **docs-undiscoverable** | fail | Both | A doc file is not reachable from `AGENTS.md` (the repo's doc index) via the link graph. |
 
 ## Group 3: Test discipline
-
 | Rule | Severity | Language | What it checks |
 |---|---|---|---|
 | **monkeypatch** | fail | Python | `monkeypatch`/`unittest.mock.patch` — prefer dependency injection. |
@@ -138,7 +150,6 @@ with a why).
 | **no-assert-test** | fail | Both | A test function with no assertion anywhere in its body — it can never fail. |
 
 ## Group 4: Suppression discipline
-
 | Rule | Severity | Language | What it checks |
 |---|---|---|---|
 | **suppression** | fail | Both | `lucidlint: ignore <signal>` with no explanation — every exemption needs a why. |
@@ -151,7 +162,6 @@ with a why).
 ## Group 4.5: Refactoring advice
 
 &dagger; *(all warn) These detect the code SHAPE a Fowler refactoring targets. Auto-fixes exist for the Python loop family (`loop-pipeline`/`loop-sequence` rewrite the loop(s) into comprehensions — the Rust shapes are detection-only, the message names the combinator), magic-number, vague-name, and long-param-list; the rest are named in the message for the agent to hand-apply.*
-
 | Rule | Severity | Language | What it checks |
 |---|---|---|---|
 | **guard-clauses** | **warn** | Python | ≥3 levels of if-in-if ("arrow code") — Replace Nested Conditional with Guard Clauses: invert to early returns. |
@@ -168,7 +178,6 @@ with a why).
 ## Group 5: Hotspot & risk (graph-based)
 
 These rules require the optional `code-review-graph` tool (installed separately or via `pip install code-review-graph`). Without it they degrade silently.
-
 | Rule | Severity | Language | What it checks |
 |---|---|---|---|
 | **hub-file** | fail | Graph | A file with ≥150 incoming or outgoing call/import edges — central module that may need splitting. |
@@ -178,7 +187,6 @@ These rules require the optional `code-review-graph` tool (installed separately 
 | **over-abstraction** | fail | Graph | An abstract base class (Python ABC) with exactly one concrete subclass — the abstraction doesn't earn its keep. |
 
 ## Group 6: Cross-cutting
-
 | Rule | Severity | Language | What it checks |
 |---|---|---|---|
 | **standard** | — | — | Catch-all for findings that don't fit the named families above. The finding's message explains what's wrong. |

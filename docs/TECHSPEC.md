@@ -7,7 +7,7 @@ How the product in `docs/PRD.md` is built. Requirements by name: R1–R20
 
 | Component | Responsibility | Provides | Consumes |
 |---|---|---|---|
-| `scanner/` (Rust binary `lucidlint`) | the finding engine: every family (per-file, partition, test rules, duplicate/unused, record-shape, complexity, graph, hotspot, abstraction, docs) computed in Rust; thresholds live here (schema 2) | language-neutral findings JSON (`schema_version` 2) + CC array | repo `.py`/`.rs`/`.md` files, the graph contract JSON (exported from `.code-review-graph/graph.db`), churn JSON, docs root |
+| `scanner/` (Rust binary `lucidlint`) | the finding engine: every family (per-file, partition, test rules, duplicate/unused, record-shape, complexity, graph, hotspot, abstraction, docs) computed in Rust; thresholds live here (schema 4) | language-neutral findings JSON (`schema_version` 4) + CC array | repo `.py`/`.rs`/`.md` files, the graph contract JSON (exported from `.code-review-graph/graph.db`), churn JSON, docs root |
 | `scanner/radonc` (Rust crate) | the radon-mirroring CC API (visitors, cc_rank, cc_visit) — parity-tested against radon 6.0.1 | `function_cc`, block linenos | ruff-python-ast (pinned `=0.0.9`) |
 | `lucidlint.py` | the orchestrator: prepare the file set (pygit2 or rglob fallback), run the binary (fail-fast when missing), convert findings → actions, rank (churn × metric × fan-in), baseline, report, gate verdict, and the `fix` subcommand (R27: the tool owns its coordinates) | CLI + testable functions; `lucidlint fix --kind/--file/--line` (R27) | the Rust binary, git history (pygit2, optional `git` extra), coverage.xml |
 | `fix_engine.py` | the auto-fix transforms (libcst): mechanical (stale-suppression, noop, unreachable, positional-literals) + structural (extract-method, extract-class, magic-number, vague-name, long-param-list) | `fix:` directives in finding messages | optional `fix` extra (libcst) |
@@ -64,7 +64,7 @@ flowchart LR
     D --> B
     E[git history / pygit2] --> F[file list + churn]
     F --> B
-    B --> G[findings JSON schema 2]
+    B --> G[findings JSON schema 4]
     G --> H[lucidlint.py: actions, rank, baseline]
     H --> I[report + gate verdict]
     I --> J[exit code]

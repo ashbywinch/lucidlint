@@ -7,6 +7,8 @@
 //! exactly: suppressions, type-ignore, global-state, builtin-shadow, closures,
 //! class-module, vague-name, strewing, except-swallows, broad-except.
 
+// lucidlint: ignore-file large-function the walkers and grammar tables are ONE exhaustive dispatch/
+// decision table each — splitting them scatters a single mapping, covered by the file why
 use rayon::prelude::*;
 use ruff_python_ast::token::{TokenKind, Tokens};
 use ruff_python_ast::{
@@ -138,17 +140,15 @@ pub fn type_ignore_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Fi
         }
         let rest = text.split_once("type: ignore").map(|(_, r)| r).unwrap_or("");
         if !rest.contains('#') {
-            out.push(Finding {
-col: 0,
-                file: file.to_string(),
-                line: ln,
-                function: String::new(),
-                kind: "type-ignore".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "# type: ignore at line {ln} without a why — a suppression is itself a finding: add a comment explaining why the checker is wrong"
-                ),
-            });
+            out.push(Finding { seam_members: Vec::new(), col: 0,
+                            file: file.to_string(),
+                            line: ln,
+                            function: String::new(),
+                            kind: "type-ignore".into(),
+                            severity: "fail".into(),
+                            message: format!(
+                                "# type: ignore at line {ln} without a why — a suppression is itself a finding: add a comment explaining why the checker is wrong"
+                            ), });
         }
     }
     out
@@ -192,6 +192,7 @@ pub fn noqa_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Finding> 
         let rest = text.split_once(marker).map(|(_, r)| r).unwrap_or("");
         if !noqa_reason(rest) {
             out.push(Finding {
+                seam_members: Vec::new(),
                 col: 0,
                 file: file.to_string(),
                 line: ln,
@@ -205,14 +206,20 @@ pub fn noqa_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Finding> 
     out
 }
 
-/// Module-level mutable literals, Global statements, and mutations of module
-/// containers inside functions — mirrors the dispatcher's global-state handlers.
+/// Module-level variable assignments (ANY — mutable or constant, mutated or
+/// not; third-pass ruling 3: "values are a class's private internals") plus
+/// `global` statements. The narrow "mutable container mutated inside a
+/// function" arm is merged into this — one family, one message. Carve-out:
+/// global services containers and framework-required globals (`app =
+/// Flask(...)`, DI registries) — a CALL-valued assignment is a service
+/// registration, not a domain value.
 pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: bool) {
     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
     if let Stmt::Global(g) = stmt {
         let line = stmt_line(state.source, stmt);
         state.findings.push(Finding {
-col: 0,
+            seam_members: Vec::new(),
+            col: 0,
             file: state.file.to_string(),
             line,
             function: fn_name.clone(),
@@ -226,62 +233,47 @@ col: 0,
         return;
     }
     if module_level {
-        // both Assign and AnnAssign: typed dicts like `_oauth_states: dict = {}`
-        // are module state exactly like bare literals (the Python
-        // _module_literal_findings handles both via _module_assignment_target)
-        let value = match stmt {
+        // both Assign and AnnAssign (typed dicts like `_oauth_states: dict =
+        // {}` are module state exactly like bare literals); AugAssign too —
+        // `X += ...` at module level is a module-level variable write.
+        let value: Option<&Expr> = match stmt {
             Stmt::Assign(a) => Some(a.value.as_ref()),
             Stmt::AnnAssign(a) => a.value.as_deref(),
+            Stmt::AugAssign(a) => Some(a.target.as_ref()),
             _ => None,
         };
         let targets: Vec<&Expr> = match stmt {
             Stmt::Assign(a) => a.targets.iter().collect(),
             Stmt::AnnAssign(a) => vec![a.target.as_ref()],
+            Stmt::AugAssign(a) => vec![a.target.as_ref()],
             _ => Vec::new(),
         };
-        if let Some(v) = value {
-            if matches!(v, Expr::List(_) | Expr::Dict(_) | Expr::Set(_)) && !all_constant(v) {
-                for target in targets {
-                    if let Expr::Name(n) = target {
-                        let line = stmt_line(state.source, stmt);
-                        state.findings.push(Finding {
-                            col: 0,
-                            file: state.file.to_string(),
-                            line,
-                            function: fn_name.clone(),
-                            kind: "global-state".into(),
-                            severity: "fail".into(),
-                            message: format!(
-                                "module-level mutable collection '{}' — no module-level mutable state",
-                                n.id.as_str()
-                            ),
-                        });
-                    }
-                }
+        let call_valued = value.is_some_and(|v| matches!(v, Expr::Call(_)));
+        for target in targets {
+            let Expr::Name(n) = target else { continue };
+            let name = n.id.as_str();
+            if name.starts_with("__") && name.ends_with("__") {
+                continue; // module protocol metadata (__all__, __version__)
             }
+            if call_valued {
+                continue; // a service/framework registration, not a domain value
+            }
+            let line = stmt_line(state.source, stmt);
+            state.findings.push(Finding {
+                seam_members: Vec::new(),
+                col: 0,
+                file: state.file.to_string(),
+                line,
+                function: fn_name.clone(),
+                kind: "global-state".into(),
+                severity: "fail".into(),
+                message: format!(
+                    "module-level variable '{}' — values are a class's private internals; the variable belongs as \
+                     that class's attribute/member (global services containers and framework-required globals are exempt)",
+                    name
+                ),
+            });
         }
-    }
-}
-
-fn all_constant(e: &Expr) -> bool {
-    match e {
-        Expr::NumberLiteral(_)
-        | Expr::StringLiteral(_)
-        | Expr::BytesLiteral(_)
-        | Expr::BooleanLiteral(_)
-        | Expr::NoneLiteral(_)
-        | Expr::EllipsisLiteral(_) => true,
-        Expr::UnaryOp(u) => all_constant(&u.operand), // -4.0 is a literal
-        Expr::List(l) => !l.elts.is_empty() && l.elts.iter().all(all_constant),
-        Expr::Set(s) => !s.elts.is_empty() && s.elts.iter().all(all_constant),
-        Expr::Tuple(t) => t.elts.iter().all(all_constant),
-        Expr::Dict(d) => {
-            !d.items.is_empty()
-                && d.items
-                    .iter()
-                    .all(|it| it.key.as_ref().map(all_constant).unwrap_or(false) && all_constant(&it.value))
-        }
-        _ => false,
     }
 }
 
@@ -291,6 +283,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         for a in &f.parameters.posonlyargs {
             if SHADOWED_BUILTINS.contains(&a.parameter.name.as_str()) {
                 state.findings.push(Finding {
+                    seam_members: Vec::new(),
                     col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
@@ -307,6 +300,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         for a in &f.parameters.args {
             if SHADOWED_BUILTINS.contains(&a.parameter.name.as_str()) {
                 state.findings.push(Finding {
+                    seam_members: Vec::new(),
                     col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
@@ -323,6 +317,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         for a in &f.parameters.kwonlyargs {
             if SHADOWED_BUILTINS.contains(&a.parameter.name.as_str()) {
                 state.findings.push(Finding {
+                    seam_members: Vec::new(),
                     col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
@@ -339,6 +334,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         if let Some(v) = &f.parameters.vararg {
             if SHADOWED_BUILTINS.contains(&v.name.as_str()) {
                 state.findings.push(Finding {
+                    seam_members: Vec::new(),
                     col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
@@ -352,6 +348,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         if let Some(k) = &f.parameters.kwarg {
             if SHADOWED_BUILTINS.contains(&k.name.as_str()) {
                 state.findings.push(Finding {
+                    seam_members: Vec::new(),
                     col: 0,
                     file: state.file.to_string(),
                     line: stmt_line(state.source, stmt),
@@ -372,6 +369,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
                 if SHADOWED_BUILTINS.contains(&n.id.as_str()) {
                     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
                     state.findings.push(Finding {
+                        seam_members: Vec::new(),
                         col: 0,
                         file: state.file.to_string(),
                         line: stmt_line(state.source, stmt),
@@ -417,6 +415,7 @@ pub fn boolean_arg_findings(state: &mut ScanState, call: &ExprCall, source: &str
                 continue;
             }
             state.findings.push(Finding {
+                seam_members: Vec::new(),
                 col: 0,
                 file: state.file.to_string(),
                 line: line_of(source, arg.range().start()),
@@ -489,18 +488,16 @@ pub fn positional_literals_findings(state: &mut ScanState, call: &ExprCall, sour
     } else {
         " — fix: positional-literals --params <names>"
     };
-    state.findings.push(Finding {
-col: 0,
-        file: state.file.to_string(),
-        line: line_of(source, call.range().start()),
-        function: fn_name,
-        kind: "positional-literals".into(),
-        severity: "warn".into(),
-        message: format!(
-            "call passes {n} {kind} positionally to {callee}() — a swapped argument is a silent bug; use keyword arguments{directive}",
-            callee = callee_name,
-        ),
-    });
+    state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+            file: state.file.to_string(),
+            line: line_of(source, call.range().start()),
+            function: fn_name,
+            kind: "positional-literals".into(),
+            severity: "warn".into(),
+            message: format!(
+                "call passes {n} {kind} positionally to {callee}() — a swapped argument is a silent bug; use keyword arguments{directive}",
+                callee = callee_name,
+            ), });
 }
 
 /// A method whose body never references its receiver — it does not touch
@@ -547,17 +544,15 @@ pub fn detached_method_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
     }
     let fn_name = f.name.to_string();
     let line = line_of(source, f.name.range().start());
-    state.findings.push(Finding {
-col: 0,
-        file: state.file.to_string(),
-        line,
-        function: fn_name.clone(),
-        kind: "detached-method".into(),
-        severity: "warn".into(),
-        message: format!(
-            "method '{fn_name}' never uses '{recv}' — it does not touch instance state; make it a @staticmethod or move it out of the class"
-        ),
-    });
+    state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+            file: state.file.to_string(),
+            line,
+            function: fn_name.clone(),
+            kind: "detached-method".into(),
+            severity: "warn".into(),
+            message: format!(
+                "method '{fn_name}' never uses '{recv}' — it does not touch instance state; make it a @staticmethod or move it out of the class"
+            ), });
 }
 
 /// Does any expression in the body reference the given name? A source-order
@@ -608,17 +603,15 @@ pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
         }
     }
     if n > 5 && !is_trivial_stub(&f.body) {
-        state.findings.push(Finding {
-            col: 0,
-            file: state.file.to_string(),
-            line: line_of(source, f.name.range().start()),
-            function: f.name.to_string(),
-            kind: "long-param-list".into(),
-            severity: "fail".into(),
-            message: format!(
-                "{n} parameters — introduce a parameter object named with a domain noun — fix: long-param-list --fix-name <Options>"
-            ),
-        });
+        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+        file: state.file.to_string(),
+        line: line_of(source, f.name.range().start()),
+        function: f.name.to_string(),
+        kind: "long-param-list".into(),
+        severity: "fail".into(),
+        message: format!(
+            "{n} parameters — introduce a parameter object named with a domain noun — fix: long-param-list --fix-name <Options>"
+        ), });
     }
 }
 
@@ -665,29 +658,25 @@ pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
             } else {
                 "except that swallows"
             };
-            state.findings.push(Finding {
-col: 0,
-                file: state.file.to_string(),
-                line,
-                function: fn_name.clone(),
-                kind: "swallow".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "{kind} at line {line} — logs are not surfacing: a caller exists that needs to decide; surface by return, raise, break, continue, sys.exit, or mutating a name the enclosing function returns — mark `# lucidlint: ignore swallow <terminal-boundary reason>` only when no caller exists to propagate to"
-                ),
-            });
+            state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                            file: state.file.to_string(),
+                            line,
+                            function: fn_name.clone(),
+                            kind: "swallow".into(),
+                            severity: "fail".into(),
+                            message: format!(
+                                "{kind} at line {line} — logs are not surfacing: a caller exists that needs to decide; surface by return, raise, break, continue, sys.exit, or mutating a name the enclosing function returns — mark `# lucidlint: ignore swallow <terminal-boundary reason>` only when no caller exists to propagate to"
+                            ), });
         } else if let Some(ty) = type_opt {
             let base = annotation_base_name(ty);
             if matches!(base.as_deref(), Some("Exception") | Some("BaseException")) {
-                state.findings.push(Finding {
-col: 0,
-                    file: state.file.to_string(),
-                    line: line_of(state.source, eh.range().start()),
-                    function: fn_name.clone(),
-                    kind: "broad-except".into(),
-                    severity: "warn".into(),
-                    message: "broad except Exception - catch what you actually handle; a true boundary catch states its blast radius in the why".into(),
-                });
+                state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                                    file: state.file.to_string(),
+                                    line: line_of(state.source, eh.range().start()),
+                                    function: fn_name.clone(),
+                                    kind: "broad-except".into(),
+                                    severity: "warn".into(),
+                                    message: "broad except Exception - catch what you actually handle; a true boundary catch states its blast radius in the why".into(), });
             }
         }
     }
@@ -976,6 +965,7 @@ pub fn closure_findings(state: &mut ScanState, stmt: &Stmt, cc: u32, span: u32) 
         )
     };
     state.findings.push(Finding {
+        seam_members: Vec::new(),
         col: 0,
         file: state.file.to_string(),
         line,
@@ -1340,21 +1330,19 @@ pub fn misplaced_method_findings(state: &mut ScanState, body: &[Stmt]) {
                         })
                     });
                     if matched {
-                        state.findings.push(Finding {
-col: 0,
-                            file: state.file.to_string(),
-                            line: *def_line,
-                            function: fn_name.id.to_string(),
-                            kind: "misplaced-method".into(),
-                            severity: "fail".into(),
-                            message: format!(
-                                "'{}' is called from '{}.{}' with the class's own state (self.{}) — the class already holds the data; move the function onto the class",
-                                fn_name.id.as_str(),
-                                c.name.as_str(),
-                                method.name.as_str(),
-                                params.join(", self.")
-                            ),
-                        });
+                        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                                                    file: state.file.to_string(),
+                                                    line: *def_line,
+                                                    function: fn_name.id.to_string(),
+                                                    kind: "misplaced-method".into(),
+                                                    severity: "fail".into(),
+                                                    message: format!(
+                                                        "'{}' is called from '{}.{}' with the class's own state (self.{}) — the class already holds the data; move the function onto the class",
+                                                        fn_name.id.as_str(),
+                                                        c.name.as_str(),
+                                                        method.name.as_str(),
+                                                        params.join(", self.")
+                                                    ), });
                     }
                 }
                 push_stmt_children(st, &mut stack);
@@ -1725,13 +1713,14 @@ fn emit_wide_tuple(state: &mut ScanState, ann: Option<&Expr>, what: &str, line: 
         return;
     };
     let message = format!(
-        "{what} is a {n}-tuple — the positions carry meaning the call site cannot see; introduce a record named with a domain noun, with named fields"
+        "{what} is a {n}-tuple — the positions carry meaning the call site cannot see; introduce a record named with a domain noun, with named fields — fix: extract-class"
     );
     // 4+ elements fail; exactly 3 warns (the RGB gray zone). Two pushes so
     // the kind/severity literal pair stays adjacent — `make rules`' drift
     // detector reads the pair from the construction.
     if n >= 4 {
         state.findings.push(Finding {
+            seam_members: Vec::new(),
             col: 0,
             file: state.file.to_string(),
             line,
@@ -1742,6 +1731,7 @@ fn emit_wide_tuple(state: &mut ScanState, ann: Option<&Expr>, what: &str, line: 
         });
     } else {
         state.findings.push(Finding {
+            seam_members: Vec::new(),
             col: 0,
             file: state.file.to_string(),
             line,
@@ -1844,17 +1834,15 @@ pub fn tuple_record_findings(state: &mut ScanState, body: &[Stmt]) {
     for (name, (arity, line)) in &records {
         let reads = counts.get(name).copied().unwrap_or(0);
         if reads >= 3 {
-            state.findings.push(Finding {
-col: 0,
-                file: state.file.to_string(),
-                line: *line,
-                function: String::new(),
-                kind: "tuple-record".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "the values of '{name}' are {arity}-tuples read {reads} times by constant index — an anonymous record; make it a class named with a domain noun (apply: lucidlint fix --kind tuple-record --name <N>) — fix: tuple-record"
-                ),
-            });
+            state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                            file: state.file.to_string(),
+                            line: *line,
+                            function: String::new(),
+                            kind: "tuple-record".into(),
+                            severity: "fail".into(),
+                            message: format!(
+                                "the values of '{name}' are {arity}-tuples read {reads} times by constant index — an anonymous record; make it a class named with a domain noun (apply: lucidlint fix --kind tuple-record --name <N>) — fix: tuple-record"
+                            ), });
         }
     }
 }
@@ -1957,23 +1945,21 @@ pub fn assembly_class_findings(state: &mut ScanState, body: &[Stmt]) {
         }
         let Some(base) = base else { continue };
         let chain_names: Vec<&str> = calls.iter().map(|(n, _)| n.as_str()).collect();
-        state.findings.push(Finding {
-col: 0,
-            file: state.file.to_string(),
-            line,
-            function: f.name.to_string(),
-            kind: "assembly-class".into(),
-            severity: "fail".into(),
-            message: format!(
-                "'{}' assembles {} structures by threading '{}' through {} ({} → {}) — a class in waiting: the threaded state belongs on an object, the module functions are its methods",
-                f.name.as_str(),
-                results.len(),
-                base,
-                calls.len(),
-                chain_names.join(" → "),
-                chain_names.last().copied().unwrap_or("")
-            ),
-        });
+        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                    file: state.file.to_string(),
+                    line,
+                    function: f.name.to_string(),
+                    kind: "assembly-class".into(),
+                    severity: "fail".into(),
+                    message: format!(
+                        "'{}' assembles {} structures by threading '{}' through {} ({} → {}) — a class in waiting: the threaded state belongs on an object, the module functions are its methods",
+                        f.name.as_str(),
+                        results.len(),
+                        base,
+                        calls.len(),
+                        chain_names.join(" → "),
+                        chain_names.last().copied().unwrap_or("")
+                    ), });
     }
 }
 
@@ -2148,6 +2134,7 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
             None => "split out a class per clump, each named with a domain noun".to_string(),
         };
         state.findings.push(Finding {
+            seam_members: params.clone(),
             col: 0,
             file: state.file.to_string(),
             line,
@@ -2157,7 +2144,7 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
             // each listed pair has its OWN >= 3 functions — do not claim
             // one function set shares them all (review-bot, PR #15)
             message: format!(
-                "{names_count} functions near here ({names}) sit in data clumps: the parameter {pw} {pairs} — {fix_direction}",
+                "{names_count} functions near here ({names}) sit in data clumps: the parameter {pw} {pairs} — {fix_direction} — fix: extract-class",
                 names_count = names.len(),
                 names = names.join(", "),
                 pw = pair_word,
@@ -2306,22 +2293,20 @@ pub fn feature_envy_findings(state: &mut ScanState, body: &[Stmt]) {
                     continue;
                 }
                 let line = line_of(state.source, f.name.range().start());
-                state.findings.push(Finding {
-col: 0,
-                    file: state.file.to_string(),
-                    line,
-                    function: f.name.to_string(),
-                    kind: "feature-envy".into(),
-                    severity: "fail".into(),
-                    message: format!(
-                        "'{}' reads '{}' {} times vs its own state {} — feature envy: the logic belongs on the envied object; move the computation onto '{}' as a method named with a domain verb (what it does) — fix: feature-envy",
-                        f.name.as_str(),
-                        receiver,
-                        n,
-                        self_reads,
-                        receiver
-                    ),
-                });
+                state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                                    file: state.file.to_string(),
+                                    line,
+                                    function: f.name.to_string(),
+                                    kind: "feature-envy".into(),
+                                    severity: "fail".into(),
+                                    message: format!(
+                                        "'{}' reads '{}' {} times vs its own state {} — feature envy: the logic belongs on the envied object; move the computation onto '{}' as a method named with a domain verb (what it does) — fix: feature-envy",
+                                        f.name.as_str(),
+                                        receiver,
+                                        n,
+                                        self_reads,
+                                        receiver
+                                    ), });
             }
         }
     }
@@ -2481,6 +2466,7 @@ pub fn undeclared_findings(scans: &[crate::UndeclScan]) -> Vec<Finding> {
                 )
             };
             out.push(Finding {
+                seam_members: Vec::new(),
                 col: 0,
                 file: s.rel.clone(),
                 line: a.line,
@@ -2534,18 +2520,16 @@ pub fn god_class_findings(state: &mut ScanState, body: &[Stmt]) {
             continue;
         }
         let line = line_of(state.source, c.name.range().start());
-        state.findings.push(Finding {
-col: 0,
-            file: state.file.to_string(),
-            line,
-            function: c.name.to_string(),
-            kind: "god-class".into(),
-            severity: "warn".into(),
-            message: format!(
-                "'{}' has {methods} methods over {span} lines — a large class; split it ONLY where the partition rule finds field-disjoint method groups (size alone is a review signal, not a split order)",
-                c.name.as_str()
-            ),
-        });
+        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                    file: state.file.to_string(),
+                    line,
+                    function: c.name.to_string(),
+                    kind: "god-class".into(),
+                    severity: "warn".into(),
+                    message: format!(
+                        "'{}' has {methods} methods over {span} lines — a large class; split it ONLY where the partition rule finds field-disjoint method groups (size alone is a review signal, not a split order)",
+                        c.name.as_str()
+                    ), });
     }
 }
 
@@ -2616,20 +2600,18 @@ pub fn duplicate_field_findings(state: &mut ScanState, body: &[Stmt]) {
                 continue;
             }
             let line = line_of(state.source, c.name.range().start());
-            state.findings.push(Finding {
-col: 0,
-                file: state.file.to_string(),
-                line,
-                function: c.name.to_string(),
-                kind: "duplicate-field".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "'{}' and the '{}' it contains both hold {} — the same data lives in two places; one of them should own it",
-                    c.name.as_str(),
-                    contained.name.as_str(),
-                    shared.join(", ")
-                ),
-            });
+            state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                            file: state.file.to_string(),
+                            line,
+                            function: c.name.to_string(),
+                            kind: "duplicate-field".into(),
+                            severity: "fail".into(),
+                            message: format!(
+                                "'{}' and the '{}' it contains both hold {} — the same data lives in two places; one of them should own it",
+                                c.name.as_str(),
+                                contained.name.as_str(),
+                                shared.join(", ")
+                            ), });
         }
     }
 }
@@ -2668,54 +2650,858 @@ fn count_expr_lambdas(e: &Expr, count: &mut u32) {
     }
 }
 
-/// A module with exactly one top-level class whose name doesn't match the
-/// file stem — the class-module rule. A module that ALSO defines module-level
+// ------------------------------------------------------------- #27 husks
+
+fn is_self_attr_expr(e: &Expr) -> bool {
+    matches!(e, Expr::Attribute(a) if matches!(a.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self"))
+}
+
+/// Does any statement in `body` write `self.<attr>` (assign/annassign/
+/// augassign)? The static-husk rule's "no state of its own" test.
+fn body_writes_self_attr(body: &[Stmt]) -> bool {
+    let mut stack: Vec<&Stmt> = body.iter().collect();
+    while let Some(s) = stack.pop() {
+        match s {
+            Stmt::Assign(a) => {
+                if a.targets.iter().any(is_self_attr_expr) {
+                    return true;
+                }
+            }
+            Stmt::AnnAssign(a) => {
+                if is_self_attr_expr(a.target.as_ref()) {
+                    return true;
+                }
+            }
+            Stmt::AugAssign(a) if is_self_attr_expr(a.target.as_ref()) => {
+                return true;
+            }
+            _ => {}
+        }
+        push_stmt_children(s, &mut stack);
+    }
+    false
+}
+
+fn class_methods(cls: &StmtClassDef) -> Vec<&StmtFunctionDef> {
+    cls.body
+        .iter()
+        .filter_map(|m| match m {
+            Stmt::FunctionDef(f) => Some(f),
+            _ => None,
+        })
+        .collect()
+}
+
+fn has_decorator(f: &StmtFunctionDef, name: &str) -> bool {
+    f.decorator_list.iter().any(|d| match &d.expression {
+        Expr::Name(n) => n.id.as_str() == name,
+        Expr::Attribute(a) => a.attr.as_str() == name,
+        _ => false,
+    })
+}
+
+/// Class with NO state of its own (no `self.X =` anywhere, no dataclass
+/// fields, no properties) whose members are ALL staticmethods — a namespace
+/// wearing a domain noun (#27 static-husk). Exclusions: inherited base (state
+/// may live in the base), ABC/Protocol (pure interfaces), pass-only subclass,
+/// `*Error`/`*Exception` (exception namespace).
+pub fn static_husk_findings(state: &mut ScanState, body: &[Stmt]) {
+    for s in body {
+        let Stmt::ClassDef(cls) = s else { continue };
+        let has_base = cls.arguments.as_ref().is_some_and(|a| !a.args.is_empty());
+        if has_base {
+            continue; // inherited base — the state may live in the base
+        }
+        let name = cls.name.as_str();
+        if name.ends_with("Error") || name.ends_with("Exception") {
+            continue; // exception namespace
+        }
+        let methods = class_methods(cls);
+        if methods.is_empty() {
+            continue; // pass-only subclass / re-export marker
+        }
+        let abstract_ = methods.iter().any(|m| has_decorator(m, "abstractmethod"));
+        let is_abc = cls.arguments.as_ref().is_some_and(|a| {
+            a.args
+                .iter()
+                .any(|b| annotation_base_name(b).is_some_and(|n| n == "ABC" || n == "Protocol"))
+        });
+        if abstract_ || is_abc {
+            continue; // pure interface
+        }
+        let has_property = methods.iter().any(|m| has_decorator(m, "property"));
+        let has_dataclass_fields = cls.body.iter().any(|m| matches!(m, Stmt::AnnAssign(_)))
+            || cls.decorator_list.iter().any(|d| match &d.expression {
+                Expr::Name(n) => n.id.as_str() == "dataclass",
+                Expr::Attribute(a) => a.attr.as_str() == "dataclass",
+                _ => false,
+            });
+        let writes_state = methods.iter().any(|m| body_writes_self_attr(&m.body));
+        let all_static = methods.iter().all(|m| has_decorator(m, "staticmethod"));
+        if !all_static || has_property || has_dataclass_fields || writes_state {
+            continue;
+        }
+        let line = stmt_line(state.source, s);
+        state.findings.push(Finding {
+            seam_members: Vec::new(),
+            col: 0,
+            file: state.file.to_string(),
+            line,
+            function: cls.name.to_string(),
+            kind: "static-husk".into(),
+            severity: "warn".into(),
+            message: format!(
+                "Class {} has no state of its own and only staticmethods — a namespace wearing a domain noun. \
+                 The fix: find the state these operations work on and put it IN the class (fields + method bodies \
+                 reading them); if there is no such state, the operations still belong with SOME abstraction or \
+                 another — possibly more than one: the class(es) that own the state they work on. Finding it is \
+                 the task; reconsider whether THIS class is the correct abstraction.",
+                name
+            ),
+        });
+    }
+}
+
+/// The names a function's parameter list binds (positional, keyword-only,
+/// vararg, kwarg) in order.
+fn fn_param_names(f: &StmtFunctionDef) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in f.parameters.posonlyargs.iter().chain(&f.parameters.args) {
+        out.push(p.parameter.name.to_string());
+    }
+    for p in &f.parameters.kwonlyargs {
+        out.push(p.parameter.name.to_string());
+    }
+    if let Some(v) = &f.parameters.vararg {
+        out.push(v.name.to_string());
+    }
+    if let Some(k) = &f.parameters.kwarg {
+        out.push(k.name.to_string());
+    }
+    out
+}
+
+/// Is `body` exactly `return F(<all params positionally in order>)`? The
+/// forwarder shape shared by delegating-husk and forwarding-chain.
+fn is_pure_forwarder_body(body: &[Stmt], callee: &mut String, params: &[String]) -> bool {
+    if body.len() != 1 {
+        return false;
+    }
+    let Stmt::Return(r) = &body[0] else { return false };
+    let Some(value) = r.value.as_deref() else { return false };
+    let Expr::Call(c) = value else { return false };
+    let Expr::Name(n) = c.func.as_ref() else { return false };
+    if c.arguments.args.len() != params.len() || !c.arguments.keywords.is_empty() {
+        return false;
+    }
+    for (arg, param) in c.arguments.args.iter().zip(params) {
+        let Expr::Name(an) = arg else { return false };
+        if an.id.as_str() != param.as_str() {
+            return false;
+        }
+    }
+    callee.clear();
+    callee.push_str(n.id.as_str());
+    true
+}
+
+/// Is `body` exactly `return <callee>(<params>)` with EVERY param passed
+/// positionally in order — the pure-forwarder SHAPE shared by
+/// delegating-husk and forwarding-chain (#30). A Name callee receives all
+/// params; an Attribute callee (a method on another object) receives the
+/// receiver as its leading param and the REST as call args
+/// (`def get_stored(store, key): return store.load(key)`).
+fn is_forwarder_shaped(body: &[Stmt], params: &[String]) -> bool {
+    if body.len() != 1 {
+        return false;
+    }
+    let Stmt::Return(r) = &body[0] else { return false };
+    let Some(value) = r.value.as_deref() else { return false };
+    let Expr::Call(c) = value else { return false };
+    if !c.arguments.keywords.is_empty() {
+        return false;
+    }
+    let expected: &[String] = match c.func.as_ref() {
+        Expr::Name(_) => params,
+        Expr::Attribute(a) => {
+            // receiver param MUST be the value's root name
+            let Expr::Name(recv) = a.value.as_ref() else {
+                return false;
+            };
+            let Some(first) = params.first() else { return false };
+            if recv.id.as_str() != first.as_str() {
+                return false;
+            }
+            &params[1..]
+        }
+        _ => return false,
+    };
+    if c.arguments.args.len() != expected.len() {
+        return false;
+    }
+    for (arg, param) in c.arguments.args.iter().zip(expected) {
+        let Expr::Name(an) = arg else { return false };
+        if an.id.as_str() != param.as_str() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Class where every instance method's body is exactly
+/// `return F(<all params>)` with F a module-level function — an indirection
+/// layer and no behavior (#27 delegating-husk). Depth >=2 chains
+/// (M -> F -> G, F itself a pure forwarder) are #30's shape — hands off.
+pub fn delegating_husk_findings(state: &mut ScanState, body: &[Stmt]) {
+    let module_fns: HashSet<String> = body
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::FunctionDef(f) => Some(f.name.to_string()),
+            _ => None,
+        })
+        .collect();
+    if module_fns.is_empty() {
+        return;
+    }
+    // module fns that are THEMSELVES pure forwarders — a husk whose callee
+    // forwards is the #30 chain shape, not a husk.
+    let forwarder_fns: HashSet<String> = body
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::FunctionDef(f) => {
+                let params = fn_param_names(f);
+                if is_forwarder_shaped(&f.body, &params) {
+                    Some(f.name.to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+        .collect();
+    let method_params = |m: &StmtFunctionDef| {
+        fn_param_names(m)
+            .into_iter()
+            .filter(|p| p != "self" && p != "cls")
+            .collect::<Vec<_>>()
+    };
+    for s in body {
+        let Stmt::ClassDef(cls) = s else { continue };
+        let methods = class_methods(cls);
+        if methods.is_empty() {
+            continue;
+        }
+        if methods.iter().any(|m| {
+            let mut callee = String::new();
+            let params = method_params(m);
+            !is_pure_forwarder_body(&m.body, &mut callee, &params) || !module_fns.contains(&callee)
+        }) {
+            continue;
+        }
+        // every method forwards to a module fn; none of those fns forwards
+        // itself (the depth-2 shape belongs to forwarding-chain)
+        let mut chains_down = false;
+        for m in &methods {
+            let params = method_params(m);
+            let mut callee = String::new();
+            if is_pure_forwarder_body(&m.body, &mut callee, &params) && forwarder_fns.contains(&callee) {
+                chains_down = true;
+            }
+        }
+        if chains_down {
+            continue;
+        }
+        let line = stmt_line(state.source, s);
+        state.findings.push(Finding {
+            seam_members: Vec::new(),
+            col: 0,
+            file: state.file.to_string(),
+            line,
+            function: cls.name.to_string(),
+            kind: "delegating-husk".into(),
+            severity: "warn".into(),
+            message: format!(
+                "class '{}' only forwards to module functions — every method is exactly `return F(<all params>)` \
+                 with no behavior of its own: callers could reach the functions directly, and the class name is a \
+                 namespace for others' work. Dissolve the husk — rewire its callers to the module functions and \
+                 delete the class; NEVER inline the functions' bodies into it — fix: dissolve-husk",
+                cls.name.as_str()
+            ),
+        });
+    }
+}
+// ------------------------------------------------------------- #30 forwarding-chain
+
+/// The method-callee forwarder form: `recv.method(<all params except the
+/// receiver>)` with the receiver the leading param.
+fn method_forwarder_callee(body: &[Stmt], params: &[String]) -> Option<(String, String)> {
+    if body.len() != 1 {
+        return None;
+    }
+    let Stmt::Return(r) = &body[0] else { return None };
+    let value = r.value.as_deref()?;
+    let Expr::Call(c) = value else { return None };
+    let Expr::Attribute(a) = c.func.as_ref() else {
+        return None;
+    };
+    if !c.arguments.keywords.is_empty() {
+        return None;
+    }
+    let Expr::Name(recv) = a.value.as_ref() else {
+        return None;
+    };
+    let first = params.first()?;
+    if recv.id.as_str() != first.as_str() {
+        return None;
+    }
+    if c.arguments.args.len() != params.len().saturating_sub(1) {
+        return None;
+    }
+    for (arg, param) in c.arguments.args.iter().zip(params.iter().skip(1)) {
+        let Expr::Name(an) = arg else { return None };
+        if an.id.as_str() != param.as_str() {
+            return None;
+        }
+    }
+    Some((first.clone(), a.attr.to_string()))
+}
+
+/// Collect a file's forwarding-chain raw material (#30): module-level
+/// functions that are pure forwarders (the middle edge), class methods that
+/// forward to a module-level function (the head edge), and EVERY class
+/// method (the terminal pool the Method: callee resolves against).
+pub fn collect_forwarders(state: &mut ScanState, body: &[Stmt]) {
+    let module_fn_params: std::collections::HashMap<String, Vec<String>> = body
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::FunctionDef(f) => Some((f.name.to_string(), fn_param_names(f))),
+            _ => None,
+        })
+        .collect();
+    for s in body {
+        let Stmt::FunctionDef(f) = s else { continue };
+        let params = fn_param_names(f);
+        let mut name_callee = String::new();
+        let is_head = is_pure_forwarder_body(&f.body, &mut name_callee, &params);
+        let method_callee = method_forwarder_callee(&f.body, &params);
+        if is_head || method_callee.is_some() {
+            state.forwarder_fns.push(ForwarderFn {
+                rel: state.file.to_string(),
+                name: f.name.to_string(),
+                line: line_of(state.source, f.name.range().start()),
+                params: params.clone(),
+                callee: match method_callee {
+                    Some((recv, m)) => format!("Method:{recv}:{m}"),
+                    None => format!("Fn:{name_callee}"),
+                },
+            });
+        }
+    }
+    for s in body {
+        let Stmt::ClassDef(cls) = s else { continue };
+        for m in &cls.body {
+            let Stmt::FunctionDef(f) = m else { continue };
+            let params: Vec<String> = fn_param_names(f)
+                .into_iter()
+                .filter(|p| p != "self" && p != "cls")
+                .collect();
+            let mut callee = String::new();
+            if is_pure_forwarder_body(&f.body, &mut callee, &params) && module_fn_params.contains_key(&callee) {
+                state.forwarder_methods.push(ForwarderMethod {
+                    rel: state.file.to_string(),
+                    class: cls.name.to_string(),
+                    name: f.name.to_string(),
+                    line: line_of(state.source, f.name.range().start()),
+                    params: params.clone(),
+                    fn_callee: callee,
+                });
+            }
+            state.repo_methods.push(RepoMethod {
+                rel: state.file.to_string(),
+                class: cls.name.to_string(),
+                name: f.name.to_string(),
+                line: line_of(state.source, f.name.range().start()),
+                params,
+            });
+        }
+    }
+}
+
+/// Does `rel`'s module already depend on the module of `target_rel`
+/// (import/reference present, or the same module)? The #30 dependency gate:
+/// collapsing a chain would marry two independent modules when no dependency
+/// exists, so only already-coupled modules fire.
+fn depends_on(
+    rel: &str,
+    target_rel: &str,
+    imports_by_rel: &std::collections::HashMap<String, Vec<crate::ImportInfo>>,
+) -> bool {
+    if rel == target_rel {
+        return true;
+    }
+    let target_stem = target_rel
+        .rsplit('/')
+        .next()
+        .unwrap_or(target_rel)
+        .trim_end_matches(".py")
+        .to_lowercase();
+    imports_by_rel.get(rel).is_some_and(|imps| {
+        imps.iter()
+            .any(|imp| imp.module.rsplit('.').next().unwrap_or(&imp.module).to_lowercase() == target_stem)
+    })
+}
+
+/// Forwarding chains (#30): method M (class C, file F1) whose body is
+/// exactly `return F(<all M params>)`, module fn F whose body is exactly
+/// `return N(<all F params>)`, N a method on ANOTHER class D (or a module
+/// fn at depth >= 2 — the #27 handoff shape). Emits ONLY when C's module
+/// already depends on D's module — a chain that is the ONLY coupling
+/// between two otherwise-independent modules is a deliberate boundary and
+/// gets NO finding and NO message.
+pub fn forwarding_chain_findings(
+    heads: &[ForwarderMethod],
+    fns: &[ForwarderFn],
+    repo_methods: &[RepoMethod],
+    imports_by_rel: &std::collections::HashMap<String, Vec<crate::ImportInfo>>,
+) -> Vec<Finding> {
+    use std::collections::HashMap;
+    let mut fn_callees: HashMap<String, &ForwarderFn> = HashMap::new();
+    for f in fns {
+        fn_callees.entry(f.name.clone()).or_insert(f);
+    }
+    let mut methods_by_name: HashMap<String, Vec<&RepoMethod>> = HashMap::new();
+    for m in repo_methods {
+        methods_by_name.entry(m.name.clone()).or_default().push(m);
+    }
+    let mut out = Vec::new();
+    for head in heads {
+        let Some(mid) = fn_callees.get(&head.fn_callee).copied() else {
+            continue;
+        };
+        let message = if let Some(rest) = mid.callee.strip_prefix("Method:") {
+            let mut it = rest.splitn(2, ':');
+            let recv = it.next().unwrap_or("").to_string();
+            let method = it.next().unwrap_or("").to_string();
+            // N is a method on another class D — resolve structurally: the
+            // unique repo method whose params match the forwarded args
+            let arg_params: Vec<String> = mid
+                .params
+                .iter()
+                .filter(|p| p.as_str() != recv.as_str())
+                .cloned()
+                .collect();
+            let candidates: Vec<&RepoMethod> = methods_by_name
+                .get(&method)
+                .into_iter()
+                .flatten()
+                .filter(|m| m.params == arg_params && m.class != head.class)
+                .copied()
+                .collect();
+            if candidates.len() != 1 {
+                continue; // ambiguous or unresolvable — no structural certainty
+            }
+            let d = candidates[0];
+            if !depends_on(&head.rel, &d.rel, imports_by_rel) {
+                continue; // the deliberate boundary — silent
+            }
+            format!(
+                "method '{}.{}({})' ({}:{}) forwards to module function '{}', which forwards to '{}.{}' ({}:{}) — \
+                 dead indirection: C already depends on {}'s module, so {} could reach '{}' directly — collapse \
+                 the chain — fix: collapse-chain",
+                head.class,
+                head.name,
+                head.params.join(", "),
+                head.rel,
+                head.line,
+                mid.name,
+                d.class,
+                d.name,
+                d.rel,
+                d.line,
+                d.class,
+                head.class,
+                d.name
+            )
+        } else {
+            // terminal is a module fn: M -> F -> G at depth >= 2 (#27 handoff)
+            let g = &mid.callee["Fn:".len()..];
+            if !depends_on(&head.rel, &mid.rel, imports_by_rel) {
+                continue;
+            }
+            format!(
+                "method '{}.{}({})' ({}:{}) forwards to module function '{}', which forwards to module function \
+                 '{}' — dead indirection at depth >= 2 — collapse the chain — fix: collapse-chain",
+                head.class,
+                head.name,
+                head.params.join(", "),
+                head.rel,
+                head.line,
+                mid.name,
+                g
+            )
+        };
+        out.push(Finding {
+            seam_members: Vec::new(),
+            col: 0,
+            file: head.rel.clone(),
+            line: head.line,
+            function: head.name.clone(),
+            kind: "forwarding-chain".into(),
+            severity: "fail".into(),
+            message,
+        });
+    }
+    out
+}
+// ------------------------------------------------------------- #28 process-class
+
+/// The enumerated process set — a general `-er` test would fire on real
+/// nouns, so the process words are enumerated. MINUS the GoF pattern
+/// lexicon: those are the domain's own pattern names (Visitor, Iterator...).
+pub const PROCESS_CLASS_WORDS: &[&str] = &[
+    "Builder",
+    "Importer",
+    "Exporter",
+    "Validator",
+    "Converter",
+    "Parser",
+    "Reader",
+    "Writer",
+    "Fetcher",
+    "Collector",
+    "Handler",
+    "Manager",
+    "Provider",
+    "Renderer",
+    "Serializer",
+    "Dispatcher",
+    "Processor",
+    "Analyzer",
+    "Scheduler",
+    "Runner",
+    "Executor",
+    "Authenticator",
+];
+pub const GOF_CLASS_WORDS: &[&str] = &[
+    "Visitor", "Iterator", "Command", "Factory", "Strategy", "Proxy", "Adapter",
+];
+
+/// A top-level class named by a process noun — the work belongs on the
+/// domain objects it operates on (#28); the four-part honesty test decides.
+pub fn process_class_findings(state: &mut ScanState, body: &[Stmt]) {
+    for s in body {
+        let Stmt::ClassDef(cls) = s else { continue };
+        let name = cls.name.as_str();
+        if GOF_CLASS_WORDS.iter().any(|w| name.ends_with(w)) {
+            continue; // the domain's own pattern names are honest
+        }
+        if !PROCESS_CLASS_WORDS.iter().any(|w| name.ends_with(w)) {
+            continue;
+        }
+        let line = stmt_line(state.source, s);
+        state.findings.push(Finding {
+            seam_members: Vec::new(),
+            col: 0,
+            file: state.file.to_string(),
+            line,
+            function: name.to_string(),
+            kind: "process-class".into(),
+            severity: "fail".into(),
+            message: format!(
+                "class {name} is a process (-er/-or name), not a thing: the work belongs on the domain objects it \
+                 operates on. A process class is the best idea only when ALL hold — (1) the domain itself names it \
+                 (the parser, the scheduler); (2) its state is its own and substantial, no actual noun can carry \
+                 it; (3) no existing type already carries this work (extend or fold, never mint a twin); (4) it is \
+                 not one owner's private device — a single consumer with no own state means the operations belong \
+                 to the domain abstraction that owns their work, not to a class of their own. Mostly one fails: \
+                 fold, rename, or delete."
+            ),
+        });
+    }
+}
+
+// ------------------------------------------------------------- #32 closure-cluster
+
+/// Names bound (assigned/annassigned/augassigned/looped/with'd) in a
+/// statement list, NOT descending into nested defs — a method's OWN locals.
+fn collect_bound_names(body: &[Stmt], out: &mut HashSet<String>) {
+    let mut stack: Vec<&Stmt> = body.iter().collect();
+    while let Some(s) = stack.pop() {
+        if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            continue;
+        }
+        match s {
+            Stmt::Assign(a) => {
+                for t in &a.targets {
+                    if let Expr::Name(n) = t {
+                        out.insert(n.id.to_string());
+                    }
+                }
+            }
+            Stmt::AnnAssign(a) => {
+                if let Expr::Name(n) = a.target.as_ref() {
+                    out.insert(n.id.to_string());
+                }
+            }
+            Stmt::AugAssign(a) => {
+                if let Expr::Name(n) = a.target.as_ref() {
+                    out.insert(n.id.to_string());
+                }
+            }
+            Stmt::For(f) => {
+                if let Expr::Name(n) = f.target.as_ref() {
+                    out.insert(n.id.to_string());
+                }
+            }
+            Stmt::With(w) => {
+                for item in &w.items {
+                    if let Some(v) = &item.optional_vars {
+                        if let Expr::Name(n) = v.as_ref() {
+                            out.insert(n.id.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        push_stmt_children(s, &mut stack);
+    }
+}
+
+/// Every Name referenced anywhere under `body` (nested defs included — an
+/// inner closure still references the method's locals).
+fn referenced_names(body: &[Stmt], out: &mut HashSet<String>) {
+    let mut stack: Vec<&Stmt> = body.iter().collect();
+    while let Some(s) = stack.pop() {
+        for e in stmt_exprs(s) {
+            walk_expr_deep(e, false, &mut |x, _| {
+                if let Expr::Name(n) = x {
+                    out.insert(n.id.to_string());
+                }
+            });
+        }
+        push_stmt_children(s, &mut stack);
+    }
+}
+
+/// A method whose nested closures partition its locals — a class-in-a-method
+/// (#32). >=2 connected components (per the local x nested-fn bipartite
+/// graph), each with >=2 nested fns and >=1 distinct local. Degenerate arm:
+/// an empty-param method >=150 lines with nested defs. WARN — the shape is
+/// often a deliberate cohesive serving method.
+pub fn closure_cluster_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    for s in body {
+        let Stmt::ClassDef(cls) = s else { continue };
+        for m in &cls.body {
+            let Stmt::FunctionDef(method) = m else { continue };
+            if method.name.as_str().starts_with("__") {
+                continue;
+            }
+            let nested: Vec<&StmtFunctionDef> = method
+                .body
+                .iter()
+                .filter_map(|mm| match mm {
+                    Stmt::FunctionDef(f) => Some(f),
+                    _ => None,
+                })
+                .collect();
+            if nested.is_empty() {
+                continue;
+            }
+            let method_params = fn_param_names(method);
+            let mut locals: HashSet<String> = method_params.iter().cloned().collect();
+            collect_bound_names(&method.body, &mut locals);
+            // per nested fn: the method locals it references
+            let mut fn_refs: Vec<(String, HashSet<String>)> = Vec::new();
+            for f in &nested {
+                let mut refs = HashSet::new();
+                referenced_names(&f.body, &mut refs);
+                let own_params: HashSet<String> = fn_param_names(f).into_iter().collect();
+                refs = refs.difference(&own_params).cloned().collect();
+                refs = refs.intersection(&locals).cloned().collect();
+                fn_refs.push((f.name.to_string(), refs));
+            }
+            // components over the fn graph: fns are linked when they share a
+            // referenced local
+            let mut comps: Vec<(Vec<String>, HashSet<String>)> = Vec::new();
+            let mut seen: HashSet<usize> = HashSet::new();
+            for i in 0..fn_refs.len() {
+                if seen.contains(&i) {
+                    continue;
+                }
+                let mut stack: Vec<usize> = vec![i];
+                let mut fns: Vec<String> = Vec::new();
+                let mut comp_locals: HashSet<String> = HashSet::new();
+                while let Some(ci) = stack.pop() {
+                    if !seen.insert(ci) {
+                        continue;
+                    }
+                    fns.push(fn_refs[ci].0.clone());
+                    comp_locals.extend(fn_refs[ci].1.iter().cloned());
+                    for j in 0..fn_refs.len() {
+                        if seen.contains(&j) {
+                            continue;
+                        }
+                        if !fn_refs[ci].1.is_disjoint(&fn_refs[j].1) {
+                            stack.push(j);
+                        }
+                    }
+                }
+                comps.push((fns, comp_locals));
+            }
+            let cluster_comps: Vec<&(Vec<String>, HashSet<String>)> = comps
+                .iter()
+                .filter(|(fns, locals)| fns.len() >= 2 && !locals.is_empty())
+                .collect();
+            let empty_params = method_params.iter().all(|p| p == "self" || p == "cls") || method_params.is_empty();
+            let span = line_of(source, method.range().end()).saturating_sub(line_of(source, method.range().start()));
+            let degenerate = empty_params && span >= 150;
+            if cluster_comps.len() < 2 && !degenerate {
+                continue;
+            }
+            let groups_text = cluster_comps
+                .iter()
+                .map(|(fns, locals)| {
+                    let mut ls: Vec<&String> = locals.iter().collect();
+                    ls.sort();
+                    format!(
+                        "{{{}}} over {{{}}}",
+                        fns.join(", "),
+                        ls.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            let line = line_of(source, method.name.range().start());
+            state.findings.push(Finding {
+                seam_members: Vec::new(),
+                col: 0,
+                file: state.file.to_string(),
+                line,
+                function: method.name.to_string(),
+                kind: "closure-cluster".into(),
+                severity: "warn".into(),
+                message: format!(
+                    "method '{}.{}' has nested closures split into {} groups over disjoint locals: {groups_text} — \
+                     a class-in-a-method: each group is a cohesive unit that could be its own class. The split is \
+                     structurally visible but may be a deliberate cohesive serving method — extract by hand when it is, \
+                     and only when it reads better",
+                    cls.name.as_str(),
+                    method.name.as_str(),
+                    cluster_comps.len()
+                ),
+            });
+        }
+    }
+}
+
+/// A module whose public class(es) aren't findable by name — the
+/// class-module rule. The file system is a name index: a class belongs in a
+/// file named after it. Single arm: exactly one public class whose name
+/// doesn't match the file stem (rename the file). Multi arm (#31): >=2
+/// public classes where AT LEAST ONE name doesn't match the stem — a
+/// matching sibling excuses nothing; the misplaced classes move to files
+/// named after them (split-module). A module that ALSO defines module-level
 /// functions is a tool script, not a class file (the class is a component,
 /// not the module's identity) — renaming it after the class would be wrong.
+/// Private classes (`_`-prefixed) are never the module's identity.
 pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &str) {
     if rel.ends_with("__init__.py") {
         return;
     }
     let classes: Vec<&Stmt> = module_body.iter().filter(|s| matches!(s, Stmt::ClassDef(_))).collect();
-    if classes.len() != 1 {
+    if classes.is_empty() {
         return;
     }
     let has_module_fns = module_body.iter().any(|s| matches!(s, Stmt::FunctionDef(_)));
     if has_module_fns {
+        return; // tool script — the class is a component, not the module identity
+    }
+    let public: Vec<&Stmt> = classes
+        .iter()
+        .filter(|s| match s {
+            Stmt::ClassDef(c) => !c.name.as_str().starts_with('_'),
+            _ => true,
+        })
+        .copied()
+        .collect();
+    if public.is_empty() {
         return;
     }
-    if rel.ends_with("__init__.py") {
-        return;
-    }
-    let classes: Vec<&Stmt> = module_body.iter().filter(|s| matches!(s, Stmt::ClassDef(_))).collect();
-    if classes.len() != 1 {
-        return;
-    }
-    let Stmt::ClassDef(cls) = classes[0] else { return };
     let stem = rel
         .rsplit('/')
         .next()
         .unwrap_or(rel)
         .trim_end_matches(".py")
         .to_lowercase();
-    let name = cls.name.to_lowercase();
-    if name == stem || name == stem.replace('_', "") {
-        return;
-    }
+    let matches_stem = |name: &str| {
+        let n = name.to_lowercase();
+        n == stem || n == stem.replace('_', "")
+    };
     // Python's ast.ClassDef.lineno is the `class` keyword line; ruff's range
     // starts at the first decorator — use the name's range for parity
-    let line = line_of(state.source, cls.name.range().start());
+    if public.len() == 1 {
+        let Stmt::ClassDef(cls) = public[0] else { return };
+        if matches_stem(cls.name.as_str()) {
+            return;
+        }
+        let line = line_of(state.source, cls.name.range().start());
+        state.findings.push(Finding {
+            seam_members: Vec::new(),
+            col: 0,
+            file: state.file.to_string(),
+            line,
+            function: cls.name.to_string(),
+            kind: "class-module".into(),
+            severity: "fail".into(),
+            message: format!(
+                "module '{rel}' holds one class '{}' — rename the file to {}.py (exception: closely related models)",
+                cls.name.as_str(),
+                cls.name.to_lowercase()
+            ),
+        });
+        return;
+    }
+    // multi arm: the misplaced public classes move to files named after them
+    let misplaced: Vec<&Stmt> = public
+        .iter()
+        .filter(|s| match s {
+            Stmt::ClassDef(c) => !matches_stem(c.name.as_str()),
+            _ => false,
+        })
+        .copied()
+        .collect();
+    if misplaced.is_empty() {
+        return;
+    }
+    let names: Vec<String> = misplaced
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::ClassDef(c) => Some(c.name.to_string()),
+            _ => None,
+        })
+        .collect();
+    let all_names: Vec<String> = public
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::ClassDef(c) => Some(c.name.to_string()),
+            _ => None,
+        })
+        .collect();
+    let Stmt::ClassDef(first) = misplaced[0] else { return };
+    let line = line_of(state.source, first.name.range().start());
     state.findings.push(Finding {
+        seam_members: Vec::new(),
         col: 0,
         file: state.file.to_string(),
         line,
-        function: cls.name.to_string(),
+        function: names.join(", "),
         kind: "class-module".into(),
         severity: "fail".into(),
         message: format!(
-            "module '{rel}' holds one class '{}' — rename the file to {}.py (exception: closely related models)",
-            cls.name.as_str(),
-            cls.name.to_lowercase()
+            "module '{rel}' holds the classes {all} but {misplaced} don't match the file's name — each public class belongs in a file named after it — fix: split-module",
+            all = all_names.join(", "),
+            misplaced = names.join(", "),
         ),
     });
 }
@@ -2735,17 +3521,15 @@ pub fn vague_name_findings(state: &mut ScanState, module_body: &[Stmt]) {
                 break; // thin role class — the name is the communication
             }
             let line = stmt_line(state.source, s);
-            state.findings.push(Finding {
-col: 0,
-                file: state.file.to_string(),
-                line,
-                function: cls.name.to_string(),
-                kind: "vague-name".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "'{suffix}' name carries a {span}-line class with {methods} methods — the domain noun should take the name — fix: vague-name --fix-name <Name>"
-                ),
-            });
+            state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                            file: state.file.to_string(),
+                            line,
+                            function: cls.name.to_string(),
+                            kind: "vague-name".into(),
+                            severity: "fail".into(),
+                            message: format!(
+                                "'{suffix}' name carries a {span}-line class with {methods} methods — the domain noun should take the name — fix: vague-name --fix-name <Name>"
+                            ), });
             break;
         }
     }
@@ -2792,7 +3576,8 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
         let names: Vec<String> = members.iter().map(|(n, l)| format!("{n} (line {l})")).collect();
         let line = members[0].1;
         state.findings.push(Finding {
-col: 0,
+            seam_members: members.iter().map(|(n, _)| n.clone()).collect(),
+            col: 0,
             file: state.file.to_string(),
             line,
             function: String::new(),
@@ -2871,17 +3656,15 @@ pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
                 let exempt = stub || (overloaded.contains(&name) && impl_def_line.get(&name).copied() == Some(line));
                 if !exempt {
                     if let Some((_, first_line)) = seen.iter().find(|(n, _)| *n == name) {
-                        state.findings.push(Finding {
-col: 0,
-                            file: state.file.to_string(),
-                            line,
-                            function: name.clone(),
-                            kind: "duplicate-def".into(),
-                            severity: "fail".into(),
-                            message: format!(
-                                "module-scope name '{name}' is bound twice (first at line {first_line}) — the later definition shadows the earlier: a shadowing hazard (dispatch or edit mistake); rename one — fix: duplicate-def"
-                            ),
-                        });
+                        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                                                    file: state.file.to_string(),
+                                                    line,
+                                                    function: name.clone(),
+                                                    kind: "duplicate-def".into(),
+                                                    severity: "fail".into(),
+                                                    message: format!(
+                                                        "module-scope name '{name}' is bound twice (first at line {first_line}) — the later definition shadows the earlier: a shadowing hazard (dispatch or edit mistake); rename one — fix: duplicate-def"
+                                                    ), });
                     }
                 }
             }
@@ -3020,18 +3803,16 @@ pub fn restating_docstring_findings(state: &mut ScanState, module_body: &[Stmt])
         let covered = words.iter().filter(|w| tokens.contains(w.as_str())).count();
         if covered as f64 / words.len() as f64 >= 0.9 {
             let line = stmt_line(state.source, s);
-            state.findings.push(Finding {
-col: 0,
-                file: state.file.to_string(),
-                line,
-                function: String::new(),
-                kind: "restating-docstring".into(),
-                severity: "warn".into(),
-                message: format!(
-                    "docstring restates the body — {covered}/{} content words appear in the code; name the concept instead — fix: restating-docstring",
-                    words.len()
-                ),
-            });
+            state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                            file: state.file.to_string(),
+                            line,
+                            function: String::new(),
+                            kind: "restating-docstring".into(),
+                            severity: "warn".into(),
+                            message: format!(
+                                "docstring restates the body — {covered}/{} content words appear in the code; name the concept instead — fix: restating-docstring",
+                                words.len()
+                            ), });
         }
     }
 }
@@ -3133,17 +3914,15 @@ pub fn duplicate_block_findings(state: &mut ScanState, module_body: &[Stmt]) {
                     // but no fix — agents delete by hand (review bot)
                     let exact = (0..BLOCK_WINDOW).all(|k| stmt_exact_key(flat[i + k]) == stmt_exact_key(flat[j + k]));
                     let directive = if exact { " — fix: duplicate-block" } else { "" };
-                    state.findings.push(Finding {
-col: 0,
-                        file: state.file.to_string(),
-                        line,
-                        function: String::new(),
-                        kind: "duplicate-block".into(),
-                        severity: "warn".into(),
-                        message: format!(
-                            "a {BLOCK_WINDOW}-statement block appears twice in this function — duplicated work (an edit mistake?); delete the second copy{directive}"
-                        ),
-                    });
+                    state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                                            file: state.file.to_string(),
+                                            line,
+                                            function: String::new(),
+                                            kind: "duplicate-block".into(),
+                                            severity: "warn".into(),
+                                            message: format!(
+                                                "a {BLOCK_WINDOW}-statement block appears twice in this function — duplicated work (an edit mistake?); delete the second copy{directive}"
+                                            ), });
                     break 'outer;
                 }
             } else {
@@ -3248,84 +4027,11 @@ pub fn returned_names(body: &[Stmt]) -> HashSet<String> {
     out
 }
 
-/// Module-scope containers mutated inside functions are still module state
-/// (`_oauth_states: dict = {}` populated by login) — mirrors the Python
-/// mutation handlers. Mutations of containers whose module literal is
-/// ALREADY flagged are skipped (Python's `flagged` set — no double report).
-pub fn mutation_findings(state: &mut ScanState, stmt: &Stmt) {
-    if state.fn_stack.is_empty() || state.module_mutables.is_empty() {
-        return;
-    }
-    let targets: Vec<&Expr> = match stmt {
-        Stmt::Assign(a) => a.targets.iter().collect(),
-        Stmt::AugAssign(a) => vec![&a.target],
-        Stmt::AnnAssign(a) => vec![a.target.as_ref()],
-        Stmt::Delete(d) => d.targets.iter().collect(),
-        _ => return,
-    };
-    for target in targets {
-        let container: Option<String> = match target {
-            Expr::Name(n) if state.module_mutables.contains(n.id.as_str()) => Some(n.id.to_string()),
-            Expr::Subscript(s) if state.module_mutables.contains(sub_name(s).as_str()) => Some(sub_name(s)),
-            _ => None,
-        };
-        if let Some(container) = container {
-            if state.module_flagged.contains(&container) {
-                continue; // the module literal itself is already a finding
-            }
-            state.findings.push(Finding {
-                col: 0,
-                file: state.file.to_string(),
-                line: stmt_line(state.source, stmt),
-                function: String::new(),
-                kind: "global-state".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "module-level collection '{container}' is mutated inside a function — no module-level mutable state"
-                ),
-            });
-        }
-    }
-}
-
 fn sub_name(s: &ruff_python_ast::ExprSubscript) -> String {
     match s.value.as_ref() {
         Expr::Name(n) => n.id.to_string(),
         _ => String::new(),
     }
-}
-
-/// Names assigned List/Dict/Set literals at module scope — containers whose
-/// in-function mutation is module state.
-pub fn module_container_names(body: &[Stmt]) -> HashSet<String> {
-    let mut out = HashSet::new();
-    for s in body {
-        let value = match s {
-            Stmt::Assign(a) => Some(&a.value),
-            Stmt::AnnAssign(a) => a.value.as_ref(),
-            _ => None,
-        };
-        if let Some(v) = value {
-            if matches!(v.as_ref(), Expr::List(_) | Expr::Dict(_) | Expr::Set(_)) {
-                match s {
-                    Stmt::Assign(a) => {
-                        for t in &a.targets {
-                            if let Expr::Name(n) = t {
-                                out.insert(n.id.to_string());
-                            }
-                        }
-                    }
-                    Stmt::AnnAssign(a) => {
-                        if let Expr::Name(n) = a.target.as_ref() {
-                            out.insert(n.id.to_string());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    out
 }
 
 /// Offsets of numeric literals that are data-table entries, exempt from
@@ -3446,39 +4152,6 @@ fn census_op_number(e: &Expr, op: &str, groups: &mut std::collections::HashMap<(
     }
 }
 
-/// Module containers whose module-level literal is non-constant — already
-/// flagged, so their mutations are not reported again (Python's `flagged`).
-pub fn module_flagged_names(body: &[Stmt]) -> HashSet<String> {
-    let mut out = HashSet::new();
-    for s in body {
-        let value = match s {
-            Stmt::Assign(a) => Some(a.value.as_ref()),
-            Stmt::AnnAssign(a) => a.value.as_deref(),
-            _ => None,
-        };
-        if let Some(v) = value {
-            if matches!(v, Expr::List(_) | Expr::Dict(_) | Expr::Set(_)) && !all_constant(v) {
-                match s {
-                    Stmt::Assign(a) => {
-                        for t in &a.targets {
-                            if let Expr::Name(n) = t {
-                                out.insert(n.id.to_string());
-                            }
-                        }
-                    }
-                    Stmt::AnnAssign(a) => {
-                        if let Expr::Name(n) = a.target.as_ref() {
-                            out.insert(n.id.to_string());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    out
-}
-
 // =====================================================================
 // advisory refactorings (warn): the detection half of Fowler refactorings
 // whose fixes are too involved to auto-apply. Each message names the
@@ -3502,17 +4175,15 @@ pub fn guard_clause_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                 let len = chain_len(s);
                 if len >= 3 {
                     let line = line_of(source, s.range().start());
-                    state.findings.push(Finding {
-col: 0,
-                        file: state.file.to_string(),
-                        line,
-                        function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
-                        kind: "guard-clauses".into(),
-                        severity: "warn".into(),
-                        message: format!(
-                            "{len} levels of nested if — Replace Nested Conditional with Guard Clauses: invert the conditions to early returns"
-                        ),
-                    });
+                    state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                                            file: state.file.to_string(),
+                                            line,
+                                            function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
+                                            kind: "guard-clauses".into(),
+                                            severity: "warn".into(),
+                                            message: format!(
+                                                "{len} levels of nested if — Replace Nested Conditional with Guard Clauses: invert the conditions to early returns"
+                                            ), });
                 }
                 // descend: nested ifs inside the body (not the chain itself)
                 if !(i.body.len() == 1 && matches!(i.body[0], Stmt::If(_)) && i.elif_else_clauses.is_empty()) {
@@ -3596,19 +4267,17 @@ pub fn conditional_polymorphism_findings(state: &mut ScanState, body: &[Stmt], s
                     let keys: Vec<Option<String>> = arms.iter().map(|t| dispatch_key(t)).collect();
                     if keys.iter().all(|k| k.is_some()) && keys.windows(2).all(|w| w[0] == w[1]) {
                         let line = chain_line;
-                        state.findings.push(Finding {
-col: 0,
-                            file: state.file.to_string(),
-                            line,
-                            function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
-                            kind: "conditional-polymorphism".into(),
-                            severity: "warn".into(),
-                            message: format!(
-                                "{} arms dispatch on the same value ('{}') — Replace Conditional with Polymorphism: one method per case",
-                                arms.len(),
-                                keys[0].as_deref().unwrap_or("")
-                            ),
-                        });
+                        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                                                    file: state.file.to_string(),
+                                                    line,
+                                                    function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
+                                                    kind: "conditional-polymorphism".into(),
+                                                    severity: "warn".into(),
+                                                    message: format!(
+                                                        "{} arms dispatch on the same value ('{}') — Replace Conditional with Polymorphism: one method per case",
+                                                        arms.len(),
+                                                        keys[0].as_deref().unwrap_or("")
+                                                    ), });
                     }
                 }
                 walk(state, &i.body, source);
@@ -3646,17 +4315,15 @@ pub fn special_case_findings(state: &mut ScanState, body: &[Stmt], source: &str)
     v.sort_by_key(|(_, (_, l))| *l);
     for (name, (n, line)) in v {
         if *n >= 3 {
-            state.findings.push(Finding {
-col: 0,
-                file: state.file.to_string(),
-                line: *line,
-                function: String::new(),
-                kind: "special-case".into(),
-                severity: "warn".into(),
-                message: format!(
-                    "{n} repeated None/empty checks on '{name}' — Introduce Special Case: handle the missing or empty value once (a default or a stand-in object) instead of checking it at every use"
-                ),
-            });
+            state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                            file: state.file.to_string(),
+                            line: *line,
+                            function: String::new(),
+                            kind: "special-case".into(),
+                            severity: "warn".into(),
+                            message: format!(
+                                "{n} repeated None/empty checks on '{name}' — Introduce Special Case: handle the missing or empty value once (a default or a stand-in object) instead of checking it at every use"
+                            ), });
         }
     }
 }
@@ -3682,18 +4349,16 @@ pub fn middle_man_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                             if let Some(v) = &r.value {
                                 if is_self_call(v) {
                                     let line = line_of(source, f.name.range().start());
-                                    state.findings.push(Finding {
-col: 0,
-                                        file: state.file.to_string(),
-                                        line,
-                                        function: f.name.to_string(),
-                                        kind: "middle-man".into(),
-                                        severity: "warn".into(),
-                                        message: format!(
-                                            "'{}' is a pure delegation to self — Remove Middle Man: call the target directly",
-                                            f.name
-                                        ),
-                                    });
+                                    state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                                                                            file: state.file.to_string(),
+                                                                            line,
+                                                                            function: f.name.to_string(),
+                                                                            kind: "middle-man".into(),
+                                                                            severity: "warn".into(),
+                                                                            message: format!(
+                                                                                "'{}' is a pure delegation to self — Remove Middle Man: call the target directly",
+                                                                                f.name
+                                                                            ), });
                                 }
                             }
                         }
@@ -3768,6 +4433,7 @@ pub fn unused_setter_findings(
             format!("setter '{name}' ({rel}:{line}) is never referenced — Remove Setting Method: delete it")
         };
         out.push(Finding {
+            seam_members: Vec::new(),
             file: rel.to_string(),
             line: *line,
             col: 0,
@@ -4271,6 +4937,7 @@ struct LoopFunctionCtx<'a, 'b> {
 impl<'a, 'b> LoopFunctionCtx<'a, 'b> {
     fn push_finding(&mut self, line: usize, kind: &str, message: String) {
         self.state.findings.push(Finding {
+            seam_members: Vec::new(),
             col: 0,
             file: self.state.file.to_string(),
             line,
@@ -4504,20 +5171,18 @@ fn loop_module_walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
                 Stmt::For(f) => {
                     if loop_body_is_pipeline(&f.body) {
                         let line = line_of(source, f.range().start());
-                        state.findings.push(Finding {
-                            col: 0,
-                            file: state.file.to_string(),
-                            line,
-                            function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
-                            kind: "loop-pipeline".into(),
-                            severity: "warn".into(),
-                            message: if loop_pipeline_auto_fixable(&f.body) {
-                                "loop builds a collection — Replace Loop with Pipeline: use a comprehension — fix: loop-pipeline"
-                            } else {
-                                "loop builds a collection — Replace Loop with Pipeline: use a comprehension"
-                            }
-                            .into(),
-                        });
+                        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                        file: state.file.to_string(),
+                        line,
+                        function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
+                        kind: "loop-pipeline".into(),
+                        severity: "warn".into(),
+                        message: if loop_pipeline_auto_fixable(&f.body) {
+                            "loop builds a collection — Replace Loop with Pipeline: use a comprehension — fix: loop-pipeline"
+                        } else {
+                            "loop builds a collection — Replace Loop with Pipeline: use a comprehension"
+                        }
+                        .into(), });
                     }
                     walk(state, &f.body, source);
                     walk(state, &f.orelse, source);
@@ -4678,9 +5343,6 @@ fn branch_guards(stmts: &[Stmt]) -> bool {
     false
 }
 
-/// An ERROR-shaped return value: an HTTPException, any *Response object, or a
-/// dict literal carrying an "error" key. A plain value (an int, a default
-/// object) is a special-case candidate, not a guard.
 fn return_is_error(e: &Expr) -> bool {
     match e {
         Expr::Call(c) => match c.func.as_ref() {
@@ -4777,17 +5439,15 @@ pub fn latent_visitor_findings(state: &mut ScanState, body: &[Stmt], source: &st
     v.sort_by_key(|(_, (_, l))| *l);
     for (family, (n, line)) in v {
         if *n >= 2 {
-            state.findings.push(Finding {
-col: 0,
-                file: state.file.to_string(),
-                line: *line,
-                function: String::new(),
-                kind: "latent-visitor".into(),
-                severity: "warn".into(),
-                message: format!(
-                    "{n} operations branch on the same object type ('{family}') — Replace Conditional with Visitor: give each type a visit_<Type> method so the branches disappear"
-                ),
-            });
+            state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                            file: state.file.to_string(),
+                            line: *line,
+                            function: String::new(),
+                            kind: "latent-visitor".into(),
+                            severity: "warn".into(),
+                            message: format!(
+                                "{n} operations branch on the same object type ('{family}') — Replace Conditional with Visitor: give each type a visit_<Type> method so the branches disappear"
+                            ), });
         }
     }
 }
@@ -4876,10 +5536,12 @@ fn dispatch_arm(e: &Expr) -> Option<(String, String)> {
 // _unused_actions in lucidlint.py.
 // =====================================================================
 
+pub use crate::common::ForwarderFn;
+pub use crate::common::ForwarderMethod;
+pub use crate::common::RepoMethod;
 pub use crate::common::SkeletonFn;
+pub use crate::common::SkeletonModule;
 
-/// The structural fingerprint: node types in CPython `ast.walk` BFS order,
-/// with names/constants/args collapsed (`_fn_skeleton`). The BFS child
 /// enumeration replicates `ast.iter_child_nodes` field order — the
 /// Parameters node emits its defaults hoisted (kw_defaults then defaults),
 /// dict literals emit all keys before all values, and if/elif chains
@@ -4889,6 +5551,31 @@ pub use crate::common::SkeletonFn;
 pub enum Q<'a> {
     N(AnyNodeRef<'a>),
     T(&'a str),
+}
+
+/// The structured fix kind of a RAW finding message: the first token after
+/// the `— fix: ` directive tail. None when the message carries no directive
+/// (fix-less findings never construct a Fix — Sixth-pass BQ1).
+pub fn fix_kind_of_message(message: &str) -> Option<&str> {
+    let pos = message.rfind("— fix: ")?;
+    let tail = &message[pos + "— fix: ".len()..];
+    let kind = tail.split_whitespace().next()?;
+    if kind == "lucidlint" {
+        return None; // the rendered full-command template — not a directive
+    }
+    Some(kind)
+}
+
+/// The rule's default fix kind (the catalog's Rule.fix via KIND_FIX) — the
+/// structured fix_kind for findings whose message carries no shape-routed
+/// directive (large-function -> extract-method, partition etc.).
+pub fn kind_fix_default(kind: &str) -> &'static str {
+    for (k, fix) in crate::rules_gen::KIND_FIX {
+        if *k == kind {
+            return fix;
+        }
+    }
+    ""
 }
 
 pub fn fn_skeleton(f: &StmtFunctionDef) -> Vec<String> {
@@ -5001,9 +5688,6 @@ fn ctx_token(ctx: &ExprContext) -> &'static str {
     }
 }
 
-// reason: the match arms mirror CPython's ast.iter_child_nodes field order —
-// one exhaustive table, splitting it would scatter a single mapping
-#[allow(clippy::too_many_lines)]
 /// Push a pattern node onto the skeleton queue.
 fn push_pattern<'a>(queue: &mut Vec<Q<'a>>, p: &'a Pattern) {
     let n = match p {
@@ -5029,7 +5713,6 @@ fn skel_tok<'a>(q: &mut Vec<Q<'a>>, t: &'static str) {
     q.push(Q::T(t));
 }
 
-// lucidlint: ignore large-function the parity-locked walker mirrors CPython's field order — one dispatch table
 pub fn skel_children<'a>(node: AnyNodeRef<'a>, queue: &mut Vec<Q<'a>>) {
     use ruff_python_ast::Pattern;
     match node {
@@ -5537,6 +6220,307 @@ pub fn is_duplicate_candidate(f: &StmtFunctionDef, skeleton_len: usize) -> bool 
     stmts.len() >= 2 && skeleton_len >= 12
 }
 
+// ------------------------------------------------------------- #26 duplicate-module
+
+/// Vendored path components — never scanned for module forks (a fork inside
+/// vendored code is upstream's problem). Independent of SCAN_SKIP_DIRS,
+/// which has no vendor entries.
+pub const VENDOR_DIRS: &[&str] = &["vendor", "third_party", "thirdparty", "node_modules", "site-packages"];
+
+pub fn is_vendored(rel: &str) -> bool {
+    rel.split('/').any(|part| VENDOR_DIRS.contains(&part))
+}
+
+/// The normalized constant token: `NAME:norm(type)` — numeric literals
+/// normalised, strings stripped, bools canonical (R4). None for non-literal
+/// values (calls, names, collections).
+fn constant_token(target: &str, value: &Expr) -> Option<String> {
+    let ty = match value {
+        Expr::NumberLiteral(_) => "num",
+        Expr::StringLiteral(_) | Expr::BytesLiteral(_) => "str",
+        Expr::BooleanLiteral(_) => "bool",
+        Expr::NoneLiteral(_) => "none",
+        Expr::UnaryOp(u) => return constant_token(target, u.operand.as_ref()),
+        _ => return None,
+    };
+    Some(format!("{target}:{ty}"))
+}
+
+/// The `NAME = literal` constant tokens in a statement list, sorted+deduped.
+fn constant_tokens(body: &[Stmt]) -> Vec<String> {
+    let mut out = Vec::new();
+    for s in body {
+        let (targets, value): (Vec<&Expr>, Option<&Expr>) = match s {
+            Stmt::Assign(a) => (a.targets.iter().collect(), Some(a.value.as_ref())),
+            Stmt::AnnAssign(a) => (vec![a.target.as_ref()], a.value.as_deref()),
+            _ => (Vec::new(), None),
+        };
+        let Some(v) = value else { continue };
+        for t in targets {
+            if let Expr::Name(n) = t {
+                if n.id.as_str().starts_with("__") {
+                    continue;
+                }
+                if let Some(tok) = constant_token(n.id.as_str(), v) {
+                    out.push(tok);
+                }
+            }
+        }
+    }
+    let mut uniq: Vec<String> = out.into_iter().collect();
+    uniq.sort();
+    uniq.dedup();
+    uniq
+}
+
+/// One statement's structural tokens, headed by a member-boundary sentinel
+/// so bigrams never cross statement boundaries.
+fn stmt_skeleton<'a>(stmt: &'a Stmt, sentinel: &str, toks: &mut Vec<String>, queue: &mut Vec<Q<'a>>) {
+    toks.push(sentinel.to_string());
+    queue.push(Q::N(AnyNodeRef::from(stmt)));
+    let mut i = 0usize;
+    while i < queue.len() {
+        let node = match &queue[i] {
+            Q::N(n) => *n,
+            Q::T(t) => {
+                toks.push((*t).to_string());
+                i += 1;
+                continue;
+            }
+        };
+        i += 1;
+        match node {
+            AnyNodeRef::ExprName(_) => toks.push("N".to_string()),
+            AnyNodeRef::ExprStringLiteral(_)
+            | AnyNodeRef::ExprBytesLiteral(_)
+            | AnyNodeRef::ExprNumberLiteral(_)
+            | AnyNodeRef::ExprBooleanLiteral(_)
+            | AnyNodeRef::ExprNoneLiteral(_)
+            | AnyNodeRef::ExprEllipsisLiteral(_)
+            | AnyNodeRef::InterpolatedStringLiteralElement(_) => toks.push("C".to_string()),
+            AnyNodeRef::Parameter(_) | AnyNodeRef::ParameterWithDefault(_) => toks.push("A".to_string()),
+            AnyNodeRef::Parameters(_) => toks.push("arguments".to_string()),
+            AnyNodeRef::ElifElseClause(_) => toks.push("If".to_string()),
+            AnyNodeRef::InterpolatedElement(_) => toks.push("FormattedValue".to_string()),
+            _ => toks.push(format!("{:?}", node.kind())),
+        }
+        skel_children(node, queue);
+    }
+}
+
+/// The structural tokens of a statement list with member boundaries (sentinels).
+fn body_skeleton(body: &[Stmt], toks: &mut Vec<String>) {
+    for s in body {
+        if matches!(s, Stmt::Import(_) | Stmt::ImportFrom(_)) {
+            continue;
+        }
+        // FRESH queue per statement: a shared queue would restart each statement's
+        // walk at index 0 and re-walk every earlier statement's subtree — O(n^2)
+        // on big modules, OOM on a 2k-line file
+        let mut queue: Vec<Q> = Vec::new();
+        stmt_skeleton(s, ";", toks, &mut queue);
+    }
+}
+
+/// Collect a file's duplicate-module identities (#26): the module itself,
+/// each top-level class, and the combined module-class identity when a
+/// module's non-import top-levels are exactly one class def.
+pub fn collect_skeleton_modules(state: &mut ScanState, body: &[Stmt], rel: &str) {
+    if state.is_test || rel.ends_with("__init__.py") || is_vendored(rel) {
+        return;
+    }
+    if body.len() < 3 {
+        return; // the file >=3-statement floor
+    }
+    let classes: Vec<&StmtClassDef> = body
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::ClassDef(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+    let module_consts = constant_tokens(body);
+    let mut module_skel = Vec::new();
+    body_skeleton(body, &mut module_skel);
+    let mut module_members: Vec<String> = body
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::FunctionDef(f) => Some(f.name.to_string()),
+            Stmt::ClassDef(c) => Some(c.name.to_string()),
+            _ => None,
+        })
+        .collect();
+    module_members.sort();
+    let non_import = body
+        .iter()
+        .filter(|s| !matches!(s, Stmt::Import(_) | Stmt::ImportFrom(_)))
+        .count();
+    let module_qualifies = non_import >= 2 && module_skel.len() >= 12 && !module_consts.is_empty();
+    if module_qualifies {
+        state.skeleton_modules.push(SkeletonModule {
+            rel: rel.to_string(),
+            name: rel
+                .rsplit('/')
+                .next()
+                .unwrap_or(rel)
+                .trim_end_matches(".py")
+                .to_string(),
+            line: 1,
+            skeleton: module_skel.clone(),
+            consts: module_consts.clone(),
+            members: module_members.clone(),
+            entity: "module",
+        });
+    }
+    for c in &classes {
+        let mut skel = Vec::new();
+        body_skeleton(&c.body, &mut skel);
+        let consts = constant_tokens(&c.body);
+        let mut members: Vec<String> = class_methods(c).iter().map(|f| f.name.to_string()).collect();
+        members.sort();
+        if skel.len() < 12 {
+            continue;
+        }
+        let line = line_of(state.source, c.name.range().start());
+        state.skeleton_modules.push(SkeletonModule {
+            rel: rel.to_string(),
+            name: c.name.to_string(),
+            line,
+            skeleton: skel.clone(),
+            consts: consts.clone(),
+            members: members.clone(),
+            entity: "class",
+        });
+        // module-class identity: exactly one class; everything else at the
+        // top level is imports or constants
+        let other_statements = body
+            .iter()
+            .filter(|s| {
+                !matches!(s, Stmt::Import(_) | Stmt::ImportFrom(_) | Stmt::ClassDef(_))
+                    && !matches!(s, Stmt::Assign(_) | Stmt::AnnAssign(_))
+            })
+            .count()
+            == 0;
+        if classes.len() == 1 && other_statements && module_qualifies {
+            let mut combined = skel.clone();
+            combined.extend(module_consts.iter().cloned());
+            let mut all = module_members.clone();
+            all.extend(members.iter().cloned());
+            all.sort();
+            all.dedup();
+            state.skeleton_modules.push(SkeletonModule {
+                rel: rel.to_string(),
+                name: c.name.to_string(),
+                line,
+                skeleton: combined,
+                consts: module_consts.clone(),
+                members: all,
+                entity: "module-class",
+            });
+        }
+    }
+}
+
+/// Cross-file module/class forks (#26): two identities with the same
+/// structural skeleton (>= 0.9 Dice) AND identical constants — a fix lands
+/// in one copy while the other silently keeps the old behavior. Pairing
+/// identities: module-module, class-class, and module-class (a module whose
+/// non-import top-levels are exactly one class def). The message names the
+/// INTERSECTING members (matched members:) — the bigram Dice cannot produce
+/// the list, so the member sets are tracked alongside.
+pub fn duplicate_module_findings(entities: &[SkeletonModule]) -> Vec<Finding> {
+    use std::collections::HashMap;
+    let mut out = Vec::new();
+    if entities.len() < 2 {
+        return out;
+    }
+    let interner = BigramInterner::new(&entities.iter().map(|e| e.skeleton.as_slice()).collect::<Vec<_>>());
+    let mut buckets: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, e) in entities.iter().enumerate() {
+        buckets.entry(e.skeleton.len()).or_default().push(i);
+    }
+    let mut len_keys: Vec<usize> = buckets.keys().copied().collect();
+    len_keys.sort_unstable();
+    let compatible = |a: &SkeletonModule, b: &SkeletonModule| {
+        a.entity == b.entity || a.entity == "module-class" || b.entity == "module-class"
+    };
+    let results: Vec<Option<Finding>> = (0..entities.len())
+        .into_par_iter()
+        .map(|i| {
+            let e = &entities[i];
+            let l = e.skeleton.len();
+            let tol = (l / 5).max(2);
+            let lo = l.saturating_sub(tol);
+            let hi = l + tol;
+            let mut best: Option<usize> = None;
+            for &len in len_keys.iter().filter(|&&k| k >= lo && k <= hi) {
+                let bucket = &buckets[&len];
+                let start = bucket.partition_point(|&j| j <= i);
+                for &j in &bucket[start..] {
+                    let earlier = &entities[j];
+                    if !compatible(e, earlier) {
+                        continue;
+                    }
+                    if e.consts != earlier.consts || e.consts.is_empty() {
+                        continue;
+                    }
+                    let sim = dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j));
+                    if sim >= 0.9 {
+                        best = Some(j);
+                        break;
+                    }
+                }
+            }
+            let j = best?;
+            // the finding lands on the LATER entity (list order), naming the
+            // earlier one — mirrors duplicate_findings' _first_duplicate
+            // semantics, so the earlier copy's readers see the fork at the
+            // later copy
+            let (earlier, later) = (e, &entities[j]);
+            let eset: std::collections::HashSet<&str> = earlier.members.iter().map(|m| m.as_str()).collect();
+            let mut matched: Vec<String> = later
+                .members
+                .iter()
+                .filter(|m| eset.contains(m.as_str()))
+                .cloned()
+                .collect();
+            matched.sort();
+            let sim = dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j));
+            let what = if later.entity == "class" { "classes" } else { "modules" };
+            let members_text = if matched.is_empty() {
+                String::new()
+            } else {
+                format!(" — matched members: {}", matched.join(", "))
+            };
+            Some(Finding {
+                seam_members: Vec::new(),
+                col: 0,
+                file: later.rel.clone(),
+                line: later.line,
+                function: later.name.clone(),
+                kind: "duplicate-module".into(),
+                severity: "fail".into(),
+                message: format!(
+                    "{what} '{}' ({}:{}) and '{}' ({}:{}) are {:.0}% similar with identical constants {{{}}} — a fork: a fix lands in one copy while the other silently keeps the old behavior{}. Reconcile the copies into one.",
+                    earlier.name,
+                    earlier.rel,
+                    earlier.line,
+                    later.name,
+                    later.rel,
+                    later.line,
+                    sim * 100.0,
+                    later.consts.join(", "),
+                    members_text,
+                ),
+            })
+        })
+        .collect();
+    for f in results.into_iter().flatten() {
+        out.push(f);
+    }
+    out
+}
+
 /// Cross-file copy-paste findings (`_duplicate_actions`).
 ///
 /// Not O(n²): the tolerance guard (`|len_a - len_b| <= max(2, len/5)`) means
@@ -5563,9 +6547,6 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
     }
     let mut len_keys: Vec<usize> = buckets.keys().copied().collect();
     len_keys.sort_unstable();
-    // the outer loop is independent per candidate (reads the shared buckets,
-    // writes only its own result) — parallel, reassembled in index order so
-    // the finding order stays deterministic
     let results: Vec<Option<Finding>> = (0..fns.len())
         .into_par_iter()
         .map(|i| {
@@ -5591,7 +6572,8 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
             if let Some((j, sim)) = best {
                 let dup = &fns[j];
                 return Some(Finding {
-col: 0,
+                    seam_members: Vec::new(),
+                    col: 0,
                     file: dup.rel.clone(),
                     line: dup.line,
                     function: dup.name.clone(),
@@ -5611,7 +6593,6 @@ col: 0,
     }
     out
 }
-
 /// Interns skeleton tokens to small ids and precomputes each function's
 /// sorted bigram index list ONCE — `duplicate_findings` then scores pairs
 /// with an allocation-free two-pointer merge instead of rebuilding bigram
@@ -5681,34 +6662,38 @@ pub fn dice_from_bigrams(a: &[(u32, u32)], b: &[(u32, u32)]) -> f64 {
     (2.0 * common as f64) / (a.len() + b.len()) as f64
 }
 
-/// Dead-code findings (`_unused_actions`).
+/// Dead-code findings (`_unused_actions`). Definitions carry an `is_class`
+/// flag — the #28 dead-class arm: a never-referenced class is as dead as a
+/// never-referenced function.
 pub fn unused_findings(
-    definitions: &[(String, String, usize)], // (rel, name, line)
+    definitions: &[(String, String, usize, bool)], // (rel, name, line, is_class)
     prod_refs: &HashSet<String>,
     test_refs: &HashSet<String>,
     strings: &[String],
 ) -> Vec<Finding> {
     let mut out = Vec::new();
-    for (rel, name, line) in definitions {
+    for (rel, name, line, is_class) in definitions {
+        let what = if *is_class { "class" } else { "function" };
         if name == "main" || prod_refs.contains(name) || strings.iter().any(|s| s.contains(name.as_str())) {
             continue;
         }
         let (message, kind) = if test_refs.contains(name) {
             (
                 format!(
-                    "function '{name}' ({rel}:{line}) is referenced only from tests — if it is a deliberate test seam (isolation hook, fixture helper), document it with `# lucidlint: ignore unused <why>`; otherwise production code that nothing ships calls is dead — delete it"
+                    "{what} '{name}' ({rel}:{line}) is referenced only from tests — if it is a deliberate test seam (isolation hook, fixture helper), document it with `# lucidlint: ignore unused <why>`; otherwise production code that nothing ships calls is dead — delete it"
                 ),
                 "unused",
             )
         } else {
             (
                 format!(
-                    "function '{name}' ({rel}:{line}) is defined but never referenced — dead code is deleted, not kept (unless it is a CLI command or public API entry point)"
+                    "{what} '{name}' ({rel}:{line}) is defined but never referenced — dead code is deleted, not kept (unless it is a CLI command or public API entry point)"
                 ),
                 "unused",
             )
         };
         out.push(Finding {
+            seam_members: Vec::new(),
             col: 0,
             file: rel.clone(),
             line: *line,
@@ -6017,35 +7002,31 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                             continue;
                         }
                         let text = source[a.range()].to_string();
-                        state.findings.push(Finding {
-col: 0,
-                            file: state.file.to_string(),
-                            line: def_line,
-                            function: f.name.to_string(),
-                            kind: "record-shape".into(),
-                            severity: "fail".into(),
-                            message: format!(
-                                "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — serialisation is no excuse for skipping the class: write a serialiser method on the class if the boundary needs one",
-                                f.name.as_str()
-                            ),
-                        });
+                        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                                                    file: state.file.to_string(),
+                                                    line: def_line,
+                                                    function: f.name.to_string(),
+                                                    kind: "record-shape".into(),
+                                                    severity: "fail".into(),
+                                                    message: format!(
+                                                        "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — serialisation is no excuse for skipping the class: write a serialiser method on the class if the boundary needs one",
+                                                        f.name.as_str()
+                                                    ), });
                     }
                 }
                 if let Some(r) = &f.returns {
                     if annotation_is_record(r.as_ref()) {
                         let text = source[r.range()].to_string();
-                        state.findings.push(Finding {
-col: 0,
-                            file: state.file.to_string(),
-                            line: def_line,
-                            function: f.name.to_string(),
-                            kind: "record-shape".into(),
-                            severity: "fail".into(),
-                            message: format!(
-                                "bare record collection '{text}' as return type of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — serialisation is no excuse for skipping the class: write a serialiser method on the class if the boundary needs one",
-                                f.name.as_str()
-                            ),
-                        });
+                        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                                                    file: state.file.to_string(),
+                                                    line: def_line,
+                                                    function: f.name.to_string(),
+                                                    kind: "record-shape".into(),
+                                                    severity: "fail".into(),
+                                                    message: format!(
+                                                        "bare record collection '{text}' as return type of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — serialisation is no excuse for skipping the class: write a serialiser method on the class if the boundary needs one",
+                                                        f.name.as_str()
+                                                    ), });
                     }
                 }
             }
@@ -6092,7 +7073,7 @@ col: 0,
     }
     for h in unique {
         let keys = display_keys(&h.keys);
-        state.findings.push(Finding { file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("dict with constant keys {{{keys}}} is a record — make a class named with a domain noun (fields: {keys}); a wire payload is still a record — serialisation is no excuse for skipping the class: write a serialiser method on the class if the boundary needs one — fix: extract-record-class --name <Record>") });
+        state.findings.push(Finding { seam_members: Vec::new(), file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("dict with constant keys {{{keys}}} is a record — make a class named with a domain noun (fields: {keys}); a wire payload is still a record — serialisation is no excuse for skipping the class: write a serialiser method on the class if the boundary needs one — fix: extract-record-class --name <Record>") });
     }
 }
 
@@ -6246,14 +7227,15 @@ pub fn partition_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
             let metric: usize = groups.iter().map(|g| g.len()).sum();
             let _ = metric;
             state.findings.push(Finding {
-col: 0,
+                seam_members: groups.iter().flatten().cloned().collect(),
+                col: 0,
                 file: state.file.to_string(),
                 line: line_of(source, cls.name.range().start()),
                 function: cls.name.to_string(),
                 kind: "partition".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "methods split into {count} field-disjoint groups ({groups_text}), connectors removed: {conn_text} — each group touches only its own fields, so the class is really {count} independent classes",
+                    "methods split into {count} field-disjoint groups ({groups_text}), connectors removed: {conn_text} — each group touches only its own fields, so the class is really {count} independent classes — fix: extract-class",
                     count = groups.len()
                 ),
             });
@@ -6367,17 +7349,15 @@ pub fn monkeypatch_findings(state: &mut ScanState, body: &[Stmt], source: &str) 
 }
 
 fn mp_finding(state: &mut ScanState, desc: &str, line: usize) {
-    state.findings.push(Finding {
-col: 0,
-        file: state.file.to_string(),
-        line,
-        function: String::new(),
-        kind: "monkeypatch".into(),
-        severity: "fail".into(),
-        message: format!(
-            "{desc} at line {line} — never monkeypatch global state; inject an object fake (a class implementing the real protocol) via parameter injection or a dependency-injection container — fakes are objects, not functions"
-        ),
-    });
+    state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+            file: state.file.to_string(),
+            line,
+            function: String::new(),
+            kind: "monkeypatch".into(),
+            severity: "fail".into(),
+            message: format!(
+                "{desc} at line {line} — never monkeypatch global state; inject an object fake (a class implementing the real protocol) via parameter injection or a dependency-injection container — fakes are objects, not functions"
+            ), });
 }
 
 const SKIPIF_NEEDLES: [&str; 5] = ["os.environ", "environ", "getenv", "os.path.exists", "sys.platform"];
@@ -6401,6 +7381,7 @@ fn is_pytest_mark_skip(a: &ExprAttribute) -> bool {
 fn parked_skip_finding(state: &mut ScanState, source: &str, offset: ruff_text_size::TextSize) {
     let line = line_of(source, offset);
     state.findings.push(Finding {
+        seam_members: Vec::new(),
         col: 0,
         file: state.file.to_string(),
         line,
@@ -6441,18 +7422,16 @@ pub fn skipif_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                                 .collect();
                             let cond = cond_parts.join(" ");
                             if SKIPIF_NEEDLES.iter().any(|needle| cond.contains(needle)) {
-                                state.findings.push(Finding {
-col: 0,
-                                    file: state.file.to_string(),
-                                    line: line_of(source, call.range().start()),
-                                    function: String::new(),
-                                    kind: "skipif".into(),
-                                    severity: "fail".into(),
-                                    message: format!(
-                                        "@pytest.mark.skipif on environment presence at line {} — never skip a test for a missing dependency: fake it (a fixture builds a stand-in) so it runs identically everywhere; only the E2E suite may skip",
-                                        line_of(source, call.range().start())
-                                    ),
-                                });
+                                state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                                                                    file: state.file.to_string(),
+                                                                    line: line_of(source, call.range().start()),
+                                                                    function: String::new(),
+                                                                    kind: "skipif".into(),
+                                                                    severity: "fail".into(),
+                                                                    message: format!(
+                                                                        "@pytest.mark.skipif on environment presence at line {} — never skip a test for a missing dependency: fake it (a fixture builds a stand-in) so it runs identically everywhere; only the E2E suite may skip",
+                                                                        line_of(source, call.range().start())
+                                                                    ), });
                             }
                         } else if a.attr.as_str() == "skip"
                             && is_pytest_mark_skip(a)
@@ -6512,7 +7491,6 @@ const FS_TEMPFILE: [&str; 6] = [
 ];
 
 /// `_fakefs_findings` — real FS access in tests without pyfakefs.
-// lucidlint: ignore large-function the fake-filesystem grammar is one decision table per backend
 pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
     let uses_fakefs_base = {
         let mut base = false;
@@ -6623,18 +7601,16 @@ pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                     fi += 1;
                 }
                 if real_fs && !needs_real {
-                    state.findings.push(Finding {
-col: 0,
-                        file: state.file.to_string(),
-                        line,
-                        function: f.name.to_string(),
-                        kind: "fakefs".into(),
-                        severity: "fail".into(),
-                        message: format!(
-                            "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3) and comment why — or mark `# lucidlint: ignore-file fakefs <why>`, citing the standard that permits real FS here",
-                            f.name.as_str()
-                        ),
-                    });
+                    state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                                            file: state.file.to_string(),
+                                            line,
+                                            function: f.name.to_string(),
+                                            kind: "fakefs".into(),
+                                            severity: "fail".into(),
+                                            message: format!(
+                                                "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3) and comment why — or mark `# lucidlint: ignore-file fakefs <why>`, citing the standard that permits real FS here",
+                                                f.name.as_str()
+                                            ), });
                 }
             }
             skel_children(n, &mut queue);
@@ -6686,6 +7662,7 @@ pub fn no_assert_test_findings(state: &mut ScanState, body: &[Stmt], source: &st
             if let AnyNodeRef::StmtFunctionDef(f) = n {
                 if f.name.as_str().starts_with("test_") && !has_assertion(&f.body) {
                     state.findings.push(Finding {
+                        seam_members: Vec::new(),
                         col: 0,
                         file: state.file.to_string(),
                         line: line_of(source, f.name.range().start()),
@@ -6923,18 +7900,16 @@ pub fn abstraction_findings(scans: &[(String, Vec<crate::ClassInfo>, Vec<crate::
     for ((rel, name), subs) in entries {
         if subs.len() == 1 {
             let line = classes.get(&(rel.clone(), name.clone())).map(|c| c.line).unwrap_or(1);
-            out.push(Finding {
-col: 0,
-                file: rel.clone(),
-                line,
-                function: name.clone(),
-                kind: "over-abstraction".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "abstract class '{name}' in {rel} has exactly one concrete subclass ('{}') — an ABC with a single implementation is ceremony: fold the subclass into the base or drop the ABC; an abstraction earns its keep at two real, differing implementations",
-                    subs[0]
-                ),
-            });
+            out.push(Finding { seam_members: Vec::new(), col: 0,
+                            file: rel.clone(),
+                            line,
+                            function: name.clone(),
+                            kind: "over-abstraction".into(),
+                            severity: "fail".into(),
+                            message: format!(
+                                "abstract class '{name}' in {rel} has exactly one concrete subclass ('{}') — an ABC with a single implementation is ceremony: fold the subclass into the base or drop the ABC; an abstraction earns its keep at two real, differing implementations",
+                                subs[0]
+                            ), });
         }
     }
     out
