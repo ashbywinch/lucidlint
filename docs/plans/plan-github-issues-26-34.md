@@ -43,249 +43,364 @@ task-shaped sections.)
 
 ## Phase 0 — Baseline
 
-1. Branch off main (`9219dc5`): `fix/github-issues-26-34`. Repo clean.
-2. `make self-check` + `pytest` green; `make scanner-check` builds.
+Point: the branch must start from a proven-clean state, so any failure later in the
+round is attributable to THIS work, not to pre-existing breakage.
+
+1. Branch off main (`9219dc5`) as `fix/github-issues-26-34`. (Done — exists at
+   `c8ccaec`, plan commits only; working tree clean.)
+2. Run `make self-check` — acceptance: `GATE: PASS` with 0 fails (the repo's ~557
+   pre-existing warnings never gate; leave them alone).
+3. Run `make test` — acceptance: lint + typecheck + 334 Rust + 185 pytest green.
 
 ## Phase 1 — Catalog (`rule_metadata.py` → `make rules`)
+
+Point: `rule_metadata.py` is the tool's single registration point — every family's
+kind, severity, section, display group and name-flag lives here ONCE, and `make
+rules` derives `scanner/src/rules_gen.rs`, RULES.md and the Python RULE_GROUPS from
+it. Getting the catalog right first keeps the derived artifacts (and the drift gate
+that pins them) coherent for everything that follows.
+
+1. **Field renames** (naming ruling 2026-09-29): in the `Rule` dataclass —
+   `Rule.display_group` (the RULES.md SECTION: architecture/style/...) becomes
+   `Rule.section`; `Rule.display` (the report BUCKET) becomes `Rule.display_group`,
+   with `None` = belongs to no group, stands alone under its own kind; `"standard"`
+   = the catch-all group; any other value = a family group (`latent-class`, `docs`,
+   `loop-pipeline`). Update: the catalog rows' kwarg names, `gen-rules.py` (`bucket
+   = display_group or kind`; group indexing by `section`), the `_CONFIG_GROUP` map,
+   RULES.md static text. Then `make rules`.
+2. **Add the new families** per the table below — kind, severity, section
+   (`architecture` unless noted), `display_group` as listed. Set `fix_name_required`
+   where the table says the judgement flag joins: `large-function`, `partition`,
+   `strewing`, `wide-tuple` (all other name-required flags already exist). Fix the
+   stale `partition` description — it says "free functions partition a struct's
+   fields"; the implementation partitions a class's METHODS over its fields.
+3. `make rules` — regenerates `rules_gen.rs` + RULES.md + RULE_GROUPS.
 
 New families (severities per Open decisions 1 and 5):
 
 | Issue | Kind | display_group | Fix kind |
 |---|---|---|---|
-| #26 | `duplicate-module` | `None` (standalone — its own name is the group) | none (reconciliation is judgment) |
+| #26 | `duplicate-module` | `None` (standalone) | none (reconciliation is judgment) |
 | #27 | `static-husk` | `None` | none |
 | #27 | `delegating-husk` | `None` | dissolve-husk (rewire callers) |
-| #28 | `process-class` (supersedes `single-use-class` — dropped 2026-09-30; the dead-class arm folds into `unused`) | `None` | none (apply the domain test: fold/rename/delete) |
+| #28 | `process-class` (supersedes the dropped single-callsite; dead-class arm folds into `unused`) | `None` | none (apply the domain test: fold/rename/delete) |
 | #30 | `forwarding-chain` | `None` | collapse-chain (multi-file, identity-gated) |
 | #31 | extend `class-module` (no new kind) | existing (`"standard"`) | split-module (new multi-file fixer) |
-| #32 | `closure-cluster` | `"latent-class"` (FAMILY_VARIANTS is DERIVED, not joined) | none (extraction refused by design) |
+| #32 | `closure-cluster` | `"latent-class"` | none (extraction refused by design) |
 
-Naming (2026-09-29): the bucket field is `display_group` — `None` means the rule
-belongs to no display group and stands alone under its own kind; `"standard"` is the
-catch-all group; any other value is a family group (`latent-class`, `docs`,
-`loop-pipeline`). The RULES.md-section field yields the name: `Rule.display_group`
-(section: architecture/style/...) becomes `Rule.section`; `Rule.display` (bucket)
-becomes `Rule.display_group`. Field-rename touches: the catalog rows' kwarg names,
-`gen-rules.py` (bucket = display_group or kind; group indexing by section), the
-`_CONFIG_GROUP` map, RULES.md static text, and the generated artifacts via `make
-rules`.
+Constraint: judgement is DERIVED from the existing `fix_name_required` flag (Open
+decisions 5) — no new metadata fields.
 
-Also register `Rule.judgement`-free stamp: judgement is DERIVED from the existing
-`fix_name_required` flag (ruling 2026-09-29, Open decisions 5 — no new metadata), and
-fix the stale `partition` description in the same catalog edit.
+Acceptance: `make rules` is idempotent; the catalog rows match the table exactly;
+Phase 5's drift check is run AFTER Phase 2 lands (every family in the table needs a
+Phase 2 emission before `make rules --check` passes — expected to fail mid-round).
 
 ## Phase 2 — Scanner (Rust)
 
-- **#26 duplicate-module** — extend the Dice machinery at checks.rs:5560
-  (`BigramInterner`, `dice_from_bigrams`) with module/class skeletons: `NAME = literal`
-  constants (capitalised, literal normalised by type) + statement bigrams minus
-  imports/docstrings. Pair identity: module-module, class-class, module-class. Threshold
-  0.9 hardcoded — configurable thresholds are NOT supported (ruling 2026-09-29, see
-  Open decisions 3). Exclusions: `__init__.py`, <3 statements,
-  vendored dirs, tests. `ignore-file duplicate-module` opt-out works per-kind.
-- **#27 static-husk** — zero instance state (no `self.X =` anywhere, no dataclass fields,
-  no properties) AND all members staticmethods, >=1 method. Exclusions: inherited base,
-  ABC/Protocol, `pass`-only subclass, `*Error`/`*Exception`. warn.
-- **#27 delegating-husk** — every instance method's body is exactly one `return`
-  expression calling a module-level function passing all params through. warn; depth >=2
-  moves to #30. Facade opt-out is a plain `lucidlint: ignore delegating-husk <why>`.
-  Fix: dissolve — rewire the husk's callers to the module functions, delete the husk
-  (it has no identity by definition). Never inline the functions' bodies into it.
-- **#28 process-class — single-callsite DROPPED (ruling 2026-09-30)**. Construction
-  count is irrelevant to lucidity; the de-baseline junk is caught by process-naming +
-  hollowness. New rule: a class whose name is process-shaped (-er/-or verb-noun set:
-  Builder, Importer, Exporter, Validator, Converter, Parser, Reader, Writer, Fetcher,
-  Collector, Handler, Manager, Provider, Renderer, Serializer, Dispatcher, Processor,
-  Analyzer, Scheduler, Runner, Executor, Authenticator, ... — enumerated; a general
-  `-er` test would fire on real nouns) — EXCLUDING GoF pattern names (Visitor,
-  Iterator, Command, Factory, Strategy, Proxy, Adapter — the domain's own lexicon).
-  fail (naming defect, `vague-name` precedent). Message carries the four-part honesty
-  test (see Fourth-pass 4). The zero-site (never constructed) arm becomes: extend
-  `unused` to CLASSES (warn, Python — "a class never referenced anywhere" via the
-  existing reference machinery; test-used is not dead).
-- **#31 class-module multi** — remove the `classes.len() != 1` returns (also the
-  DUPLICATED `__init__.py`/len block at checks.rs:2687-2693 — a merge artifact, clean
-  it while here); add condition: module (non-test, not `__init__`) with >=2 public
-  classes where AT LEAST ONE public class's name doesn't match the stem
-  (case-insensitive, plural-underscore form ok). A matching class EXCUSES NOTHING
-  (ruling 2026-09-30): the finding names the MISPLACED classes — a class belongs in
-  a file named after it, regardless of whether a sibling already matches the stem.
-  Keep tool-script/test/exceptions. fail (matches existing). Fix directive:
-  `— fix: split-module`. Fix operates on the misplaced classes only: the stem-named
-  class (if any) STAYS in the origin module. Fixture migration:
-  `class_module_matching_name_and_multi_class_pass` (main.rs:3485, User/Team, neither
-  matches) is INVERTED into the new arm's finding test; add a PASS fixture where
-  EVERY class matches the stem (PlanCritique BQ6 — the plan's original evidence
-  fixture contradicts its own rule).
-- **#32 closure-cluster** — local-var x nested-fn bipartite graph per method; >=2
-  connected components each >=2 nested fns and >=1 distinct local ⇒ cluster. Degenerate
-  arm: empty-param method >=150 lines with nested defs. warn (severity ruling
-  2026-09-29 — message can be wrong, extraction can hurt). Co-reporting with
-  `closures`/`large-function` is ACCEPTED (dedupe across families is out of scope).
-  Refusal citation: the current extract-method refusal for nested targets returns
-  `(None, None)` with NO decline text (fix_engine.py:260-261) — implementing "the
-  refusal cites closure-cluster" means ADDING decline-text plumbing on the Python
-  side, using the >=2-nested-def proxy: the bipartite cluster graph lives in the
-  scanner; the fix engine sees one file and must not reimplement the detection.
-- **#30 forwarding-chain detection** — structural same-repo resolution: method M body
-  exactly `return F(<all M params>)` (or F as the sole expression), module fn F body
-  exactly `return N(<all F params>)` where N is a method on ANOTHER class D; depth >=2
-  edges. No graph tool required. fail (severity ruling 2026-09-29) WITH the
-  DEPENDENCY-BOUNDARY GATE (2026-09-30): the chain is only dead indirection when the
-  modules are ALREADY coupled — C's module imports/references D's module, or C and D
-  are in the same module. When C's module and D's module are otherwise independent,
-  the chain is the ONLY coupling path — a deliberate boundary (the issue's own
-  other's classes) — NO finding, NO message. (No finding means no message: the
-  flagged finding fires only in the coupled case, where the boundary rationale does
-  not apply and no caveat belongs in its message.)
-- **#34 structured seam — the implementation steps**:
-  1. In the Rust scanner, add a `seam_members: Vec<String>` field to the `Finding`
-     struct (scanner/src/common.rs). In `data_clump_findings` (checks.rs ~2150),
-     `partition_findings` (~6232), and `strewing_findings` (~2790), populate it:
-     data-clump = the function names currently joined into the message's names list
-     (plus each pair's member names); partition = the method names in the disjoint
-     groups; strewing = the function names sharing the leading parameter. All other
-     emitters leave it empty.
-  2. Serialize it: `main.rs`'s per-finding `json!` block adds
-     `"seam_members": <field>`; no other field changes.
-  3. Orchestrator (lucidlint.py): bump the scan contract check from 3 to 4
-     (lucidlint.py:825 `expected 3`), update its pinning test (test_lucidlint.py
-     pins schema_version 3 inline), and fix the stale "schema 2" mentions in
-     docs/TECHSPEC.md and docs/PLAN.md. The reader maps `seam_members` into the
-     Action; required on the three carrier kinds (data-clump/partition/strewing),
-     absent elsewhere — branch on the kind; no `.get` default (no-backwards-compat
-     ruling).
-  4. Acceptance: a scan of a repo containing a data-clump emits its findings with
-     non-empty `seam_members` in `--json`; the grouping layer (Phase 4 #34) groups
-     on that field.
-  Constraints: NO message parsing — the seam data comes from this field, never from
-  scraping the message text. The schema bump is deliberate (backwards compatibility
-  is not supported); old-schema output must be rejected loudly, not defaulted.
+Each emission lives in `scanner/src/checks.rs` (or `rustscan.rs` where it is
+Rust-shaped), is registered per Phase 1, and has a fixture in
+`tests/fixtures/rust/` + a unit test.
+
+- **#26 duplicate-module** — Point: a fork — two modules or classes with the same
+  structural skeleton — is drift waiting to happen: a fix lands in one copy and the
+  other silently keeps the old behavior. The function-level `duplicate` rule cannot
+  see a whole-module fork (its unit is a function); this rule names the fork as ONE
+  decision.
+  Actions: (1) extend the skeleton machinery (`BigramInterner` ~checks.rs:5620,
+  `dice_from_bigrams` ~5655) to modules and classes — skeleton = `NAME = literal`
+  constants (token `NAME:norm(type)`) + statement bigrams, bigrams never crossing
+  member boundaries; pair identities module-module, class-class, module-class (a
+  module whose non-import top-levels are exactly one class def). (2) Gates: skeleton
+  >=2 statements AND >=12 tokens (mirror the function rule); file gate >=3
+  statements. (3) Exclusions: `__init__.py`, tests, vendored dirs — add a
+  `VENDOR_DIRS` path-component list (`vendor`, `third_party`, `thirdparty`,
+  `node_modules`, `site-packages`); `SCAN_SKIP_DIRS` has no vendor entries. (4)
+  Track per-skeleton member-name sets and emit their INTERSECTION as "matched
+  members:" in the message — the bigram Dice counts cannot produce the list. (5)
+  Emit `duplicate-module`, `fail`, threshold 0.9 hardcoded.
+  Constraints: no configurable threshold (ruling, Open decisions 3);
+  `# lucidlint: ignore-file duplicate-module <why>` works per-file.
+  Acceptance: a fixture pair with >=0.9 skeletons and identical constants emits one
+  fail finding naming the intersecting members; a <3-statement file never fires;
+  `ignore-file` silences it.
+- **#27 static-husk** — Point: a class with no state whose members are all
+  staticmethods is a namespace wearing a domain noun — it presents an object's shape
+  while owning nothing, and the reader expects state that isn't there (the
+  GedcomDocument shape: the records it should hold live outside it).
+  Actions: new emitter — class where (no `self.X =` anywhere, no dataclass fields,
+  no properties) AND every member is a `@staticmethod`, with >=1 method -> kind
+  `static-husk`, `warn`.
+  Exclusions (none of these fire): inherited base (state may live in the base), ABC/
+  Protocol (pure interfaces), `pass`-only subclass (re-export marker),
+  `*Error`/`*Exception` (exception namespace).
+  Acceptance: stateless static-only fixture fires warn; each exclusion shape passes.
+- **#27 delegating-husk** — Point: a class where every method forwards to a module
+  function adds an indirection layer and no behavior — callers could reach the
+  functions directly, and the class name is a namespace for others' work (the
+  Memory shape).
+  Actions: new emitter — class where every instance method's body is exactly
+  `return F(<all params>)` with F a module-level function -> kind `delegating-husk`,
+  `warn`. Depth >=2 chains are #30's shape (hand them off). Fix: dissolve — rewire
+  the husk's callers to the module functions, delete the husk (Phase 3).
+  Constraints: facade opt-out is a plain `lucidlint: ignore delegating-husk <why>`;
+  NEVER inline the functions' bodies into the husk.
+  Acceptance: husk fixture fires warn; a depth-2 M->F->G shape produces a
+  `forwarding-chain` finding instead.
+- **#28 process-class** — Point: a process-named class (Builder, Validator,
+  Importer...) usually labels work that belongs ON the domain objects it operates
+  on — the name is a verb wearing a noun; the reader cannot tell the thing from the
+  doing. (single-callsite is DROPPED — 2026-09-30: construction count is irrelevant
+  to lucidity.)
+  Actions: new emitter — top-level class name in the ENUMERATED process set
+  (Builder, Importer, Exporter, Validator, Converter, Parser, Reader, Writer,
+  Fetcher, Collector, Handler, Manager, Provider, Renderer, Serializer, Dispatcher,
+  Processor, Analyzer, Scheduler, Runner, Executor, Authenticator, ... a general
+  `-er` test would fire on real nouns) MINUS the GoF lexicon (Visitor, Iterator,
+  Command, Factory, Strategy, Proxy, Adapter — the domain's own pattern names) ->
+  kind `process-class`, `fail`. Message = the four-part honesty test (Fourth-pass
+  4). No fix directive: fold/rename/delete is judgment, so not name-required and
+  unstamped.
+  Dead-class arm: extend `unused` to CLASSES — defs list gains class definitions;
+  "never referenced" via the existing prod_refs/test_refs machinery; test-used is
+  not dead. `warn`.
+  Acceptance: a RefValidator-shaped fixture fires fail with the honesty-test message
+  (parts 1-4 present); GoF names pass; a never-referenced class fires `unused`;
+  test-only-referenced passes.
+- **#31 class-module multi** — Point: the file system is a name index — a class
+  belongs in a file named after it so a reader can find the concept by name. A
+  multi-class module in which any public class's name does not match the stem
+  leaves that class unfindable; a matching sibling excuses nothing (ruling
+  2026-09-30).
+  Actions: in `class_module_findings` (checks.rs:2675) — (1) remove the
+  `classes.len() != 1` returns; (2) remove the DUPLICATED `__init__.py`/len block at
+  checks.rs:2687-2693 (merge artifact); (3) add the condition: module (non-test,
+  not `__init__`) with >=2 public classes where AT LEAST ONE public class's name
+  does not match the stem (case-insensitive, plural-underscore form ok) -> `fail`;
+  (4) the message names the MISPLACED classes; (5) keep the tool-script
+  (`has_module_fns`) and `__init__` exemptions; (6) the message ends
+  `— fix: split-module`.
+  Acceptance: fixture migration — INVERT
+  `class_module_matching_name_and_multi_class_pass` (main.rs:3485: User/Team,
+  neither matches) into the new arm's FINDING test; add a PASS fixture where EVERY
+  class matches the stem; add a mixed fixture (one matches, one does not -> finding
+  names only the misplaced).
+- **#32 closure-cluster** — Point: a method whose nested closures partition its
+  locals is a class-in-a-method — the split is structurally visible, but extract-
+  method refuses nested targets, so no rule sees the shape today. `warn`: the shape
+  is often a deliberate cohesive serving method (the message can be wrong; forced
+  extraction can hurt).
+  Actions: new emitter — per method, build the local-var x nested-fn bipartite
+  graph; >=2 connected components, each with >=2 nested fns and >=1 distinct local
+  -> kind `closure-cluster`, `warn`, display `latent-class`. Degenerate arm:
+  empty-param method >=150 lines with nested defs. Fix-side: the extract-method
+  refusal (fix_engine.py:260-261) currently returns `(None, None)` with NO decline
+  text — ADD decline-text plumbing on the Python side using the >=2-nested-def
+  proxy ("nested target with >=2 closures (closure-cluster shape) — extract by
+  hand"): the cluster graph lives in the scanner; the fix engine sees one file and
+  must NOT reimplement the detection.
+  Constraints: co-reporting with `closures`/`large-function` is ACCEPTED (dedupe
+  across families is out of scope); the proxy being weaker than the rule condition
+  is accepted (the citation is a hint, not a claim the rule fired).
+  Acceptance: a boxjig.main-shaped fixture fires warn; a nested closure-cluster
+  extract-method request returns the decline text.
+- **#30 forwarding-chain detection** — Point: method -> module function -> method at
+  depth >=2 is dead indirection when the layers already know each other — each just
+  re-expresses the next. BUT when the chain is the ONLY coupling between two
+  otherwise-independent modules, it is a deliberate boundary: the modules meet at a
+  function so neither side knows the other's classes. Then there is NO finding and
+  NO message.
+  Actions: structural same-repo resolution — method M body exactly `return F(<all M
+  params>)` (or F as the sole expression); module fn F body exactly `return N(<all F
+  params>)`; N a method on ANOTHER class D; depth >=2 edges. Emit `forwarding-chain`,
+  `fail`, ONLY when C's module already depends on D's module (import/reference
+  present, or same module).
+  Constraints: no graph tool required; boundary case = silent.
+  Acceptance: coupled fixture fires fail; a server/CLI-style independent-modules
+  chain emits nothing.
+- **#34 structured seam** — Point: the report must be able to show "these N
+  findings are ONE design decision" (issue #34). That needs the clump member sets as
+  structured data — never scraped from message prose.
+  Actions: (1) add `seam_members: Vec<String>` to the `Finding` struct
+  (scanner/src/common.rs); populate in `data_clump_findings` (~2150 — the function
+  names currently joined into the message's names list, plus each pair's member
+  names), `partition_findings` (~6232 — the method names in the disjoint groups),
+  `strewing_findings` (~2790 — the functions sharing the leading parameter); all
+  other emitters leave it empty. (2) Serialize: `main.rs`'s per-finding `json!`
+  block adds `"seam_members": <field>`; nothing else changes. (3) Orchestrator:
+  bump the contract check 3 -> 4 (lucidlint.py:825), update the pinning test
+  (test_lucidlint.py pins schema_version 3 inline), fix the stale "schema 2"
+  mentions in docs/TECHSPEC.md and docs/PLAN.md; the reader maps the field into the
+  Action, required on the three carriers, absent elsewhere — branch on the kind, no
+  `.get` default (no-backwards-compat ruling).
+  Acceptance: scanning a repo with a data-clump shows non-empty `seam_members` in
+  `--json`; the Phase 4 grouping keys on it; old-schema output is rejected loudly.
+
 
 ## Phase 3 — Fix engine (Python, libcst; fix.rs for Rust where shape applies)
 
-- **#30 collapse-chain — IN SCOPE (ruling 2026-09-29: full multi-file fix)**. The
-  transform is identity-gated and NEVER blindly inlines (user requirement 2026-09-29).
-  Chain C.M -> F -> D.N with M, F pure forwarders, F single-caller:
-  - **DEPENDENCY GATE** (2026-09-30) — refuse when C's module does not already depend
-    on D's module: collapsing would marry two independent modules (the chain is the
-    deliberate boundary).
-  - **IDENTITY GATE** — D has data members (self.X assigns, declared/dataclass fields)
-    or any non-forwarding member -> D is real: **rewire, not inline** — M calls
-    D.N(<args>) directly, F deleted. Inlining would duplicate D's behavior into C and
-    erase D's role.
-  - D has NO identity (no state, no behavior beyond forwarded calls) -> N is a method
-    in exile: **promote N to a sibling method of M on C** (`self.N(...)`); M's body
-    becomes the call (or M merges into N); F deleted; D dissolves. INLINE N's body into
-    M only as the fallback when the move is refused (N has other callers whose rewrite
-    to a C instance is unsafe, or a name collision on C) — inlining preserves N for
-    its other callers.
-  - REFUSALS (all shapes): >1 caller of F; `*args`/`**kwargs` passthrough; callee N in
-    third-party code (no source); keyword-name collisions after substitution; any
-    `from mod import F` re-export reference (deleting F breaks the importer).
-  - Multi-file transaction: repo-wide single-caller determination, cross-file call-site
-    rewrite, cross-file member move, delete F, per-file py_compile + re-scan showing
-    the chain gone. Scope per Open decisions: full fix, this round.
-- **#31 split-module — IN SCOPE (ruling 2026-09-29)**. New structural fixer (libcst).
-  Two layouts; the choice is a CORRECTNESS decision, never a safety one (the transform
-  is deterministic and safe for both; user requirement 2026-09-29).
-  - **PACKAGE layout** — convert `mod.py` -> `mod/` package: `<class>.py` per public
-    class (statically-computed import set) and `__init__.py` re-exporting every class
-    (`from .row import Row`); `from mod import Row` / `mod.Row` keep resolving with
-    ZERO caller rewrites. (No constants in `__init__.py` — third-pass 5: they move
-    into the owning class.)
-  - **FLAT layout** — the issue's original spec: `<class>.py` siblings next to the
-    module; rewrite `from old import Cls` -> `from new import Cls` and `old.Cls` ->
-    `new.Cls` repo-wide to a fixed point.
-  DECISION RULE (correctness — cohesion ONLY, no container-word test, 2026-09-29):
-  the split's SUBJECT is the public classes whose names don't match the stem (the
-  misplaced classes; a stem-matching class, if any, STAYS in the origin — it is
-  home, and excuses nothing for the others). Cluster the subject by edges =
-  cross-class member references OR shared class-level attributes (module-level
-  constants do not exist as a signal — third-pass 3 forbids them). The stem's part
-  of speech is irrelevant; what matters is whether the CLASSES belong together.
-  Per cluster of the subject:
-  - all misplaced classes form ONE cluster -> **PACKAGE**; named by the stem when no
-    class matches it (the stem is free), else via `--name <package>` (the stem
-    belongs to the staying class);
-  - a cohesive sub-cluster (>=2 misplaced classes, edges among them) -> **PACKAGE**
-    via `--name <package>` (never flat-for-convenience; the name is the commitment);
-  - a singleton misplaced class (no edges) -> **FLAT** file named after it.
-  (The existing "closely related models" carve-out in the message stays.)
-  REFUSE (refusals are transform-safety only — the fixer declines with a reason and
-  the agent applies by hand): an existing `mod/` directory when flat is also
-  impossible; module-level executable statements BETWEEN classes (they run in
-  sequence; splitting would reorder them); an import cycle in the candidate layout; a
-  target file collision in both layouts. SAFETY: per-file py_compile + the rule's own
-  re-scan showing the stems now match. Refusal/preview surface follows the existing
-  extract-module fixer (`fix_engine.py`) — same refusal pattern, class-level targets.
+- **#30 collapse-chain — IN SCOPE (ruling 2026-09-29: full multi-file fix)**.
+  Point: the chains Phase 2 flags are dead indirection inside already-coupled
+  modules; the fix removes the redundant layer. The transform must NEVER blindly
+  inline — the right fix depends on whose class is real, and a boundary chain must
+  be refused, not collapsed.
+  Actions (fix_engine.py; fix.rs for Rust shapes):
+  1. Chain facts are re-derived repo-wide in libcst — the fixer already reads
+     repo-wide (`_py_files`, `_name_occurrences`, `_repo_params`); the libcst
+     re-derivation is pinned by the same rule tests as the Rust detector
+     (documented duplication, NOT a silent second implementation).
+  2. Per chain C.M -> F -> D.N (M, F pure forwarders, F single-caller):
+     - DEPENDENCY GATE (2026-09-30): refuse when C's module does not already depend
+       on D's module — collapsing would marry two independent modules (the chain is
+       the deliberate boundary).
+     - IDENTITY GATE: D has data members (`self.X` assigns, declared/dataclass
+       fields) or any non-forwarding member -> D is real: **REWIRE, not inline** —
+       M calls `D.N(<args>)` directly, F deleted (inlining would duplicate D's
+       behavior into C and erase D's role).
+     - D has NO identity -> N is a method in exile: **PROMOTE N to a sibling method
+       of M on C** (`self.N(...)`); M's body becomes the call or M merges into N; F
+       deleted; D dissolves — delete D only when ZERO external references to D
+       (constructions, from-imports, isinstance, annotations, subclassing,
+       attribute access), else D remains as an empty husk and #27 reports it.
+       Promotion refused when N touches `self.<attr>` or self-methods. N's other
+       callers: rewired only where a C instance provably exists; otherwise
+       **INLINE** N's body into M as the fallback (preserves N). M merge: after
+       rewiring, if M is unreferenced, fold M into N and delete M; else keep M as
+       `return self.N(...)`.
+     - REFUSALS (all shapes): >1 caller of F; `*args`/`**kwargs` passthrough;
+       callee N in third-party code (no source); keyword-name collisions after
+       substitution; any `from mod import F` re-export reference (deleting F breaks
+       the importer).
+  3. Multi-file transaction: `_FixRequest` gains `extra_writes: list[(rel,
+     source)]` and `deletes: list[rel]`; the orchestrator applies origin + extras +
+     deletes, then verifies via the REPO-WIDE scan (NOT `scan_single_file`) that no
+     forwarding-chain remains. Iterate per edge until no chain remains (R9); params
+     pass through positionally-in-order or all by identical keyword names with
+     defaults re-supplied.
+  Acceptance: the server/CLI boundary chain refuses with the dependency reason; a
+  coupled chain collapses (rewire or promote, never blind inline) and the repo-wide
+  re-scan shows zero `forwarding-chain` findings.
+- **#31 split-module — IN SCOPE (ruling 2026-09-29)**.
+  Point: misplaced classes belong in files named after them, but the layout must be
+  the RIGHT one for the classes — a cohesive set is a package, independent classes
+  are flat files; the choice is correctness, never safety convenience (both layouts
+  are deterministic and safe).
+  Actions (fix_engine.py, libcst):
+  1. The split's SUBJECT = the public classes whose names don't match the stem; a
+     stem-matching class STAYS in the origin.
+  2. Layouts: PACKAGE = `mod.py` -> `mod/` with `<class>.py` per subject class +
+     `__init__.py` re-exporting (`from mod import Cls` / `mod.Cls` keep resolving,
+     ZERO caller rewrites; NO constants in `__init__.py` — third-pass 5: they move
+     into the owning class). FLAT = `<class>.py` siblings; rewrite `from old
+     import Cls` -> `from new import Cls` and `old.Cls` -> `new.Cls` repo-wide to a
+     fixed point; `mod.py` REMAINS as the residual module (functions, constants,
+     private classes, stem-matching class), deleted iff it becomes empty.
+  3. DECISION RULE (cohesion only, no container-word test, 2026-09-29): cluster the
+     subject by edges = cross-class member references OR shared class-level
+     attributes. Per cluster: all misplaced classes one cluster -> PACKAGE, named by
+     the stem when free, else via `--name <package>`; cohesive sub-cluster (>=2
+     misplaced, edges among them) -> PACKAGE via `--name <package>`; singleton ->
+     FLAT file. The "closely related models" carve-out stays in the message.
+  4. REFUSALS (transform-safety only — decline with a reason, the agent applies by
+     hand): an existing `mod/` directory when flat is also impossible; module-level
+     executable statements BETWEEN classes (splitting would reorder them); an import
+     cycle in the candidate layout — cycles among the produced class files; the
+     `__init__` re-export/constant edge is exempt by construction (constants-first
+     ordering); a target file/dir collision; relative imports in `mod.py`
+     (`from .x import ...`) refuse PACKAGE (fall to flat — the path root changes).
+     `--name` is required when the package name isn't derivable: DECLINE when
+     absent (never flat-for-convenience).
+  5. Safety: per-file py_compile + the rule's own re-scan showing every remaining
+     class's stem matches.
+  Acceptance: fixtures cover flat-singleton split, whole-cluster package by stem,
+  sub-cluster package via `--name`, mixed module (stem class stays, misplaced move),
+  and each refusal case; the re-scan shows zero `class-module` findings.
 
 ## Phase 4 — Orchestrator (lucidlint.py; Action model)
 
-- **#33(a) stamp** — `judgement: bool` field on Action → `--json` actions; TEXT kind
-  header gains `JUDGEMENT` for judged findings and `MECHANICAL` for the deterministic
-  rewrite kinds (issue #33(a) requires both stamps; findings without a fix directive
-  get neither). Judgement set — DECIDED (2026-09-29): **anything where the user must
-  provide a name**. Definition: the finding's fix kind (via `fix_kind_of`,
-  gen-rules.py:203-216) is in NAME_REQUIRED_KINDS (rules_gen.rs:134) — i.e. complexity,
-  feature-envy, long-param-list, loop-hoist, magic-number, tuple-record, vague-name,
-  record-shape (extract-record-class), module-cohesion (extract-module), and the
-  extract-class latent-class variants (data-clump, partition, strewing, wide-tuple).
-  Supersedes the earlier derived-ten: feature-envy, magic-number and loop-hoist JOIN
-  (they are name-required; the "name-required but mechanical" carve-out is gone).
-  NOTE: data-clump and partition currently carry NO fix directive (PlanCritique
-  C-notes) — they gain `— fix: extract-class` in the scanner message so the stamp
-  applies. Mechanical := fixable AND fix kind NOT name-required (loop-pipeline /
-  loop-sequence, positional-literals, stale-suppression, noop-statement, unreachable,
-  duplicate-def, restating-docstring, duplicate-block, undeclared-attribute).
-  No new metadata: judgement is DERIVED from the existing catalog `fix_name_required`
-  (already driving NAME_REQUIRED_KINDS, LSP needsName, CLI refusal) — one source of
-  truth, the stamp cannot drift from the fix surface.
-- **#33(b) NAMING notice — ONCE PER REPORT, not per finding (ruling 2026-09-29)**.
-  When >=1 judgement-stamped finding exists, print the notice once at the top of the
-  findings list (after the header); judgement findings reference it via their
-  `JUDGEMENT` stamp — no preamble copied onto messages. JSON: `meta.naming_notice`
-  (present iff any judgement finding) + per-action `judgement: true`. Notice text
-  (draft, 2026-09-29 — research-sourced: DDD stateless-services rule, the no-Manager
-  canon, McConnell):
-  "NAMING — the name is the commitment: it must be what the domain calls the THING,
-  not what the code does to it. (1) Read this module's and the domain's existing nouns
-  first — if a type already carries this group, extend it, never mint a twin. (2) A
-  verb name (-er/-or: Builder, Importer, Validator, Capture) names a process: if it
-  holds state, that state IS the thing — name the class by it (the session, the
-  queue, the checkout); if it holds none, it's functions, not a class. (3) An -er/-or
-  name is honest only when the domain itself calls a stateful component that (the
-  parser, the compiler, the scheduler) and no existing type already is it. (4) Names
-  that describe the means, not the thing: generic containers (Options, Context,
-  Parameters, Config) and this tool's own jargon (Seam, Clump, Accumulator) — the
-  thing has a domain noun." Scanner messages stay clean; LSP unchanged this round
-  (direct-to-binary, documented gap).
-- **#33(c) name-suffix nudge — HELD (ruling 2026-09-29, option A)**. No post-hoc
-  note; naming is steered first time by the notice + stamp. The recorded decision D
+- **#33(a) stamp** — Point: agents must treat name-committing fixes as judgment
+  calls (the reader decides the right name) and mechanical rewrites as applicable;
+  the report marks which is which so no agent blindly applies a naming commit.
+  Actions:
+  1. `Action` gains `judgement: bool` — True iff the finding's kind (signal) is in
+     the generated NAME_REQUIRED_KINDS (rules_gen.rs — derived from the catalog
+     `fix_name_required` flags, one source of truth; the per-finding read is one
+     lookup, no tables). The Phase 1 flag additions (large-function, partition,
+     strewing, wide-tuple) complete the judgement set per the 2026-09-29 ruling
+     (magic-number, loop-hoist are name-required and therefore judgement; the
+     "name-required but mechanical" carve-out is gone). NO message-directive changes
+     this round — flag-without-directive is accepted (data-clump precedent).
+  2. TEXT: the kind header renders `JUDGEMENT` for judged findings, `MECHANICAL`
+     for fixable-and-not-judged kinds (loop-pipeline/loop-sequence,
+     positional-literals, stale-suppression, noop-statement, unreachable,
+     duplicate-def, restating-docstring, duplicate-block, undeclared-attribute);
+     fix-less findings get neither stamp.
+  3. `--json`: per-action `judgement: true|false`.
+  Acceptance: a complexity finding renders `[JUDGEMENT]`; a loop-pipeline finding
+  renders `[MECHANICAL]`; `--json` carries `judgement` per action; a data-clump
+  finding is judged without any message change.
+- **#33(b) NAMING notice** — Point: the naming lesson is issued ONCE per report, not
+  copied onto every message, so it exists without inflating the report (ruling
+  2026-09-29).
+  Actions (lucidlint.py render): when >=1 judgement-stamped finding exists, print
+  the notice once at the top of the findings list (after the header); each judged
+  finding references it via its `JUDGEMENT` stamp — no message copies. Text: the
+  four-point NAMING notice (2026-09-29 draft, research-sourced): names must be what
+  the domain calls the THING; verb names (-er/-or) name a process — stateful
+  process = name the state, stateless = functions; an -er/-or is honest only when
+  the domain calls a stateful component that and no existing type already is it;
+  generic containers (Options/Context/Parameters/Config) and tool jargon
+  (Seam/Clump/Accumulator) name the means, not the thing. JSON:
+  `meta.naming_notice` present iff any judgement finding. Constraint: scanner
+  messages stay clean; the LSP's lack of the notice is a recorded decision, no doc
+  edit this round.
+  Acceptance: a report with one judged finding prints exactly one notice; `--json`
+  meta carries it; zero judged findings -> no notice.
+- **#33(c) name-suffix nudge — HELD (ruling 2026-09-29). Nothing to build**: no
+  post-hoc note; naming is steered first-time by the notice + stamp; decision D
   (no second-guessing names) governs.
-- **#33(d) existence check — folded into the notice's point 1**. No per-message copy.
-- **#34 clustering** — report layer: >=3 findings sharing a seam group under
-  "these N findings share ONE seam — design the target type once, for all of them (the
-  seams: ...)". Seam = (file, function) for extract findings; member-set intersection via
-  the new structured field for latent-class findings. JSON: non-breaking `groups` array
-  beside flat `actions`. Deterministic ordering.
+- **#33(d) existence check — folded into the notice's point 1. Nothing to build.**
+- **#34 clustering** — Point: N findings sharing one seam are ONE design decision;
+  the report must show that so the agent designs the target type once instead of
+  minting N half-baked types (the issue's 62-findings case).
+  Actions (lucidlint.py render layer, per rule R5):
+  1. Seam modes: (a) complexity/large-function -> (file, function); (b) the
+     carriers (data-clump/partition/strewing) -> their `seam_members` sets (Phase
+     2 field).
+  2. Group by union-find transitive closure over overlapping member sets (pairwise
+     overlap merges; cross-kind groups allowed — a data-clump and a partition over
+     the same class share a seam).
+  3. A group of >=3 findings prints the heading: "these N findings share ONE seam —
+     design the target type once, for all of them (the seams: ...)".
+  4. JSON: `groups` array ALWAYS present (empty when no cluster); item =
+     `{heading, seam, finding indices into actions}`. Ordering: groups and members
+     by (file, line) of first/inner findings, deterministic across runs. No
+     "non-breaking" language (moot under the no-backwards-compat ruling).
+  Acceptance: the issue's 6-clump scenario renders one heading; `--json` `groups`
+  contains the cluster; two runs produce identical output.
 
 ## Phase 5 — Verification
 
-- Per rule: scanner unit test (fixture in `tests/fixtures/rust/` — the include_str!
-  convention; NOT `scanner/tests/fixtures/`, which does not exist), suppression test
-  (`lucidlint: ignore` + config `ignore`), orchestrator test where gate behavior
-  changes.
-- `cargo test` green; `make rules --check` (drift); `make check` (ruff + pyrefly);
-  `pytest` green.
-- `make self-check` — new families on lucidlint's own repo: expect hits
-  (e.g. process-named classes in lucidlint.py/fix_engine.py; closure-cluster/static-husk
-  on fix_engine.py). Hygiene for hits: suppress each with a `lucidlint: ignore <signal>
-  <why>` comment at the site — baselines CANNOT carry whys (bare kind:file:function
-  keys, lucidlint.py:1661) and new WARN findings never gate; the round still ends with
-  no unsuppressed hit (that is the house standard, not the gate).
-- `make coverage` refresh; commit; PR to main (house pattern:
-  previous round was `fix/github-issues-21-22-23` → PR #24).
+Point: proof, not ceremony — every new family's behavior is pinned by tests, and the
+gate, suites, and self-check are green before the PR.
+
+1. Per rule: scanner unit test (fixture in `tests/fixtures/rust/` — the include_str!
+   convention; NOT `scanner/tests/fixtures/`, which does not exist), suppression
+   test (`lucidlint: ignore` + config `ignore`), orchestrator test where gate
+   behavior changes.
+2. `cargo test` green; `make rules --check` (drift — run AFTER every Phase 2
+   emission and the Phase 1 catalog land together; expected red mid-round); `make
+   check` (ruff + pyrefly); `pytest` green.
+3. `make self-check` — the new families scan lucidlint's own repo; expect hits
+   (process-named classes in lucidlint.py/fix_engine.py; closure-cluster/static-husk
+   on fix_engine.py). Hygiene: suppress each hit with a
+   `lucidlint: ignore <signal> <why>` comment at the site — baselines CANNOT carry
+   whys (bare kind:file:function keys, lucidlint.py:1661) and new WARN findings
+   never gate; the round ends with no unsuppressed hit (the house standard, not the
+   gate).
+4. `make coverage` refresh; commit; PR to main (house pattern:
+   `fix/github-issues-21-22-23` -> PR #24).
+
+Acceptance: 1-4 all green; coverage refreshed; PR opened against main.
 
 ## Open decisions (pending rulings marked; decided rulings recorded)
 
