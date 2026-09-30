@@ -124,7 +124,14 @@ fix the stale `partition` description in the same catalog edit.
 - **#30 forwarding-chain detection** — structural same-repo resolution: method M body
   exactly `return F(<all M params>)` (or F as the sole expression), module fn F body
   exactly `return N(<all F params>)` where N is a method on ANOTHER class D; depth >=2
-  edges. No graph tool required. fail (severity ruling 2026-09-29).
+  edges. No graph tool required. fail (severity ruling 2026-09-29) WITH the
+  DEPENDENCY-BOUNDARY GATE (2026-09-30): the chain is only dead indirection when the
+  modules are ALREADY coupled — C's module imports/references D's module, or C and D
+  are in the same module. When C's module and D's module are otherwise independent,
+  the chain is the ONLY coupling path — a deliberate boundary (the issue's own
+  evidence shape: the server met the CLI at a module function, neither side knew the
+  other's classes) — NO finding. Message notes the case: "...unless this chain is the
+  only coupling between A and B — then it is a deliberate boundary and stays."
 - **#34 structured seam** — new finding field carrying clump members: data-clump's
   function names + parameter pairs, partition's groups, strewing's names. NO message
   parsing (agreed seam source). NO compatibility seam: the scan contract bumps to
@@ -139,6 +146,9 @@ fix the stale `partition` description in the same catalog edit.
 - **#30 collapse-chain — IN SCOPE (ruling 2026-09-29: full multi-file fix)**. The
   transform is identity-gated and NEVER blindly inlines (user requirement 2026-09-29).
   Chain C.M -> F -> D.N with M, F pure forwarders, F single-caller:
+  - **DEPENDENCY GATE** (2026-09-30) — refuse when C's module does not already depend
+    on D's module: collapsing would marry two independent modules (the chain is the
+    deliberate boundary).
   - **IDENTITY GATE** — D has data members (self.X assigns, declared/dataclass fields)
     or any non-forwarding member -> D is real: **rewire, not inline** — M calls
     D.N(<args>) directly, F deleted. Inlining would duplicate D's behavior into C and
@@ -269,7 +279,9 @@ fix the stale `partition` description in the same catalog edit.
      near-unmistakable; forking is drift risk.
    - `forwarding-chain`: **fail** — exact forwarder bodies are structurally verifiable;
      collapsing removes dead indirection (a deliberate facade opts out via
-     suppression-with-why).
+     suppression-with-why). GATED (2026-09-30): no finding when the chain is the only
+     coupling path between two otherwise-independent modules — the message can be
+     wrong and the code is better with the boundary (severity principle).
    - `closure-cluster`: **warn** — nested handlers over disjoint locals are often a
      deliberate cohesive serving method (the issue's own server.py is this shape);
      forced extraction can make handler wiring less readable.
