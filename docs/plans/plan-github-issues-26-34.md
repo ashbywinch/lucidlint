@@ -129,9 +129,9 @@ fix the stale `partition` description in the same catalog edit.
   modules are ALREADY coupled — C's module imports/references D's module, or C and D
   are in the same module. When C's module and D's module are otherwise independent,
   the chain is the ONLY coupling path — a deliberate boundary (the issue's own
-  evidence shape: the server met the CLI at a module function, neither side knew the
-  other's classes) — NO finding. Message notes the case: "...unless this chain is the
-  only coupling between A and B — then it is a deliberate boundary and stays."
+  other's classes) — NO finding, NO message. (No finding means no message: the
+  flagged finding fires only in the coupled case, where the boundary rationale does
+  not apply and no caveat belongs in its message.)
 - **#34 structured seam** — new finding field carrying clump members: data-clump's
   function names + parameter pairs, partition's groups, strewing's names. NO message
   parsing (agreed seam source). NO compatibility seam: the scan contract bumps to
