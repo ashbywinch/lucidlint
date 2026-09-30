@@ -48,7 +48,7 @@ New families (severities per Open decisions 1 and 5):
 | #26 | `duplicate-module` | `None` (standalone — its own name is the group) | none (reconciliation is judgment) |
 | #27 | `static-husk` | `None` | none |
 | #27 | `delegating-husk` | `None` | dissolve-husk (rewire callers) |
-| #28 | `single-use-class` | `None` | none (a question, not a transform) |
+| #28 | `process-class` (supersedes `single-use-class` — dropped 2026-09-30; the dead-class arm folds into `unused`) | `None` | none (apply the domain test: fold/rename/delete) |
 | #30 | `forwarding-chain` | `None` | collapse-chain (multi-file, identity-gated) |
 | #31 | extend `class-module` (no new kind) | existing (`"standard"`) | split-module (new multi-file fixer) |
 | #32 | `closure-cluster` | `"latent-class"` (FAMILY_VARIANTS is DERIVED, not joined) | none (extraction refused by design) |
@@ -84,10 +84,18 @@ fix the stale `partition` description in the same catalog edit.
   moves to #30. Facade opt-out is a plain `lucidlint: ignore delegating-husk <why>`.
   Fix: dissolve — rewire the husk's callers to the module functions, delete the husk
   (it has no identity by definition). Never inline the functions' bodies into it.
-- **#28 single-callsite** — extend the repo-wide reference walker behind `unused`
-  (checks.rs:5684): count `ClassName(` call nodes per class; exactly-one site, or zero
-  sites and not abstract. Exclusions: factory `cls(...)` recursion counted once via the
-  factory, annotations/strings/comments/`typing.cast`, test files. warn.
+- **#28 process-class — single-callsite DROPPED (ruling 2026-09-30)**. Construction
+  count is irrelevant to lucidity; the de-baseline junk is caught by process-naming +
+  hollowness. New rule: a class whose name is process-shaped (-er/-or verb-noun set:
+  Builder, Importer, Exporter, Validator, Converter, Parser, Reader, Writer, Fetcher,
+  Collector, Handler, Manager, Provider, Renderer, Serializer, Dispatcher, Processor,
+  Analyzer, Scheduler, Runner, Executor, Authenticator, ... — enumerated; a general
+  `-er` test would fire on real nouns) — EXCLUDING GoF pattern names (Visitor,
+  Iterator, Command, Factory, Strategy, Proxy, Adapter — the domain's own lexicon).
+  fail (naming defect, `vague-name` precedent). Message carries the four-part honesty
+  test (see Fourth-pass 4). The zero-site (never constructed) arm becomes: extend
+  `unused` to CLASSES (warn, Python — "a class never referenced anywhere" via the
+  existing reference machinery; test-used is not dead).
 - **#31 class-module multi** — remove the `classes.len() != 1` returns (also the
   DUPLICATED `__init__.py`/len block at checks.rs:2687-2693 — a merge artifact, clean
   it while here); add condition: >=2 public classes AND no class name matches the stem
@@ -232,8 +240,8 @@ fix the stale `partition` description in the same catalog edit.
 - `cargo test` green; `make rules --check` (drift); `make check` (ruff + pyrefly);
   `pytest` green.
 - `make self-check` — new families on lucidlint's own repo: expect hits
-  (e.g. single-callsite classes in lucidlint.py; possible closure-cluster/static-husk on
-  fix_engine.py). Hygiene for hits: suppress each with a `lucidlint: ignore <signal>
+  (e.g. process-named classes in lucidlint.py/fix_engine.py; closure-cluster/static-husk
+  on fix_engine.py). Hygiene for hits: suppress each with a `lucidlint: ignore <signal>
   <why>` comment at the site — baselines CANNOT carry whys (bare kind:file:function
   keys, lucidlint.py:1661) and new WARN findings never gate; the round still ends with
   no unsuppressed hit (that is the house standard, not the gate).
@@ -298,19 +306,19 @@ Second cold critique (agent://PlanCritique2) verified 11 first-critique items re
 the 12 below remained mechanical gaps. These resolutions SUPERSEDE the corresponding
 Phase text where they conflict.
 
-1. **#28 collection (R1)** — NEW pass, not an extension: `PerFileScan` gains
-   `call_counts: HashMap<String, usize>` — Call nodes whose func is a bare Name equal
-   to a repo class name; attribute calls (`x.Cls(`) excluded. Repo-wide aggregation in
-   a builder mirroring `unused_findings`' shape (defs + prod/test call counts, the
-   unused test-seam split applies). Factory inference is depth-1: a classmethod whose
-   body is only `return cls(...)`/`return Cls(...)` marks the factory's EXTERNAL callers
-   as the construction site; the `cls()` recursion is not counted.
-2. **#28 predicates (R2)** — Construction = bare-Name Call only. NOT construction:
-   attribute calls, annotations, decorators, base-class lists, `isinstance`,
-   `typing.cast`, strings, comments. Construction inside the class's own methods counts.
-   Abstract := the existing `ClassInfo.abstract_` flag (reuse, over-abstraction's).
-   Tests: test files excluded from counts ENTIRELY, but any test-file name reference to
-   the class exempts it from the zero-site arm (test-used is not dead).
+1. **#28 process-class (R1) — supersedes the single-callsite spec** (dropped
+   2026-09-30: construction count is irrelevant to lucidity). Detection: top-level
+   class name in the enumerated process set (Builder, Importer, Exporter, Validator,
+   Converter, Parser, Reader, Writer, Fetcher, Collector, Handler, Manager, Provider,
+   Renderer, Serializer, Dispatcher, Processor, Analyzer, Scheduler, Runner, Executor,
+   Authenticator, ...) MINUS the GoF pattern lexicon (Visitor, Iterator, Command,
+   Factory, Strategy, Proxy, Adapter). Severity fail. No automated fix; the message
+   carries the four-part honesty test. No `fix_name_required` (fold/rename/delete is
+   judgment), so unstamped.
+2. **#28 dead-class arm (R2)** — extend `unused` (warn, Python) from functions to
+   classes: "class X is never referenced anywhere in the repo" — same reference
+   machinery (prod_refs/test_refs), same test-seam treatment (test-used is not dead;
+   annotations count as references). No construction counting exists or is added.
 3. **#31 public + exemptions (R3)** — "public" = name not starting with `_`. The
    tool-script exemption (`has_module_fns`) applies to BOTH arms. split-module moves
    public classes only; private classes stay in the origin (in FLAT: `mod.py` keeps
@@ -468,7 +476,13 @@ is runtime output):
    findings are pointers for the reader's judgment; the question is always
    "what is the best way to make this code more maintainable, lucid, and
    obviously correct?" (stated in RULES.md's preamble).
-4. **#28 message reframe** (drops the "second caller" dedup frame):
-   "class X is constructed at exactly one site — is its name a real domain
-   concept the code is clearer for having (keep it), or one owner's label
-   for a process (fold, rename, or delete)?"
+4. **process-class message (supersedes the #28 reframe — single-callsite dropped
+   2026-09-30)**:
+   "class X is a process (-er/-or name), not a thing: the work belongs on the
+   domain objects it operates on, or in functions. A process class is the best
+   idea only when ALL hold — (1) the domain itself names it (the parser, the
+   scheduler); (2) its state is its own and substantial, no actual noun can
+   carry it; (3) no existing type already carries this work (extend or fold,
+   never mint a twin); (4) it is not one owner's private device (a single
+   consumer with no own state is a function, not a class). Mostly one fails:
+   fold, rename, or delete."
