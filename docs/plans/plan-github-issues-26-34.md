@@ -77,7 +77,7 @@ that pins them) coherent for everything that follows.
    RULES.md static text. Then `make rules`.
 2. **Add the new families** per the table below — kind, severity, section
    (`architecture` unless noted), `display_group` as listed; **add the fix registry
-   (Fifth-pass)**: `FixParam`/`Fix` models, and each row's `fix=` link — the new
+   (Fifth-pass)**: the `Fix` inputs declarations, and each row's `fix=` link — the
    rules carry `fix=None` (their fixes ship in Phase 3 with the fixer work:
    dissolve-husk, collapse-chain, split-module). Replace the boolean flags with the
    fix links on the existing name-required rows (large-function, partition,
@@ -343,24 +343,24 @@ fixers and the Phase 4 render changes.
   must treat name-committing fixes as judgment calls (the reader supplies the name)
   and mechanical rewrites as applicable; the report marks which is which. The
   name-requirement is NOT per-finding data — it is a property of the finding's
-  kind's linked fix (Fifth-pass: `fix_of(signal).params` declares the required
-  `name`). NO
+  `fix_kind`: the kind's declared inputs decide (Fifth-pass). NO
   `Action.judgement` field, NO JSON `judgement` field, no marker appended to any
   message: the finding whose fix needs a name already SHOWS it — its own fix
   directive reads `--name <Name>`. That IS the per-finding signal.
-  Actions (lucidlint.py render, one lookup — on the STRUCTURED `signal` field,
-  NEVER message text):
-  1. Judge-true iff the rule's linked fix declares a required `name` param
-     (`fix_of(signal).params` — Fifth-pass). A flagged data-clump matches via its
-     row's `fix="extract-class"`; a partition finding matches on its raw signal,
-     not its display kind `latent-class`. The directive's `--name` text is NOT
-     parsed; the fix's params are the source of truth.
+  Actions (lucidlint.py render, one lookup — on the finding's STRUCTURED
+  `fix_kind` field, NEVER message text):
+  1. Judge-true iff the finding's fix kind declares `"name"` among its required
+     inputs (`FIX.inputs(fix_kind)` — Fifth-pass, static lookup). A flagged
+     data-clump matches via its row's `fix="extract-class"`; a partition finding
+     matches on its raw `fix_kind`, not its display kind `latent-class`. The
+     directive's `--name` text is NOT parsed; the kind's declared inputs are the
+     source of truth.
   2. TEXT: the kind header renders `JUDGEMENT` for judge-true findings,
      `MECHANICAL` for fixable kinds outside it (loop-pipeline/loop-sequence,
      positional-literals, stale-suppression, noop-statement, unreachable,
      duplicate-def, restating-docstring, duplicate-block, undeclared-attribute);
      fix-less findings get neither.
-  3. Stamps are computed at render from the signal — nothing stored per action.
+  3. Stamps are computed at render from the `fix_kind` — nothing stored per action.
   Acceptance: a complexity finding renders `[JUDGEMENT]`; a loop-pipeline finding
   renders `[MECHANICAL]`; scanner message text is byte-identical to today's (the
   stamp is renderer-side).
@@ -677,39 +677,34 @@ flag-without-fix and large-function fix-without-flag — exactly what parallel t
 does. Replace it with a class structure: a FIX declares its parameters once; a RULE
 links to its fix; "requires a name" is a property of the fix's parameter list.
 
-1. **Models** (rule_metadata.py):
-   - `FixParam(name: str, required: bool)` — one fix parameter.
-   - `Fix(kind: str, params: tuple[FixParam, ...])` — one declaration per fix kind.
-   - `Rule.fix: str | None` — the fix kind the rule's findings advertise (replaces
-     the `fix_name_required` bool AND gen-rules.py's `fix_kind_of` override map: the
-     three overrides become plain `fix=` values on the rows — data-clump
-     `fix="extract-class"`, record-shape `fix="extract-record-class"`,
+1. **Models** (rule_metadata.py) — STATIC declarations, never instances:
+   - `Fix(kind: str, inputs: tuple[str, ...])` — one declaration per fix kind: the
+     AGENT-SUPPLIED inputs its implementation requires (name, params, fix-name). A
+     kind with no such inputs declares `inputs=()`. Anchor inputs (file, line, col)
+     are NOT declared — they come from the finding for every fix and live on the
+     request the agent builds when running the fix. Nothing constructs a "fix
+     object"; the declaration is read by kind lookup.
+   - `Rule.fix: str | None` — the fix kind the rule's findings advertise by default
+     (replaces the `fix_name_required` bool AND gen-rules.py's `fix_kind_of`
+     override map: the three overrides become plain `fix=` values on the rows —
+     data-clump `fix="extract-class"`, record-shape `fix="extract-record-class"`,
      module-cohesion `fix="extract-module"`; complexity/large-function
-     `fix="extract-method"`; vague-name `fix="rename"`; long-param-list
+     `fix="extract-method"`; vague-name `fix="vague-name"`; long-param-list
      `fix="long-param-list"`; tuple-record `fix="tuple-record"`; magic-number
-     `fix="magic-number"`; loop-hoist `fix="loop-hoist"`; fix-less rules `fix=None`).
-   - `FixParam("name", required=True)` on: extract-method, extract-class,
-     extract-record-class, extract-module, rename, tuple-record, long-param-list,
-     magic-number, loop-hoist. No name param on the deterministic rewrites
-     (loop-pipeline/loop-sequence, positional-literals, stale-suppression, the
-     mechanical set).
-2. **Derivations all read the same source**: judge-true iff the rule's linked fix
-   declares a required `name` param (`fix_of(signal).params`). CLI --name gate,
-   LSP needsName, render stamps (JUDGEMENT/MECHANICAL) and the NAMING-notice
-   trigger all use it. NAME_REQUIRED_KINDS stops being maintained — generated from
-   the params if any artifact still wants the list.
-3. **Drift gate (new)**: every finding's message directive must equal its `Rule.fix`
-   — the R27 contract, pinned by the existing drift test. The data-clump/large-
-   function classes of mismatch become hard failures. This supersedes the
-   "no message-directive changes" note for the MACHINE TAIL only: the directive's
-   `--name <Name>` is the surface the registry pins; message prose stays untouched.
-   (The flag-without-directive state for data-clump/partition/wide-tuple dies with
-   this gate: their rows declare `fix="extract-class"`, so their directives must
-   carry `— fix: extract-class`.)
-4. **Acceptance**: a rule's judge-status flips by editing its row or the fix's
-   params — one place; a fix taking `--name` tomorrow makes its findings judge-true
-   with no second registration; the drift test fails on any directive/fix
-   mismatch.
+     `fix="magic-number"`; loop-hoist `fix="loop-hoist"`; feature-envy
+     `fix="feature-envy"`; fix-less rules `fix=None`).
+   - `inputs` containing `"name"` on: extract-method, extract-class,
+     extract-record-class, extract-module, vague-name, tuple-record, long-param-list
+     (also `"params"`), magic-number, loop-hoist, feature-envy. The deterministic
+     rewrites declare no agent inputs (loop-pipeline/loop-sequence,
+     positional-literals, stale-suppression, noop-statement, unreachable,
+     duplicate-def, restating-docstring, duplicate-block, undeclared-attribute).
+2. **Derivations all read the same source**: judge-true iff the finding's fix kind
+   declares `"name"` among its required inputs (`FIX.inputs(fix_kind)` — static
+   lookup, no construction). CLI --name gate, LSP needsName, render stamps
+   (JUDGEMENT/MECHANICAL) and the NAMING-notice trigger all use it. NAME_REQUIRED_
+   KINDS stops being maintained — generated from the inputs if any artifact still
+   wants the list.
 ## Sixth-pass — third review resolutions (2026-09-30) — supersede where conflicts
 
 1. **fix_kind is structured data (BQ1).** The directive has no parameters of its
@@ -717,7 +712,8 @@ links to its fix; "requires a name" is a property of the fix's parameter list.
    per finding (shape-routing: complexity -> extract-method | dispatch-registry |
    rule-table) and renders it into the directive tail. Emit that value as a
    structured finding field `fix_kind` (schema 4, same wire change as
-   `seam_members`). Judge-true := `Fix(fix_kind).params` declares a required `name`
+   `seam_members`). Judge-true := the finding's fix kind declares `"name"` among
+   its agent-supplied inputs (`FIX.inputs(fix_kind)` — static lookup)
    param — per finding, on the kind actually offered. Notice trigger and stamps
    read the same field. The directive is the agent-facing rendering of that value;
    no parsing, no linked-vs-offered divergence. The registry registers every fix
@@ -733,7 +729,7 @@ links to its fix; "requires a name" is a property of the fix's parameter list.
    stale-suppression, noop-statement, unreachable, duplicate-def,
    restating-docstring, duplicate-block, undeclared-attribute, magic-number,
    tuple-record, long-param-list, extract-class, extract-record-class,
-   extract-module). `FixParam("name", required=True)` on: extract-method,
+   extract-module). `inputs` containing `"name"` on: extract-method,
    extract-class, extract-record-class, extract-module, vague-name, tuple-record,
    long-param-list, magic-number, loop-hoist, feature-envy.
 3. **extract-class fixer covers the clump shapes (BQ3 — approved 2026-09-30).**
@@ -767,14 +763,14 @@ links to its fix; "requires a name" is a property of the fix's parameter list.
    only — no constants; the "(constants-first ordering)" refusal parenthetical is
    deleted; `from mod import CONST` from class files does not survive. The
    deleted-if-empty rule stays.
-7. **split-module's conditional name (BQ7).** `Fix("split-module",
-   params=(FixParam("name", required=False),))` — not judge-true via the
-   required-param rule; no global CLI --name gate for it. The FIXER declines when
-   the package name is not derivable and none was supplied: "name the package with
-   a domain noun" (the naming notice still governs the report when other judged
-   findings exist).
+7. **split-module's optional name (BQ7).** Fix("split-module", inputs=()) — the
+   package name is OPTIONAL (stem-derivable, else supplied to the fixer), not a
+   required agent input. Not judge-true via the required-name rule; no global CLI
+   --name gate. The fixer declines when the name is not derivable and none was
+   supplied: "name the package with a domain noun" (the naming notice still governs
+   the report when other judged findings exist).
 8. **Smaller corrections**: (a) #33(b) trigger wording = "any finding whose
-   `Fix(fix_kind).params` declares a required name"; (b) Second-critique R6's
+   `FIX.inputs(fix_kind)` declares a required name"; (b) Second-critique R6's
    mechanism sentence (fix_kind_of/NAME_REQUIRED_KINDS render-time lookup) is
    superseded by items 1-2; R6's directive-addition sentence is retained via item
    3; (c) Phase 1.2 "existing name-required rows" -> "rows that must BECOME
