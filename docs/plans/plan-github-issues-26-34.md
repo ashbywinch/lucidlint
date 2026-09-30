@@ -332,13 +332,20 @@ Rust-shaped), is registered per Phase 1, and has a fixture in
   `Action.judgement` field, NO JSON `judgement` field, no marker appended to any
   message: the finding whose fix needs a name already SHOWS it — its own fix
   directive reads `--name <Name>`. That IS the per-finding signal.
-  Actions (lucidlint.py render, one kind lookup):
-  1. TEXT: the kind header renders `JUDGEMENT` for kinds in NAME_REQUIRED_KINDS,
+  Actions (lucidlint.py render, one lookup — on the STRUCTURED `signal` field,
+  NEVER message text):
+  1. Judge-true iff `fix_kind_of(signal)` is in NAME_REQUIRED_KINDS — the SAME
+     transform the generator applied to build the table (gen-rules.py:208-210), so
+     a flagged data-clump matches via its entry `extract-class`, and a partition
+     finding matches on its raw signal, not its display kind `latent-class`. The
+     directive's `--name` text is NOT parsed; the catalog flag is the source of
+     truth.
+  2. TEXT: the kind header renders `JUDGEMENT` for judge-true findings,
      `MECHANICAL` for fixable kinds outside it (loop-pipeline/loop-sequence,
      positional-literals, stale-suppression, noop-statement, unreachable,
      duplicate-def, restating-docstring, duplicate-block, undeclared-attribute);
      fix-less findings get neither.
-  2. Stamps are computed at render from the kind — nothing stored per action.
+  3. Stamps are computed at render from the signal — nothing stored per action.
   Acceptance: a complexity finding renders `[JUDGEMENT]`; a loop-pipeline finding
   renders `[MECHANICAL]`; scanner message text is byte-identical to today's (the
   stamp is renderer-side).
@@ -346,9 +353,10 @@ Rust-shaped), is registered per Phase 1, and has a fixture in
   copied onto every message, so it exists without inflating the report (ruling
   2026-09-29). The lesson teaches what `--name <Name>` is asking for.
   Actions (lucidlint.py render): print the notice once at the top of the findings
-  list (after the header) iff ANY finding in the report carries a name-required fix
-  directive (kind in NAME_REQUIRED_KINDS — the same lookup as the stamp). No
-  per-finding reference beyond the directive itself. Text: the four-point NAMING
+  list (after the header) iff ANY finding is judge-true (`fix_kind_of(signal)` in
+  NAME_REQUIRED_KINDS — the same structured lookup as the stamp, never message
+  text). No per-finding reference beyond the directive itself. Text: the four-point
+  NAMING
   notice (2026-09-29 draft, research-sourced): names must be what the domain calls
   the THING; verb names (-er/-or) name a process — stateful process = name the
   state; stateless = the operations belong to the abstraction that owns their state
