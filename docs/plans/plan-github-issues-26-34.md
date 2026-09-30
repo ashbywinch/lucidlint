@@ -324,45 +324,42 @@ Rust-shaped), is registered per Phase 1, and has a fixture in
 
 ## Phase 4 — Orchestrator (lucidlint.py; Action model)
 
-- **#33(a) stamp** — Point: agents must treat name-committing fixes as judgment
-  calls (the reader decides the right name) and mechanical rewrites as applicable;
-  the report marks which is which so no agent blindly applies a naming commit.
-  Actions:
-  1. `Action` gains `judgement: bool` — True iff the finding's kind (signal) is in
-     the generated NAME_REQUIRED_KINDS (rules_gen.rs — derived from the catalog
-     `fix_name_required` flags, one source of truth; the per-finding read is one
-     lookup, no tables). The Phase 1 flag additions (large-function, partition,
-     strewing, wide-tuple) complete the judgement set per the 2026-09-29 ruling
-     (magic-number, loop-hoist are name-required and therefore judgement; the
-     "name-required but mechanical" carve-out is gone). NO message-directive changes
-     this round — flag-without-directive is accepted (data-clump precedent).
-  2. TEXT: the kind header renders `JUDGEMENT` for judged findings, `MECHANICAL`
-     for fixable-and-not-judged kinds (loop-pipeline/loop-sequence,
+- **#33(a) stamps — render-time only, no stored flag (2026-09-30)**. Point: agents
+  must treat name-committing fixes as judgment calls (the reader supplies the name)
+  and mechanical rewrites as applicable; the report marks which is which. The
+  name-requirement is NOT per-finding data — it is a property of the finding's kind,
+  already in the catalog (`fix_name_required` -> generated NAME_REQUIRED_KINDS). NO
+  `Action.judgement` field, NO JSON `judgement` field, no marker appended to any
+  message: the finding whose fix needs a name already SHOWS it — its own fix
+  directive reads `--name <Name>`. That IS the per-finding signal.
+  Actions (lucidlint.py render, one kind lookup):
+  1. TEXT: the kind header renders `JUDGEMENT` for kinds in NAME_REQUIRED_KINDS,
+     `MECHANICAL` for fixable kinds outside it (loop-pipeline/loop-sequence,
      positional-literals, stale-suppression, noop-statement, unreachable,
      duplicate-def, restating-docstring, duplicate-block, undeclared-attribute);
-     fix-less findings get neither stamp.
-  3. `--json`: per-action `judgement: true|false`.
+     fix-less findings get neither.
+  2. Stamps are computed at render from the kind — nothing stored per action.
   Acceptance: a complexity finding renders `[JUDGEMENT]`; a loop-pipeline finding
-  renders `[MECHANICAL]`; `--json` carries `judgement` per action; a data-clump
-  finding is judged without any message change.
+  renders `[MECHANICAL]`; scanner message text is byte-identical to today's (the
+  stamp is renderer-side).
 - **#33(b) NAMING notice** — Point: the naming lesson is issued ONCE per report, not
   copied onto every message, so it exists without inflating the report (ruling
-  2026-09-29).
-  Actions (lucidlint.py render): when >=1 judgement-stamped finding exists, print
-  the notice once at the top of the findings list (after the header); each judged
-  finding references it via its `JUDGEMENT` stamp — no message copies. Text: the
-  four-point NAMING notice (2026-09-29 draft, research-sourced): names must be what
-  the domain calls the THING; verb names (-er/-or) name a process — stateful
-  process = name the state; stateless = the operations belong to the abstraction
-  that owns their state — find it; an -er/-or is honest only when
-  the domain calls a stateful component that and no existing type already is it;
-  generic containers (Options/Context/Parameters/Config) and tool jargon
-  (Seam/Clump/Accumulator) name the means, not the thing. JSON:
-  `meta.naming_notice` present iff any judgement finding. Constraint: scanner
-  messages stay clean; the LSP's lack of the notice is a recorded decision, no doc
-  edit this round.
-  Acceptance: a report with one judged finding prints exactly one notice; `--json`
-  meta carries it; zero judged findings -> no notice.
+  2026-09-29). The lesson teaches what `--name <Name>` is asking for.
+  Actions (lucidlint.py render): print the notice once at the top of the findings
+  list (after the header) iff ANY finding in the report carries a name-required fix
+  directive (kind in NAME_REQUIRED_KINDS — the same lookup as the stamp). No
+  per-finding reference beyond the directive itself. Text: the four-point NAMING
+  notice (2026-09-29 draft, research-sourced): names must be what the domain calls
+  the THING; verb names (-er/-or) name a process — stateful process = name the
+  state; stateless = the operations belong to the abstraction that owns their state
+  — find it; an -er/-or is honest only when the domain calls a stateful component
+  that and no existing type already is it; generic containers
+  (Options/Context/Parameters/Config) and tool jargon (Seam/Clump/Accumulator) name
+  the means, not the thing. JSON: `meta.naming_notice` present iff the trigger
+  fires. Constraint: scanner messages stay clean; the LSP's lack of the notice is a
+  recorded decision, no doc edit this round.
+  Acceptance: a report with one name-required finding prints exactly one notice;
+  `--json` meta carries it; no name-required finding -> no notice.
 - **#33(c) name-suffix nudge — HELD (ruling 2026-09-29). Nothing to build**: no
   post-hoc note; naming is steered first-time by the notice + stamp; decision D
   (no second-guessing names) governs.
