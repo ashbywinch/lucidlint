@@ -57,6 +57,38 @@ name = "rust"
 language-servers = ["lucidlint"]
 ```
 
+## Updating an installed LSP
+
+The server the editors/agents run is the binary at
+`~/.local/share/lucidlint/bin/lucidlint` (that path is the install — an
+old binary there keeps serving old rules until replaced AND restarted).
+To update it in one pass:
+
+```sh
+VER=v0.5.0   # the release to install
+gh release download $VER --repo ashbywinch/lucidlint \
+  -p "lucidlint-$VER-x86_64-unknown-linux-musl.tar.gz"
+tar xzf "lucidlint-$VER-x86_64-unknown-linux-musl.tar.gz"
+install -m 755 "lucidlint-$VER-x86_64-unknown-linux-musl/bin/lucidlint" \
+  ~/.local/share/lucidlint/bin/lucidlint
+pkill -f 'lucidlint --lsp'   # running clients keep serving the old rules;
+                              # the editor/omp respawns on the next request
+```
+
+Then VERIFY what is served, not just that a file moved — a stdio
+`initialize` handshake answers with the served version:
+
+```sh
+INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+printf 'Content-Length: %d\r\n\r\n%s' "${#INIT}" "$INIT" \
+  | timeout 3 ~/.local/share/lucidlint/bin/lucidlint --lsp | grep -o '"version":"[^"]*"'
+# expect: "version":"v0.5.0" (the tag the bundle was built from)
+```
+
+Do NOT confuse this with `~/.local/bin/lucid-lint` (hyphenated) — that is
+an unrelated prose-accessibility linter. It is not lucidlint; leave it
+alone.
+
 ## Notes
 
 - macOS: the first run of a downloaded (unsigned) binary needs
