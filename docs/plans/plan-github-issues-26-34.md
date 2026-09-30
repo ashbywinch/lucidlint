@@ -458,8 +458,10 @@ is runtime output):
    lucid, and obviously correct. A finding is a pointer, not a verdict —
    its message and suggested fix state the reasoning and exist to make the
    reader reflect. Judge each with common sense: what is the best way to
-   make this code more maintainable, lucid, and obviously correct? Apply
-   the fix where it serves that aim; suppress with a why where it doesn't."
+   make this code more maintainable, lucid, and obviously correct? When
+   the suggested fix isn't right, draw on your knowledge of good class
+   design to devise a better one. Suppress only where the finding itself
+   does not apply — and give the why a reviewer can check."
 3. **AGENTS.md Rules** — one rule, link, no copy: the tool exists for code
    lucidity; never design from mechanics (dedup, size, call counts);
    findings are pointers for the reader's judgment; the question is always
