@@ -427,3 +427,45 @@ Phase text where they conflict.
    module-level constants (lucidlint.py, fix_engine.py, scanner emits) — handled per
    Phase 5 hygiene: refactor into class attributes or suppress-with-why. The round is
    not green until zero unsuppressed hits.
+## Fourth-pass — the lucidity principle (2026-09-30)
+
+The tool's entire purpose is code lucidity — code that is maintainable,
+lucid, and obviously correct. Every rule, message, and fix serves that aim;
+findings are POINTERS for the reader's judgment, never verdicts or orders.
+Derived rule-design rule (dev agents): NEVER justify a rule, threshold, or
+message from mechanics (deduplication, size, call counts) — a class with one
+construction site can be exactly right. The judgment asked of the reader is
+always: "what is the best way to make this code more maintainable, lucid,
+and obviously correct?"
+
+Encode it at the four surfaces (per docs/writing-documentation.md: one
+canonical statement in RULES.md; AGENTS.md links, never copies; the header
+is runtime output):
+
+1. **Report header** — replace `common::REPORT_HEADER` (common.rs:959):
+   "lucidlint — the aim is code that is maintainable, lucid, and obviously
+   correct. Findings and suggested fixes are pointers, not orders: for each,
+   judge the best way to make this code more maintainable, lucid, and
+   obviously correct. Fix findings instead of suppressing them; give every
+   suppression a why a reviewer can check."
+   JSON carriage VERIFIED: scan emits `"header"` (main.rs:2073) ->
+   orchestrator read (lucidlint.py:1386) -> `--json` meta "header"
+   (lucidlint.py:171); text prints it (:218); LSP excluded by pinned test.
+   The const's pinning test (common.rs:966-970, asserts "readable") updates
+   to the new triplet.
+2. **RULES.md preamble** — canonical statement, right after the title:
+   "Every rule below exists for one reason: code that is maintainable,
+   lucid, and obviously correct. A finding is a pointer, not a verdict —
+   its message and suggested fix state the reasoning and exist to make the
+   reader reflect. Judge each with common sense: what is the best way to
+   make this code more maintainable, lucid, and obviously correct? Apply
+   the fix where it serves that aim; suppress with a why where it doesn't."
+3. **AGENTS.md Rules** — one rule, link, no copy: the tool exists for code
+   lucidity; never design from mechanics (dedup, size, call counts);
+   findings are pointers for the reader's judgment; the question is always
+   "what is the best way to make this code more maintainable, lucid, and
+   obviously correct?" (stated in RULES.md's preamble).
+4. **#28 message reframe** (drops the "second caller" dedup frame):
+   "class X is constructed at exactly one site — is its name a real domain
+   concept the code is clearer for having (keep it), or one owner's label
+   for a process (fold, rename, or delete)?"
