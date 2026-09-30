@@ -69,9 +69,12 @@ that pins them) coherent for everything that follows.
    = display_group or kind`; group indexing by `section`), the `_CONFIG_GROUP` map,
    RULES.md static text. Then `make rules`.
 2. **Add the new families** per the table below — kind, severity, section
-   (`architecture` unless noted), `display_group` as listed. Set `fix_name_required`
-   where the table says the judgement flag joins: `large-function`, `partition`,
-   `strewing`, `wide-tuple` (all other name-required flags already exist). Fix the
+   (`architecture` unless noted), `display_group` as listed; **add the fix registry
+   (Fifth-pass)**: `FixParam`/`Fix` models, and each row's `fix=` link — the new
+   rules carry `fix=None` (their fixes ship in Phase 3 with the fixer work:
+   dissolve-husk, collapse-chain, split-module). Replace the boolean flags with the
+   fix links on the existing name-required rows (large-function, partition,
+   strewing, wide-tuple join the registry via their `fix=` values). Fix the
    stale `partition` description — it says "free functions partition a struct's
    fields"; the implementation partitions a class's METHODS over its fields.
 3. `make rules` — regenerates `rules_gen.rs` + RULES.md + RULE_GROUPS.
@@ -88,8 +91,8 @@ New families (severities per Open decisions 1 and 5):
 | #31 | extend `class-module` (no new kind) | existing (`"standard"`) | split-module (new multi-file fixer) |
 | #32 | `closure-cluster` | `"latent-class"` | none (extraction refused by design) |
 
-Constraint: judgement is DERIVED from the existing `fix_name_required` flag (Open
-decisions 5) — no new metadata fields.
+Constraint: judge-status is a property of the linked fix's PARAMS (Fifth-pass) —
+there are no boolean name flags and no maintained kind list.
 
 Acceptance: `make rules` is idempotent; the catalog rows match the table exactly;
 Phase 5's drift check is run AFTER Phase 2 lands (every family in the table needs a
@@ -327,19 +330,19 @@ Rust-shaped), is registered per Phase 1, and has a fixture in
 - **#33(a) stamps — render-time only, no stored flag (2026-09-30)**. Point: agents
   must treat name-committing fixes as judgment calls (the reader supplies the name)
   and mechanical rewrites as applicable; the report marks which is which. The
-  name-requirement is NOT per-finding data — it is a property of the finding's kind,
-  already in the catalog (`fix_name_required` -> generated NAME_REQUIRED_KINDS). NO
+  name-requirement is NOT per-finding data — it is a property of the finding's
+  kind's linked fix (Fifth-pass: `fix_of(signal).params` declares the required
+  `name`). NO
   `Action.judgement` field, NO JSON `judgement` field, no marker appended to any
   message: the finding whose fix needs a name already SHOWS it — its own fix
   directive reads `--name <Name>`. That IS the per-finding signal.
   Actions (lucidlint.py render, one lookup — on the STRUCTURED `signal` field,
   NEVER message text):
-  1. Judge-true iff `fix_kind_of(signal)` is in NAME_REQUIRED_KINDS — the SAME
-     transform the generator applied to build the table (gen-rules.py:208-210), so
-     a flagged data-clump matches via its entry `extract-class`, and a partition
-     finding matches on its raw signal, not its display kind `latent-class`. The
-     directive's `--name` text is NOT parsed; the catalog flag is the source of
-     truth.
+  1. Judge-true iff the rule's linked fix declares a required `name` param
+     (`fix_of(signal).params` — Fifth-pass). A flagged data-clump matches via its
+     row's `fix="extract-class"`; a partition finding matches on its raw signal,
+     not its display kind `latent-class`. The directive's `--name` text is NOT
+     parsed; the fix's params are the source of truth.
   2. TEXT: the kind header renders `JUDGEMENT` for judge-true findings,
      `MECHANICAL` for fixable kinds outside it (loop-pipeline/loop-sequence,
      positional-literals, stale-suppression, noop-statement, unreachable,
@@ -458,11 +461,12 @@ Acceptance: 1-4 all green; coverage refreshed; PR opened against main.
    judgment call the tool must not second-guess") governs. The nudge's ropey-name
    triage is instead the notice's content, issued before the name exists.
 5. **Judgement set — DECIDED (2026-09-29): anything where the user must provide a
-   name.** Judgement := the finding's fix kind is in NAME_REQUIRED_KINDS (derived from
-   the existing catalog `fix_name_required` flag — no new metadata). Includes
-   feature-envy, magic-number, loop-hoist (name-required — the earlier
-   "name-required but mechanical" carve-out is gone); mechanical := fixable without a
-   user-supplied name; unstamped := no fix directive. See Phase 4 #33(a).
+   name. [The mechanism is SUPERSEDED by the Fifth-pass fix registry — params, not
+   flags; the ruling's SET survives.]** Original: Judgement := the finding's
+   fix kind is in NAME_REQUIRED_KINDS (derived from the existing catalog flag).
+   Includes feature-envy, magic-number, loop-hoist (name-required — the earlier
+   "name-required but mechanical" carve-out is gone); mechanical := fixable without
+   a user-supplied name; unstamped := no fix directive. See Phase 4 #33(a).
 6. **Backward compatibility — DECIDED (2026-09-29): NOT supported.** The scan
    contract is strictly versioned (existing pattern: `lucidlint.py:825` rejects a
    mismatched `schema_version`); contract changes bump the schema and old output is
@@ -482,8 +486,8 @@ Phase text where they conflict.
    Renderer, Serializer, Dispatcher, Processor, Analyzer, Scheduler, Runner, Executor,
    Authenticator, ...) MINUS the GoF pattern lexicon (Visitor, Iterator, Command,
    Factory, Strategy, Proxy, Adapter). Severity fail. No automated fix; the message
-   carries the four-part honesty test. No `fix_name_required` (fold/rename/delete is
-   judgment), so unstamped.
+   carries the four-part honesty test. `fix=None` (fold/rename/delete is judgment),
+   so unstamped.
 2. **#28 dead-class arm (R2)** — extend `unused` (warn, Python) from functions to
    classes: "class X is never referenced anywhere in the repo" — same reference
    machinery (prod_refs/test_refs), same test-seam treatment (test-used is not dead;
@@ -568,14 +572,17 @@ Phase text where they conflict.
     round.
 ## Third-pass rulings (2026-09-29) — amend the sections above
 
-1. **Judgement = the catalog `fix_name_required` flag, period.** One read, no
-   derivation tables. The earlier fix_kind_of/message-directive machinery is DROPPED —
-   it duplicated knowledge the flag already owns. Set the flag on the rows that
-   semantically require a name but lack it: `large-function` (real existing drift —
-   its extract-method fix demands a name yet the flag is absent, so derived
-   NAME_REQUIRED_KINDS + LSP needsName miss it), `partition`, `strewing`,
-   `wide-tuple`. Message directives NOT changed this round; the flag-without-directive
-   state is accepted (data-clump precedent, verified: flag set, message prose-only).
+1. **Judgement — SUPERSEDED by the Fifth-pass fix registry (params, not flags);
+   retained as history.** Original ruling: the catalog `fix_name_required` flag,
+   one read, no derivation tables; the fix_kind_of/message-directive machinery is
+   DROPPED. Set the flag on the rows that semantically require a name but lack it:
+   `large-function` (real existing drift — its extract-method fix demands a name
+   yet the flag is absent, so derived NAME_REQUIRED_KINDS + LSP needsName miss it),
+   `partition`, `strewing`, `wide-tuple`. Message directives NOT changed this
+   round; the flag-without-directive state is accepted (data-clump precedent,
+   verified: flag set, message prose-only). [Superseded 2026-09-30: the registry
+   replaces the flag; the drift gate now REQUIRES the directives to match
+   `Rule.fix`, so the flag-without-directive acceptance dies with it.]
 2. **Package layout never flattens for convenience.** A cohesive sub-cluster (subset
    holds cross-class member references or shared class-level attributes) also gets a
    package; when
@@ -657,3 +664,43 @@ is runtime output):
    not one owner's private device — a single consumer with no own state means the
    operations belong to the domain abstraction that owns their work, not to a
    class of their own. Mostly one fails: fold, rename, or delete."
+## Fifth-pass — the fix registry (2026-09-30) — supersedes the flag mechanics
+
+The boolean "name-required" list is a fragile parallel fact: data-clump shipped
+flag-without-fix and large-function fix-without-flag — exactly what parallel truth
+does. Replace it with a class structure: a FIX declares its parameters once; a RULE
+links to its fix; "requires a name" is a property of the fix's parameter list.
+
+1. **Models** (rule_metadata.py):
+   - `FixParam(name: str, required: bool)` — one fix parameter.
+   - `Fix(kind: str, params: tuple[FixParam, ...])` — one declaration per fix kind.
+   - `Rule.fix: str | None` — the fix kind the rule's findings advertise (replaces
+     the `fix_name_required` bool AND gen-rules.py's `fix_kind_of` override map: the
+     three overrides become plain `fix=` values on the rows — data-clump
+     `fix="extract-class"`, record-shape `fix="extract-record-class"`,
+     module-cohesion `fix="extract-module"`; complexity/large-function
+     `fix="extract-method"`; vague-name `fix="rename"`; long-param-list
+     `fix="long-param-list"`; tuple-record `fix="tuple-record"`; magic-number
+     `fix="magic-number"`; loop-hoist `fix="loop-hoist"`; fix-less rules `fix=None`).
+   - `FixParam("name", required=True)` on: extract-method, extract-class,
+     extract-record-class, extract-module, rename, tuple-record, long-param-list,
+     magic-number, loop-hoist. No name param on the deterministic rewrites
+     (loop-pipeline/loop-sequence, positional-literals, stale-suppression, the
+     mechanical set).
+2. **Derivations all read the same source**: judge-true iff the rule's linked fix
+   declares a required `name` param (`fix_of(signal).params`). CLI --name gate,
+   LSP needsName, render stamps (JUDGEMENT/MECHANICAL) and the NAMING-notice
+   trigger all use it. NAME_REQUIRED_KINDS stops being maintained — generated from
+   the params if any artifact still wants the list.
+3. **Drift gate (new)**: every finding's message directive must equal its `Rule.fix`
+   — the R27 contract, pinned by the existing drift test. The data-clump/large-
+   function classes of mismatch become hard failures. This supersedes the
+   "no message-directive changes" note for the MACHINE TAIL only: the directive's
+   `--name <Name>` is the surface the registry pins; message prose stays untouched.
+   (The flag-without-directive state for data-clump/partition/wide-tuple dies with
+   this gate: their rows declare `fix="extract-class"`, so their directives must
+   carry `— fix: extract-class`.)
+4. **Acceptance**: a rule's judge-status flips by editing its row or the fix's
+   params — one place; a fix taking `--name` tomorrow makes its findings judge-true
+   with no second registration; the drift test fails on any directive/fix
+   mismatch.
