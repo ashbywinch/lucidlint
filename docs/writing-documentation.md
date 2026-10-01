@@ -141,15 +141,16 @@ fact and decision.
   (must / never), acceptance (verifiable command).
 ## Clarity rules
 
+Write each sentence as one of two kinds: facts about the software, or
+commands about what the reader does. Do not mix a fact and a command in
+one sentence.
+
 Why: readers use a doc right before acting. A sentence they must re-read
 costs time and can cause the wrong action.
 
-Write each sentence as one of two kinds:
-
-- **Write facts about what the software does. Write commands about what the
-  reader does.** Write "`cache.py` reads `cache.toml` at startup" as a
-  fact. Write "edit that file, then run `cache gc`" as a command. Do not
-  mix a fact and a command in one sentence.
+Give each kind its own sentence. Write "`cache.py` reads `cache.toml`
+at startup" as the fact. Write "edit that file, then run `cache gc`" as
+the command.
 - **Write instructions with the same rules as facts.** Use the active
   voice, write one idea per sentence, make every noun knowable, use simple
   words.
@@ -184,9 +185,12 @@ Write each section by these rules:
 - Define tool terms (finding, seam, stamp, directive, baseline, action,
   family) in plain words at first use.
 
-Write each section so it gives the reader one of: a command to run, a file
-to edit or open, a rule ("Never X"), a value to set or a name to use, an
-acceptance check, or a link to a document that answers the question.
+Write each section so it gives the reader one of:
+- a command to run, or a file to edit or open
+- a rule ("Never X")
+- a value to set, or a name to use
+- an acceptance check
+- a link to a document that answers the question
 
 Canonical pairs:
 
