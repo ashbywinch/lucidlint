@@ -150,26 +150,25 @@ Write each sentence as one of two kinds:
   actions.** Write "the cache reads `cache.toml` at startup" as a fact.
   Write "edit that file, then restart the service" as a command. Do not mix
   a fact and a command in one sentence.
-- **Write instructions with the same rules as facts.** Name the subject,
-  use the active voice, write one idea per sentence, use simple words.
+- **Write instructions with the same rules as facts.** Use the active
+  voice, write one idea per sentence, name every noun, use simple words.
 
 Write each section by these rules:
 
 - **Write each rule as a command.** Write "put X", "name X", "write X",
-  "do not X". When you write a rule sentence that describes a document or
-  its sentences, rewrite it as a command.
+  "do not X".
 - **Put the main point first.** Write the fact or the instruction in the
   first sentence. Write the reasons after it.
 - **Name the heading after what the section gives the reader.** Do not use
   "Overview", "Details", or "Misc": they do not say what the section holds.
-- **Write one idea per sentence.** When two actions share a sentence, split
-  it into two sentences.
+- **Write one idea per sentence.** Write each idea in its own sentence.
 - **Write in the active voice.** Write "the process writes the file", not
   "the file is written by the process".
-- **Write the subject's name in the sentence.** Write the name of the thing
-  the sentence is about before you say anything else about it. Write "the
-  cache reads `cache.toml`", not "it reads `cache.toml`". Do not write
-  "the artifact", "the system", "this".
+- **Make every noun identifiable.** Write each noun so the reader knows the
+  exact thing it names. Write the name in the same sentence, or write the
+  name in the text immediately before it. Do not write "the service checks
+  the backups using the process" unless the preceding text already names
+  that service, those backups, and that process.
 - **Define terms at first use.** Explain each term in plain words where it
   first appears. Use one name for one thing throughout.
 - **Use concrete words.** Write "the lock blocks the write", not "write
@@ -186,15 +185,19 @@ Write each section by these rules:
 
 Write each section so it gives the reader one of: a command to run, a file
 to edit or open, a rule ("Never X"), a value to set or a name to use, an
-acceptance check, or a link to the doc that answers the question. When a
-section gives the reader none of these, rewrite it.
+acceptance check, or a link to the doc that answers the question.
 
-Canonical pair:
+Canonical pairs:
 
 ✗ "The service blocks writes."
 
 ✓ "The scheduler blocks writes at 23:00. To flush old entries, run `cache
 gc`."
+
+✗ "The service checks the backups using the process."
+
+✓ "The copy process backs up `data.db` each night. The scheduler checks
+the backups using it."
 
 ## The documentation-quality checklist
 
@@ -212,7 +215,7 @@ gc`."
 - [ ] Code shows a canonical ✗/✓ pair, not exhaustive cases
 - [ ] Facts and instructions are separate: facts describe the system, commands tell the reader what to do
 - [ ] Every rule is written as a command ("put", "name", "write", "do not")
-- [ ] The subject's name appears in the sentence itself
+- [ ] Every noun has an identifiable referent, named in the sentence or in the text immediately before it
 - [ ] The section's first sentence states the answer
 - [ ] The heading names what the section gives the reader
 - [ ] Each sentence says one thing, in the active voice
