@@ -118,6 +118,9 @@ Replace:
 Verdicts over the complete emitted message set (57 families), against the
 Message Standard. Families whose messages already state a verifiable reason
 and end with the action need no change; the audit names the exceptions.
+Texts show the resolved message a reader sees, not the Rust format!
+template; where a value varies, the text names it in braces ('{cls}') with
+the fill spelled out beside the table cell.
 
 Complies as-is (42): assembly-class, boolean-arg, broad-except,
 builtin-shadow, closure-cluster, conditional-polymorphism, debug-artifact,
@@ -136,7 +139,7 @@ Needs rewrite (10 families):
 |---|---|
 | long-param-list | "{n} parameters — the call site cannot see what each value means, and no name says what they are together. Group the parameters that belong together into one object named with a domain noun." |
 | partition | Append the action: "Split it into {count} classes." |
-| class-module | "module '{rel}' holds one class '{}' — readers browse the codebase by file structure, and a differently named file hides the class from that walk. Rename the file to {}.py (exception: closely related models)." |
+| class-module | "{rel} holds one class named '{cls}' — readers browse the codebase by file structure, and a differently named file hides the class from that walk. Rename the file to '{stem}.py' (exception: closely related models)." — {cls} is the class's name, {stem} its lowercase form |
 | no-assert-test | "It can never fail, so it proves nothing. Add an assertion or delete the test." |
 | docs-link | "A link that leads nowhere misleads the reader. Fix the target or remove the link." |
 | record-shape (return) | "f returns a dict that holds the fields of a record; the shape has no name at the call site. Type the return with the class that models the shape; create that class if none exists." |
