@@ -35,9 +35,10 @@ applies to message text. This standard adds the rules specific to messages.
 - Separate the excluded case from the rule with a test that only the
   excluded case passes. A trait the rule and the exclusion share cannot
   mark the line.
-- Write the understanding cost as the mechanism. Name what the code fails
-  to say about the domain; the maintenance cost alone does not motivate
-  the reader.
+- Write the mechanism as the failure the shape causes. Name what the code
+  fails to say or check, in terms a reader verifies at the cited line, and
+  how the action fixes it. Do not write a cost the reader can accept:
+  effort is a price the reader may pay, error is not.
 
 ## Vocabulary
 
@@ -57,6 +58,10 @@ applies to message text. This standard adds the rules specific to messages.
 
 ## What a message must not do
 
+- Never prescribe an action that creates another finding. Check the
+  prescribed fix against the other rule families before you write it. A
+  module-level constant is one such action: the name itself is a
+  global-state finding.
 - Do not write line numbers or fix commands into the prose. The tool owns
   coordinates; the fix command is structured data, appended as the
   directive tail (R27).
@@ -67,8 +72,9 @@ applies to message text. This standard adds the rules specific to messages.
   the decision the reader must make with the actions it leads to.
 - Never approve duplicate code. If the shape is a duplicate, write the
   action that removes the duplication.
-- Do not direct the reader to a module-level constant. Name the value on
-  the class that owns the computation.
+- Do not name a value at module scope in a fix; the name is a
+  global-state finding. Name the value on the class that owns the
+  computation.
 
 ## Checklist
 
@@ -82,6 +88,7 @@ applies to message text. This standard adds the rules specific to messages.
 - [ ] Conditions use "if"; "when" is for time only
 - [ ] Every classification names the action for its case
 - [ ] The message asserts only what the detector knows
-- [ ] The mechanism names the understanding cost
+- [ ] The mechanism names the failure the shape causes and is verifiable
+- [ ] The prescribed action creates no other finding
 - [ ] No action leaves or approves duplicate code
 - [ ] Named values point at the owning class, never module scope
