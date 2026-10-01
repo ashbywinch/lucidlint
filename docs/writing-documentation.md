@@ -139,55 +139,38 @@ fact and decision.
 - **Task-shaped sections.** When a doc describes how to do something, use
   the task-card shape: goal (one verb), scope (exact paths), constraints
   (must / never), acceptance (verifiable command).
-## Clarity — the reader acts on the first pass
+## Clarity
 
-A doc that cannot be acted on after one pass has failed; a claim the reader
-cannot check has no force. Every sentence passes two tests: does the reader
-know what to DO, and could a reader who disagrees verify the claim against
-the code?
+Why it matters: a doc is read right before the reader acts on it — a human
+implementing a change, an agent about to run a command. A sentence that
+needs a second reading costs a working token and delays the action.
 
-- **Define every term at first use, or don't use it.** "The erasure is the
-  finding" teaches nothing: neither word has a plain meaning in its sentence
-  yet. If a concept matters, say it in one plain clause once — "the dict
-  hides the value's real type" — or cut the term. Never borrow a term from
-  the tool's internals, another doc, or a prior message without glossing it
-  here.
-- **One idea per sentence.** One subject, one verb, one instruction. An
-  "and"/"but" chain or an em-dash clause is two sentences; split it. A
-  sentence the reader must re-read is a defect.
-- **Mechanism first, action last.** Name what actually breaks or drifts (the
-  mechanism), then end with the single imperative. A verdict without a
-  mechanism ("serialisation is no excuse") invites the reader to defer or
-  dismiss; a mechanism without an action leaves them guessing. This is the
-  tool's R31 and the plan rule "judgement passages state the operative
-  mechanism and the reason" applied to every doc and message.
-- **No excuses the rule doesn't own.** A categorical rule has no "unless
-  it's genuinely X" tail. If a case falls outside the rule, change the rule;
-  never offer a courtesy out in the message. (There is no "genuine
-  configuration" exemption for module-level state: configuration is state
-  and has an owning class.)
-- **No deference to prior verdicts.** "Agent X called this nonsense" is not
-  analysis. Restate the claim, check it against the code, take a position.
-- **Verbs over nouns; active voice.** "Type the parameter with that class"
-  beats "the parameter is typed as a record erasing the class". Eliminate
-  "there is/are" openers. (Principles summarised from Google's Technical
-  Writing One: specific verbs, one idea per sentence, terms defined at first
-  use, consistent terminology.)
-- **Short by saying less, not by compressing harder.** A plain two-line
-  sentence beats a jargon one-liner; then shorten the plain one. Messages
-  that must be concise earn that by dropping non-operative clauses, not by
-  packing three ideas into one sentence.
+The test: read a section once, then state what it delivers. If you cannot,
+rewrite the section.
+
+- **Answer first, reason after.** Lead each section with the fact or the
+  instruction the reader came for; put the rationale below it. A section
+  whose first sentence survives alone has an answer.
+- **Define every term at first use, or drop it.** A word the reader cannot
+  gloss in one plain clause is jargon here.
+- **One idea per sentence.** If a sentence needs a second reading, split it.
+  Two actions joined by "and" are two sentences.
+- **Concrete nouns and verbs.** State what the artifact does ("blocks writes
+  while the lock is held"). Do not write what something "is about", "aims
+  for", or "enables". A heading names the section's deliverable; a slogan
+  is not a name.
+- **Cut words, then cut more.** Fifteen plain words that say what thirty did
+  are the better sentence. Concise means less to read, not faster to
+  misread.
 
 Canonical pair:
 
-✗ `data` is typed as dict but it is the serialised form of a record — and
-the erasure is the finding: every call site can build the shape ad hoc, and
-every field change happens unchecked, so the shape drifts away from the
-class.
+✗ "Documentation should be clear and comprehensive so that all stakeholders
+can leverage the full capabilities of the system effectively."
 
-✓ `data` is a dict that holds the fields of an existing class (the wire form
-its `from_dict` reads). Left as dict, call sites build the shape ad hoc and
-field changes go unchecked. Type the parameter with the class.
+✓ "Section test: read a section once, then state what it delivers. If you
+cannot, the section needs rewriting; if the answer is two facts, the section
+needs splitting."
 
 ## The documentation-quality checklist
 
@@ -204,6 +187,6 @@ field changes go unchecked. Type the parameter with the class.
 - [ ] Tables replace paragraphs where fields are consistent
 - [ ] Code shows a canonical ✗/✓ pair, not exhaustive cases
 - [ ] Every term is defined at first use (or not used)
-- [ ] Sentences carry one idea: mechanism first, then the one imperative
-- [ ] No escape hatch the rule itself does not state
+- [ ] Each section's first sentence carries its answer; the reason follows
+- [ ] One-pass test: after one read, you can state what the section delivers
 - [ ] Always-loaded files within the ~150–200 line ceiling
