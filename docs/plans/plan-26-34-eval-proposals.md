@@ -23,7 +23,7 @@ proposer left the code alone.
 
 ## A. Message clarity — mechanism, action, no jargon
 
-The message rules stand in this section; the writing standard's "Clarity"
+The message rules stand in this section; the writing standard's "Clarity rules"
 section (docs/writing-documentation.md) covers documentation prose. Every
 fail message names what breaks, then what to do, in plain words.
 

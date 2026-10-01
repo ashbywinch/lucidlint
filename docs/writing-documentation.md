@@ -139,39 +139,44 @@ fact and decision.
 - **Task-shaped sections.** When a doc describes how to do something, use
   the task-card shape: goal (one verb), scope (exact paths), constraints
   (must / never), acceptance (verifiable command).
-## Clarity
+## Clarity rules
 
-Why it matters: a doc is read right before the reader acts on it. A sentence
-that needs a second reading costs a working token and delays the action.
+Why: a doc is read right before the reader acts on it. A sentence that needs
+a second reading costs a working token and delays the action.
 
-The test runs on a second reader, never the author. The author knows what
-they meant, so their own reading proves nothing. Hand the section to a
-reader who has not seen the rest of the doc; they must say what to do next.
-For repo changes, the review bot is that reader.
+The property: a section is clear when a reader who has not seen the rest of
+the doc can say what to do next.
 
-Lead with the answer: the section's first sentence states the fact or the
-instruction; the rationale follows.
+Write to that property:
 
-A section delivers one of five concrete things:
-- a command to run, or a file to edit or open
-- a rule ("Never X")
-- a value to set, or a name to use
-- an acceptance check
-- a link to the doc that answers the question
+- **Lead with the answer.** The first sentence states the fact or the
+  instruction; the rationale follows. Read the first sentence alone; it
+  must stand alone.
+- **Name the heading after the deliverable.** Read the heading without the
+  section; if you cannot tell what the section delivers, rename it.
+  "Overview", "Details", "Misc" name nothing.
+- **State one idea per sentence.** Split sentences at "and", "but", and
+  em-dashes. Two actions joined by "and" are two sentences.
+- **Define terms at first use, or drop them.** A term the reader cannot
+  explain in one plain clause is jargon here.
+- **Use concrete nouns and verbs.** Say what the artifact does: "blocks
+  writes while the lock is held". Do not write what something "is about",
+  "aims for", or "enables".
+- **Cut words, then cut more.** Fifteen plain words that say what thirty
+  did are the better sentence.
 
-A section that delivers none of these has no answer. Rewrite it.
+A section answers one question, delivering one of: a command to run, a file
+to edit or open, a rule ("Never X"), a value to set or a name to use, an
+acceptance check, or a link to the doc that answers it. A section that
+delivers none of these has no answer; rewrite it.
 
-The review bot checks these, mechanically:
-- No sentence over 30 words. Split at "and", "but", and em-dashes.
-- No "there is" or "there are" sentence openers.
-- No weasel words: enable, leverage, robust, seamless, transparent,
+Rules to state simply:
+- No sentence over 30 words.
+- No sentence starts with "There is" or "There are".
+- Do not use weasel words: enable, leverage, robust, seamless, transparent,
   "is about", "aims to".
-- Tool and domain terms — finding, seam, stamp, directive, baseline, action,
-  family — carry a plain gloss at first use, or never appear.
-
-These checks catch the common failure: prose that reads fine to its author
-and says nothing to its reader. They are the floor, not the bar: a section
-that passes them still needs the second-reader test.
+- Gloss tool and domain terms (finding, seam, stamp, directive, baseline,
+  action, family) in plain words at first use, or do not use them.
 
 Canonical pair:
 
@@ -195,7 +200,7 @@ file and restart the service."
 - [ ] Commands replace descriptions where executable
 - [ ] Tables replace paragraphs where fields are consistent
 - [ ] Code shows a canonical ✗/✓ pair, not exhaustive cases
-- [ ] A second reader, not the author, can state what the section delivers
+- [ ] A reader who has not seen the rest of the doc can state what the section delivers
 - [ ] Section delivers one of: command, file, rule, value, check, link
 - [ ] No sentence over 30 words; no "there is/are" openers
 - [ ] Tool and domain terms glossed at first use (finding, seam, stamp, directive, baseline, action, family)
