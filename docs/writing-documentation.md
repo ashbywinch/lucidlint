@@ -146,23 +146,31 @@ costs time and can cause the wrong action.
 
 Write each section so it follows these rules:
 
-- **Put the main point first.** The first sentence of a section states the
-  fact or the instruction. The reasons follow it.
-- **Name the heading after what the section gives the reader.** "Overview",
-  "Details", "Misc" say nothing.
-- **State one idea per sentence.** A sentence with two actions is two
-  sentences. Split it.
-- **Use the active voice.** "The process writes the file", not "the file is
-  written by the process".
-- **Name the subject.** The sentence names the tool, file, or command it is
-  about. Do not say "the artifact", "the system", "this".
+- **State each rule as an instruction.** Write the rule as "put X", "name
+  X", "write X", "do not X". When a rule sentence describes what a document
+  or sentence does, rewrite it as a command.
+- **Put the main point first.** Write the fact or the instruction in the
+  first sentence. Write the reasons after it.
+- **Name the heading after what the section gives the reader.** Do not use
+  "Overview", "Details", or "Misc".
+- **Write one idea per sentence.** When two actions share a sentence, split
+  it into two sentences.
+- **Use the active voice.** Write "The process writes the file", not "the
+  file is written by the process".
+- **Name the subject.** Write the name of the tool, file, or command the
+  sentence is about. Do not write "the artifact", "the system", "this".
 - **Define terms at first use.** Explain each term in plain words where it
   first appears. Use one name for one thing throughout.
-- **Use concrete words.** Name the object and the action: "the service
-  blocks writes", not "write protection is enabled".
-- **Use the simplest word.** "Start" not "initiate"; "end" not "terminate".
-- **Cut words that add no information.** "In order to" is "to"; "at this
-  point in time" is "now".
+- **Use concrete words.** Name the object and the action: write "the
+  service blocks writes", not "write protection is enabled".
+- **Use the simplest word.** Write "start" not "initiate"; write "end" not
+  "terminate".
+- **Cut words that add no information.** Write "to" not "in order to";
+  write "now" not "at this point in time".
+- Write each section so it gives the reader one of: a command to run, a
+  file to edit or open, a rule ("Never X"), a value to set or a name to
+  use, an acceptance check, or a link to the doc that answers the question.
+  When a section gives the reader none of these, rewrite it.
 
 Also:
 - Keep sentences under 30 words.
@@ -171,22 +179,11 @@ Also:
 - Define tool terms (finding, seam, stamp, directive, baseline, action,
   family) in plain words at first use.
 
-A section delivers one of:
-- a command to run, or a file to edit or open
-- a rule ("Never X")
-- a value to set, or a name to use
-- an acceptance check
-- a link to the doc that answers the question
-
-A section that delivers none of these has no answer.
-
 Canonical pair:
 
-✗ "Documentation should be clear and comprehensive so that all stakeholders
-can leverage the full capabilities of the system effectively."
+✗ A sentence names the tool, file, or command it is about.
 
-✓ "The cache reads `cache.toml` at startup. To change a limit, edit that
-file and restart the service."
+✓ Write the name of the tool, file, or command the sentence is about.
 
 ## The documentation-quality checklist
 
@@ -202,6 +199,7 @@ file and restart the service."
 - [ ] Commands replace descriptions where executable
 - [ ] Tables replace paragraphs where fields are consistent
 - [ ] Code shows a canonical ✗/✓ pair, not exhaustive cases
+- [ ] Every rule is an instruction to the writer, not a description of the writing
 - [ ] The section's first sentence states the answer
 - [ ] The heading names what the section gives the reader
 - [ ] Each sentence says one thing, in the active voice
