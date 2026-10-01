@@ -300,10 +300,13 @@ rather than a number.
   accumulator the enclosing function returns (`issues.append(...)`) rides
   the error out in the result and is not a swallow. The fail-fast
   rule is distinct from broad-except linting (ruff BLE001 owns that;
-  this tool only adds the house rule). Module-level state includes typed
-  `AnnAssign` literals and collections mutated inside functions, not
-  just non-constant `Assign` literals (negative literals like `-4.0` are
-  still constants — the UnaryOp wrapper is not state). A dict spread
+  this tool only adds the house rule). Module-level state is ANY assignment
+  at module scope — bare, annotated (`AnnAssign`), or augmented — because a
+  value bound at import time is a class's private internals wherever it
+  sits, tables of literals included (2026-09-30: the container exemptions
+  were dropped, so a lookup table is state too). Dunder names (`__all__`,
+  `__version__`) and call-valued registrations are exempt — module protocol
+  metadata and framework wiring, not domain values. A dict spread
   merge (`{**session, "x": v}`) updates an existing shape and is not a
   record being built; `__init__` bodies are excluded from the
   near-duplicate scan (init boilerplate is convention, not copy-paste).
