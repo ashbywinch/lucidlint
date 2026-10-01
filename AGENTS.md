@@ -42,6 +42,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | Testing standards | `docs/testing-standards.md` |
 | UX standards | `docs/ux-standards.md` |
 | What good documentation is | `docs/writing-documentation.md` |
+| Writing finding messages (the message standard) | `docs/writing-messages.md` |
 | Required doc set and folder structure | `docs/documentation-structure.md` |
 | What each tool does | `README.md` (below) |
 
