@@ -141,36 +141,45 @@ fact and decision.
   (must / never), acceptance (verifiable command).
 ## Clarity
 
-Why it matters: a doc is read right before the reader acts on it — a human
-implementing a change, an agent about to run a command. A sentence that
-needs a second reading costs a working token and delays the action.
+Why it matters: a doc is read right before the reader acts on it. A sentence
+that needs a second reading costs a working token and delays the action.
 
-The test: read a section once, then state what it delivers. If you cannot,
-rewrite the section.
+The test runs on a second reader, never the author. The author knows what
+they meant, so their own reading proves nothing. Hand the section to a
+reader who has not seen the rest of the doc; they must say what to do next.
+For repo changes, the review bot is that reader.
 
-- **Answer first, reason after.** Lead each section with the fact or the
-  instruction the reader came for; put the rationale below it. A section
-  whose first sentence survives alone has an answer.
-- **Define every term at first use, or drop it.** A word the reader cannot
-  gloss in one plain clause is jargon here.
-- **One idea per sentence.** If a sentence needs a second reading, split it.
-  Two actions joined by "and" are two sentences.
-- **Concrete nouns and verbs.** State what the artifact does ("blocks writes
-  while the lock is held"). Do not write what something "is about", "aims
-  for", or "enables". A heading names the section's deliverable; a slogan
-  is not a name.
-- **Cut words, then cut more.** Fifteen plain words that say what thirty did
-  are the better sentence. Concise means less to read, not faster to
-  misread.
+Lead with the answer: the section's first sentence states the fact or the
+instruction; the rationale follows.
+
+A section delivers one of five concrete things:
+- a command to run, or a file to edit or open
+- a rule ("Never X")
+- a value to set, or a name to use
+- an acceptance check
+- a link to the doc that answers the question
+
+A section that delivers none of these has no answer. Rewrite it.
+
+The review bot checks these, mechanically:
+- No sentence over 30 words. Split at "and", "but", and em-dashes.
+- No "there is" or "there are" sentence openers.
+- No weasel words: enable, leverage, robust, seamless, transparent,
+  "is about", "aims to".
+- Tool and domain terms — finding, seam, stamp, directive, baseline, action,
+  family — carry a plain gloss at first use, or never appear.
+
+These checks catch the common failure: prose that reads fine to its author
+and says nothing to its reader. They are the floor, not the bar: a section
+that passes them still needs the second-reader test.
 
 Canonical pair:
 
 ✗ "Documentation should be clear and comprehensive so that all stakeholders
 can leverage the full capabilities of the system effectively."
 
-✓ "Section test: read a section once, then state what it delivers. If you
-cannot, the section needs rewriting; if the answer is two facts, the section
-needs splitting."
+✓ "The cache reads `cache.toml` at startup. To change a limit, edit that
+file and restart the service."
 
 ## The documentation-quality checklist
 
@@ -186,7 +195,8 @@ needs splitting."
 - [ ] Commands replace descriptions where executable
 - [ ] Tables replace paragraphs where fields are consistent
 - [ ] Code shows a canonical ✗/✓ pair, not exhaustive cases
-- [ ] Every term is defined at first use (or not used)
-- [ ] Each section's first sentence carries its answer; the reason follows
-- [ ] One-pass test: after one read, you can state what the section delivers
+- [ ] A second reader, not the author, can state what the section delivers
+- [ ] Section delivers one of: command, file, rule, value, check, link
+- [ ] No sentence over 30 words; no "there is/are" openers
+- [ ] Tool and domain terms glossed at first use (finding, seam, stamp, directive, baseline, action, family)
 - [ ] Always-loaded files within the ~150–200 line ceiling
