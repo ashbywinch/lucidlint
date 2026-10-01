@@ -113,6 +113,45 @@ Replace:
 - Each replacement ships test-first: a fixture whose expected message
   asserts the new text (TDD rule).
 
+### A7. Full message audit
+
+Verdicts over the complete emitted message set (57 families), against the
+Message Standard. Families whose messages already state a verifiable reason
+and end with the action need no change; the audit names the exceptions.
+
+Complies as-is (42): assembly-class, boolean-arg, broad-except,
+builtin-shadow, closure-cluster, conditional-polymorphism, debug-artifact,
+delegating-husk, detached-method, docs-undiscoverable, duplicate,
+duplicate-def, duplicate-field, fakefs, feature-envy, forwarding-chain,
+god-class, guard-clauses, inline-import, latent-visitor, middle-man,
+misplaced-method, monkeypatch, noqa, noop-statement, over-abstraction,
+positional-literals, private-import, process-class, restating-docstring,
+skipif, special-case, static-husk, strewing, swallow, tuple-record,
+type-ignore, undeclared-attribute, unreachable, unused-setter, vague-name,
+wide-tuple.
+
+Needs rewrite (10 families):
+
+| Family | Change |
+|---|---|
+| long-param-list | "{n} parameters — the call site cannot see what each value means, and the group has no name. Introduce one parameter object named with a domain noun." |
+| partition | Append the action: "Split it into {count} classes." |
+| class-module | "A class file is found by the class's name; a mismatched name hides the class from readers and importers. Rename the file to {}.py (exception: closely related models)." |
+| no-assert-test | "It can never fail, so it proves nothing. Add an assertion or delete the test." |
+| docs-link | "A link that leads nowhere misleads the reader. Fix the target or remove the link." |
+| record-shape (return) | "f returns a dict that holds the fields of a record; the shape has no name at the call site. Type the return with the class that models the shape; create that class if none exists." |
+| record-shape (param) | A1 text |
+| record-shape (dict literal) | A2 text |
+| data-clump | A3 text |
+| global-state | A4 text |
+| duplicate-block | C1 text |
+| duplicate-module | C2 text |
+| magic-number | A5 text |
+
+Report-level, fixed in section B (not message rewrites): loop-pipeline
+renders "(self)" or an empty state name (B7); bulk-suppression points at an
+arbitrary file (B6).
+
 ## B. Report mechanics — render defects
 
 Fix these first; all are small.
