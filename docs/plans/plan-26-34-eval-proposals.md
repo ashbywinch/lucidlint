@@ -134,9 +134,9 @@ Needs rewrite (10 families):
 
 | Family | Change |
 |---|---|
-| long-param-list | "{n} parameters — the call site cannot see what each value means, and the group has no name. Introduce one parameter object named with a domain noun." |
+| long-param-list | "{n} parameters — the call site cannot see what each value means, and no name says what they are together. Group the parameters that belong together into one object named with a domain noun." |
 | partition | Append the action: "Split it into {count} classes." |
-| class-module | "A class file is found by the class's name; a mismatched name hides the class from readers and importers. Rename the file to {}.py (exception: closely related models)." |
+| class-module | "module '{rel}' holds one class '{}' — readers browse the codebase by file structure, and a differently named file hides the class from that walk. Rename the file to {}.py (exception: closely related models)." |
 | no-assert-test | "It can never fail, so it proves nothing. Add an assertion or delete the test." |
 | docs-link | "A link that leads nowhere misleads the reader. Fix the target or remove the link." |
 | record-shape (return) | "f returns a dict that holds the fields of a record; the shape has no name at the call site. Type the return with the class that models the shape; create that class if none exists." |
