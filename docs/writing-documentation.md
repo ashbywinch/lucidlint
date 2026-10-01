@@ -141,42 +141,44 @@ fact and decision.
   (must / never), acceptance (verifiable command).
 ## Clarity rules
 
-Why: a doc is read right before the reader acts on it. A sentence that needs
-a second reading costs a working token and delays the action.
+Why: readers use a doc right before acting. A sentence they must re-read
+costs time and can cause the wrong action.
 
-The property: a section is clear when a reader who has not seen the rest of
-the doc can say what to do next.
+Write each section so it follows these rules:
 
-Write to that property:
+- **Put the main point first.** The first sentence of a section states the
+  fact or the instruction. The reasons follow it.
+- **Name the heading after what the section gives the reader.** "Overview",
+  "Details", "Misc" say nothing.
+- **State one idea per sentence.** A sentence with two actions is two
+  sentences. Split it.
+- **Use the active voice.** "The process writes the file", not "the file is
+  written by the process".
+- **Name the subject.** The sentence names the tool, file, or command it is
+  about. Do not say "the artifact", "the system", "this".
+- **Define terms at first use.** Explain each term in plain words where it
+  first appears. Use one name for one thing throughout.
+- **Use concrete words.** Name the object and the action: "the service
+  blocks writes", not "write protection is enabled".
+- **Use the simplest word.** "Start" not "initiate"; "end" not "terminate".
+- **Cut words that add no information.** "In order to" is "to"; "at this
+  point in time" is "now".
 
-- **Lead with the answer.** The first sentence states the fact or the
-  instruction; the rationale follows. Read the first sentence alone; it
-  must stand alone.
-- **Name the heading after the deliverable.** Read the heading without the
-  section; if you cannot tell what the section delivers, rename it.
-  "Overview", "Details", "Misc" name nothing.
-- **State one idea per sentence.** Split sentences at "and", "but", and
-  em-dashes. Two actions joined by "and" are two sentences.
-- **Define terms at first use, or drop them.** A term the reader cannot
-  explain in one plain clause is jargon here.
-- **Use concrete nouns and verbs.** Say what the artifact does: "blocks
-  writes while the lock is held". Do not write what something "is about",
-  "aims for", or "enables".
-- **Cut words, then cut more.** Fifteen plain words that say what thirty
-  did are the better sentence.
+Also:
+- Keep sentences under 30 words.
+- Do not start a sentence with "There is" or "There are".
+- Do not use weasel words: enable, leverage, robust, seamless, transparent.
+- Define tool terms (finding, seam, stamp, directive, baseline, action,
+  family) in plain words at first use.
 
-A section answers one question, delivering one of: a command to run, a file
-to edit or open, a rule ("Never X"), a value to set or a name to use, an
-acceptance check, or a link to the doc that answers it. A section that
-delivers none of these has no answer; rewrite it.
+A section delivers one of:
+- a command to run, or a file to edit or open
+- a rule ("Never X")
+- a value to set, or a name to use
+- an acceptance check
+- a link to the doc that answers the question
 
-Rules to state simply:
-- No sentence over 30 words.
-- No sentence starts with "There is" or "There are".
-- Do not use weasel words: enable, leverage, robust, seamless, transparent,
-  "is about", "aims to".
-- Gloss tool and domain terms (finding, seam, stamp, directive, baseline,
-  action, family) in plain words at first use, or do not use them.
+A section that delivers none of these has no answer.
 
 Canonical pair:
 
@@ -200,8 +202,9 @@ file and restart the service."
 - [ ] Commands replace descriptions where executable
 - [ ] Tables replace paragraphs where fields are consistent
 - [ ] Code shows a canonical ✗/✓ pair, not exhaustive cases
-- [ ] A reader who has not seen the rest of the doc can state what the section delivers
-- [ ] Section delivers one of: command, file, rule, value, check, link
-- [ ] No sentence over 30 words; no "there is/are" openers
-- [ ] Tool and domain terms glossed at first use (finding, seam, stamp, directive, baseline, action, family)
+- [ ] The section's first sentence states the answer
+- [ ] The heading names what the section gives the reader
+- [ ] Each sentence says one thing, in the active voice
+- [ ] Every term is defined in plain words at first use
+- [ ] No sentence over 30 words; no "there is/are"; no weasel words
 - [ ] Always-loaded files within the ~150–200 line ceiling
