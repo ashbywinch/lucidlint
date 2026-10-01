@@ -144,46 +144,57 @@ fact and decision.
 Why: readers use a doc right before acting. A sentence they must re-read
 costs time and can cause the wrong action.
 
-Write each section so it follows these rules:
+Write each sentence as one of two kinds:
 
-- **State each rule as an instruction.** Write the rule as "put X", "name
-  X", "write X", "do not X". When a rule sentence describes what a document
-  or sentence does, rewrite it as a command.
+- **Write facts about the system. Write commands about the reader's
+  actions.** Write "the cache reads `cache.toml` at startup" as a fact.
+  Write "edit that file, then restart the service" as a command. Do not mix
+  a fact and a command in one sentence.
+- **Write instructions with the same rules as facts.** Name the subject,
+  use the active voice, write one idea per sentence, use simple words.
+
+Write each section by these rules:
+
+- **Write each rule as a command.** Write "put X", "name X", "write X",
+  "do not X". When you write a rule sentence that describes a document or
+  its sentences, rewrite it as a command.
 - **Put the main point first.** Write the fact or the instruction in the
   first sentence. Write the reasons after it.
 - **Name the heading after what the section gives the reader.** Do not use
-  "Overview", "Details", or "Misc".
+  "Overview", "Details", or "Misc": they do not say what the section holds.
 - **Write one idea per sentence.** When two actions share a sentence, split
   it into two sentences.
-- **Use the active voice.** Write "The process writes the file", not "the
-  file is written by the process".
-- **Name the subject.** Write the name of the tool, file, or command the
-  sentence is about. Do not write "the artifact", "the system", "this".
+- **Write in the active voice.** Write "the process writes the file", not
+  "the file is written by the process".
+- **Write the subject's name in the sentence.** Write the name of the thing
+  the sentence is about before you say anything else about it. Write "the
+  cache reads `cache.toml`", not "it reads `cache.toml`". Do not write
+  "the artifact", "the system", "this".
 - **Define terms at first use.** Explain each term in plain words where it
   first appears. Use one name for one thing throughout.
-- **Use concrete words.** Name the object and the action: write "the
-  service blocks writes", not "write protection is enabled".
+- **Use concrete words.** Write "the lock blocks the write", not "write
+  protection is enabled".
 - **Use the simplest word.** Write "start" not "initiate"; write "end" not
   "terminate".
 - **Cut words that add no information.** Write "to" not "in order to";
   write "now" not "at this point in time".
-- Write each section so it gives the reader one of: a command to run, a
-  file to edit or open, a rule ("Never X"), a value to set or a name to
-  use, an acceptance check, or a link to the doc that answers the question.
-  When a section gives the reader none of these, rewrite it.
-
-Also:
 - Keep sentences under 30 words.
 - Do not start a sentence with "There is" or "There are".
 - Do not use weasel words: enable, leverage, robust, seamless, transparent.
 - Define tool terms (finding, seam, stamp, directive, baseline, action,
   family) in plain words at first use.
 
+Write each section so it gives the reader one of: a command to run, a file
+to edit or open, a rule ("Never X"), a value to set or a name to use, an
+acceptance check, or a link to the doc that answers the question. When a
+section gives the reader none of these, rewrite it.
+
 Canonical pair:
 
-✗ A sentence names the tool, file, or command it is about.
+✗ "The service blocks writes."
 
-✓ Write the name of the tool, file, or command the sentence is about.
+✓ "The scheduler blocks writes at 23:00. To flush old entries, run `cache
+gc`."
 
 ## The documentation-quality checklist
 
@@ -199,7 +210,9 @@ Canonical pair:
 - [ ] Commands replace descriptions where executable
 - [ ] Tables replace paragraphs where fields are consistent
 - [ ] Code shows a canonical ✗/✓ pair, not exhaustive cases
-- [ ] Every rule is an instruction to the writer, not a description of the writing
+- [ ] Facts and instructions are separate: facts describe the system, commands tell the reader what to do
+- [ ] Every rule is written as a command ("put", "name", "write", "do not")
+- [ ] The subject's name appears in the sentence itself
 - [ ] The section's first sentence states the answer
 - [ ] The heading names what the section gives the reader
 - [ ] Each sentence says one thing, in the active voice
