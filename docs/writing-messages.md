@@ -17,6 +17,11 @@ applies to message text. This standard adds the rules specific to messages.
 - Name the referents. Write the file, the function, and the parameter the
   message is about, using the names at the cited location. Do not write
   "the service", "the function", or "the parameter" as stand-ins.
+- Pass every referent the message names as a named capture. Write {rel},
+  {function}, {param}, or {value} in the template for each value the
+  message names. Do not hard-code a value the finding already carries, and
+  do not write a demonstrative — "this", "that", "it" — where the named
+  capture fits.
 - Write "if" for a condition the reader tests; write "when" only for time.
 - Give every classification an action. When you write what a thing is,
   write what the reader does about it in the same place.
@@ -78,6 +83,7 @@ applies to message text. This standard adds the rules specific to messages.
 ## Checklist
 
 - [ ] The message names the file, function, and parameter it is about
+- [ ] Every varying referent is a named capture, never a hard-coded literal or a demonstrative
 - [ ] The mechanism of harm appears before the action
 - [ ] A reader can verify the mechanism at the cited line
 - [ ] The message ends with the command

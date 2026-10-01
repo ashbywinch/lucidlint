@@ -112,6 +112,8 @@ Replace:
 - The `— fix:` directive tail stays; prose changes only.
 - Each replacement ships test-first: a fixture whose expected message
   asserts the new text (TDD rule).
+- Every template uses named captures; no positional {}, no hard-coded
+  value the finding carries, no demonstrative where the capture fits.
 
 ### A7. Full message audit
 
