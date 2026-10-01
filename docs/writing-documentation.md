@@ -225,5 +225,7 @@ Canonical pairs:
 - [ ] The heading names what the section gives the reader
 - [ ] Each sentence says one thing, in the active voice
 - [ ] Every term is defined in plain words at first use
-- [ ] No sentence over 30 words; no "there is/are"; no weasel words
+- [ ] No sentence over 30 words
+- [ ] No sentence starts with "There is" or "There are"
+- [ ] No weasel words (enable, leverage, robust, seamless, transparent)
 - [ ] Always-loaded files within the ~150–200 line ceiling
