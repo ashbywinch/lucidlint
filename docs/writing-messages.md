@@ -35,10 +35,9 @@ applies to message text. This standard adds the rules specific to messages.
 - Separate the excluded case from the rule with a test that only the
   excluded case passes. A trait the rule and the exclusion share cannot
   mark the line.
-- Write the mechanism as the failure the shape causes. Name what the code
-  fails to say or check, in terms a reader verifies at the cited line, and
-  how the action fixes it. Do not write a cost the reader can accept:
-  effort is a price the reader may pay, error is not.
+- Write the reason as what the reader will understand. Say what the code
+  leaves unstated about the domain, and how the fix states it. The reader
+  uses this to judge a repo standard that contradicts the rule.
 
 ## Vocabulary
 
@@ -88,7 +87,7 @@ applies to message text. This standard adds the rules specific to messages.
 - [ ] Conditions use "if"; "when" is for time only
 - [ ] Every classification names the action for its case
 - [ ] The message asserts only what the detector knows
-- [ ] The mechanism names the failure the shape causes and is verifiable
+- [ ] The reason states what the code leaves unstated and how the fix states it
 - [ ] The prescribed action creates no other finding
 - [ ] No action leaves or approves duplicate code
 - [ ] Named values point at the owning class, never module scope
