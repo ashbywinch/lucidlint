@@ -146,12 +146,13 @@ costs time and can cause the wrong action.
 
 Write each sentence as one of two kinds:
 
-- **Write facts about the system. Write commands about the reader's
-  actions.** Write "the cache reads `cache.toml` at startup" as a fact.
-  Write "edit that file, then restart the service" as a command. Do not mix
-  a fact and a command in one sentence.
+- **Write facts about what the software does. Write commands about what the
+  reader does.** Write "`cache.py` reads `cache.toml` at startup" as a
+  fact. Write "edit that file, then run `cache gc`" as a command. Do not
+  mix a fact and a command in one sentence.
 - **Write instructions with the same rules as facts.** Use the active
-  voice, write one idea per sentence, name every noun, use simple words.
+  voice, write one idea per sentence, make every noun knowable, use simple
+  words.
 
 Write each section by these rules:
 
@@ -162,17 +163,17 @@ Write each section by these rules:
 - **Name the heading after what the section gives the reader.** Do not use
   "Overview", "Details", or "Misc": they do not say what the section holds.
 - **Write one idea per sentence.** Write each idea in its own sentence.
-- **Write in the active voice.** Write "the process writes the file", not
-  "the file is written by the process".
-- **Make every noun identifiable.** Write each noun so the reader knows the
-  exact thing it names. Write the name in the same sentence, or write the
-  name in the text immediately before it. Do not write "the service checks
-  the backups using the process" unless the preceding text already names
-  that service, those backups, and that process.
+- **Write in the active voice.** Write "`backup.py` writes `data.db`",
+  not "`data.db` is written by `backup.py`".
+- **Make every noun knowable.** Write each noun so the reader can tell,
+  with the context they already have, which thing it refers to. Name the
+  thing when the reader knows it. Define or describe it when they do not.
+  Link to the document that defines it when such a document exists. A name
+  alone is not enough when the reader cannot know what the name refers to.
 - **Define terms at first use.** Explain each term in plain words where it
   first appears. Use one name for one thing throughout.
-- **Use concrete words.** Write "the lock blocks the write", not "write
-  protection is enabled".
+- **Use concrete words.** Write "the `data.db` lock blocks the write",
+  not "write protection is enabled".
 - **Use the simplest word.** Write "start" not "initiate"; write "end" not
   "terminate".
 - **Cut words that add no information.** Write "to" not "in order to";
@@ -185,19 +186,19 @@ Write each section by these rules:
 
 Write each section so it gives the reader one of: a command to run, a file
 to edit or open, a rule ("Never X"), a value to set or a name to use, an
-acceptance check, or a link to the doc that answers the question.
+acceptance check, or a link to a document that answers the question.
 
 Canonical pairs:
 
 ✗ "The service blocks writes."
 
-✓ "The scheduler blocks writes at 23:00. To flush old entries, run `cache
-gc`."
+✓ "The `data.db` lock blocks writes at 23:00. To flush old entries, run
+`cache gc`."
 
-✗ "The service checks the backups using the process."
+✗ "The scheduler checks the backups using the copy process."
 
-✓ "The copy process backs up `data.db` each night. The scheduler checks
-the backups using it."
+✓ "`backup.py copy` starts at 23:00. It copies the day's `data.db` to
+`backups/` and verifies the copy's size against the original."
 
 ## The documentation-quality checklist
 
@@ -213,9 +214,9 @@ the backups using it."
 - [ ] Commands replace descriptions where executable
 - [ ] Tables replace paragraphs where fields are consistent
 - [ ] Code shows a canonical ✗/✓ pair, not exhaustive cases
-- [ ] Facts and instructions are separate: facts describe the system, commands tell the reader what to do
+- [ ] Facts and instructions are separate: facts describe the software, commands tell the reader what to do
 - [ ] Every rule is written as a command ("put", "name", "write", "do not")
-- [ ] Every noun has an identifiable referent, named in the sentence or in the text immediately before it
+- [ ] Every noun's referent is knowable to the reader: name it, define or describe it, or link to its definition
 - [ ] The section's first sentence states the answer
 - [ ] The heading names what the section gives the reader
 - [ ] Each sentence says one thing, in the active voice
