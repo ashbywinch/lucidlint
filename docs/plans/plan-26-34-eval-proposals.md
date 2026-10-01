@@ -55,13 +55,14 @@ a domain noun". Defect: no mechanism; reads as a class mandate for any dict.
 
 Replace:
 
-> Constant keys mean this dict is a record: the keys get rebuilt at every
-> build site, and each copy can drift apart. Make a class whose fields are
-> the keys. If the values are objects keyed by name — a dispatch table — it
-> is not a record; suppress with a why.
+> This dict has constant keys; the keys are fields of one record. Each build
+> site re-creates the keys, so the copies can drift apart. Make a class with
+> these fields and build it once. If the values select behavior (handlers,
+> nodes), keep the dict as a lookup table and suppress with a why.
 
-The dispatch escape is the rule's own: a name-keyed table of objects is not
-data in a fixed shape.
+The exclusion separates the cases by a test only the excluded case passes:
+values that select behavior are a lookup, values that are fields are a
+record.
 
 ### A3. data-clump
 
@@ -71,10 +72,10 @@ mechanism.
 
 Replace:
 
-> These functions each take the same parameter pair — the pair is one type
-> that travels together. Threaded individually, a signature change in the
-> pair propagates to every caller, and the pair has no name for shared work
-> to hang on. Make one class per pair, named with a domain noun.
+> These functions pass the same pair, (folder, fingerprint), together. The pair
+> is one thing in the domain, and passing it as two parameters never says what
+> that thing is. Make a class whose name states that thing, and pass one
+> instance.
 
 ### A4. global-state — no configuration exemption
 
@@ -94,7 +95,19 @@ registrations):
 > without monkeypatching the module, and it binds at import time. Find the
 > class this value serves and make it that class's attribute.
 
-### A5. Rewrite constraints
+### A5. magic-number
+
+Current: "magic number 5 — a bare literal in a computation; replace it with
+a named constant". Defect: the remedy points at module scope, where a
+module-level name is itself a global-state finding.
+
+Replace:
+
+> `5` appears bare in `walk_time`; its meaning is not stated where it is
+> used. Give it a name on the class that owns this computation, and write
+> that name in its place.
+
+### A6. Rewrite constraints
 
 - The `— fix:` directive tail stays; prose changes only.
 - Each replacement ships test-first: a fixture whose expected message
@@ -129,8 +142,8 @@ instruction:
 
 > If one block is a paste copy of the other, delete it. If these are
 > intentional twins (parallel branches), the duplication is still the finding
-> — extract the shared part. A twin that can diverge is a fork; a twin that
-> cannot is a paste.
+> — extract the shared part. If a twin can diverge, it is a fork; if it
+> cannot, it is a paste.
 
 ### C2. duplicate-module
 
@@ -140,9 +153,10 @@ the values are 4 vs 12, and the classes inherit one base.
 
 Replace for base-class pairs:
 
-> Two subclasses of one base with identical shape — constants are the only
-> difference. If they are config-variants, the split is correct; if they were
-> meant to differ, one is missing its override.
+> Two subclasses of one base have identical shape; only their constants
+> differ. If they are config-variants, move the constants into the base and
+> delete the duplicate subclasses. If they were meant to differ, one is
+> missing its override.
 
 ## D. The evaluation as a regression test
 

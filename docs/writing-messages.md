@@ -17,6 +17,11 @@ applies to message text. This standard adds the rules specific to messages.
 - Name the referents. Write the file, the function, and the parameter the
   message is about, using the names at the cited location. Do not write
   "the service", "the function", or "the parameter" as stand-ins.
+- Write "if" for a condition the reader tests; write "when" only for time.
+- Give every classification an action. When you write what a thing is,
+  write what the reader does about it in the same place.
+- State only what the detector knows. Do not name a class or a method the
+  tool has not resolved.
 
 ## Reasoning — the reader can check the message
 
@@ -27,6 +32,12 @@ applies to message text. This standard adds the rules specific to messages.
   violation when the rule defines it. Never invent an exemption in a
   message: an exemption the rule does not state is a courtesy the message
   has no authority to give.
+- Separate the excluded case from the rule with a test that only the
+  excluded case passes. A trait the rule and the exclusion share cannot
+  mark the line.
+- Write the understanding cost as the mechanism. Name what the code fails
+  to say about the domain; the maintenance cost alone does not motivate
+  the reader.
 
 ## Vocabulary
 
@@ -54,6 +65,10 @@ applies to message text. This standard adds the rules specific to messages.
   write the distinction that tells the cases apart.
 - Do not write a single action when a sibling case breaks under it. Write
   the decision the reader must make with the actions it leads to.
+- Never approve duplicate code. If the shape is a duplicate, write the
+  action that removes the duplication.
+- Do not direct the reader to a module-level constant. Name the value on
+  the class that owns the computation.
 
 ## Checklist
 
@@ -64,3 +79,9 @@ applies to message text. This standard adds the rules specific to messages.
 - [ ] No report-level word is used as an instruction
 - [ ] Every sentence is under 30 words
 - [ ] No exemption the rule does not state
+- [ ] Conditions use "if"; "when" is for time only
+- [ ] Every classification names the action for its case
+- [ ] The message asserts only what the detector knows
+- [ ] The mechanism names the understanding cost
+- [ ] No action leaves or approves duplicate code
+- [ ] Named values point at the owning class, never module scope
