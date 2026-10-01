@@ -102,10 +102,11 @@ into or mutates a name the enclosing function returns (accumulator
 pattern) as surfacing too. `_noop_statement_findings` flags expression
 statements that discard their value (non-Call/Constant/Await/Yield/Lambda/
 NamedExpr). `is_constant_value` treats UnaryOp constants (`-4.0`, `+1`) as
-literals, and a lookup table of such values is a constant. `_kind_counts` renders the per-kind
+literals, so a lookup table of such values reads as constant to the
+magic-number and record checks — a separate question from the module-state
+rule, which flags the table's NAME binding. `_kind_counts` renders the per-kind
 roll-up line. In check_records, `record_literal_lines` skips dicts with
-spread keys (`**` — None-key on 3.14, DictUnpack on 3.5-3.13), and
-`_is_constant_value` handles UnaryOp constants. `ReferenceScan` splits `prod_references` vs
+spread keys (`**` — None-key on 3.14, DictUnpack on 3.5-3.13). `ReferenceScan` splits `prod_references` vs
 `test_references`: decorated module functions are registered by their
 decorator, and a function referenced only from tests is a conditional
 test-seam finding. `global_state_findings` is the one module-state walker: a

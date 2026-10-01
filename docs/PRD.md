@@ -304,7 +304,11 @@ rather than a number.
   at module scope — bare, annotated (`AnnAssign`), or augmented — because a
   value bound at import time is a class's private internals wherever it
   sits, tables of literals included (2026-09-30: the container exemptions
-  were dropped, so a lookup table is state too). Dunder names (`__all__`,
+  were dropped, so a lookup table is state too). This is about WHERE the
+  name lives, not what the value is: R13's "constant lookup tables stay
+  anonymous" exempts the table from becoming a record class; the module-state
+  rule still moves that table onto the class that owns it as a class
+  attribute. Dunder names (`__all__`,
   `__version__`) and call-valued registrations are exempt — module protocol
   metadata and framework wiring, not domain values. A dict spread
   merge (`{**session, "x": v}`) updates an existing shape and is not a
