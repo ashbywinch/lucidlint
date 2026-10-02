@@ -69,6 +69,10 @@ applies to message text. This standard adds the rules specific to messages.
 - Do not write line numbers or fix commands into the prose. The tool owns
   coordinates; the fix command is structured data, appended as the
   directive tail (R27).
+- Do not put suppression instructions in the message — "lucidlint:
+  ignore", "suppress with", "mark the finding". The report appends the
+  suppression pointer after the message at render time. A message states
+  what to do with the code; silencing the finding is the renderer's job.
 - Do not label a fix mechanical when the shape requires judgment. When the
   shape's cases call for different actions, write each case's action, or
   write the distinction that tells the cases apart.

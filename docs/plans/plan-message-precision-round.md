@@ -287,15 +287,14 @@ Residual defects:
    a grouping decision, not a mechanical fact. The stamp must distinguish
    "needs a name" from "involves a decision": give the split-module
    fix record a judgement marker so the stamp renders JUDGEMENT.
-6. unused advice order: the renderer prepends "suppress with: <signal>"
-   to every finding line, including families whose messages already
-   carry their own suppression wording (unused: "document it with
-   `# lucidlint: ignore unused <why>`"; swallow and broad-except the
-   same). The generic prefix buries the operative action. The renderer
-   skips the prefix when the message already contains the suppression
-   directive; the line then leads with the action — the deletion branch
-   at dead sites, the document branch at seam sites — while families
-   without message-suppression keep the prefix.
+6. unused advice order: the suppression pointer is renderer data, and
+   several messages embed their own ("document it with `# lucidlint:
+   ignore unused <why>`", swallow's "mark `# lucidlint: ignore swallow`",
+   record-shape's "suppress with a why"). The duplication buries the
+   action. Two corrections: the messages lose all suppression wording
+   (they state mechanism and action only), and the renderer appends
+   "suppress with: <signal>" AFTER the message, so the action leads and
+   the pointer appears exactly once.
 7. Report arithmetic: the ledger line still leaves the fail/warning/
    suppressed totals unreconciled; the reconciliation must sum them.
 8. Ordering epsilons: a bare tiny float in a comparison (scheduler
