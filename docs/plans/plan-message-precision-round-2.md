@@ -78,8 +78,12 @@ round-8 proposer reports no def-above marker gap.
 Actions:
 
 1. A duration suggestion names a concrete unit only when the unit is
-   explicit in the comment ("# one day"); name-derived tokens alone are
-   never certain enough for the example.
+   explicit in the comment ("# one day"). Name-derived tokens never
+   supply the example, for two reasons: the name-certain cases are
+   already exempt (a literal whose own target names the unit never
+   reaches the suggestion), and the remaining name-derived tokens come
+   from the surrounding context, which has misfired on the same value
+   in three consecutive rounds.
 2. Otherwise the action is "express it as a timedelta in its unit".
 3. Fixtures: `# one day` comment renders timedelta(days=1); the
    name-only 86400 renders "in its unit"; timedelta(minutes=86400)
