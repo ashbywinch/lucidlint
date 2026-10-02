@@ -134,10 +134,18 @@ Acceptance: round-8 proposer sees why acknowledged debt re-reports.
 
 Actions:
 
-1. loop-pipeline emits only when the loop builds a NEW collection; a
-   loop that mutates a pre-existing dict or list emits nothing.
-2. Fixtures: the settings_payload shape (mutating an existing dict)
-   emits nothing; the eval_context pure-build shape still fires.
+1. The loop gate's body-shape check cannot tell a build from a
+   mutation — it sees the write, not the target's provenance. Add the
+   binding check: the target collection must have no binding before the
+   loop in the enclosing scope — not a parameter, not a name bound
+   earlier in the function, not a module name bound before the function
+   — except a target created empty (`= {}`, `= []`) in the statement
+   immediately before the loop, which is still this loop's own build.
+   Anything else emits nothing.
+2. Fixtures: the settings_payload shape (a parameter or earlier-bound
+   dict mutated in the loop) emits nothing; the eval_context pure-build
+   shape still fires; the empty-created-immediately-before shape still
+   fires.
 
 Acceptance: round-8 proposer reports no mutation-loop misfire.
 
