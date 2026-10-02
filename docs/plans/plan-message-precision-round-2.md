@@ -99,14 +99,16 @@ Acceptance: round-8 proposer finds no implausible-duration suggestion.
 
 Actions:
 
-1. The "highest change-cost" line and its legend sentence leave the
-   report. The ranking has produced no accepted guidance in seven
-   rounds — every accepted change came from the finding's message, not
-   the rank — and the displayed percentile reads as urgency every
-   round. The internal sort stays as it is; nothing has objected to the
-   ordering, only to its display.
-2. Fixtures: the header renders no change-cost line and no "priority =
-   percentile" legend; the per-item lines carry no RISK tags.
+1. The percentile, the "highest change-cost" label, and the legend
+   leave the report; the composite was the misleading part. The raw
+   metrics stay, rendered as facts: a finding with CC >= 15, or >= 10
+   changes in the history, or >= 10 callers gets one extra line naming
+   exactly the facts it meets — "This function is complex (17 decision
+   points) and changed often (14 changes)" — with a clause per fact,
+   never a percentile, never "risk".
+2. Fixtures: the CC-17 high-churn finding renders the facts line; a
+   CC-4 never-changed finding renders none; no report line contains
+   "risk", "RISK", or "change-cost".
 
 Acceptance: round-8 proposer does not read the line as urgency.
 
