@@ -65,16 +65,20 @@ Set `SCRATCH=${TMPDIR:-/tmp}/lucidlint-eval` and `mkdir -p "$SCRATCH"`.
    > the tool suggests, grounded in the actual code at the cited file:line.
    > Read the cited code when you need to judge. If you would act, describe
    > the concrete change: the shape of the new code, the names, the
-   > structure. If you would not, say so and give your reason.
+   > structure. If you would make a change but not exactly the one the tool
+   > proposes, write CHANGE-DIFFERS: the tool's fix, what you would do
+   > instead, and why. If you would not make a change, say so and give
+   > your reason.
    >
    > Elaborate on anything you find confusing: any wording, metric,
    > priority, suggested fix, or expectation you do not understand. Quote
    > it, say what you think it means, and say where you lose it.
    >
    > Output: CHANGE <file>:<line> (<kind>): what you would do and why.
-   > KEEP <file>:<line> (<kind>): why you would leave it. CONFUSING: a
-   > bullet list. End with one paragraph on how much of the report you
-   > would act on.
+   > CHANGE-DIFFERS <file>:<line> (<kind>): the tool's fix, your fix, and
+   > why yours differs. KEEP <file>:<line> (<kind>): why you would leave
+   > it. CONFUSING: a bullet list. End with one paragraph on how much of
+   > the report you would act on.
    >
    > Acceptance: every distinct finding or group is in CHANGE or KEEP (fold
    > near-identical items, naming each file:line); no files modified.
@@ -95,34 +99,41 @@ Set `SCRATCH=${TMPDIR:-/tmp}/lucidlint-eval` and `mkdir -p "$SCRATCH"`.
 
 5. **Harvest the signals.** From the two proposals and critiques, record:
    - the action rate: items the proposer would change, over items reported;
+   - the differs count: CHANGE-DIFFERS items per family — a message whose
+     prescribed action the agent replaced is a message defect, not a repo
+     defect;
    - the verdict tally: STRONG / GOOD / WEAK / REJECT per repo;
    - the CONFUSING list, verbatim: it names report defects (rendering,
      metrics, wording) the author never sees;
    - the deference signal: whether any critic overturned a proposer's KEEP
-     or questioned a repo convention the proposer deferred to. A proposer
-     keeping sixty record-shape sites because "the repo documents it",
-     with the critic agreeing, is the signal that the message's reasoning
-     did not reach the reader.
+     or questioned a repo convention the proposer deferred to.
 
 6. **Save the artifacts** beside the reports: `<name>-proposal.md` and
    `<name>-critique.md` in `$SCRATCH`.
+
+## Reading the signals
+
+Each signal explains itself and names the change it triggers. A careful
+designer's verdicts are the ground truth; the proposer's behaviour is the
+measure; the report text is what you fix.
+
+| Signal | What it means | Change it triggers |
+|---|---|---|
+| CHANGE-DIFFERS: the proposer became the tool's fix for something else | The message's mechanism and action disagree: the reading is right, the prescription is wrong. In the round, duplicate-block's "delete the second copy" was right that the blocks are duplicated and wrong that deleting fixes it — the twins were load-bearing branches | Rework that family's message: write the decision rule (paste vs twin) instead of the single action |
+| CONFUSING list grows | The report text misleads its reader: an entry names an artifact the reader cannot parse — an empty seam list, a lost octal, an unreconciled count | Fix the renderer or header artifact that the entry names |
+| A critic overturns a proposer's KEEP | The proposer over-deferred: code the expert would change was kept as "the repo documents it" | The family's message lacked a reason the reader could weigh; strengthen the mechanism (what the code leaves unstated) |
+| Action rate collapses | Proposals shrink across the board, not in one family | The last message or renderer change regressed; a message became vaguer or longer |
+| A repo standard quoted verbatim as the reason to keep | The reader had nothing to weigh the finding against; the round's record-shape failure, where sixty boundary sites were kept on the repo's word | The message must state why the shape is wrong so the reader can judge whether their own standard is the wrong one |
 
 ## Regression acceptance
 
 Re-run the round after any change to a message, a report renderer, or the
 catalog. A message change passes when the proposer re-weights the
 contested family: a record-shape rewrite must make the houses proposer
-argue the boundary convention instead of citing it. Read the trend, not a
-fixed pass/fail: the round is a qualitative regression test.
-
-## Failures to watch
-
-- New items appear in the proposer's CONFUSING list: a report defect
-  regressed.
-- A critic overturns a KEEP: the proposer over-deferred.
-- The action rate collapses: the messages became less actionable.
-- A repo standard is quoted verbatim as the reason to keep: the message's
-  mechanism did not land.
+argue the boundary convention instead of citing it. A renderer change
+passes when the CONFUSING artifacts it fixed stop appearing. Read the
+trend, not a fixed pass/fail: the round is a qualitative regression
+test.
 
 ## Constraints
 
