@@ -88,10 +88,21 @@ Actions:
 1. Exempt a literal whose parent Call names a unit constructor
    (Quantity, timedelta, TimeInterval, and any call whose keyword carries
    a unit name: `Quantity(x, "minute")`, `timedelta(minutes=20)`), and a
-   literal in a field whose name states the unit.
-2. Fixtures: `Quantity(20, "minute")` on `max_walk_to_station` does not
-   fire; `return a * 60` still fires with the A5 text.
-3. Keep the B8 exemptions; extend the exemption test table.
+   literal in a field whose name states the unit — the unit is already
+   stated, so the value is named.
+2. When a bare literal's surroundings state units — the enclosing names
+   carry them (`distance_km`, `max_walk_to_station`), a unit comment sits
+   on the literal, or the expression mixes incompatible-looking values —
+   the message actively suggests the unit mechanism, not just a name:
+   "This is a quantity, not a bare number: express it as a pint Quantity
+   (`Quantity(5, 'km/hour')`) so the unit rides with the value and
+   conversions are checked; name it where the computation owns it." When
+   the file does not import pint, the message adds that pint is the
+   house units library and names introducing it.
+3. Fixtures: `Quantity(20, "minute")` on `max_walk_to_station` does not
+   fire; `5` beside a `# 5 km/h` comment fires with the pint-suggestion
+   text; `return a * 60` still fires with the A5 text.
+4. Keep the B8 exemptions; extend the exemption test table.
 
 Acceptance: `cargo test` green; the round-3 CONFUSING entry for
 settings.py:69-71 / domain.py:119 disappears on the next houses scan.
@@ -105,51 +116,61 @@ the advice must not say "remove it".
 Actions:
 
 1. Extend the marker window to include a trailing comment on the
-   finding's own line.
-2. Split the stale-suppression verdict by evidence:
-   - the signal family fires near the marker but outside the window →
-     mis-placed: advice is "move the marker into the 3 lines ending at
-     the finding", never "remove";
-   - nothing fires in the file for that family → stale: "remove it".
-3. Fixtures: the server:704 shape (marker on the except line) binds and
-   clears; the rightmove_url:57 shape reports mis-placed with the move
-   advice.
+   finding's own line. The server:704 shape (marker on the except's
+   line) binds and clears.
+2. Markers outside the window do not bind, and the report says nothing
+   about them: the finding fires, the marker stays as documentation.
+   There is no advice to move a marker and no mis-placed verdict — the
+   tool never tells the reader to relocate a comment.
+3. "Stale — remove it" is reserved for the one case it means: the
+   family fires nowhere in the file. The rightmove_url:57 shape (marker
+   one line past the window, family firing below) produces no stale
+   verdict and no advice.
 4. The suppression guidance sentence in the render states: a marker
    binds on the finding's own line or within the 3 lines ending at it.
 
 Acceptance: `cargo test` + `pytest` green; round-4 proposer's CONFUSING
 has no same-line or one-line-past window entry.
 
-## Phase 4 — the line-up items (each small, one fixture)
+## Phase 4 — report lines that mislead (each small, one fixture)
 
-1. class-module: when the fix kind differs from the signal kind, the
-   per-item line links them: "suppress with: class-module (this family's
-   fix is split-module)". Render-side, test in test_lucidlint.py.
-2. GATE line: when a repo-root lucidlint.json holds acknowledged actions
-   and --baseline was not passed, append "(N in lucidlint.json, not
-   activated)" to the "+0 acknowledged" phrase.
-3. Per-item tags: drop [RISKxx] from finding lines; keep the single
-   top-risk line in the header. Update the tag test.
+1. class-module names: the suppression advice names the signal
+   (class-module) and the fix names the fixer (split-module) — two words
+   for one family. Link them in the line: "suppress with: class-module
+   (this family's fix: split-module)". Reader-side test.
+2. Headline truth: when a repo-root lucidlint.json holds acknowledged
+   actions and --baseline was not passed, the "+0 acknowledged" phrase
+   appends "(N in lucidlint.json, not activated)".
+3. [RISKxx] per-item tags: read as priority, they are actually the
+   churn x fan-in percentile; the valuable fail (complexity) shows the
+   lowest number and wire noise the highest. Drop the tag from finding
+   lines; keep severity and the header's single top-risk line. Update
+   the tag test.
 
-Acceptance: `pytest` green; round-4 proposer reads the class-module and
-RISK lines without CONFUSING entries.
+Acceptance: `pytest` green; round-4 proposer reads the class-module
+line and the risk line without CONFUSING entries.
 
 ## Phase 5 — loop-pipeline: emit only where the shape fits
 
-Point: 202 of 204 warnings are the template issued for shapes the recipe
-cannot address; the finding should exist only when a comprehension is
-actually applicable.
+Point: loop-pipeline is a warning that says "this loop builds a
+collection — replace it with a comprehension (or fold it)". The template
+is correct only for a loop whose body is one pure per-item computation
+building one collection (`for k, v in items: result[k] = f(v)` becomes
+`{k: f(v) for k, v in items}`). The detector fires the same template at
+loops with no collection to build: a priority-queue drain (pop, process,
+requeue), a polling loop that sleeps and checks, a polyline bit-decoder
+that mutates state per bit, a counter loop. "fold: interval =
+max/sum/min(...)" is nonsense for those shapes. On houses, 202 of the
+204 warnings are that misfire, and the CONFUSING lists keep naming it.
 
 Actions:
 
-1. Gate the emission on the loop shape: emit loop-pipeline only for a
-   loop whose body builds one collection via pure per-item computation
-   (no early exit, no side effect, no second accumulator). Drain loops,
-   sleep-schedules, and state machines emit nothing.
-2. For the kept shapes, drop the fold/hoist recipe sentences entirely —
-   no finding, by construction.
-3. Fixtures: eval_context.py:42 shape still fires; a PriorityQueue drain
-   and a polling sleep-schedule do not.
+1. Emit the finding only when the loop genuinely reduces to a
+   comprehension: a pure per-item computation building one collection,
+   with no early exit, no side effect, and no second accumulator.
+2. Every other loop emits nothing — no finding, by construction.
+3. Fixtures: the eval_context.py:42 shape (pure dict build) still fires;
+   a PriorityQueue drain and a polling sleep-schedule do not.
 
 Acceptance: `cargo test` green; the houses loop-pipeline warning count
 drops toward the 204-sites' pure-build subset, and the round-4 proposer
