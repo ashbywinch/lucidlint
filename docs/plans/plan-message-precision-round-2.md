@@ -99,9 +99,13 @@ Acceptance: round-8 proposer finds no implausible-duration suggestion.
 
 Actions:
 
-1. The "highest change-cost" line appends the reason: "— the code
-   most expensive to change, not the most important finding".
-2. Fixture: the line renders the appended clause.
+1. The "highest change-cost" line renders without the RISK percentile:
+   "highest change-cost: {file}:{line} ({fn})". The number is the
+   urgency carrier — the rename and the legend sentence both existed
+   when round-7 still read RISK99 as an emergency — so the number
+   leaves the line; the legend sentence stays and explains the ranking.
+2. Fixtures: the headline line renders the label and location with no
+   "[RISK" on it; the per-item lines still carry no RISK tags.
 
 Acceptance: round-8 proposer does not read the line as urgency.
 
