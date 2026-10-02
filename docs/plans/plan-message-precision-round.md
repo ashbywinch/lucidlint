@@ -308,11 +308,14 @@ Residual defects:
    machinery: every firing literal shares the defect — nothing states
    what the value means or why this magnitude. The message is the
    general form: "{value} is used {in-function}, but nothing states
-   what it means or why this magnitude. Name what it stands for and the
-   reason for its size, on the class that owns the computation." The
-   pint/timedelta action variants (H3) stay for unit-visible contexts;
-   the data-table exemption sentence stays; no role word, no position
-   trigger.
+   what it means or why this magnitude. Write it as a named constant
+   where the computation uses it, and state what it means and why this
+   size in the name or in one clause beside it." The constant is an
+   attribute on the enclosing class when the computation is a method,
+   and a local at the top of the function otherwise; never a module
+   global. The pint/timedelta action variants (H3) stay for
+   unit-visible contexts; the data-table exemption sentence stays; no
+   role word, no position trigger.
 
 ## Order of work
 
