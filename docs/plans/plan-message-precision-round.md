@@ -297,11 +297,13 @@ Residual defects:
    the pointer appears exactly once.
 7. Report arithmetic: the ledger's "reported 209" equals the gate's
    "99 action(s) + 110 warnings", and no line states the relationship.
-   Both lines print the breakdown with the same terms: the gate says
-   "F fail action(s) + W warnings = R reported", the ledger says
-   "reported R (F fails + W warnings) + acknowledged + config-ignored +
-   comment-suppressed = total". A test asserts the printed numbers
-   satisfy both relationships.
+   The ledger is the single home of the numbers: "reported 209 (99 fails
+   + 110 warnings) + acknowledged 0 (baseline — N acknowledged in
+   lucidlint.json — pass --baseline lucidlint.json to activate) +
+   config-ignored + comment-suppressed = total". The gate line stops
+   repeating the counts; it keeps the mode, the target count, and the
+   top-risk line. A test asserts each number appears once, the
+   relationships hold, and the gate repeats none of them.
 8. Ordering epsilons: a bare tiny float in a comparison (scheduler
    1e-6) is ordering semantics; the magic-number message should name the
    epsilon case.
