@@ -215,6 +215,34 @@ Residual defects, for the next iteration:
    top line "highest change-cost", and give complexity and size equal
    weight with churn in the risk formula.
 
+## G. Round-5 acceptance (2026-10-02) — cleared items and residuals
+
+Cleared by the F round: from_dict sites with an existing ingestion no
+longer emit (houses record-shape fails 81 to 45); the pint unit clause is
+explicit only when unambiguous; the top line states change-cost; the
+metric and label changes are in.
+
+Residual defects for the next round:
+
+1. Scalars in parameter position: a dict[str, str] parameter
+   (derived_node.py:882) carries the ad-hoc text whose premise ("its
+   value is a fixed-shape record") is false. Extend the scalar-map rule
+   to parameter and return arms.
+2. Union-typed parameters (tfl_client: `_TflJourneyResponse | dict`): the
+   ad-hoc text says "Typed as dict" where the code names the record. The
+   message must state the union and direct the ingestion.
+3. Def-anchored window: a marker two lines above a def-bound finding is
+   inside the 3-line window but does not bind. The window must resolve
+   the full three lines ending at the reported line for def and class
+   anchors.
+4. Stale rationale overclaim: the appended exemption clause lists
+   unit/constant/table exemptions but the file's literals are list
+   indices. The clause must name the exemption that applies per file, or
+   state none.
+5. Truncated repo markers (bus.py:122, extract_bus_fares.py:174) are cut
+   mid-word; the tool must define whether a truncated marker binds and
+   state it.
+
 ## Order of work
 
 1. Phase 1 (record-shape classification; the largest single change).

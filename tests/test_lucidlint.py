@@ -676,8 +676,8 @@ def test_per_item_lines_keep_severity_marker_not_risk_tag(capsys):
     # Phase 4: the [RISKxx] tag is dropped from per-item finding lines — it
     # read as a brokenness order (the only true complexity fail carried the
     # LOWEST display value). Severity survives as the [warn] marker; fail
-    # findings carry none (the GATE line and the header's single top-risk
-    # line carry the risk percentile).
+    # findings carry none (the GATE line and the header's single highest
+    # change-cost line carry the risk percentile).
     fail = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 1, 0, "", "", priority=99)
     ch._render_file_group("x.py", [fail])
     out = capsys.readouterr().out
@@ -699,7 +699,7 @@ def test_summary_top_line_names_the_actual_rule(tmp_path, capsys):
     top = ch.Action("record-shape", "fail", "tools/adopt.py", 116, "from_dict", "m", 1.0, 0, "", "", priority=99)
     ch._RenderCtx(repo, gate_args(), "main", "abc1234", "no coverage", False).render_summary([top], [], [])
     out = capsys.readouterr().out
-    assert "top-risk tools/adopt.py:116 (from_dict) [RISK99]" in out
+    assert "highest change-cost: tools/adopt.py:116 (from_dict) [RISK99]" in out
     assert "top P99 tools/adopt.py" not in out
 
 
@@ -898,6 +898,59 @@ def test_marker_one_line_above_window_renders_finding_no_stale(tmp_path, capsys)
     assert "remove it" not in out  # nothing advises deleting or moving the marker
 
 
+def test_marker_one_line_above_def_suppresses_def_line_finding(tmp_path, capsys):
+    # F3 (round-4): a marker one line above a def binds a finding ANCHORED
+    # on the def line — the window resolves against the finding's reported
+    # line (the def line), so def_line - 1 is inside the 3 lines ending at
+    # it (extract_bus_fares:174/175 shape; round-4 CONFUSING: "markers one
+    # line above a def do not bind")
+    big = (
+        "def busy(a, b, c, d):\n"
+        + "".join(
+            f"    if a == {i} and b == {i * 2}:\n"
+            f"        x = a + b + c + d + {i}\n"
+            f"        y = x * {i}\n"
+            "    elif b is None:\n"
+            "        pass\n"
+            for i in range(20)
+        )
+        + "    return x + y\n"
+    )
+    repo = make_repo(tmp_path, app_src="# lucidlint: ignore complexity the dispatch chain is the registry\n" + big)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "cyclomatic complexity" not in out  # the def-line finding is gone
+    assert "suppressed: complexity×1" in out  # the marker is counted, not stale
+    assert "stale-suppression" not in out
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    assert "complexity" not in [a["kind"] for a in data["actions"]]
+    assert data["suppressions"].get("complexity") == 1
+    # control: the same shape WITHOUT the comment renders the finding
+    plain = make_repo(tmp_path / "plain", app_src=big)
+    run_main(plain, "--warn")
+    out = capsys.readouterr().out
+    assert "cyclomatic complexity" in out
+
+
+def test_marker_one_line_above_class_suppresses_class_line_finding(tmp_path, capsys):
+    # F3: the def-line window anchoring holds for CLASS anchors too — an
+    # unused-class finding reports at the class line; a marker one line
+    # above the class binds it (the window counts from the class line).
+    # The class is named after the file stem so class-module does not fire
+    # and merge away the unused finding (both render kind "standard")
+    src = "class App:\n    pass\n"
+    repo = make_repo(tmp_path, app_src="# lucidlint: ignore unused kept for the repl\n" + src)
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    assert "unused" not in [a["signal"] for a in data["actions"]]
+    assert data["suppressions"].get("unused") == 1
+    plain = make_repo(tmp_path / "plain", app_src=src)
+    run_main(plain, "--warn")
+    out = capsys.readouterr().out
+    assert "class 'App'" in out and "defined but never referenced" in out
+
+
 def test_bulk_suppression_renders_at_report_level(capsys):
     # B6: a bulk-suppression finding is a repo-wide count — it must render
     # ONCE at report level, NOT inside a per-file section at its arbitrary
@@ -1081,8 +1134,19 @@ def test_raw_score_uses_the_metric():
     complexity/large-function finding to the same priority)."""
     assert ch._raw_score("complexity", 60, 10) > ch._raw_score("complexity", 15, 10)
     assert ch._raw_score("large-function", 300, 5) > ch._raw_score("large-function", 100, 5)
-    # the churn factor still scales within a metric
+    # the churn factor still scales within a metric — but root-weighted: a
+    # 6x churn gap is ~1.31x raw risk, not the linear 1.71x (F5: complexity
+    # and size must keep equal weight with churn)
     assert ch._raw_score("complexity", 20, 30) > ch._raw_score("complexity", 20, 5)
+    assert ch._raw_score("complexity", 20, 30) < ch._raw_score("complexity", 20, 5) * 1.5
+
+
+def test_high_complexity_low_churn_outranks_low_complexity_high_churn():
+    # F5: the churn factor is the square root of the linear one, so
+    # complexity/size get equal weight with churn — a CC-40 never-touched
+    # function outranks a CC-20 heavily-churned one (the linear factor
+    # ordered them 1.0 vs 1.25 the other way)
+    assert ch._raw_score("complexity", 40, 0) > ch._raw_score("complexity", 20, 200)
 
 
 def test_preview_refusal_on_no_seam_is_silent(tmp_path, capsys):
@@ -1501,12 +1565,12 @@ def test_main_json_meta(tmp_path, capsys):
 
 def test_main_priority_percentile(tmp_path, capsys):
     # Phase 4: the [RISKxx] tag is gone from per-item finding lines — it
-    # read as a brokenness order. The header's single top-risk line keeps
-    # the bracket; per-item lines carry only the severity marker.
+    # read as a brokenness order. The header's single highest change-cost
+    # line keeps the bracket; per-item lines carry only the severity marker.
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     run_main(repo, "--warn")
     out = capsys.readouterr().out
-    assert re.search(r"top-risk \S+:\d+ \([^)]*\) \[RISK\d{2}\]", out), out
+    assert re.search(r"highest change-cost: \S+:\d+ \([^)]*\) \[RISK\d{2}\]", out), out
     for line in out.splitlines():
         if line.startswith("  [") and " — " in line:
             assert "[RISK" not in line, line

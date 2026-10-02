@@ -122,8 +122,9 @@ struct ScanState<'a> {
     /// (P2) Literals exempted by a unit-stating name (assignment target or
     /// enclosing parameter).
     magic_unit_named_exempts: HashSet<usize>,
-    /// (P2) Literals whose surroundings state a unit — offset -> the pint
-    /// message's unit label (None = ambiguous token, unit clause omitted).
+    /// (P2/F2) Literals whose surroundings state a unit — offset -> the
+    /// pint message's unit label (None = ambiguous or several tokens — the
+    /// generic "(its unit)" clause, never a fabricated unit).
     magic_unit_surroundings: std::collections::HashMap<usize, Option<&'static str>>,
     /// Every referenced name (Name nodes + import aliases) in this file.
     refs: HashSet<String>,
@@ -825,14 +826,13 @@ impl<'a> ScanState<'a> {
         // P2: surroundings state the unit — a trailing comment on the
         // literal's own line (`a * 5  # 5 km/h`) or a same-statement name —
         // so the message suggests the pint mechanism instead of a bare name.
+        // F2: the explicit unit clause rides only when the context names
+        // EXACTLY ONE unambiguous unit token; an ambiguous or multi-token
+        // context gets the generic "(its unit)" form, never a fabricated
+        // unit.
         let message = match self.magic_unit_surroundings.get(&at) {
-            Some(label) => {
-                let qty = match label {
-                    Some(l) => format!("Quantity({value}, '{l}')"),
-                    None => format!("Quantity({value})"),
-                };
-                format!("magic number {value}{in_fn} — this is a quantity, not a bare number: express it as a pint Quantity ({qty}) so the unit rides with the value and conversions are checked; name it where the computation owns it. — fix: magic-number --fix-name <CONST>")
-            }
+            Some(Some(label)) => format!("magic number {value}{in_fn} — this is a quantity, not a bare number: express it as a pint Quantity (Quantity({value}, '{label}')) so the unit rides with the value and conversions are checked; name it where the computation owns it. — fix: magic-number --fix-name <CONST>"),
+            Some(None) => format!("magic number {value}{in_fn} — this is a quantity, not a bare number: express it as a pint Quantity (its unit) so conversions are checked; name it where the computation owns it. — fix: magic-number --fix-name <CONST>"),
             None => format!("magic number {value}{in_fn} — its meaning is not stated where it is used. Name it on the class that owns the computation. Collection-literal data tables (>= 3 same-kind numeric siblings) are exempt. — fix: magic-number --fix-name <CONST>"),
         };
         self.findings.push(Finding {
@@ -2542,6 +2542,39 @@ mod tests {
     }
 
     #[test]
+    fn magic_unit_ambiguous_context_gets_generic_pint_text() {
+        // F2: the explicit unit clause fires only when the literal's own
+        // context (its line's trailing comment or its statement's names)
+        // names EXACTLY ONE unit token. A comment naming minutes and
+        // seconds, or a statement whose names carry two units, still gets
+        // the pint message — with the generic "(its unit)" clause, never a
+        // fabricated unit; a single-token name context keeps the explicit
+        // clause.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_unit_pint_suggestion_ambiguous__01.py"
+        ));
+        let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
+        assert_eq!(m.len(), 3, "{f:?}");
+        let generic: Vec<&&Finding> = m.iter().filter(|x| x.line == 2 || x.line == 6).collect();
+        assert_eq!(generic.len(), 2, "{m:?}");
+        for x in &generic {
+            assert!(
+                x.message.contains("this is a quantity, not a bare number"),
+                "{}",
+                x.message
+            );
+            assert!(
+                x.message.contains("express it as a pint Quantity (its unit)"),
+                "{}",
+                x.message
+            );
+            assert!(!x.message.contains(", '"), "{}", x.message);
+        }
+        let named = m.iter().find(|x| x.line == 12).expect("single-token name line fires");
+        assert!(named.message.contains("Quantity(5, 'second')"), "{}", named.message);
+    }
+
+    #[test]
     fn duplicate_fast_path_matches_reference_dice() {
         // the sorted-index-bigram fast path must agree with the reference
         // multiset dice on the pinned repetition cases (2026-08-17 review-log)
@@ -4244,6 +4277,40 @@ mod tests {
             ret.message
         );
         assert!(!ret.message.contains("call sites build it ad hoc"), "{}", ret.message);
+    }
+
+    #[test]
+    fn record_wire_functions_with_ingestion_class_emit_nothing() {
+        // F1: a from_dict/from_json function whose module defines a class
+        // that carries from_dict already IS the recommended shape — the wire
+        // message's advice (give the shape a named record and ingest the
+        // wire with its from_dict) describes a step already taken. No
+        // record-shape finding at those parse boundaries.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_from_dict_with_ingestion_class_passes__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+    }
+
+    #[test]
+    fn record_wire_functions_without_ingestion_class_keep_the_wire_message() {
+        // F1: only wire-named functions whose module has NO from_dict class
+        // keep the wire message — the parse boundary genuinely has no type.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_from_json_wire_message_fires__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(
+            r[0].message.contains("from_json returns the wire form of a record"),
+            "{}",
+            r[0].message
+        );
+        assert!(
+            r[0].message.contains("ingest the wire with its from_dict"),
+            "{}",
+            r[0].message
+        );
     }
 
     #[test]

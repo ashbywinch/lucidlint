@@ -230,8 +230,10 @@ class _RenderCtx:
             f"{self._config_ignored_note()}){mine_txt}, "
             # B2: the top line names the ACTUAL rule (the raw-risk percentile
             # the formula line below defines) — never "the hotspot", a
-            # definition the top item may not satisfy
-            f"top-risk {top.file}:{top.line} ({top.function or top.kind}) [RISK{top.priority:02d}]"
+            # definition the top item may not satisfy; F5: it is the code
+            # whose change costs the most — fixing it first lowers future
+            # change cost
+            f"highest change-cost: {top.file}:{top.line} ({top.function or top.kind}) [RISK{top.priority:02d}]"
         )
         print(
             "priority ranks change-cost (churn x fan-in), not brokenness — which item is worth "
@@ -243,9 +245,9 @@ class _RenderCtx:
                 "run --refresh-coverage (make coverage) for definite test-status verdicts"
             )
         print(
-            "priority = percentile of raw risk (metric norm x (1 + churn/30) x (1 + callers/5)); "
+            "priority = percentile of raw risk (metric norm x sqrt(1 + churn/30) x (1 + callers/5)); "
             "norms: CC/40, lines/200, edges/400, risk/1 "
-            "(norm capped at 1.0, churn factor at 1.5, callers factor at 1.0) "
+            "(norm capped at 1.0, churn/30 capped at 1.5 with its root taken, callers factor at 1.0) "
             "— the displayed thresholds are the fail bars, not the norms; "
             "thresholds: CC>=15, fn>=120 lines, file>=150 edges, risk>=0.8, hotspot top 10% "
             + f"by churn with CC>=15; coverage: {coverage_source}"
@@ -395,10 +397,15 @@ def _numbits_to_lines(numbits: bytes) -> set[int]:
 
 
 def _raw_score(kind: str, metric: float, churn: int, callers: int | None = None) -> float:
-    """Continuous risk score: normalized metric x churn factor (x fan-in for high-risk).
+    """Continuous risk score: normalized metric x root-weighted churn factor
+    (x fan-in for high-risk).
 
     Normalized to a 1-99 percentile ranking in main, so the list spreads
-    instead of saturating at 99.
+    instead of saturating at 99. The churn factor is the SQUARE ROOT of the
+    linear one: a 10x churn gap is ~3.2x raw risk, not 10x, so complexity
+    and size keep equal weight with churn (F5 — the top line names the code
+    whose change costs the most, and a big untouched function costs more
+    than a small heavily-churned one).
     """
     # kind -> norm constant; naming each entry hides the table
     norm = {
@@ -415,7 +422,7 @@ def _raw_score(kind: str, metric: float, churn: int, callers: int | None = None)
         "hotspot": min(metric / 40, 1.0),
         "high-risk": min(metric, 1.0),
     }.get(kind, 0.5)
-    score = norm * (1 + min(churn / 30, 1.5))
+    score = norm * ((1 + min(churn / 30, 1.5)) ** 0.5)
     if kind == "high-risk" and callers:
         score *= 1 + min(callers / 5, 1.0)
     return score
@@ -1317,7 +1324,7 @@ def _render_file_group(
         # Phase 4: the per-item RISKxx bracket is gone — it read as a
         # brokenness order (the valuable fail carried the lowest display
         # value); severity survives as the [warn] marker for warnings, and
-        # the header's single top-risk line carries the risk percentile
+        # the header's single highest change-cost line carries the percentile
         tag = "warn" if a.severity == "warn" else ""
         # a latent-class variant's display kind (latent-class) IS its
         # suppression family — nothing to teach, and a suppression recipe

@@ -1,3 +1,6 @@
+// lucidlint: ignore-file long-param-list the suppression pass threads the scan shapes and the
+// evidence flags (findings, comments, file, marker, books, numeric-literal probe) —
+// an options struct would add a hop for the two callers
 //! The language-neutral core of the scan: logic that is IDENTICAL for every
 //! language layer, parameterized only by what the language layers extract.
 //!
@@ -511,12 +514,16 @@ fn signal_line_index(findings: &[crate::Finding]) -> std::collections::HashMap<S
 /// comment token ('#' or "//") used in the why-less messages. `pre_used`
 /// carries the suppressions the caller's cc-array retain already honored so
 /// stale detection does not re-flag them (the Rust layer's cc path).
+/// `has_numeric_literals` states whether the file still holds numeric
+/// literals — the stale magic-number message then appends the exemption
+/// delta (F4) instead of reading as if the numbers were gone.
 pub fn apply_suppressions_impl(
     findings: Vec<crate::Finding>,
     comments: &[(usize, String)],
     file: &str,
     marker: &str,
     books: &mut SuppressionBooks,
+    has_numeric_literals: bool,
 ) -> Vec<crate::Finding> {
     let supps = suppressions_from_comments(comments);
     let mut out = Vec::new();
@@ -591,6 +598,7 @@ pub fn apply_suppressions_impl(
         file,
         marker,
         by_signal: &by_signal,
+        has_numeric_literals,
     };
     out.extend(ctx.stale_suppression_findings());
     out
@@ -631,6 +639,25 @@ struct StaleCtx<'a> {
     /// the stale binding-reason reasons cite (gone / covered / out of
     /// window).
     by_signal: &'a std::collections::HashMap<String, Vec<usize>>,
+    /// F4: the file still holds numeric literals — the magic-number stale
+    /// message says so when the current exemptions cover them.
+    has_numeric_literals: bool,
+}
+
+impl StaleCtx<'_> {
+    /// F4: the rule-delta clause for a stale marker. The magic-number
+    /// family's current exemptions (unit-named values, named constants,
+    /// data tables) can cover a file's literals — then the family fires
+    /// nowhere although the numbers are still there. The stale message
+    /// states that delta so the reader can verify before deleting the
+    /// marker; every other kind keeps the plain text.
+    fn exemption_delta(&self, sig: &str) -> &'static str {
+        if sig == "magic-number" && self.has_numeric_literals {
+            " — the file still holds numeric literals — the unit-named/constant/table exemptions cover them now; verify the reason before deleting the marker"
+        } else {
+            ""
+        }
+    }
 }
 
 impl<'a> StaleCtx<'a> {
@@ -662,6 +689,7 @@ impl<'a> StaleCtx<'a> {
                 let Some(reason) = self.stale_reason(sig) else {
                     continue;
                 };
+                let delta = self.exemption_delta(sig);
                 out.push(crate::Finding { seam_members: Vec::new(), col: 0,
                 file: self.file.to_string(),
                 line: *ln,
@@ -669,7 +697,7 @@ impl<'a> StaleCtx<'a> {
                 kind: "stale-suppression".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "suppression '{} lucidlint: ignore {sig}' at line {ln} no longer fires ({reason}) — remove it{fix_tail}",
+                    "suppression '{} lucidlint: ignore {sig}' at line {ln} no longer fires ({reason}{delta}) — remove it{fix_tail}",
                     self.marker
                 ), });
             }
@@ -687,6 +715,7 @@ impl<'a> StaleCtx<'a> {
                 // suppression over a family that still fires is either bound
                 // or redundant documentation — never a stale verdict
                 if self.lines_for(sig).is_empty() {
+                    let delta = self.exemption_delta(sig);
                     out.push(crate::Finding { seam_members: Vec::new(), col: 0,
                     file: self.file.to_string(),
                     line: *ln,
@@ -694,7 +723,7 @@ impl<'a> StaleCtx<'a> {
                     kind: "stale-suppression".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "file suppression '{} lucidlint: ignore-file {sig}' no longer fires (no matching finding fires in this file — it was fixed, or the kind was renamed) — remove it{fix_tail}",
+                        "file suppression '{} lucidlint: ignore-file {sig}' no longer fires (no matching finding fires in this file — it was fixed, or the kind was renamed{delta}) — remove it{fix_tail}",
                         self.marker
                     ), });
                 }
@@ -783,7 +812,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![finding("closures", 2)], &comments, "x.rs", "//", &mut books);
+        let fs = apply_suppressions_impl(vec![finding("closures", 2)], &comments, "x.rs", "//", &mut books, false);
         assert!(!fs.iter().any(|f| f.kind == "closures"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -797,7 +826,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books);
+        let fs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books, false);
         assert!(fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
     #[test]
@@ -811,7 +840,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let rs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books);
+        let rs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books, false);
         let msg = rs
             .iter()
             .find(|f| f.kind == "stale-suppression")
@@ -823,7 +852,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let py = apply_suppressions_impl(vec![], &comments, "x.py", "#", &mut books);
+        let py = apply_suppressions_impl(vec![], &comments, "x.py", "#", &mut books, false);
         let msg = py
             .iter()
             .find(|f| f.kind == "stale-suppression")
@@ -850,6 +879,7 @@ mod tests {
                 pre_used: &PreUsedSuppressions::default(),
                 spent: &mut spent,
             },
+            true, // the file still holds numeric literals — the exemptions cover them
         );
         let msg = gone
             .iter()
@@ -858,6 +888,36 @@ mod tests {
             .message
             .clone();
         assert!(msg.contains("nothing fires in this file"), "{msg}");
+        // F4: the rule delta — the literals are STILL in the file, so the
+        // message says the unit-named/constant/table exemptions cover them
+        // now, and why the family fires nowhere
+        assert!(
+            msg.contains("the file still holds numeric literals — the unit-named/constant/table exemptions cover them now; verify the reason before deleting the marker"),
+            "{msg}"
+        );
+
+        // control: the same marker over a file with NO numeric literals
+        // keeps the plain fires-nowhere text — no delta clause
+        let mut spent = std::collections::HashSet::new();
+        let bare = apply_suppressions_impl(
+            vec![],
+            &[(1, "// lucidlint: ignore magic-number gone".to_string())],
+            "x.py",
+            "#",
+            &mut SuppressionBooks {
+                pre_used: &PreUsedSuppressions::default(),
+                spent: &mut spent,
+            },
+            false,
+        );
+        let msg = bare
+            .iter()
+            .find(|f| f.kind == "stale-suppression")
+            .unwrap()
+            .message
+            .clone();
+        assert!(msg.contains("nothing fires in this file"), "{msg}");
+        assert!(!msg.contains("the file still holds numeric literals"), "{msg}");
 
         // marker below the finding: the window of line 3 is 1..=3, so a
         // marker at 5 cannot bind — the family still fires, so the marker
@@ -872,6 +932,7 @@ mod tests {
                 pre_used: &PreUsedSuppressions::default(),
                 spent: &mut spent,
             },
+            false,
         );
         assert!(
             !misplaced.iter().any(|f| f.kind == "stale-suppression"),
@@ -893,6 +954,7 @@ mod tests {
                 pre_used: &PreUsedSuppressions::default(),
                 spent: &mut spent,
             },
+            false,
         );
         assert!(!covered.iter().any(|f| f.kind == "stale-suppression"), "{covered:?}");
     }
@@ -913,6 +975,7 @@ mod tests {
                 pre_used: &PreUsedSuppressions::default(),
                 spent: &mut spent,
             },
+            false,
         );
         assert!(!near.iter().any(|f| f.kind == "stale-suppression"), "{near:?}");
         assert!(near.iter().any(|f| f.kind == "magic-number"), "{near:?}");
@@ -927,6 +990,7 @@ mod tests {
                 pre_used: &PreUsedSuppressions::default(),
                 spent: &mut spent,
             },
+            false,
         );
         let msg = far
             .iter()
@@ -949,7 +1013,14 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![finding("partition", 9)], &comments, "x.rs", "//", &mut books);
+        let fs = apply_suppressions_impl(
+            vec![finding("partition", 9)],
+            &comments,
+            "x.rs",
+            "//",
+            &mut books,
+            false,
+        );
         assert!(!fs.iter().any(|f| f.kind == "partition"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -967,7 +1038,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![finding("strewing", 2)], &comments, "x.py", "#", &mut books);
+        let fs = apply_suppressions_impl(vec![finding("strewing", 2)], &comments, "x.py", "#", &mut books, false);
         assert!(!fs.iter().any(|f| f.kind == "strewing"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -998,6 +1069,7 @@ mod tests {
             "x.py",
             "#",
             &mut books,
+            false,
         );
         assert!(
             !fs.iter().any(|f| f.kind == "magic-number" || f.kind == "middle-man"),
@@ -1016,7 +1088,14 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![finding("magic-number", 3)], &comments, "x.rs", "//", &mut books);
+        let fs = apply_suppressions_impl(
+            vec![finding("magic-number", 3)],
+            &comments,
+            "x.rs",
+            "//",
+            &mut books,
+            false,
+        );
         assert!(!fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -1030,7 +1109,14 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![finding("magic-number", 5)], &comments, "x.rs", "//", &mut books);
+        let fs = apply_suppressions_impl(
+            vec![finding("magic-number", 5)],
+            &comments,
+            "x.rs",
+            "//",
+            &mut books,
+            false,
+        );
         assert!(fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
     }
 }

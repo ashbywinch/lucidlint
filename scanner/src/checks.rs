@@ -129,7 +129,21 @@ pub fn apply_suppressions_impl(
     tokens: &Tokens,
     books: &mut crate::common::SuppressionBooks,
 ) -> Vec<Finding> {
-    crate::common::apply_suppressions_impl(findings, &comment_lines(source, tokens), file, "#", books)
+    // F4: the stale magic-number message cites the file's numeric literals —
+    // the family fires nowhere because the exemptions cover them. The token
+    // stream states the fact precisely (a digit in a string is not a
+    // numeric literal).
+    let has_numeric_literals = tokens
+        .iter()
+        .any(|t| matches!(t.kind(), TokenKind::Int | TokenKind::Float));
+    crate::common::apply_suppressions_impl(
+        findings,
+        &comment_lines(source, tokens),
+        file,
+        "#",
+        books,
+        has_numeric_literals,
+    )
 }
 
 /// `# type: ignore` without a why (a second comment on the line) is a finding.
@@ -4135,8 +4149,8 @@ fn census_value(e: &Expr, groups: &mut std::collections::HashMap<bool, Vec<usize
 /// named by its surroundings (the assignment-target/parameter exemption) or
 /// deserves the pint-suggestion message.
 pub const UNIT_TOKENS: &[&str] = &[
-    "km", "mile", "m", "cm", "mm", "min", "minute", "sec", "hour", "day", "week", "month", "year", "mph", "kmh", "kg",
-    "watt",
+    "km", "mile", "m", "cm", "mm", "min", "minute", "sec", "second", "hour", "day", "week", "month", "year", "mph",
+    "kmh", "kg", "watt",
 ];
 
 /// The pint unit label for a matched token — km -> kilometer, min -> minute,
@@ -4150,7 +4164,7 @@ pub fn unit_token_label(tok: &str) -> Option<&'static str> {
         "cm" => Some("centimeter"),
         "mm" => Some("millimeter"),
         "min" | "minute" => Some("minute"),
-        "sec" => Some("second"),
+        "sec" | "second" => Some("second"),
         "hour" => Some("hour"),
         "day" => Some("day"),
         "week" => Some("week"),
@@ -4195,17 +4209,25 @@ fn name_components(name: &str) -> Vec<String> {
     out
 }
 
-/// The first unit token an identifier states, if any — a component matching
-/// a token or its plural (`minutes`, `hours`, `miles`, ...).
-pub fn unit_token_of_name(name: &str) -> Option<&'static str> {
+/// The DISTINCT unit tokens an identifier states — a component matching a
+/// token or its plural (`minutes`, `hours`, `miles`, `seconds`, ...).
+pub fn unit_tokens_of_name(name: &str) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
     for comp in name_components(name) {
         for tok in UNIT_TOKENS {
-            if comp == *tok || (comp.len() == tok.len() + 1 && comp.starts_with(tok) && comp.ends_with('s')) {
-                return Some(tok);
+            if (comp == *tok || (comp.len() == tok.len() + 1 && comp.starts_with(tok) && comp.ends_with('s')))
+                && !out.contains(tok)
+            {
+                out.push(tok);
             }
         }
     }
-    None
+    out
+}
+
+/// The first unit token an identifier states, if any.
+pub fn unit_token_of_name(name: &str) -> Option<&'static str> {
+    unit_tokens_of_name(name).into_iter().next()
 }
 
 /// Does an identifier state a unit (P2): the nearest enclosing assignment
@@ -4214,9 +4236,10 @@ pub fn name_states_unit(name: &str) -> bool {
     unit_token_of_name(name).is_some()
 }
 
-/// The unit token a comment states, if any — whole identifier-ish words only
-/// (`5 km/h` -> km; the `m` inside a word never counts).
-fn unit_token_of_comment(text: &str) -> Option<&'static str> {
+/// The DISTINCT unit tokens a comment states — whole identifier-ish words
+/// only (`5 km/h` -> [km]; `minutes and seconds` -> [minute, second]; an
+/// `m` inside a word never counts).
+fn unit_tokens_of_comment(text: &str) -> Vec<&'static str> {
     let mut words: Vec<String> = Vec::new();
     let mut cur = String::new();
     for c in text.chars() {
@@ -4229,24 +4252,26 @@ fn unit_token_of_comment(text: &str) -> Option<&'static str> {
     if !cur.is_empty() {
         words.push(cur);
     }
+    let mut out: Vec<&'static str> = Vec::new();
     for tok in UNIT_TOKENS {
         for w in &words {
-            if w == *tok || (w.len() == tok.len() + 1 && w.starts_with(tok) && w.ends_with('s')) {
-                return Some(tok);
+            if (w == *tok || (w.len() == tok.len() + 1 && w.starts_with(tok) && w.ends_with('s'))) && !out.contains(tok)
+            {
+                out.push(tok);
             }
         }
     }
-    None
+    out
 }
 
-/// Does the literal's line carry a TRAILING comment (a '#' after the
-/// literal on the same line) that states a unit — `a * 5  # 5 km/h`?
-fn line_trailing_unit_comment(source: &str, off: usize) -> Option<&'static str> {
+/// The unit tokens a literal's line carries as a TRAILING comment (a '#'
+/// after the literal on the same line) — `a * 5  # 5 km/h` -> [km].
+fn line_trailing_unit_tokens(source: &str, off: usize) -> Vec<&'static str> {
     let line_end = source[off..].find('\n').map(|i| off + i).unwrap_or(source.len());
     let rest = &source[off..line_end];
     match rest.find('#') {
-        Some(hash) => unit_token_of_comment(&rest[hash + 1..]),
-        None => None,
+        Some(hash) => unit_tokens_of_comment(&rest[hash + 1..]),
+        None => Vec::new(),
     }
 }
 
@@ -4337,8 +4362,12 @@ pub fn magic_unit_named_offsets(body: &[Stmt]) -> HashSet<usize> {
 /// naming the value: a trailing comment on the literal's own line (`a * 5
 /// # 5 km/h`) or a name in the literal's same statement (`if distance_km >
 /// 30`). The literal still fires — with the pint-suggestion message instead
-/// of the A5 text. Maps offset -> the unit's message label (None = the
-/// token is ambiguous; the unit clause is omitted).
+/// of the A5 text. Maps offset -> the unit's message label. The explicit
+/// unit clause is emitted only when the literal's context (its line's
+/// trailing comment + its statement's names) names EXACTLY ONE distinct
+/// unit token with an unambiguous label; a context with several tokens (or
+/// a single ambiguous token) keeps the pint message WITHOUT a fabricated
+/// unit (None).
 pub fn magic_unit_surroundings_offsets(
     body: &[Stmt],
     source: &str,
@@ -4346,23 +4375,40 @@ pub fn magic_unit_surroundings_offsets(
     let mut out = std::collections::HashMap::new();
     let mut sq: Vec<&Stmt> = body.iter().collect();
     while let Some(s) = sq.pop() {
-        let mut names: Vec<&str> = Vec::new();
+        let mut name_tokens: Vec<&'static str> = Vec::new();
         let mut literals: Vec<usize> = Vec::new();
         for e in stmt_exprs(s) {
             walk_expr_deep(e, false, &mut |x, _| match x {
-                Expr::Name(n) => names.push(n.id.as_str()),
+                Expr::Name(n) => {
+                    for tok in unit_tokens_of_name(n.id.as_str()) {
+                        if !name_tokens.contains(&tok) {
+                            name_tokens.push(tok);
+                        }
+                    }
+                }
                 Expr::NumberLiteral(n) => literals.push(n.range().start().to_usize()),
                 _ => {}
             });
         }
-        let name_label: Option<Option<&'static str>> =
-            names.iter().find_map(|n| unit_token_of_name(n).map(unit_token_label));
         for off in &literals {
-            if let Some(label) = name_label {
-                out.insert(*off, label);
-            } else if let Some(tok) = line_trailing_unit_comment(source, *off) {
-                out.insert(*off, unit_token_label(tok));
+            // the literal's own context: its statement's names + its line's
+            // trailing comment — the DISTINCT tokens across both decide
+            // whether a unit can be named without fabrication.
+            let mut tokens = name_tokens.clone();
+            for tok in line_trailing_unit_tokens(source, *off) {
+                if !tokens.contains(&tok) {
+                    tokens.push(tok);
+                }
             }
+            if tokens.is_empty() {
+                continue;
+            }
+            let label = if tokens.len() == 1 {
+                unit_token_label(tokens[0])
+            } else {
+                None
+            };
+            out.insert(*off, label);
         }
         match s {
             Stmt::FunctionDef(f) => {
@@ -6738,11 +6784,38 @@ fn display_keys(keys: &[String]) -> String {
     format!("{}, … (+{})", keys[..MAX].join(", "), keys.len() - MAX)
 }
 
+/// F1: does any class in the module carry a from_dict method? Such a class
+/// IS the ingestion the wire message recommends — the module's wire-named
+/// functions already sit at a parse boundary with a named record, so
+/// record-shape does not fire there (a step already taken is not advice).
+fn module_has_from_dict_class(body: &[Stmt]) -> bool {
+    let mut sq: Vec<&Stmt> = body.iter().collect();
+    while let Some(s) = sq.pop() {
+        if let Stmt::ClassDef(c) = s {
+            let carries = c
+                .body
+                .iter()
+                .any(|m| matches!(m, Stmt::FunctionDef(f) if f.name.to_lowercase().contains("from_dict")));
+            if carries {
+                return true;
+            }
+        }
+        match s {
+            Stmt::FunctionDef(f) => sq.extend(&f.body),
+            _ => push_stmt_children(s, &mut sq),
+        }
+    }
+    false
+}
+
 /// The record-shape family: signature findings + record dict literals,
 /// walking the module in ast.walk BFS order (nested functions included).
 pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
     let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
     let mut qi = 0usize;
+    // F1: the module-level ingestion fact — one scan per module, applied to
+    // every wire-named function in it.
+    let module_has_ingestion = module_has_from_dict_class(body);
     while qi < queue.len() {
         if let Q::N(n) = queue[qi] {
             if let AnyNodeRef::StmtFunctionDef(f) = n {
@@ -6769,45 +6842,50 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                 // premise is false there. Emit the wire message; every other
                 // function keeps the internal-ad-hoc text.
                 let wire = f.name.to_lowercase().contains("from_dict") || f.name.to_lowercase().contains("from_json");
-                for (arg, ann) in params {
-                    if let Some(a) = ann {
-                        if !annotation_is_record(a) {
-                            continue;
+                // F1: a wire function whose module carries a from_dict class
+                // already sits at a typed parse boundary — no record-shape
+                // finding at all (the wire message's advice is a step taken).
+                if !(wire && module_has_ingestion) {
+                    for (arg, ann) in params {
+                        if let Some(a) = ann {
+                            if !annotation_is_record(a) {
+                                continue;
+                            }
+                            let message = if wire {
+                                format!("{arg} is the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.")
+                            } else {
+                                format!("{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists.")
+                            };
+                            state.findings.push(Finding {
+                                seam_members: Vec::new(),
+                                col: 0,
+                                file: state.file.to_string(),
+                                line: def_line,
+                                function: f.name.to_string(),
+                                kind: "record-shape".into(),
+                                severity: "fail".into(),
+                                message,
+                            });
                         }
-                        let message = if wire {
-                            format!("{arg} is the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.")
-                        } else {
-                            format!("{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists.")
-                        };
-                        state.findings.push(Finding {
-                            seam_members: Vec::new(),
-                            col: 0,
-                            file: state.file.to_string(),
-                            line: def_line,
-                            function: f.name.to_string(),
-                            kind: "record-shape".into(),
-                            severity: "fail".into(),
-                            message,
-                        });
                     }
-                }
-                if let Some(r) = &f.returns {
-                    if annotation_is_record(r.as_ref()) {
-                        let message = if wire {
-                            format!("{fname} returns the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.", fname = f.name.as_str())
-                        } else {
-                            format!("{fname} returns a dict that holds the fields of a record; the shape has no name at the call site. Type the return with the class that models the shape; create that class if none exists.", fname = f.name.as_str())
-                        };
-                        state.findings.push(Finding {
-                            seam_members: Vec::new(),
-                            col: 0,
-                            file: state.file.to_string(),
-                            line: def_line,
-                            function: f.name.to_string(),
-                            kind: "record-shape".into(),
-                            severity: "fail".into(),
-                            message,
-                        });
+                    if let Some(r) = &f.returns {
+                        if annotation_is_record(r.as_ref()) {
+                            let message = if wire {
+                                format!("{fname} returns the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.", fname = f.name.as_str())
+                            } else {
+                                format!("{fname} returns a dict that holds the fields of a record; the shape has no name at the call site. Type the return with the class that models the shape; create that class if none exists.", fname = f.name.as_str())
+                            };
+                            state.findings.push(Finding {
+                                seam_members: Vec::new(),
+                                col: 0,
+                                file: state.file.to_string(),
+                                line: def_line,
+                                function: f.name.to_string(),
+                                kind: "record-shape".into(),
+                                severity: "fail".into(),
+                                message,
+                            });
+                        }
                     }
                 }
             }
