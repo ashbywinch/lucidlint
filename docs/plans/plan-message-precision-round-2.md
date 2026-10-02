@@ -33,11 +33,16 @@ acceptance instrument.
 
 Actions:
 
-1. One classifier for the dict value element: a capitalized identifier
-   (in-module class or stdlib name like Decimal) means the value is a
-   named type — render the collection message in every arm: parameter,
-   return, and dict literal. A lowercase element keeps the G1 path
-   (scalar subscripts silent; bare dict keeps the existing text).
+1. One classifier for the dict value element, built on the AST binding
+   table, never capitalization: the name resolves to a class defined in
+   the module, an imported name (`from decimal import Decimal`, `from
+   houses.model import Provenance`), or a known typing/builtin
+   constructor — the value is a named type and the collection message
+   renders in every arm: parameter, return, and dict literal. An
+   unresolvable element keeps the G1 path (scalar subscripts silent;
+   bare dict keeps the existing text). The {record} name in the message
+   is the resolved symbol; unresolvable names render "whose values are
+   named types".
 2. The collection message: "{param} is a map whose values are {record}.
    The map itself has no name and no role: call sites pass a bare dict,
    and nothing says what the collection means. Make a class for the
