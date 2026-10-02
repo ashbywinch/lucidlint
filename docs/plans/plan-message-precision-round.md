@@ -274,9 +274,13 @@ Residual defects:
    own context states exactly one unit token. Family known but the unit
    ambiguous: write "in its unit". Family unknown: the generic A5 form,
    no timedelta or pint claim. No plausibility heuristics.
-4. Swallow detector: the message lists "mutating a name the enclosing
-   function returns" as surfacing, but the detector does not implement
-   it. Implement the criterion; the server.py:704 probe then clears.
+4. Swallow criterion: the detector implements "mutating a name the
+   enclosing function returns" in its letter — the mutated name must
+   itself be in the return set. server.py:704 mutates db and the
+   returned dict carries it; the name is not returned, so the value
+   surfaces but the finding fires. Broaden the criterion: a mutated
+   name that appears anywhere in the enclosing function's return
+   expression tree counts as surfaced.
 5. class-module fix stamp: split-module is marked mechanical although
    the family is a judgment call; drop the mechanical stamp for it.
 6. unused advice order: "suppress with: unused" heads the message even
