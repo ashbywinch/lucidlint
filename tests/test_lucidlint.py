@@ -672,13 +672,22 @@ def test_seam_heading_never_renders_empty_member_list():
     assert heading == "these 3 findings share ONE seam — design the target type once, for all of them"
 
 
-def test_report_tag_reads_as_risk_percentile_not_brokenness(capsys):
-    # B2: the per-item tag names what the number IS — a raw-risk percentile
-    # ("RISK99"), not a bare P99 that reads as a brokenness score
-    ch._render_file_group("x.py", [ch.Action("complexity", "fail", "x.py", 3, "f", "m", 1, 0, "", "", priority=99)])
+def test_per_item_lines_keep_severity_marker_not_risk_tag(capsys):
+    # Phase 4: the [RISKxx] tag is dropped from per-item finding lines — it
+    # read as a brokenness order (the only true complexity fail carried the
+    # LOWEST display value). Severity survives as the [warn] marker; fail
+    # findings carry none (the GATE line and the header's single top-risk
+    # line carry the risk percentile).
+    fail = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 1, 0, "", "", priority=99)
+    ch._render_file_group("x.py", [fail])
     out = capsys.readouterr().out
-    assert "[RISK99]" in out
+    assert "[RISK" not in out
     assert "[P99]" not in out
+    warn = ch.Action("magic-number", "warn", "x.py", 5, "g", "m", 1, 0, "", "", priority=42)
+    ch._render_file_group("x.py", [warn])
+    out = capsys.readouterr().out
+    assert "[warn]" in out
+    assert "[RISK" not in out
 
 
 def test_summary_top_line_names_the_actual_rule(tmp_path, capsys):
@@ -728,6 +737,28 @@ def test_repo_root_lucidlint_json_legacy_replaces_cannot_tell(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "lucidlint.json uses a pre-round 'actions' schema" in out
     assert "no baseline — cannot tell what is new" not in out
+
+
+def test_gate_line_names_baseline_flag_with_repo_root_acks(tmp_path, capsys):
+    # Phase 4: a repo-root lucidlint.json holding acknowledged actions reads
+    # as "+0 acknowledged" until --baseline is passed — the GATE line appends
+    # the flag itself so the reader learns it from the message (round-3:
+    # "95 acknowledged action(s)" read as "+0 acknowledged")
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    (repo / "lucidlint.json").write_text(json.dumps({
+        "actions": [
+            "swallow:houses/app.py:4:f",
+            "record-shape:houses/app.py:1:from_dict",
+        ]
+    }))
+    run_main(repo)
+    out = capsys.readouterr().out
+    assert (
+        "+0 acknowledged in baseline — 2 acknowledged in lucidlint.json — "
+        "pass --baseline lucidlint.json to activate them"
+    ) in out
+    assert "no baseline — cannot tell what is new" not in out
+    assert "lucidlint.json holds" not in out  # the standalone clause is gone
 
 
 def test_suppression_ledger_reconciles_all_three_accounts(tmp_path, capsys):
@@ -799,16 +830,72 @@ def test_config_ignored_family_advisory_skips_marker_remedy(capsys):
 
 
 def test_suppression_advice_states_marker_window(capsys):
-    # B5: the suppression guidance states the marker window — a comment binds
-    # within the 3 lines ending at the finding; a marker further up does not
-    # (round: markers 2+ lines above a def left the finding live and the
-    # marker "stale")
+    # Phase 3: the suppression guidance states the window positively — a
+    # marker binds on the finding's OWN line or within the 3 lines ending at
+    # it; the tool never tells the reader a marker further up "does not"
+    # bind (that read as advice to move the marker — there is no such advice)
     a = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
     a.signal = "inline-import"
     ch._render_file_group("x.py", [a])
     out = capsys.readouterr().out
     assert "suppress with: inline-import" in out
-    assert "binds within the 3 lines ending at this finding" in out
+    assert "binds on this finding's own line or within the 3 lines ending at it" in out
+    assert "a marker further up does not" not in out
+
+
+def test_render_links_suppression_signal_to_family_fix(capsys):
+    # Phase 4: a finding whose suppression identity and fix kind differ
+    # (class-module -> split-module) links them in ONE line — "suppress
+    # with: class-module" beside "fix: --kind split-module" read as two
+    # unrelated commands (round-3 CONFUSING)
+    a = ch.Action("standard", "fail", "x.py", 1, "Employee", "m", 1, 0, "", "", fix_kind="split-module")
+    a.signal = "class-module"
+    ch._render_file_group("x.py", [a])
+    out = capsys.readouterr().out
+    assert "suppress with: class-module (this family's fix: split-module)" in out
+
+
+def test_same_line_trailing_marker_suppresses_finding(tmp_path, capsys):
+    # Phase 3: a trailing comment on the finding's OWN line is a suppression
+    # marker for that finding (the marker text names the signal) — the
+    # server.py:704 shape binds and clears: no finding renders, the census
+    # counts the site marker
+    src = SWALLOW_SRC.replace(
+        "    except Exception:\n        pass",
+        "    except Exception:  # lucidlint: ignore swallow the fallback is fine\n        pass",
+    )
+    repo = make_repo(tmp_path, app_src=src)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "except that swallows at line" not in out
+    assert "suppressed: swallow×1" in out
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    assert "swallow" not in [a["signal"] for a in data["actions"]]
+    assert data["suppressions"].get("swallow") == 1
+
+
+def test_marker_one_line_above_window_renders_finding_no_stale(tmp_path, capsys):
+    # Phase 3: a marker OUTSIDE the window is documentation, not staleness —
+    # when the signal fires nearby, the finding renders and the report
+    # mentions NOTHING about the marker (no stale verdict, no advice; the
+    # tool never tells the reader to move a marker). "Stale — remove it" is
+    # reserved for a signal that fires NOWHERE in the file. (rightmove_url
+    # shape: marker one line past the window reported 'stale' round 2/3)
+    src = (
+        "def f():\n"
+        "    # lucidlint: ignore magic-number deliberate ordering constant\n"
+        "    pass\n"
+        "def g():\n"
+        "    return 60 * 24\n"
+    )
+    repo = make_repo(tmp_path, app_src=src)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "magic number 60 in g" in out  # the finding fires
+    assert "stale-suppression" not in out  # the marker draws no stale verdict
+    assert "no longer fires" not in out
+    assert "remove it" not in out  # nothing advises deleting or moving the marker
 
 
 def test_bulk_suppression_renders_at_report_level(capsys):
@@ -1413,10 +1500,16 @@ def test_main_json_meta(tmp_path, capsys):
 
 
 def test_main_priority_percentile(tmp_path, capsys):
+    # Phase 4: the [RISKxx] tag is gone from per-item finding lines — it
+    # read as a brokenness order. The header's single top-risk line keeps
+    # the bracket; per-item lines carry only the severity marker.
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     run_main(repo, "--warn")
     out = capsys.readouterr().out
-    assert "[RISK" in out or "warn" in out
+    assert re.search(r"top-risk \S+:\d+ \([^)]*\) \[RISK\d{2}\]", out), out
+    for line in out.splitlines():
+        if line.startswith("  [") and " — " in line:
+            assert "[RISK" not in line, line
 
 
 def test_update_baseline_excludes_warns(tmp_path):

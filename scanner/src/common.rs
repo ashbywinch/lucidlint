@@ -654,7 +654,14 @@ impl<'a> StaleCtx<'a> {
                 if why.is_empty() || self.used_line.contains(&(*ln, sig.clone())) {
                     continue;
                 }
-                let reason = self.stale_reason(sig, *ln);
+                // "stale — remove it" means exactly one case: the signal
+                // fires NOWHERE in this file. When the family still fires
+                // anywhere, the marker is documentation (a mis-placed or
+                // covered marker binds nothing) — no stale verdict, and no
+                // advice to move it (plan Phase 3).
+                let Some(reason) = self.stale_reason(sig) else {
+                    continue;
+                };
                 out.push(crate::Finding { seam_members: Vec::new(), col: 0,
                 file: self.file.to_string(),
                 line: *ln,
@@ -676,32 +683,28 @@ impl<'a> StaleCtx<'a> {
                 .iter()
                 .find(|(_, t)| t.contains(&format!("lucidlint: ignore-file {sig}")))
             {
-                let lines = self.lines_for(sig);
-                let reason = if lines.is_empty() {
-                    "no matching finding fires in this file — it was fixed, or the kind was renamed".to_string()
-                } else if lines.iter().all(|l| self.used_line.contains(&(*l, sig.clone()))) {
-                    "every matching finding already has its own line-level marker — the file suppression is redundant"
-                        .to_string()
-                } else {
-                    "matching findings exist but the file suppression was never consumed — one of them should have matched it".to_string()
-                };
-                out.push(crate::Finding { seam_members: Vec::new(), col: 0,
-                file: self.file.to_string(),
-                line: *ln,
-                function: String::new(),
-                kind: "stale-suppression".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "file suppression '{} lucidlint: ignore-file {sig}' no longer fires ({reason}) — remove it{fix_tail}",
-                    self.marker
-                ), });
+                // same fires-nowhere gate as the line markers: a file
+                // suppression over a family that still fires is either bound
+                // or redundant documentation — never a stale verdict
+                if self.lines_for(sig).is_empty() {
+                    out.push(crate::Finding { seam_members: Vec::new(), col: 0,
+                    file: self.file.to_string(),
+                    line: *ln,
+                    function: String::new(),
+                    kind: "stale-suppression".into(),
+                    severity: "fail".into(),
+                    message: format!(
+                        "file suppression '{} lucidlint: ignore-file {sig}' no longer fires (no matching finding fires in this file — it was fixed, or the kind was renamed) — remove it{fix_tail}",
+                        self.marker
+                    ), });
+                }
             }
         }
         out
     }
 
     /// Every line where a finding matching `sig` (family-aware) fired in
-    /// this scan — the facts the binding-reason diagnostics cite.
+    /// this scan — the facts the fires-nowhere verdict cites.
     fn lines_for(&self, sig: &str) -> Vec<usize> {
         let mut lines: Vec<usize> = self
             .by_signal
@@ -713,26 +716,17 @@ impl<'a> StaleCtx<'a> {
         lines
     }
 
-    /// WHY an unused marker did not bind: the finding is gone, another
-    /// marker covers it (one marker per finding, innermost first), or the
-    /// finding sits outside the marker's 3-line window. The houses sweep
-    /// burned probe sessions on each of these before reading the source.
-    fn stale_reason(&self, sig: &str, ln: usize) -> String {
-        let lines = self.lines_for(sig);
-        if lines.is_empty() {
-            return "nothing fires in this file — the finding was fixed, or the kind was renamed".to_string();
+    /// WHY an unused marker is stale — None when it is not: "stale — remove
+    /// it" means exactly one case, the marker's signal fires NOWHERE in the
+    /// file (a family renamed, a finding fixed). When the family still fires
+    /// anywhere, the marker binds nothing but stays as documentation and the
+    /// report says nothing about it (plan Phase 3).
+    fn stale_reason(&self, sig: &str) -> Option<String> {
+        if self.lines_for(sig).is_empty() {
+            Some("nothing fires in this file — the finding was fixed, or the kind was renamed".to_string())
+        } else {
+            None
         }
-        if lines.iter().any(|&l| ln <= l && l - ln < 3) {
-            return "every matching finding in the marker's window already has its own marker — one marker covers one finding (innermost first)"
-                .to_string();
-        }
-        if let Some(&near) = lines.iter().min_by_key(|&&l| l.abs_diff(ln)) {
-            return format!(
-                "the nearest matching finding is at line {near}; markers bind within the 3 lines ending at it ({}..={near})",
-                near.saturating_sub(2)
-            );
-        }
-        "nothing fires in this file".to_string()
     }
 }
 
@@ -840,11 +834,12 @@ mod tests {
     }
 
     #[test]
-    fn stale_message_states_why_the_marker_did_not_bind() {
-        // three causes, three reasons: the finding is gone; the finding is
-        // outside the marker's window; the window's findings are already
-        // covered (one marker per finding). The houses sweep burned probe
-        // sessions on each before reading the source.
+    fn stale_only_when_signal_fires_nowhere() {
+        // Phase 3: "stale — remove it" is reserved for the ONE case it
+        // means — the marker's signal fires NOWHERE in the file. When the
+        // family still fires anywhere, the marker is documentation: no
+        // stale-suppression finding at all, never a mis-placed verdict,
+        // never advice to move the marker (the rightmove_url:57 shape).
         let mut spent = std::collections::HashSet::new();
         let gone = apply_suppressions_impl(
             vec![],
@@ -865,7 +860,8 @@ mod tests {
         assert!(msg.contains("nothing fires in this file"), "{msg}");
 
         // marker below the finding: the window of line 3 is 1..=3, so a
-        // marker at 5 cannot bind — the reason names the move
+        // marker at 5 cannot bind — the family still fires, so the marker
+        // stays as documentation and NO stale verdict is emitted
         let mut spent = std::collections::HashSet::new();
         let misplaced = apply_suppressions_impl(
             vec![finding("magic-number", 3)],
@@ -877,16 +873,13 @@ mod tests {
                 spent: &mut spent,
             },
         );
-        let msg = misplaced
-            .iter()
-            .find(|f| f.kind == "stale-suppression")
-            .unwrap()
-            .message
-            .clone();
-        assert!(msg.contains("nearest matching finding is at line 3"), "{msg}");
-        assert!(msg.contains("lines ending at it"), "{msg}");
+        assert!(
+            !misplaced.iter().any(|f| f.kind == "stale-suppression"),
+            "{misplaced:?}"
+        );
 
-        // two markers, one finding: the loser's window is fully covered
+        // two markers, one finding: the loser's window is fully covered —
+        // the signal still fires, so the loser is documentation too
         let mut spent = std::collections::HashSet::new();
         let covered = apply_suppressions_impl(
             vec![finding("magic-number", 3)],
@@ -901,13 +894,48 @@ mod tests {
                 spent: &mut spent,
             },
         );
-        let msgs: Vec<String> = covered
+        assert!(!covered.iter().any(|f| f.kind == "stale-suppression"), "{covered:?}");
+    }
+
+    #[test]
+    fn stale_marker_one_line_past_window_stays_documentation() {
+        // The fires-nowhere distinction, per signal: a marker one line past
+        // the window over a family firing below (rightmove_url:57 — marker
+        // at 3, window of line 6 is 4..=6) gets no verdict and no advice;
+        // the SAME marker would be stale if the family fired nowhere at all.
+        let mut spent = std::collections::HashSet::new();
+        let near = apply_suppressions_impl(
+            vec![finding("magic-number", 6), finding("magic-number", 9)],
+            &[(3, "// lucidlint: ignore magic-number threshold".to_string())],
+            "x.py",
+            "#",
+            &mut SuppressionBooks {
+                pre_used: &PreUsedSuppressions::default(),
+                spent: &mut spent,
+            },
+        );
+        assert!(!near.iter().any(|f| f.kind == "stale-suppression"), "{near:?}");
+        assert!(near.iter().any(|f| f.kind == "magic-number"), "{near:?}");
+
+        let mut spent = std::collections::HashSet::new();
+        let far = apply_suppressions_impl(
+            vec![],
+            &[(3, "// lucidlint: ignore magic-number threshold".to_string())],
+            "x.py",
+            "#",
+            &mut SuppressionBooks {
+                pre_used: &PreUsedSuppressions::default(),
+                spent: &mut spent,
+            },
+        );
+        let msg = far
             .iter()
-            .filter(|f| f.kind == "stale-suppression")
-            .map(|f| f.message.clone())
-            .collect();
-        assert_eq!(msgs.len(), 1, "{msgs:?}");
-        assert!(msgs[0].contains("already has its own marker"), "{}", msgs[0]);
+            .find(|f| f.kind == "stale-suppression")
+            .unwrap()
+            .message
+            .clone();
+        assert!(msg.contains("nothing fires in this file"), "{msg}");
+        assert!(!msg.contains("nearest matching finding"), "{msg}");
     }
 
     #[test]

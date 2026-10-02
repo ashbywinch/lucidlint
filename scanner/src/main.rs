@@ -98,7 +98,7 @@ struct ScanState<'a> {
     claimed_dispatch: std::collections::HashSet<usize>,
     /// Parent chain for the magic-number position check — exprs plus the
     /// non-expr layers (stmt, keyword) that break the direct-parent link.
-    parent_stack: Vec<ParentEntry>,
+    parent_stack: Vec<ParentEntry<'a>>,
     /// Module-level function definitions (name, line) — non-test files.
     defs: Vec<(String, usize)>,
     /// set_* methods and property setters (name, line) — repo-wide pass.
@@ -119,6 +119,12 @@ struct ScanState<'a> {
     magic_table_exempts: HashSet<usize>,
     magic_const_rhs_exempts: HashSet<usize>,
     magic_len_guard_exempts: HashSet<usize>,
+    /// (P2) Literals exempted by a unit-stating name (assignment target or
+    /// enclosing parameter).
+    magic_unit_named_exempts: HashSet<usize>,
+    /// (P2) Literals whose surroundings state a unit — offset -> the pint
+    /// message's unit label (None = ambiguous token, unit clause omitted).
+    magic_unit_surroundings: std::collections::HashMap<usize, Option<&'static str>>,
     /// Every referenced name (Name nodes + import aliases) in this file.
     refs: HashSet<String>,
     /// String literal values (prod files only).
@@ -217,10 +223,20 @@ fn parent_kind(e: &Expr) -> ParentExprKind {
     }
 }
 
-enum ParentEntry {
+enum ParentEntry<'a> {
     Expr(ParentExprKind),
+    /// A positional argument of a call — the callee's name (P2: the
+    /// unit-constructor exemption).
+    CallArg {
+        callee: &'a str,
+    },
+    /// A keyword argument of a call — callee + the keyword's name (P2: a
+    /// unit-naming keyword — timedelta(minutes=20) — states the unit).
+    CallKw {
+        callee: &'a str,
+        kw: &'a str,
+    },
     Stmt,
-    Keyword,
 }
 
 impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
@@ -406,13 +422,21 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                     message: "breakpoint() left in production code — remove it".into(),
                 });
             }
+            let callee: &'a str = match call.func.as_ref() {
+                Expr::Name(n) => n.id.as_str(),
+                Expr::Attribute(a) => a.attr.as_str(),
+                _ => "",
+            };
             self.parent_stack.push(ParentEntry::Expr(parent_kind(expr)));
             self.visit_expr(&call.func);
             for arg in &call.arguments.args {
+                self.parent_stack.push(ParentEntry::CallArg { callee });
                 self.visit_expr(arg);
+                self.parent_stack.pop();
             }
             for kw in &call.arguments.keywords {
-                self.parent_stack.push(ParentEntry::Keyword);
+                let name: &'a str = kw.arg.as_ref().map(|n| n.id.as_str()).unwrap_or("");
+                self.parent_stack.push(ParentEntry::CallKw { callee, kw: name });
                 self.visit_expr(&kw.value);
                 self.parent_stack.pop();
             }
@@ -764,7 +788,7 @@ impl<'a> ScanState<'a> {
                     | ParentExprKind::UnaryOp
                     | ParentExprKind::Call
             )
-        );
+        ) || matches!(self.parent_stack.last(), Some(ParentEntry::CallArg { .. }));
         if !parent_is_op {
             return; // a bare subscript index is a position code, not domain magic
         }
@@ -772,8 +796,25 @@ impl<'a> ScanState<'a> {
         if self.magic_table_exempts.contains(&at)
             || self.magic_const_rhs_exempts.contains(&at)
             || self.magic_len_guard_exempts.contains(&at)
+            || self.magic_unit_named_exempts.contains(&at)
         {
             return;
+        }
+        // P2: the nearest enclosing call's callee is a unit constructor
+        // (Quantity, timedelta, TimeDelta, Distance) or its keyword names a
+        // unit (timedelta(minutes=20)) — the unit is stated at the site, so
+        // the literal is named there.
+        let nearest_call = self.parent_stack.iter().rev().find_map(|e| match e {
+            ParentEntry::CallArg { callee } => Some((*callee, "")),
+            ParentEntry::CallKw { callee, kw } => Some((*callee, *kw)),
+            _ => None,
+        });
+        if let Some((callee, kw)) = nearest_call {
+            let unit_ctor = matches!(callee, "Quantity" | "timedelta" | "TimeDelta" | "Distance");
+            let unit_kw = !kw.is_empty() && checks::name_states_unit(kw);
+            if unit_ctor || unit_kw {
+                return;
+            }
         }
         let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
         let in_fn = if fn_name.is_empty() {
@@ -781,7 +822,29 @@ impl<'a> ScanState<'a> {
         } else {
             format!(" in {fn_name}")
         };
-        self.findings.push(Finding { seam_members: Vec::new(), file: self.file.to_string(), line: line_of(self.source, n.range.start()), col: col_of(self.source, n.range.start()), function: fn_name, kind: "magic-number".into(), severity: "warn".into(), message: format!("magic number {value}{in_fn} — its meaning is not stated where it is used. Name it on the class that owns the computation. Collection-literal data tables (>= 3 same-kind numeric siblings) are exempt. — fix: magic-number --fix-name <CONST>") });
+        // P2: surroundings state the unit — a trailing comment on the
+        // literal's own line (`a * 5  # 5 km/h`) or a same-statement name —
+        // so the message suggests the pint mechanism instead of a bare name.
+        let message = match self.magic_unit_surroundings.get(&at) {
+            Some(label) => {
+                let qty = match label {
+                    Some(l) => format!("Quantity({value}, '{l}')"),
+                    None => format!("Quantity({value})"),
+                };
+                format!("magic number {value}{in_fn} — this is a quantity, not a bare number: express it as a pint Quantity ({qty}) so the unit rides with the value and conversions are checked; name it where the computation owns it. — fix: magic-number --fix-name <CONST>")
+            }
+            None => format!("magic number {value}{in_fn} — its meaning is not stated where it is used. Name it on the class that owns the computation. Collection-literal data tables (>= 3 same-kind numeric siblings) are exempt. — fix: magic-number --fix-name <CONST>"),
+        };
+        self.findings.push(Finding {
+            seam_members: Vec::new(),
+            file: self.file.to_string(),
+            line: line_of(self.source, n.range.start()),
+            col: col_of(self.source, n.range.start()),
+            function: fn_name,
+            kind: "magic-number".into(),
+            severity: "warn".into(),
+            message,
+        });
     }
 
     /// No-op statements: expression statements that discard their value.
@@ -1216,6 +1279,8 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         magic_table_exempts: checks::magic_table_exempt_offsets(&body),
         magic_const_rhs_exempts: checks::magic_const_rhs_offsets(&body),
         magic_len_guard_exempts: checks::magic_len_guard_offsets(&body),
+        magic_unit_named_exempts: checks::magic_unit_named_offsets(&body),
+        magic_unit_surroundings: checks::magic_unit_surroundings_offsets(&body, source),
         is_test: is_test_path(name),
         ..Default::default()
     };
@@ -2427,6 +2492,54 @@ mod tests {
         ));
         assert!(!f.iter().any(|x| x.kind == "magic-number"));
     }
+    #[test]
+    fn magic_unit_constructor_call_is_exempt() {
+        // P2: the unit is stated at the call site — Quantity(20, 'minute')
+        // and timedelta(minutes=20) name their unit (constructor callee or a
+        // unit-naming keyword); the literal is named there, no finding.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_unit_constructor_exempt__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "magic-number"), "{f:?}");
+    }
+
+    #[test]
+    fn magic_unit_named_assignment_and_param_are_exempt() {
+        // P2: a literal whose nearest assignment target — or an enclosing
+        // function's parameter — names the unit (max_walk_km = 2 * 30,
+        // distance_m * 30) is named by that name, not magic.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_unit_named_assignment_exempt__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "magic-number"), "{f:?}");
+    }
+
+    #[test]
+    fn magic_unit_comment_gets_pint_suggestion_plain_gets_a5() {
+        // P2: a literal with a unit-stating trailing comment is a quantity,
+        // not a bare number — the message suggests a pint Quantity with the
+        // mapped unit (km -> kilometer); a plain literal keeps the A5 text.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_unit_pint_suggestion__01.py"
+        ));
+        let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
+        assert_eq!(m.len(), 2, "{f:?}");
+        let pint = m.iter().find(|x| x.line == 2).expect("pint line fires");
+        assert!(
+            pint.message.contains("this is a quantity, not a bare number"),
+            "{}",
+            pint.message
+        );
+        assert!(pint.message.contains("Quantity(5, 'kilometer')"), "{}", pint.message);
+        assert!(pint.message.contains("--fix-name <CONST>"), "{}", pint.message);
+        let plain = m.iter().find(|x| x.line == 6).expect("plain line fires");
+        assert!(
+            plain.message.contains("its meaning is not stated where it is used"),
+            "{}",
+            plain.message
+        );
+        assert!(!plain.message.contains("quantity"), "{}", plain.message);
+    }
 
     #[test]
     fn duplicate_fast_path_matches_reference_dice() {
@@ -2816,6 +2929,28 @@ mod tests {
             "../../tests/fixtures/rust/short_param_list_and_five_plus_self_pass__01.py"
         ));
         assert!(!f.iter().any(|x| x.kind == "long-param-list"));
+    }
+    #[test]
+    fn trailing_marker_on_multiline_except_header_binds() {
+        // Phase 3: a marker riding the except header's closing line (the
+        // server.py:704 shape — `except (…):  # lucidlint: ignore …`) binds
+        // and clears: the finding anchors at the header's colon line, where
+        // a trailing marker sits — the single-line trailing-marker case
+        // (marker on the `except` line) already bound; this is its
+        // multi-line twin.
+        let src = "try:\n    work()\nexcept (\n    ValueError,\n    TypeError,\n):  # lucidlint: ignore swallow boundary is logged upstream\n    log('blip')\n";
+        let f = scan_src(src);
+        assert!(!f.iter().any(|x| x.kind == "swallow"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+
+        // control: the same header without a marker still fires, anchored
+        // at the header's colon line (where a trailing marker would sit)
+        let src2 = "try:\n    work()\nexcept (\n    ValueError,\n    TypeError,\n):\n    log('blip')\n";
+        let f2 = scan_src(src2);
+        let s: Vec<&Finding> = f2.iter().filter(|x| x.kind == "swallow").collect();
+        assert_eq!(s.len(), 1, "{f2:?}");
+        assert_eq!(s[0].line, 6, "{f2:?}");
+        assert!(!f2.iter().any(|x| x.kind == "stale-suppression"), "{f2:?}");
     }
 
     // ------------------------------------------------------------- except family
@@ -4045,6 +4180,71 @@ mod tests {
         ));
         assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
     }
+    #[test]
+    fn record_scalar_map_literal_is_a_lookup_not_a_record() {
+        // P1: the scalar-map sub-family — a dict whose EVERY value is a
+        // scalar literal is a lookup keyed by identity, not a record: no
+        // record-shape finding. A collection value keeps the finding (the
+        // dict holds shape, not identities).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_scalar_map_literal_passes__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        let g = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_collection_value_dict_still_fires__01.py"
+        ));
+        let r: Vec<&Finding> = g.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1, "{g:?}");
+        assert!(r[0].message.contains("This dict has constant keys"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn record_from_dict_functions_carry_the_wire_message() {
+        // P1: the wire-parse sub-family — a dict arriving as a parameter or
+        // return of a from_dict/from_json function is built at the parse
+        // boundary, never ad hoc; the A1 premise ("call sites build it ad
+        // hoc") is false there, so the message names the wire form, the
+        // parse boundary, and the from_dict ingestion instead.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_from_dict_wire_message__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 2, "{f:?}");
+        let param = r
+            .iter()
+            .find(|x| x.message.contains("raw is the wire form of a record"))
+            .expect("param arm fires");
+        assert!(
+            param.message.contains("the parse boundary has no type"),
+            "{}",
+            param.message
+        );
+        assert!(
+            param.message.contains("ingest the wire with its from_dict"),
+            "{}",
+            param.message
+        );
+        assert!(
+            !param.message.contains("call sites build it ad hoc"),
+            "{}",
+            param.message
+        );
+        let ret = r
+            .iter()
+            .find(|x| x.message.contains("from_json returns the wire form of a record"))
+            .expect("return arm fires");
+        assert!(
+            ret.message.contains("the parse boundary has no type"),
+            "{}",
+            ret.message
+        );
+        assert!(
+            ret.message.contains("ingest the wire with its from_dict"),
+            "{}",
+            ret.message
+        );
+        assert!(!ret.message.contains("call sites build it ad hoc"), "{}", ret.message);
+    }
 
     #[test]
     fn record_dict_call_as_inline_argument_is_found() {
@@ -5195,67 +5395,99 @@ mod tests {
     }
 
     #[test]
-    fn loop_sequence_shared_accumulator_is_a_pipeline() {
-        // the same accumulator fed by two loops is a pipeline: each pass
-        // feeds the next (review-bot, PR #274)
+    fn loop_dict_build_subscript_store_still_fires() {
+        // P5: the pure dict-build shape (eval_context.py:42 —
+        // `result[k] = f(v)` in one per-item pass) IS a comprehension in
+        // disguise — loop-pipeline still fires.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_dict_build_subscript_store_is_found__01.py"
+        ));
+        let p: Vec<&Finding> = f.iter().filter(|x| x.kind == "loop-pipeline").collect();
+        assert_eq!(p.len(), 1, "{f:?}");
+        assert!(p[0].message.contains("use a comprehension"), "{}", p[0].message);
+        assert!(!f.iter().any(|x| x.kind == "loop-hoist"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "mutating-loop"), "{f:?}");
+    }
+
+    #[test]
+    fn loop_pump_and_polling_shapes_emit_nothing() {
+        // P5: a PriorityQueue drain (pop/append/requeue) and a polling
+        // sleep-schedule are not comprehension shapes — no loop finding at
+        // all, no fold advice, no sequence verdict.
+        let pump = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_pump_priority_queue_drain_emits_nothing__01.py"
+        ));
+        assert!(!pump.iter().any(|x| x.kind == "loop-pipeline"), "{pump:?}");
+        assert!(!pump.iter().any(|x| x.kind == "loop-hoist"), "{pump:?}");
+        assert!(!pump.iter().any(|x| x.kind == "mutating-loop"), "{pump:?}");
+        let poll = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_polling_sleep_emits_nothing__01.py"
+        ));
+        assert!(!poll.iter().any(|x| x.kind == "loop-pipeline"), "{poll:?}");
+        assert!(!poll.iter().any(|x| x.kind == "loop-hoist"), "{poll:?}");
+        assert!(!poll.iter().any(|x| x.kind == "mutating-loop"), "{poll:?}");
+        assert!(!poll.iter().any(|x| x.kind == "loop-sequence"), "{poll:?}");
+    }
+
+    #[test]
+    fn loop_shared_accumulator_passes_each_fire_pipeline_no_sequence_verdict() {
+        // P5: the sequence judgement is gone — a loop either reduces to a
+        // comprehension (loop-pipeline) or emits nothing. Two `chunks +=
+        // [p]` loops are each a comprehension shape and still fire as
+        // pipelines; there is no loop-sequence verdict on top.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/loop_sequence_shared_accumulator_is_a_pipeline__01.py"
         ));
-        let seq: Vec<&Finding> = f.iter().filter(|x| x.kind == "loop-sequence").collect();
-        assert_eq!(seq.len(), 1, "{f:?}");
-        assert!(seq[0].message.contains("pipeline"), "{}", seq[0].message);
-        let pipes = f.iter().filter(|x| x.kind == "loop-pipeline").count();
-        assert_eq!(pipes, 2, "{f:?}");
+        let pipes: Vec<&Finding> = f.iter().filter(|x| x.kind == "loop-pipeline").collect();
+        assert_eq!(pipes.len(), 2, "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-sequence"), "{f:?}");
     }
 
     #[test]
-    fn loop_sequence_independent_passes_get_extraction_advice() {
-        // independent per-target loops are a sequence, but extraction advice
-        // (one helper per pass) — they are NOT one pipeline
+    fn loop_sequences_emit_only_the_pipeline_shape() {
+        // P5: independent appended loops each fire loop-pipeline; the
+        // sequence extraction advice is gone, and a fold rebind (latest-
+        // wins with per-iteration temps) emits nothing at all.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/loop_sequence_independent_passes_get_extraction_advice__01.py"
         ));
-        let seq = f
-            .iter()
-            .find(|x| x.kind == "loop-sequence")
-            .expect("loop-sequence fires");
-        assert!(seq.message.contains("named helper"), "{}", seq.message);
-        // a fold (latest-wins) with per-iteration temps is still a fold —
-        // the temps do not make it a mutating loop
+        assert_eq!(f.iter().filter(|x| x.kind == "loop-pipeline").count(), 2, "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-sequence"), "{f:?}");
         let t = scan_src(include_str!(
             "../../tests/fixtures/rust/loop_sequence_independent_passes_get_extraction_advice__02.py"
         ));
+        assert!(!t.iter().any(|x| x.kind == "loop-pipeline"), "{t:?}");
+        assert!(!t.iter().any(|x| x.kind == "loop-hoist"), "{t:?}");
         assert!(!t.iter().any(|x| x.kind == "mutating-loop"), "{t:?}");
-        let d = t.iter().find(|x| x.kind == "loop-hoist").expect("fold advice fires");
-        assert!(d.message.contains("fold"), "{}", d.message);
     }
-
     #[test]
-    fn mutating_loop_requires_two_or_more_surviving_state_writes() {
-        // three surviving state writes -> mutating-loop (sequential writes
-        // to out/counts/total)
+    fn multi_accumulator_loops_emit_nothing() {
+        // P5: a loop writing three accumulators is stateful, not a
+        // comprehension — no mutating-loop verdict and no fold advice; the
+        // single reduction emits nothing too.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/mutating_loop_requires_two_or_more_surviving_state_writes__01.py"
         ));
-        assert!(f.iter().any(|x| x.kind == "mutating-loop"), "{f:?}");
-        // a single reduction is a fold, not a mutation
+        assert!(!f.iter().any(|x| x.kind == "mutating-loop"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-pipeline"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-hoist"), "{f:?}");
         let ok = scan_src(include_str!(
             "../../tests/fixtures/rust/mutating_loop_requires_two_or_more_surviving_state_writes__02.py"
         ));
         assert!(!ok.iter().any(|x| x.kind == "mutating-loop"), "{ok:?}");
+        assert!(!ok.iter().any(|x| x.kind == "loop-hoist"), "{ok:?}");
+        assert!(!ok.iter().any(|x| x.kind == "loop-pipeline"), "{ok:?}");
     }
-
     #[test]
-    fn loop_sequence_feed_chain_is_a_pipeline() {
-        // the second pass consumes the first pass's output — a feed chain
+    fn loop_feed_chain_loops_each_fire_pipeline_no_sequence_verdict() {
+        // P5: the second pass consumes the first pass's output — each loop
+        // is itself a comprehension shape and fires as pipeline; the feed
+        // chain verdict is gone.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/loop_sequence_feed_chain_is_a_pipeline__01.py"
         ));
-        let seq = f
-            .iter()
-            .find(|x| x.kind == "loop-sequence")
-            .expect("loop-sequence fires");
-        assert!(seq.message.contains("pipeline"), "{}", seq.message);
+        assert_eq!(f.iter().filter(|x| x.kind == "loop-pipeline").count(), 2, "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-sequence"), "{f:?}");
     }
 
     #[test]
@@ -5290,27 +5522,20 @@ mod tests {
     }
 
     #[test]
-    fn loop_hoist_fires_on_single_mutation_long_body_loops() {
-        // a long per-item calculation feeding one accumulator is a hoist —
-        // the body becomes a helper and the loop a comprehension
+    fn non_pipeline_loop_bodies_emit_nothing() {
+        // P5: a long per-item calculation feeding one accumulator is NOT a
+        // comprehension shape — no hoist advice, no fold; only the pure
+        // append loop still fires, as loop-pipeline.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/loop_hoist_fires_on_single_mutation_long_body_loops__01.py"
         ));
-        let hoist = f.iter().find(|x| x.kind == "loop-hoist").expect("loop-hoist fires");
-        assert!(hoist.message.contains("hoist the calculation"), "{}", hoist.message);
-        assert!(
-            hoist.message.contains("Replace Loop with Pipeline"),
-            "{}",
-            hoist.message
-        );
-        // a multi-statement fold with a guarded assignment is still a fold
+        assert!(!f.iter().any(|x| x.kind == "loop-hoist"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-pipeline"), "{f:?}");
         let g = scan_src(include_str!(
             "../../tests/fixtures/rust/loop_hoist_fires_on_single_mutation_long_body_loops__02.py"
         ));
-        let d = g.iter().find(|x| x.kind == "loop-hoist").expect("fold advice fires");
-        assert!(!d.message.contains("hoist the calculation"), "{}", d.message);
-        assert!(d.message.contains("fold"), "{}", d.message);
-        // a pure append loop hoists nothing — pipeline advice covers it
+        assert!(!g.iter().any(|x| x.kind == "loop-hoist"), "{g:?}");
+        assert!(!g.iter().any(|x| x.kind == "loop-pipeline"), "{g:?}");
         let p = scan_src(include_str!(
             "../../tests/fixtures/rust/loop_hoist_fires_on_single_mutation_long_body_loops__03.py"
         ));
@@ -5319,21 +5544,14 @@ mod tests {
     }
 
     #[test]
-    fn loop_hoist_attribute_accumulator_renders_the_member_name() {
-        // B7: a self.result.append loop renders "(result)" — never "(self)"
+    fn multi_statement_accumulator_loop_emits_nothing() {
+        // P5: the old B7 hoist shape — a multi-statement body feeding one
+        // member accumulator — is not a comprehension; nothing emits (the
+        // member-name render belonged to the removed hoist advice).
         let src = "class C:\n    def go(self, xs):\n        self.result = []\n        for x in xs:\n            v = x * 2\n            w = v + 1\n            if w:\n                self.result.append(w)\n        return self.result\n";
         let f = scan_src(src);
-        let h: Vec<&Finding> = f.iter().filter(|x| x.kind == "loop-hoist").collect();
-        assert!(!h.is_empty(), "{f:?}");
-        assert!(
-            h[0].message.contains("builds one collection (result)"),
-            "{}",
-            h[0].message
-        );
-        assert!(!h[0].message.contains("(self)"), "{}", h[0].message);
-        assert!(!h[0].message.contains("()"), "{}", h[0].message);
-        // the comprehension advice uses the member name too
-        assert!(h[0].message.contains("result = [<helper>"), "{}", h[0].message);
+        assert!(!f.iter().any(|x| x.kind == "loop-hoist"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-pipeline"), "{f:?}");
     }
 
     #[test]

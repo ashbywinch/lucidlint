@@ -7,6 +7,7 @@
 //! exactly: suppressions, type-ignore, global-state, builtin-shadow, closures,
 //! class-module, vague-name, strewing, except-swallows, broad-except.
 
+// lucidlint: ignore-file closures the unit-name walker and wire-classifier probes are one-purpose local visits
 // lucidlint: ignore-file large-function the walkers and grammar tables are ONE exhaustive dispatch/
 // decision table each — splitting them scatters a single mapping, covered by the file why
 use rayon::prelude::*;
@@ -635,6 +636,30 @@ fn is_trivial_stub(body: &[Stmt]) -> bool {
     }
 }
 
+/// The line the except header's colon sits on — the line a trailing marker
+/// on the except clause rides. Single-line headers: the `except` line. A
+/// multi-line `except (…):` header: the closing `):` line (plan Phase 3:
+/// the server.py:704 shape — a marker on the except's own line binds and
+/// clears; the finding anchors where its trailing marker would sit).
+fn except_header_colon_line(source: &str, eh: &ruff_python_ast::ExceptHandlerExceptHandler) -> usize {
+    let bytes = source.as_bytes();
+    let mut i = eh.range().start().to_usize();
+    let end = eh.range().end().to_usize();
+    let mut depth = 0usize;
+    while i < end {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b':' if depth == 0 => {
+                return line_of(source, ruff_text_size::TextSize::new(i as u32));
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    line_of(source, eh.range().start())
+}
+
 /// The except family: swallows (fail) and broad excepts (warn).
 pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
     let Stmt::Try(t) = stmt else { return };
@@ -651,7 +676,7 @@ pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
             }
         };
         if swallows {
-            let line = line_of(state.source, eh.range().start());
+            let line = except_header_colon_line(state.source, eh);
             let kind = if type_opt.is_none() {
                 "bare except"
             } else {
@@ -671,7 +696,7 @@ pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
             if matches!(base.as_deref(), Some("Exception") | Some("BaseException")) {
                 state.findings.push(Finding { seam_members: Vec::new(), col: 0,
                                     file: state.file.to_string(),
-                                    line: line_of(state.source, eh.range().start()),
+                                    line: except_header_colon_line(state.source, eh),
                                     function: fn_name.clone(),
                                     kind: "broad-except".into(),
                                     severity: "warn".into(),
@@ -4103,6 +4128,254 @@ fn census_value(e: &Expr, groups: &mut std::collections::HashMap<bool, Vec<usize
     }
 }
 
+// ---------------------------------------------------------------- unit tokens
+
+/// Unit tokens — words that state a physical unit (plan P2). A name or
+/// comment carrying one states the value's unit: the literal is either
+/// named by its surroundings (the assignment-target/parameter exemption) or
+/// deserves the pint-suggestion message.
+pub const UNIT_TOKENS: &[&str] = &[
+    "km", "mile", "m", "cm", "mm", "min", "minute", "sec", "hour", "day", "week", "month", "year", "mph", "kmh", "kg",
+    "watt",
+];
+
+/// The pint unit label for a matched token — km -> kilometer, min -> minute,
+/// sec -> second, ... None when the token is ambiguous (`m` alone), in which
+/// case the message omits the unit clause.
+pub fn unit_token_label(tok: &str) -> Option<&'static str> {
+    match tok {
+        "km" => Some("kilometer"),
+        "mile" => Some("mile"),
+        "m" => None, // meter? mile? ambiguous
+        "cm" => Some("centimeter"),
+        "mm" => Some("millimeter"),
+        "min" | "minute" => Some("minute"),
+        "sec" => Some("second"),
+        "hour" => Some("hour"),
+        "day" => Some("day"),
+        "week" => Some("week"),
+        "month" => Some("month"),
+        "year" => Some("year"),
+        "mph" => Some("mile_per_hour"),
+        "kmh" => Some("kilometer_per_hour"),
+        "kg" => Some("kilogram"),
+        "watt" => Some("watt"),
+        _ => None,
+    }
+}
+
+/// The word components of an identifier — snake_case separators and
+/// camelCase humps (`max_distance_km` -> [max, distance, km];
+/// `maxDistanceKm` -> the same). Whole-word matching avoids the substring
+/// trap: a bare `m` must be its OWN component, not a letter inside `name`.
+fn name_components(name: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if c == '_' || c == '-' {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            prev_lower = false;
+        } else if c.is_ascii_uppercase() {
+            if prev_lower {
+                out.push(std::mem::take(&mut cur));
+            }
+            cur.push(c.to_ascii_lowercase());
+            prev_lower = false;
+        } else {
+            cur.push(c);
+            prev_lower = true;
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// The first unit token an identifier states, if any — a component matching
+/// a token or its plural (`minutes`, `hours`, `miles`, ...).
+pub fn unit_token_of_name(name: &str) -> Option<&'static str> {
+    for comp in name_components(name) {
+        for tok in UNIT_TOKENS {
+            if comp == *tok || (comp.len() == tok.len() + 1 && comp.starts_with(tok) && comp.ends_with('s')) {
+                return Some(tok);
+            }
+        }
+    }
+    None
+}
+
+/// Does an identifier state a unit (P2): the nearest enclosing assignment
+/// target or parameter such as `max_walk_km`, `distance_m`.
+pub fn name_states_unit(name: &str) -> bool {
+    unit_token_of_name(name).is_some()
+}
+
+/// The unit token a comment states, if any — whole identifier-ish words only
+/// (`5 km/h` -> km; the `m` inside a word never counts).
+fn unit_token_of_comment(text: &str) -> Option<&'static str> {
+    let mut words: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for c in text.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            cur.push(c.to_ascii_lowercase());
+        } else if !cur.is_empty() {
+            words.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    for tok in UNIT_TOKENS {
+        for w in &words {
+            if w == *tok || (w.len() == tok.len() + 1 && w.starts_with(tok) && w.ends_with('s')) {
+                return Some(tok);
+            }
+        }
+    }
+    None
+}
+
+/// Does the literal's line carry a TRAILING comment (a '#' after the
+/// literal on the same line) that states a unit — `a * 5  # 5 km/h`?
+fn line_trailing_unit_comment(source: &str, off: usize) -> Option<&'static str> {
+    let line_end = source[off..].find('\n').map(|i| off + i).unwrap_or(source.len());
+    let rest = &source[off..line_end];
+    match rest.find('#') {
+        Some(hash) => unit_token_of_comment(&rest[hash + 1..]),
+        None => None,
+    }
+}
+
+/// (P2) Magic-number literal offsets exempted by a unit-stating NAME: the
+/// nearest enclosing assignment target (or any enclosing function's
+/// parameter) states the unit, so the value is named — `max_walk_km = 2 *
+/// 30` fires nothing. The module-constant-RHS, octal/hex/binary, subscript,
+/// and data-table exemptions (B8) are untouched.
+pub fn magic_unit_named_offsets(body: &[Stmt]) -> HashSet<usize> {
+    fn bind_target(t: &Expr) -> Option<String> {
+        match t {
+            Expr::Name(n) => Some(n.id.to_string()),
+            Expr::Attribute(a) => Some(a.attr.to_string()),
+            _ => None,
+        }
+    }
+    fn scan_literals(e: &Expr, out: &mut HashSet<usize>) {
+        walk_expr_deep(e, false, &mut |x, _| {
+            if let Expr::NumberLiteral(n) = x {
+                out.insert(n.range().start().to_usize());
+            }
+        });
+    }
+    fn walk(stmts: &[Stmt], params: &HashSet<String>, out: &mut HashSet<usize>) {
+        for s in stmts {
+            match s {
+                Stmt::FunctionDef(f) => {
+                    let mut p = params.clone();
+                    function_param_names(&f.parameters, &mut p);
+                    walk(&f.body, &p, out);
+                }
+                Stmt::ClassDef(c) => walk(&c.body, params, out),
+                Stmt::For(f) => {
+                    walk(&f.body, params, out);
+                    walk(&f.orelse, params, out);
+                }
+                Stmt::While(w) => {
+                    walk(&w.body, params, out);
+                    walk(&w.orelse, params, out);
+                }
+                Stmt::If(i) => {
+                    walk(&i.body, params, out);
+                    for cl in &i.elif_else_clauses {
+                        walk(&cl.body, params, out);
+                    }
+                }
+                Stmt::Try(t) => {
+                    walk(&t.body, params, out);
+                    for h in &t.handlers {
+                        let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                        walk(&eh.body, params, out);
+                    }
+                    walk(&t.orelse, params, out);
+                    walk(&t.finalbody, params, out);
+                }
+                Stmt::With(w) => walk(&w.body, params, out),
+                Stmt::Match(m) => {
+                    for case in &m.cases {
+                        walk(&case.body, params, out);
+                    }
+                }
+                _ => {
+                    let target_unit = match s {
+                        Stmt::Assign(a) => a
+                            .targets
+                            .iter()
+                            .any(|t| bind_target(t).is_some_and(|n| name_states_unit(&n))),
+                        Stmt::AnnAssign(a) => bind_target(&a.target).is_some_and(|n| name_states_unit(&n)),
+                        Stmt::AugAssign(a) => bind_target(&a.target).is_some_and(|n| name_states_unit(&n)),
+                        _ => false,
+                    };
+                    if target_unit || params.iter().any(|p| name_states_unit(p)) {
+                        for e in stmt_exprs(s) {
+                            scan_literals(e, out);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let empty: HashSet<String> = HashSet::new();
+    let mut out = HashSet::new();
+    walk(body, &empty, &mut out);
+    out
+}
+
+/// (P2) Magic-number literal offsets whose SURROUNDINGS state a unit without
+/// naming the value: a trailing comment on the literal's own line (`a * 5
+/// # 5 km/h`) or a name in the literal's same statement (`if distance_km >
+/// 30`). The literal still fires — with the pint-suggestion message instead
+/// of the A5 text. Maps offset -> the unit's message label (None = the
+/// token is ambiguous; the unit clause is omitted).
+pub fn magic_unit_surroundings_offsets(
+    body: &[Stmt],
+    source: &str,
+) -> std::collections::HashMap<usize, Option<&'static str>> {
+    let mut out = std::collections::HashMap::new();
+    let mut sq: Vec<&Stmt> = body.iter().collect();
+    while let Some(s) = sq.pop() {
+        let mut names: Vec<&str> = Vec::new();
+        let mut literals: Vec<usize> = Vec::new();
+        for e in stmt_exprs(s) {
+            walk_expr_deep(e, false, &mut |x, _| match x {
+                Expr::Name(n) => names.push(n.id.as_str()),
+                Expr::NumberLiteral(n) => literals.push(n.range().start().to_usize()),
+                _ => {}
+            });
+        }
+        let name_label: Option<Option<&'static str>> =
+            names.iter().find_map(|n| unit_token_of_name(n).map(unit_token_label));
+        for off in &literals {
+            if let Some(label) = name_label {
+                out.insert(*off, label);
+            } else if let Some(tok) = line_trailing_unit_comment(source, *off) {
+                out.insert(*off, unit_token_label(tok));
+            }
+        }
+        match s {
+            Stmt::FunctionDef(f) => {
+                for b in &f.body {
+                    sq.push(b);
+                }
+            }
+            _ => push_stmt_children(s, &mut sq),
+        }
+    }
+    out
+}
+
 fn census_number(e: &Expr, groups: &mut std::collections::HashMap<bool, Vec<usize>>) {
     if let Expr::NumberLiteral(n) = e {
         push_census_literal(n, groups);
@@ -4422,19 +4695,6 @@ pub fn unused_setter_findings(
 // =====================================================================
 // the loop family (Replace Loop with Pipeline) — Python
 
-/// The base NAME of an expression: `x` itself, `a.b.c` -> a, `a[k].b` -> a.
-fn loop_expr_base_name(e: &Expr) -> Option<String> {
-    let mut v = e;
-    loop {
-        match v {
-            Expr::Name(n) => return Some(n.id.to_string()),
-            Expr::Attribute(a) => v = &a.value,
-            Expr::Subscript(s) => v = &s.value,
-            _ => return None,
-        }
-    }
-}
-
 /// The control-flow children of a statement — nested def/class scopes excluded.
 fn loop_stmt_children(s: &Stmt) -> Vec<&Stmt> {
     let mut out = Vec::new();
@@ -4560,399 +4820,14 @@ fn loop_pipeline_auto_fixable(stmts: &[Stmt]) -> bool {
     }
 }
 
-/// The minimum flattened body statement count for a single-mutation loop to
-/// carry the hoist advice — the body clearly computes more than it appends
-/// (the user's "more than a couple of lines").
-const LOOP_HOIST_MIN_STMTS: usize = 4;
-
-/// The flattened statement count of a loop body — every control-flow child
-/// counts (a nested loop is one statement), nested defs are not the body's
-/// business.
-fn loop_body_stmt_count(stmts: &[&Stmt]) -> usize {
-    fn walk(stmts: &[&Stmt], n: &mut usize) {
-        for &s in stmts {
-            if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
-                continue;
-            }
-            *n += 1;
-            for child in loop_stmt_children(s) {
-                walk(&[child], n);
-            }
-        }
-    }
-    let mut n = 0;
-    walk(stmts, &mut n);
-    n
-}
-
-/// Does the body mutate `acc` via a mutating receiver call or a subscript
-/// store — a collection BUILD? The hoist advice (a helper that returns the
-/// value, then a comprehension) fits a build; a rebind/augment fold gets the
-/// measure-helper + fold advice instead.
-fn loop_mutation_is_collection_build(body: &[&Stmt], acc: &str) -> bool {
-    let mut found = false;
-    let mut stack: Vec<&Stmt> = body.to_vec();
-    while let Some(s) = stack.pop() {
-        match s {
-            Stmt::Expr(e) => {
-                walk_expr_deep(&e.value, false, &mut |x, _| {
-                    if let Expr::Call(c) = x {
-                        if let Expr::Attribute(a) = c.func.as_ref() {
-                            if MUTATING_METHODS.contains(&a.attr.as_str())
-                                && loop_state_name(&a.value).as_deref() == Some(acc)
-                            {
-                                found = true;
-                            }
-                        }
-                    }
-                });
-            }
-            Stmt::Assign(a) if a.targets.len() == 1 => {
-                if let Expr::Subscript(s) = &a.targets[0] {
-                    if loop_state_name(&s.value).as_deref() == Some(acc) {
-                        found = true;
-                    }
-                }
-            }
-            Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
-            _ => {
-                for child in loop_stmt_children(s) {
-                    stack.push(child);
-                }
-            }
-        }
-    }
-    found
-}
-
-/// Can the loop-hoist FIXER rewrite this for-loop: a simple Name target
-/// whose accumulator writes are ALL append/add calls (the engine's
-/// _LoopHoistExtractor contract)? Rebind/subscript writes on the accumulator
-/// and extend/appendleft/update receivers keep the directive off (the
-/// finding still fires, the fix just does not advertise itself).
-fn loop_hoist_fixable(for_target: &Expr, body: &[Stmt], acc: &str) -> bool {
-    if !matches!(for_target, Expr::Name(_)) {
-        return false;
-    }
-    let mut found = false;
-    let mut bad = false;
-    fn walk(stmts: &[&Stmt], acc: &str, found: &mut bool, bad: &mut bool) {
-        for &s in stmts {
-            match s {
-                Stmt::Expr(e) => {
-                    walk_expr_deep(&e.value, false, &mut |x, _| {
-                        if let Expr::Call(c) = x {
-                            if let Expr::Attribute(a) = c.func.as_ref() {
-                                if loop_state_name(&a.value).as_deref() == Some(acc) {
-                                    if matches!(a.attr.as_str(), "append" | "add") {
-                                        *found = true;
-                                    } else {
-                                        *bad = true;
-                                    }
-                                }
-                            }
-                        }
-                    });
-                }
-                Stmt::Assign(a) => {
-                    for t in &a.targets {
-                        if loop_state_name(t).as_deref() == Some(acc) {
-                            *bad = true;
-                        }
-                    }
-                }
-                Stmt::AnnAssign(a) => {
-                    if loop_state_name(&a.target).as_deref() == Some(acc) {
-                        *bad = true;
-                    }
-                }
-                Stmt::AugAssign(a) => {
-                    if loop_state_name(&a.target).as_deref() == Some(acc) {
-                        *bad = true;
-                    }
-                }
-                Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
-                _ => {
-                    for child in loop_stmt_children(s) {
-                        walk(&[child], acc, found, bad);
-                    }
-                }
-            }
-        }
-    }
-    let refs: Vec<&Stmt> = body.iter().collect();
-    walk(&refs, acc, &mut found, &mut bad);
-    found && !bad
-}
-
-/// Record one mutated name if it is a candidate, not excluded, and not yet
-/// recorded (dedup across the body).
-fn loop_record_name(
-    name: &str,
-    candidates: &HashSet<String>,
-    excl: &HashSet<String>,
-    out: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-) {
-    if candidates.contains(name) && !excl.contains(name) && !seen.contains(name) {
-        seen.insert(name.to_string());
-        out.push(name.to_string());
-    }
-}
-
-/// Record a mutated MEMBER name — an attribute member is the object's
-/// state, not a function binding, so the candidates bound-check does not
-/// apply (B7: `self.x` records `x`, never `self`).
-fn loop_record_member(name: &str, excl: &HashSet<String>, out: &mut Vec<String>, seen: &mut HashSet<String>) {
-    if !name.is_empty() && !excl.contains(name) && !seen.contains(name) {
-        seen.insert(name.to_string());
-        out.push(name.to_string());
-    }
-}
-
-/// The state name of a mutation receiver or write target: `x` -> x,
-/// `counts[k]` -> counts, `self.x` -> the member `x`, `self.x[k]` -> x —
-/// the member of an attribute access IS the loop state, never the receiver
-/// (B7: renders `x` where the old code rendered `(self)`).
-fn loop_state_name(e: &Expr) -> Option<String> {
-    match e {
-        Expr::Name(n) => Some(n.id.to_string()),
-        Expr::Attribute(a) => Some(a.attr.to_string()),
-        Expr::Subscript(s) => loop_state_name(&s.value),
-        _ => None,
-    }
-}
-
-/// The accumulator's parenthetical display in the loop-hoist message: the
-/// member name when the loop builds `self.x` (renders `x`), the plain name
-/// otherwise — never "(self)" or "()"; drop the parenthetical when no name
-/// exists (B7).
-fn loop_acc_paren(acc: &str) -> String {
-    if acc.is_empty() || acc == "self" || acc == "cls" {
-        String::new()
-    } else {
-        format!(" ({acc})")
-    }
-}
-/// A write TARGET's state name: a rebind (`x`), a container write
-/// (`counts[k]` -> counts), or an object member write — `self.x` -> x (B7:
-/// the MEMBER is the state; the receiver is the class, never "self").
-fn loop_write_target(
-    t: &Expr,
-    candidates: &HashSet<String>,
-    excl: &HashSet<String>,
-    out: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-) {
-    match t {
-        Expr::Name(n) => {
-            if n.id.as_str() != "self" && n.id.as_str() != "cls" {
-                loop_record_name(n.id.as_str(), candidates, excl, out, seen);
-            }
-        }
-        Expr::Tuple(tu) => {
-            for el in &tu.elts {
-                loop_write_target(el, candidates, excl, out, seen);
-            }
-        }
-        Expr::List(li) => {
-            for el in &li.elts {
-                loop_write_target(el, candidates, excl, out, seen);
-            }
-        }
-        Expr::Starred(st) => loop_write_target(&st.value, candidates, excl, out, seen),
-        Expr::Attribute(a) => {
-            // an attribute write mutates the MEMBER — self.x / obj.x -> x.
-            // Gate on the receiver being known state (self/cls or a
-            // candidate binding); the member name bypasses the candidates
-            // check (a class member is not in this function's bindings).
-            let recv_ok = match loop_expr_base_name(&a.value) {
-                Some(b) if b == "self" || b == "cls" => true,
-                Some(b) => candidates.contains(&b),
-                None => false,
-            };
-            if recv_ok {
-                loop_record_member(&a.attr, excl, out, seen);
-            }
-        }
-        Expr::Subscript(s) => loop_write_target(&s.value, candidates, excl, out, seen),
-        _ => {
-            if let Some(base) = loop_expr_base_name(t) {
-                if base != "self" && base != "cls" {
-                    loop_record_name(&base, candidates, excl, out, seen);
-                }
-            }
-        }
-    }
-}
-
-/// The candidate names one statement MUTATES — rebinds, subscript/attribute
-/// stores, deletes, and mutating receiver calls. Nested defs are new scopes.
-fn loop_stmt_writes(
-    s: &Stmt,
-    candidates: &HashSet<String>,
-    excl: &HashSet<String>,
-    out: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-) {
-    match s {
-        Stmt::Assign(a) => {
-            for t in &a.targets {
-                loop_write_target(t, candidates, excl, out, seen);
-            }
-        }
-        Stmt::AnnAssign(a) => loop_write_target(&a.target, candidates, excl, out, seen),
-        Stmt::AugAssign(a) => loop_write_target(&a.target, candidates, excl, out, seen),
-        Stmt::Delete(d) => {
-            for t in &d.targets {
-                loop_write_target(t, candidates, excl, out, seen);
-            }
-        }
-        Stmt::Expr(e) => {
-            walk_expr_deep(&e.value, false, &mut |x, _| {
-                if let Expr::Call(c) = x {
-                    if let Expr::Attribute(a) = c.func.as_ref() {
-                        if MUTATING_METHODS.contains(&a.attr.as_str()) {
-                            // the receiver's member is the state the call
-                            // mutates: self.x.append -> x, counts.append -> counts
-                            loop_write_target(&a.value, candidates, excl, out, seen);
-                        }
-                    }
-                }
-            });
-        }
-        Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
-        _ => {
-            for child in loop_stmt_children(s) {
-                loop_stmt_writes(child, candidates, excl, out, seen);
-            }
-        }
-    }
-}
-
-/// The candidate names a statement list MUTATES — the loop's own target
-/// (`excl`) is not a mutation.
-fn loop_mutated_candidates(stmts: &[&Stmt], candidates: &HashSet<String>, excl: &HashSet<String>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for s in stmts {
-        loop_stmt_writes(s, candidates, excl, &mut out, &mut seen);
-    }
-    out
-}
-
-/// The candidate names the loop's iterable READS — the feed signal (loop N
-/// consuming what loop N-1 built). Body reads are left out: the iterable is
-/// where the chain actually joins.
-fn loop_iter_reads(iter: &Expr, candidates: &HashSet<String>, excl: &HashSet<String>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    walk_expr_deep(iter, false, &mut |x, _| {
-        if let Expr::Name(n) = x {
-            loop_record_name(n.id.as_str(), candidates, excl, &mut out, &mut seen);
-        }
-    });
-    out
-}
-
-/// Every For target in the function's own scope — a loop's iteration
-/// variable is not "state the loop mutates".
-fn loop_for_targets(body: &[Stmt]) -> HashSet<String> {
-    let mut out = HashSet::new();
-    let mut stack: Vec<&Stmt> = body.iter().collect();
-    while let Some(s) = stack.pop() {
-        match s {
-            Stmt::For(f) => {
-                let mut t = HashSet::new();
-                expr_bindings(&f.target, &mut t);
-                out.extend(t);
-            }
-            Stmt::FunctionDef(_) | Stmt::ClassDef(_) => continue,
-            _ => {
-                for child in loop_stmt_children(s) {
-                    stack.push(child);
-                }
-            }
-        }
-    }
-    out
-}
-
-/// The function-scope names bound OUTSIDE every loop body — the state a
-/// loop can SURVIVE: top-level statements plus non-loop control flow (an
-/// if/try/with branch that is not inside a loop). Loop bodies are NOT
-/// descended and loop targets are NOT bound: an iteration variable or a
-/// body-local temp (`item` in both loops of the completeness test,
-/// `m`/`version` in `_latest`) is not state that outlives a pass, even when
-/// an earlier loop happened to bind it.
-fn loop_surviving_bindings(body: &[Stmt]) -> HashSet<String> {
-    fn bind_stmt(s: &Stmt, out: &mut HashSet<String>) {
-        match s {
-            Stmt::FunctionDef(f) => {
-                out.insert(f.name.to_string());
-            }
-            Stmt::ClassDef(c) => {
-                out.insert(c.name.to_string());
-            }
-            Stmt::Assign(a) => {
-                for t in &a.targets {
-                    expr_bindings(t, out);
-                }
-            }
-            Stmt::AnnAssign(a) => expr_bindings(&a.target, out),
-            Stmt::AugAssign(a) => expr_bindings(&a.target, out),
-            Stmt::With(w) => {
-                for item in &w.items {
-                    if let Some(v) = &item.optional_vars {
-                        expr_bindings(v, out);
-                    }
-                }
-            }
-            Stmt::Import(i) => {
-                for a in &i.names {
-                    out.insert(a.name.as_str().split('.').next().unwrap_or("").to_string());
-                }
-            }
-            Stmt::ImportFrom(i) => {
-                for a in &i.names {
-                    if a.name.as_str() != "*" {
-                        out.insert(a.name.to_string());
-                    }
-                }
-            }
-            Stmt::For(_) | Stmt::While(_) => return,
-            _ => {}
-        }
-        for child in loop_stmt_children(s) {
-            bind_stmt(child, out);
-        }
-    }
-    let mut out = HashSet::new();
-    for s in body {
-        bind_stmt(s, &mut out);
-    }
-    out
-}
-
-/// One outermost loop's shape, for the sequence judgement.
-struct LoopSeqLoop {
-    line: usize,
-    mutated: Vec<String>,
-    reads: Vec<String>,
-    pipelined: bool,
-}
-
 /// The per-function loop pass — a flat struct holds the walk's state, so
 /// the walker is a method instead of closures. `'a` is the ctx's own
-/// borrow lifetimes (state + the per-function sets), `'b` ScanState's
-/// inner source lifetime — independent: the locals die with the function
-/// pass, the ScanState outlives it.
+/// borrow lifetime (the function's name), `'b` ScanState's inner source
+/// lifetime — independent: the local dies with the function pass, the
+/// ScanState outlives it.
 struct LoopFunctionCtx<'a, 'b> {
     state: &'a mut ScanState<'b>,
-    survivors: &'a HashSet<String>,
-    fn_targets: &'a HashSet<String>,
     fn_name: &'a str,
-    seq: Vec<LoopSeqLoop>,
 }
 
 impl<'a, 'b> LoopFunctionCtx<'a, 'b> {
@@ -4969,218 +4844,51 @@ impl<'a, 'b> LoopFunctionCtx<'a, 'b> {
         });
     }
 
-    /// pipeline/mutating per loop at any depth; the OUTERMOST loops are
-    /// collected for the sequence judgement.
-    fn walk_loops(&mut self, stmts: &[Stmt], in_loop: bool) {
+    /// The pipeline shape per loop at any depth — and the ONLY loop finding
+    /// (P5): a loop whose body is one pure per-item collection mutation
+    /// (with at most one if-filter, no else) reduces to a comprehension.
+    /// Every other loop emits NOTHING — no mutating-loop, no hoist/fold
+    /// advice, no sequence judgement: a PriorityQueue drain, a polling
+    /// sleep-schedule, or a bit-decoder fits none of the recipes.
+    fn walk_loops(&mut self, stmts: &[Stmt]) {
         for s in stmts {
             match s {
                 Stmt::For(f) => {
                     let line = line_of(self.state.source, f.range().start());
-                    let mut own_target = HashSet::new();
-                    expr_bindings(&f.target, &mut own_target);
-                    let mut body: Vec<&Stmt> = f.body.iter().collect();
-                    body.extend(f.orelse.iter());
-                    let mutated = loop_mutated_candidates(&body, self.survivors, &own_target);
-                    let auto_fixable = loop_pipeline_auto_fixable(&f.body);
                     if loop_body_is_pipeline(&f.body) {
-                        let message = if auto_fixable {
+                        let message = if loop_pipeline_auto_fixable(&f.body) {
                             "loop builds a collection — Replace Loop with Pipeline: use a comprehension — fix: loop-pipeline"
                         } else {
                             "loop builds a collection — Replace Loop with Pipeline: use a comprehension"
                         };
                         self.push_finding(line, "loop-pipeline", message.into());
-                    } else if mutated.len() >= 2 {
-                        self.push_finding(
-                            line,
-                            "mutating-loop",
-                            format!(
-                                "loop mutates {} — Replace Loop with Pipeline: {} pieces of state survive the loop and the changes are invisible at the call site; build each output as a comprehension (or a helper that returns the new state)",
-                                mutated.join(", "),
-                                mutated.len(),
-                            ),
-                        );
-                    } else if mutated.len() == 1 {
-                        let n = loop_body_stmt_count(&body);
-                        if n >= LOOP_HOIST_MIN_STMTS {
-                            let acc = &mutated[0];
-                            let paren = loop_acc_paren(acc);
-                            let fixable = loop_hoist_fixable(&f.target, &f.body, acc);
-                            let message = if loop_mutation_is_collection_build(&body, acc) {
-                                if fixable {
-                                    format!(
-                                        "loop body is {n} statements yet builds one collection{paren} — hoist the calculation: name what one item contributes as a helper that RETURNS the value (a domain noun), then Replace Loop with Pipeline: {acc} = [<helper>(<target>) for <target> in <iter>] — fix: loop-hoist --fix-name <Name>"
-                                    )
-                                } else {
-                                    format!(
-                                        "loop body is {n} statements yet builds one collection{paren} — hoist the calculation: name what one item contributes as a helper that RETURNS the value (a domain noun), then Replace Loop with Pipeline: {acc} = [<helper>(<target>) for <target> in <iter>]"
-                                    )
-                                }
-                            } else {
-                                format!(
-                                    "loop body is {n} statements yet mutates only {acc} — hoist the per-item measure into a named helper (a domain noun for one item's value), then fold: {acc} = max/sum/min(<iter>, key=<helper>)"
-                                )
-                            };
-                            self.push_finding(line, "loop-hoist", message);
-                        }
                     }
-                    if !in_loop {
-                        let mut excl = self.fn_targets.clone();
-                        excl.extend(own_target);
-                        self.seq.push(LoopSeqLoop {
-                            line,
-                            reads: loop_iter_reads(&f.iter, self.survivors, &excl),
-                            mutated,
-                            pipelined: auto_fixable,
-                        });
-                    }
-                    self.walk_loops(&f.body, true);
-                    self.walk_loops(&f.orelse, true);
+                    self.walk_loops(&f.body);
+                    self.walk_loops(&f.orelse);
                 }
                 Stmt::While(w) => {
-                    let line = line_of(self.state.source, w.range().start());
-                    let mut body: Vec<&Stmt> = w.body.iter().collect();
-                    body.extend(w.orelse.iter());
-                    let mutated = loop_mutated_candidates(&body, self.survivors, &HashSet::new());
-                    if mutated.len() >= 2 {
-                        self.push_finding(
-                            line,
-                            "mutating-loop",
-                            format!(
-                                "loop mutates {} — Replace Loop with Pipeline: {} pieces of state survive the loop and the changes are invisible at the call site; build each output as a comprehension (or a helper that returns the new state)",
-                                mutated.join(", "),
-                                mutated.len(),
-                            ),
-                        );
-                    } else if mutated.len() == 1 {
-                        let n = loop_body_stmt_count(&body);
-                        if n >= LOOP_HOIST_MIN_STMTS {
-                            let acc = &mutated[0];
-                            let paren = loop_acc_paren(acc);
-                            let message = if loop_mutation_is_collection_build(&body, acc) {
-                                format!(
-                                    "loop body is {n} statements yet builds one collection{paren} — hoist the calculation: name what one item contributes as a helper that RETURNS the value (a domain noun), then Replace Loop with Pipeline: {acc} = [<helper>(<target>) for <target> in <iter>]"
-                                )
-                            } else {
-                                format!(
-                                    "loop body is {n} statements yet mutates only {acc} — hoist the per-item measure into a named helper (a domain noun for one item's value), then fold: {acc} = max/sum/min(<iter>, key=<helper>)"
-                                )
-                            };
-                            self.push_finding(line, "loop-hoist", message);
-                        }
-                    }
-                    if !in_loop {
-                        self.seq.push(LoopSeqLoop {
-                            line,
-                            reads: loop_iter_reads(&w.test, self.survivors, self.fn_targets),
-                            mutated,
-                            pipelined: false, // while-loops are never comprehension shapes
-                        });
-                    }
-                    self.walk_loops(&w.body, true);
-                    self.walk_loops(&w.orelse, true);
+                    self.walk_loops(&w.body);
+                    self.walk_loops(&w.orelse);
                 }
                 Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
                 _ => {
                     for child in loop_stmt_children(s) {
-                        self.walk_loops(std::slice::from_ref(child), in_loop);
+                        self.walk_loops(std::slice::from_ref(child));
                     }
                 }
             }
-        }
-    }
-
-    /// The sequence verdict: loops SHARE a mutated name, or a later loop
-    /// READS what an earlier one wrote -> the sequence IS a pipeline;
-    /// independent passes -> one named helper per loop.
-    fn emit_sequence(&mut self, fn_line: usize) {
-        if self.seq.len() < 2 {
-            return;
-        }
-        let mut shared: HashSet<String> = HashSet::new();
-        for (i, a) in self.seq.iter().enumerate() {
-            for b in self.seq.iter().skip(i + 1) {
-                for m in &a.mutated {
-                    if b.mutated.contains(m) {
-                        shared.insert(m.clone());
-                    }
-                }
-            }
-        }
-        let mut fed: Vec<String> = Vec::new();
-        for (i, a) in self.seq.iter().enumerate() {
-            let earlier: HashSet<&str> = self
-                .seq
-                .iter()
-                .take(i)
-                .flat_map(|s| s.mutated.iter().map(|m| m.as_str()))
-                .collect();
-            for r in &a.reads {
-                if earlier.contains(r.as_str()) && !fed.contains(r) {
-                    fed.push(r.clone());
-                }
-            }
-        }
-        let lines: Vec<String> = self.seq.iter().map(|l| l.line.to_string()).collect();
-        if !shared.is_empty() || !fed.is_empty() {
-            // the auto-fix (`--kind loop-sequence`) rewrites a contiguous
-            // shared-accumulator chain of ONE rewriteable pipeline loop per
-            // member — advertise only when every loop in the sequence is
-            // exactly that (feed chains and multi-accumulator loops would
-            // make the engine decline). Computed before `shared` moves.
-            let chainable = shared.len() == 1
-                && self.seq.iter().all(|l| {
-                    let s = shared.iter().next().map(String::as_str).unwrap_or("");
-                    l.pipelined && l.mutated.len() == 1 && l.mutated[0] == s
-                });
-            let names: Vec<String> = shared.into_iter().collect();
-            let message = if chainable {
-                format!(
-                    "{} sequential loops at lines {} share or feed the same state ({}) — the sequence IS a pipeline: replace each loop with a comprehension and chain them, so every state change is visible in one reading — fix: loop-sequence",
-                    self.seq.len(),
-                    lines.join(", "),
-                    names.join(", "),
-                )
-            } else {
-                format!(
-                    "{} sequential loops at lines {} share or feed the same state ({}) — the sequence IS a pipeline: replace each loop with a comprehension and chain them, so every state change is visible in one reading",
-                    self.seq.len(),
-                    lines.join(", "),
-                    names.join(", "),
-                )
-            };
-            self.push_finding(fn_line, "loop-sequence", message);
-        } else {
-            self.push_finding(
-                fn_line,
-                "loop-sequence",
-                format!(
-                    "{} sequential loops at lines {} change the function's state independently — extract each loop into a named helper (one named step per loop), so the function reads as a sequence of steps",
-                    self.seq.len(),
-                    lines.join(", "),
-                ),
-            );
         }
     }
 }
 
-/// The per-function pass: pipeline/mutating per loop at any depth,
-/// loop-sequence for the function's OUTERMOST loops.
-fn loop_function_findings(state: &mut ScanState, f: &StmtFunctionDef, source: &str) {
-    let mut survivors: HashSet<String> = HashSet::new();
-    function_param_names(&f.parameters, &mut survivors);
-    survivors.extend(loop_surviving_bindings(&f.body));
+/// The per-function pass: the pipeline shape for loops at any depth.
+fn loop_function_findings(state: &mut ScanState, f: &StmtFunctionDef) {
     let fn_name = f.name.to_string();
-    let fn_line = line_of(source, f.range().start());
-    let fn_targets = loop_for_targets(&f.body);
     let mut ctx = LoopFunctionCtx {
         state,
-        survivors: &survivors,
-        fn_targets: &fn_targets,
         fn_name: &fn_name,
-        seq: Vec::new(),
     };
-    ctx.walk_loops(&f.body, false);
-    ctx.emit_sequence(fn_line);
+    ctx.walk_loops(&f.body);
 }
 
 /// Module-level walk: the plain pipeline shape for module loops, and
@@ -5190,7 +4898,7 @@ fn loop_module_walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
     fn walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
         for s in stmts {
             match s {
-                Stmt::FunctionDef(f) => loop_function_findings(state, f, source),
+                Stmt::FunctionDef(f) => loop_function_findings(state, f),
                 Stmt::For(f) => {
                     if loop_body_is_pipeline(&f.body) {
                         let line = line_of(source, f.range().start());
@@ -5240,17 +4948,16 @@ fn loop_module_walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
     walk(state, stmts, source);
 }
 
-/// Replace Loop with Pipeline family (Python): the imperative loop shapes a
+/// Replace Loop with Pipeline family (Python): the ONE loop shape a
 /// functional pipeline replaces —
-/// - `loop-pipeline`: a loop whose body is ONLY a collection mutation
-///   (append/add/update, `name += [..]`, or a subscript store) with at most
-///   one if-filter — a comprehension in disguise;
-/// - `mutating-loop`: a loop that mutates >=2 pieces of state that SURVIVE
-///   it (accumulated collections, rebound names, object writes) — the state
-///   changes are invisible at the call site;
-/// - `loop-sequence`: >=2 sequential (non-nested) loops in one function —
-///   a hidden pipeline when they share or feed state, else separate named
-///   steps.
+/// - `loop-pipeline`: a loop whose body is ONLY a pure per-item collection
+///   mutation (append/add/update, `name += [..]`, or a subscript store)
+///   with at most one if-filter, no else — a comprehension in disguise.
+///
+/// P5 gate: LOOP-pipeline is the ONLY loop finding. A loop that does not
+/// reduce to a comprehension emits NOTHING — no mutating-loop verdict, no
+/// hoist/fold advice, no sequence judgement: a PriorityQueue drain, a
+/// polling sleep-schedule, or a bit-decoder fits none of the recipes.
 ///
 /// Function-scope analysis; module-level loops get only the single-loop
 /// pipeline shape (the global-state family owns module-level containers).
@@ -6902,29 +6609,21 @@ fn annotation_is_record(e: &Expr) -> bool {
     false
 }
 
-/// `_is_constant_value`: a literal that cannot vary at runtime (lookup
-/// tables may carry nested constant structures).
-fn is_constant_value(e: &Expr) -> bool {
+/// A SCALAR LITERAL value: a string, number, bool, or None literal (unary
+/// +/- on a number stays scalar — `-1` IS the literal -1). A dict whose
+/// every value is scalar is a lookup keyed by identity, not a record
+/// (P1 scalar-map); values that are collections, calls, names, or attribute
+/// loads carry shape and keep the finding.
+fn is_scalar_literal(e: &Expr) -> bool {
     match e {
-        Expr::StringLiteral(_)
-        | Expr::BytesLiteral(_)
-        | Expr::NumberLiteral(_)
-        | Expr::BooleanLiteral(_)
-        | Expr::NoneLiteral(_)
-        | Expr::EllipsisLiteral(_) => true,
-        Expr::UnaryOp(u) if matches!(u.op, UnaryOp::UAdd | UnaryOp::USub) => is_constant_value(&u.operand),
-        Expr::List(l) => l.elts.iter().all(is_constant_value),
-        Expr::Tuple(t) => t.elts.iter().all(is_constant_value),
-        Expr::Dict(d) => d
-            .items
-            .iter()
-            .all(|it| it.key.as_ref().map(is_constant_value).unwrap_or(false) && is_constant_value(&it.value)),
+        Expr::StringLiteral(_) | Expr::NumberLiteral(_) | Expr::BooleanLiteral(_) | Expr::NoneLiteral(_) => true,
+        Expr::UnaryOp(u) if matches!(u.op, UnaryOp::UAdd | UnaryOp::USub) => is_scalar_literal(&u.operand),
         _ => false,
     }
 }
 
-/// The dict-literal scan: record positions only; inline call arguments are
-/// maps and are not descended into; spread merges are not records.
+/// The record-dict hit: shape and keys for the record-shape message; spread
+/// merges ({**base, ...}) update an existing shape and are not records.
 struct RecordHit {
     line: usize,
     col: usize,
@@ -6949,8 +6648,11 @@ fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<RecordHit>) {
                     _ => None,
                 })
                 .collect();
-            let has_dynamic_value = d.items.iter().any(|it| !is_constant_value(&it.value));
-            if d.items.len() >= 2 && !keys.is_empty() && has_dynamic_value {
+            // scalar-map: EVERY value a scalar literal — a lookup keyed by
+            // identity, not a record. A collection/call/name/attribute value
+            // keeps the finding (the dict holds shape).
+            let scalar_map = d.items.iter().all(|it| is_scalar_literal(&it.value));
+            if d.items.len() >= 2 && !keys.is_empty() && !scalar_map {
                 found.push(RecordHit {
                     line: line_of(source, d.range().start()),
                     col: col_of(source, d.range().start()),
@@ -7000,8 +6702,8 @@ fn record_literal_scan(e: &Expr, source: &str, found: &mut Vec<RecordHit>) {
             };
             if is_dict {
                 let kwargs = &c.arguments.keywords;
-                let has_dynamic = kwargs.iter().any(|k| !is_constant_value(&k.value));
-                if kwargs.len() >= 2 && has_dynamic {
+                let scalar_map = kwargs.iter().all(|k| is_scalar_literal(&k.value));
+                if kwargs.len() >= 2 && !scalar_map {
                     let keys: Vec<String> = kwargs
                         .iter()
                         .filter_map(|k| k.arg.as_ref().map(|n| n.id.to_string()))
@@ -7061,34 +6763,51 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                 if let Some(k) = &f.parameters.kwarg {
                     params.push((k.name.as_str(), k.annotation.as_deref()));
                 }
+                // P1 sub-family classification: a dict that ARRIVES at a
+                // from_dict/from_json function's parse boundary is built
+                // nowhere ad hoc — the A1 "call sites build it ad hoc"
+                // premise is false there. Emit the wire message; every other
+                // function keeps the internal-ad-hoc text.
+                let wire = f.name.to_lowercase().contains("from_dict") || f.name.to_lowercase().contains("from_json");
                 for (arg, ann) in params {
                     if let Some(a) = ann {
                         if !annotation_is_record(a) {
                             continue;
                         }
-                        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
-                                                    file: state.file.to_string(),
-                                                    line: def_line,
-                                                    function: f.name.to_string(),
-                                                    kind: "record-shape".into(),
-                                                    severity: "fail".into(),
-                                                    message: format!(
-                                                        "{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists."
-                                                    ), });
+                        let message = if wire {
+                            format!("{arg} is the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.")
+                        } else {
+                            format!("{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists.")
+                        };
+                        state.findings.push(Finding {
+                            seam_members: Vec::new(),
+                            col: 0,
+                            file: state.file.to_string(),
+                            line: def_line,
+                            function: f.name.to_string(),
+                            kind: "record-shape".into(),
+                            severity: "fail".into(),
+                            message,
+                        });
                     }
                 }
                 if let Some(r) = &f.returns {
                     if annotation_is_record(r.as_ref()) {
-                        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
-                                                    file: state.file.to_string(),
-                                                    line: def_line,
-                                                    function: f.name.to_string(),
-                                                    kind: "record-shape".into(),
-                                                    severity: "fail".into(),
-                                                    message: format!(
-                                                        "{fname} returns a dict that holds the fields of a record; the shape has no name at the call site. Type the return with the class that models the shape; create that class if none exists.",
-                                                        fname = f.name.as_str()
-                                                    ), });
+                        let message = if wire {
+                            format!("{fname} returns the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.", fname = f.name.as_str())
+                        } else {
+                            format!("{fname} returns a dict that holds the fields of a record; the shape has no name at the call site. Type the return with the class that models the shape; create that class if none exists.", fname = f.name.as_str())
+                        };
+                        state.findings.push(Finding {
+                            seam_members: Vec::new(),
+                            col: 0,
+                            file: state.file.to_string(),
+                            line: def_line,
+                            function: f.name.to_string(),
+                            kind: "record-shape".into(),
+                            severity: "fail".into(),
+                            message,
+                        });
                     }
                 }
             }

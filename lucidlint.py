@@ -207,12 +207,16 @@ class _RenderCtx:
         top = fails[0]
         bits = []
         # without a baseline nothing is acknowledged — say so plainly; a
-        # repo-root lucidlint.json changes the claim (B3)
+        # repo-root lucidlint.json changes the claim: "+0 acknowledged" is
+        # true only of the ACTIVE baseline, so the phrase attaches the flag
+        # itself (Phase 4: "95 acknowledged action(s)" read as "+0
+        # acknowledged" — round-3 CONFUSING)
+        acknote = ""
         if args.baseline is None and not self.baseline_migration:
             current, _ = _baseline_file_state(self.repo / "lucidlint.json")
             if current:
-                bits.append(
-                    f"lucidlint.json holds {current} acknowledged action(s) at the repo root — "
+                acknote = (
+                    f" — {current} acknowledged in lucidlint.json — "
                     "pass --baseline lucidlint.json to activate them"
                 )
             else:
@@ -222,7 +226,7 @@ class _RenderCtx:
         verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
         print(
             f"{verdict} — {len(fails)} action(s) across {targets} distinct targets "
-            f"(+{len(acks)} acknowledged in baseline, {len(warns)} warnings never-fail"
+            f"(+{len(acks)} acknowledged in baseline{acknote}, {len(warns)} warnings never-fail"
             f"{self._config_ignored_note()}){mine_txt}, "
             # B2: the top line names the ACTUAL rule (the raw-risk percentile
             # the formula line below defines) — never "the hotspot", a
@@ -1310,9 +1314,11 @@ def _render_file_group(
         loc = f":{a.line}" + (f":{a.col}" if a.col else "") + (f" ({a.function})" if a.function else "")
         churn = f" [churn {a.churn}x]" if a.churn else ""
         kinds = ",".join(a.kinds) if a.kinds else a.kind
-        # B2: the bare P-number reads as a brokenness score; the priority IS
-        # a raw-risk percentile (1-99), so the tag names what the number is
-        tag = f"RISK{a.priority:02d}" if a.severity != "warn" else "warn"
+        # Phase 4: the per-item RISKxx bracket is gone — it read as a
+        # brokenness order (the valuable fail carried the lowest display
+        # value); severity survives as the [warn] marker for warnings, and
+        # the header's single top-risk line carries the risk percentile
+        tag = "warn" if a.severity == "warn" else ""
         # a latent-class variant's display kind (latent-class) IS its
         # suppression family — nothing to teach, and a suppression recipe
         # beside "create the class" invites hiding the defect. Only a
@@ -1324,23 +1330,28 @@ def _render_file_group(
             and a.signal not in a.kinds
             and a.signal not in _FAMILY_OF_VARIANT
         )
+        # Phase 4: when a family's suppression identity and its fix are two
+        # words (class-module -> split-module), the line links them — the
+        # reader saw "suppress with: class-module" beside "fix: --kind
+        # split-module" as two unrelated commands (round-3 CONFUSING)
+        fix_link = f" (this family's fix: {a.fix_kind})" if a.fix_kind and a.fix_kind != a.signal else ""
         # B5: a bare per-site marker is the wrong remedy when the family is
         # config-ignored (a house decision, made elsewhere) — say so and name
-        # the config key; otherwise state the marker window (a comment binds
-        # within the 3 lines ending at the finding — a marker further up does
-        # not, it goes stale)
+        # the config key; otherwise state the marker window POSITIVELY: a
+        # marker binds on the finding's own line or within the 3 lines
+        # ending at it — never advice to relocate a marker (Phase 3: a
+        # mis-placed marker is documentation, not something to move)
         ck = (ignore_keys or {}).get(a.signal) if a.signal else None
         if marker and ck:
             suppress = (
-                f" — suppress with: {a.signal} — this family is config-ignored under "
+                f" — suppress with: {a.signal}{fix_link} — this family is config-ignored under "
                 f"{ck}: fix the finding or extend the ignore scope (a per-site marker "
                 "is redundant)"
             )
         elif marker:
             suppress = (
-                f" — suppress with: {a.signal} — a lucidlint: ignore comment binds "
-                "within the 3 lines ending at this finding (a marker further up "
-                "does not)"
+                f" — suppress with: {a.signal}{fix_link} — a lucidlint: ignore comment binds "
+                "on this finding's own line or within the 3 lines ending at it"
             )
         elif ck:
             suppress = (
@@ -1350,7 +1361,8 @@ def _render_file_group(
         else:
             suppress = ""
         stamp = _stamp_of(a)
-        print(f"  [{tag}][{kinds}]{suppress} {loc}{churn} — {a.message}" + (f" [{stamp}]" if stamp else ""))
+        bracket = "".join(f"[{t}]" for t in (tag, kinds) if t)
+        print(f"  {bracket}{suppress} {loc}{churn} — {a.message}" + (f" [{stamp}]" if stamp else ""))
         if a.note:
             print(f"      -> {a.note}")
 

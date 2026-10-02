@@ -178,6 +178,43 @@ Acceptance: `cargo test` green; the houses loop-pipeline warning count
 drops toward the 204-sites' pure-build subset, and the round-4 proposer
 reports no loop-pipeline CONFUSING entries.
 
+## F. Round-4 acceptance (2026-10-02) — PASS; five residual defects
+
+The precision round landed (366 scanner + 230 pytest green, self-check at
+0, coverage 86%). The eval re-ran on houses: loop-pipeline warnings went
+204 to 15 with zero recipe complaints; per-item RISK tags, the move-a-marker
+advice, and the invalid baseline headline are gone; the scalar-map
+taxonomy reached the reader (property_nodes:665 kept as "dict of scalars,
+not a record"). The proposer now reuses existing record classes instead of
+creating ones (bus.py empty-case dicts, commute_breakdown — and caught a
+latent str/float type bug doing it), and the from_dict family is kept with
+an argument, not a citation.
+
+Residual defects, for the next iteration:
+
+1. Wire message at record-exists sites: ~30 from_dict sites already HAVE
+   the named record and the ingestion; the wire text "give the shape a
+   named record and ingest the wire with its from_dict" describes a step
+   already taken. Detect ingestion-exists (a class in scope with
+   from_dict for the same shape) and do not emit at those sites — only
+   wire sites without a record get the message.
+2. Pint suggestion fabricates units: Quantity(86400, 'minute') is
+   dimensionally wrong at derived_node:618 and bus.py:192. Emit the unit
+   clause only when the unit is unambiguous; otherwise "express it as a
+   pint Quantity (its unit)" without a fabricated unit.
+3. Window anchoring: markers one line above a def do not bind although
+   the guidance says "within the 3 lines ending at the finding" — the
+   def-line anchor and the finding line must be reconciled, and the
+   guidance must match the implementation exactly.
+4. Stale message without the rule delta: markers whose findings are now
+   exempt (unit-named values) read "nothing fires in this file" with no
+   explanation; the stale message should state the kind and note the
+   current exemptions when the file's values are covered by them.
+5. Top-risk headline: the single top-risk line presents a from_dict site
+   as the report's headline while the valuable fixes sit elsewhere; drop
+   the headline or mark it explicitly as highest change-cost, never the
+   first thing to fix.
+
 ## Order of work
 
 1. Phase 1 (record-shape classification; the largest single change).

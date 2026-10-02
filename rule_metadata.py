@@ -29,6 +29,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 # RULES.md display groups in order — (name, header suffix, intro note)
+# lucidlint: ignore record-shape the rule catalogue is the config registry — its rows are the spec
 GROUP_INFO = {
     "architecture": (
         "Group 1: Architecture & design",
@@ -145,6 +146,7 @@ class Fix:
 # takes its package name as an OPTIONAL input, never a required one, so its
 # judge-status stays False; it declines, it does not demand, when the name
 # is not derivable).
+# lucidlint: ignore record-shape the input registry is this tool's kind schema — a row per fixer, not an ad hoc record
 FIX_REQUIRED_INPUTS: dict[str, tuple[str, ...]] = {
     "extract-method": ("name",),
     "extract-class": ("name",),
