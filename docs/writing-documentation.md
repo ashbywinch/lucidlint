@@ -95,14 +95,19 @@ of a doc that describes it. Prefer interfaces that make it easy to get right
 use them. The test is a living doc that fails when it lies; a written doc
 stays green when it goes stale.
 
-## No lectures on history
+## No history lessons
 
-Never explain why a decision was made by describing the alternative that
-failed and the person who made it. "It's a constraint inherited from X's
-code" is a lecture. The reason is what matters; the history is noise. If
-a reader needs to know why, state the constraint: "this message format is
-required by the upstream API" — not "Bob chose this format in 2022 because
-the old parser couldn't handle".
+Documentation never explains how the current state came to be. Do not
+write what changed, who decided, what failed before, or when the shift
+happened: that is history, and history is noise. Write the state and the
+reason instead.
+
+✗ "We renamed this line in 2026 after readers kept taking it the wrong
+way."
+
+✓ "The line above the findings names the code whose change would cost the
+most."
+.
 
 ## API keys never go in docs
 
@@ -228,4 +233,5 @@ Canonical pairs:
 - [ ] No sentence over 30 words
 - [ ] No sentence starts with "There is" or "There are"
 - [ ] No weasel words (enable, leverage, robust, seamless, transparent)
+- [ ] No history lessons: no account of what changed, who decided, or what failed before
 - [ ] Always-loaded files within the ~150–200 line ceiling

@@ -211,11 +211,9 @@ Residual defects, for the next iteration:
    explanation; the stale message should state the kind and note the
    current exemptions when the file's values are covered by them.
 5. Top-risk line. The line names the code whose change would cost the
-   most. Fixing it first lowers future change cost. Two defects. Readers
-   take it as "most important to fix". The formula lets churn outweigh
-   complexity and size, so a wire-parse entry headed the report while a
-   function with CC 17 sat at the bottom. Fix: label it "highest
-   change-cost", and give complexity and size equal weight with churn.
+   most. Fixing it first lowers future change cost. Name the report's
+   top line "highest change-cost", and give complexity and size equal
+   weight with churn in the risk formula.
 
 ## Order of work
 
