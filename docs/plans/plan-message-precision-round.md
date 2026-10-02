@@ -304,9 +304,14 @@ Residual defects:
    repeating the counts; it keeps the mode, the target count, and the
    top-risk line. A test asserts each number appears once, the
    relationships hold, and the gate repeats none of them.
-8. Ordering epsilons: a bare tiny float in a comparison (scheduler
-   1e-6) is ordering semantics; the magic-number message should name the
-   epsilon case.
+8. Comparison operands: a literal a comparison depends on (1e-6, 0.85,
+   100, 51.5 — the scheduler tie-break, the Jaccard threshold, the km
+   cap, the bbox edge) has the same unstated property regardless of
+   size: the comparison's outcome rides on it, and nothing names what it
+   separates or why that magnitude. The magic-number message for a
+   literal inside a Compare chain states that mechanism and the action:
+   "Name it on the class that owns the computation and state what it
+   separates." No size test.
 
 ## Order of work
 
