@@ -116,16 +116,17 @@ Acceptance: round-8 proposer does not read the line as urgency.
 
 Actions:
 
-1. Baseline keys are kind:file:line:function — line-bearing — so line
-   drift silently un-acknowledges debt. When an acknowledged key's
-   kind:file:function triple appears among today's findings but none of
-   them sits at its recorded line, that entry is drifted, not new. The
-   ledger appends to the acknowledged term: "N acknowledged entries
-   point at lines that no longer hold the finding — re-acknowledge with
-   --update-baseline", rendered only when the count is nonzero.
-2. Fixtures: a baseline key at a stale line re-reports its finding and
-   renders the clause; the same key at the current line acknowledges
-   and renders no clause.
+1. Exact-identity matching, the pyrefly pattern: an acknowledged key
+   that matches no current finding is stale — drifted, fixed, and
+   deleted are the same case; no reconciliation is attempted. When the
+   count is nonzero the ledger renders: "N acknowledged entries match
+   no current finding — re-acknowledge with --update-baseline". The
+   update command regenerates the baseline, as it does for pyrefly and
+   mypy-baseline.
+2. Fixtures: a baseline key that no current finding occupies re-reports
+   its finding and renders the clause; the same key at the current line
+   acknowledges and renders no clause; a key for a fixed finding
+   renders the same clause, undistinguished.
 
 Acceptance: round-8 proposer sees why acknowledged debt re-reports.
 
