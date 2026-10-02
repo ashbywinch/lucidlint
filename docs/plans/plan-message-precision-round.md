@@ -304,18 +304,15 @@ Residual defects:
    repeating the counts; it keeps the mode, the target count, and the
    top-risk line. A test asserts each number appears once, the
    relationships hold, and the gate repeats none of them.
-8. Role-visible literals: not comparisons only. A literal whose position
-   shows its role while its specific meaning stays unstated is the same
-   defect regardless of the role: a comparison operand (the reader sees
-   a cutoff; the missing fact is what it separates and why that
-   magnitude), a delay/timedelta call argument (the reader sees a
-   duration; the missing fact is why that length), a multiplier (the
-   reader sees a conversion; the missing fact is what it converts). The
-   message names the role the position establishes and asks for the
-   value's specific meaning. The trigger is structural — a Compare
-   chain, a call argument whose callee names a delay or timedelta, a
-   BinOp operand — never a size test, never a semantic claim. Positions
-   without a visible role keep the generic A5 text.
+8. One message for every magic literal. Role detection is unnecessary
+   machinery: every firing literal shares the defect — nothing states
+   what the value means or why this magnitude. The message is the
+   general form: "{value} is used {in-function}, but nothing states
+   what it means or why this magnitude. Name what it stands for and the
+   reason for its size, on the class that owns the computation." The
+   pint/timedelta action variants (H3) stay for unit-visible contexts;
+   the data-table exemption sentence stays; no role word, no position
+   trigger.
 
 ## Order of work
 
