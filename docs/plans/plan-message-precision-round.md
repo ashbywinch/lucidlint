@@ -243,6 +243,42 @@ Residual defects for the next round:
    mid-word; the tool must define whether a truncated marker binds and
    state it.
 
+## H. Round-6 acceptance (2026-10-02) — residuals for the next round
+
+Cleared by the G round: typed scalar-valued dict subscripts no longer
+fire; union-typed parameters get the union message; the def-anchored
+window binds markers up to 2 lines above and one per def site; the stale
+clause names only the exemptions that cover the file; truncated markers
+bind; the guidance states the truncated-why rule.
+
+Residual defects:
+
+1. Class-valued maps: dict[str, SomeClass] (Provenance, Attempt,
+   UserInputNode) fires with "the shape has no name" although the value
+   type is named. Treat a subscript whose value element is a class name
+   as a keyed collection, the same as scalars. This also fixes the
+   headline: the false-positive site heads "highest change-cost".
+2. Inside-def markers: a marker on the line immediately after a
+   def-anchored finding (the first body line) does not bind. The window
+   gains the line after the finding: "binds on this finding's own line,
+   the 3 lines ending at it, or the line after it".
+3. Duration constants: retry caps are durations, not physical
+   quantities. The pint suggestion should name timedelta for duration
+   units (second, minute, hour, day) when the value is a round duration,
+   and pint for physical quantities.
+4. Swallow detector: the message lists "mutating a name the enclosing
+   function returns" as surfacing, but the detector does not implement
+   it. Implement the criterion; the server.py:704 probe then clears.
+5. class-module fix stamp: split-module is marked mechanical although
+   the family is a judgment call; drop the mechanical stamp for it.
+6. unused advice order: "suppress with: unused" heads the message even
+   when the action is deletion; state deletion first at dead sites.
+7. Report arithmetic: the ledger line still leaves the fail/warning/
+   suppressed totals unreconciled; the reconciliation must sum them.
+8. Ordering epsilons: a bare tiny float in a comparison (scheduler
+   1e-6) is ordering semantics; the magic-number message should name the
+   epsilon case.
+
 ## Order of work
 
 1. Phase 1 (record-shape classification; the largest single change).

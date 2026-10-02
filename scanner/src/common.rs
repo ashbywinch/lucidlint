@@ -249,7 +249,10 @@ pub struct Suppressions {
 /// Parse `lucidlint: ignore <signal> <why>` / `ignore-file` comments.
 /// `comments` are (line, full comment text incl. the marker) — each language
 /// layer extracts them its own way (ruff tokens for Python, a string-aware
-/// scan for Rust); the parse and the matching are shared.
+/// scan for Rust); the parse and the matching are shared. A marker binds by
+/// its signal name alone: the why may truncate at line end (a repo marker
+/// cut mid-expression still binds — G5); only a marker with NO why at all
+/// is why-less and does not bind.
 pub fn suppressions_from_comments(comments: &[(usize, String)]) -> Suppressions {
     let mut line_map: HashMap<usize, Vec<(String, String)>> = HashMap::new();
     let mut file_map = HashMap::new();
@@ -437,24 +440,17 @@ fn common_group_line_indices(findings: &[crate::Finding]) -> Vec<Vec<usize>> {
     groups
 }
 
-/// Marker inventory for one line-group: distinct explained marker lines whose
-/// signal matches any member, minus globally spent/taken pairs.
-fn marker_inventory(
-    members: &[usize],
-    findings: &[crate::Finding],
-    supps: &Suppressions,
-    used_line: &std::collections::HashSet<(usize, String)>,
-    taken: &std::collections::HashSet<(usize, String)>,
-) -> Vec<(usize, String)> {
+/// Marker inventory for one line-group: every explained marker line whose
+/// signal matches any member, one pair per line. A pair another line-group
+/// consumed is NOT filtered here — a marker two lines above a def binds the
+/// def-anchored finding AND the literal one line below it (G3): one marker
+/// covers the whole def site, recorded spent once (set semantics).
+fn marker_inventory(members: &[usize], findings: &[crate::Finding], supps: &Suppressions) -> Vec<(usize, String)> {
     let mut pairs: Vec<(usize, String)> = Vec::new();
     for ln in window_lines(findings[members[0]].line) {
         if let Some(entries) = supps.line.get(&ln) {
             for (sig, why) in entries {
-                if why.is_empty()
-                    || used_line.contains(&(ln, sig.clone()))
-                    || taken.contains(&(ln, sig.clone()))
-                    || pairs.iter().any(|(pl, _)| *pl == ln)
-                {
+                if why.is_empty() || pairs.iter().any(|(pl, _)| *pl == ln) {
                     continue;
                 }
                 if members.iter().any(|&i| signal_matches(sig, &findings[i].kind)) {
@@ -475,26 +471,38 @@ struct LineMarkerCtx<'a> {
 
 /// Bind one line-group's members to its markers inner-first. Returns flags
 /// parallel to `members`: true = exempted by a LINE marker (consumed).
+/// G3: one marker binds EVERY member anchored at the same col — several
+/// record-shaped params of one def all report at col 0, and a marker above
+/// the def must cover the whole site. Nested findings at DISTINCT cols
+/// (inner literals) keep the innermost-first rule: one marker peels only
+/// the innermost record; two peel inner then outer.
 fn peel_assign(members: &[usize], findings: &[crate::Finding], ctx: &mut LineMarkerCtx) -> Vec<bool> {
-    let pairs = marker_inventory(members, findings, ctx.supps, ctx.used_line, ctx.taken);
+    let pairs = marker_inventory(members, findings, ctx.supps);
     let mut ok = vec![false; members.len()];
     // members sort by col DESC (inner-first) while the inventory sorts by
-    // line DESC — a single advancing pointer strands a marker whose kind
-    // matches a LATER member behind an earlier non-match (review bot):
-    // search the whole inventory for the first unused marker matching each
-    // member's signal
+    // line DESC — group members by col so one marker serves one anchor.
     let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut by_col: Vec<(usize, Vec<usize>)> = Vec::new();
     for (j, &i) in members.iter().enumerate() {
-        if let Some((pi, cand)) = pairs
-            .iter()
-            .enumerate()
-            .find(|(pi, cand)| !used.contains(pi) && signal_matches(&cand.1, &findings[i].kind))
-        {
+        match by_col.last_mut() {
+            Some((c, js)) if *c == findings[i].col => js.push(j),
+            _ => by_col.push((findings[i].col, vec![j])),
+        }
+    }
+    for (_col, js) in by_col {
+        let matches_any = |pi: usize| {
+            js.iter()
+                .any(|&j| signal_matches(&pairs[pi].1, &findings[members[j]].kind))
+        };
+        if let Some(pi) = (0..pairs.len()).find(|&pi| !used.contains(&pi) && matches_any(pi)) {
             used.insert(pi);
+            let cand = pairs[pi].clone();
             ctx.taken.insert(cand.clone());
             ctx.used_line.insert(cand.clone());
             ctx.spent.insert(cand.clone());
-            ok[j] = true;
+            for &j in &js {
+                ok[j] = true;
+            }
         }
     }
     ok
@@ -514,16 +522,17 @@ fn signal_line_index(findings: &[crate::Finding]) -> std::collections::HashMap<S
 /// comment token ('#' or "//") used in the why-less messages. `pre_used`
 /// carries the suppressions the caller's cc-array retain already honored so
 /// stale detection does not re-flag them (the Rust layer's cc path).
-/// `has_numeric_literals` states whether the file still holds numeric
-/// literals — the stale magic-number message then appends the exemption
-/// delta (F4) instead of reading as if the numbers were gone.
+/// `magic_exempt_labels` names the exemption kinds among the file's
+/// still-present magic-number candidates — the stale magic-number message
+/// then appends the exact delta (G4) instead of reading as if the numbers
+/// were gone or claiming exemptions that do not apply.
 pub fn apply_suppressions_impl(
     findings: Vec<crate::Finding>,
     comments: &[(usize, String)],
     file: &str,
     marker: &str,
     books: &mut SuppressionBooks,
-    has_numeric_literals: bool,
+    magic_exempt_labels: &[&'static str],
 ) -> Vec<crate::Finding> {
     let supps = suppressions_from_comments(comments);
     let mut out = Vec::new();
@@ -598,7 +607,7 @@ pub fn apply_suppressions_impl(
         file,
         marker,
         by_signal: &by_signal,
-        has_numeric_literals,
+        magic_exempt_labels,
     };
     out.extend(ctx.stale_suppression_findings());
     out
@@ -639,24 +648,48 @@ struct StaleCtx<'a> {
     /// the stale binding-reason reasons cite (gone / covered / out of
     /// window).
     by_signal: &'a std::collections::HashMap<String, Vec<usize>>,
-    /// F4: the file still holds numeric literals — the magic-number stale
-    /// message says so when the current exemptions cover them.
-    has_numeric_literals: bool,
+    /// G4: the exemption-kind labels among the file's still-present
+    /// magic-number candidates (unit-named, constant-definition,
+    /// data-table, length-guard, position/index) — the stale message names
+    /// exactly the kinds that cover the file's literals, never a blanket
+    /// unit/constant/table claim for a file whose literals are indices.
+    magic_exempt_labels: &'a [&'static str],
 }
 
 impl StaleCtx<'_> {
-    /// F4: the rule-delta clause for a stale marker. The magic-number
+    /// G4: the rule-delta clause for a stale marker. The magic-number
     /// family's current exemptions (unit-named values, named constants,
-    /// data tables) can cover a file's literals — then the family fires
-    /// nowhere although the numbers are still there. The stale message
-    /// states that delta so the reader can verify before deleting the
-    /// marker; every other kind keeps the plain text.
-    fn exemption_delta(&self, sig: &str) -> &'static str {
-        if sig == "magic-number" && self.has_numeric_literals {
-            " — the file still holds numeric literals — the unit-named/constant/table exemptions cover them now; verify the reason before deleting the marker"
-        } else {
-            ""
+    /// data tables, length guards, the position/index skip) can cover a
+    /// file's literals — then the family fires nowhere although the numbers
+    /// are still there. The stale message names ONLY the kinds present among
+    /// the file's exempted literals so the reader can verify before deleting
+    /// the marker; every other kind keeps the plain text.
+    fn exemption_delta(&self, sig: &str) -> String {
+        if sig != "magic-number" || self.magic_exempt_labels.is_empty() {
+            return String::new();
         }
+        let labels = self.magic_exempt_labels;
+        let joined = match labels.len() {
+            1 => labels[0].to_string(),
+            2 => format!("{} and {}", labels[0], labels[1]),
+            _ => {
+                let mut s = String::new();
+                for (i, l) in labels.iter().enumerate() {
+                    if i + 2 == labels.len() {
+                        s.push_str(&format!("{l}, and "));
+                    } else if i == labels.len() - 1 {
+                        s.push_str(l);
+                    } else {
+                        s.push_str(&format!("{l}, "));
+                    }
+                }
+                s
+            }
+        };
+        let noun = if labels.len() == 1 { "exemption" } else { "exemptions" };
+        format!(
+            " — the file still holds numeric literals — now covered by the {joined} {noun}; verify the reason before deleting the marker"
+        )
     }
 }
 
@@ -812,7 +845,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![finding("closures", 2)], &comments, "x.rs", "//", &mut books, false);
+        let fs = apply_suppressions_impl(vec![finding("closures", 2)], &comments, "x.rs", "//", &mut books, &[]);
         assert!(!fs.iter().any(|f| f.kind == "closures"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -826,7 +859,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books, false);
+        let fs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books, &[]);
         assert!(fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
     #[test]
@@ -840,7 +873,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let rs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books, false);
+        let rs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books, &[]);
         let msg = rs
             .iter()
             .find(|f| f.kind == "stale-suppression")
@@ -852,7 +885,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let py = apply_suppressions_impl(vec![], &comments, "x.py", "#", &mut books, false);
+        let py = apply_suppressions_impl(vec![], &comments, "x.py", "#", &mut books, &[]);
         let msg = py
             .iter()
             .find(|f| f.kind == "stale-suppression")
@@ -879,7 +912,7 @@ mod tests {
                 pre_used: &PreUsedSuppressions::default(),
                 spent: &mut spent,
             },
-            true, // the file still holds numeric literals — the exemptions cover them
+            &["unit-named", "constant-definition", "data-table"],
         );
         let msg = gone
             .iter()
@@ -888,11 +921,11 @@ mod tests {
             .message
             .clone();
         assert!(msg.contains("nothing fires in this file"), "{msg}");
-        // F4: the rule delta — the literals are STILL in the file, so the
-        // message says the unit-named/constant/table exemptions cover them
-        // now, and why the family fires nowhere
+        // G4: the rule delta — the literals are STILL in the file, so the
+        // message names EXACTLY the exemption kinds passed (unit-named and
+        // constant-definition and data-table), not a blanket claim
         assert!(
-            msg.contains("the file still holds numeric literals — the unit-named/constant/table exemptions cover them now; verify the reason before deleting the marker"),
+            msg.contains("the file still holds numeric literals — now covered by the unit-named, constant-definition, and data-table exemptions; verify the reason before deleting the marker"),
             "{msg}"
         );
 
@@ -908,7 +941,7 @@ mod tests {
                 pre_used: &PreUsedSuppressions::default(),
                 spent: &mut spent,
             },
-            false,
+            &[],
         );
         let msg = bare
             .iter()
@@ -932,7 +965,7 @@ mod tests {
                 pre_used: &PreUsedSuppressions::default(),
                 spent: &mut spent,
             },
-            false,
+            &[],
         );
         assert!(
             !misplaced.iter().any(|f| f.kind == "stale-suppression"),
@@ -954,7 +987,7 @@ mod tests {
                 pre_used: &PreUsedSuppressions::default(),
                 spent: &mut spent,
             },
-            false,
+            &[],
         );
         assert!(!covered.iter().any(|f| f.kind == "stale-suppression"), "{covered:?}");
     }
@@ -975,7 +1008,7 @@ mod tests {
                 pre_used: &PreUsedSuppressions::default(),
                 spent: &mut spent,
             },
-            false,
+            &[],
         );
         assert!(!near.iter().any(|f| f.kind == "stale-suppression"), "{near:?}");
         assert!(near.iter().any(|f| f.kind == "magic-number"), "{near:?}");
@@ -990,7 +1023,7 @@ mod tests {
                 pre_used: &PreUsedSuppressions::default(),
                 spent: &mut spent,
             },
-            false,
+            &[],
         );
         let msg = far
             .iter()
@@ -1000,6 +1033,59 @@ mod tests {
             .clone();
         assert!(msg.contains("nothing fires in this file"), "{msg}");
         assert!(!msg.contains("nearest matching finding"), "{msg}");
+    }
+
+    #[test]
+    fn stale_delta_names_only_the_applicable_exemption_kinds() {
+        // G4: the appended exemption clause lists EXACTLY the kinds that
+        // cover the file's remaining literals — a position/index-only file
+        // never claims unit/constant/table, and no candidates means no
+        // clause at all.
+        let mut spent = std::collections::HashSet::new();
+        let index_only = apply_suppressions_impl(
+            vec![],
+            &[(1, "// lucidlint: ignore magic-number gone".to_string())],
+            "x.py",
+            "#",
+            &mut SuppressionBooks {
+                pre_used: &PreUsedSuppressions::default(),
+                spent: &mut spent,
+            },
+            &["position/index"],
+        );
+        let msg = index_only
+            .iter()
+            .find(|f| f.kind == "stale-suppression")
+            .unwrap()
+            .message
+            .clone();
+        assert!(msg.contains("now covered by the position/index exemption"), "{msg}");
+        assert!(!msg.contains("unit-named"), "{msg}");
+        assert!(!msg.contains("constant-definition"), "{msg}");
+        assert!(!msg.contains("data-table"), "{msg}");
+
+        // no candidates -> the marker reads as a plain fix/rename stale,
+        // with no exemption clause
+        let mut spent = std::collections::HashSet::new();
+        let none = apply_suppressions_impl(
+            vec![],
+            &[(1, "// lucidlint: ignore magic-number gone".to_string())],
+            "x.py",
+            "#",
+            &mut SuppressionBooks {
+                pre_used: &PreUsedSuppressions::default(),
+                spent: &mut spent,
+            },
+            &[],
+        );
+        let msg = none
+            .iter()
+            .find(|f| f.kind == "stale-suppression")
+            .unwrap()
+            .message
+            .clone();
+        assert!(msg.contains("nothing fires in this file"), "{msg}");
+        assert!(!msg.contains("covered by the"), "{msg}");
     }
 
     #[test]
@@ -1013,14 +1099,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(
-            vec![finding("partition", 9)],
-            &comments,
-            "x.rs",
-            "//",
-            &mut books,
-            false,
-        );
+        let fs = apply_suppressions_impl(vec![finding("partition", 9)], &comments, "x.rs", "//", &mut books, &[]);
         assert!(!fs.iter().any(|f| f.kind == "partition"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -1038,7 +1117,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![finding("strewing", 2)], &comments, "x.py", "#", &mut books, false);
+        let fs = apply_suppressions_impl(vec![finding("strewing", 2)], &comments, "x.py", "#", &mut books, &[]);
         assert!(!fs.iter().any(|f| f.kind == "strewing"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -1069,7 +1148,7 @@ mod tests {
             "x.py",
             "#",
             &mut books,
-            false,
+            &[],
         );
         assert!(
             !fs.iter().any(|f| f.kind == "magic-number" || f.kind == "middle-man"),
@@ -1094,7 +1173,7 @@ mod tests {
             "x.rs",
             "//",
             &mut books,
-            false,
+            &[],
         );
         assert!(!fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
@@ -1115,7 +1194,7 @@ mod tests {
             "x.rs",
             "//",
             &mut books,
-            false,
+            &[],
         );
         assert!(fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
     }

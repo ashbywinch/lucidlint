@@ -66,17 +66,24 @@ impl RustScan {
     }
 }
 
-/// F4: does the file hold an integer/float literal anywhere? The stale
-/// magic-number message cites it when the family fires nowhere — the
-/// exemptions cover the values; the numbers are not gone. The visit default
-/// reaches every expression (pattern literals included) in one pass.
+/// G4: does the file hold a magic-CANDIDATE literal (value outside 0/1/2)
+/// anywhere — the fact the stale magic-number message cites when the family
+/// fires nowhere: the position rule exempted the values; the numbers are
+/// not gone. The visit default reaches every expression (pattern literals
+/// included) in one pass.
 struct NumericLiteralProbe {
     found: bool,
 }
 impl<'ast> syn::visit::Visit<'ast> for NumericLiteralProbe {
     fn visit_expr_lit(&mut self, el: &'ast syn::ExprLit) {
-        if matches!(el.lit, syn::Lit::Int(_) | syn::Lit::Float(_)) {
-            self.found = true;
+        if let syn::Lit::Int(i) = &el.lit {
+            if common::is_magic_value(i.base10_digits()) {
+                self.found = true;
+            }
+        } else if let syn::Lit::Float(f) = &el.lit {
+            if common::is_magic_value(f.base10_digits()) {
+                self.found = true;
+            }
         }
     }
 }
@@ -133,12 +140,17 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     state.findings.extend(no_assert_test_findings(&file, name));
     state.walk_file(&file);
     let mut scan = state.finish();
-    // F4: does the file hold numeric literals anywhere — the fact the stale
-    // magic-number message cites when the family fires nowhere (the
-    // exemptions cover the values; the numbers are not gone).
+    // G4: does the file hold magic-CANDIDATE literals anywhere — the fact
+    // the stale magic-number message cites when the family fires nowhere.
+    // Rust's only exemptions are the position rule, so the label set is
+    // ["position/index"] or empty.
     let mut probe = NumericLiteralProbe { found: false };
     syn::visit::Visit::visit_file(&mut probe, &file);
-    let has_numeric_literals = probe.found;
+    let magic_exempt_labels: Vec<&'static str> = if probe.found {
+        vec!["position/index"]
+    } else {
+        Vec::new()
+    };
     // suppressions parse from the whole file, filtering every family — the
     // shared why-less rule applies (`// lucidlint: ignore` needs a why)
     let comments = rs_comment_lines(source);
@@ -176,10 +188,9 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         pre_used: &pre_used,
         spent: &mut supps_spent,
     };
+
     scan.findings =
-        common::apply_suppressions_impl(scan.findings, &comments, name, "//", &mut books, has_numeric_literals);
-    scan.supps = supps;
-    scan.supps_spent = supps_spent;
+        common::apply_suppressions_impl(scan.findings, &comments, name, "//", &mut books, &magic_exempt_labels);
     scan
 }
 

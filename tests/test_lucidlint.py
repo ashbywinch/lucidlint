@@ -833,13 +833,16 @@ def test_suppression_advice_states_marker_window(capsys):
     # Phase 3: the suppression guidance states the window positively — a
     # marker binds on the finding's OWN line or within the 3 lines ending at
     # it; the tool never tells the reader a marker further up "does not"
-    # bind (that read as advice to move the marker — there is no such advice)
+    # bind (that read as advice to move the marker — there is no such advice).
+    # G5: the sentence gains the truncated-why statement — binding is keyed by
+    # the SIGNAL NAME, so a why text cut mid-word at the line end still binds
     a = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
     a.signal = "inline-import"
     ch._render_file_group("x.py", [a])
     out = capsys.readouterr().out
     assert "suppress with: inline-import" in out
-    assert "binds on this finding's own line or within the 3 lines ending at it" in out
+    assert "binds by its signal name on this finding's own line or within the 3 lines ending at it" in out
+    assert "the why text may end mid-word at the line end and still bind" in out
     assert "a marker further up does not" not in out
 
 

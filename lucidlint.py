@@ -1345,9 +1345,11 @@ def _render_file_group(
         # B5: a bare per-site marker is the wrong remedy when the family is
         # config-ignored (a house decision, made elsewhere) — say so and name
         # the config key; otherwise state the marker window POSITIVELY: a
-        # marker binds on the finding's own line or within the 3 lines
-        # ending at it — never advice to relocate a marker (Phase 3: a
-        # mis-placed marker is documentation, not something to move)
+        # marker binds by its signal name on the finding's own line or within
+        # the 3 lines ending at it — never advice to relocate a marker (Phase
+        # 3: a mis-placed marker is documentation, not something to move).
+        # G5: the why is free text — one cut mid-word at the line end still
+        # binds, because the signal name is the binding token
         ck = (ignore_keys or {}).get(a.signal) if a.signal else None
         if marker and ck:
             suppress = (
@@ -1358,7 +1360,8 @@ def _render_file_group(
         elif marker:
             suppress = (
                 f" — suppress with: {a.signal}{fix_link} — a lucidlint: ignore comment binds "
-                "on this finding's own line or within the 3 lines ending at it"
+                "by its signal name on this finding's own line or within the 3 lines "
+                "ending at it; the why text may end mid-word at the line end and still bind"
             )
         elif ck:
             suppress = (

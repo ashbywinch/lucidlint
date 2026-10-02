@@ -8,6 +8,7 @@
 //! class-module, vague-name, strewing, except-swallows, broad-except.
 
 // lucidlint: ignore-file closures the unit-name walker and wire-classifier probes are one-purpose local visits
+// lucidlint: ignore-file long-param-list the annotation and exemption tables thread the scan shapes and their evidence flags — grouping them adds a hop for the shared tables
 // lucidlint: ignore-file large-function the walkers and grammar tables are ONE exhaustive dispatch/
 // decision table each — splitting them scatters a single mapping, covered by the file why
 use rayon::prelude::*;
@@ -121,28 +122,24 @@ pub fn parse_suppressions(source: &str, tokens: &Tokens) -> crate::common::Suppr
 /// itself lives in `common::suppressions_from_comments`). `pre_used` carries
 /// the suppressions the cc-retain already honored (complexity suppressions
 /// are applied before the findings filter; stale detection must not re-flag
-/// them).
+/// them). `magic_exempt_labels` names the exemption kinds among the file's
+/// still-present magic-number candidates — the stale message cites exactly
+/// those (G4), never a blanket unit/constant/table claim.
 pub fn apply_suppressions_impl(
     findings: Vec<Finding>,
     source: &str,
     file: &str,
     tokens: &Tokens,
     books: &mut crate::common::SuppressionBooks,
+    magic_exempt_labels: &[&'static str],
 ) -> Vec<Finding> {
-    // F4: the stale magic-number message cites the file's numeric literals —
-    // the family fires nowhere because the exemptions cover them. The token
-    // stream states the fact precisely (a digit in a string is not a
-    // numeric literal).
-    let has_numeric_literals = tokens
-        .iter()
-        .any(|t| matches!(t.kind(), TokenKind::Int | TokenKind::Float));
     crate::common::apply_suppressions_impl(
         findings,
         &comment_lines(source, tokens),
         file,
         "#",
         books,
-        has_numeric_literals,
+        magic_exempt_labels,
     )
 }
 
@@ -4120,6 +4117,90 @@ fn census_collection(e: &Expr, groups: &mut std::collections::HashMap<bool, Vec<
     }
 }
 
+/// G4: offsets of the numeric literals that ARE magic-number candidates —
+pub fn magic_number_candidates(body: &[Stmt], source: &str) -> HashSet<usize> {
+    let mut out = HashSet::new();
+    let mut sq: Vec<&Stmt> = body.iter().collect();
+    while let Some(s) = sq.pop() {
+        for e in stmt_exprs(s) {
+            walk_expr_deep(e, true, &mut |x, _| {
+                if let Expr::NumberLiteral(n) = x {
+                    let text = source[n.range()].to_string();
+                    if text.len() >= 2 {
+                        let prefix = &text[..2];
+                        if prefix.eq_ignore_ascii_case("0x")
+                            || prefix.eq_ignore_ascii_case("0o")
+                            || prefix.eq_ignore_ascii_case("0b")
+                        {
+                            return;
+                        }
+                    }
+                    let value = match &n.value {
+                        ruff_python_ast::Number::Int(i) => i.to_string(),
+                        ruff_python_ast::Number::Float(f) => f.to_string(),
+                        ruff_python_ast::Number::Complex { .. } => return,
+                    };
+                    if matches!(value.as_str(), "0" | "1" | "2") {
+                        return; // never magic anyway
+                    }
+                    out.insert(n.range().start().to_usize());
+                }
+            });
+        }
+        match s {
+            Stmt::FunctionDef(f) => {
+                for b in &f.body {
+                    sq.push(b);
+                }
+            }
+            _ => push_stmt_children(s, &mut sq),
+        }
+    }
+    out
+}
+
+/// G4: per-file exemption-kind labels among the file's magic-number
+/// candidates — the named exemptions (data-table, constant-definition,
+/// length-guard, unit-named) that cover at least one candidate, plus
+/// "position/index" when a candidate is exempted by NO named exemption (the
+/// parent-is-op position skip). The stale magic-number message names
+/// exactly these — never unit/constant/table for a file whose literals are
+/// indices. Empty when the file holds no candidates (nothing is exempted).
+pub fn magic_exemption_labels(
+    body: &[Stmt],
+    source: &str,
+    table: &HashSet<usize>,
+    const_rhs: &HashSet<usize>,
+    len_guard: &HashSet<usize>,
+    unit_named: &HashSet<usize>,
+) -> Vec<&'static str> {
+    let candidates = magic_number_candidates(body, source);
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let covers = |set: &HashSet<usize>| candidates.iter().any(|o| set.contains(o));
+    let mut labels = Vec::new();
+    if covers(unit_named) {
+        labels.push("unit-named");
+    }
+    if covers(const_rhs) {
+        labels.push("constant-definition");
+    }
+    if covers(table) {
+        labels.push("data-table");
+    }
+    if covers(len_guard) {
+        labels.push("length-guard");
+    }
+    let any_unnamed = candidates
+        .iter()
+        .any(|o| !table.contains(o) && !const_rhs.contains(o) && !len_guard.contains(o) && !unit_named.contains(o));
+    if any_unnamed {
+        labels.push("position/index");
+    }
+    labels
+}
+
 /// A direct element of a collection: nested collections recurse; a number
 /// (bare or under a BinOp/UnaryOp/Compare) is a same-kind data candidate;
 /// anything else (calls, subscripts, comprehensions) stops the census — not
@@ -6556,6 +6637,22 @@ fn ann_base_name(e: &Expr) -> Option<String> {
     }
 }
 
+/// G1: is this dict VALUE element class-name-like — a capitalized name or
+/// attribute (leading underscores ignored: `_TflJourneyResponse` is a
+/// class). A map whose values are classes holds shaped objects, not
+/// scalars, so the dict is a record.
+fn ann_value_is_class_like(e: &Expr) -> bool {
+    let name = match e {
+        Expr::Name(n) => n.id.as_str(),
+        Expr::Attribute(a) => a.attr.as_str(),
+        _ => return false,
+    };
+    name.trim_start_matches('_')
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_uppercase())
+}
+
 /// `_unwrap`: peel Optional[..]/Union[..]/A | B wrappers into their members.
 fn ann_unwrap<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     match e {
@@ -6615,19 +6712,35 @@ fn annotation_is_record(e: &Expr) -> bool {
                 let mut val_parts = Vec::new();
                 ann_unwrap(&t.elts[1], &mut val_parts);
                 if val_parts.len() > 1 {
-                    // a union value: a record or shapeless member makes it a record
+                    // a union value: a record or shapeless member makes it a
+                    // record; an all-scalar union (`str | None`) is a lookup
                     return val_parts.iter().any(|p| annotation_is_record(p))
                         || val_parts
                             .iter()
-                            .any(|p| matches!(ann_name_of(p).as_deref(), Some("Any" | "object")));
+                            .any(|p| matches!(ann_name_of(p).as_deref(), Some("Any" | "object")))
+                        || val_parts.iter().any(|p| ann_value_is_class_like(p));
                 }
                 let val = val_parts[0];
                 let val_name = ann_name_of(val);
-                if matches!(val_name.as_deref(), Some("Any" | "object" | "None")) {
+                if matches!(val_name.as_deref(), Some("Any" | "object")) {
                     return true; // grab-bag: no shape
+                }
+                // G1 scalar-map: a keyed collection of SCALAR values is a
+                // lookup, not a record — dict[str, str] stamps, dict[str,
+                // int] counts, dict[str, None] sentinels hold no shape. A
+                // class-name-like value or a nested collection keeps the
+                // finding (the dict holds shape).
+                if matches!(
+                    val_name.as_deref(),
+                    Some("str" | "int" | "float" | "bool" | "bytes" | "None")
+                ) {
+                    return false;
                 }
                 if matches!(val, Expr::Subscript(_)) {
                     return !is_variadic_tuple(val); // collection values are records
+                }
+                if ann_value_is_class_like(val) {
+                    return true; // class-named values keep the finding
                 }
                 return matches!(ann_base_name(val).as_deref(), Some("dict" | "tuple" | "list"));
             }
@@ -6784,6 +6897,46 @@ fn display_keys(keys: &[String]) -> String {
     format!("{}, … (+{})", keys[..MAX].join(", "), keys.len() - MAX)
 }
 
+/// G2: the module's class names that carry a from_dict method — a union
+/// `X | dict` blending one of these with the wire dict hides which shape a
+/// caller passes; the union message directs the ingestion at entry.
+fn module_from_dict_class_names(body: &[Stmt]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut sq: Vec<&Stmt> = body.iter().collect();
+    while let Some(s) = sq.pop() {
+        if let Stmt::ClassDef(c) = s {
+            let carries = c
+                .body
+                .iter()
+                .any(|m| matches!(m, Stmt::FunctionDef(f) if f.name.to_lowercase().contains("from_dict")));
+            if carries {
+                out.insert(c.name.to_string());
+            }
+        }
+        match s {
+            Stmt::FunctionDef(f) => sq.extend(&f.body),
+            _ => push_stmt_children(s, &mut sq),
+        }
+    }
+    out
+}
+
+/// G2: the annotation is a union (`A | dict`, `Union[A, dict]`) and a NAME
+/// member resolves to a module class that carries from_dict — the union
+/// message's {record}. Only unions qualify; a bare class annotation is
+/// typed, not a record.
+fn union_record_class(e: &Expr, from_dict_classes: &HashSet<String>) -> Option<String> {
+    let mut wrapped = Vec::new();
+    ann_unwrap(e, &mut wrapped);
+    if wrapped.len() < 2 {
+        return None;
+    }
+    wrapped.iter().find_map(|p| match p {
+        Expr::Name(n) if from_dict_classes.contains(n.id.as_str()) => Some(n.id.to_string()),
+        _ => None,
+    })
+}
+
 /// F1: does any class in the module carry a from_dict method? Such a class
 /// IS the ingestion the wire message recommends — the module's wire-named
 /// functions already sit at a parse boundary with a named record, so
@@ -6816,6 +6969,9 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
     // F1: the module-level ingestion fact — one scan per module, applied to
     // every wire-named function in it.
     let module_has_ingestion = module_has_from_dict_class(body);
+    // G2: the module's from_dict classes — a union-typed parameter blending
+    // one of them with the wire dict gets the union message.
+    let from_dict_classes = module_from_dict_class_names(body);
     while qi < queue.len() {
         if let Q::N(n) = queue[qi] {
             if let AnyNodeRef::StmtFunctionDef(f) = n {
@@ -6851,7 +7007,13 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                             if !annotation_is_record(a) {
                                 continue;
                             }
-                            let message = if wire {
+                            // G2: a union-typed parameter whose record member
+                            // is a module class with from_dict — the union
+                            // hides which shape a caller passes; direct the
+                            // ingestion at entry.
+                            let message = if let Some(record) = union_record_class(a, &from_dict_classes) {
+                                format!("{arg} accepts the wire dict alongside the {record} class; the union hides which shape a caller passes. Ingest the wire at entry with {record}.from_dict and drop the dict from the union.")
+                            } else if wire {
                                 format!("{arg} is the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.")
                             } else {
                                 format!("{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists.")

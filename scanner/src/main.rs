@@ -1350,11 +1350,24 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         });
     }
     let mut supps_spent = HashSet::new();
+    // G4: the exemption-kind labels among the file's still-present
+    // magic-number candidates — threaded into the stale message so it names
+    // exactly the exemptions that apply (never unit/constant/table for
+    // indices).
+    let magic_exempt_labels = checks::magic_exemption_labels(
+        &body,
+        source,
+        &state.magic_table_exempts,
+        &state.magic_const_rhs_exempts,
+        &state.magic_len_guard_exempts,
+        &state.magic_unit_named_exempts,
+    );
     let mut books = crate::common::SuppressionBooks {
         pre_used: &pre_used,
         spent: &mut supps_spent,
     };
-    let findings = checks::apply_suppressions_impl(state.findings, source, name, tokens, &mut books);
+    let findings =
+        checks::apply_suppressions_impl(state.findings, source, name, tokens, &mut books, &magic_exempt_labels);
     let mut all = type_ignore_findings(source, name, tokens);
     all.extend(noqa_findings(source, name, tokens));
     all.extend(findings);
@@ -5262,6 +5275,146 @@ mod tests {
             "{}",
             rs[0].message
         );
+    }
+    #[test]
+    fn record_scalar_map_signature_is_a_lookup_not_a_record() {
+        // G1: a parameter or return typed with a dict whose VALUE element is
+        // scalar (str/None/bool stamps and keys) is a lookup, not a record —
+        // derived_node's dep_timestamps: dict[str, str] shape emits nothing.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_scalar_map_signature_passes__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_class_value_in_signature_keeps_the_finding() {
+        // G1: a dict whose value element is class-name-like (capitalized)
+        // holds shaped objects — the finding stays with the ad-hoc text.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_class_value_signature_keeps_finding__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(
+            rs[0]
+                .message
+                .contains("data is a dict; its value is a fixed-shape record"),
+            "{}",
+            rs[0].message
+        );
+    }
+
+    #[test]
+    fn record_union_with_module_from_dict_class_emits_the_union_message() {
+        // G2: `X | dict` where X is a class IN THE MODULE with from_dict —
+        // tfl_client's _disambiguate_national_rail shape. The message states
+        // the union and directs the ingestion; the from_dict method itself
+        // is a typed parse boundary and emits nothing (F1).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_union_with_module_from_dict_class__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(
+            rs[0]
+                .message
+                .contains("data accepts the wire dict alongside the _TflJourneyResponse class"),
+            "{}",
+            rs[0].message
+        );
+        assert!(
+            rs[0].message.contains(
+                "Ingest the wire at entry with _TflJourneyResponse.from_dict and drop the dict from the union"
+            ),
+            "{}",
+            rs[0].message
+        );
+    }
+
+    #[test]
+    fn record_union_without_module_class_keeps_the_ad_hoc_text() {
+        // G2: the same union with NO in-module from_dict class stays on the
+        // existing path — the ad-hoc dict text, not the union message.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_union_without_module_class_keeps_ad_hoc__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(
+            rs[0]
+                .message
+                .contains("data is a dict; its value is a fixed-shape record"),
+            "{}",
+            rs[0].message
+        );
+        assert!(
+            !rs[0].message.contains("accepts the wire dict alongside"),
+            "{}",
+            rs[0].message
+        );
+    }
+
+    #[test]
+    fn record_suppression_two_lines_above_def_binds_the_whole_site() {
+        // G3 delta_vs_home_node shape: the marker one line above the def
+        // binds the def-anchored return finding AND the record literal one
+        // line below it — one marker covers the whole to_dict site.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_suppression_two_lines_above_def_binds__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_suppression_one_marker_binds_the_def_site_twins() {
+        // G3 extract_bus_fares shape: two record-shaped params on one def
+        // line both report at the def anchor (col 0) — ONE marker above the
+        // def binds both; the site is one decision.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_suppression_one_marker_binds_def_site__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn suppression_marker_above_class_binds_the_class_finding() {
+        // G3 class anchor: a marker one line above a class binds a finding
+        // reported at the class line (process-class) and is not stale.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/suppression_marker_above_class_binds__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "process-class"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn suppression_far_above_def_does_not_bind_and_is_not_stale() {
+        // G3 guard: a marker 3+ lines above the def is beyond the 3-line
+        // window — the finding fires, the marker stays as documentation,
+        // and no stale verdict is emitted (api_router's 9-line gap).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_suppression_far_above_does_not_bind__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn truncated_marker_binds_by_signal_alone() {
+        // G5: a repo marker cut mid-expression at line end (bus.py:122 —
+        // "…→ Attempt (dict[str,") still binds: the why may truncate; only
+        // the signal matters, and the why is not empty, so the why-less
+        // rule never applies.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_truncated_marker_binds__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
     }
 
     #[test]
