@@ -304,14 +304,18 @@ Residual defects:
    repeating the counts; it keeps the mode, the target count, and the
    top-risk line. A test asserts each number appears once, the
    relationships hold, and the gate repeats none of them.
-8. Comparison operands: a literal a comparison depends on (1e-6, 0.85,
-   100, 51.5 — the scheduler tie-break, the Jaccard threshold, the km
-   cap, the bbox edge) has the same unstated property regardless of
-   size: the comparison's outcome rides on it, and nothing names what it
-   separates or why that magnitude. The magic-number message for a
-   literal inside a Compare chain states that mechanism and the action:
-   "Name it on the class that owns the computation and state what it
-   separates." No size test.
+8. Role-visible literals: not comparisons only. A literal whose position
+   shows its role while its specific meaning stays unstated is the same
+   defect regardless of the role: a comparison operand (the reader sees
+   a cutoff; the missing fact is what it separates and why that
+   magnitude), a delay/timedelta call argument (the reader sees a
+   duration; the missing fact is why that length), a multiplier (the
+   reader sees a conversion; the missing fact is what it converts). The
+   message names the role the position establishes and asks for the
+   value's specific meaning. The trigger is structural — a Compare
+   chain, a call argument whose callee names a delay or timedelta, a
+   BinOp operand — never a size test, never a semantic claim. Positions
+   without a visible role keep the generic A5 text.
 
 ## Order of work
 
