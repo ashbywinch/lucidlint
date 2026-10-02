@@ -310,7 +310,7 @@ Residual defects:
    general form: "{value} is used {in-function}, but nothing states
    what it means or why this magnitude. Write it as a named constant
    where the computation uses it, and state what it means and why this
-   size in the name or in one clause beside it." The constant is an
+   size in the name or in one comment beside it." The constant is an
    attribute on the enclosing class when the computation is a method,
    and a local at the top of the function otherwise; never a module
    global. The pint/timedelta action variants (H3) stay for
