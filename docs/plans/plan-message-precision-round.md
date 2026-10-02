@@ -281,8 +281,12 @@ Residual defects:
    surfaces but the finding fires. Broaden the criterion: a mutated
    name that appears anywhere in the enclosing function's return
    expression tree counts as surfaced.
-5. class-module fix stamp: split-module is marked mechanical although
-   the family is a judgment call; drop the mechanical stamp for it.
+5. class-module fix stamp: the stamp source is `_stamp_of` — JUDGEMENT
+   when the fix is name-required, MECHANICAL otherwise. split-module's
+   name is optional, so it renders [MECHANICAL]; the transform involves
+   a grouping decision, not a mechanical fact. The stamp must distinguish
+   "needs a name" from "involves a decision": give the split-module
+   fix record a judgement marker so the stamp renders JUDGEMENT.
 6. unused advice order: "suppress with: unused" heads the message even
    when the action is deletion; state deletion first at dead sites.
 7. Report arithmetic: the ledger line still leaves the fail/warning/
