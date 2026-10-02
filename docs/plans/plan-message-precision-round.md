@@ -140,7 +140,9 @@ has no same-line or one-line-past window entry.
    (this family's fix: split-module)". Reader-side test.
 2. Headline truth: when a repo-root lucidlint.json holds acknowledged
    actions and --baseline was not passed, the "+0 acknowledged" phrase
-   appends "(N in lucidlint.json, not activated)".
+   appends the flag itself — "(N acknowledged in lucidlint.json — pass
+   --baseline lucidlint.json to activate them)" — so the reader learns
+   the flag from the message.
 3. [RISKxx] per-item tags: read as priority, they are actually the
    churn x fan-in percentile; the valuable fail (complexity) shows the
    lowest number and wire noise the highest. Drop the tag from finding
