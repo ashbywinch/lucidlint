@@ -216,8 +216,8 @@ Residual defects, for the next iteration:
    wrong. Fixing the most expensive code first is a coherent strategy
    when the goal is to lower future change cost. Fix the presentation,
    not the information: label the line "highest change-cost: the most
-   expensive code to modify safely", and decide whether the code is
-   wrong by reading the finding's message, not the risk line. Re-weight
+   expensive code to modify safely", Judge whether the code is
+   wrong from the explanation in the report, not from the risk number. Re-weight
    the metric so complexity and size are not dominated by the churn
    factor — the round evidence (a CC-17 knot at RISK01 while wire noise
    heads the report) is the calibration data.
