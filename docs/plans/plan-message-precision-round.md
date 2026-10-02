@@ -295,8 +295,13 @@ Residual defects:
    (they state mechanism and action only), and the renderer appends
    "suppress with: <signal>" AFTER the message, so the action leads and
    the pointer appears exactly once.
-7. Report arithmetic: the ledger line still leaves the fail/warning/
-   suppressed totals unreconciled; the reconciliation must sum them.
+7. Report arithmetic: the ledger's "reported 209" equals the gate's
+   "99 action(s) + 110 warnings", and no line states the relationship.
+   Both lines print the breakdown with the same terms: the gate says
+   "F fail action(s) + W warnings = R reported", the ledger says
+   "reported R (F fails + W warnings) + acknowledged + config-ignored +
+   comment-suppressed = total". A test asserts the printed numbers
+   satisfy both relationships.
 8. Ordering epsilons: a bare tiny float in a comparison (scheduler
    1e-6) is ordering semantics; the magic-number message should name the
    epsilon case.
