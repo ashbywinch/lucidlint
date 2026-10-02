@@ -211,9 +211,14 @@ Residual defects, for the next iteration:
    explanation; the stale message should state the kind and note the
    current exemptions when the file's values are covered by them.
 5. Top-risk headline: the single top-risk line presents a from_dict site
-   as the report's headline while the valuable fixes sit elsewhere; drop
-   the headline or mark it explicitly as highest change-cost, never the
-   first thing to fix.
+   as the report's headline while the valuable fixes sit elsewhere. The
+   line is change-cost, not wrongness: fix-it-first is a coherent
+   strategy under a reduce-change-cost goal. Fix the presentation, not
+   the information: label the line exactly ("highest change-cost: the
+   most expensive code to modify safely") so the strategy reading is
+   explicit, and re-weight the metric so complexity and size are not
+   dominated by the churn factor — the round evidence (a CC-17 knot at
+   RISK01 while wire noise heads the report) is the calibration data.
 
 ## Order of work
 
