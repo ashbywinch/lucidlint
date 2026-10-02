@@ -39,6 +39,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | Plan for resolving issues #26–#34 (branch `fix/github-issues-26-34`) | `docs/plans/plan-github-issues-26-34.md` |
 | Proposals from the #26–#34 subtask evaluation (message clarity, render fixes) | `docs/plans/plan-26-34-eval-proposals.md` |
 | Next round: message precision (record-shape premises, suppression window, loop gating) | `docs/plans/plan-message-precision-round.md` |
+| Message precision round 2 (section I residuals) | `docs/plans/plan-message-precision-round-2.md` |
 | Coding standards (canonical + language conventions) | `docs/coding-standards.md` |
 | Testing standards | `docs/testing-standards.md` |
 | UX standards | `docs/ux-standards.md` |
