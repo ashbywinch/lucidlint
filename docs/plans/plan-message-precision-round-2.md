@@ -77,17 +77,21 @@ round-8 proposer reports no def-above marker gap.
 
 Actions:
 
-1. A duration suggestion names a concrete unit only when the unit is
-   explicit in the comment ("# one day"). Name-derived tokens never
-   supply the example, for two reasons: the name-certain cases are
-   already exempt (a literal whose own target names the unit never
-   reaches the suggestion), and the remaining name-derived tokens come
-   from the surrounding context, which has misfired on the same value
-   in three consecutive rounds.
-2. Otherwise the action is "express it as a timedelta in its unit".
-3. Fixtures: `# one day` comment renders timedelta(days=1); the
-   name-only 86400 renders "in its unit"; timedelta(minutes=86400)
-   never renders.
+1. The suggestion never names a unit. No unit source is certain:
+   comments rot, and name-derived tokens have misfired three times on
+   one value. The duration form is "express it as a timedelta in its
+   unit"; the physical form is "express it as a pint Quantity in its
+   unit". The family split (duration versus physical) comes from the
+   token classification; nothing more. This supersedes H3's certainty
+   bar and the F2 explicit-unit clause.
+2. The explicit-unit examples are removed from the messages; no
+   timedelta(days=1), no Quantity(5, 'kilometer'), and never
+   timedelta(minutes=86400).
+3. Fixtures: a `# one day` line renders "timedelta in its unit"; a
+   `# 5 km/h` line renders "pint Quantity in its unit"; the
+   unit-example forms appear in no emitted message.
+4. The constant-RHS exemption for unit-named targets is not relied on
+   here; whether it should exist is a separate, unopened question.
 
 Acceptance: round-8 proposer finds no implausible-duration suggestion.
 
