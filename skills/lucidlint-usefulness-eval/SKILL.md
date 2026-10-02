@@ -80,8 +80,9 @@ Set `SCRATCH=${TMPDIR:-/tmp}/lucidlint-eval` and `mkdir -p "$SCRATCH"`.
    > it. CONFUSING: a bullet list. End with one paragraph on how much of
    > the report you would act on.
    >
-   > Acceptance: every distinct finding or group is in CHANGE or KEEP (fold
-   > near-identical items, naming each file:line); no files modified.
+   > Acceptance: every distinct finding or group is in CHANGE,
+   > CHANGE-DIFFERS, or KEEP (fold near-identical items, naming each
+   > file:line); no files modified.
 
    Never add hints. Do not tell the agent the project's design principles,
    the evaluation's purpose, or that this is a test. The point is what the
