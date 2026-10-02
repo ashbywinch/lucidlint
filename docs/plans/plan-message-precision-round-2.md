@@ -58,14 +58,17 @@ and "fixed-shape record" never appears with a named-type value.
 
 Actions:
 
-1. A signature finding (parameter or return anchor) binds a marker in
-   the 3 lines ending at the def line OR on the parameter line itself.
-   The house convention (comment one line above the def) binds.
+1. A signature finding (parameter or return anchor) binds a marker on
+   the line above the def or on the def line itself — the convention's
+   own size, not the 3-line constant — OR in the parameter-line window.
+   A marker one line above the def binds whatever line the parameter
+   anchors on.
 2. Markers in the gap keep the no-over-bind rule: a marker claimed by a
    finding on its own line wins.
 3. Fixtures: a multi-line signature with the marker on def-1 binds; the
-   marker on the parameter line binds; a marker inside the body 2 lines
-   below the def does not bind unless a finding sits there.
+   marker on def binds; the marker on the parameter line binds; a
+   marker inside the body 2 lines below the def does not bind unless a
+   finding sits there.
 
 Acceptance: the ~25 sanctioned wire-boundary sites cease re-reporting;
 round-8 proposer reports no def-above marker gap.
