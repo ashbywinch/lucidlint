@@ -210,11 +210,12 @@ Residual defects, for the next iteration:
    exempt (unit-named values) read "nothing fires in this file" with no
    explanation; the stale message should state the kind and note the
    current exemptions when the file's values are covered by them.
-5. Top-risk headline: re-label the line and re-weight the metric. The
-   label: "highest change-cost: the most expensive code to modify
-   safely; fixing it first saves the most future churn". Weight
-   complexity and size above the churn factor (calibration: wire noise
-   headed round 4 while the CC-17 knot sat at RISK01).
+5. Top-risk line. The line names the code whose change would cost the
+   most. Fixing it first lowers future change cost. Two defects. Readers
+   take it as "most important to fix". The formula lets churn outweigh
+   complexity and size, so a wire-parse entry headed the report while a
+   function with CC 17 sat at the bottom. Fix: label it "highest
+   change-cost", and give complexity and size equal weight with churn.
 
 ## Order of work
 
