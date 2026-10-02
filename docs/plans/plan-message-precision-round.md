@@ -212,15 +212,17 @@ Residual defects, for the next iteration:
    current exemptions when the file's values are covered by them.
 5. Top-risk headline: the single top-risk line presents a from_dict site
    as the report's headline while the valuable fixes sit elsewhere. The
-   line ranks what a change would cost; it does not rank which code is
-   wrong. Fixing the most expensive code first is a coherent strategy
-   when the goal is to lower future change cost. Fix the presentation,
-   not the information: label the line "highest change-cost: the most
-   expensive code to modify safely", Judge whether the code is
-   wrong from the explanation in the report, not from the risk number. Re-weight
-   the metric so complexity and size are not dominated by the churn
-   factor — the round evidence (a CC-17 knot at RISK01 while wire noise
-   heads the report) is the calibration data.
+   risk number ranks the cost of changing that code. The goal is
+   already fixed: the reader runs lucidlint to lower future change
+   cost. Fixing the highest-cost code first is therefore the coherent
+   order — the change costs once, the churn it prevents would recur.
+   The line does not rank which code is wrong; judge that from the
+   explanation in the report. Fix the presentation, not the
+   information: label the line "highest change-cost: the most expensive
+   code to modify safely; fixing it first saves the most future churn",
+   and re-weight the metric so complexity and size are not dominated by
+   the churn factor — the round evidence (a CC-17 knot at RISK01 while
+   wire noise heads the report) is the calibration data.
 
 ## Order of work
 
