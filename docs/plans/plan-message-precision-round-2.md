@@ -116,13 +116,16 @@ Acceptance: round-8 proposer does not read the line as urgency.
 
 Actions:
 
-1. When the repo's baseline entries acknowledge no finding on the
-   current lines (the file's acknowledged keys match nothing scanned at
-   their lines), the ledger appends: "N acknowledged entries point at
-   lines that no longer hold the finding — re-acknowledge with
-   --update-baseline".
-2. Fixture: a repo with a baseline whose keys are stale renders the
-   clause.
+1. Baseline keys are kind:file:line:function — line-bearing — so line
+   drift silently un-acknowledges debt. When an acknowledged key's
+   kind:file:function triple appears among today's findings but none of
+   them sits at its recorded line, that entry is drifted, not new. The
+   ledger appends to the acknowledged term: "N acknowledged entries
+   point at lines that no longer hold the finding — re-acknowledge with
+   --update-baseline", rendered only when the count is nonzero.
+2. Fixtures: a baseline key at a stale line re-reports its finding and
+   renders the clause; the same key at the current line acknowledges
+   and renders no clause.
 
 Acceptance: round-8 proposer sees why acknowledged debt re-reports.
 
