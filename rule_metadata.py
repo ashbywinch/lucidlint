@@ -122,6 +122,13 @@ class Fix:
         its required agent inputs (the Fifth-pass judgement signal)."""
         return FIX_REGISTRY.name_required(self.kind)
 
+    @property
+    def judgement(self) -> bool:
+        """H5: the stamp's judge signal — true when the fix needs a name OR
+        its kind is judgement-marked (a decision, not a mechanical fact);
+        the registry is the single source for both surfaces."""
+        return self.name_required or FIX_REGISTRY.judgement_marked(self.kind)
+
     def command(self) -> str:
         """The full runnable command — the R27 directive rewrite in ONE
         place on the object (`lucidlint fix --kind K --file F --line L
@@ -142,10 +149,11 @@ class Fix:
 #
 # Every kind the scanner can offer is registered here — including the
 # complexity shape-routing kinds (dispatch-registry, rule-table) and the
-# Phase-3 fixers (dissolve-husk, collapse-chain, split-module — the latter
-# takes its package name as an OPTIONAL input, never a required one, so its
-# judge-status stays False; it declines, it does not demand, when the name
-# is not derivable).
+# Phase-3 fixers (dissolve-husk, collapse-chain, split-module — the
+# latter takes its package name as an OPTIONAL input, never a required
+# one, so name_required stays False; it declines, it does not demand,
+# when the name is not derivable. H5: split-module's grouping decision
+# is still a judgement — JUDGEMENT_KINDS below carries that mark).
 # lucidlint: ignore record-shape the input registry is this tool's kind schema — a row per fixer, not an ad hoc record
 FIX_REQUIRED_INPUTS: dict[str, tuple[str, ...]] = {
     "extract-method": ("name",),
@@ -175,6 +183,16 @@ FIX_REQUIRED_INPUTS: dict[str, tuple[str, ...]] = {
     "split-module": (),
 }
 
+# H5: kinds whose fix renders JUDGEMENT although no input is REQUIRED — the
+# transform involves a decision, not a mechanical fact. split-module's
+# package name stays optional (stem-derivable, else supplied to the fixer),
+# so the inputs registry cannot mark it name-required; the grouping decision
+# is the judgement, and the stamp honors it without claiming the fix demands
+# a name. Dissolve-husk and collapse-chain stay mechanical by exclusion.
+JUDGEMENT_KINDS: frozenset[str] = frozenset({
+    "split-module",
+})
+
 
 class FixRegistry:
     """The static kind schema — which agent inputs each fix kind's
@@ -193,6 +211,11 @@ class FixRegistry:
 
     def kinds(self) -> list[str]:
         return sorted(self.required)
+
+    def judgement_marked(self, kind: str) -> bool:
+        """H5: judge-true by DECISION, not by a required input — the kinds
+        in JUDGEMENT_KINDS render JUDGEMENT although they demand no name."""
+        return kind in JUDGEMENT_KINDS
 
 
 FIX_REGISTRY = FixRegistry()

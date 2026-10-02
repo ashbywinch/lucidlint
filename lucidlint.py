@@ -119,6 +119,7 @@ class _ScanFlags:
 
 
 @dataclass
+# lucidlint: ignore partition the render-context accessors are by-feature read helpers on one record
 class _RenderCtx:
     """The shared render context — one object instead of a 9-parameter tail."""
 
@@ -134,31 +135,51 @@ class _RenderCtx:
     config_ignore_keys: dict[str, str] = field(default_factory=dict)  # B5: signal -> config key
     baseline_migration: str = ""  # B3: pre-round baseline note ("" = none)
 
-    def _config_ignored_note(self) -> str:
-        """The §9 debt ledger: config-ignored findings are filtered BEFORE the
-        verdict — without a count they vanish entirely, and the ignore can
-        grow without the gate ever showing it."""
+    def _config_ignored_detail(self) -> str:
+        """The §9 debt ledger's per-kind detail: the config-ignored families
+        and their counts (magic-number=2, ...) — without them the ignore can
+        grow without the gate ever showing WHICH kinds it hides."""
         if not self.ignored_by_signal:
             return ""
         top = ", ".join(f"{sig}={n}" for sig, n in self.ignored_by_signal.most_common(4))
-        total = sum(self.ignored_by_signal.values())
-        return f", {total} config-ignored ({top})"
+        return f" ({top})"
+
+    def _baseline_acknote(self) -> str:
+        """H7: the baseline-activation clause rides the LEDGER (the single
+        home of the numbers) — the gate repeats no count. Phase 4: a
+        repo-root lucidlint.json holding acknowledged actions reads as "+0
+        acknowledged" until --baseline is passed; the note attaches the flag
+        itself so the reader learns it from the message (round-3 CONFUSING:
+        "95 acknowledged action(s)" read as "+0 acknowledged")."""
+        if self.args.baseline is not None or self.baseline_migration:
+            return ""
+        current, _ = _baseline_file_state(self.repo / "lucidlint.json")
+        if not current:
+            return ""
+        return (
+            f" — {current} acknowledged in lucidlint.json — "
+            "pass --baseline lucidlint.json to activate"
+        )
 
     def _suppression_ledger(self, fails: list[Action], warns: list[Action], acks: list[Action]) -> str | None:
-        """B4: ONE header line reconciling the three suppression accounts —
-        acknowledged (baseline), config-ignored (family opt-out),
-        comment-suppressed (site markers) — with the reported actions, so the
-        per-kind roll-up reconstitutes. None when nothing is suppressed."""
+        """H7: ONE additive line — the single home of the report's numbers:
+        reported = fails + warnings and total = reported + acknowledged +
+        config-ignored + comment-suppressed are stated HERE, and the gate
+        line repeats none of them. The baseline-activation clause rides the
+        acknowledged term. None only when there is literally nothing to
+        state."""
         ignored = sum(self.ignored_by_signal.values()) if self.ignored_by_signal else 0
         census = sum(self.suppression_census.values()) if self.suppression_census else 0
-        if not acks and not ignored and not census:
-            return None
         reported = len(fails) + len(warns)
+        acknote = self._baseline_acknote()
+        if not reported and not acks and not ignored and not census and not acknote:
+            return None
         total = reported + len(acks) + ignored + census
         return (
-            f"suppression ledger — reported {reported} + acknowledged {len(acks)} (baseline) "
-            f"+ config-ignored {ignored} (family opt-out) + comment-suppressed {census} "
-            f"(site markers) = {total} findings"
+            f"{total} findings — {reported} reported ({len(fails)} fails + {len(warns)} warnings) "
+            f"+ {len(acks)} acknowledged (baseline){acknote}"
+            f" + {ignored} config-ignored{self._config_ignored_detail()}"
+            f" + {census} comment-suppressed"
         )
 
     def render_json(self, unique: list[Action]) -> None:
@@ -206,28 +227,22 @@ class _RenderCtx:
         graph_preferred = self.graph_preferred
         top = fails[0]
         bits = []
-        # without a baseline nothing is acknowledged — say so plainly; a
-        # repo-root lucidlint.json changes the claim: "+0 acknowledged" is
-        # true only of the ACTIVE baseline, so the phrase attaches the flag
-        # itself (Phase 4: "95 acknowledged action(s)" read as "+0
-        # acknowledged" — round-3 CONFUSING)
-        acknote = ""
+        # H7: the counts live in the LEDGER — the gate repeats none of them;
+        # it states the mode, the scope (distinct targets), and the single
+        # highest change-cost line. The baseline honesty clause carries no
+        # count and stays here ("no baseline — cannot tell what is new"); the
+        # activation clause for a repo-root lucidlint.json rides the ledger's
+        # acknowledged term (Phase 4: "95 acknowledged action(s)" read as
+        # "+0 acknowledged" — round-3 CONFUSING)
         if args.baseline is None and not self.baseline_migration:
             current, _ = _baseline_file_state(self.repo / "lucidlint.json")
-            if current:
-                acknote = (
-                    f" — {current} acknowledged in lucidlint.json — "
-                    "pass --baseline lucidlint.json to activate them"
-                )
-            else:
+            if not current:
                 bits.append("no baseline — cannot tell what is new")
-        mine_txt = ("; " + "; ".join(bits)) if bits else ""
+        mine_txt = (", " + ", ".join(bits)) if bits else ""
         targets = len({(a.file, a.function) for a in fails})
         verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
         print(
-            f"{verdict} — {len(fails)} action(s) across {targets} distinct targets "
-            f"(+{len(acks)} acknowledged in baseline{acknote}, {len(warns)} warnings never-fail"
-            f"{self._config_ignored_note()}){mine_txt}, "
+            f"{verdict} — across {targets} distinct targets{mine_txt}, "
             # B2: the top line names the ACTUAL rule (the raw-risk percentile
             # the formula line below defines) — never "the hotspot", a
             # definition the top item may not satisfy; F5: it is the code
@@ -272,8 +287,10 @@ class _RenderCtx:
         if self.baseline_migration:
             print(self.baseline_migration)
             print()
-        # B4: reconcile the three suppression accounts so the per-kind
-        # roll-up reconstitutes (round: "469 suppressed vs 74 reported")
+        # H7: the LEDGER is the single home of the numbers — the additive
+        # relationship (reported = fails + warnings; total = reported +
+        # acknowledged + config-ignored + comment-suppressed) is stated ONCE
+        # here, and every GATE line repeats none of it
         ledger = self._suppression_ledger(fails, warns, acks)
         if ledger:
             print(ledger)
@@ -282,13 +299,10 @@ class _RenderCtx:
             # the ledger must show even when the config-ignores ate every
             # action — "clean" while debt is hidden is the invisibility the
             # ledger exists to remove (review finding)
-            ignored_note = self._config_ignored_note()
-            print(f"GATE: PASS — clean, no actions{ignored_note}")
+            print("GATE: PASS — clean, no actions")
             return
         if not fails:
-            warn_note = f" ({len(warns)} warnings reported, never fail)" if warns else ""
-            ignored_note = self._config_ignored_note()
-            print(f"GATE: PASS — {len(acks)} action(s) acknowledged in baseline{warn_note}{ignored_note}")
+            print("GATE: PASS")
             if warns:
                 print(f"by kind — warnings: {_kind_counts(warns)}")
                 _render_actions(repo, args, warns, [], self.suppression_census, self.config_ignore_keys)
@@ -1372,7 +1386,12 @@ def _render_file_group(
             suppress = ""
         stamp = _stamp_of(a)
         bracket = "".join(f"[{t}]" for t in (tag, kinds) if t)
-        print(f"  {bracket}{suppress} {loc}{churn} — {a.message}" + (f" [{stamp}]" if stamp else ""))
+        # H6: the MESSAGE leads — the suppression pointer (and the
+        # config-ignored advisory / marker-window sentence where they apply)
+        # appends AFTER it, so the action reads first and the pointer
+        # appears exactly once (the messages no longer embed suppression
+        # wording — the pointer is renderer data)
+        print(f"  {bracket} {loc}{churn} — {a.message}{suppress}" + (f" [{stamp}]" if stamp else ""))
         if a.note:
             print(f"      -> {a.note}")
 
@@ -1389,13 +1408,16 @@ def _fix_of(a: Action) -> rule_metadata.Fix | None:
 
 
 def _stamp_of(a: Action) -> str:
-    """#33(a): render-time only — `JUDGEMENT` when the finding's fix needs a
-    name (the registry says so via name_required), `MECHANICAL` for fixable
-    kinds outside it; fix-less findings get neither."""
+    """#33(a)+H5: render-time only — `JUDGEMENT` when the finding's fix needs
+    a name (the registry says so via name_required) OR its kind is
+    judgement-marked (H5: split-module's split is a grouping decision — a
+    judgement, not a mechanical fact, even though its package name is
+    optional); `MECHANICAL` for fixable kinds outside both; fix-less
+    findings get neither."""
     fix = _fix_of(a)
     if fix is None:
         return ""
-    return "JUDGEMENT" if fix.name_required else "MECHANICAL"
+    return "JUDGEMENT" if fix.judgement else "MECHANICAL"
 
 
 _NAMING_NOTICE = (

@@ -600,6 +600,22 @@ def test_render_stamps_judgement_and_mechanical(capsys):
     assert out.count("[MECHANICAL]") == 1, out
 
 
+def test_render_stamps_split_module_judgement_and_fixers_mechanical(capsys):
+    # H5: split-module's name is OPTIONAL (stem-derivable) yet the split is a
+    # grouping decision, not a mechanical fact — the judgement marker makes
+    # the stamp render [JUDGEMENT] for a class-module finding; dissolve-husk
+    # and collapse-chain keep [MECHANICAL]
+    judge = ch.Action("standard", "fail", "x.py", 1, "Employee", "m", 1, 0, "", "", fix_kind="split-module")
+    judge.signal = "class-module"
+    husk = ch.Action("standard", "fail", "y.py", 4, "g", "m", 1, 0, "", "", fix_kind="dissolve-husk")
+    chain = ch.Action("standard", "fail", "z.py", 5, "h", "m", 1, 0, "", "", fix_kind="collapse-chain")
+    ch._render_file_group("x.py", [judge, husk, chain])
+    out = capsys.readouterr().out
+    assert "[JUDGEMENT]" in out, out
+    assert out.count("[JUDGEMENT]") == 1, out
+    assert out.count("[MECHANICAL]") == 2, out
+
+
 def test_naming_notice_printed_once_iff_judge_true(tmp_path, capsys):
     # #33(b): the lesson is issued ONCE per report, only when a judge-true
     # finding exists — never repeated per finding
@@ -739,11 +755,12 @@ def test_repo_root_lucidlint_json_legacy_replaces_cannot_tell(tmp_path, capsys):
     assert "no baseline — cannot tell what is new" not in out
 
 
-def test_gate_line_names_baseline_flag_with_repo_root_acks(tmp_path, capsys):
-    # Phase 4: a repo-root lucidlint.json holding acknowledged actions reads
-    # as "+0 acknowledged" until --baseline is passed — the GATE line appends
-    # the flag itself so the reader learns it from the message (round-3:
-    # "95 acknowledged action(s)" read as "+0 acknowledged")
+def test_ledger_names_baseline_flag_with_repo_root_acks(tmp_path, capsys):
+    # Phase 4 + H7: a repo-root lucidlint.json holding acknowledged actions
+    # reads as "+0 acknowledged" until --baseline is passed — the LEDGER
+    # line (the single home of the numbers; the gate repeats no count)
+    # attaches the flag itself so the reader learns it from the message
+    # (round-3: "95 acknowledged action(s)" read as "+0 acknowledged")
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     (repo / "lucidlint.json").write_text(json.dumps({
         "actions": [
@@ -754,20 +771,24 @@ def test_gate_line_names_baseline_flag_with_repo_root_acks(tmp_path, capsys):
     run_main(repo)
     out = capsys.readouterr().out
     assert (
-        "+0 acknowledged in baseline — 2 acknowledged in lucidlint.json — "
-        "pass --baseline lucidlint.json to activate them"
+        "+ 0 acknowledged (baseline) — "
+        "2 acknowledged in lucidlint.json — "
+        "pass --baseline lucidlint.json to activate"
     ) in out
+    gate = next(line for line in out.splitlines() if line.startswith("GATE:"))
+    assert "acknowledged" not in gate and "action(s)" not in gate, gate
     assert "no baseline — cannot tell what is new" not in out
     assert "lucidlint.json holds" not in out  # the standalone clause is gone
 
 
 def test_suppression_ledger_reconciles_all_three_accounts(tmp_path, capsys):
-    # B4: ONE header line reconciles the three suppression accounts
-    # (baseline-acknowledged / config-ignored / comment-suppressed) so the
-    # per-kind roll-up reconstitutes (round: "469 suppressed vs 74 reported").
-    # The contract is the arithmetic (reported+acked+ignored+census == total)
-    # and that the fixture exercises both the config-ignore and census
-    # accounts; the absolute finding counts belong to the scanner.
+    # H7: ONE additive header line is the single home of the numbers —
+    # reported = fails + warnings and total = reported + acknowledged +
+    # config-ignored + comment-suppressed (baseline-acknowledged /
+    # config-ignored / comment-suppressed) hold on the same line, and the
+    # gate repeats none of them. The fixture exercises both the
+    # config-ignore and census accounts; the absolute counts belong to the
+    # scanner.
     src = (
         SWALLOW_SRC  # reported fail
         + "\ndef m():\n    return 60 * 24\n"  # magic-number warn -> config-ignored
@@ -778,12 +799,13 @@ def test_suppression_ledger_reconciles_all_three_accounts(tmp_path, capsys):
     run_main(repo)
     out = capsys.readouterr().out
     m = re.search(
-        r"suppression ledger — reported (\d+) \+ acknowledged (\d+) \(baseline\) \+ config-ignored (\d+) "
-        r"\(family opt-out\) \+ comment-suppressed (\d+) \(site markers\) = (\d+) findings",
+        r"(\d+) findings — (\d+) reported \((\d+) fails \+ (\d+) warnings\) \+ (\d+) acknowledged "
+        r"\(baseline\) \+ (\d+) config-ignored \([^)]*\) \+ (\d+) comment-suppressed",
         out,
     )
     assert m, out
-    reported, acked, ignored, census, total = (int(g) for g in m.groups())
+    total, reported, fails, warns, acked, ignored, census = (int(g) for g in m.groups())
+    assert fails + warns == reported, out
     assert reported + acked + ignored + census == total, out
     assert ignored >= 1 and census >= 1 and acked == 0, out
 
@@ -794,14 +816,51 @@ def test_suppression_ledger_reconciles_all_three_accounts(tmp_path, capsys):
     run_main(repo, "--baseline", str(baseline))
     out = capsys.readouterr().out
     m = re.search(
-        r"suppression ledger — reported (\d+) \+ acknowledged (\d+) \(baseline\) \+ config-ignored (\d+) "
-        r"\(family opt-out\) \+ comment-suppressed (\d+) \(site markers\) = (\d+) findings",
+        r"(\d+) findings — (\d+) reported \((\d+) fails \+ (\d+) warnings\) \+ (\d+) acknowledged "
+        r"\(baseline\) \+ (\d+) config-ignored \([^)]*\) \+ (\d+) comment-suppressed",
         out,
     )
     assert m, out
-    reported, acked, ignored, census, total = (int(g) for g in m.groups())
+    total, reported, fails, warns, acked, ignored, census = (int(g) for g in m.groups())
+    assert fails + warns == reported, out
     assert reported + acked + ignored + census == total, out
     assert acked >= 1, out
+
+
+def test_ledger_single_home_of_numbers_gate_repeats_none(tmp_path, capsys):
+    # H7: the LEDGER states each account number EXACTLY ONCE (reported =
+    # fails + warnings; total = reported + acknowledged + config-ignored +
+    # comment-suppressed; the baseline-activation clause rides the
+    # acknowledged term), and the GATE line repeats none of them — it keeps
+    # the mode, the target count, and the highest change-cost line only
+    src = (
+        SWALLOW_SRC  # 1 reported fail
+        + "\ndef m():\n    return 60 * 24\n"  # magic-number warn -> config-ignored
+        + 'RECORD = {"a": 1}  # lucidlint: ignore record-shape data table row\n'  # census
+    )
+    repo = make_repo(tmp_path, app_src=src)
+    (repo / ".lucidlint.toml").write_text('[lucidlint]\nignore = ["magic-number"]\n')
+    (repo / "lucidlint.json").write_text(json.dumps({"actions": ["swallow:houses/app.py:4:f"]}))
+    run_main(repo)
+    out = capsys.readouterr().out
+    m = re.search(
+        r"(\d+) findings — (\d+) reported \((\d+) fails \+ (\d+) warnings\) \+ (\d+) acknowledged "
+        r"\(baseline\) — \d+ acknowledged in lucidlint\.json — pass --baseline lucidlint\.json "
+        r"to activate \+ (\d+) config-ignored \([^)]*\) \+ (\d+) comment-suppressed",
+        out,
+    )
+    assert m, out
+    total, reported, fails, warns, acked, ignored, census = (int(g) for g in m.groups())
+    assert fails + warns == reported, out
+    assert reported + acked + ignored + census == total, out
+    assert out.count(" findings — ") == 1, out
+    gate = next(line for line in out.splitlines() if line.startswith("GATE:"))
+    assert re.search(r"across \d+ distinct targets", gate) and "highest change-cost:" in gate, gate
+    for count_word in (
+        "action(s)", "reported", " acknowledged", " config-ignored", " comment-suppressed",
+        "warnings never-fail", "fails +",
+    ):
+        assert count_word not in gate, gate
 
 
 def test_config_ignored_family_advisory_names_config_key(tmp_path, capsys):
@@ -856,6 +915,23 @@ def test_render_links_suppression_signal_to_family_fix(capsys):
     ch._render_file_group("x.py", [a])
     out = capsys.readouterr().out
     assert "suppress with: class-module (this family's fix: split-module)" in out
+
+
+def test_render_message_leads_suppression_pointer(capsys):
+    # H6: the MESSAGE renders first — the suppression pointer (and the
+    # marker-window sentence / config-ignored advisory where they apply)
+    # appends AFTER it, so the action reads first and the pointer appears
+    # exactly once (the messages themselves carry no suppression wording)
+    a = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a.signal = "inline-import"
+    b = ch.Action("standard", "fail", "y.py", 4, "g", "cfg-msg", 1, 0, "", "")
+    b.signal = "global-state"
+    ch._render_file_group("x.py", [a, b], ignore_keys={"global-state": "'houses/**'"})
+    out = capsys.readouterr().out
+    assert out.index("— m") < out.index("suppress with: inline-import"), out
+    assert "binds by its signal name" in out
+    assert out.index("— cfg-msg") < out.index("config-ignored under 'houses/**'"), out
+    assert out.count("suppress with:") == 2, out
 
 
 def test_same_line_trailing_marker_suppresses_finding(tmp_path, capsys):
@@ -1549,7 +1625,10 @@ def test_main_baseline_ack(tmp_path, capsys):
     assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
     assert run_main(repo, "--baseline", str(baseline)) == 0
     out = capsys.readouterr().out
-    assert "acknowledged in baseline" in out
+    # H7: the acknowledged account lives in the LEDGER line (the gate's
+    # PASS line repeats no counts)
+    assert "acknowledged (baseline)" in out
+    assert re.search(r"GATE: PASS\b", out), out
 
 
 def test_main_json_meta(tmp_path, capsys):

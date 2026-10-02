@@ -317,6 +317,45 @@ Residual defects:
    unit-visible contexts; the data-table exemption sentence stays; no
    role word, no position trigger.
 
+## I. Round-7 acceptance (2026-10-02) — H round results
+
+Cleared by H: the swallow mutation criterion (server:704 gone, its old
+markers now stale); the split-module judgement stamp; the message-first
+render order; the ledger as the single home of the numbers ("243
+reported (132 fails + 111 warnings) + 0 acknowledged (baseline) — 95 in
+lucidlint.json ..."; the proposer's CONFUSING had no arithmetic or
+pointer-order entry); the magic message's general form.
+
+Partial and residual:
+
+1. The collection message did not reach the class-valued return/param
+   paths: "its value is a fixed-shape record" still fires 34 times,
+   including dict[str, Provenance] (attempt.py:424) and dict[str,
+   Decimal] (domain.py:384). H1's map_value_class missed them (Decimal
+   is a stdlib capital; the return-type arm bypassed the check). The
+   collection message must render for every dict whose value element is
+   a named type — module or stdlib — in every emitter arm.
+2. Signature window vs the house convention: markers placed one line
+   above the def (the codebase convention) sit one line outside the
+   parameter-anchored window on multi-line signatures, so ~25 sanctioned
+   wire-boundary sites re-report. A signature finding binds markers
+   within the 3 lines ending at the def line OR on the parameter line.
+3. timedelta unit silliness: derived_node:618 renders
+   "timedelta(minutes=86400)". A duration suggestion must not name a
+   unit whose result is an implausible duration; write "in its unit"
+   unless the unit is certain in the comment.
+4. The highest-change-cost line still reads as urgency beside a finding
+   the reader rejects; the label should add "— the code most expensive
+   to change, not the most important finding".
+5. Baseline line drift: the repo's acknowledged entries point at old
+   lines, so acknowledged debt re-reports every run; the report should
+   note when the baseline keys no longer match current lines.
+6. loop-pipeline gate: loops that mutate a pre-existing collection
+   still fire "Replace Loop with Pipeline"; the gate must exclude
+   mutation of an existing dict.
+7. static-husk DI defaults: the open-ended fix text confuses for DI
+   default adapters whose state lives in the module singletons.
+
 ## Order of work
 
 1. Phase 1 (record-shape classification; the largest single change).

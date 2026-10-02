@@ -700,7 +700,7 @@ pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
                             kind: "swallow".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "{kind} at line {line} — logs are not surfacing: a caller exists that needs to decide; surface by return, raise, break, continue, sys.exit, or mutating a name the enclosing function returns — mark `# lucidlint: ignore swallow <terminal-boundary reason>` only when no caller exists to propagate to"
+                                "{kind} at line {line} — logs are not surfacing: a caller exists that needs to decide; surface by return, raise, break, continue, sys.exit, or mutating a name the enclosing function returns"
                             ), });
         } else if let Some(ty) = type_opt {
             let base = annotation_base_name(ty);
@@ -3958,7 +3958,13 @@ fn stmt_exact_key(s: &Stmt) -> Vec<String> {
     }
     toks
 }
-/// Names the function returns at its own top level (nested functions excluded).
+/// Names that surface through the function's returns: every name that
+/// appears ANYWHERE in a return expression tree (nested functions
+/// excluded) — a bare `return name`, the values of a returned dict literal,
+/// tuple elements, f-string fields, call arguments. A mutated name that
+/// surfaces in any part of the returned value surfaces the error (H4: the
+/// server.py:704 shape — the except mutates db and the returned dict
+/// carries it, so the value surfaces although `db` is not itself returned).
 pub fn returned_names(body: &[Stmt]) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut stack: Vec<&Stmt> = body.iter().collect();
@@ -3968,14 +3974,31 @@ pub fn returned_names(body: &[Stmt]) -> HashSet<String> {
         }
         if let Stmt::Return(r) = s {
             if let Some(v) = &r.value {
-                if let Expr::Name(n) = v.as_ref() {
-                    out.insert(n.id.to_string());
-                }
+                collect_expr_names(v.as_ref(), &mut out);
             }
         }
         push_stmt_children(s, &mut stack);
     }
     out
+}
+
+/// Every `Name` in a return expression tree — the returned value's full
+/// shape (dict literal values and keys, tuple elements, f-string fields,
+/// call arguments), not just a bare name. Uses ruff's source_order walker,
+/// which descends all expression children.
+fn collect_expr_names(e: &Expr, out: &mut HashSet<String>) {
+    use ruff_python_ast::visitor::source_order::{walk_expr, SourceOrderVisitor};
+    struct NameCollector<'a>(&'a mut HashSet<String>);
+    impl<'a> SourceOrderVisitor<'a> for NameCollector<'a> {
+        fn visit_expr(&mut self, e: &'a Expr) {
+            if let Expr::Name(n) = e {
+                self.0.insert(n.id.to_string());
+            }
+            walk_expr(self, e);
+        }
+    }
+    let mut c = NameCollector(out);
+    c.visit_expr(e); // visit the ROOT too — walk_expr only descends children
 }
 
 fn sub_name(s: &ruff_python_ast::ExprSubscript) -> String {
@@ -4259,6 +4282,47 @@ pub fn unit_token_label(tok: &str) -> Option<&'static str> {
     }
 }
 
+/// (H3) The unit-family rendering for a unit-visible magic literal. Duration
+/// units (second/minute/hour/day/week) render as a timedelta; physical units
+/// render as a pint Quantity. The concrete unit rides only when the literal's
+/// own context names EXACTLY ONE unit token; a single ambiguous token or
+/// several same-family tokens render the family's generic "in its unit"
+/// form. Tokens from BOTH families (or none) fall back to the A5 generic
+/// text. No plausibility heuristics anywhere.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum UnitContext {
+    /// One duration token — a timedelta with the concrete unit.
+    Duration(&'static str),
+    /// Several duration tokens — a timedelta in its unit, unit not named.
+    DurationAmbiguous,
+    /// One unambiguous physical token — a pint Quantity with the label.
+    Pint(&'static str),
+    /// One ambiguous physical token (`m`) or several physical tokens — a
+    /// pint Quantity in its unit, unit not named.
+    PintAmbiguous,
+    /// No usable unit context — the generic A5 text.
+    Generic,
+}
+
+/// (H3) Is this unit token a duration (timedelta-expressible)? `min`/`sec`
+/// are aliases of minute/second and count as durations.
+pub fn is_duration_token(tok: &'static str) -> bool {
+    matches!(tok, "min" | "minute" | "sec" | "second" | "hour" | "day" | "week")
+}
+
+/// (H3) The timedelta keyword argument for a duration token — the plural
+/// form (`day` -> `days`). None for a non-duration unit.
+pub fn duration_unit_arg(tok: &'static str) -> Option<&'static str> {
+    match tok {
+        "min" | "minute" => Some("minutes"),
+        "sec" | "second" => Some("seconds"),
+        "hour" => Some("hours"),
+        "day" => Some("days"),
+        "week" => Some("weeks"),
+        _ => None,
+    }
+}
+
 /// The word components of an identifier — snake_case separators and
 /// camelCase humps (`max_distance_km` -> [max, distance, km];
 /// `maxDistanceKm` -> the same). Whole-word matching avoids the substring
@@ -4439,20 +4503,17 @@ pub fn magic_unit_named_offsets(body: &[Stmt]) -> HashSet<usize> {
     out
 }
 
-/// (P2) Magic-number literal offsets whose SURROUNDINGS state a unit without
-/// naming the value: a trailing comment on the literal's own line (`a * 5
-/// # 5 km/h`) or a name in the literal's same statement (`if distance_km >
-/// 30`). The literal still fires — with the pint-suggestion message instead
-/// of the A5 text. Maps offset -> the unit's message label. The explicit
-/// unit clause is emitted only when the literal's context (its line's
-/// trailing comment + its statement's names) names EXACTLY ONE distinct
-/// unit token with an unambiguous label; a context with several tokens (or
-/// a single ambiguous token) keeps the pint message WITHOUT a fabricated
-/// unit (None).
-pub fn magic_unit_surroundings_offsets(
-    body: &[Stmt],
-    source: &str,
-) -> std::collections::HashMap<usize, Option<&'static str>> {
+/// (P2/H3) Magic-number literal offsets whose SURROUNDINGS state a unit
+/// without naming the value: a trailing comment on the literal's own line
+/// (`a * 5  # 5 km/h`) or a name in the literal's same statement
+/// (`if distance_km > 30`). The literal still fires — with the unit-family
+/// message instead of the A5 text. Maps offset -> the unit rendering
+/// (H3): the concrete unit is written only when the literal's context (its
+/// line's trailing comment + its statement's names) names EXACTLY ONE
+/// distinct duration or unambiguous physical unit token; a single ambiguous
+/// token or several same-family tokens render the family's "in its unit"
+/// form; tokens from both families (or none) fall back to the A5 generic.
+pub fn magic_unit_surroundings_offsets(body: &[Stmt], source: &str) -> std::collections::HashMap<usize, UnitContext> {
     let mut out = std::collections::HashMap::new();
     let mut sq: Vec<&Stmt> = body.iter().collect();
     while let Some(s) = sq.pop() {
@@ -4474,7 +4535,7 @@ pub fn magic_unit_surroundings_offsets(
         for off in &literals {
             // the literal's own context: its statement's names + its line's
             // trailing comment — the DISTINCT tokens across both decide
-            // whether a unit can be named without fabrication.
+            // the family and whether a unit can be named without fabrication.
             let mut tokens = name_tokens.clone();
             for tok in line_trailing_unit_tokens(source, *off) {
                 if !tokens.contains(&tok) {
@@ -4484,12 +4545,23 @@ pub fn magic_unit_surroundings_offsets(
             if tokens.is_empty() {
                 continue;
             }
-            let label = if tokens.len() == 1 {
-                unit_token_label(tokens[0])
+            let ctx = if tokens.len() == 1 {
+                let tok = tokens[0];
+                if let Some(arg) = duration_unit_arg(tok) {
+                    UnitContext::Duration(arg)
+                } else if let Some(label) = unit_token_label(tok) {
+                    UnitContext::Pint(label)
+                } else {
+                    UnitContext::PintAmbiguous // `m` alone: meter vs mile
+                }
+            } else if tokens.iter().all(|t| is_duration_token(t)) {
+                UnitContext::DurationAmbiguous
+            } else if tokens.iter().all(|t| !is_duration_token(t)) {
+                UnitContext::PintAmbiguous
             } else {
-                None
+                UnitContext::Generic // tokens from both unit families
             };
-            out.insert(*off, label);
+            out.insert(*off, ctx);
         }
         match s {
             Stmt::FunctionDef(f) => {
@@ -6579,7 +6651,7 @@ pub fn unused_findings(
         let (message, kind) = if test_refs.contains(name) {
             (
                 format!(
-                    "{what} '{name}' ({rel}:{line}) is referenced only from tests — if it is a deliberate test seam (isolation hook, fixture helper), document it with `# lucidlint: ignore unused <why>`; otherwise production code that nothing ships calls is dead — delete it"
+                    "{what} '{name}' ({rel}:{line}) is referenced only from tests — if it is a deliberate test seam (isolation hook, fixture helper), document it; otherwise production code that nothing ships calls is dead — delete it"
                 ),
                 "unused",
             )
@@ -6651,6 +6723,59 @@ fn ann_value_is_class_like(e: &Expr) -> bool {
         .chars()
         .next()
         .is_some_and(|c| c.is_uppercase())
+}
+
+/// (H1) The value class of a dict-shaped parameter annotation: `dict[str,
+/// SomeClass]` — the subscript's value element is a single class-name-like
+/// name (capitalized, leading underscores allowed; typed scalars excepted,
+/// G1). The collection is the unnamed shape, so the finding names the map —
+/// never the value, which the annotation already names. A union value, a
+/// nested collection, or a non-dict annotation returns None (those keep the
+/// ad-hoc/union texts).
+fn map_value_class(a: &Expr) -> Option<String> {
+    let mut wrapped = Vec::new();
+    ann_unwrap(a, &mut wrapped);
+    if wrapped.len() != 1 {
+        return None;
+    }
+    let Expr::Subscript(s) = wrapped[0] else {
+        return None;
+    };
+    if ann_base_name(&s.value).as_deref() != Some("dict") {
+        return None;
+    }
+    let Expr::Tuple(t) = s.slice.as_ref() else {
+        return None;
+    };
+    if t.elts.len() != 2 {
+        return None;
+    }
+    if !matches!(ann_name_of(&t.elts[0]).as_deref(), Some("str" | "Any")) {
+        return None;
+    }
+    let mut val_parts = Vec::new();
+    ann_unwrap(&t.elts[1], &mut val_parts);
+    if val_parts.len() != 1 {
+        return None;
+    }
+    let val = val_parts[0];
+    // grab-bag markers are not classes — dict[str, Any] keeps the ad-hoc text
+    if matches!(ann_name_of(val).as_deref(), Some("Any" | "object")) {
+        return None;
+    }
+    if matches!(val, Expr::Subscript(_)) {
+        return None; // collection values keep the fixed-shape text
+    }
+    if matches!(
+        ann_name_of(val).as_deref(),
+        Some("str" | "int" | "float" | "bool" | "bytes" | "None")
+    ) {
+        return None; // G1 scalar-map: a lookup, not a record
+    }
+    if ann_value_is_class_like(val) {
+        return ann_name_of(val);
+    }
+    None
 }
 
 /// `_unwrap`: peel Optional[..]/Union[..]/A | B wrappers into their members.
@@ -6976,7 +7101,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
         if let Q::N(n) = queue[qi] {
             if let AnyNodeRef::StmtFunctionDef(f) = n {
                 let def_line = line_of(source, f.name.range().start());
-                let mut params: Vec<(&str, Option<&Expr>)> = Vec::new();
+                let mut params: Vec<(&str, Option<&Expr>, usize)> = Vec::new();
                 for pwd in f
                     .parameters
                     .posonlyargs
@@ -6984,13 +7109,29 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                     .chain(&f.parameters.args)
                     .chain(&f.parameters.kwonlyargs)
                 {
-                    params.push((pwd.parameter.name.as_str(), pwd.parameter.annotation.as_deref()));
+                    // H2: the finding anchors at the ANNOTATED PARAMETER's
+                    // own line (its range start), not the def line — a
+                    // multi-line signature's params report on their lines.
+                    let param_line = line_of(source, pwd.parameter.range().start());
+                    params.push((
+                        pwd.parameter.name.as_str(),
+                        pwd.parameter.annotation.as_deref(),
+                        param_line,
+                    ));
                 }
                 if let Some(v) = &f.parameters.vararg {
-                    params.push((v.name.as_str(), v.annotation.as_deref()));
+                    params.push((
+                        v.name.as_str(),
+                        v.annotation.as_deref(),
+                        line_of(source, v.range().start()),
+                    ));
                 }
                 if let Some(k) = &f.parameters.kwarg {
-                    params.push((k.name.as_str(), k.annotation.as_deref()));
+                    params.push((
+                        k.name.as_str(),
+                        k.annotation.as_deref(),
+                        line_of(source, k.range().start()),
+                    ));
                 }
                 // P1 sub-family classification: a dict that ARRIVES at a
                 // from_dict/from_json function's parse boundary is built
@@ -7002,7 +7143,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                 // already sits at a typed parse boundary — no record-shape
                 // finding at all (the wire message's advice is a step taken).
                 if !(wire && module_has_ingestion) {
-                    for (arg, ann) in params {
+                    for (arg, ann, param_line) in params {
                         if let Some(a) = ann {
                             if !annotation_is_record(a) {
                                 continue;
@@ -7015,6 +7156,12 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                                 format!("{arg} accepts the wire dict alongside the {record} class; the union hides which shape a caller passes. Ingest the wire at entry with {record}.from_dict and drop the dict from the union.")
                             } else if wire {
                                 format!("{arg} is the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.")
+                            } else if let Some(record) = map_value_class(a) {
+                                // H1: the collection is the unnamed shape —
+                                // the message names the MAP, never the value
+                                // (the annotation already names the value's
+                                // class).
+                                format!("{arg} is a map whose values are {record}. The map itself has no name and no role: call sites pass a bare dict, and nothing says what the collection means. Make a class for the collection, named with a domain noun, and pass that.")
                             } else {
                                 format!("{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists.")
                             };
@@ -7022,7 +7169,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                                 seam_members: Vec::new(),
                                 col: 0,
                                 file: state.file.to_string(),
-                                line: def_line,
+                                line: param_line,
                                 function: f.name.to_string(),
                                 kind: "record-shape".into(),
                                 severity: "fail".into(),
@@ -7032,6 +7179,17 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                     }
                     if let Some(r) = &f.returns {
                         if annotation_is_record(r.as_ref()) {
+                            // H2: a return finding anchors at the return
+                            // annotation's position; the def line only when
+                            // that cannot be resolved.
+                            let ret_line = {
+                                let l = line_of(source, r.range().start());
+                                if l == 0 {
+                                    def_line
+                                } else {
+                                    l
+                                }
+                            };
                             let message = if wire {
                                 format!("{fname} returns the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.", fname = f.name.as_str())
                             } else {
@@ -7041,7 +7199,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                                 seam_members: Vec::new(),
                                 col: 0,
                                 file: state.file.to_string(),
-                                line: def_line,
+                                line: ret_line,
                                 function: f.name.to_string(),
                                 kind: "record-shape".into(),
                                 severity: "fail".into(),
@@ -7094,7 +7252,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
     }
     for h in unique {
         let keys = display_keys(&h.keys);
-        state.findings.push(Finding { seam_members: Vec::new(), file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("This dict has constant keys ({keys}); the keys are fields of one record. Each build site re-creates the keys, so the copies can drift apart. Make a class with these fields and build it once. If the values select behavior (handlers, nodes), keep the dict as a lookup table and suppress with a why. — fix: extract-record-class --name <Record>") });
+        state.findings.push(Finding { seam_members: Vec::new(), file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("This dict has constant keys ({keys}); the keys are fields of one record. Each build site re-creates the keys, so the copies can drift apart. Make a class with these fields and build it once. If the values select behavior (handlers, nodes), keep the dict as a lookup table. — fix: extract-record-class --name <Record>") });
     }
 }
 
@@ -7629,7 +7787,7 @@ pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                                             kind: "fakefs".into(),
                                             severity: "fail".into(),
                                             message: format!(
-                                                "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3) and comment why — or mark `# lucidlint: ignore-file fakefs <why>`, citing the standard that permits real FS here",
+                                                "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3) and comment why",
                                                 f.name.as_str()
                                             ), });
                 }
