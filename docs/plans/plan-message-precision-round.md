@@ -254,18 +254,26 @@ bind; the guidance states the truncated-why rule.
 Residual defects:
 
 1. Class-valued maps: dict[str, SomeClass] (Provenance, Attempt,
-   UserInputNode) fires with "the shape has no name" although the value
-   type is named. Treat a subscript whose value element is a class name
-   as a keyed collection, the same as scalars. This also fixes the
-   headline: the false-positive site heads "highest change-cost".
-2. Inside-def markers: a marker on the line immediately after a
-   def-anchored finding (the first body line) does not bind. The window
-   gains the line after the finding: "binds on this finding's own line,
-   the 3 lines ending at it, or the line after it".
-3. Duration constants: retry caps are durations, not physical
-   quantities. The pint suggestion should name timedelta for duration
-   units (second, minute, hour, day) when the value is a round duration,
-   and pint for physical quantities.
+   UserInputNode) keeps the finding — the map is the unnamed shape, and
+   the value type is irrelevant to the judgment. The message defect is
+   the pointer: "its value is a fixed-shape record" names the value,
+   which is already named. The message must name the collection as the
+   object of the fix: "Make a class for the collection, named with a
+   domain noun, and pass that."
+2. Signature findings anchor at the def line, column 0; for a
+   multi-line signature that is not the line with the problem — the
+   annotated parameter's line is. A marker on the parameter's own line
+   (inside the multi-line signature) is therefore ignored. Anchor
+   parameter findings at the parameter's line. For a single-line
+   signature the parameter shares the def line; there, a marker on the
+   line after the finding binds only when no finding exists on that
+   line.
+3. Duration constants: retry caps are durations. The suggestion splits
+   by unit family — timedelta for second/minute/hour/day/week, pint for
+   physical units — and writes a concrete unit only when the literal's
+   own context states exactly one unit token. Family known but the unit
+   ambiguous: write "in its unit". Family unknown: the generic A5 form,
+   no timedelta or pint claim. No plausibility heuristics.
 4. Swallow detector: the message lists "mutating a name the enclosing
    function returns" as surfacing, but the detector does not implement
    it. Implement the criterion; the server.py:704 probe then clears.
