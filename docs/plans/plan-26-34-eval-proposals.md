@@ -211,6 +211,43 @@ standard. Acceptance for a message change: an agent reading only the message
 can name the mechanism and the action. Turn the session's harness commands
 into a script when the first slice lands.
 
+## E. Round-3 acceptance (2026-10-02) — PASS with a defects list
+
+The plan's items landed (B1-B8, A1-A9, C1-C2, test-first; 358 scanner +
+226 pytest green, self-check at 0, coverage 86%). The eval re-ran on houses
+at the same head with the new binary; the acceptance criterion — the
+proposer argues the record-shape family instead of citing the repo
+convention — PASSES: for the first time the proposer weighed the message's
+premise against the code ("call sites build it ad hoc, field changes go
+unchecked — fails at every site: the dict is the serialized form of a
+class that exists at the site") instead of citing the house's wire-dict
+standard. The engagement exposed the next message defects, to be fixed in
+the next round:
+
+1. record-shape mechanism clause is false at parse edges: at from_dict
+   sites the shape is NOT built ad hoc — nothing constructs the dict
+   except the wire. The premise holds for internal ad-hoc records only.
+2. record-shape fires on scalar-valued mappings (derived_node.py:882,
+   property_nodes.py:659): "its value is a fixed-shape record" is false
+   for a dict of stamps/strings.
+3. magic-number "its meaning is not stated where it is used" is false for
+   unit-named literals (Quantity(20, 'minute') on max_walk_to_station).
+4. Suppression window: a marker on the SAME line as its except does not
+   bind (server.py:704), and a marker one line past the 3-line window is
+   reported "stale — remove it" when it is the only documentation of the
+   literals (rightmove_url.py:57). Placement misses are not staleness;
+   the stale verdict needs to distinguish the two.
+5. class-module: "suppress with: class-module" vs "fix: split-module" —
+   the suppression kind and the fix kind have different names, so the two
+   suggested actions do not line up.
+6. Header: 95 acknowledged actions exist in the repo's lucidlint.json but
+   the headline reads "+0 acknowledged" until --baseline is passed; the
+   ledger line should surface the unactivated baseline count.
+7. CHANGE-DIFFERS quality is high and now outranks the tool at several
+   sites (fallback literals should reference the model default, not a new
+   local constant; a pure Decimal parse should narrow its except, not add
+   a marker) — the differs verdicts are the next message-text input.
+
 ## Order of work
 
 1. B1–B8: render and precision fixes, each with a fixture.

@@ -130,7 +130,7 @@ fn check_target(
             function: String::new(),
             kind: "docs-link".into(),
             severity: "fail".into(),
-            message: format!("{what} '{target}' from {rel} does not resolve — a doc that links nowhere is a finding"),
+            message: format!("{what} '{target}' from {rel} does not resolve — a link that leads nowhere misleads the reader. Fix the target or remove the link."),
         });
     }
 }
@@ -355,7 +355,16 @@ mod tests {
         std::fs::create_dir_all(dir.join("docs")).unwrap();
         std::fs::write(dir.join("docs/guide.md"), "see [missing](nope.md)\n").unwrap();
         let f = docs_findings(&dir, &std::collections::HashSet::new());
-        assert!(f.iter().any(|x| x.kind == "docs-link" && x.message.contains("nope.md")));
+        let broken: Vec<&Finding> = f.iter().filter(|x| x.kind == "docs-link").collect();
+        assert_eq!(broken.len(), 1, "{f:?}");
+        // A7: the message names the broken target and the two actions
+        assert!(
+            broken[0]
+                .message
+                .contains("link to 'nope.md' from docs/guide.md does not resolve — a link that leads nowhere misleads the reader. Fix the target or remove the link."),
+            "{}",
+            broken[0].message
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

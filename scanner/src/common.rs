@@ -83,6 +83,10 @@ pub struct SkeletonModule {
     /// "module" | "class" | "module-class" (a module whose non-import
     /// top-levels are exactly one class def — pairs as both).
     pub entity: &'static str,
+    /// The class identity's direct base names ("Name:Base" / "Attr:mod:Base")
+    /// — empty for module/module-class identities. C2: two classes sharing
+    /// one base get the subclass message, not the fork prose.
+    pub bases: Vec<String>,
 }
 
 /// A module-level function whose body is exactly `return <callee>(<all

@@ -653,6 +653,184 @@ def test_seam_groups_combine_overlapping_member_sets():
     assert "share ONE seam" in heading
     assert ch._seam_groups(actions[:1]) == []  # below the >=3 bar
 
+# ------------------------------------------------------------------ #26-#34 evaluation round: render mechanics (B1-B6)
+def test_seam_heading_never_renders_empty_member_list():
+    # B1: three findings transitively share seams but no single member is in
+    # all of them — the heading must drop the parenthetical, never render
+    # "the seams: )" (round: "these 14 findings share ONE seam (the seams: )")
+    actions = [
+        ch.Action("latent-class", "fail", "a.py", i, f"f{i}", "m", 1, 0, "", "",
+                  seam_members=members, fix_kind="extract-class")
+        for i, members in enumerate((("a", "b"), ("b", "c"), ("c", "d")), start=1)
+    ]
+    groups = ch._seam_groups(actions)
+    assert len(groups) == 1, groups
+    heading = cast(str, groups[0]["heading"])
+    assert "share ONE seam" in heading
+    assert "(the seams: )" not in heading
+    assert "()" not in heading
+    assert heading == "these 3 findings share ONE seam — design the target type once, for all of them"
+
+
+def test_report_tag_reads_as_risk_percentile_not_brokenness(capsys):
+    # B2: the per-item tag names what the number IS — a raw-risk percentile
+    # ("RISK99"), not a bare P99 that reads as a brokenness score
+    ch._render_file_group("x.py", [ch.Action("complexity", "fail", "x.py", 3, "f", "m", 1, 0, "", "", priority=99)])
+    out = capsys.readouterr().out
+    assert "[RISK99]" in out
+    assert "[P99]" not in out
+
+
+def test_summary_top_line_names_the_actual_rule(tmp_path, capsys):
+    # B2: the header's top line must not claim the top action is "the
+    # hotspot" (a definition it may not satisfy) — it names the actual rule,
+    # the raw-risk percentile (round: "top P99 tools/adopt.py" while :116 is
+    # not CC>=15)
+    repo = make_repo(tmp_path)
+    top = ch.Action("record-shape", "fail", "tools/adopt.py", 116, "from_dict", "m", 1.0, 0, "", "", priority=99)
+    ch._RenderCtx(repo, gate_args(), "main", "abc1234", "no coverage", False).render_summary([top], [], [])
+    out = capsys.readouterr().out
+    assert "top-risk tools/adopt.py:116 (from_dict) [RISK99]" in out
+    assert "top P99 tools/adopt.py" not in out
+
+
+def test_legacy_baseline_prints_migration_line(tmp_path, capsys):
+    # B3: a baseline carrying the pre-round 'actions' schema (line-less keys)
+    # must print ONE migration line — never read as "+0 acknowledged" debt,
+    # never failed as phantom-stale entries
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    baseline = tmp_path / "lucidlint.json"
+    baseline.write_text(json.dumps({
+        "actions": [
+            "record-shape:houses/app.py:from_dict",
+            "swallow:houses/app.py:f",
+        ]
+    }))
+    rc = run_main(repo, "--baseline", str(baseline))
+    out, err = capsys.readouterr()
+    assert rc == 1  # the current swallow finding is unacknowledged
+    assert (
+        "lucidlint.json uses a pre-round 'actions' schema — re-acknowledge with"
+        " --update-baseline to migrate (2 actions ignored)" in out
+    )
+    assert "stale baseline" not in err
+
+
+def test_repo_root_lucidlint_json_legacy_replaces_cannot_tell(tmp_path, capsys):
+    # B3: with no --baseline, a repo-root lucidlint.json that plainly holds
+    # pre-round acknowledgements must not be silently read as "no baseline —
+    # cannot tell what is new" — the migration note names it
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    (repo / "lucidlint.json").write_text(json.dumps({
+        "actions": ["record-shape:houses/app.py:from_dict", "swallow:houses/app.py:f"]
+    }))
+    run_main(repo)
+    out = capsys.readouterr().out
+    assert "lucidlint.json uses a pre-round 'actions' schema" in out
+    assert "no baseline — cannot tell what is new" not in out
+
+
+def test_suppression_ledger_reconciles_all_three_accounts(tmp_path, capsys):
+    # B4: ONE header line reconciles the three suppression accounts
+    # (baseline-acknowledged / config-ignored / comment-suppressed) so the
+    # per-kind roll-up reconstitutes (round: "469 suppressed vs 74 reported").
+    # The contract is the arithmetic (reported+acked+ignored+census == total)
+    # and that the fixture exercises both the config-ignore and census
+    # accounts; the absolute finding counts belong to the scanner.
+    src = (
+        SWALLOW_SRC  # reported fail
+        + "\ndef m():\n    return 60 * 24\n"  # magic-number warn -> config-ignored
+        + 'RECORD = {"a": 1}  # lucidlint: ignore record-shape data table row\n'  # census
+    )
+    repo = make_repo(tmp_path, app_src=src)
+    (repo / ".lucidlint.toml").write_text('[lucidlint]\nignore = ["magic-number"]\n')
+    run_main(repo)
+    out = capsys.readouterr().out
+    m = re.search(
+        r"suppression ledger — reported (\d+) \+ acknowledged (\d+) \(baseline\) \+ config-ignored (\d+) "
+        r"\(family opt-out\) \+ comment-suppressed (\d+) \(site markers\) = (\d+) findings",
+        out,
+    )
+    assert m, out
+    reported, acked, ignored, census, total = (int(g) for g in m.groups())
+    assert reported + acked + ignored + census == total, out
+    assert ignored >= 1 and census >= 1 and acked == 0, out
+
+    # acknowledged debt appears in the ledger too: lock today's findings and
+    # re-run — the ledger still reconciles
+    baseline = tmp_path / "lucidlint.json"
+    assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
+    run_main(repo, "--baseline", str(baseline))
+    out = capsys.readouterr().out
+    m = re.search(
+        r"suppression ledger — reported (\d+) \+ acknowledged (\d+) \(baseline\) \+ config-ignored (\d+) "
+        r"\(family opt-out\) \+ comment-suppressed (\d+) \(site markers\) = (\d+) findings",
+        out,
+    )
+    assert m, out
+    reported, acked, ignored, census, total = (int(g) for g in m.groups())
+    assert reported + acked + ignored + census == total, out
+    assert acked >= 1, out
+
+
+def test_config_ignored_family_advisory_names_config_key(tmp_path, capsys):
+    # B5: a finding whose family is config-ignored elsewhere must not be
+    # offered a bare per-site marker as the remedy — the per-item line says
+    # the family is config-ignored and names the config key (round:
+    # "suppress with:" next to "Fix findings instead of suppressing")
+    repo = make_repo(tmp_path, app_src="def f():\n    return 60 * 24\n")
+    (repo / "scripts" / "oneoff.py").write_text("def main():\n    return 60 * 24\n")
+    (repo / ".lucidlint.toml").write_text('[lucidlint."houses/**"]\nignore = ["magic-number"]\n')
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "this family is config-ignored under 'houses/**': fix the finding or extend the ignore scope" in out
+
+
+def test_config_ignored_family_advisory_skips_marker_remedy(capsys):
+    # B5 (unit): for a displayed-family finding (kind != signal) whose signal
+    # is config-ignored, the suppress line names the config key instead of a
+    # bare per-site marker as the remedy
+    a = ch.Action("standard", "fail", "scripts/oneoff.py", 3, "main", "m", 1, 0, "", "")
+    a.signal = "global-state"
+    ch._render_file_group("scripts/oneoff.py", [a], ignore_keys={"global-state": "'houses/**'"})
+    out = capsys.readouterr().out
+    assert "suppress with: global-state" in out
+    assert "config-ignored under 'houses/**'" in out
+
+
+def test_suppression_advice_states_marker_window(capsys):
+    # B5: the suppression guidance states the marker window — a comment binds
+    # within the 3 lines ending at the finding; a marker further up does not
+    # (round: markers 2+ lines above a def left the finding live and the
+    # marker "stale")
+    a = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a.signal = "inline-import"
+    ch._render_file_group("x.py", [a])
+    out = capsys.readouterr().out
+    assert "suppress with: inline-import" in out
+    assert "binds within the 3 lines ending at this finding" in out
+
+
+def test_bulk_suppression_renders_at_report_level(capsys):
+    # B6: a bulk-suppression finding is a repo-wide count — it must render
+    # ONCE at report level, NOT inside a per-file section at its arbitrary
+    # anchor file (round: layout.py:1)
+    bulk = ch.Action(
+        "bulk-suppression", "warn", "layout.py", 1, "",
+        "record-shape suppressed at 12 sites - repeated identical whys are POLICY, "
+        "not per-site judgment: move the rule into [lucidlint.guidance] config guidance "
+        "or a documented config ignore, or fix the recurring cause",
+        1, 0, "", "",
+    )
+    warn = ch.Action("magic-number", "warn", "x.py", 3, "f", "m1", 1, 0, "", "")
+    ch._render_actions(Path("repo"), argparse.Namespace(baseline=None), [bulk, warn], [])
+    out = capsys.readouterr().out
+    assert "layout.py" not in out
+    assert "bulk suppression (policy — a repo-level decision, not a file site):" in out
+    assert "record-shape suppressed at 12 sites" in out
+    assert out.index("bulk suppression") < out.index("x.py")
+
+
 
 def test_json_carries_naming_notice_and_groups(tmp_path, capsys):
     repo = make_repo(tmp_path)
@@ -1238,7 +1416,7 @@ def test_main_priority_percentile(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     run_main(repo, "--warn")
     out = capsys.readouterr().out
-    assert "P0" in out or "P1" in out or "P2" in out or "warn" in out
+    assert "[RISK" in out or "warn" in out
 
 
 def test_update_baseline_excludes_warns(tmp_path):

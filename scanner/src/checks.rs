@@ -217,6 +217,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
     if let Stmt::Global(g) = stmt {
         let line = stmt_line(state.source, stmt);
+        let names: Vec<&str> = g.names.iter().map(|n| n.as_str()).collect();
         state.findings.push(Finding {
             seam_members: Vec::new(),
             col: 0,
@@ -226,10 +227,10 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
             kind: "global-state".into(),
             severity: "fail".into(),
             message: format!(
-                "global statement at line {line} — no module-level mutable state: pass it around or keep ONE global services object set at the entry point"
+                "{} is a module-level variable: a global read that binds at import time. Callers cannot inject or vary it without monkeypatching the module. Find the class this value serves; make it that class's attribute.",
+                names.join(", ")
             ),
         });
-        let _ = g;
         return;
     }
     if module_level {
@@ -268,9 +269,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
                 kind: "global-state".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "module-level variable '{}' — values are a class's private internals; the variable belongs as \
-                     that class's attribute/member (global services containers and framework-required globals are exempt)",
-                    name
+                    "{name} is a module-level variable: a global read that binds at import time. Callers cannot inject or vary it without monkeypatching the module. Find the class this value serves; make it that class's attribute."
                 ),
             });
         }
@@ -610,7 +609,7 @@ pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
         kind: "long-param-list".into(),
         severity: "fail".into(),
         message: format!(
-            "{n} parameters — introduce a parameter object named with a domain noun — fix: long-param-list --fix-name <Options>"
+            "{n} parameters — the call site cannot see what each value means, and no name says what they are together. Group the parameters that belong together into one object named with a domain noun. — fix: long-param-list --fix-name <Options>"
         ), });
     }
 }
@@ -1972,83 +1971,15 @@ pub fn assembly_class_findings(state: &mut ScanState, body: &[Stmt]) {
 struct AnchorClump {
     functions: Vec<String>,
     pairs: Vec<(String, String)>,
-}
-
-/// The class whose declared fields account for EVERY clump parameter —
-/// exact field names, or derived properties (`unit` -> `scale.unit` when
-/// the field `scale: PageScale` is annotated with a class that declares
-/// `unit`). Returns (class name, per-param read path on the class) for the
-/// message; None when no class accounts for the whole clump (the fallback
-/// message stays "split out a class"). Issue #22: a latent class the tool
-/// already knows must be suggested BY NAME, not re-invented — inventing a
-/// verb-named class is the wrong fix review rejects on the noun principle.
-fn class_for_clump(classes: &[&StmtClassDef], params: &[String]) -> Option<(String, Vec<String>)> {
-    let declared: Vec<(String, std::collections::HashSet<String>)> = classes
-        .iter()
-        .map(|c| {
-            let fields: std::collections::HashSet<String> =
-                class_field_names(c).iter().map(|(f, _)| f.clone()).collect();
-            (c.name.to_string(), fields)
-        })
-        .collect();
-    // best = (exact matches, covered params, source order, name, reads)
-    let mut best: Option<(usize, usize, usize, String, Vec<String>)> = None;
-    for (ci, c) in classes.iter().enumerate() {
-        let fields = class_field_names(c);
-        let mut reads: Vec<String> = Vec::new();
-        let mut exact = 0usize;
-        let mut ok = true;
-        for p in params {
-            if fields.iter().any(|(f, _)| f == p) {
-                reads.push(p.clone());
-                exact += 1;
-            } else {
-                // derived: p is a member of some field's annotated class
-                let derived = fields.iter().find_map(|(f, ty)| {
-                    let ty = ty.as_deref()?;
-                    if declared.iter().any(|(n, attrs)| n == ty && attrs.contains(p)) {
-                        Some(format!("{f}.{p}"))
-                    } else {
-                        None
-                    }
-                });
-                match derived {
-                    Some(path) => reads.push(path),
-                    None => {
-                        ok = false;
-                        break;
-                    }
-                }
-            }
-        }
-        if !ok {
-            continue;
-        }
-        let score = (exact, reads.len(), ci);
-        let better = match &best {
-            Some((be, bc, bi, ..)) => {
-                score.0 > *be || (score.0 == *be && (score.1 > *bc || (score.1 == *bc && score.2 < *bi)))
-            }
-            None => true,
-        };
-        if better {
-            best = Some((score.0, score.1, score.2, c.name.to_string(), reads));
-        }
-    }
-    best.map(|(_, _, _, name, reads)| (name, reads))
+    /// Each pair's OWN function set — the union is not shared by every pair
+    /// (review-bot, PR #15).
+    pair_fns: Vec<Vec<String>>,
 }
 
 /// Three or more module functions sharing the same unordered parameter
 /// pair — the pair travels together, so it is a data clump; introduce a
 /// parameter object.
 pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
-    let classes: Vec<&StmtClassDef> = body
-        .iter()
-        .filter_map(|s| match s {
-            Stmt::ClassDef(c) => Some(c),
-            _ => None,
-        })
-        .collect();
     let mut funcs: Vec<(&StmtFunctionDef, Vec<String>)> = Vec::new();
     for s in body {
         let Stmt::FunctionDef(f) = s else { continue };
@@ -2095,44 +2026,30 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
             }
         }
         entry.pairs.push((a.clone(), b.clone()));
+        // each pair's OWN >= 3 functions — the message names these, never a
+        // union some pair does not share (review-bot, PR #15)
+        let mut fns: Vec<String> = fs.iter().map(|f| f.name.to_string()).collect();
+        fns.sort();
+        entry.pair_fns.push(fns);
     }
     let mut anchors: Vec<_> = by_anchor.into_iter().collect();
     anchors.sort_by_key(|((line, _), _)| *line);
     for ((line, anchor), clump) in anchors {
-        let (mut names, mut group_pairs) = (clump.functions, clump.pairs);
-        names.sort();
-        group_pairs.sort();
-        let pair_text = group_pairs
-            .iter()
-            .map(|(a, b)| format!("({a}, {b})"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let pair_word = if group_pairs.len() == 1 { "pair" } else { "pairs" };
+        // the pairs travel with their own function sets through the sort
+        let mut paired: Vec<((String, String), Vec<String>)> = clump.pairs.into_iter().zip(clump.pair_fns).collect();
+        paired.sort();
+        let Some(((pa, pb), pair_names)) = paired.first().cloned() else {
+            continue;
+        };
+        let pair_text = format!("({pa}, {pb})");
+        // seam grouping keeps every clump parameter (schema-3 disambiguation)
         let mut params: Vec<String> = Vec::new();
-        for (a, b) in &group_pairs {
+        for ((a, b), _) in &paired {
             params.push(a.clone());
             params.push(b.clone());
         }
         params.sort();
         params.dedup();
-        // a clump whose parameter set is accounted for by an existing
-        // class's fields gets BOTH directions: fold into that class, or —
-        // the clump may be a legit subset of the class that travels on its
-        // own — its own class (a domain noun for the subset)
-        let fix_direction = match class_for_clump(&classes, &params) {
-            Some((class_name, reads)) => {
-                let reads_text = reads
-                    .iter()
-                    .map(|r| format!("{class_name}.{r}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "either make these functions methods of {class_name} (the state reads as {reads_text}), \
-                     or give the clump its own class named with a domain noun (a subset that travels together may be its own value)"
-                )
-            }
-            None => "split out a class per clump, each named with a domain noun".to_string(),
-        };
         state.findings.push(Finding {
             seam_members: params.clone(),
             col: 0,
@@ -2141,14 +2058,12 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
             function: anchor,
             kind: "data-clump".into(),
             severity: "fail".into(),
-            // each listed pair has its OWN >= 3 functions — do not claim
-            // one function set shares them all (review-bot, PR #15)
+            // A3: the message names the FIRST qualifying pair and only ITS
+            // functions — each pair has its OWN >= 3 functions (PR #15)
             message: format!(
-                "{names_count} functions near here ({names}) sit in data clumps: the parameter {pw} {pairs} — {fix_direction} — fix: extract-class",
-                names_count = names.len(),
-                names = names.join(", "),
-                pw = pair_word,
-                pairs = pair_text,
+                "{names_count} functions near here ({names}) pass the same parameter pair {pair_text} together. The pair is one thing in the domain, and passing it as two parameters never says what that thing is. Make a class whose name states that thing, and pass one instance. — fix: extract-class",
+                names_count = pair_names.len(),
+                names = pair_names.join(", "),
             ),
         });
     }
@@ -3455,9 +3370,9 @@ pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &
             kind: "class-module".into(),
             severity: "fail".into(),
             message: format!(
-                "module '{rel}' holds one class '{}' — rename the file to {}.py (exception: closely related models)",
-                cls.name.as_str(),
-                cls.name.to_lowercase()
+                "{rel} holds one class named '{cls}' — readers browse the codebase by file structure, and a differently named file hides the class from that walk. Rename the file to '{stem}.py' (exception: closely related models).",
+                cls = cls.name.as_str(),
+                stem = cls.name.to_lowercase()
             ),
         });
         return;
@@ -3921,7 +3836,7 @@ pub fn duplicate_block_findings(state: &mut ScanState, module_body: &[Stmt]) {
                                             kind: "duplicate-block".into(),
                                             severity: "warn".into(),
                                             message: format!(
-                                                "a {BLOCK_WINDOW}-statement block appears twice in this function — duplicated work (an edit mistake?); delete the second copy{directive}"
+                                                "a {BLOCK_WINDOW}-statement block appears twice in this function — duplicated work. If one block is a paste copy of the other, delete it. If these are intentional twins (parallel branches), the duplication is still the finding — extract the shared part. If a twin can diverge, it is a fork; if it cannot, it is a paste.{directive}"
                                             ), });
                     break 'outer;
                 }
@@ -4036,12 +3951,13 @@ fn sub_name(s: &ruff_python_ast::ExprSubscript) -> String {
 
 /// Offsets of numeric literals that are data-table entries, exempt from
 /// magic-number: inside a single collection literal (dict/list/set/tuple,
-/// nested collections allowed) where at least 3 same-kind numeric siblings
-/// (same int/float type, same operator) sit directly under a BinOp/UnaryOp/
-/// Compare. The literal IS the data there — `{"A": 6/9, "B": 7/9, ...}` and
-/// `{"UB": (51.4, 51.6, -0.5, 0.0), ...}` — naming each would destroy the
-/// table. A number is exempt when ANY enclosing collection's sibling group
-/// reaches the bar (the geo case only clears at the dict level, not per row).
+/// nested collections allowed) where at least 3 SAME-KIND numeric siblings
+/// (int vs float) sit — directly as elements, or under a BinOp/UnaryOp/
+/// Compare. The literal IS the data there — `{"A": 6/9, "B": 7/9, ...}`,
+/// `{"UB": (51.4, 51.6, -0.5, 0.0), ...}`, and a 4x12 grid pair in one dict
+/// initializer (B8) — naming each would destroy the table. A number is
+/// exempt when ANY enclosing collection's sibling group reaches the bar
+/// (the geo case only clears at the dict level, not per row).
 pub fn magic_table_exempt_offsets(body: &[Stmt]) -> HashSet<usize> {
     use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
     struct CollectionFinder<'a> {
@@ -4066,7 +3982,7 @@ pub fn magic_table_exempt_offsets(body: &[Stmt]) -> HashSet<usize> {
     }
     let mut exempt: HashSet<usize> = HashSet::new();
     for c in finder.collections {
-        let mut groups: std::collections::HashMap<(bool, String), Vec<usize>> = std::collections::HashMap::new();
+        let mut groups: std::collections::HashMap<bool, Vec<usize>> = std::collections::HashMap::new();
         census_collection(c, &mut groups);
         for offsets in groups.values() {
             if offsets.len() >= 3 {
@@ -4077,9 +3993,66 @@ pub fn magic_table_exempt_offsets(body: &[Stmt]) -> HashSet<usize> {
     exempt
 }
 
+/// Offsets of the numeric literals in a module-level named constant's OWN
+/// definition: the entire RHS of `X = <expr>` at module scope. The name IS
+/// the why — flagging `RATE = 2 * 60` or `MARGIN = -12` would demand a
+/// second name for a value the constant already names (B8).
+pub fn magic_const_rhs_offsets(body: &[Stmt]) -> HashSet<usize> {
+    let mut out = HashSet::new();
+    for s in body {
+        let value: Option<&Expr> = match s {
+            Stmt::Assign(a) => Some(a.value.as_ref()),
+            Stmt::AnnAssign(a) => a.value.as_deref(),
+            _ => None,
+        };
+        let Some(v) = value else { continue };
+        walk_expr_deep(v, false, &mut |e, _| {
+            if let Expr::NumberLiteral(n) = e {
+                out.insert(n.range().start().to_usize());
+            }
+        });
+    }
+    out
+}
+
+/// Offsets of the numeric comparators of a `len(...) OP N` length guard —
+/// a tuple/collection length check is structural, not domain magic (B8).
+pub fn magic_len_guard_offsets(body: &[Stmt]) -> HashSet<usize> {
+    use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
+    struct GuardFinder {
+        offsets: HashSet<usize>,
+    }
+    impl SourceOrderVisitor<'_> for GuardFinder {
+        fn visit_expr(&mut self, e: &Expr) {
+            if let Expr::Compare(c) = e {
+                if let Expr::Call(call) = c.left.as_ref() {
+                    if matches!(call.func.as_ref(), Expr::Name(n) if n.id.as_str() == "len") {
+                        for cmp in &c.comparators {
+                            if let Expr::NumberLiteral(n) = cmp {
+                                self.offsets.insert(n.range().start().to_usize());
+                            }
+                        }
+                    }
+                }
+            }
+            walk_expr(self, e);
+        }
+    }
+    fn walk_expr<'a, V: SourceOrderVisitor<'a>>(v: &mut V, e: &'a Expr) {
+        ruff_python_ast::visitor::source_order::walk_expr(v, e);
+    }
+    let mut finder = GuardFinder {
+        offsets: HashSet::new(),
+    };
+    for s in body {
+        walk_stmt(&mut finder, s);
+    }
+    finder.offsets
+}
+
 /// Census a collection literal's subtree: numbers whose op-parent chain up to
 /// this collection passes only through collection literals.
-fn census_collection(e: &Expr, groups: &mut std::collections::HashMap<(bool, String), Vec<usize>>) {
+fn census_collection(e: &Expr, groups: &mut std::collections::HashMap<bool, Vec<usize>>) {
     match e {
         Expr::Dict(d) => {
             for item in &d.items {
@@ -4108,48 +4081,48 @@ fn census_collection(e: &Expr, groups: &mut std::collections::HashMap<(bool, Str
     }
 }
 
-/// A direct element of a collection: nested collections recurse; an op's
-/// direct number children are data candidates; anything else (calls,
-/// subscripts, comprehensions) stops the census — not table data.
-fn census_value(e: &Expr, groups: &mut std::collections::HashMap<(bool, String), Vec<usize>>) {
+/// A direct element of a collection: nested collections recurse; a number
+/// (bare or under a BinOp/UnaryOp/Compare) is a same-kind data candidate;
+/// anything else (calls, subscripts, comprehensions) stops the census — not
+fn census_value(e: &Expr, groups: &mut std::collections::HashMap<bool, Vec<usize>>) {
     match e {
         Expr::Dict(_) | Expr::List(_) | Expr::Set(_) | Expr::Tuple(_) => census_collection(e, groups),
+        Expr::NumberLiteral(n) => push_census_literal(n, groups),
         Expr::BinOp(b) => {
-            let op = format!("{:?}", b.op);
-            census_op_number(&b.left, &op, groups);
-            census_op_number(&b.right, &op, groups);
+            census_number(b.left.as_ref(), groups);
+            census_number(b.right.as_ref(), groups);
         }
-        Expr::UnaryOp(u) => {
-            let op = format!("{:?}", u.op);
-            census_op_number(&u.operand, &op, groups);
-        }
+        Expr::UnaryOp(u) => census_number(u.operand.as_ref(), groups),
         Expr::Compare(c) => {
-            let op = format!("{:?}", c.ops);
-            census_op_number(&c.left, &op, groups);
+            census_number(c.left.as_ref(), groups);
             for cmp in &c.comparators {
-                census_op_number(cmp, &op, groups);
+                census_number(cmp, groups);
             }
         }
         _ => {}
     }
 }
 
-fn census_op_number(e: &Expr, op: &str, groups: &mut std::collections::HashMap<(bool, String), Vec<usize>>) {
+fn census_number(e: &Expr, groups: &mut std::collections::HashMap<bool, Vec<usize>>) {
     if let Expr::NumberLiteral(n) = e {
-        let is_int = matches!(n.value, ruff_python_ast::Number::Int(_));
-        let value = match &n.value {
-            ruff_python_ast::Number::Int(i) => i.to_string(),
-            ruff_python_ast::Number::Float(f) => f.to_string(),
-            ruff_python_ast::Number::Complex { .. } => return,
-        };
-        if matches!(value.as_str(), "0" | "1" | "2") {
-            return; // never magic anyway
-        }
-        groups
-            .entry((is_int, op.to_string()))
-            .or_default()
-            .push(n.range().start().to_usize());
+        push_census_literal(n, groups);
     }
+}
+
+fn push_census_literal(
+    n: &ruff_python_ast::ExprNumberLiteral,
+    groups: &mut std::collections::HashMap<bool, Vec<usize>>,
+) {
+    let is_int = matches!(n.value, ruff_python_ast::Number::Int(_));
+    let value = match &n.value {
+        ruff_python_ast::Number::Int(i) => i.to_string(),
+        ruff_python_ast::Number::Float(f) => f.to_string(),
+        ruff_python_ast::Number::Complex { .. } => return,
+    };
+    if matches!(value.as_str(), "0" | "1" | "2") {
+        return; // never magic anyway
+    }
+    groups.entry(is_int).or_default().push(n.range().start().to_usize());
 }
 
 // =====================================================================
@@ -4626,7 +4599,7 @@ fn loop_mutation_is_collection_build(body: &[&Stmt], acc: &str) -> bool {
                     if let Expr::Call(c) = x {
                         if let Expr::Attribute(a) = c.func.as_ref() {
                             if MUTATING_METHODS.contains(&a.attr.as_str())
-                                && loop_expr_base_name(&a.value).as_deref() == Some(acc)
+                                && loop_state_name(&a.value).as_deref() == Some(acc)
                             {
                                 found = true;
                             }
@@ -4636,7 +4609,7 @@ fn loop_mutation_is_collection_build(body: &[&Stmt], acc: &str) -> bool {
             }
             Stmt::Assign(a) if a.targets.len() == 1 => {
                 if let Expr::Subscript(s) = &a.targets[0] {
-                    if loop_expr_base_name(&s.value).as_deref() == Some(acc) {
+                    if loop_state_name(&s.value).as_deref() == Some(acc) {
                         found = true;
                     }
                 }
@@ -4670,7 +4643,7 @@ fn loop_hoist_fixable(for_target: &Expr, body: &[Stmt], acc: &str) -> bool {
                     walk_expr_deep(&e.value, false, &mut |x, _| {
                         if let Expr::Call(c) = x {
                             if let Expr::Attribute(a) = c.func.as_ref() {
-                                if loop_expr_base_name(&a.value).as_deref() == Some(acc) {
+                                if loop_state_name(&a.value).as_deref() == Some(acc) {
                                     if matches!(a.attr.as_str(), "append" | "add") {
                                         *found = true;
                                     } else {
@@ -4683,18 +4656,18 @@ fn loop_hoist_fixable(for_target: &Expr, body: &[Stmt], acc: &str) -> bool {
                 }
                 Stmt::Assign(a) => {
                     for t in &a.targets {
-                        if loop_expr_base_name(t).as_deref() == Some(acc) {
+                        if loop_state_name(t).as_deref() == Some(acc) {
                             *bad = true;
                         }
                     }
                 }
                 Stmt::AnnAssign(a) => {
-                    if loop_expr_base_name(&a.target).as_deref() == Some(acc) {
+                    if loop_state_name(&a.target).as_deref() == Some(acc) {
                         *bad = true;
                     }
                 }
                 Stmt::AugAssign(a) => {
-                    if loop_expr_base_name(&a.target).as_deref() == Some(acc) {
+                    if loop_state_name(&a.target).as_deref() == Some(acc) {
                         *bad = true;
                     }
                 }
@@ -4727,9 +4700,43 @@ fn loop_record_name(
     }
 }
 
-/// A write TARGET's base state name: a rebind (`x`), a container write
-/// (`counts[k]` -> counts), or an object write — bare `self.attr` stores
-/// are skipped (the object is the class, not loop state).
+/// Record a mutated MEMBER name — an attribute member is the object's
+/// state, not a function binding, so the candidates bound-check does not
+/// apply (B7: `self.x` records `x`, never `self`).
+fn loop_record_member(name: &str, excl: &HashSet<String>, out: &mut Vec<String>, seen: &mut HashSet<String>) {
+    if !name.is_empty() && !excl.contains(name) && !seen.contains(name) {
+        seen.insert(name.to_string());
+        out.push(name.to_string());
+    }
+}
+
+/// The state name of a mutation receiver or write target: `x` -> x,
+/// `counts[k]` -> counts, `self.x` -> the member `x`, `self.x[k]` -> x —
+/// the member of an attribute access IS the loop state, never the receiver
+/// (B7: renders `x` where the old code rendered `(self)`).
+fn loop_state_name(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Name(n) => Some(n.id.to_string()),
+        Expr::Attribute(a) => Some(a.attr.to_string()),
+        Expr::Subscript(s) => loop_state_name(&s.value),
+        _ => None,
+    }
+}
+
+/// The accumulator's parenthetical display in the loop-hoist message: the
+/// member name when the loop builds `self.x` (renders `x`), the plain name
+/// otherwise — never "(self)" or "()"; drop the parenthetical when no name
+/// exists (B7).
+fn loop_acc_paren(acc: &str) -> String {
+    if acc.is_empty() || acc == "self" || acc == "cls" {
+        String::new()
+    } else {
+        format!(" ({acc})")
+    }
+}
+/// A write TARGET's state name: a rebind (`x`), a container write
+/// (`counts[k]` -> counts), or an object member write — `self.x` -> x (B7:
+/// the MEMBER is the state; the receiver is the class, never "self").
 fn loop_write_target(
     t: &Expr,
     candidates: &HashSet<String>,
@@ -4738,7 +4745,11 @@ fn loop_write_target(
     seen: &mut HashSet<String>,
 ) {
     match t {
-        Expr::Name(n) => loop_record_name(n.id.as_str(), candidates, excl, out, seen),
+        Expr::Name(n) => {
+            if n.id.as_str() != "self" && n.id.as_str() != "cls" {
+                loop_record_name(n.id.as_str(), candidates, excl, out, seen);
+            }
+        }
         Expr::Tuple(tu) => {
             for el in &tu.elts {
                 loop_write_target(el, candidates, excl, out, seen);
@@ -4751,15 +4762,25 @@ fn loop_write_target(
         }
         Expr::Starred(st) => loop_write_target(&st.value, candidates, excl, out, seen),
         Expr::Attribute(a) => {
-            if let Some(base) = loop_expr_base_name(&a.value) {
-                if base != "self" {
-                    loop_record_name(&base, candidates, excl, out, seen);
-                }
+            // an attribute write mutates the MEMBER — self.x / obj.x -> x.
+            // Gate on the receiver being known state (self/cls or a
+            // candidate binding); the member name bypasses the candidates
+            // check (a class member is not in this function's bindings).
+            let recv_ok = match loop_expr_base_name(&a.value) {
+                Some(b) if b == "self" || b == "cls" => true,
+                Some(b) => candidates.contains(&b),
+                None => false,
+            };
+            if recv_ok {
+                loop_record_member(&a.attr, excl, out, seen);
             }
         }
+        Expr::Subscript(s) => loop_write_target(&s.value, candidates, excl, out, seen),
         _ => {
             if let Some(base) = loop_expr_base_name(t) {
-                loop_record_name(&base, candidates, excl, out, seen);
+                if base != "self" && base != "cls" {
+                    loop_record_name(&base, candidates, excl, out, seen);
+                }
             }
         }
     }
@@ -4792,9 +4813,9 @@ fn loop_stmt_writes(
                 if let Expr::Call(c) = x {
                     if let Expr::Attribute(a) = c.func.as_ref() {
                         if MUTATING_METHODS.contains(&a.attr.as_str()) {
-                            if let Some(base) = loop_expr_base_name(&a.value) {
-                                loop_record_name(&base, candidates, excl, out, seen);
-                            }
+                            // the receiver's member is the state the call
+                            // mutates: self.x.append -> x, counts.append -> counts
+                            loop_write_target(&a.value, candidates, excl, out, seen);
                         }
                     }
                 }
@@ -4982,15 +5003,16 @@ impl<'a, 'b> LoopFunctionCtx<'a, 'b> {
                         let n = loop_body_stmt_count(&body);
                         if n >= LOOP_HOIST_MIN_STMTS {
                             let acc = &mutated[0];
+                            let paren = loop_acc_paren(acc);
                             let fixable = loop_hoist_fixable(&f.target, &f.body, acc);
                             let message = if loop_mutation_is_collection_build(&body, acc) {
                                 if fixable {
                                     format!(
-                                        "loop body is {n} statements yet builds one collection ({acc}) — hoist the calculation: name what one item contributes as a helper that RETURNS the value (a domain noun), then Replace Loop with Pipeline: {acc} = [<helper>(<target>) for <target> in <iter>] — fix: loop-hoist --fix-name <Name>"
+                                        "loop body is {n} statements yet builds one collection{paren} — hoist the calculation: name what one item contributes as a helper that RETURNS the value (a domain noun), then Replace Loop with Pipeline: {acc} = [<helper>(<target>) for <target> in <iter>] — fix: loop-hoist --fix-name <Name>"
                                     )
                                 } else {
                                     format!(
-                                        "loop body is {n} statements yet builds one collection ({acc}) — hoist the calculation: name what one item contributes as a helper that RETURNS the value (a domain noun), then Replace Loop with Pipeline: {acc} = [<helper>(<target>) for <target> in <iter>]"
+                                        "loop body is {n} statements yet builds one collection{paren} — hoist the calculation: name what one item contributes as a helper that RETURNS the value (a domain noun), then Replace Loop with Pipeline: {acc} = [<helper>(<target>) for <target> in <iter>]"
                                     )
                                 }
                             } else {
@@ -5033,9 +5055,10 @@ impl<'a, 'b> LoopFunctionCtx<'a, 'b> {
                         let n = loop_body_stmt_count(&body);
                         if n >= LOOP_HOIST_MIN_STMTS {
                             let acc = &mutated[0];
+                            let paren = loop_acc_paren(acc);
                             let message = if loop_mutation_is_collection_build(&body, acc) {
                                 format!(
-                                    "loop body is {n} statements yet builds one collection ({acc}) — hoist the calculation: name what one item contributes as a helper that RETURNS the value (a domain noun), then Replace Loop with Pipeline: {acc} = [<helper>(<target>) for <target> in <iter>]"
+                                    "loop body is {n} statements yet builds one collection{paren} — hoist the calculation: name what one item contributes as a helper that RETURNS the value (a domain noun), then Replace Loop with Pipeline: {acc} = [<helper>(<target>) for <target> in <iter>]"
                                 )
                             } else {
                                 format!(
@@ -6325,6 +6348,28 @@ fn body_skeleton(body: &[Stmt], toks: &mut Vec<String>) {
 /// Collect a file's duplicate-module identities (#26): the module itself,
 /// each top-level class, and the combined module-class identity when a
 /// module's non-import top-levels are exactly one class def.
+/// A class identity's direct base names ("Name:Base" / "Attr:pkg:Base"),
+/// sorted+deduped — the C2 shared-base pairing signal.
+fn class_bases(c: &StmtClassDef) -> Vec<String> {
+    let mut bases: Vec<String> = Vec::new();
+    if let Some(arguments) = &c.arguments {
+        for b in &arguments.args {
+            match b {
+                Expr::Name(n) => bases.push(format!("Name:{}", n.id.as_str())),
+                Expr::Attribute(a) => {
+                    if let Expr::Name(v) = a.value.as_ref() {
+                        bases.push(format!("Attr:{}:{}", v.id.as_str(), a.attr.as_str()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    bases.sort();
+    bases.dedup();
+    bases
+}
+
 pub fn collect_skeleton_modules(state: &mut ScanState, body: &[Stmt], rel: &str) {
     if state.is_test || rel.ends_with("__init__.py") || is_vendored(rel) {
         return;
@@ -6370,6 +6415,7 @@ pub fn collect_skeleton_modules(state: &mut ScanState, body: &[Stmt], rel: &str)
             consts: module_consts.clone(),
             members: module_members.clone(),
             entity: "module",
+            bases: Vec::new(),
         });
     }
     for c in &classes {
@@ -6390,6 +6436,7 @@ pub fn collect_skeleton_modules(state: &mut ScanState, body: &[Stmt], rel: &str)
             consts: consts.clone(),
             members: members.clone(),
             entity: "class",
+            bases: class_bases(c),
         });
         // module-class identity: exactly one class; everything else at the
         // top level is imports or constants
@@ -6416,6 +6463,7 @@ pub fn collect_skeleton_modules(state: &mut ScanState, body: &[Stmt], rel: &str)
                 consts: module_consts.clone(),
                 members: all,
                 entity: "module-class",
+                bases: Vec::new(),
             });
         }
     }
@@ -6492,15 +6540,22 @@ pub fn duplicate_module_findings(entities: &[SkeletonModule]) -> Vec<Finding> {
             } else {
                 format!(" — matched members: {}", matched.join(", "))
             };
-            Some(Finding {
-                seam_members: Vec::new(),
-                col: 0,
-                file: later.rel.clone(),
-                line: later.line,
-                function: later.name.clone(),
-                kind: "duplicate-module".into(),
-                severity: "fail".into(),
-                message: format!(
+            // C2: two classes inheriting the SAME base have a shared owner —
+            // the fork prose is false there (a fix in one subclass does not
+            // silently diverge; the base is the shared home)
+            let shared_base = earlier.entity == "class"
+                && later.entity == "class"
+                && !earlier.bases.is_empty()
+                && earlier.bases == later.bases;
+            let message = if shared_base {
+                format!(
+                    "{what}: {a} and {b} are two subclasses of one base with identical shape; only their constants differ. If they are config-variants, move the constants into the base and delete the duplicate subclasses. If they were meant to differ, one is missing its override.",
+                    what = what,
+                    a = earlier.name,
+                    b = later.name,
+                )
+            } else {
+                format!(
                     "{what} '{}' ({}:{}) and '{}' ({}:{}) are {:.0}% similar with identical constants {{{}}} — a fork: a fix lands in one copy while the other silently keeps the old behavior{}. Reconcile the copies into one.",
                     earlier.name,
                     earlier.rel,
@@ -6511,7 +6566,17 @@ pub fn duplicate_module_findings(entities: &[SkeletonModule]) -> Vec<Finding> {
                     sim * 100.0,
                     later.consts.join(", "),
                     members_text,
-                ),
+                )
+            };
+            Some(Finding {
+                seam_members: Vec::new(),
+                col: 0,
+                file: later.rel.clone(),
+                line: later.line,
+                function: later.name.clone(),
+                kind: "duplicate-module".into(),
+                severity: "fail".into(),
+                message,
             })
         })
         .collect();
@@ -7001,7 +7066,6 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                         if !annotation_is_record(a) {
                             continue;
                         }
-                        let text = source[a.range()].to_string();
                         state.findings.push(Finding { seam_members: Vec::new(), col: 0,
                                                     file: state.file.to_string(),
                                                     line: def_line,
@@ -7009,14 +7073,12 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                                                     kind: "record-shape".into(),
                                                     severity: "fail".into(),
                                                     message: format!(
-                                                        "bare record collection '{text}' in parameter '{arg}' of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — serialisation is no excuse for skipping the class: write a serialiser method on the class if the boundary needs one",
-                                                        f.name.as_str()
+                                                        "{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists."
                                                     ), });
                     }
                 }
                 if let Some(r) = &f.returns {
                     if annotation_is_record(r.as_ref()) {
-                        let text = source[r.range()].to_string();
                         state.findings.push(Finding { seam_members: Vec::new(), col: 0,
                                                     file: state.file.to_string(),
                                                     line: def_line,
@@ -7024,8 +7086,8 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                                                     kind: "record-shape".into(),
                                                     severity: "fail".into(),
                                                     message: format!(
-                                                        "bare record collection '{text}' as return type of {} (line {def_line}) — convert it to a class named with a domain noun, with named fields; a wire payload is still a record — serialisation is no excuse for skipping the class: write a serialiser method on the class if the boundary needs one",
-                                                        f.name.as_str()
+                                                        "{fname} returns a dict that holds the fields of a record; the shape has no name at the call site. Type the return with the class that models the shape; create that class if none exists.",
+                                                        fname = f.name.as_str()
                                                     ), });
                     }
                 }
@@ -7073,7 +7135,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
     }
     for h in unique {
         let keys = display_keys(&h.keys);
-        state.findings.push(Finding { seam_members: Vec::new(), file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("dict with constant keys {{{keys}}} is a record — make a class named with a domain noun (fields: {keys}); a wire payload is still a record — serialisation is no excuse for skipping the class: write a serialiser method on the class if the boundary needs one — fix: extract-record-class --name <Record>") });
+        state.findings.push(Finding { seam_members: Vec::new(), file: state.file.to_string(), line: h.line, col: h.col, function: String::new(), kind: "record-shape".into(), severity: "fail".into(), message: format!("This dict has constant keys ({keys}); the keys are fields of one record. Each build site re-creates the keys, so the copies can drift apart. Make a class with these fields and build it once. If the values select behavior (handlers, nodes), keep the dict as a lookup table and suppress with a why. — fix: extract-record-class --name <Record>") });
     }
 }
 
@@ -7235,7 +7297,7 @@ pub fn partition_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                 kind: "partition".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "methods split into {count} field-disjoint groups ({groups_text}), connectors removed: {conn_text} — each group touches only its own fields, so the class is really {count} independent classes — fix: extract-class",
+                    "methods split into {count} field-disjoint groups ({groups_text}), connectors removed: {conn_text} — each group touches only its own fields, so the class is really {count} independent classes. Split it into {count} classes. — fix: extract-class",
                     count = groups.len()
                 ),
             });
@@ -7669,7 +7731,7 @@ pub fn no_assert_test_findings(state: &mut ScanState, body: &[Stmt], source: &st
                         function: f.name.to_string(),
                         kind: "no-assert-test".into(),
                         severity: "fail".into(),
-                        message: "test has no assertion — it can never fail".to_string(),
+                        message: "test has no assertion — it can never fail, so it proves nothing. Add an assertion or delete the test.".to_string(),
                     });
                 }
             }

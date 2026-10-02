@@ -131,6 +131,8 @@ class _RenderCtx:
     ignored_by_signal: Counter | None = None
     report_header: str = ""
     suppression_census: dict[str, int] | None = None
+    config_ignore_keys: dict[str, str] = field(default_factory=dict)  # B5: signal -> config key
+    baseline_migration: str = ""  # B3: pre-round baseline note ("" = none)
 
     def _config_ignored_note(self) -> str:
         """The §9 debt ledger: config-ignored findings are filtered BEFORE the
@@ -141,6 +143,23 @@ class _RenderCtx:
         top = ", ".join(f"{sig}={n}" for sig, n in self.ignored_by_signal.most_common(4))
         total = sum(self.ignored_by_signal.values())
         return f", {total} config-ignored ({top})"
+
+    def _suppression_ledger(self, fails: list[Action], warns: list[Action], acks: list[Action]) -> str | None:
+        """B4: ONE header line reconciling the three suppression accounts —
+        acknowledged (baseline), config-ignored (family opt-out),
+        comment-suppressed (site markers) — with the reported actions, so the
+        per-kind roll-up reconstitutes. None when nothing is suppressed."""
+        ignored = sum(self.ignored_by_signal.values()) if self.ignored_by_signal else 0
+        census = sum(self.suppression_census.values()) if self.suppression_census else 0
+        if not acks and not ignored and not census:
+            return None
+        reported = len(fails) + len(warns)
+        total = reported + len(acks) + ignored + census
+        return (
+            f"suppression ledger — reported {reported} + acknowledged {len(acks)} (baseline) "
+            f"+ config-ignored {ignored} (family opt-out) + comment-suppressed {census} "
+            f"(site markers) = {total} findings"
+        )
 
     def render_json(self, unique: list[Action]) -> None:
         repo = self.repo
@@ -187,9 +206,17 @@ class _RenderCtx:
         graph_preferred = self.graph_preferred
         top = fails[0]
         bits = []
-        # without a baseline nothing is acknowledged — say so plainly
-        if args.baseline is None:
-            bits.append("no baseline — cannot tell what is new")
+        # without a baseline nothing is acknowledged — say so plainly; a
+        # repo-root lucidlint.json changes the claim (B3)
+        if args.baseline is None and not self.baseline_migration:
+            current, _ = _baseline_file_state(self.repo / "lucidlint.json")
+            if current:
+                bits.append(
+                    f"lucidlint.json holds {current} acknowledged action(s) at the repo root — "
+                    "pass --baseline lucidlint.json to activate them"
+                )
+            else:
+                bits.append("no baseline — cannot tell what is new")
         mine_txt = ("; " + "; ".join(bits)) if bits else ""
         targets = len({(a.file, a.function) for a in fails})
         verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
@@ -197,7 +224,10 @@ class _RenderCtx:
             f"{verdict} — {len(fails)} action(s) across {targets} distinct targets "
             f"(+{len(acks)} acknowledged in baseline, {len(warns)} warnings never-fail"
             f"{self._config_ignored_note()}){mine_txt}, "
-            f"top P{top.priority} {top.file}:{top.line} ({top.function or top.kind})"
+            # B2: the top line names the ACTUAL rule (the raw-risk percentile
+            # the formula line below defines) — never "the hotspot", a
+            # definition the top item may not satisfy
+            f"top-risk {top.file}:{top.line} ({top.function or top.kind}) [RISK{top.priority:02d}]"
         )
         print(
             "priority ranks change-cost (churn x fan-in), not brokenness — which item is worth "
@@ -232,6 +262,16 @@ class _RenderCtx:
         if groups:
             print("\n".join(g["heading"] for g in groups))
             print()
+        # B3: a pre-round baseline schema is a file-format problem, named ONCE
+        if self.baseline_migration:
+            print(self.baseline_migration)
+            print()
+        # B4: reconcile the three suppression accounts so the per-kind
+        # roll-up reconstitutes (round: "469 suppressed vs 74 reported")
+        ledger = self._suppression_ledger(fails, warns, acks)
+        if ledger:
+            print(ledger)
+            print()
         if not unique:
             # the ledger must show even when the config-ignores ate every
             # action — "clean" while debt is hidden is the invisibility the
@@ -245,15 +285,15 @@ class _RenderCtx:
             print(f"GATE: PASS — {len(acks)} action(s) acknowledged in baseline{warn_note}{ignored_note}")
             if warns:
                 print(f"by kind — warnings: {_kind_counts(warns)}")
-                _render_actions(repo, args, warns, [], self.suppression_census)
+                _render_actions(repo, args, warns, [], self.suppression_census, self.config_ignore_keys)
             return
         self.render_summary(fails, warns, acks)
         print(f"by kind — fails: {_kind_counts(fails)}; warnings: {_kind_counts(warns)}")
-        _render_actions(repo, args, fails, acks, self.suppression_census)
+        _render_actions(repo, args, fails, acks, self.suppression_census, self.config_ignore_keys)
         if warns:
             print(f"\nwarnings (reported, never fail) — {len(warns)}:")
             # the census was printed with the fails group — once per report
-            _render_actions(repo, args, warns, [], None)
+            _render_actions(repo, args, warns, [], None, self.config_ignore_keys)
 @dataclass
 class Action:
     """One finding. Kind families: complexity/large-function merge per target;
@@ -1200,29 +1240,68 @@ def _merge_key(a: Action) -> tuple:
 
 class _Baseline(NamedTuple):
     """The acknowledged-action keys + config-ignored counts from the baseline
-    file — a named record instead of a bare tuple."""
+    file — a named record instead of a bare tuple. `legacy` counts the
+    pre-round 'actions' entries that cannot map to current key identities."""
 
     keys: set[str]
     ignored: dict[str, int]
+    legacy: int = 0
+
+
+def _baseline_entry_is_current(entry: Any) -> bool:
+    """True when a baseline 'actions' entry is the current key shape
+    (kind:file:line:function with a numeric line). Pre-round files stored
+    other shapes — line-less keys, action dicts — which are legacy (#26-#34
+    B3): they cannot match current findings and must never read as
+    acknowledged debt, fail as phantom-stale, or crash the loader."""
+    if not isinstance(entry, str):
+        return False
+    parts = entry.split(":", 3)
+    return len(parts) == 4 and parts[2].isdigit()
+
+
+def _baseline_file_state(path) -> tuple[int, int]:
+    """(current-format entries, legacy entries) in a baseline file; (0, 0)
+    when absent or unreadable. Used to recognize a repo's own lucidlint.json
+    when no --baseline was passed (#26-#34 B3)."""
+    if not path or not path.exists():
+        return (0, 0)
+    try:
+        entries = json.loads(path.read_text()).get("actions", [])
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+        return (0, 0)
+    if not isinstance(entries, list):
+        return (0, 0)
+    return (
+        sum(1 for e in entries if _baseline_entry_is_current(e)),
+        sum(1 for e in entries if not _baseline_entry_is_current(e)),
+    )
 
 
 def _load_baseline(path) -> _Baseline:
     """Acknowledged action keys + the config-ignored counts (the §9 growth
-    ledger) from the baseline file (best-effort)."""
+    ledger) from the baseline file (best-effort). Pre-round 'actions' entries
+    are counted and dropped, so the caller prints ONE migration line instead
+    of reading the file as empty debt (#26-#34 B3)."""
 
     if path and path.exists():
         try:
             data = json.loads(path.read_text())
-            keys = set(data.get("actions", []))
+            entries = data.get("actions", [])
+            entries = entries if isinstance(entries, list) else []
+            keys = {e for e in entries if _baseline_entry_is_current(e)}
+            legacy = sum(1 for e in entries if not _baseline_entry_is_current(e))
             ignored = dict(data.get("config_ignored", {}))
-            return _Baseline(keys, {k: int(v) for k, v in ignored.items()})
+            return _Baseline(keys, {k: int(v) for k, v in ignored.items()}, legacy)
         # lucidlint: ignore swallow corrupt baseline; gate unbaselined
         except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
             log(f"baseline {path} unreadable — ignoring")
     return _Baseline(set(), {})
 
 
-def _render_file_group(file: str, items: list[Action]) -> None:
+def _render_file_group(
+    file: str, items: list[Action], ignore_keys: dict[str, str] | None = None
+) -> None:
     """One file's actions, priority-ordered, with notes."""
     print(f"\n{file}")
     for a in items:
@@ -1231,20 +1310,45 @@ def _render_file_group(file: str, items: list[Action]) -> None:
         loc = f":{a.line}" + (f":{a.col}" if a.col else "") + (f" ({a.function})" if a.function else "")
         churn = f" [churn {a.churn}x]" if a.churn else ""
         kinds = ",".join(a.kinds) if a.kinds else a.kind
-        tag = f"P{a.priority:02d}" if a.severity != "warn" else "warn"
+        # B2: the bare P-number reads as a brokenness score; the priority IS
+        # a raw-risk percentile (1-99), so the tag names what the number is
+        tag = f"RISK{a.priority:02d}" if a.severity != "warn" else "warn"
         # a latent-class variant's display kind (latent-class) IS its
         # suppression family — nothing to teach, and a suppression recipe
         # beside "create the class" invites hiding the defect. Only a
         # display identity that cannot be suppressed (standard) names the
         # raw signal.
-        suppress = (
-            f" — suppress with: {a.signal}"
-            if a.signal
+        marker = (
+            a.signal
             and a.signal != a.kind
             and a.signal not in a.kinds
             and a.signal not in _FAMILY_OF_VARIANT
-            else ""
         )
+        # B5: a bare per-site marker is the wrong remedy when the family is
+        # config-ignored (a house decision, made elsewhere) — say so and name
+        # the config key; otherwise state the marker window (a comment binds
+        # within the 3 lines ending at the finding — a marker further up does
+        # not, it goes stale)
+        ck = (ignore_keys or {}).get(a.signal) if a.signal else None
+        if marker and ck:
+            suppress = (
+                f" — suppress with: {a.signal} — this family is config-ignored under "
+                f"{ck}: fix the finding or extend the ignore scope (a per-site marker "
+                "is redundant)"
+            )
+        elif marker:
+            suppress = (
+                f" — suppress with: {a.signal} — a lucidlint: ignore comment binds "
+                "within the 3 lines ending at this finding (a marker further up "
+                "does not)"
+            )
+        elif ck:
+            suppress = (
+                f" — this family is config-ignored under {ck}: fix the finding or "
+                "extend the ignore scope"
+            )
+        else:
+            suppress = ""
         stamp = _stamp_of(a)
         print(f"  [{tag}][{kinds}]{suppress} {loc}{churn} — {a.message}" + (f" [{stamp}]" if stamp else ""))
         if a.note:
@@ -1348,11 +1452,15 @@ def _seam_groups(actions: list[Action]) -> list[dict[str, Any]]:
             if shared_loc is not None
             else (", ".join(sorted(shared_members)) if shared_members else "")
         )
+        # B1: an empty member list must never render "(the seams: )" — a
+        # transitive cluster has no member present in every finding, so there
+        # is no seam NAME to print; drop the parenthetical instead
+        paren = f" (the seams: {seam_label})" if seam_label else ""
         groups.append(
             {
                 "heading": (
                     f"these {len(members_sorted)} findings share ONE seam — design the target "
-                    f"type once, for all of them (the seams: {seam_label})"
+                    f"type once, for all of them{paren}"
                 ),
                 "seam": seam_label,
                 "findings": members_sorted,
@@ -1369,16 +1477,32 @@ def _kind_counts(actions: list[Action]) -> str:
     return ", ".join(f"{k}={v}" for k, v in counts.most_common())
 
 
+# lucidlint: ignore closures the render helpers are one-purpose local walks
+# lucidlint: ignore long-param-list the report pass context is a (repo, args, actions) trio
 def _render_actions(
-    repo: Path, args, fails: list[Action], acks: list[Action], census: dict[str, int] | None = None
+    repo: Path,
+    args,
+    fails: list[Action],
+    acks: list[Action],
+    census: dict[str, int] | None = None,
+    ignore_keys: dict[str, str] | None = None,
 ) -> None:
     """Per-file grouped action lines, baseline acknowledgements, the footer,
     and the suppression census (what the gate did NOT report on)."""
+    # B6: a bulk-suppression finding is a repo-wide count — its anchor file
+    # is arbitrary (the file with the most suppressed sites), so it renders
+    # ONCE at report level, never inside a per-file section
+    bulk = [a for a in fails if a.kind == "bulk-suppression"]
+    rest = [a for a in fails if a.kind != "bulk-suppression"]
+    if bulk:
+        print("\nbulk suppression (policy — a repo-level decision, not a file site):")
+        for a in sorted(bulk, key=lambda a: a.message):
+            print(f"  {a.message}")
     by_file: dict[str, list[Action]] = {}
-    for a in fails:
+    for a in rest:
         by_file.setdefault(a.file, []).append(a)
     for file, items in sorted(by_file.items(), key=lambda kv: -max(i.priority for i in kv[1])):
-        _render_file_group(file, items)
+        _render_file_group(file, items, ignore_keys)
     if acks:
         print(
             f"\nacknowledged in baseline ({len(acks)}): "
@@ -1491,6 +1615,11 @@ class _GateRunner:
         self.suppression_census: dict[str, int] = {}
         self.ignored_config: _LucidlintConfig = _LucidlintConfig(set(), [])
         self.ignored_by_signal: Counter[str] = Counter()
+        # B5: signal -> the config key that ignores it (per-path glob or the
+        # repo-wide list) — per-item suppression advice must name it
+        self.config_ignore_keys: dict[str, str] = {}
+        # B3: the one-line pre-round baseline migration note ("" = none)
+        self.baseline_migration: str = ""
         self.unique: list[Action] = []
         self.stale: list[str] = []
         self.baseline_ignored: dict[str, int] = {}
@@ -1530,6 +1659,14 @@ class _GateRunner:
         ever wrong")."""
         self.ignored_config = self._load_lucidlint_config()
         self.ignored_by_signal = Counter()
+        # B5: remember which config key ignores each signal, so a finding's
+        # per-item advisory can name it instead of offering a bare site marker
+        self.config_ignore_keys = {}
+        for sig in self.ignored_config.global_ignore:
+            self.config_ignore_keys.setdefault(sig, "the repo-wide ignore list")
+        for pattern, path_ignored in self.ignored_config.per_path_ignore:
+            for sig in path_ignored:
+                self.config_ignore_keys.setdefault(sig, f"'{pattern}'")
         for a in self.actions:
             house_rule = self.ignored_config.guidance.get(a.signal)
             if house_rule is not None:
@@ -1858,8 +1995,27 @@ class _GateRunner:
 
         if self.args.update_baseline:
             return self._write_baseline(self.unique, self.ignored_by_signal)
-        baseline_keys, self.baseline_ignored = _load_baseline(self.args.baseline)
+        bl = _load_baseline(self.args.baseline)
+        baseline_keys, self.baseline_ignored = bl.keys, bl.ignored
         self.stale = _apply_baseline(self.unique, baseline_keys)
+        # B3: a pre-round 'actions' schema (line-less keys or action dicts)
+        # cannot map to current identities — ONE migration line, never a
+        # silent "+0 acknowledged"/"cannot tell what is new", never
+        # phantom-stale failures. With a --baseline file the note names it;
+        # without one, a repo-root lucidlint.json is recognized the same way.
+        self.baseline_migration = ""
+        if self.args.baseline and bl.legacy:
+            self.baseline_migration = (
+                f"{self.args.baseline.name} uses a pre-round 'actions' schema — re-acknowledge "
+                f"with --update-baseline to migrate ({bl.legacy} actions ignored)"
+            )
+        elif self.args.baseline is None:
+            _, legacy = _baseline_file_state(self.repo / "lucidlint.json")
+            if legacy:
+                self.baseline_migration = (
+                    "lucidlint.json uses a pre-round 'actions' schema — re-acknowledge "
+                    f"with --update-baseline to migrate ({legacy} actions ignored)"
+                )
         # the §9 growth signal: a config-ignored family whose count GREW since
         # the baseline is debt being added to, not held — the ignore's scope is
         # wrong. A warning, never a gate failure (growing repos legitimately
@@ -1889,9 +2045,14 @@ class _GateRunner:
             ignored_by_signal=self.ignored_by_signal,
             report_header=self.report_header,
             suppression_census=self.suppression_census,
+            config_ignore_keys=self.config_ignore_keys,
+            baseline_migration=self.baseline_migration,
         )
 
         if self.args.json:
+            # stdout is the JSON document — the migration note rides stderr
+            if self.baseline_migration:
+                log(self.baseline_migration)
             self.rc.render_json(self.unique)
         else:
             self.rc.render_text(self.unique, fails, warns, acks)
