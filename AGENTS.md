@@ -43,6 +43,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | UX standards | `docs/ux-standards.md` |
 | What good documentation is | `docs/writing-documentation.md` |
 | Writing finding messages (the message standard) | `docs/writing-messages.md` |
+| Run the two-repo usefulness evaluation (proposer + critic round) | `skills/lucidlint-usefulness-eval/SKILL.md` |
 | Required doc set and folder structure | `docs/documentation-structure.md` |
 | What each tool does | `README.md` (below) |
 
