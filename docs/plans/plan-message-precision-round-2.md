@@ -99,13 +99,14 @@ Acceptance: round-8 proposer finds no implausible-duration suggestion.
 
 Actions:
 
-1. The "highest change-cost" line renders without the RISK percentile:
-   "highest change-cost: {file}:{line} ({fn})". The number is the
-   urgency carrier — the rename and the legend sentence both existed
-   when round-7 still read RISK99 as an emergency — so the number
-   leaves the line; the legend sentence stays and explains the ranking.
-2. Fixtures: the headline line renders the label and location with no
-   "[RISK" on it; the per-item lines still carry no RISK tags.
+1. The "highest change-cost" line and its legend sentence leave the
+   report. The ranking has produced no accepted guidance in seven
+   rounds — every accepted change came from the finding's message, not
+   the rank — and the displayed percentile reads as urgency every
+   round. The internal sort stays as it is; nothing has objected to the
+   ordering, only to its display.
+2. Fixtures: the header renders no change-cost line and no "priority =
+   percentile" legend; the per-item lines carry no RISK tags.
 
 Acceptance: round-8 proposer does not read the line as urgency.
 
