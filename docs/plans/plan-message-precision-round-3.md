@@ -152,9 +152,11 @@ Actions:
    on is still raw dicts, lists, or loose fields, represent it with
    classes first, then re-check 2 and 3." The detector states the part
    it can see; the reader runs the test.
-3. record-shape does not fire on a return that is an annotated
-   accessor copy of the class's own state (return self.X). Awaiting
-   the verdict.
+3. Removed — no accessor-copy exemption. A class's collection-typed
+   data should itself be a class, with its instance owned by the larger
+   class. A plain list held or returned by a class is an unmodelled
+   collection, not data that is already owned, so the finding stands at
+   those sites.
 
 Acceptance: round-9 proposer reports neither misdescription.
 
