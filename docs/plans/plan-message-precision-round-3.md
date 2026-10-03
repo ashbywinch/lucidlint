@@ -117,13 +117,19 @@ role, the flagged site's does not.
 
 Actions:
 
-1. The duplicate-module comparison adds function-level skeleton
-   similarity (the body_skeleton machinery already in place), so a
-   pair of modules sharing one function's skeleton forked apart is
-   paired even when their constants differ. The schools:140 shared-
-   base case keeps its config-variant message.
-2. Fixture: the http_error pair (dag/ and houses/) fires duplicate-
-   module; schools:140 keeps the base-class text.
+1. The constants pre-filter requires identical tokens AND non-empty;
+   the http_error pair (dag/, houses/) has no module-level constants —
+   its 500/429 sit inside functions — so both sides are empty and the
+   gate skips the pair before the Dice check runs. Drop the emptiness
+   requirement: identical constant tokens, including both empty, plus
+   the structural bar (>= 0.9 Dice, the length window, compatible
+   entity kinds).
+2. If the pair still misses on Dice or the length window once the
+   pre-filter is removed, measure it and bring the number back; do not
+   loosen the structural bar on a guess.
+3. Fixtures: the http_error pair fires; a pair with differing
+   non-empty constants stays skipped; the schools config-variant pair
+   keeps the shared-base message.
 
 Acceptance: round-9 proposer sees the http_error pair flagged and no
 COMФUSING asymmetry entry.
