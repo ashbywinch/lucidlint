@@ -66,6 +66,28 @@ impl RustScan {
     }
 }
 
+/// G4: does the file hold a magic-CANDIDATE literal (value outside 0/1/2)
+/// anywhere — the fact the stale magic-number message cites when the family
+/// fires nowhere: the position rule exempted the values; the numbers are
+/// not gone. The visit default reaches every expression (pattern literals
+/// included) in one pass.
+struct NumericLiteralProbe {
+    found: bool,
+}
+impl<'ast> syn::visit::Visit<'ast> for NumericLiteralProbe {
+    fn visit_expr_lit(&mut self, el: &'ast syn::ExprLit) {
+        if let syn::Lit::Int(i) = &el.lit {
+            if common::is_magic_value(i.base10_digits()) {
+                self.found = true;
+            }
+        } else if let syn::Lit::Float(f) = &el.lit {
+            if common::is_magic_value(f.base10_digits()) {
+                self.found = true;
+            }
+        }
+    }
+}
+
 pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     let file = match syn::parse_file(source) {
         Ok(f) => f,
@@ -118,6 +140,17 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     state.findings.extend(no_assert_test_findings(&file, name));
     state.walk_file(&file);
     let mut scan = state.finish();
+    // G4: does the file hold magic-CANDIDATE literals anywhere — the fact
+    // the stale magic-number message cites when the family fires nowhere.
+    // Rust's only exemptions are the position rule, so the label set is
+    // ["position/index"] or empty.
+    let mut probe = NumericLiteralProbe { found: false };
+    syn::visit::Visit::visit_file(&mut probe, &file);
+    let magic_exempt_labels: Vec<&'static str> = if probe.found {
+        vec!["position/index"]
+    } else {
+        Vec::new()
+    };
     // suppressions parse from the whole file, filtering every family — the
     // shared why-less rule applies (`// lucidlint: ignore` needs a why)
     let comments = rs_comment_lines(source);
@@ -155,9 +188,9 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         pre_used: &pre_used,
         spent: &mut supps_spent,
     };
-    scan.findings = common::apply_suppressions_impl(scan.findings, &comments, name, "//", &mut books);
-    scan.supps = supps;
-    scan.supps_spent = supps_spent;
+
+    scan.findings =
+        common::apply_suppressions_impl(scan.findings, &comments, name, "//", &mut books, &magic_exempt_labels);
     scan
 }
 
@@ -342,7 +375,14 @@ impl<'a> RsState<'a> {
     /// Same, with the schema-3 anchor column (1-based; 0 = line-level).
     // lucidlint: ignore long-param-list one caller — the struct would be ceremony for a single call site
     fn finding_col(&mut self, kind: &str, severity: &str, line: usize, col: usize, function: &str, message: String) {
+        // Phase 4a: the Rust layer records no logical line — its findings
+        // anchor on the item or statement that starts the construct (`fn`/
+        // `struct` line, the literal's line), so `logical_start: None` already
+        // means the finding's own line, exactly the marker window this layer
+        // has always used.
         self.findings.push(Finding {
+            logical_start: None,
+            seam_members: Vec::new(),
             col,
             file: self.file.to_string(),
             line,
@@ -1148,6 +1188,8 @@ fn walk_test_fns(item: &Item, out: &mut Vec<Finding>, file_name: &str) {
                 && !block_asserts(&f.block)
             {
                 out.push(Finding {
+                    logical_start: None,
+                    seam_members: Vec::new(),
                     file: file_name.to_string(),
                     line: f.sig.span().start().line,
                     col: 0,
@@ -1241,6 +1283,8 @@ fn ignored_test_findings(file: &File, file_name: &str) -> Vec<Finding> {
         fn visit_item_fn(&mut self, f: &'ast ItemFn) {
             if has_attr(&f.attrs, "test") && has_attr(&f.attrs, "ignore") {
                 self.findings.push(Finding {
+                    logical_start: None,
+                    seam_members: Vec::new(),
                     file: self.file.clone(),
                     line: f.sig.span().start().line,
                     col: 0,

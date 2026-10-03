@@ -1,3 +1,6 @@
+// evidence flags (findings, comments, file, marker, books, numeric-literal probe) —
+// lucidlint: ignore-file long-param-list the suppression pass threads the scan shapes and the
+// an options struct would add a hop for the two callers
 //! The language-neutral core of the scan: logic that is IDENTICAL for every
 //! language layer, parameterized only by what the language layers extract.
 //!
@@ -63,6 +66,67 @@ pub struct SkeletonFn {
     pub name: String,
     pub line: usize,
     pub skeleton: Vec<String>,
+}
+
+/// One duplicate-module candidate (#26): a module or top-level class
+/// identity with its structural skeleton, constant tokens, and member-name
+/// set. Built per file in the Python layer; the repo-wide pass pairs
+/// identities with >= 0.9 Dice AND identical constant sets.
+#[derive(Clone)]
+pub struct SkeletonModule {
+    pub rel: String,
+    pub name: String,
+    pub line: usize,
+    pub skeleton: Vec<String>,
+    /// `NAME:norm(type)` tokens for the identity's `NAME = literal` constants
+    /// (numeric literals normalised, strings stripped, bools canonical).
+    pub consts: Vec<String>,
+    /// Sorted member names — the issue's "matched members:" intersection.
+    pub members: Vec<String>,
+    /// "module" | "class" | "module-class" (a module whose non-import
+    /// top-levels are exactly one class def — pairs as both).
+    pub entity: &'static str,
+    /// The class identity's direct base names ("Name:Base" / "Attr:mod:Base")
+    /// — empty for module/module-class identities. C2: two classes sharing
+    /// one base get the subclass message, not the fork prose.
+    pub bases: Vec<String>,
+}
+
+/// A module-level function whose body is exactly `return <callee>(<all
+/// params>)` — the middle edge of a forwarding chain (#30).
+#[derive(Clone)]
+pub struct ForwarderFn {
+    pub rel: String,
+    pub name: String,
+    pub line: usize,
+    pub params: Vec<String>,
+    /// "Fn:<name>" for a module-fn callee, "Method:<recv-param>:<method>" for
+    /// a method callee on another class.
+    pub callee: String,
+}
+
+/// A class method whose body is exactly `return F(<all params>)` with F a
+/// module-level function — the head of a forwarding chain (#30).
+#[derive(Clone)]
+pub struct ForwarderMethod {
+    pub rel: String,
+    pub class: String,
+    pub name: String,
+    pub line: usize,
+    pub params: Vec<String>, // minus self/cls
+    pub fn_callee: String,
+}
+
+/// Every method of every top-level class (params minus receiver) — the
+/// terminal pool the forwarding-chain detector resolves `recv.method(...)`
+/// callees against (#30, R9).
+#[derive(Clone)]
+pub struct RepoMethod {
+    pub rel: String,
+    pub class: String,
+    pub name: String,
+    pub line: usize,
+    pub params: Vec<String>,
 }
 
 /// Rewrite a finding message's `fix:` directive into the FULL runnable
@@ -182,10 +246,13 @@ pub struct Suppressions {
     pub file: HashMap<String, String>,
 }
 
-/// Parse `lucidlint: ignore <signal> <why>` / `ignore-file` comments.
 /// `comments` are (line, full comment text incl. the marker) — each language
+/// Parse `lucidlint: ignore <signal> <why>` / `ignore-file` comments.
 /// layer extracts them its own way (ruff tokens for Python, a string-aware
-/// scan for Rust); the parse and the matching are shared.
+/// scan for Rust); the parse and the matching are shared. A marker binds by
+/// its signal name alone: the why may truncate at line end (a repo marker
+/// cut mid-expression still binds — G5); only a marker with NO why at all
+/// is why-less and does not bind.
 pub fn suppressions_from_comments(comments: &[(usize, String)]) -> Suppressions {
     let mut line_map: HashMap<usize, Vec<(String, String)>> = HashMap::new();
     let mut file_map = HashMap::new();
@@ -242,17 +309,39 @@ pub fn signal_matches(sig: &str, finding_kind: &str) -> bool {
     sig == finding_kind || alias_variants(sig).contains(&finding_kind)
 }
 
-/// How far above a finding a suppression comment may sit. A suppression sits
-/// "directly above" its code, but a decorator line (`@final`) or a stacked
-/// comment/blank line intervenes — a fixed line/line-1 window breaks that
-/// (RUST-CORE B7). A 3-line window clears one intervening line while staying
-/// "adjacent" — far enough that a deliberate comment is never orphaned, close
-/// enough that it cannot drift onto an unrelated statement.
-const SUPPRESSION_WINDOW: usize = 3;
+/// How far above a finding a suppression comment may sit, in the plain
+/// line-pair rule: the finding's own line and the line immediately before it.
+/// A marker two lines above (a decorator line intervening, say) binds nothing
+/// — and, because the signal still fires somewhere, it is documentation
+/// rather than stale. A finding whose construct spans several source lines
+/// also admits its logical line's pair (`finding_window`); this constant
+/// governs the physical pair and the complexity summaries, which are not
+/// Finding records and carry no logical line.
+const SUPPRESSION_WINDOW: usize = 2;
 
 /// The `SUPPRESSION_WINDOW` lines ending at `line` (descending), never below 1.
 pub fn window_lines(line: usize) -> impl Iterator<Item = usize> {
     (line.max(SUPPRESSION_WINDOW) + 1 - SUPPRESSION_WINDOW..=line).rev()
+}
+
+/// The lines a marker may sit on to bind `f`, nearest first: the finding's own
+/// line and the line before it, UNION the logical line's pair — the `def` line
+/// for a signature finding, the enclosing statement's first line for a wrapped
+/// call or split literal (Phase 4a). One line of code can span several source
+/// lines, so the practiced "marker directly above the `def`" placement binds
+/// every finding anchored on the signature, however deep the finding's own
+/// source line sits.
+pub fn finding_window(f: &crate::Finding) -> Vec<usize> {
+    let logical = f.logical_line();
+    let mut lines: Vec<usize> = Vec::with_capacity(4);
+    for l in [f.line, f.line.saturating_sub(1), logical, logical.saturating_sub(1)] {
+        if l >= 1 && !lines.contains(&l) {
+            lines.push(l);
+        }
+    }
+    lines.sort_unstable();
+    lines.reverse();
+    lines
 }
 
 /// A finding is exempt when an explained file suppression covers it.
@@ -293,7 +382,7 @@ pub fn filter_repo_wide(
             continue;
         }
         let mut line_hit = false;
-        for ln in window_lines(f.line) {
+        for ln in finding_window(&f) {
             if let Some(entries) = supps.line.get(&ln) {
                 for (sig, why) in entries {
                     if why.is_empty() || spent.contains(&(ln, sig.clone())) {
@@ -373,24 +462,29 @@ fn common_group_line_indices(findings: &[crate::Finding]) -> Vec<Vec<usize>> {
     groups
 }
 
-/// Marker inventory for one line-group: distinct explained marker lines whose
-/// signal matches any member, minus globally spent/taken pairs.
-fn marker_inventory(
-    members: &[usize],
-    findings: &[crate::Finding],
-    supps: &Suppressions,
-    used_line: &std::collections::HashSet<(usize, String)>,
-    taken: &std::collections::HashSet<(usize, String)>,
-) -> Vec<(usize, String)> {
+/// Marker inventory for one line-group: every explained marker line whose
+/// signal matches any member, one pair per line. A pair another line-group
+/// consumed is NOT filtered here — one marker covers every member of the
+/// site it sits on (own line or the line before), recorded spent once (set
+/// semantics). The window is the union of the members' two-line-plus-logical
+/// windows: a def's signature findings share the def line even when their own
+/// lines differ.
+fn marker_inventory(members: &[usize], findings: &[crate::Finding], supps: &Suppressions) -> Vec<(usize, String)> {
+    let mut window: Vec<usize> = Vec::new();
+    for &i in members {
+        for ln in finding_window(&findings[i]) {
+            if !window.contains(&ln) {
+                window.push(ln);
+            }
+        }
+    }
+    window.sort_unstable();
+    window.reverse();
     let mut pairs: Vec<(usize, String)> = Vec::new();
-    for ln in window_lines(findings[members[0]].line) {
+    for ln in window {
         if let Some(entries) = supps.line.get(&ln) {
             for (sig, why) in entries {
-                if why.is_empty()
-                    || used_line.contains(&(ln, sig.clone()))
-                    || taken.contains(&(ln, sig.clone()))
-                    || pairs.iter().any(|(pl, _)| *pl == ln)
-                {
+                if why.is_empty() || pairs.iter().any(|(pl, _)| *pl == ln) {
                     continue;
                 }
                 if members.iter().any(|&i| signal_matches(sig, &findings[i].kind)) {
@@ -411,29 +505,45 @@ struct LineMarkerCtx<'a> {
 
 /// Bind one line-group's members to its markers inner-first. Returns flags
 /// parallel to `members`: true = exempted by a LINE marker (consumed).
-fn peel_assign(members: &[usize], findings: &[crate::Finding], ctx: &mut LineMarkerCtx) -> Vec<bool> {
-    let pairs = marker_inventory(members, findings, ctx.supps, ctx.used_line, ctx.taken);
-    let mut ok = vec![false; members.len()];
-    // members sort by col DESC (inner-first) while the inventory sorts by
-    // line DESC — a single advancing pointer strands a marker whose kind
-    // matches a LATER member behind an earlier non-match (review bot):
-    // search the whole inventory for the first unused marker matching each
-    // member's signal
-    let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for (j, &i) in members.iter().enumerate() {
-        if let Some((pi, cand)) = pairs
-            .iter()
-            .enumerate()
-            .find(|(pi, cand)| !used.contains(pi) && signal_matches(&cand.1, &findings[i].kind))
-        {
-            used.insert(pi);
-            ctx.taken.insert(cand.clone());
-            ctx.used_line.insert(cand.clone());
-            ctx.spent.insert(cand.clone());
-            ok[j] = true;
+/// G3: one marker binds EVERY member anchored at the same col — several
+/// record-shaped params of one def all report at col 0, and a marker above
+/// the def must cover the whole site. Nested findings at DISTINCT cols
+/// (inner literals) keep the innermost-first rule: one marker peels only
+/// the innermost record; two peel inner then outer.
+impl<'a> LineMarkerCtx<'a> {
+    /// Bind one line-group's members to its markers inner-first.
+    fn peel(&mut self, members: &[usize], findings: &[crate::Finding]) -> Vec<bool> {
+        let pairs = marker_inventory(members, findings, self.supps);
+        let mut ok = vec![false; members.len()];
+        // members sort by col DESC (inner-first) while the inventory sorts
+        // by line DESC — group members by col so one marker serves one
+        // anchor.
+        let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut by_col: Vec<(usize, Vec<usize>)> = Vec::new();
+        for (j, &i) in members.iter().enumerate() {
+            match by_col.last_mut() {
+                Some((c, js)) if *c == findings[i].col => js.push(j),
+                _ => by_col.push((findings[i].col, vec![j])),
+            }
         }
+        for (_col, js) in by_col {
+            let matches_any = |pi: usize| {
+                js.iter()
+                    .any(|&j| signal_matches(&pairs[pi].1, &findings[members[j]].kind))
+            };
+            if let Some(pi) = (0..pairs.len()).find(|&pi| !used.contains(&pi) && matches_any(pi)) {
+                used.insert(pi);
+                let cand = pairs[pi].clone();
+                self.taken.insert(cand.clone());
+                self.used_line.insert(cand.clone());
+                self.spent.insert(cand.clone());
+                for &j in &js {
+                    ok[j] = true;
+                }
+            }
+        }
+        ok
     }
-    ok
 }
 
 /// Per-signal line index — the facts behind the stale binding reasons
@@ -450,12 +560,17 @@ fn signal_line_index(findings: &[crate::Finding]) -> std::collections::HashMap<S
 /// comment token ('#' or "//") used in the why-less messages. `pre_used`
 /// carries the suppressions the caller's cc-array retain already honored so
 /// stale detection does not re-flag them (the Rust layer's cc path).
+/// `magic_exempt_labels` names the exemption kinds among the file's
+/// still-present magic-number candidates — the stale magic-number message
+/// then appends the exact delta (G4) instead of reading as if the numbers
+/// were gone or claiming exemptions that do not apply.
 pub fn apply_suppressions_impl(
     findings: Vec<crate::Finding>,
     comments: &[(usize, String)],
     file: &str,
     marker: &str,
     books: &mut SuppressionBooks,
+    magic_exempt_labels: &[&'static str],
 ) -> Vec<crate::Finding> {
     let supps = suppressions_from_comments(comments);
     let mut out = Vec::new();
@@ -465,17 +580,15 @@ pub fn apply_suppressions_impl(
     for (ln, entries) in &supps.line {
         for (sig, why) in entries {
             if why.is_empty() && seen_invalid.insert((*ln, sig.clone())) {
-                out.push(crate::Finding {
-col: 0,
-                file: file.to_string(),
-                line: *ln,
-                function: String::new(),
-                kind: "suppression".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "suppression '{marker} lucidlint: ignore {sig}' at line {ln} without a why — exemptions only apply with an explanation"
-                ),
-            });
+                out.push(crate::Finding { logical_start: None, seam_members: Vec::new(), col: 0,
+                                file: file.to_string(),
+                                line: *ln,
+                                function: String::new(),
+                                kind: "suppression".into(),
+                                severity: "fail".into(),
+                                message: format!(
+                                    "suppression '{marker} lucidlint: ignore {sig}' at line {ln} without a why — exemptions only apply with an explanation"
+                                ), });
             }
         }
     }
@@ -485,17 +598,15 @@ col: 0,
                 .iter()
                 .find(|(_, t)| t.contains(&format!("lucidlint: ignore-file {sig}")))
             {
-                out.push(crate::Finding {
-col: 0,
-                    file: file.to_string(),
-                    line: *ln,
-                    function: String::new(),
-                    kind: "suppression".into(),
-                    severity: "fail".into(),
-                    message: format!(
-                        "file suppression '{marker} lucidlint: ignore-file {sig}' at line {ln} without a why — exemptions only apply with an explanation"
-                    ),
-                });
+                out.push(crate::Finding { logical_start: None, seam_members: Vec::new(), col: 0,
+                                    file: file.to_string(),
+                                    line: *ln,
+                                    function: String::new(),
+                                    kind: "suppression".into(),
+                                    severity: "fail".into(),
+                                    message: format!(
+                                        "file suppression '{marker} lucidlint: ignore-file {sig}' at line {ln} without a why — exemptions only apply with an explanation"
+                                    ), });
             }
         }
     }
@@ -510,7 +621,7 @@ col: 0,
             taken: &mut taken,
             spent: books.spent,
         };
-        let ok = peel_assign(&members, &findings, &mut ctx);
+        let ok = ctx.peel(&members, &findings);
         for (j, &i) in members.iter().enumerate() {
             if ok[j] {
                 exempted[i] = true;
@@ -534,6 +645,7 @@ col: 0,
         file,
         marker,
         by_signal: &by_signal,
+        magic_exempt_labels,
     };
     out.extend(ctx.stale_suppression_findings());
     out
@@ -574,6 +686,49 @@ struct StaleCtx<'a> {
     /// the stale binding-reason reasons cite (gone / covered / out of
     /// window).
     by_signal: &'a std::collections::HashMap<String, Vec<usize>>,
+    /// G4: the exemption-kind labels among the file's still-present
+    /// magic-number candidates (unit-named, constant-definition,
+    /// data-table, length-guard, position/index) — the stale message names
+    /// exactly the kinds that cover the file's literals, never a blanket
+    /// unit/constant/table claim for a file whose literals are indices.
+    magic_exempt_labels: &'a [&'static str],
+}
+
+impl StaleCtx<'_> {
+    /// G4: the rule-delta clause for a stale marker. The magic-number
+    /// family's current exemptions (unit-named values, named constants,
+    /// data tables, length guards, the position/index skip) can cover a
+    /// file's literals — then the family fires nowhere although the numbers
+    /// are still there. The stale message names ONLY the kinds present among
+    /// the file's exempted literals so the reader can verify before deleting
+    /// the marker; every other kind keeps the plain text.
+    fn exemption_delta(&self, sig: &str) -> String {
+        if sig != "magic-number" || self.magic_exempt_labels.is_empty() {
+            return String::new();
+        }
+        let labels = self.magic_exempt_labels;
+        let joined = match labels.len() {
+            1 => labels[0].to_string(),
+            2 => format!("{} and {}", labels[0], labels[1]),
+            _ => {
+                let mut s = String::new();
+                for (i, l) in labels.iter().enumerate() {
+                    if i + 2 == labels.len() {
+                        s.push_str(&format!("{l}, and "));
+                    } else if i == labels.len() - 1 {
+                        s.push_str(l);
+                    } else {
+                        s.push_str(&format!("{l}, "));
+                    }
+                }
+                s
+            }
+        };
+        let noun = if labels.len() == 1 { "exemption" } else { "exemptions" };
+        format!(
+            " — the file still holds numeric literals — now covered by the {joined} {noun}; verify the reason before deleting the marker"
+        )
+    }
 }
 
 impl<'a> StaleCtx<'a> {
@@ -597,19 +752,25 @@ impl<'a> StaleCtx<'a> {
                 if why.is_empty() || self.used_line.contains(&(*ln, sig.clone())) {
                     continue;
                 }
-                let reason = self.stale_reason(sig, *ln);
-                out.push(crate::Finding {
-                    col: 0,
-                    file: self.file.to_string(),
-                    line: *ln,
-                    function: String::new(),
-                    kind: "stale-suppression".into(),
-                    severity: "fail".into(),
-                    message: format!(
-                        "suppression '{} lucidlint: ignore {sig}' at line {ln} no longer fires ({reason}) — remove it{fix_tail}",
-                        self.marker
-                    ),
-                });
+                // "stale — remove it" means exactly one case: the signal
+                // fires NOWHERE in this file. When the family still fires
+                // anywhere, the marker is documentation (a mis-placed or
+                // covered marker binds nothing) — no stale verdict, and no
+                // advice to move it (plan Phase 3).
+                let Some(reason) = self.stale_reason(sig) else {
+                    continue;
+                };
+                let delta = self.exemption_delta(sig);
+                out.push(crate::Finding { logical_start: None, seam_members: Vec::new(), col: 0,
+                file: self.file.to_string(),
+                line: *ln,
+                function: String::new(),
+                kind: "stale-suppression".into(),
+                severity: "fail".into(),
+                message: format!(
+                    "suppression '{} lucidlint: ignore {sig}' at line {ln} no longer fires ({reason}{delta}) — remove it{fix_tail}",
+                    self.marker
+                ), });
             }
         }
         for (sig, why) in &self.supps.file {
@@ -621,34 +782,29 @@ impl<'a> StaleCtx<'a> {
                 .iter()
                 .find(|(_, t)| t.contains(&format!("lucidlint: ignore-file {sig}")))
             {
-                let lines = self.lines_for(sig);
-                let reason = if lines.is_empty() {
-                    "no matching finding fires in this file — it was fixed, or the kind was renamed".to_string()
-                } else if lines.iter().all(|l| self.used_line.contains(&(*l, sig.clone()))) {
-                    "every matching finding already has its own line-level marker — the file suppression is redundant"
-                        .to_string()
-                } else {
-                    "matching findings exist but the file suppression was never consumed — one of them should have matched it".to_string()
-                };
-                out.push(crate::Finding {
-                    col: 0,
+                // same fires-nowhere gate as the line markers: a file
+                // suppression over a family that still fires is either bound
+                // or redundant documentation — never a stale verdict
+                if self.lines_for(sig).is_empty() {
+                    let delta = self.exemption_delta(sig);
+                    out.push(crate::Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                     file: self.file.to_string(),
                     line: *ln,
                     function: String::new(),
                     kind: "stale-suppression".into(),
                     severity: "fail".into(),
                     message: format!(
-                        "file suppression '{} lucidlint: ignore-file {sig}' no longer fires ({reason}) — remove it{fix_tail}",
+                        "file suppression '{} lucidlint: ignore-file {sig}' no longer fires (no matching finding fires in this file — it was fixed, or the kind was renamed{delta}) — remove it{fix_tail}",
                         self.marker
-                    ),
-                });
+                    ), });
+                }
             }
         }
         out
     }
 
     /// Every line where a finding matching `sig` (family-aware) fired in
-    /// this scan — the facts the binding-reason diagnostics cite.
+    /// this scan — the facts the fires-nowhere verdict cites.
     fn lines_for(&self, sig: &str) -> Vec<usize> {
         let mut lines: Vec<usize> = self
             .by_signal
@@ -660,26 +816,17 @@ impl<'a> StaleCtx<'a> {
         lines
     }
 
-    /// WHY an unused marker did not bind: the finding is gone, another
-    /// marker covers it (one marker per finding, innermost first), or the
-    /// finding sits outside the marker's 3-line window. The houses sweep
-    /// burned probe sessions on each of these before reading the source.
-    fn stale_reason(&self, sig: &str, ln: usize) -> String {
-        let lines = self.lines_for(sig);
-        if lines.is_empty() {
-            return "nothing fires in this file — the finding was fixed, or the kind was renamed".to_string();
+    /// WHY an unused marker is stale — None when it is not: "stale — remove
+    /// it" means exactly one case, the marker's signal fires NOWHERE in the
+    /// file (a family renamed, a finding fixed). When the family still fires
+    /// anywhere, the marker binds nothing but stays as documentation and the
+    /// report says nothing about it (plan Phase 3).
+    fn stale_reason(&self, sig: &str) -> Option<String> {
+        if self.lines_for(sig).is_empty() {
+            Some("nothing fires in this file — the finding was fixed, or the kind was renamed".to_string())
+        } else {
+            None
         }
-        if lines.iter().any(|&l| ln <= l && l - ln < 3) {
-            return "every matching finding in the marker's window already has its own marker — one marker covers one finding (innermost first)"
-                .to_string();
-        }
-        if let Some(&near) = lines.iter().min_by_key(|&&l| l.abs_diff(ln)) {
-            return format!(
-                "the nearest matching finding is at line {near}; markers bind within the 3 lines ending at it ({}..={near})",
-                near.saturating_sub(2)
-            );
-        }
-        "nothing fires in this file".to_string()
     }
 }
 
@@ -712,6 +859,8 @@ mod tests {
 
     fn finding(kind: &str, line: usize) -> Finding {
         Finding {
+            logical_start: None,
+            seam_members: Vec::new(),
             file: "x.rs".into(),
             line,
             col: 0,
@@ -735,7 +884,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![finding("closures", 2)], &comments, "x.rs", "//", &mut books);
+        let fs = apply_suppressions_impl(vec![finding("closures", 2)], &comments, "x.rs", "//", &mut books, &[]);
         assert!(!fs.iter().any(|f| f.kind == "closures"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -749,7 +898,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books);
+        let fs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books, &[]);
         assert!(fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
     #[test]
@@ -763,7 +912,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let rs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books);
+        let rs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books, &[]);
         let msg = rs
             .iter()
             .find(|f| f.kind == "stale-suppression")
@@ -775,7 +924,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let py = apply_suppressions_impl(vec![], &comments, "x.py", "#", &mut books);
+        let py = apply_suppressions_impl(vec![], &comments, "x.py", "#", &mut books, &[]);
         let msg = py
             .iter()
             .find(|f| f.kind == "stale-suppression")
@@ -786,11 +935,12 @@ mod tests {
     }
 
     #[test]
-    fn stale_message_states_why_the_marker_did_not_bind() {
-        // three causes, three reasons: the finding is gone; the finding is
-        // outside the marker's window; the window's findings are already
-        // covered (one marker per finding). The houses sweep burned probe
-        // sessions on each before reading the source.
+    fn stale_only_when_signal_fires_nowhere() {
+        // Phase 3: "stale — remove it" is reserved for the ONE case it
+        // means — the marker's signal fires NOWHERE in the file. When the
+        // family still fires anywhere, the marker is documentation: no
+        // stale-suppression finding at all, never a mis-placed verdict,
+        // never advice to move the marker (the rightmove_url:57 shape).
         let mut spent = std::collections::HashSet::new();
         let gone = apply_suppressions_impl(
             vec![],
@@ -801,6 +951,7 @@ mod tests {
                 pre_used: &PreUsedSuppressions::default(),
                 spent: &mut spent,
             },
+            &["unit-named", "constant-definition", "data-table"],
         );
         let msg = gone
             .iter()
@@ -809,9 +960,40 @@ mod tests {
             .message
             .clone();
         assert!(msg.contains("nothing fires in this file"), "{msg}");
+        // G4: the rule delta — the literals are STILL in the file, so the
+        // message names EXACTLY the exemption kinds passed (unit-named and
+        // constant-definition and data-table), not a blanket claim
+        assert!(
+            msg.contains("the file still holds numeric literals — now covered by the unit-named, constant-definition, and data-table exemptions; verify the reason before deleting the marker"),
+            "{msg}"
+        );
+
+        // control: the same marker over a file with NO numeric literals
+        // keeps the plain fires-nowhere text — no delta clause
+        let mut spent = std::collections::HashSet::new();
+        let bare = apply_suppressions_impl(
+            vec![],
+            &[(1, "// lucidlint: ignore magic-number gone".to_string())],
+            "x.py",
+            "#",
+            &mut SuppressionBooks {
+                pre_used: &PreUsedSuppressions::default(),
+                spent: &mut spent,
+            },
+            &[],
+        );
+        let msg = bare
+            .iter()
+            .find(|f| f.kind == "stale-suppression")
+            .unwrap()
+            .message
+            .clone();
+        assert!(msg.contains("nothing fires in this file"), "{msg}");
+        assert!(!msg.contains("the file still holds numeric literals"), "{msg}");
 
         // marker below the finding: the window of line 3 is 1..=3, so a
-        // marker at 5 cannot bind — the reason names the move
+        // marker at 5 cannot bind — the family still fires, so the marker
+        // stays as documentation and NO stale verdict is emitted
         let mut spent = std::collections::HashSet::new();
         let misplaced = apply_suppressions_impl(
             vec![finding("magic-number", 3)],
@@ -822,17 +1004,15 @@ mod tests {
                 pre_used: &PreUsedSuppressions::default(),
                 spent: &mut spent,
             },
+            &[],
         );
-        let msg = misplaced
-            .iter()
-            .find(|f| f.kind == "stale-suppression")
-            .unwrap()
-            .message
-            .clone();
-        assert!(msg.contains("nearest matching finding is at line 3"), "{msg}");
-        assert!(msg.contains("lines ending at it"), "{msg}");
+        assert!(
+            !misplaced.iter().any(|f| f.kind == "stale-suppression"),
+            "{misplaced:?}"
+        );
 
-        // two markers, one finding: the loser's window is fully covered
+        // two markers, one finding: the loser's window is fully covered —
+        // the signal still fires, so the loser is documentation too
         let mut spent = std::collections::HashSet::new();
         let covered = apply_suppressions_impl(
             vec![finding("magic-number", 3)],
@@ -846,14 +1026,105 @@ mod tests {
                 pre_used: &PreUsedSuppressions::default(),
                 spent: &mut spent,
             },
+            &[],
         );
-        let msgs: Vec<String> = covered
+        assert!(!covered.iter().any(|f| f.kind == "stale-suppression"), "{covered:?}");
+    }
+
+    #[test]
+    fn stale_marker_one_line_past_window_stays_documentation() {
+        // The fires-nowhere distinction, per signal: a marker past the
+        // two-line window over a family firing below (marker at 3, window of
+        // line 6 is 5..=6) gets no verdict and no advice; the SAME marker
+        // would be stale if the family fired nowhere at all.
+        let mut spent = std::collections::HashSet::new();
+        let near = apply_suppressions_impl(
+            vec![finding("magic-number", 6), finding("magic-number", 9)],
+            &[(3, "// lucidlint: ignore magic-number threshold".to_string())],
+            "x.py",
+            "#",
+            &mut SuppressionBooks {
+                pre_used: &PreUsedSuppressions::default(),
+                spent: &mut spent,
+            },
+            &[],
+        );
+        assert!(!near.iter().any(|f| f.kind == "stale-suppression"), "{near:?}");
+        assert!(near.iter().any(|f| f.kind == "magic-number"), "{near:?}");
+
+        let mut spent = std::collections::HashSet::new();
+        let far = apply_suppressions_impl(
+            vec![],
+            &[(3, "// lucidlint: ignore magic-number threshold".to_string())],
+            "x.py",
+            "#",
+            &mut SuppressionBooks {
+                pre_used: &PreUsedSuppressions::default(),
+                spent: &mut spent,
+            },
+            &[],
+        );
+        let msg = far
             .iter()
-            .filter(|f| f.kind == "stale-suppression")
-            .map(|f| f.message.clone())
-            .collect();
-        assert_eq!(msgs.len(), 1, "{msgs:?}");
-        assert!(msgs[0].contains("already has its own marker"), "{}", msgs[0]);
+            .find(|f| f.kind == "stale-suppression")
+            .unwrap()
+            .message
+            .clone();
+        assert!(msg.contains("nothing fires in this file"), "{msg}");
+        assert!(!msg.contains("nearest matching finding"), "{msg}");
+    }
+
+    #[test]
+    fn stale_delta_names_only_the_applicable_exemption_kinds() {
+        // G4: the appended exemption clause lists EXACTLY the kinds that
+        // cover the file's remaining literals — a position/index-only file
+        // never claims unit/constant/table, and no candidates means no
+        // clause at all.
+        let mut spent = std::collections::HashSet::new();
+        let index_only = apply_suppressions_impl(
+            vec![],
+            &[(1, "// lucidlint: ignore magic-number gone".to_string())],
+            "x.py",
+            "#",
+            &mut SuppressionBooks {
+                pre_used: &PreUsedSuppressions::default(),
+                spent: &mut spent,
+            },
+            &["position/index"],
+        );
+        let msg = index_only
+            .iter()
+            .find(|f| f.kind == "stale-suppression")
+            .unwrap()
+            .message
+            .clone();
+        assert!(msg.contains("now covered by the position/index exemption"), "{msg}");
+        assert!(!msg.contains("unit-named"), "{msg}");
+        assert!(!msg.contains("constant-definition"), "{msg}");
+        assert!(!msg.contains("data-table"), "{msg}");
+
+        // no candidates -> the marker reads as a plain fix/rename stale,
+        // with no exemption clause
+        let mut spent = std::collections::HashSet::new();
+        let none = apply_suppressions_impl(
+            vec![],
+            &[(1, "// lucidlint: ignore magic-number gone".to_string())],
+            "x.py",
+            "#",
+            &mut SuppressionBooks {
+                pre_used: &PreUsedSuppressions::default(),
+                spent: &mut spent,
+            },
+            &[],
+        );
+        let msg = none
+            .iter()
+            .find(|f| f.kind == "stale-suppression")
+            .unwrap()
+            .message
+            .clone();
+        assert!(msg.contains("nothing fires in this file"), "{msg}");
+        assert!(!msg.contains("covered by the"), "{msg}");
     }
 
     #[test]
@@ -867,7 +1138,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![finding("partition", 9)], &comments, "x.rs", "//", &mut books);
+        let fs = apply_suppressions_impl(vec![finding("partition", 9)], &comments, "x.rs", "//", &mut books, &[]);
         assert!(!fs.iter().any(|f| f.kind == "partition"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -885,7 +1156,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![finding("strewing", 2)], &comments, "x.py", "#", &mut books);
+        let fs = apply_suppressions_impl(vec![finding("strewing", 2)], &comments, "x.py", "#", &mut books, &[]);
         assert!(!fs.iter().any(|f| f.kind == "strewing"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -906,6 +1177,8 @@ mod tests {
             spent: &mut std::collections::HashSet::new(),
         };
         let deep_magic = Finding {
+            logical_start: None,
+            seam_members: Vec::new(),
             col: 5,
             ..finding("magic-number", 2)
         };
@@ -915,6 +1188,7 @@ mod tests {
             "x.py",
             "#",
             &mut books,
+            &[],
         );
         assert!(
             !fs.iter().any(|f| f.kind == "magic-number" || f.kind == "middle-man"),
@@ -924,39 +1198,103 @@ mod tests {
     }
 
     #[test]
-    fn decorator_line_does_not_break_suppression_window() {
-        // B7: a comment two lines above the finding (a decorator line
-        // intervenes) still suppresses — the window is 3 lines, not
-        // line/line-1.
+    fn marker_two_lines_above_does_not_bind_and_is_not_stale() {
+        // Phase 4: a comment two lines above the finding (a decorator line
+        // intervenes) binds nothing — the window is the finding's own line and
+        // the line before (its logical line, when it has one, adds its own
+        // pair — these test findings carry none). The family still fires, so
+        // the marker is documentation, never stale.
         let comments = vec![(1, "// lucidlint: ignore magic-number the gate threshold".to_string())];
         let mut books = SuppressionBooks {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![finding("magic-number", 3)], &comments, "x.rs", "//", &mut books);
-        assert!(!fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
+        let fs = apply_suppressions_impl(
+            vec![finding("magic-number", 3)],
+            &comments,
+            "x.rs",
+            "//",
+            &mut books,
+            &[],
+        );
+        assert!(fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
 
     #[test]
     fn window_is_bounded_far_comment_does_not_suppress() {
-        // B7 guard: the window stays adjacent — a comment 4+ lines above is
-        // NOT a suppression of the finding.
+        // Phase 4 guard: the window stays adjacent — a comment 3+ lines above
+        // is NOT a suppression of the finding (and the finding carries no
+        // logical line to widen the window).
         let comments = vec![(1, "// lucidlint: ignore magic-number far away".to_string())];
         let mut books = SuppressionBooks {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![finding("magic-number", 5)], &comments, "x.rs", "//", &mut books);
+        let fs = apply_suppressions_impl(
+            vec![finding("magic-number", 5)],
+            &comments,
+            "x.rs",
+            "//",
+            &mut books,
+            &[],
+        );
         assert!(fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
+    }
+
+    #[test]
+    fn logical_window_binds_on_the_logical_line_and_stays_bounded() {
+        // Phase 4a: a finding on line 5 whose construct starts on line 2 (a
+        // multi-line signature arm) is bound by a marker on the logical line
+        // or the line before — the marker at 2 sits two lines above the
+        // finding's own line and a plain two-line window would miss it.
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let sig = Finding {
+            logical_start: Some(2),
+            ..finding("record-shape", 5)
+        };
+        let bound = apply_suppressions_impl(
+            vec![sig],
+            &[(2, "// lucidlint: ignore record-shape the wire payload".to_string())],
+            "x.rs",
+            "//",
+            &mut books,
+            &[],
+        );
+        assert!(!bound.iter().any(|f| f.kind == "record-shape"), "{bound:?}");
+        assert!(!bound.iter().any(|f| f.kind == "stale-suppression"), "{bound:?}");
+
+        // two lines above the logical line binds nothing — and because the
+        // family still fires the marker is documentation, never stale
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let far = Finding {
+            logical_start: Some(3),
+            ..finding("record-shape", 5)
+        };
+        let left = apply_suppressions_impl(
+            vec![far],
+            &[(1, "// lucidlint: ignore record-shape too far".to_string())],
+            "x.rs",
+            "//",
+            &mut books,
+            &[],
+        );
+        assert!(left.iter().any(|f| f.kind == "record-shape"), "{left:?}");
+        assert!(!left.iter().any(|f| f.kind == "stale-suppression"), "{left:?}");
     }
 }
 
 /// The report header — printed on every CLI run (text banner AND a `header`
 /// field in --json; never under the LSP). It states the AIM so agents read
-/// the intent before the findings: fix rather than suppress, and make every
-/// suppression reviewer-checkable.
-pub const REPORT_HEADER: &str = "lucidlint - the aim is code that is readable, maintainable, and obviously correct: fix findings instead of suppressing them, and give every suppression a why a reviewer can check";
+/// the intent before the findings: findings are pointers, fix rather than
+/// suppress, and make every suppression reviewer-checkable (Fourth-pass).
+pub const REPORT_HEADER: &str = "lucidlint — the aim is code that is maintainable, lucid, and obviously correct. Findings and suggested fixes are pointers, not orders: for each, judge the best way to make this code more maintainable, lucid, and obviously correct. Fix findings instead of suppressing them; give every suppression a why a reviewer can check";
 
 #[cfg(test)]
 mod header_tests {
@@ -964,9 +1302,9 @@ mod header_tests {
 
     #[test]
     fn report_header_names_the_three_aims() {
-        assert!(REPORT_HEADER.contains("readable"));
-        assert!(REPORT_HEADER.contains("maintainable"));
+        assert!(REPORT_HEADER.contains("lucid"));
         assert!(REPORT_HEADER.contains("obviously correct"));
         assert!(REPORT_HEADER.contains("why a reviewer can check"));
+        assert!(REPORT_HEADER.contains("pointers, not orders"));
     }
 }

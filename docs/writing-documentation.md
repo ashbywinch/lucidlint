@@ -95,14 +95,18 @@ of a doc that describes it. Prefer interfaces that make it easy to get right
 use them. The test is a living doc that fails when it lies; a written doc
 stays green when it goes stale.
 
-## No lectures on history
+## No history lessons
 
-Never explain why a decision was made by describing the alternative that
-failed and the person who made it. "It's a constraint inherited from X's
-code" is a lecture. The reason is what matters; the history is noise. If
-a reader needs to know why, state the constraint: "this message format is
-required by the upstream API" — not "Bob chose this format in 2022 because
-the old parser couldn't handle".
+Documentation never explains how the current state came to be. Do not
+write what changed, who decided, what failed before, or when the shift
+happened: that is history, and history is noise. Write the state and the
+reason instead.
+
+✗ "We renamed this line in 2026 after readers kept taking it the wrong
+way."
+
+✓ "The line above the findings names the code whose change would cost the
+most."
 
 ## API keys never go in docs
 
@@ -139,6 +143,71 @@ fact and decision.
 - **Task-shaped sections.** When a doc describes how to do something, use
   the task-card shape: goal (one verb), scope (exact paths), constraints
   (must / never), acceptance (verifiable command).
+## Clarity rules
+
+Write each sentence as one of two kinds: facts about the software, or
+commands about what the reader does. Do not mix a fact and a command in
+one sentence.
+
+Why: readers use a doc right before acting. A sentence they must re-read
+costs time and can cause the wrong action.
+
+Give each kind its own sentence. Write "`cache.py` reads `cache.toml`
+at startup" as the fact. Write "edit that file, then run `cache gc`" as
+the command.
+- **Write instructions with the same rules as facts.** Use the active
+  voice, write one idea per sentence, make every noun knowable, use simple
+  words.
+
+Write each section by these rules:
+
+- **Write each rule as a command.** Write "put X", "name X", "write X",
+  "do not X".
+- **Put the main point first.** Write the fact or the instruction in the
+  first sentence. Write the reasons after it.
+- **Name the heading after what the section gives the reader.** Do not use
+  "Overview", "Details", or "Misc": they do not say what the section holds.
+- **Write one idea per sentence.** Write each idea in its own sentence.
+- **Write in the active voice.** Write "`backup.py` writes `data.db`",
+  not "`data.db` is written by `backup.py`".
+- **Make every noun knowable.** Write each noun so the reader can tell,
+  with the context they already have, which thing it refers to. Name the
+  thing when the reader knows it. Define or describe it when they do not.
+  Link to the document that defines it when such a document exists. A name
+  alone is not enough when the reader cannot know what the name refers to.
+- **Define terms at first use.** Explain each term in plain words where it
+  first appears. Use one name for one thing throughout.
+- **Use concrete words.** Write "the `data.db` lock blocks the write",
+  not "write protection is enabled".
+- **Use the simplest word.** Write "start" not "initiate"; write "end" not
+  "terminate".
+- **Cut words that add no information.** Write "to" not "in order to";
+  write "now" not "at this point in time".
+- Keep sentences under 30 words.
+- Do not start a sentence with "There is" or "There are".
+- Do not use weasel words: enable, leverage, robust, seamless, transparent.
+- Define project-specific jargon in plain words at first use — house
+  terms such as finding, seam, stamp, directive, baseline, action, and
+  family included.
+
+Write each section so it gives the reader one of:
+- a command to run, or a file to edit or open
+- a rule ("Never X")
+- a value to set, or a name to use
+- an acceptance check
+- a link to a document that answers the question
+
+Canonical pairs:
+
+✗ "The service blocks writes."
+
+✓ "The `data.db` lock blocks writes at 23:00. To flush old entries, run
+`cache gc`."
+
+✗ "The scheduler checks the backups using the copy process."
+
+✓ "`backup.py copy` starts at 23:00. It copies the day's `data.db` to
+`backups/` and verifies the copy's size against the original."
 
 ## The documentation-quality checklist
 
@@ -154,4 +223,15 @@ fact and decision.
 - [ ] Commands replace descriptions where executable
 - [ ] Tables replace paragraphs where fields are consistent
 - [ ] Code shows a canonical ✗/✓ pair, not exhaustive cases
+- [ ] Facts and instructions are separate: facts describe the software, commands tell the reader what to do
+- [ ] Every rule is written as a command ("put", "name", "write", "do not")
+- [ ] Every noun's referent is knowable to the reader: name it, define or describe it, or link to its definition
+- [ ] The section's first sentence states the answer
+- [ ] The heading names what the section gives the reader
+- [ ] Each sentence says one thing, in the active voice
+- [ ] Every term is defined in plain words at first use
+- [ ] No sentence over 30 words
+- [ ] No sentence starts with "There is" or "There are"
+- [ ] No weasel words (enable, leverage, robust, seamless, transparent)
+- [ ] No history lessons: no account of what changed, who decided, or what failed before
 - [ ] Always-loaded files within the ~150–200 line ceiling
