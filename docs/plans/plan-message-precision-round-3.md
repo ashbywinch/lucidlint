@@ -60,9 +60,11 @@ Actions:
    magic message names both alternatives and never claims which
    applies: "Write it as a named constant where the computation uses
    it, and state what it means and why this size in the name or in one
-   comment beside it. If the value is a duration, express it as a
-   timedelta; if it is a physical quantity, express it as a pint
-   Quantity." The family is the reader's judgment.
+   comment beside it. If the value carries units, express it in a type
+   that understands them — Python's timedelta for durations, or a
+   Quantity from the pint units library for physical measures." The
+   principle is general; the two are glossed examples; the family is
+   the reader's judgment.
 2. Fixtures: the 60-division site renders the general text plus both
    mechanism sentences, never "is a duration"; the retry-cap site
    renders the same; no unit is named for either.
