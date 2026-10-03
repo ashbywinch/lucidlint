@@ -170,6 +170,44 @@ Actions:
 Acceptance: the clause renders with its count when drift exists and
 stays absent when every acknowledged key matches.
 
+## K. Round-9 acceptance (2026-10-02) — cleared and residual
+
+Cleared by the round-3 implementation (395 scanner + 240 pytest green,
+self-check at zero, coverage 86%): the collection message renders
+identically at attempt.py:424 and :626, and the round-9 reader quotes its
+alias line back ("an alias to dict names the problem, it does not solve
+it"); both mechanisms render with no family claim (bus.py:192 no longer
+"is a duration"); async loops emit nothing; the closure message carries
+no false accumulator claim; the process-class three-part test is in the
+message; duplicate-module pairs constant-free module forks (the
+http_error pair fires, as modules) while its constants clause renders
+only when they exist and match; and the baselined run exercised the
+stale clause live — 9 acknowledged, "86 acknowledged entries match no
+current finding — re-acknowledge with --update-baseline" — which the
+round-9 reader acted on exactly as intended.
+
+Residual:
+
+1. The two-line window is implemented as settled, and the round-9 reader
+   reports ~20 markers placed five or six lines above their findings that
+   no longer bind, with nothing explaining it. The rule is right (own
+   line or the line before); the repo's marker placement must move, or
+   the markers are documentation the tool does not read. No tool change
+   proposed until the user rules.
+2. The duplicate-module refinement (class pairs require matching
+   constants; modules pair on shape alone) cleared seven lookalike class
+   pairs in this repo; the http_error pair fires as a module pair. Two
+   class pairs remain possible on other repos; watch round 10.
+3. The houses config-ignore for global-state grew 37 to 333 sites,
+   against the repo's own "no blanket config ignores" decision; the
+   round-9 reader asks that the ignore be re-scoped and the rest report.
+4. The houses baseline needs re-anchoring (86 drifted keys); re-running
+   --update-baseline after reviewing the 9 live entries is the reader's
+   stated plan.
+5. 55 broad-except sites: the reader proposes one shared boundary-catch
+   helper in the repo so the per-site markers disappear; a repo change,
+   not a tool change.
+
 ## Order of work
 
 1. Phase 1, then Phase 6 — the consistency and completeness defects.

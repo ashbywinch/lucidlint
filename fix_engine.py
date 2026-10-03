@@ -136,8 +136,8 @@ class _ModuleProposal(NamedTuple):
 # lucidlint: ignore-file misplaced-method the repo helpers serve module-level callers too — moving them
 # lucidlint: ignore-file misplaced-method onto _FixRequest would strand half
 # lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
-# lucidlint: ignore-file record-shape a class per helper hop is ceremony
 # cohesive methods over the request state; the partition rule finds no
+# lucidlint: ignore-file record-shape a class per helper hop is ceremony
 # field-disjoint split, so the size is a review signal, not a split order
 @dataclass
 class _FixRequest:
@@ -4227,8 +4227,8 @@ class _NameCount(cst.CSTVisitor):
             self.n += 1
 
 
-# lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
 # the orchestrator
+# lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
 def _name_occurrences(repo: Path, name: str) -> int:
     """Name-node occurrences of `name` across the repo's .py files — the
     duplicate-def safety check: a delete is only offered when the shadowing
@@ -4543,8 +4543,8 @@ def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
     return moved
 
 
-# lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
 # the orchestrator
+# lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
 def _origin_after_move(module: cst.Module, move: set[str], opts, rel: str) -> list:
     """The origin's body after the split: the moved defs dropped, the
     re-export import inserted after the last import — every other file's
@@ -4613,8 +4613,8 @@ def _pure_forward_of(fn: cst.FunctionDef) -> tuple[_ForwardTarget | None, list[s
     return None, []
 
 
-# lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
 # the orchestrator
+# lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
 def _module_fn_node(module: cst.Module, name: str) -> cst.FunctionDef | None:
     for stmt in module.body:
         if isinstance(stmt, cst.FunctionDef) and stmt.name.value == name:
@@ -4664,8 +4664,8 @@ def _reexported(repo: Path, name: str) -> bool:
     return False
 
 
-# lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
 # the orchestrator
+# lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
 def _depends_on(repo: Path, rel: str, d_rel: str) -> bool:
     if rel == d_rel:
         return True

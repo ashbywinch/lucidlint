@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# lucidlint: ignore-file global-state module-level constants (excluded dirs, action kinds, thresholds, fix aliases)
 # are the gate's configuration tables — a config class is the eventual home, not this round
-# lucidlint: ignore-file complexity the orchestrator's git functions are single-pass protocol
+# lucidlint: ignore-file global-state module-level constants (excluded dirs, action kinds, thresholds, fix aliases)
 # walks — decisions are path branches, not branching logic
+# lucidlint: ignore-file complexity the orchestrator's git functions are single-pass protocol
 
 """lucidlint.py — the deterministic lucidlint gate: a thin orchestrator
 over the Rust scan core.
@@ -540,8 +540,8 @@ def _gitignored_docs(repo: Path) -> tuple[str, ...]:
                 capture_output=True,
                 text=True,
             )
-        except OSError as e:  # lucidlint: ignore swallow terminal boundary — gitless env, no caller to propagate to
             # no git binary — the referenced-absent-doc query degrades; the
+        except OSError as e:  # lucidlint: ignore swallow terminal boundary — gitless env, no caller to propagate to
             # walk's pygit2 answer still stands (gitless mode, review bot)
             log(f"git check-ignore unavailable ({e}) — referenced-absent docs stay visible")
         else:
@@ -988,8 +988,8 @@ def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
         # resolve BOTH sides: with --repo . (relative), a relative base makes
         # relative_to raise and the finding would be silently dropped
         rel = Path(file_val).resolve().relative_to(repo.resolve()).as_posix()
-    except (ValueError, OSError):  # lucidlint: ignore swallow an unmappable path means the finding
         # is for a file outside this scan set — drop it, not a failure to surface
+    except (ValueError, OSError):  # lucidlint: ignore swallow an unmappable path means the finding
         rel = ""
     return rel if rel in rels else None
 
@@ -1395,8 +1395,8 @@ def _render_file_group(
         elif marker:
             suppress = (
                 f" — suppress with: {a.signal}{fix_link} — a lucidlint: ignore comment binds "
-                "by its signal name on this finding's own line or within the 3 lines "
-                "ending at it; the why text may end mid-word at the line end and still bind"
+                "by its signal name on this finding's own line or on the line immediately "
+                "before it; the why text may end mid-word at the line end and still bind"
             )
         elif ck:
             suppress = (
@@ -1643,11 +1643,11 @@ class _LucidlintConfig:
 
 # lucidlint: ignore-file god-class the gate pipeline is ONE responsibility —
 # lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
-# lucidlint: ignore-file record-shape a class per helper hop is ceremony
 # the runner owns the repo scan end to end; the partition rule finds no
+# lucidlint: ignore-file record-shape a class per helper hop is ceremony
 # field-disjoint method groups, so the size is a review signal, not a split
-# lucidlint: ignore process-class _GateRunner is the CLI's one pipeline object — its state is real and the name is
 # the domain's
+# lucidlint: ignore process-class _GateRunner is the CLI's one pipeline object — its state is real and the name is
 class _GateRunner:
     """The repo-scan gate flow. The pipeline state (history, coverage,
     actions, baselines) lives on the runner instead of threading through

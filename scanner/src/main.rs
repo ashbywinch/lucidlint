@@ -122,10 +122,6 @@ struct ScanState<'a> {
     /// (P2) Literals exempted by a unit-stating name (assignment target or
     /// enclosing parameter).
     magic_unit_named_exempts: HashSet<usize>,
-    /// (P2/P3) Literals whose surroundings state a unit — offset -> the
-    /// unit-FAMILY rendering: timedelta for duration units, pint for
-    /// physical units. The suggestion never names a unit (P3).
-    magic_unit_surroundings: std::collections::HashMap<usize, checks::UnitContext>,
     /// Every referenced name (Name nodes + import aliases) in this file.
     refs: HashSet<String>,
     /// String literal values (prod files only).
@@ -823,18 +819,10 @@ impl<'a> ScanState<'a> {
         } else {
             format!(" in {fn_name}")
         };
-        // P2: surroundings state the unit — a trailing comment on the
-        // literal's own line (`a * 5  # 5 km/h`) or a same-statement name —
-        // so the message suggests the unit mechanism instead of a bare name.
-        // P3: the family split (timedelta vs pint) comes from the token
-        // classification, nothing more — the suggestion NEVER names a unit,
-        // so both forms say "in its unit"; tokens from both families (or no
-        // unit) fall back to the A5 generic text.
-        let message = match self.magic_unit_surroundings.get(&at) {
-            Some(checks::UnitContext::Duration) => format!("magic number {value}{in_fn} — {value} is a duration — express it as a timedelta in its unit, so the unit rides with the value. — fix: magic-number --fix-name <CONST>"),
-            Some(checks::UnitContext::Pint) => format!("magic number {value}{in_fn} — this is a quantity, not a bare number: express it as a pint Quantity in its unit so the unit rides with the value and conversions are checked; name it where the computation owns it. — fix: magic-number --fix-name <CONST>"),
-             Some(checks::UnitContext::Generic) | None => format!("magic number {value}{in_fn} — nothing states what it means or why this magnitude. Write it as a named constant where the computation uses it, and state what it means and why this size in the name or in one comment beside it. Collection-literal data tables (>= 3 same-kind numeric siblings) are exempt. — fix: magic-number --fix-name <CONST>"),
-         };
+        // P2: both mechanisms are named as glossed examples; the family is
+        // the reader's judgment, so the same message renders at every firing
+        // site and the suggestion NEVER names a unit or claims which applies.
+        let message = format!("magic number {value}{in_fn} — nothing states what it means or why this magnitude. Write it as a named constant where the computation uses it, and state what it means and why this size in the name or in one comment beside it. If the value carries units, express it in a type that understands them — Python's timedelta for durations, or a Quantity from the pint units library for physical measures. Collection-literal data tables (>= 3 same-kind numeric siblings) are exempt. — fix: magic-number --fix-name <CONST>");
         self.findings.push(Finding {
             seam_members: Vec::new(),
             file: self.file.to_string(),
@@ -1280,7 +1268,6 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         magic_const_rhs_exempts: checks::magic_const_rhs_offsets(&body),
         magic_len_guard_exempts: checks::magic_len_guard_offsets(&body),
         magic_unit_named_exempts: checks::magic_unit_named_offsets(&body),
-        magic_unit_surroundings: checks::magic_unit_surroundings_offsets(&body, source),
         is_test: is_test_path(name),
         ..Default::default()
     };
@@ -2529,133 +2516,46 @@ mod tests {
     }
 
     #[test]
-    fn magic_unit_comment_gets_pint_suggestion_plain_gets_a5() {
-        // P2/P3: a literal with a unit-stating trailing comment is a
-        // quantity, not a bare number — the message suggests a pint
-        // Quantity IN ITS UNIT, never naming a unit (no Quantity(5,
-        // 'kilometer')); a plain literal keeps the A5 text.
+    fn magic_number_message_names_both_mechanisms_and_never_the_family() {
+        // Phase 2: the Duration/Pint/Generic split is removed — the same
+        // message renders at every firing site, naming both mechanisms as
+        // glossed examples, never claiming which applies, and never naming a
+        // unit. The 60-division conversion factor and the retry cap render
+        // identical text; "is a duration" appears nowhere.
+        let general = "nothing states what it means or why this magnitude";
+        let mechanisms = "If the value carries units, express it in a type that understands them — Python's timedelta for durations, or a Quantity from the pint units library for physical measures";
+        for (fx, src) in [
+            (
+                "divisor-60",
+                include_str!("../../tests/fixtures/rust/magic_number_divisor_60_general__01.py"),
+            ),
+            (
+                "retry-cap",
+                include_str!("../../tests/fixtures/rust/magic_number_retry_cap_general__01.py"),
+            ),
+        ] {
+            let f = scan_src(src);
+            let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
+            assert_eq!(m.len(), 1, "{fx}: {f:?}");
+            assert!(m[0].message.contains(general), "{fx}: {}", m[0].message);
+            assert!(m[0].message.contains(mechanisms), "{fx}: {}", m[0].message);
+            assert!(!m[0].message.contains("is a duration"), "{fx}: {}", m[0].message);
+            assert!(!m[0].message.contains("Quantity("), "{fx}: {}", m[0].message);
+            assert!(!m[0].message.contains("timedelta("), "{fx}: {}", m[0].message);
+            assert!(m[0].message.contains("--fix-name <CONST>"), "{fx}: {}", m[0].message);
+        }
+        // a unit-stating trailing comment no longer selects a family — the
+        // same message, and no unit is named
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/magic_unit_pint_suggestion__01.py"
         ));
         let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
         assert_eq!(m.len(), 2, "{f:?}");
-        let pint = m.iter().find(|x| x.line == 2).expect("pint line fires");
-        assert!(
-            pint.message.contains("this is a quantity, not a bare number"),
-            "{}",
-            pint.message
-        );
-        assert!(
-            pint.message.contains("express it as a pint Quantity in its unit"),
-            "{}",
-            pint.message
-        );
-        assert!(!pint.message.contains("kilometer"), "{}", pint.message);
-        assert!(!pint.message.contains("Quantity("), "{}", pint.message);
-        assert!(pint.message.contains("--fix-name <CONST>"), "{}", pint.message);
-        let plain = m.iter().find(|x| x.line == 6).expect("plain line fires");
-        assert!(
-            plain
-                .message
-                .contains("nothing states what it means or why this magnitude"),
-            "{}",
-            plain.message
-        );
-        assert!(!plain.message.contains("quantity"), "{}", plain.message);
-    }
-
-    #[test]
-    fn magic_unit_ambiguous_context_gets_generic_pint_text() {
-        // P3: the family split (timedelta vs pint) is all the token
-        // classification decides — a comment naming minutes and seconds or
-        // a statement whose names carry two duration units is a DURATION;
-        // the suggestion is the timedelta "in its unit" form, and a
-        // single-token name context renders the SAME form — no unit is ever
-        // named.
-        let f = scan_src(include_str!(
-            "../../tests/fixtures/rust/magic_unit_pint_suggestion_ambiguous__01.py"
-        ));
-        let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
-        assert_eq!(m.len(), 3, "{f:?}");
-        let ambiguous: Vec<&&Finding> = m.iter().filter(|x| x.line == 2 || x.line == 6).collect();
-        assert_eq!(ambiguous.len(), 2, "{m:?}");
-        for x in &ambiguous {
-            assert!(x.message.contains("is a duration"), "{}", x.message);
-            assert!(
-                x.message.contains("express it as a timedelta in its unit"),
-                "{}",
-                x.message
-            );
-            assert!(!x.message.contains(", '"), "{}", x.message);
-            assert!(!x.message.contains("pint"), "{}", x.message);
-        }
-        let named = m.iter().find(|x| x.line == 12).expect("single-token name line fires");
-        assert!(
-            named.message.contains("express it as a timedelta in its unit"),
-            "{}",
-            named.message
-        );
-        assert!(!named.message.contains("timedelta("), "{}", named.message);
-    }
-
-    #[test]
-    fn magic_unit_duration_gets_timedelta_form() {
-        // P3: a duration unit in the literal's own context — express it as
-        // a timedelta in its unit, NEVER with a concrete unit
-        // (timedelta(days=5) appears in no emitted message), and never a
-        // pint Quantity.
-        let f = scan_src(include_str!(
-            "../../tests/fixtures/rust/magic_unit_duration_timedelta__01.py"
-        ));
-        let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
-        assert_eq!(m.len(), 1, "{f:?}");
-        assert!(m[0].message.contains("5 is a duration"), "{}", m[0].message);
-        assert!(
-            m[0].message.contains("express it as a timedelta in its unit"),
-            "{}",
-            m[0].message
-        );
-        assert!(!m[0].message.contains("timedelta("), "{}", m[0].message);
-        assert!(!m[0].message.contains("pint"), "{}", m[0].message);
-    }
-
-    #[test]
-    fn magic_unit_ambiguous_physical_gets_pint_in_its_unit() {
-        // H3: an ambiguous single physical unit (`m` alone) or several
-        // physical tokens keep the pint form WITHOUT a fabricated unit.
-        let f = scan_src(include_str!(
-            "../../tests/fixtures/rust/magic_unit_pint_ambiguous__01.py"
-        ));
-        let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
-        assert_eq!(m.len(), 2, "{f:?}");
         for x in &m {
-            assert!(
-                x.message.contains("express it as a pint Quantity in its unit"),
-                "{}",
-                x.message
-            );
-            assert!(!x.message.contains(", '"), "{}", x.message);
+            assert!(x.message.contains(general), "{}", x.message);
+            assert!(x.message.contains(mechanisms), "{}", x.message);
+            assert!(!x.message.contains("kilometer"), "{}", x.message);
         }
-    }
-
-    #[test]
-    fn magic_unit_mixed_families_fall_back_to_the_generic_text() {
-        // H3: tokens from BOTH unit families (a duration + a physical
-        // unit) cannot claim one mechanism — the generic A5 text applies,
-        // with neither timedelta nor pint asserted.
-        let f = scan_src(include_str!(
-            "../../tests/fixtures/rust/magic_unit_mixed_families_gets_generic__01.py"
-        ));
-        let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
-        assert_eq!(m.len(), 1, "{f:?}");
-        assert!(
-            m[0].message
-                .contains("nothing states what it means or why this magnitude"),
-            "{}",
-            m[0].message
-        );
-        assert!(!m[0].message.contains("timedelta"), "{}", m[0].message);
-        assert!(!m[0].message.contains("pint"), "{}", m[0].message);
     }
 
     #[test]
@@ -3268,6 +3168,23 @@ mod tests {
         ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "closures").collect();
         assert_eq!(r.len(), 1, "{f:?}");
+    }
+
+    #[test]
+    fn closures_collaborator_write_drops_the_accumulator_claim() {
+        // Phase 7a: a mutating call on an attribute of a captured local
+        // (`prop.payers.push`) still makes the closures finding fire — the
+        // object is shared state — but the LOCAL is not being accumulated, so
+        // the message states only that the closures close over the enclosing
+        // locals and makes no accumulator claim.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/closures_collaborator_write_no_accumulator__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "closures").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("closing over its state"), "{}", r[0].message);
+        assert!(!r[0].message.contains("accumulator"), "{}", r[0].message);
+        assert!(!r[0].message.contains("captured local"), "{}", r[0].message);
     }
 
     // ------------------------------------ misplaced-method / tuple-record / assembly
@@ -4180,15 +4097,17 @@ mod tests {
         assert!(!f.iter().any(|x| x.kind == "delegating-husk"), "{f:?}");
     }
     #[test]
-    fn process_class_fires_with_honesty_test_message() {
+    fn process_class_fires_with_the_three_part_test_message() {
         let f = scan_src(include_str!("../../tests/fixtures/rust/process_class_fires__01.py"));
         let hits: Vec<_> = f.iter().filter(|x| x.kind == "process-class").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         for part in [
-            "(1) the domain itself names it",
-            "(2) its state is its own",
-            "(3) no existing type",
-            "(4) it is not one owner",
+            "is named for a process, not a thing",
+            "Keep the name only when all three hold",
+            "1) the domain calls this component by that name",
+            "2) the data it operates on is all already represented by well-designed classes",
+            "3) data and logic still remain that legitimately fit better in a process class",
+            "represent it with classes first, then re-check 2 and 3",
         ] {
             assert!(hits[0].message.contains(part), "missing {part}: {}", hits[0].message);
         }
@@ -5007,6 +4926,44 @@ mod tests {
         assert!(!f.iter().any(|x| x.kind == "duplicate-module"), "{f:?}");
     }
 
+    #[test]
+    fn duplicate_module_fires_without_constants_and_claims_none() {
+        // Phase 6: the constants leave the gate — two near-identical modules
+        // with NO module-level constants are still a fork, and the message
+        // makes no constants claim when there are none.
+        let f = scan_corpus(&[
+            (
+                "dag_error.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_http_error_pair__01.py"),
+            ),
+            (
+                "houses_error.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_http_error_pair__02.py"),
+            ),
+        ]);
+        let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-module").collect();
+        assert_eq!(d.len(), 1, "{f:?}");
+        assert!(!d[0].message.contains("identical constants"), "{}", d[0].message);
+        assert!(d[0].message.contains("— a fork:"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn duplicate_module_below_the_similarity_bar_stays_silent() {
+        // Phase 6: Dice >= 0.9 alone decides — a pair of similar-length
+        // classes with different structure stays silent.
+        let f = scan_corpus(&[
+            (
+                "alpha.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_below_threshold__01.py"),
+            ),
+            (
+                "beta.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_below_threshold__02.py"),
+            ),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "duplicate-module"), "{f:?}");
+    }
+
     // ------------------------------------------------- unused
     #[test]
     fn message_wording_states_the_real_fix_and_the_exemption() {
@@ -5332,13 +5289,17 @@ mod tests {
 
     #[test]
     fn suppression_peels_innermost_first() {
-        // markers stack directly above the target line; each marker comment
-        // exempts ONE anchor, inner-first (schema-3 col). One marker peels
-        // only the innermost record; two peel inner then outer.
+        // Phase 4: the window is the finding's own line and the line before.
+        // Stacked markers reach only the line-before marker, so one marker
+        // peels the innermost record (highest col) and the outer remains.
         let src_two =
             "def deep(user):\n    # lucidlint: ignore record-shape outer seam\n    # lucidlint: ignore record-shape inner seam\n    return {\"a\": {\"x\": user, \"y\": user}, \"b\": 1}\n";
         let two = scan_src(src_two);
-        assert!(!two.iter().any(|x| x.kind == "record-shape"), "{two:?}");
+        assert_eq!(
+            two.iter().filter(|x| x.kind == "record-shape").count(),
+            1,
+            "only the line-before marker binds; the outer record remains: {two:?}"
+        );
 
         let src_one =
             "def deep(user):\n    # lucidlint: ignore record-shape inner seam\n    return {\"a\": {\"x\": user, \"y\": user}, \"b\": 1}\n";
@@ -5431,7 +5392,7 @@ mod tests {
         assert!(
             rs[0]
                 .message
-                .contains("Make a class for the collection, named with a domain noun, and pass that"),
+                .contains("Make a class for the collection, named with a domain noun — an alias to dict names the problem, it does not solve it"),
             "{}",
             rs[0].message
         );
@@ -5456,7 +5417,7 @@ mod tests {
         assert!(
             rs[0]
                 .message
-                .contains("Make a class for the collection, named with a domain noun, and pass that"),
+                .contains("Make a class for the collection, named with a domain noun — an alias to dict names the problem, it does not solve it"),
             "{}",
             rs[0].message
         );
@@ -5500,12 +5461,63 @@ mod tests {
         for x in &rs {
             assert!(
                 x.message
-                    .contains("Make a class for the collection, named with a domain noun, and pass that"),
+                    .contains("Make a class for the collection, named with a domain noun — an alias to dict names the problem, it does not solve it"),
                 "{}",
                 x.message
             );
             assert!(!x.message.contains("fixed-shape record"), "{}", x.message);
         }
+    }
+
+    #[test]
+    fn record_optional_and_aliased_named_type_maps_render_the_collection_message() {
+        // Phase 1: the union wrapper (`dict[str, Provenance] | None`) and the
+        // raw-dict alias (`Sources = dict[str, Provenance]`) both resolve to
+        // the same map — the collection message renders in every arm, and the
+        // alias names the problem rather than exempting it.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_optional_named_type_map__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(
+            rs[0].message.contains("sources is a map whose values are Provenance"),
+            "{}",
+            rs[0].message
+        );
+        assert!(
+            rs[0]
+                .message
+                .contains("an alias to dict names the problem, it does not solve it"),
+            "{}",
+            rs[0].message
+        );
+        assert!(!rs[0].message.contains("fixed-shape record"), "{}", rs[0].message);
+
+        let a = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_raw_dict_alias_does_not_exempt__01.py"
+        ));
+        let ars: Vec<&Finding> = a.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(ars.len(), 1, "{a:?}");
+        assert!(
+            ars[0].message.contains("sources is a map whose values are Provenance"),
+            "{}",
+            ars[0].message
+        );
+        assert!(
+            ars[0]
+                .message
+                .contains("an alias to dict names the problem, it does not solve it"),
+            "{}",
+            ars[0].message
+        );
+        assert!(
+            ars[0]
+                .message
+                .contains("Move the operations that take, build, or read this map onto the class as methods"),
+            "{}",
+            ars[0].message
+        );
     }
 
     #[test]
@@ -5558,25 +5570,24 @@ mod tests {
     }
 
     #[test]
-    fn record_signature_def_above_marker_binds_every_parameter() {
-        // P2: the codebase puts the suppression one line above the def — on
-        // a MULTI-LINE signature the parameter-anchored findings sit 3+
-        // lines below the def, out of the plain 3-line window. The binder
-        // extends a signature finding's window to [param-2..param] ∪
-        // [def-1..def], so ONE def-above marker covers all four params.
+    fn record_def_above_marker_binds_every_parameter() {
+        // Phase 4: the binding window is the finding's own line and the line
+        // before. A single-line def anchors every parameter finding at the def
+        // line, so ONE marker one line above the def binds all four params —
+        // the def site is one decision.
         let f = scan_src(include_str!(
-            "../../tests/fixtures/rust/record_def_above_marker_binds_multiline_signature__01.py"
+            "../../tests/fixtures/rust/record_def_above_marker_binds_def_site__01.py"
         ));
         assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
         assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
     }
 
     #[test]
-    fn record_signature_def_line_marker_binds_every_parameter() {
-        // P2: the marker on the def line itself is part of the extended
-        // window too — the signature's whole def site is one decision.
+    fn record_def_line_marker_binds_every_parameter() {
+        // Phase 4: a marker ON the def line (a trailing comment) is the
+        // finding's own line — it binds every parameter anchored there.
         let f = scan_src(include_str!(
-            "../../tests/fixtures/rust/record_def_line_marker_binds_multiline_signature__01.py"
+            "../../tests/fixtures/rust/record_def_line_marker_binds_def_site__01.py"
         ));
         assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
         assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
@@ -5584,10 +5595,10 @@ mod tests {
 
     #[test]
     fn record_signature_gap_marker_does_not_bind_and_is_not_stale() {
-        // P2: a marker at def+2 with no finding on its own line is beyond
-        // every parameter window AND the def-above pair — the finding still
-        // fires, the marker stays as documentation, and no stale verdict is
-        // emitted (the family still fires).
+        // Phase 4: a marker at def+2 with no finding on its own line or the
+        // line before is beyond the two-line window — the finding still fires,
+        // the marker stays as documentation, and no stale verdict is emitted
+        // (the family still fires).
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/record_signature_gap_marker_does_not_bind__01.py"
         ));
@@ -5647,12 +5658,12 @@ mod tests {
     }
 
     #[test]
-    fn record_suppression_two_lines_above_def_binds_the_whole_site() {
-        // G3 delta_vs_home_node shape: the marker one line above the def
-        // binds the def-anchored return finding AND the record literal one
-        // line below it — one marker covers the whole to_dict site.
+    fn record_suppression_one_line_above_def_binds_the_def_site() {
+        // Phase 4: the marker on the line before the def binds the
+        // def-anchored return finding — the window is the finding's own line
+        // and the line before it.
         let f = scan_src(include_str!(
-            "../../tests/fixtures/rust/record_suppression_two_lines_above_def_binds__01.py"
+            "../../tests/fixtures/rust/record_suppression_one_line_above_def_binds__01.py"
         ));
         assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
         assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
@@ -5683,9 +5694,10 @@ mod tests {
 
     #[test]
     fn suppression_far_above_def_does_not_bind_and_is_not_stale() {
-        // G3 guard: a marker 3+ lines above the def is beyond the 3-line
-        // window — the finding fires, the marker stays as documentation,
-        // and no stale verdict is emitted (api_router's 9-line gap).
+        // Phase 4 guard: a marker 3+ lines above the def is beyond the
+        // two-line window — the finding fires, the marker stays as
+        // documentation, and no stale verdict is emitted (api_router's
+        // 9-line gap).
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/record_suppression_far_above_does_not_bind__01.py"
         ));
@@ -5708,29 +5720,24 @@ mod tests {
     }
 
     #[test]
-    fn complexity_suppression_three_lines_above_not_stale() {
-        // B7: a decorator line may intervene between the suppression comment
-        // and the def. With a 3-line window the comment directly above the
-        // decorator still suppresses the cc finding, and the used suppression
-        // is not flagged stale (the cc retain records the SAME window).
+    fn complexity_marker_binding_follows_the_two_line_window() {
+        // Phase 4: the window is the finding's own line and the line before.
+        // The cc retain uses the same window, so a marker on the line before
+        // the def is consumed (not stale); a marker two lines above (a
+        // decorator intervenes) binds nothing, and since the findings stream
+        // carries no complexity finding it is reported stale.
         let mut body = String::new();
         for i in 0..16 {
-            body.push_str(&format!("    if c{i}:\n        x{i} = {i}\n"));
+            body.push_str(&format!("    if a{i}:\n        x{i} = {i}\n"));
         }
-        let src = format!(
-            "# lucidlint: ignore complexity calibrated\n@deco\ndef f({c0}, {c1}, {c2}, {c3}, {c4}, {c5}, {c6}, {c7}, {c8}, {c9}, {c10}, {c11}, {c12}, {c13}, {c14}, {c15}):\n{body}    return 0\n",
-            c0 = "a", c1 = "b", c2 = "c", c3 = "d", c4 = "e", c5 = "f", c6 = "g", c7 = "h",
-            c8 = "i", c9 = "j", c10 = "k", c11 = "l", c12 = "m", c13 = "n", c14 = "o", c15 = "p",
-        );
-        let f = scan_src(&src);
-        assert!(
-            !f.iter().any(|x| x.kind == "complexity"),
-            "the windowed suppression must hold"
-        );
-        assert!(
-            !f.iter().any(|x| x.kind == "stale-suppression"),
-            "a used suppression is not stale"
-        );
+        let params = "a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15";
+        let bound = format!("# lucidlint: ignore complexity calibrated\ndef f({params}):\n{body}    return 0\n");
+        let b = scan_src(&bound);
+        assert!(!b.iter().any(|x| x.kind == "stale-suppression"), "{b:?}");
+
+        let out = format!("# lucidlint: ignore complexity calibrated\n@deco\ndef f({params}):\n{body}    return 0\n");
+        let o = scan_src(&out);
+        assert!(o.iter().any(|x| x.kind == "stale-suppression"), "{o:?}");
     }
 
     #[test]
@@ -5902,6 +5909,20 @@ mod tests {
         assert!(f.iter().any(|x| x.kind == "loop-pipeline"));
         let ok = scan_src(include_str!("../../tests/fixtures/rust/loop_pipeline_detected__02.py"));
         assert!(!ok.iter().any(|x| x.kind == "loop-pipeline"));
+    }
+
+    #[test]
+    fn loop_pipeline_skips_async_functions() {
+        // Phase 3: an async function's loops carry no loop-pipeline finding —
+        // the recipe's comprehension cannot prove the awaits belong inside an
+        // async comprehension. The sync pure-build shape still fires.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_pipeline_async_emits_nothing__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "loop-pipeline"), "{f:?}");
+        let sync =
+            scan_src("def collect(xs):\n    out = []\n    for x in xs:\n        out.append(x)\n    return out\n");
+        assert!(sync.iter().any(|x| x.kind == "loop-pipeline"), "{sync:?}");
     }
 
     #[test]

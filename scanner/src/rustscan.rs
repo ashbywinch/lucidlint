@@ -189,15 +189,8 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         spent: &mut supps_spent,
     };
 
-    scan.findings = common::apply_suppressions_impl(
-        scan.findings,
-        source,
-        &comments,
-        name,
-        "//",
-        &mut books,
-        &magic_exempt_labels,
-    );
+    scan.findings =
+        common::apply_suppressions_impl(scan.findings, &comments, name, "//", &mut books, &magic_exempt_labels);
     scan
 }
 

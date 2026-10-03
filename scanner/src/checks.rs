@@ -1,6 +1,6 @@
 // lucidlint: ignore-file complexity the parity-locked AST walkers are single dispatch tables —
-// lucidlint: ignore-file boolean-arg Rust has no named arguments — the traversal's
 // positional in_call_func flag is the API contract, not an unnamed boolean
+// lucidlint: ignore-file boolean-arg Rust has no named arguments — the traversal's
 // match-arm count is table size, not branching; keep NEW functions under cc 15
 
 //! The remaining standard-family checks, mirroring the Python implementation
@@ -9,8 +9,8 @@
 
 // lucidlint: ignore-file closures the unit-name walker and wire-classifier probes are one-purpose local visits
 // lucidlint: ignore-file long-param-list the annotation and exemption tables thread the scan shapes and their evidence flags — grouping them adds a hop for the shared tables
-// lucidlint: ignore-file large-function the walkers and grammar tables are ONE exhaustive dispatch/
 // decision table each — splitting them scatters a single mapping, covered by the file why
+// lucidlint: ignore-file large-function the walkers and grammar tables are ONE exhaustive dispatch/
 use rayon::prelude::*;
 use ruff_python_ast::token::{TokenKind, Tokens};
 use ruff_python_ast::{
@@ -135,7 +135,6 @@ pub fn apply_suppressions_impl(
 ) -> Vec<Finding> {
     crate::common::apply_suppressions_impl(
         findings,
-        source,
         &comment_lines(source, tokens),
         file,
         "#",
@@ -978,8 +977,12 @@ pub fn annotation_base_name(e: &Expr) -> Option<String> {
 }
 
 /// Closures: >= 2 inner functions/lambdas with cc >= 15, span >= 60, OR
-/// shared-state mutation (the accumulator pattern — closures that WRITE to
-/// the enclosing function's locals are a class in disguise even when small).
+/// shared-state mutation (closures that WRITE to the enclosing function's
+/// locals are a class in disguise even when small). The mutation gate counts
+/// a write reached through a captured object's attribute (`writer.lines.append`);
+/// the message's accumulator claim renders only when a closure writes the
+/// captured local itself (`L.append`), so the message never calls a
+/// collaborator an accumulator.
 pub fn closure_findings(state: &mut ScanState, stmt: &Stmt, cc: u32, span: u32) {
     let Stmt::FunctionDef(f) = stmt else { return };
     let inner = inner_function_count(stmt);
@@ -991,13 +994,17 @@ pub fn closure_findings(state: &mut ScanState, stmt: &Stmt, cc: u32, span: u32) 
         return;
     }
     let line = stmt_line(state.source, stmt);
-    let why = if mutated.is_empty() {
+    // the claim is about the captured LOCAL, not an object it holds: a
+    // method call on `prop.attr` is a collaborator being used, not an
+    // accumulator being filled.
+    let assigned = captured_state_writes(f, false);
+    let why = if assigned.is_empty() {
         String::new()
     } else {
         format!(
             " — its closures write to {} captured local{} (the accumulator pattern)",
-            mutated.len(),
-            if mutated.len() == 1 { "" } else { "s" }
+            assigned.len(),
+            if assigned.len() == 1 { "" } else { "s" }
         )
     };
     state.findings.push(Finding {
@@ -1046,6 +1053,15 @@ const MUTATING_METHODS: &[&str] = &[
 /// functions are scanned — a deeper nesting is judged by its own
 /// `closure_findings` run when its enclosing function is scanned.
 pub fn closures_mutate_shared_state(f: &StmtFunctionDef) -> Vec<String> {
+    captured_state_writes(f, true)
+}
+
+/// The distinct enclosing-scope locals the direct inner functions write.
+/// `through_attributes` counts a mutating call on an attribute reached from
+/// the local (`writer.lines.append`) as a write to `writer` — the
+/// collaborator shape, used for the mutation GATE. Without it only the local
+/// itself counts (`L.append`), which is the message's accumulator claim.
+fn captured_state_writes(f: &StmtFunctionDef, through_attributes: bool) -> Vec<String> {
     let (inners, outer_bound) = scope_fns_and_bindings(&f.body);
     let mut params = HashSet::new();
     function_param_names(&f.parameters, &mut params);
@@ -1062,7 +1078,7 @@ pub fn closures_mutate_shared_state(f: &StmtFunctionDef) -> Vec<String> {
             .map(|s| s.as_str())
             .collect();
         for name in &candidates {
-            if !seen.contains(*name) && scope_mutates(&inner.body, &HashSet::from([*name])) {
+            if !seen.contains(*name) && scope_mutates(&inner.body, &HashSet::from([*name]), through_attributes) {
                 seen.insert(name.to_string());
                 mutated.push(name.to_string());
             }
@@ -1073,13 +1089,13 @@ pub fn closures_mutate_shared_state(f: &StmtFunctionDef) -> Vec<String> {
 
 /// Does any statement in *body* (control-flow descend, not nested def/class
 /// scopes) WRITE to one of *candidates*?
-fn scope_mutates(body: &[Stmt], candidates: &HashSet<&str>) -> bool {
+fn scope_mutates(body: &[Stmt], candidates: &HashSet<&str>, through_attributes: bool) -> bool {
     let mut stack: Vec<&Stmt> = Vec::new();
     for s in body {
         stack.push(s);
     }
     while let Some(s) = stack.pop() {
-        if stmt_writes(s, candidates) {
+        if stmt_writes(s, candidates, through_attributes) {
             return true;
         }
         if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
@@ -1090,28 +1106,38 @@ fn scope_mutates(body: &[Stmt], candidates: &HashSet<&str>) -> bool {
     false
 }
 
-fn stmt_writes(s: &Stmt, candidates: &HashSet<&str>) -> bool {
+fn stmt_writes(s: &Stmt, candidates: &HashSet<&str>, through_attributes: bool) -> bool {
     match s {
         Stmt::Assign(a) => a.targets.iter().any(|t| store_target_writes(t, candidates)),
         Stmt::AnnAssign(a) => store_target_writes(&a.target, candidates),
         Stmt::AugAssign(a) => store_target_writes(&a.target, candidates),
         Stmt::Delete(d) => d.targets.iter().any(|t| store_target_writes(t, candidates)),
         Stmt::Nonlocal(n) => n.names.iter().any(|id| candidates.contains(id.as_str())),
-        Stmt::Expr(e) => expr_writes(&e.value, candidates),
-        Stmt::Return(r) => r.value.as_ref().is_some_and(|v| expr_writes(v, candidates)),
-        Stmt::If(i) => expr_writes(&i.test, candidates),
-        Stmt::While(w) => expr_writes(&w.test, candidates),
-        Stmt::For(f) => expr_writes(&f.iter, candidates) || expr_writes(&f.target, candidates),
+        Stmt::Expr(e) => expr_writes(&e.value, candidates, through_attributes),
+        Stmt::Return(r) => r
+            .value
+            .as_ref()
+            .is_some_and(|v| expr_writes(v, candidates, through_attributes)),
+        Stmt::If(i) => expr_writes(&i.test, candidates, through_attributes),
+        Stmt::While(w) => expr_writes(&w.test, candidates, through_attributes),
+        Stmt::For(f) => {
+            expr_writes(&f.iter, candidates, through_attributes)
+                || expr_writes(&f.target, candidates, through_attributes)
+        }
         Stmt::With(w) => w.items.iter().any(|item| {
-            expr_writes(&item.context_expr, candidates)
-                || item.optional_vars.as_ref().is_some_and(|v| expr_writes(v, candidates))
+            expr_writes(&item.context_expr, candidates, through_attributes)
+                || item
+                    .optional_vars
+                    .as_ref()
+                    .is_some_and(|v| expr_writes(v, candidates, through_attributes))
         }),
         Stmt::Try(t) => t.handlers.iter().any(|h| match h {
-            ruff_python_ast::ExceptHandler::ExceptHandler(eh) => {
-                eh.type_.as_ref().is_some_and(|t| expr_writes(t, candidates))
-            }
+            ruff_python_ast::ExceptHandler::ExceptHandler(eh) => eh
+                .type_
+                .as_ref()
+                .is_some_and(|t| expr_writes(t, candidates, through_attributes)),
         }),
-        Stmt::Assert(a) => expr_writes(&a.test, candidates),
+        Stmt::Assert(a) => expr_writes(&a.test, candidates, through_attributes),
         _ => false,
     }
 }
@@ -1142,7 +1168,10 @@ fn store_target_writes(t: &Expr, candidates: &HashSet<&str>) -> bool {
 
 /// Does *e* WRITE to a candidate: a mutating method call on it, or a write
 /// nested anywhere inside (call args, subscripts, comprehensions, lambdas).
-fn expr_writes(e: &Expr, candidates: &HashSet<&str>) -> bool {
+/// `through_attributes` peels a receiver chain to its base name
+/// (`writer.lines.append` writes `writer`); without it only a receiver that
+/// IS the candidate name counts.
+fn expr_writes(e: &Expr, candidates: &HashSet<&str>, through_attributes: bool) -> bool {
     // the unified traversal descends every child; this closure only decides
     // whether a CALL mutates a captured candidate (the receiver check)
     let mut found = false;
@@ -1152,14 +1181,11 @@ fn expr_writes(e: &Expr, candidates: &HashSet<&str>) -> bool {
         }
         if let Expr::Call(c) = x {
             if let Expr::Attribute(a) = c.func.as_ref() {
-                // receiver mutation: L.append(...) or writer.lines.append(...)
-                // — peel attribute chains to the base name before the
-                // candidates check
                 if MUTATING_METHODS.contains(&a.attr.as_str()) {
                     let mut receiver = a.value.as_ref();
                     loop {
                         match receiver {
-                            Expr::Attribute(inner) => receiver = inner.value.as_ref(),
+                            Expr::Attribute(inner) if through_attributes => receiver = inner.value.as_ref(),
                             Expr::Name(n) => {
                                 if candidates.contains(n.id.as_str()) {
                                     found = true;
@@ -3140,8 +3166,9 @@ pub const GOF_CLASS_WORDS: &[&str] = &[
     "Visitor", "Iterator", "Command", "Factory", "Strategy", "Proxy", "Adapter",
 ];
 
-/// A top-level class named by a process noun — the work belongs on the
-/// domain objects it operates on (#28); the four-part honesty test decides.
+/// A top-level class named by a process noun — keep the name only when the
+/// three-part test clears it; the GoF pattern names are the domain's own and
+/// stay exempt.
 pub fn process_class_findings(state: &mut ScanState, body: &[Stmt]) {
     for s in body {
         let Stmt::ClassDef(cls) = s else { continue };
@@ -3162,13 +3189,7 @@ pub fn process_class_findings(state: &mut ScanState, body: &[Stmt]) {
             kind: "process-class".into(),
             severity: "fail".into(),
             message: format!(
-                "class {name} is a process (-er/-or name), not a thing: the work belongs on the domain objects it \
-                 operates on. A process class is the best idea only when ALL hold — (1) the domain itself names it \
-                 (the parser, the scheduler); (2) its state is its own and substantial, no actual noun can carry \
-                 it; (3) no existing type already carries this work (extend or fold, never mint a twin); (4) it is \
-                 not one owner's private device — a single consumer with no own state means the operations belong \
-                 to the domain abstraction that owns their work, not to a class of their own. Mostly one fails: \
-                 fold, rename, or delete."
+                "class {name} is named for a process, not a thing. Keep the name only when all three hold: 1) the domain calls this component by that name; 2) the data it operates on is all already represented by well-designed classes; 3) data and logic still remain that legitimately fit better in a process class. If the data it operates on is still raw dicts, lists, or loose fields, represent it with classes first, then re-check 2 and 3."
             ),
         });
     }
@@ -4260,29 +4281,6 @@ pub const UNIT_TOKENS: &[&str] = &[
     "kmh", "kg", "watt",
 ];
 
-///(P3) The unit-family rendering for a unit-visible magic literal. Duration
-/// units (second/minute/hour/day/week) render as a timedelta; physical units
-/// render as a pint Quantity. The suggestion NEVER names a unit — no unit
-/// source is certain (comments rot, and name-derived tokens misfire), so
-/// both forms say "in its unit" and the family split comes from the token
-/// classification; nothing more. Tokens from BOTH families (or none) fall
-/// back to the A5 generic text. No plausibility heuristics anywhere.
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub enum UnitContext {
-    /// One or more duration tokens — a timedelta suggestion ("in its unit").
-    Duration,
-    /// One or more physical tokens — a pint Quantity suggestion ("in its unit").
-    Pint,
-    /// No usable unit context — the generic A5 text.
-    Generic,
-}
-
-///(P3) Is this unit token a duration (timedelta-expressible)? `min`/`sec`
-/// are aliases of minute/second and count as durations.
-pub fn is_duration_token(tok: &'static str) -> bool {
-    matches!(tok, "min" | "minute" | "sec" | "second" | "hour" | "day" | "week")
-}
-
 /// The word components of an identifier — snake_case separators and
 /// camelCase humps (`max_distance_km` -> [max, distance, km];
 /// `maxDistanceKm` -> the same). Whole-word matching avoids the substring
@@ -4339,45 +4337,6 @@ pub fn unit_token_of_name(name: &str) -> Option<&'static str> {
 /// target or parameter such as `max_walk_km`, `distance_m`.
 pub fn name_states_unit(name: &str) -> bool {
     unit_token_of_name(name).is_some()
-}
-
-/// The DISTINCT unit tokens a comment states — whole identifier-ish words
-/// only (`5 km/h` -> [km]; `minutes and seconds` -> [minute, second]; an
-/// `m` inside a word never counts).
-fn unit_tokens_of_comment(text: &str) -> Vec<&'static str> {
-    let mut words: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    for c in text.chars() {
-        if c.is_alphanumeric() || c == '_' {
-            cur.push(c.to_ascii_lowercase());
-        } else if !cur.is_empty() {
-            words.push(std::mem::take(&mut cur));
-        }
-    }
-    if !cur.is_empty() {
-        words.push(cur);
-    }
-    let mut out: Vec<&'static str> = Vec::new();
-    for tok in UNIT_TOKENS {
-        for w in &words {
-            if (w == *tok || (w.len() == tok.len() + 1 && w.starts_with(tok) && w.ends_with('s'))) && !out.contains(tok)
-            {
-                out.push(tok);
-            }
-        }
-    }
-    out
-}
-
-/// The unit tokens a literal's line carries as a TRAILING comment (a '#'
-/// after the literal on the same line) — `a * 5  # 5 km/h` -> [km].
-fn line_trailing_unit_tokens(source: &str, off: usize) -> Vec<&'static str> {
-    let line_end = source[off..].find('\n').map(|i| off + i).unwrap_or(source.len());
-    let rest = &source[off..line_end];
-    match rest.find('#') {
-        Some(hash) => unit_tokens_of_comment(&rest[hash + 1..]),
-        None => Vec::new(),
-    }
 }
 
 /// (P2) Magic-number literal offsets exempted by a unit-stating NAME: the
@@ -4460,71 +4419,6 @@ pub fn magic_unit_named_offsets(body: &[Stmt]) -> HashSet<usize> {
     let empty: HashSet<String> = HashSet::new();
     let mut out = HashSet::new();
     walk(body, &empty, &mut out);
-    out
-}
-
-/// (P2/H3) Magic-number literal offsets whose SURROUNDINGS state a unit
-/// without naming the value: a trailing comment on the literal's own line
-/// (`a * 5  # 5 km/h`) or a name in the literal's same statement
-/// (`if distance_km > 30`). The literal still fires — with the unit-family
-/// message instead of the A5 text. Maps offset -> the unit-family rendering
-/// (P3): the family (timedelta for duration tokens, pint for physical
-/// tokens) is all the classification decides — the suggestion never names a
-/// unit; tokens from both families (or none) fall back to the A5 generic.
-pub fn magic_unit_surroundings_offsets(body: &[Stmt], source: &str) -> std::collections::HashMap<usize, UnitContext> {
-    let mut out = std::collections::HashMap::new();
-    let mut sq: Vec<&Stmt> = body.iter().collect();
-    while let Some(s) = sq.pop() {
-        let mut name_tokens: Vec<&'static str> = Vec::new();
-        let mut literals: Vec<usize> = Vec::new();
-        for e in stmt_exprs(s) {
-            walk_expr_deep(e, false, &mut |x, _| match x {
-                Expr::Name(n) => {
-                    for tok in unit_tokens_of_name(n.id.as_str()) {
-                        if !name_tokens.contains(&tok) {
-                            name_tokens.push(tok);
-                        }
-                    }
-                }
-                Expr::NumberLiteral(n) => literals.push(n.range().start().to_usize()),
-                _ => {}
-            });
-        }
-        for off in &literals {
-            // the literal's own context: its statement's names + its line's
-            // trailing comment — the DISTINCT tokens across both decide the
-            // family; the suggestion never names a unit, so single-token,
-            // multi-token, and ambiguous contexts all render the family's
-            // "in its unit" form (P3).
-            let mut tokens = name_tokens.clone();
-            for tok in line_trailing_unit_tokens(source, *off) {
-                if !tokens.contains(&tok) {
-                    tokens.push(tok);
-                }
-            }
-            if tokens.is_empty() {
-                continue;
-            }
-            // family: all tokens duration -> timedelta, all physical -> pint;
-            // tokens from both families (or none) fall back to the A5 generic.
-            let ctx = if tokens.iter().all(|t| is_duration_token(t)) {
-                UnitContext::Duration
-            } else if tokens.iter().all(|t| !is_duration_token(t)) {
-                UnitContext::Pint
-            } else {
-                UnitContext::Generic
-            };
-            out.insert(*off, ctx);
-        }
-        match s {
-            Stmt::FunctionDef(f) => {
-                for b in &f.body {
-                    sq.push(b);
-                }
-            }
-            _ => push_stmt_children(s, &mut sq),
-        }
-    }
     out
 }
 
@@ -5200,12 +5094,18 @@ impl<'a, 'b> LoopFunctionCtx<'a, 'b> {
 
 /// The per-function pass: the pipeline shape for loops at any depth.
 /// `module_bindings` maps every module-level name to its first binding
-/// line — the "bound before the function" exclusion (P6).
+/// line — the "bound before the function" exclusion (P6). An async
+/// function's loops emit nothing: the comprehension's awaits belong inside
+/// an async comprehension, which is a different, rarer rewrite the recipe
+/// does not prove.
 fn loop_function_findings(
     state: &mut ScanState,
     f: &StmtFunctionDef,
     module_bindings: &std::collections::HashMap<String, usize>,
 ) {
+    if f.is_async {
+        return;
+    }
     let fn_name = f.name.to_string();
     let mut param_names = Vec::new();
     for p in f
@@ -6511,7 +6411,7 @@ pub fn collect_skeleton_modules(state: &mut ScanState, body: &[Stmt], rel: &str)
         .iter()
         .filter(|s| !matches!(s, Stmt::Import(_) | Stmt::ImportFrom(_)))
         .count();
-    let module_qualifies = non_import >= 2 && module_skel.len() >= 12 && !module_consts.is_empty();
+    let module_qualifies = non_import >= 2 && module_skel.len() >= 12;
     if module_qualifies {
         state.skeleton_modules.push(SkeletonModule {
             rel: rel.to_string(),
@@ -6603,7 +6503,7 @@ pub fn duplicate_module_findings(entities: &[SkeletonModule]) -> Vec<Finding> {
     let compatible = |a: &SkeletonModule, b: &SkeletonModule| {
         a.entity == b.entity || a.entity == "module-class" || b.entity == "module-class"
     };
-    let results: Vec<Option<Finding>> = (0..entities.len())
+    let results: Vec<Option<(Finding, String, String, bool)>> = (0..entities.len())
         .into_par_iter()
         .map(|i| {
             let e = &entities[i];
@@ -6620,7 +6520,15 @@ pub fn duplicate_module_findings(entities: &[SkeletonModule]) -> Vec<Finding> {
                     if !compatible(e, earlier) {
                         continue;
                     }
-                    if e.consts != earlier.consts || e.consts.is_empty() {
+                    // two classes pair on matching constants as well as on
+                    // shape: small classes are alike by nature, so the config
+                    // evidence carries the fork claim there. Modules pair on
+                    // the structural measure alone — a whole file's shape is
+                    // evidence enough, and constant-free module forks exist.
+                    if e.entity == "class"
+                        && earlier.entity == "class"
+                        && (e.consts.is_empty() || e.consts != earlier.consts)
+                    {
                         continue;
                     }
                     let sim = dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j));
@@ -6666,8 +6574,13 @@ pub fn duplicate_module_findings(entities: &[SkeletonModule]) -> Vec<Finding> {
                     b = later.name,
                 )
             } else {
+                let consts_clause = if !earlier.consts.is_empty() && earlier.consts == later.consts {
+                    format!(" with identical constants {{{}}}", later.consts.join(", "))
+                } else {
+                    String::new()
+                };
                 format!(
-                    "{what} '{}' ({}:{}) and '{}' ({}:{}) are {:.0}% similar with identical constants {{{}}} — a fork: a fix lands in one copy while the other silently keeps the old behavior{}. Reconcile the copies into one.",
+                    "{what} '{}' ({}:{}) and '{}' ({}:{}) are {:.0}% similar{} — a fork: a fix lands in one copy while the other silently keeps the old behavior{}. Reconcile the copies into one.",
                     earlier.name,
                     earlier.rel,
                     earlier.line,
@@ -6675,23 +6588,40 @@ pub fn duplicate_module_findings(entities: &[SkeletonModule]) -> Vec<Finding> {
                     later.rel,
                     later.line,
                     sim * 100.0,
-                    later.consts.join(", "),
+                    consts_clause,
                     members_text,
                 )
             };
-            Some(Finding {
-                seam_members: Vec::new(),
-                col: 0,
-                file: later.rel.clone(),
-                line: later.line,
-                function: later.name.clone(),
-                kind: "duplicate-module".into(),
-                severity: "fail".into(),
-                message,
-            })
+            Some((
+                Finding {
+                    seam_members: Vec::new(),
+                    col: 0,
+                    file: later.rel.clone(),
+                    line: later.line,
+                    function: later.name.clone(),
+                    kind: "duplicate-module".into(),
+                    severity: "fail".into(),
+                    message,
+                },
+                earlier.rel.clone(),
+                later.rel.clone(),
+                later.entity == "class",
+            ))
         })
         .collect();
-    for f in results.into_iter().flatten() {
+    // one finding per file pair, at the most specific level: when a class
+    // pair and its enclosing module pair report the same two files, the
+    // class finding wins — it names the classes and their relationship.
+    let class_pairs: std::collections::HashSet<(String, String)> = results
+        .iter()
+        .flatten()
+        .filter(|(_, _, _, is_class)| *is_class)
+        .map(|(_, a, b, _)| (a.clone(), b.clone()))
+        .collect();
+    for (f, a, b, is_class) in results.into_iter().flatten() {
+        if !is_class && class_pairs.contains(&(a, b)) {
+            continue;
+        }
         out.push(f);
     }
     out
@@ -6937,6 +6867,11 @@ fn ann_value_is_class_like(e: &Expr) -> bool {
 /// resolution, never capitalization.
 struct TypeBindings {
     names: std::collections::HashSet<String>,
+    /// (P1) Module-level raw-dict aliases: `Sources = dict[str, Provenance]`
+    /// (or `Sources: TypeAlias = ...`). An alias names the shape but carries
+    /// no behavior, so it must not exempt the collection finding — the
+    /// annotation resolves through it to the dict it names.
+    aliases: std::collections::HashMap<String, Expr>,
 }
 
 /// (P1) The fixed typing/builtin constructor names — a name ANY module may
@@ -6997,9 +6932,29 @@ const KNOWN_TYPE_CONSTRUCTORS: &[&str] = &[
 /// (P1) Build the binding table from the module's own AST: every ClassDef
 /// name, every Import/ImportFrom alias (the AS name, else the imported
 /// name — `import decimal` binds `decimal`, `import x.y as z` binds `z`),
-/// plus the fixed constructor set.
+/// plus the fixed constructor set. Module-level type aliases
+/// (`Sources = dict[str, Provenance]`) are recorded separately so an
+/// annotation names the shape it aliases.
 fn module_type_bindings(body: &[Stmt]) -> TypeBindings {
     let mut names: std::collections::HashSet<String> = KNOWN_TYPE_CONSTRUCTORS.iter().map(|s| s.to_string()).collect();
+    let mut aliases: std::collections::HashMap<String, Expr> = std::collections::HashMap::new();
+    for s in body {
+        match s {
+            Stmt::Assign(a) if a.targets.len() == 1 => {
+                if let (Expr::Name(n), true) = (&a.targets[0], type_alias_value(&a.value)) {
+                    aliases.insert(n.id.to_string(), (*a.value).clone());
+                }
+            }
+            Stmt::AnnAssign(a) => {
+                if let (Expr::Name(n), Some(v)) = (a.target.as_ref(), a.value.as_deref()) {
+                    if type_alias_value(v) {
+                        aliases.insert(n.id.to_string(), v.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     let mut sq: Vec<&Stmt> = body.iter().collect();
     while let Some(s) = sq.pop() {
         match s {
@@ -7030,14 +6985,45 @@ fn module_type_bindings(body: &[Stmt]) -> TypeBindings {
         }
         push_stmt_children(s, &mut sq);
     }
-    TypeBindings { names }
+    TypeBindings { names, aliases }
+}
+
+/// (P1) Is this assignment value a type expression (a raw-dict alias such as
+/// `dict[str, Provenance]`), not a runtime value? Subscripts, names,
+/// attributes, and unions qualify; literals and calls do not.
+fn type_alias_value(e: &Expr) -> bool {
+    match e {
+        Expr::Subscript(_) | Expr::Name(_) | Expr::Attribute(_) => true,
+        Expr::BinOp(b) => matches!(b.op, Operator::BitOr),
+        _ => false,
+    }
+}
+
+/// (P1) Resolve an annotation through the module's raw-dict aliases:
+/// `Sources = dict[str, Provenance]` makes `sources: Sources` the same
+/// shape as `sources: dict[str, Provenance]`. One name that is not an
+/// alias (or a cycle, bounded) ends the walk.
+fn resolve_alias<'a>(e: &'a Expr, bindings: &'a TypeBindings) -> &'a Expr {
+    let mut cur = e;
+    for _ in 0..8 {
+        match cur {
+            Expr::Name(n) => match bindings.aliases.get(n.id.as_str()) {
+                Some(target) => cur = target,
+                None => return cur,
+            },
+            _ => return cur,
+        }
+    }
+    cur
 }
 
 /// (P1) Is this annotation-name a named type? First-class rule: the name
-/// resolves through the module's binding table. The capitalization check is
-/// the retained H1 fallback so an unbound capitalized name keeps its
-/// existing behavior — resolution is the criterion for NEW classifications.
+/// resolves through the module's binding table (or is a raw-dict alias,
+/// which resolves to the dict it names). The capitalization check is the
+/// retained H1 fallback so an unbound capitalized name keeps its existing
+/// behavior — resolution is the criterion for NEW classifications.
 fn ann_value_is_named_type(e: &Expr, bindings: &TypeBindings) -> bool {
+    let e = resolve_alias(e, bindings);
     match e {
         Expr::Name(n) => bindings.names.contains(n.id.as_str()) || ann_value_is_class_like(e),
         Expr::Attribute(a) => bindings.names.contains(a.attr.as_str()) || ann_value_is_class_like(e),
@@ -7051,15 +7037,30 @@ fn ann_value_is_named_type(e: &Expr, bindings: &TypeBindings) -> bool {
 /// OR keeps the H1 class-like fallback for unbound capitalized names; typed
 /// scalars excepted (G1). The collection is the unnamed shape, so the
 /// finding names the map — never the value, which the annotation already
-/// names. A union value, a nested collection, or a non-dict annotation
-/// returns None (those keep the ad-hoc/union texts).
+/// names. A union over the annotation (`dict[str, Provenance] | None`) is
+/// resolved to its single dict member, so the same shape renders the same
+/// message in every arm; a union value, a nested collection, or a non-dict
+/// annotation returns None (those keep the ad-hoc/union texts).
 fn map_value_class(a: &Expr, bindings: &TypeBindings) -> Option<String> {
+    let a = resolve_alias(a, bindings);
     let mut wrapped = Vec::new();
     ann_unwrap(a, &mut wrapped);
-    if wrapped.len() != 1 {
-        return None;
+    let mut found: Vec<String> = Vec::new();
+    for part in &wrapped {
+        if let Some(record) = map_value_class_one(part, bindings) {
+            found.push(record);
+        }
     }
-    let Expr::Subscript(s) = wrapped[0] else {
+    if found.len() == 1 {
+        Some(found.remove(0))
+    } else {
+        None // no dict member (not a map) or several (ambiguous)
+    }
+}
+
+/// (P1) One annotation member's value class: `dict[str, SomeClass]` only.
+fn map_value_class_one(e: &Expr, bindings: &TypeBindings) -> Option<String> {
+    let Expr::Subscript(s) = e else {
         return None;
     };
     if ann_base_name(&s.value).as_deref() != Some("dict") {
@@ -7079,7 +7080,7 @@ fn map_value_class(a: &Expr, bindings: &TypeBindings) -> Option<String> {
     if val_parts.len() != 1 {
         return None;
     }
-    let val = val_parts[0];
+    let val = resolve_alias(val_parts[0], bindings);
     // grab-bag markers are not classes — dict[str, Any] keeps the ad-hoc text
     if matches!(ann_name_of(val).as_deref(), Some("Any" | "object")) {
         return None;
@@ -7133,11 +7134,14 @@ fn is_variadic_tuple(e: &Expr) -> bool {
 }
 
 /// `_annotation_is_record`: record-shaped bare collection in a signature.
-fn annotation_is_record(e: &Expr) -> bool {
+/// Raw-dict aliases resolve first, so `sources: Sources` is the record its
+/// alias names.
+fn annotation_is_record(e: &Expr, bindings: &TypeBindings) -> bool {
+    let e = resolve_alias(e, bindings);
     let mut wrapped = Vec::new();
     ann_unwrap(e, &mut wrapped);
     if wrapped.len() != 1 {
-        return wrapped.iter().any(|p| annotation_is_record(p));
+        return wrapped.iter().any(|p| annotation_is_record(p, bindings));
     }
     let node = wrapped[0];
     if let Expr::Name(n) = node {
@@ -7160,7 +7164,7 @@ fn annotation_is_record(e: &Expr) -> bool {
                 if val_parts.len() > 1 {
                     // a union value: a record or shapeless member makes it a
                     // record; an all-scalar union (`str | None`) is a lookup
-                    return val_parts.iter().any(|p| annotation_is_record(p))
+                    return val_parts.iter().any(|p| annotation_is_record(p, bindings))
                         || val_parts
                             .iter()
                             .any(|p| matches!(ann_name_of(p).as_deref(), Some("Any" | "object")))
@@ -7199,7 +7203,7 @@ fn annotation_is_record(e: &Expr) -> bool {
             let mut parts = Vec::new();
             ann_unwrap(s.slice.as_ref(), &mut parts);
             if parts.len() != 1 {
-                return parts.iter().any(|p| annotation_is_record(p));
+                return parts.iter().any(|p| annotation_is_record(p, bindings));
             }
             let value = parts[0];
             if matches!(value, Expr::Subscript(_)) {
@@ -7438,6 +7442,7 @@ fn module_has_from_dict_class(body: &[Stmt]) -> bool {
                 return true;
             }
         }
+
         match s {
             Stmt::FunctionDef(f) => sq.extend(&f.body),
             _ => push_stmt_children(s, &mut sq),
@@ -7445,6 +7450,10 @@ fn module_has_from_dict_class(body: &[Stmt]) -> bool {
     }
     false
 }
+
+/// The collection message's shared continuation: the map is the unnamed
+/// shape; the alias answer and the member-function move are the action.
+const COLLECTION_MESSAGE_TAIL: &str = "The map itself has no name and no role: call sites pass a bare dict, and nothing says what the collection means. Make a class for the collection, named with a domain noun — an alias to dict names the problem, it does not solve it. Move the operations that take, build, or read this map onto the class as methods, splitting them where the class does not own all the work; which operations belong there is the judgement call.";
 
 /// The record-shape family: signature findings + record dict literals,
 /// walking the module in ast.walk BFS order (nested functions included).
@@ -7508,7 +7517,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                 if !(wire && module_has_ingestion) {
                     for (arg, ann, param_line) in params {
                         if let Some(a) = ann {
-                            if !annotation_is_record(a) {
+                            if !annotation_is_record(a, &bindings) {
                                 continue;
                             }
                             // G2: a union-typed parameter whose record member
@@ -7524,7 +7533,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                                 // the message names the MAP, never the value
                                 // (the annotation already names the value's
                                 // class).
-                                format!("{arg} is a map whose values are {record}. The map itself has no name and no role: call sites pass a bare dict, and nothing says what the collection means. Make a class for the collection, named with a domain noun, and pass that.")
+                                format!("{arg} is a map whose values are {record}. {COLLECTION_MESSAGE_TAIL}")
                             } else {
                                 format!("{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists.")
                             };
@@ -7541,7 +7550,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                         }
                     }
                     if let Some(r) = &f.returns {
-                        if annotation_is_record(r.as_ref()) {
+                        if annotation_is_record(r.as_ref(), &bindings) {
                             // H2: a return finding anchors at the return
                             // annotation's position; the def line only when
                             // that cannot be resolved.
@@ -7560,7 +7569,10 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                                 // named type renders the collection message —
                                 // the map is the unnamed shape, exactly as in
                                 // the parameter arm.
-                                format!("{fname} returns a map whose values are {record}. The map itself has no name and no role: call sites pass a bare dict, and nothing says what the collection means. Make a class for the collection, named with a domain noun, and pass that.", fname = f.name.as_str())
+                                format!(
+                                    "{fname} returns a map whose values are {record}. {COLLECTION_MESSAGE_TAIL}",
+                                    fname = f.name.as_str()
+                                )
                             } else {
                                 format!("{fname} returns a dict that holds the fields of a record; the shape has no name at the call site. Type the return with the class that models the shape; create that class if none exists.", fname = f.name.as_str())
                             };
@@ -7626,7 +7638,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
         // constant-keys record text.
         let message = match &h.record {
             Some(record) => format!(
-                "This dict is a map whose values are {record}. The map itself has no name and no role: call sites pass a bare dict, and nothing says what the collection means. Make a class for the collection, named with a domain noun, and pass that."
+                "This dict is a map whose values are {record}. {COLLECTION_MESSAGE_TAIL}"
             ),
             None => format!(
                 "This dict has constant keys ({keys}); the keys are fields of one record. Each build site re-creates the keys, so the copies can drift apart. Make a class with these fields and build it once. If the values select behavior (handlers, nodes), keep the dict as a lookup table. — fix: extract-record-class --name <Record>"

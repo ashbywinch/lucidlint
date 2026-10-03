@@ -1,5 +1,5 @@
-// lucidlint: ignore-file long-param-list the suppression pass threads the scan shapes and the
 // evidence flags (findings, comments, file, marker, books, numeric-literal probe) —
+// lucidlint: ignore-file long-param-list the suppression pass threads the scan shapes and the
 // an options struct would add a hop for the two callers
 //! The language-neutral core of the scan: logic that is IDENTICAL for every
 //! language layer, parameterized only by what the language layers extract.
@@ -246,8 +246,8 @@ pub struct Suppressions {
     pub file: HashMap<String, String>,
 }
 
-/// Parse `lucidlint: ignore <signal> <why>` / `ignore-file` comments.
 /// `comments` are (line, full comment text incl. the marker) — each language
+/// Parse `lucidlint: ignore <signal> <why>` / `ignore-file` comments.
 /// layer extracts them its own way (ruff tokens for Python, a string-aware
 /// scan for Rust); the parse and the matching are shared. A marker binds by
 /// its signal name alone: the why may truncate at line end (a repo marker
@@ -309,100 +309,15 @@ pub fn signal_matches(sig: &str, finding_kind: &str) -> bool {
     sig == finding_kind || alias_variants(sig).contains(&finding_kind)
 }
 
-/// How far above a finding a suppression comment may sit. A suppression sits
-/// "directly above" its code, but a decorator line (`@final`) or a stacked
-/// comment/blank line intervenes — a fixed line/line-1 window breaks that
-/// (RUST-CORE B7). A 3-line window clears one intervening line while staying
-/// "adjacent" — far enough that a deliberate comment is never orphaned, close
-/// enough that it cannot drift onto an unrelated statement.
-const SUPPRESSION_WINDOW: usize = 3;
+/// How far above a finding a suppression comment may sit: the finding's own
+/// line and the line immediately before it. A marker two lines above (a
+/// decorator line intervening, say) binds nothing — and, because the signal
+/// still fires somewhere, it is documentation rather than stale.
+const SUPPRESSION_WINDOW: usize = 2;
 
 /// The `SUPPRESSION_WINDOW` lines ending at `line` (descending), never below 1.
 pub fn window_lines(line: usize) -> impl Iterator<Item = usize> {
     (line.max(SUPPRESSION_WINDOW) + 1 - SUPPRESSION_WINDOW..=line).rev()
-}
-
-// (P2) ————————————————— signature-window extension
-
-/// (P2) The nearest preceding line whose STRIPPED text opens a def (`def `
-/// or `async def `) — the signature's anchor. The search is bounded: a
-/// finding in a signature lies at most a signature-span below the def, so
-/// a def further up cannot be the enclosing signature.
-fn def_line_before(source: &str, line: usize) -> Option<usize> {
-    let lines: Vec<&str> = source.lines().collect();
-    let mut l = line.saturating_sub(1); // 0-based scan start
-    let bound = l.saturating_sub(40);
-    while l > bound {
-        l -= 1;
-        let t = lines.get(l).copied().unwrap_or("").trim_start();
-        if t.starts_with("def ") || t.starts_with("async def ") {
-            return Some(l + 1);
-        }
-    }
-    None
-}
-
-/// (P2) Does the line's CODE (trailing comment stripped) end with `:`?
-fn code_ends_with_colon(t: &str) -> bool {
-    let code = match t.find('#') {
-        Some(i) => &t[..i],
-        None => t,
-    };
-    code.trim_end().ends_with(':')
-}
-
-/// (P2) The line where a def's signature closes: the first line at or after
-/// `def_line` where the paren depth (opened by `def name(`) returns to 0 on
-/// a line whose code ends with `:`. A single-line def closes on its own
-/// line. None when no closing colon appears within the bound — then the
-/// finding cannot be proven to sit in a signature.
-fn closing_colon_line(source: &str, def_line: usize) -> Option<usize> {
-    let lines: Vec<&str> = source.lines().collect();
-    let mut depth: i32 = 0;
-    let max = (def_line + 40).min(lines.len());
-    for l in def_line..=max {
-        let t = lines.get(l - 1).copied().unwrap_or("");
-        depth += t.chars().filter(|&c| c == '(').count() as i32;
-        depth -= t.chars().filter(|&c| c == ')').count() as i32;
-        if depth <= 0 && code_ends_with_colon(t) {
-            return Some(l);
-        }
-    }
-    None
-}
-
-/// (P2) The def line anchoring a signature finding, if any: the finding
-/// must lie between the nearest preceding def and its closing-colon line
-/// (a parameter annotation line or the return-annotation/colon line).
-/// Body findings sit after the colon and get no extension. Returns the
-/// def line once — the window builder needs it and the membership test
-/// would otherwise compute the upward scan twice per finding.
-fn signature_def_line(source: &str, line: usize) -> Option<usize> {
-    let def = def_line_before(source, line)?;
-    match closing_colon_line(source, def) {
-        Some(col) if line >= def && line <= col => Some(def),
-        None if line == def => Some(def),
-        _ => None,
-    }
-}
-
-/// (P2) A signature finding's binding window: the parameter-anchored
-/// 3-line window UNION the def-above pair [def-1..def] — the codebase puts
-/// the suppression one line above the def, so a multi-line signature's
-/// parameter-anchored findings must not strand that marker outside the
-/// window. Descending order keeps the parameter-adjacent marker priority
-/// (a marker on the finding's own line wins). Non-signature findings keep
-/// the plain window.
-fn finding_window_lines(source: &str, line: usize) -> Vec<usize> {
-    let mut out: Vec<usize> = window_lines(line).collect();
-    if let Some(def) = signature_def_line(source, line) {
-        for l in (def.saturating_sub(1)..=def).rev() {
-            if l >= 1 && !out.contains(&l) {
-                out.push(l);
-            }
-        }
-    }
-    out
 }
 
 /// A finding is exempt when an explained file suppression covers it.
@@ -525,18 +440,12 @@ fn common_group_line_indices(findings: &[crate::Finding]) -> Vec<Vec<usize>> {
 
 /// Marker inventory for one line-group: every explained marker line whose
 /// signal matches any member, one pair per line. A pair another line-group
-/// consumed is NOT filtered here — a marker two lines above a def binds the
-/// def-anchored finding AND the literal one line below it (G3): one marker
-/// covers the whole def site, recorded spent once (set semantics). The
-/// window is the extended signature window (P2) for def-anchored findings.
-fn marker_inventory(
-    members: &[usize],
-    findings: &[crate::Finding],
-    supps: &Suppressions,
-    source: &str,
-) -> Vec<(usize, String)> {
+/// consumed is NOT filtered here — one marker covers every member of the
+/// site it sits on (own line or the line before), recorded spent once (set
+/// semantics). The window is the shared two-line rule.
+fn marker_inventory(members: &[usize], findings: &[crate::Finding], supps: &Suppressions) -> Vec<(usize, String)> {
     let mut pairs: Vec<(usize, String)> = Vec::new();
-    for ln in finding_window_lines(source, findings[members[0]].line) {
+    for ln in window_lines(findings[members[0]].line) {
         if let Some(entries) = supps.line.get(&ln) {
             for (sig, why) in entries {
                 if why.is_empty() || pairs.iter().any(|(pl, _)| *pl == ln) {
@@ -553,7 +462,6 @@ fn marker_inventory(
 
 struct LineMarkerCtx<'a> {
     supps: &'a Suppressions,
-    source: &'a str,
     used_line: &'a mut std::collections::HashSet<(usize, String)>,
     taken: &'a mut std::collections::HashSet<(usize, String)>,
     spent: &'a mut std::collections::HashSet<(usize, String)>,
@@ -569,7 +477,7 @@ struct LineMarkerCtx<'a> {
 impl<'a> LineMarkerCtx<'a> {
     /// Bind one line-group's members to its markers inner-first.
     fn peel(&mut self, members: &[usize], findings: &[crate::Finding]) -> Vec<bool> {
-        let pairs = marker_inventory(members, findings, self.supps, self.source);
+        let pairs = marker_inventory(members, findings, self.supps);
         let mut ok = vec![false; members.len()];
         // members sort by col DESC (inner-first) while the inventory sorts
         // by line DESC — group members by col so one marker serves one
@@ -622,7 +530,6 @@ fn signal_line_index(findings: &[crate::Finding]) -> std::collections::HashMap<S
 /// were gone or claiming exemptions that do not apply.
 pub fn apply_suppressions_impl(
     findings: Vec<crate::Finding>,
-    source: &str,
     comments: &[(usize, String)],
     file: &str,
     marker: &str,
@@ -674,7 +581,6 @@ pub fn apply_suppressions_impl(
     for members in common_group_line_indices(&findings) {
         let mut ctx = LineMarkerCtx {
             supps: &supps,
-            source,
             used_line: &mut used_line,
             taken: &mut taken,
             spent: books.spent,
@@ -941,15 +847,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(
-            vec![finding("closures", 2)],
-            "",
-            &comments,
-            "x.rs",
-            "//",
-            &mut books,
-            &[],
-        );
+        let fs = apply_suppressions_impl(vec![finding("closures", 2)], &comments, "x.rs", "//", &mut books, &[]);
         assert!(!fs.iter().any(|f| f.kind == "closures"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -963,7 +861,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(vec![], "", &comments, "x.rs", "//", &mut books, &[]);
+        let fs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books, &[]);
         assert!(fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
     #[test]
@@ -977,7 +875,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let rs = apply_suppressions_impl(vec![], "", &comments, "x.rs", "//", &mut books, &[]);
+        let rs = apply_suppressions_impl(vec![], &comments, "x.rs", "//", &mut books, &[]);
         let msg = rs
             .iter()
             .find(|f| f.kind == "stale-suppression")
@@ -989,7 +887,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let py = apply_suppressions_impl(vec![], "", &comments, "x.py", "#", &mut books, &[]);
+        let py = apply_suppressions_impl(vec![], &comments, "x.py", "#", &mut books, &[]);
         let msg = py
             .iter()
             .find(|f| f.kind == "stale-suppression")
@@ -1009,7 +907,6 @@ mod tests {
         let mut spent = std::collections::HashSet::new();
         let gone = apply_suppressions_impl(
             vec![],
-            "",
             &[(1, "// lucidlint: ignore magic-number gone".to_string())],
             "x.py",
             "#",
@@ -1039,7 +936,6 @@ mod tests {
         let mut spent = std::collections::HashSet::new();
         let bare = apply_suppressions_impl(
             vec![],
-            "",
             &[(1, "// lucidlint: ignore magic-number gone".to_string())],
             "x.py",
             "#",
@@ -1064,7 +960,6 @@ mod tests {
         let mut spent = std::collections::HashSet::new();
         let misplaced = apply_suppressions_impl(
             vec![finding("magic-number", 3)],
-            "",
             &[(5, "// lucidlint: ignore magic-number threshold".to_string())],
             "x.py",
             "#",
@@ -1084,7 +979,6 @@ mod tests {
         let mut spent = std::collections::HashSet::new();
         let covered = apply_suppressions_impl(
             vec![finding("magic-number", 3)],
-            "",
             &[
                 (2, "// lucidlint: ignore magic-number first".to_string()),
                 (3, "// lucidlint: ignore magic-number second".to_string()),
@@ -1102,14 +996,13 @@ mod tests {
 
     #[test]
     fn stale_marker_one_line_past_window_stays_documentation() {
-        // The fires-nowhere distinction, per signal: a marker one line past
-        // the window over a family firing below (rightmove_url:57 — marker
-        // at 3, window of line 6 is 4..=6) gets no verdict and no advice;
-        // the SAME marker would be stale if the family fired nowhere at all.
+        // The fires-nowhere distinction, per signal: a marker past the
+        // two-line window over a family firing below (marker at 3, window of
+        // line 6 is 5..=6) gets no verdict and no advice; the SAME marker
+        // would be stale if the family fired nowhere at all.
         let mut spent = std::collections::HashSet::new();
         let near = apply_suppressions_impl(
             vec![finding("magic-number", 6), finding("magic-number", 9)],
-            "",
             &[(3, "// lucidlint: ignore magic-number threshold".to_string())],
             "x.py",
             "#",
@@ -1125,7 +1018,6 @@ mod tests {
         let mut spent = std::collections::HashSet::new();
         let far = apply_suppressions_impl(
             vec![],
-            "",
             &[(3, "// lucidlint: ignore magic-number threshold".to_string())],
             "x.py",
             "#",
@@ -1154,7 +1046,6 @@ mod tests {
         let mut spent = std::collections::HashSet::new();
         let index_only = apply_suppressions_impl(
             vec![],
-            "",
             &[(1, "// lucidlint: ignore magic-number gone".to_string())],
             "x.py",
             "#",
@@ -1180,7 +1071,6 @@ mod tests {
         let mut spent = std::collections::HashSet::new();
         let none = apply_suppressions_impl(
             vec![],
-            "",
             &[(1, "// lucidlint: ignore magic-number gone".to_string())],
             "x.py",
             "#",
@@ -1211,15 +1101,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(
-            vec![finding("partition", 9)],
-            "",
-            &comments,
-            "x.rs",
-            "//",
-            &mut books,
-            &[],
-        );
+        let fs = apply_suppressions_impl(vec![finding("partition", 9)], &comments, "x.rs", "//", &mut books, &[]);
         assert!(!fs.iter().any(|f| f.kind == "partition"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -1237,15 +1119,7 @@ mod tests {
             pre_used: &PreUsedSuppressions::default(),
             spent: &mut std::collections::HashSet::new(),
         };
-        let fs = apply_suppressions_impl(
-            vec![finding("strewing", 2)],
-            "",
-            &comments,
-            "x.py",
-            "#",
-            &mut books,
-            &[],
-        );
+        let fs = apply_suppressions_impl(vec![finding("strewing", 2)], &comments, "x.py", "#", &mut books, &[]);
         assert!(!fs.iter().any(|f| f.kind == "strewing"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
@@ -1272,7 +1146,6 @@ mod tests {
         };
         let fs = apply_suppressions_impl(
             vec![deep_magic, finding("middle-man", 2)],
-            "",
             &comments,
             "x.py",
             "#",
@@ -1287,10 +1160,11 @@ mod tests {
     }
 
     #[test]
-    fn decorator_line_does_not_break_suppression_window() {
-        // B7: a comment two lines above the finding (a decorator line
-        // intervenes) still suppresses — the window is 3 lines, not
-        // line/line-1.
+    fn marker_two_lines_above_does_not_bind_and_is_not_stale() {
+        // Phase 4: a comment two lines above the finding (a decorator line
+        // intervenes) binds nothing — the window is the finding's own line
+        // and the line before. The family still fires, so the marker is
+        // documentation, never stale.
         let comments = vec![(1, "// lucidlint: ignore magic-number the gate threshold".to_string())];
         let mut books = SuppressionBooks {
             pre_used: &PreUsedSuppressions::default(),
@@ -1298,21 +1172,20 @@ mod tests {
         };
         let fs = apply_suppressions_impl(
             vec![finding("magic-number", 3)],
-            "",
             &comments,
             "x.rs",
             "//",
             &mut books,
             &[],
         );
-        assert!(!fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
+        assert!(fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
         assert!(!fs.iter().any(|f| f.kind == "stale-suppression"), "{:?}", fs);
     }
 
     #[test]
     fn window_is_bounded_far_comment_does_not_suppress() {
-        // B7 guard: the window stays adjacent — a comment 4+ lines above is
-        // NOT a suppression of the finding.
+        // Phase 4 guard: the window stays adjacent — a comment 3+ lines above
+        // is NOT a suppression of the finding.
         let comments = vec![(1, "// lucidlint: ignore magic-number far away".to_string())];
         let mut books = SuppressionBooks {
             pre_used: &PreUsedSuppressions::default(),
@@ -1320,7 +1193,6 @@ mod tests {
         };
         let fs = apply_suppressions_impl(
             vec![finding("magic-number", 5)],
-            "",
             &comments,
             "x.rs",
             "//",

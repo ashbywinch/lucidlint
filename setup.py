@@ -11,8 +11,8 @@ The binary is platform-specific, so the wheel is forced to a platform tag
 wheel would otherwise get.
 """
 # lucidlint: ignore-file global-state setup.py is single-purpose packaging glue — its constants are the wheel metadata
-# lucidlint: ignore-file class-module the wheel's build commands are packaging glue, not a class file — the
 # filename is the wheel, not any one command class
+# lucidlint: ignore-file class-module the wheel's build commands are packaging glue, not a class file — the
 
 import os
 import shutil
@@ -56,6 +56,6 @@ class BuildPy(build_py):
         super().run()
 
 
-# lucidlint: ignore record-shape cmdclass is setuptools' plugin wire —
 # a name->class registry, not a domain record
+# lucidlint: ignore record-shape cmdclass is setuptools' plugin wire —
 setup(cmdclass={"build_py": BuildPy, "bdist_wheel": PlatformWheel})

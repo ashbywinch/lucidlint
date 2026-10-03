@@ -1,9 +1,9 @@
-# lucidlint: ignore-file positional-literals the catalog rows are one uniform schema — kind, severity,
 # group, languages, description in registration order; keyword-izing 60 rows would bury the data
-# lucidlint: ignore-file global-state the catalog rows, group tables and fix registry ARE the
+# lucidlint: ignore-file positional-literals the catalog rows are one uniform schema — kind, severity,
 # registry's data — a config class is the eventual home, not this round
-# lucidlint: ignore-file class-module this module BY DESIGN is the catalog of rules and fixes —
+# lucidlint: ignore-file global-state the catalog rows, group tables and fix registry ARE the
 # the classes are the data and the file-system name index does not fit a registry module
+# lucidlint: ignore-file class-module this module BY DESIGN is the catalog of rules and fixes —
 """Canonical rule metadata — the ONE registration point for every finding
 family.
 
