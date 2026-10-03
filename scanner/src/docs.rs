@@ -122,16 +122,14 @@ fn check_target(
         return; // intentionally private — not a broken link
     }
     if !abs.exists() {
-        out.push(Finding {
-            seam_members: Vec::new(),
-            file: rel.to_string(),
-            line: 0,
-            col: 0,
-            function: String::new(),
-            kind: "docs-link".into(),
-            severity: "fail".into(),
-            message: format!("{what} '{target}' from {rel} does not resolve — a link that leads nowhere misleads the reader. Fix the target or remove the link."),
-        });
+        out.push(Finding { logical_start: None, seam_members: Vec::new(),
+        file: rel.to_string(),
+        line: 0,
+        col: 0,
+        function: String::new(),
+        kind: "docs-link".into(),
+        severity: "fail".into(),
+        message: format!("{what} '{target}' from {rel} does not resolve — a link that leads nowhere misleads the reader. Fix the target or remove the link."), });
     }
 }
 
@@ -312,6 +310,7 @@ fn docs_reachability(repo: &Path, gitignored: &HashSet<String>) -> Vec<Finding> 
     message.push_str(&unreachable.join(", "));
     message.push_str(". Link each from its group's index");
     out.push(Finding {
+        logical_start: None,
         seam_members: Vec::new(),
         file: "AGENTS.md".into(),
         line: 0,

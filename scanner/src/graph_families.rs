@@ -368,7 +368,7 @@ pub fn cycle_findings_for(graph: &BTreeMap<String, Vec<String>>) -> Vec<Finding>
             sorted.sort();
             sorted[0].clone()
         });
-        out.push(Finding { seam_members: Vec::new(), file: anchor, line: 0, col: 0, function: String::new(), kind: "import-cycle".into(), severity: "fail".into(), message: format!(
+        out.push(Finding { logical_start: None, seam_members: Vec::new(), file: anchor, line: 0, col: 0, function: String::new(), kind: "import-cycle".into(), severity: "fail".into(), message: format!(
             "import cycle: {cycle_text} — circular imports are fixed by restructuring modules, never hidden behind lazy imports: hoist the shared interface into its own module"
         ) });
     }
@@ -411,7 +411,7 @@ pub fn large_function_findings(
         if !include_tests && is_test_rel(&rel) {
             continue;
         }
-        out.push(Finding { seam_members: Vec::new(), file: rel, line: ls as usize, col: 0, function: n.name.clone(), kind: "large-function".into(), severity: "fail".into(), message: format!("function spans {span} lines (>= {max_lines}) — Extract Function: split it into small named functions, one job each") });
+        out.push(Finding { logical_start: None, seam_members: Vec::new(), file: rel, line: ls as usize, col: 0, function: n.name.clone(), kind: "large-function".into(), severity: "fail".into(), message: format!("function spans {span} lines (>= {max_lines}) — Extract Function: split it into small named functions, one job each") });
     }
     out
 }
@@ -483,6 +483,7 @@ pub fn hub_file_findings(
             message = format!("{edge_count} call/import edges (>= {max_edges})");
         }
         out.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             col: 0,
             file: rel,
@@ -569,7 +570,7 @@ pub fn high_risk_findings(repo: &Path, contract: &GraphContract, max_risk: f64, 
     let mut out = Vec::new();
     for (n, risk, caller_count, _tested) in scored {
         let line = n.line_start.unwrap_or(1) as usize;
-        out.push(Finding { seam_members: Vec::new(), col: 0,
+        out.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
         file: repo_rel(repo, &n.file_path),
         line,
         function: n.name.clone(),
@@ -660,6 +661,7 @@ pub fn layer_mix_findings(repo: &Path, contract: &GraphContract, files: &[String
         let metric: usize = big.iter().map(|(_, n)| n.len()).sum();
         let _ = metric;
         out.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             file: rel.clone(),
             line: 0,
@@ -750,6 +752,7 @@ pub fn folder_mix_findings(repo: &Path, contract: &GraphContract) -> Vec<Finding
             .collect::<Vec<_>>()
             .join(", ");
         out.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             file: rel.clone(),
             line: 0,
@@ -831,7 +834,7 @@ pub fn module_cohesion_findings(repo: &Path, contract: &GraphContract, max_edges
             })
             .collect::<Vec<_>>()
             .join(", ");
-        out.push(Finding { seam_members: Vec::new(), file: rel.clone(), line: 0, col: 0, function: String::new(), kind: "module-cohesion".into(), severity: "fail".into(), message: format!(
+        out.push(Finding { logical_start: None, seam_members: Vec::new(), file: rel.clone(), line: 0, col: 0, function: String::new(), kind: "module-cohesion".into(), severity: "fail".into(), message: format!(
             "module '{rel}' holds {} domains of >= 2 nodes ({edge_count} edges): {groups} — split the module at the domain seams — fix: extract-module --fix-name <module> --params <members>",
             domains.len()
         ) });
@@ -861,6 +864,7 @@ pub fn hotspot_findings(
             continue;
         }
         out.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             file: rel.clone(),
             line: 1,
@@ -912,6 +916,7 @@ pub fn churn_untested_findings(
             continue;
         }
         out.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             file: rel.clone(),
             line: 1,

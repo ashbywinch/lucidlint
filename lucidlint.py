@@ -1395,8 +1395,9 @@ def _render_file_group(
         elif marker:
             suppress = (
                 f" — suppress with: {a.signal}{fix_link} — a lucidlint: ignore comment binds "
-                "by its signal name on this finding's own line or on the line immediately "
-                "before it; the why text may end mid-word at the line end and still bind"
+                "by its signal name on this finding's own line, the line before it, the "
+                "logical line's first source line, or the line before that; the why text "
+                "may end mid-word at the line end and still bind"
             )
         elif ck:
             suppress = (

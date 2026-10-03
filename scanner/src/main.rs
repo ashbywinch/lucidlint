@@ -63,6 +63,23 @@ pub struct Finding {
     /// the functions sharing a leading parameter (strewing). Always emitted
     /// (empty on non-carriers — BQ4); never scraped from message prose.
     pub seam_members: Vec<String>,
+
+    /// The first source line of the LOGICAL line holding this finding — the
+    /// `def`/`async def` line for a signature finding, the enclosing
+    /// statement's first source line for a wrapped call or split literal.
+    /// One line of code can span several source lines, and a marker binds on
+    /// the logical line too (Phase 4a). `None` = the finding's own line, the
+    /// usual case; internal only (never serialized — the JSON stays schema 4).
+    #[serde(skip)]
+    logical_start: Option<usize>,
+}
+
+impl Finding {
+    /// The finding's logical line: its own line when no construct spans
+    /// several source lines, else the construct's first source line.
+    pub(crate) fn logical_line(&self) -> usize {
+        self.logical_start.unwrap_or(self.line)
+    }
 }
 
 /// One function's cyclomatic complexity — radon-equivalent counting.
@@ -130,6 +147,10 @@ struct ScanState<'a> {
     decorated: HashSet<String>,
     /// Duplicate candidates with their structural skeletons.
     skeletons: Vec<SkeletonFn>,
+    /// Per-source-line logical-line start (1-based): the first source line of
+    /// the construct a line belongs to (a multi-line `def`, a wrapped call, a
+    /// split literal). Index = physical line; value = logical start.
+    logical_starts: Vec<usize>,
     /// File is under a test path — reference-scan split + skeleton skip.
     is_test: bool,
 }
@@ -409,6 +430,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             {
                 let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
                 self.findings.push(Finding {
+                    logical_start: None,
                     seam_members: Vec::new(),
                     file: self.file.to_string(),
                     line: line_of(source, call.range().start()),
@@ -824,6 +846,7 @@ impl<'a> ScanState<'a> {
         // site and the suggestion NEVER names a unit or claims which applies.
         let message = format!("magic number {value}{in_fn} — nothing states what it means or why this magnitude. Write it as a named constant where the computation uses it, and state what it means and why this size in the name or in one comment beside it. If the value carries units, express it in a type that understands them — Python's timedelta for durations, or a Quantity from the pint units library for physical measures. Collection-literal data tables (>= 3 same-kind numeric siblings) are exempt. — fix: magic-number --fix-name <CONST>");
         self.findings.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             file: self.file.to_string(),
             line: line_of(self.source, n.range.start()),
@@ -855,6 +878,7 @@ impl<'a> ScanState<'a> {
         if !harmless {
             let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
             self.findings.push(Finding {
+                logical_start: None,
                 seam_members: Vec::new(),
                 file: self.file.to_string(),
                 line: line_of(self.source, v.range().start()),
@@ -875,6 +899,7 @@ impl<'a> ScanState<'a> {
         if !self.fn_stack.is_empty() {
             let line = stmt_line(self.source, stmt);
             self.findings.push(Finding {
+                logical_start: None,
                 seam_members: Vec::new(),
                 col: 0,
                 file: self.file.to_string(),
@@ -904,6 +929,7 @@ impl<'a> ScanState<'a> {
                             format!("{}.{}", im.module.as_ref().map(|m| m.as_str()).unwrap_or(""), name)
                         };
                         self.findings.push(Finding {
+                            logical_start: None,
                             seam_members: Vec::new(),
                             file: self.file.to_string(),
                             line: stmt_line(self.source, stmt),
@@ -921,6 +947,7 @@ impl<'a> ScanState<'a> {
                     let name = alias.name.as_str();
                     if name.split('.').any(|seg| seg.starts_with('_')) {
                         self.findings.push(Finding {
+                            logical_start: None,
                             seam_members: Vec::new(),
                             file: self.file.to_string(),
                             line: stmt_line(self.source, stmt),
@@ -955,6 +982,7 @@ impl<'a> ScanState<'a> {
                     if let Some(dead) = list.get(i + 1) {
                         let line = stmt_line(self.source, dead);
                         self.findings.push(Finding {
+                            logical_start: None,
                             seam_members: Vec::new(),
                             col: 0,
                             file: self.file.to_string(),
@@ -1236,7 +1264,6 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
 /// their markers cannot bind here and a stale finding for one is a false
 /// fail artifact. The gate path keeps stale reporting: its merge consumes
 /// those markers and drops exactly the stale findings that survive it.
-// lucidlint: ignore record-shape Finding is the core finding type consumed repo-wide — one more consumer is not a new record
 fn drop_repo_wide_stale_artifacts(findings: &mut Vec<Finding>) {
     findings.retain(|f| {
         f.kind != "stale-suppression"
@@ -1264,6 +1291,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     let mut state = ScanState {
         file: name,
         source,
+        logical_starts: checks::logical_line_starts(source, parsed.tokens()),
         magic_table_exempts: checks::magic_table_exempt_offsets(&body),
         magic_const_rhs_exempts: checks::magic_const_rhs_offsets(&body),
         magic_len_guard_exempts: checks::magic_len_guard_offsets(&body),
@@ -1305,6 +1333,20 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
                 skel_children(n, &mut queue);
             }
             qi += 1;
+        }
+    }
+    // Phase 4a: label every emitted finding with its logical line — the first
+    // source line of the construct it sits in (a multi-line `def`/`async def`,
+    // a wrapped call, a split literal). The binder then admits a marker on the
+    // logical line or the line before it in addition to the finding's own line
+    // pair. Single-line constructs keep `None` (the finding's own line).
+    {
+        let starts = &state.logical_starts;
+        for f in &mut state.findings {
+            let line = f.line;
+            if f.logical_start.is_none() {
+                f.logical_start = starts.get(line).copied().filter(|&start| start < line);
+            }
         }
     }
     let tokens = parsed.tokens();
@@ -1658,7 +1700,6 @@ fn sig_of_stale(msg: &str) -> String {
 /// the file's suppressions for those repo-wide findings (family-aware, widened
 /// window) and drop the stale-suppression findings the consumed comments
 /// caused (review-log B3). The survivors are appended to `all` in place.
-// lucidlint: ignore record-shape Finding is the core finding type consumed repo-wide — one more consumer is not a new record
 pub(crate) fn reconcile_repo_wide(
     all: &mut Vec<Finding>,
     repo_wide: Vec<Finding>,
@@ -1762,7 +1803,7 @@ fn bulk_suppression_findings(
                 top = Some((rel, sites));
             }
         }
-        out.push(Finding { seam_members: Vec::new(), file: top.map(|(r, _)| r.clone()).unwrap_or_default(), line: 1, col: 0, function: String::new(), kind: "bulk-suppression".into(), severity: "warn".into(), message: format!(
+        out.push(Finding { logical_start: None, seam_members: Vec::new(), file: top.map(|(r, _)| r.clone()).unwrap_or_default(), line: 1, col: 0, function: String::new(), kind: "bulk-suppression".into(), severity: "warn".into(), message: format!(
             "{kind} suppressed at {n} sites - repeated identical whys are POLICY, not per-site judgment: \
         move the rule into [lucidlint.guidance] config guidance or a documented config ignore, or fix the recurring cause"
         ) });
@@ -5289,9 +5330,11 @@ mod tests {
 
     #[test]
     fn suppression_peels_innermost_first() {
-        // Phase 4: the window is the finding's own line and the line before.
-        // Stacked markers reach only the line-before marker, so one marker
-        // peels the innermost record (highest col) and the outer remains.
+        // Phase 4/4a: the window is the finding's own line, the line before,
+        // and the logical line's pair — here the return statement is one
+        // source line, so the logical line is the finding's own. Stacked
+        // markers reach only the line-before marker, so one marker peels the
+        // innermost record (highest col) and the outer remains.
         let src_two =
             "def deep(user):\n    # lucidlint: ignore record-shape outer seam\n    # lucidlint: ignore record-shape inner seam\n    return {\"a\": {\"x\": user, \"y\": user}, \"b\": 1}\n";
         let two = scan_src(src_two);
@@ -5571,10 +5614,11 @@ mod tests {
 
     #[test]
     fn record_def_above_marker_binds_every_parameter() {
-        // Phase 4: the binding window is the finding's own line and the line
-        // before. A single-line def anchors every parameter finding at the def
-        // line, so ONE marker one line above the def binds all four params —
-        // the def site is one decision.
+        // Phase 4/4a: the binding window is the finding's own line, the line
+        // before, and the logical line's pair (nothing extra here — the def
+        // is one source line). A single-line def anchors every parameter
+        // finding at the def line, so ONE marker one line above the def binds
+        // all four params — the def site is one decision.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/record_def_above_marker_binds_def_site__01.py"
         ));
@@ -5594,11 +5638,77 @@ mod tests {
     }
 
     #[test]
+    fn record_logical_def_above_marker_binds_multiline_signature() {
+        // Phase 4a: one line of code can span several source lines. The
+        // marker sits one line above the def, the parameter and return
+        // findings anchor on their own interior lines — the def line is the
+        // signature's LOGICAL line, so the single marker binds every finding
+        // in the signature and is not stale (the round-9 shape:
+        // dag/attempt.py:298 marker -> :304 finding).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_logical_def_above_marker_binds_multiline_signature__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_logical_def_line_marker_binds_multiline_signature() {
+        // Phase 4a: a marker ON the def line binds every finding in a
+        // multi-line signature — the def line is the logical line the
+        // parameter and return findings belong to.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_logical_def_line_marker_binds_multiline_signature__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_logical_wrapped_call_marker_binds() {
+        // Phase 4a: the record literal's own line is inside a wrapped call,
+        // whose logical line starts at `send(`. A marker one line above the
+        // call's first line binds the argument's finding and is not stale.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_logical_wrapped_call_marker_binds__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_logical_physical_line_marker_binds_inside_wrapped_call() {
+        // Phase 4a: statement-level precision survives — a marker on the
+        // finding's own source line binds it even when the construct started
+        // on an earlier line.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_logical_physical_line_marker_binds__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_logical_two_lines_above_binds_nothing_and_is_not_stale() {
+        // Phase 4a guard: a marker two lines above the logical line (and
+        // above the physical line too) is beyond the union window — the
+        // finding fires, the marker stays as documentation, and no stale
+        // verdict is emitted (the family still fires).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_logical_two_lines_above_binds_nothing__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
     fn record_signature_gap_marker_does_not_bind_and_is_not_stale() {
-        // Phase 4: a marker at def+2 with no finding on its own line or the
-        // line before is beyond the two-line window — the finding still fires,
-        // the marker stays as documentation, and no stale verdict is emitted
-        // (the family still fires).
+        // Phase 4/4a: a marker at def+2 binds neither the finding's own line
+        // pair nor the signature's logical line pair — it is beyond the union
+        // window, so the finding still fires, the marker stays as
+        // documentation, and no stale verdict is emitted (the family still
+        // fires).
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/record_signature_gap_marker_does_not_bind__01.py"
         ));
@@ -5659,9 +5769,10 @@ mod tests {
 
     #[test]
     fn record_suppression_one_line_above_def_binds_the_def_site() {
-        // Phase 4: the marker on the line before the def binds the
-        // def-anchored return finding — the window is the finding's own line
-        // and the line before it.
+        // Phase 4/4a: the marker on the line before the def binds the
+        // def-anchored return finding — the window is the finding's own line,
+        // the line before it, and the logical line's pair (here the def is one
+        // source line).
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/record_suppression_one_line_above_def_binds__01.py"
         ));
@@ -5694,10 +5805,11 @@ mod tests {
 
     #[test]
     fn suppression_far_above_def_does_not_bind_and_is_not_stale() {
-        // Phase 4 guard: a marker 3+ lines above the def is beyond the
-        // two-line window — the finding fires, the marker stays as
-        // documentation, and no stale verdict is emitted (api_router's
-        // 9-line gap).
+        // Phase 4/4a guard: a marker 3+ lines above the def is beyond the
+        // union window — the def is one source line, so its logical line adds
+        // no earlier anchor. The finding fires, the marker stays as
+        // documentation, and no stale verdict is emitted (api_router's 9-line
+        // gap).
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/record_suppression_far_above_does_not_bind__01.py"
         ));
@@ -5721,11 +5833,13 @@ mod tests {
 
     #[test]
     fn complexity_marker_binding_follows_the_two_line_window() {
-        // Phase 4: the window is the finding's own line and the line before.
-        // The cc retain uses the same window, so a marker on the line before
-        // the def is consumed (not stale); a marker two lines above (a
-        // decorator intervenes) binds nothing, and since the findings stream
-        // carries no complexity finding it is reported stale.
+        // Phase 4/4a: the window is the finding's own line and the line
+        // before. Complexity summaries are not Finding records and carry no
+        // logical line, so the plain two-line window governs here. The cc
+        // retain uses the same window, so a marker on the line before the def
+        // is consumed (not stale); a marker two lines above (a decorator
+        // intervenes) binds nothing, and since the findings stream carries no
+        // complexity finding it is reported stale.
         let mut body = String::new();
         for i in 0..16 {
             body.push_str(&format!("    if a{i}:\n        x{i} = {i}\n"));

@@ -375,7 +375,13 @@ impl<'a> RsState<'a> {
     /// Same, with the schema-3 anchor column (1-based; 0 = line-level).
     // lucidlint: ignore long-param-list one caller — the struct would be ceremony for a single call site
     fn finding_col(&mut self, kind: &str, severity: &str, line: usize, col: usize, function: &str, message: String) {
+        // Phase 4a: the Rust layer records no logical line — its findings
+        // anchor on the item or statement that starts the construct (`fn`/
+        // `struct` line, the literal's line), so `logical_start: None` already
+        // means the finding's own line, exactly the marker window this layer
+        // has always used.
         self.findings.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             col,
             file: self.file.to_string(),
@@ -1182,6 +1188,7 @@ fn walk_test_fns(item: &Item, out: &mut Vec<Finding>, file_name: &str) {
                 && !block_asserts(&f.block)
             {
                 out.push(Finding {
+                    logical_start: None,
                     seam_members: Vec::new(),
                     file: file_name.to_string(),
                     line: f.sig.span().start().line,
@@ -1276,6 +1283,7 @@ fn ignored_test_findings(file: &File, file_name: &str) -> Vec<Finding> {
         fn visit_item_fn(&mut self, f: &'ast ItemFn) {
             if has_attr(&f.attrs, "test") && has_attr(&f.attrs, "ignore") {
                 self.findings.push(Finding {
+                    logical_start: None,
                     seam_members: Vec::new(),
                     file: self.file.clone(),
                     line: f.sig.span().start().line,

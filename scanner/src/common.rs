@@ -309,15 +309,39 @@ pub fn signal_matches(sig: &str, finding_kind: &str) -> bool {
     sig == finding_kind || alias_variants(sig).contains(&finding_kind)
 }
 
-/// How far above a finding a suppression comment may sit: the finding's own
-/// line and the line immediately before it. A marker two lines above (a
-/// decorator line intervening, say) binds nothing — and, because the signal
-/// still fires somewhere, it is documentation rather than stale.
+/// How far above a finding a suppression comment may sit, in the plain
+/// line-pair rule: the finding's own line and the line immediately before it.
+/// A marker two lines above (a decorator line intervening, say) binds nothing
+/// — and, because the signal still fires somewhere, it is documentation
+/// rather than stale. A finding whose construct spans several source lines
+/// also admits its logical line's pair (`finding_window`); this constant
+/// governs the physical pair and the complexity summaries, which are not
+/// Finding records and carry no logical line.
 const SUPPRESSION_WINDOW: usize = 2;
 
 /// The `SUPPRESSION_WINDOW` lines ending at `line` (descending), never below 1.
 pub fn window_lines(line: usize) -> impl Iterator<Item = usize> {
     (line.max(SUPPRESSION_WINDOW) + 1 - SUPPRESSION_WINDOW..=line).rev()
+}
+
+/// The lines a marker may sit on to bind `f`, nearest first: the finding's own
+/// line and the line before it, UNION the logical line's pair — the `def` line
+/// for a signature finding, the enclosing statement's first line for a wrapped
+/// call or split literal (Phase 4a). One line of code can span several source
+/// lines, so the practiced "marker directly above the `def`" placement binds
+/// every finding anchored on the signature, however deep the finding's own
+/// source line sits.
+pub fn finding_window(f: &crate::Finding) -> Vec<usize> {
+    let logical = f.logical_line();
+    let mut lines: Vec<usize> = Vec::with_capacity(4);
+    for l in [f.line, f.line.saturating_sub(1), logical, logical.saturating_sub(1)] {
+        if l >= 1 && !lines.contains(&l) {
+            lines.push(l);
+        }
+    }
+    lines.sort_unstable();
+    lines.reverse();
+    lines
 }
 
 /// A finding is exempt when an explained file suppression covers it.
@@ -358,7 +382,7 @@ pub fn filter_repo_wide(
             continue;
         }
         let mut line_hit = false;
-        for ln in window_lines(f.line) {
+        for ln in finding_window(&f) {
             if let Some(entries) = supps.line.get(&ln) {
                 for (sig, why) in entries {
                     if why.is_empty() || spent.contains(&(ln, sig.clone())) {
@@ -442,10 +466,22 @@ fn common_group_line_indices(findings: &[crate::Finding]) -> Vec<Vec<usize>> {
 /// signal matches any member, one pair per line. A pair another line-group
 /// consumed is NOT filtered here — one marker covers every member of the
 /// site it sits on (own line or the line before), recorded spent once (set
-/// semantics). The window is the shared two-line rule.
+/// semantics). The window is the union of the members' two-line-plus-logical
+/// windows: a def's signature findings share the def line even when their own
+/// lines differ.
 fn marker_inventory(members: &[usize], findings: &[crate::Finding], supps: &Suppressions) -> Vec<(usize, String)> {
+    let mut window: Vec<usize> = Vec::new();
+    for &i in members {
+        for ln in finding_window(&findings[i]) {
+            if !window.contains(&ln) {
+                window.push(ln);
+            }
+        }
+    }
+    window.sort_unstable();
+    window.reverse();
     let mut pairs: Vec<(usize, String)> = Vec::new();
-    for ln in window_lines(findings[members[0]].line) {
+    for ln in window {
         if let Some(entries) = supps.line.get(&ln) {
             for (sig, why) in entries {
                 if why.is_empty() || pairs.iter().any(|(pl, _)| *pl == ln) {
@@ -544,7 +580,7 @@ pub fn apply_suppressions_impl(
     for (ln, entries) in &supps.line {
         for (sig, why) in entries {
             if why.is_empty() && seen_invalid.insert((*ln, sig.clone())) {
-                out.push(crate::Finding { seam_members: Vec::new(), col: 0,
+                out.push(crate::Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                 file: file.to_string(),
                                 line: *ln,
                                 function: String::new(),
@@ -562,7 +598,7 @@ pub fn apply_suppressions_impl(
                 .iter()
                 .find(|(_, t)| t.contains(&format!("lucidlint: ignore-file {sig}")))
             {
-                out.push(crate::Finding { seam_members: Vec::new(), col: 0,
+                out.push(crate::Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                     file: file.to_string(),
                                     line: *ln,
                                     function: String::new(),
@@ -725,7 +761,7 @@ impl<'a> StaleCtx<'a> {
                     continue;
                 };
                 let delta = self.exemption_delta(sig);
-                out.push(crate::Finding { seam_members: Vec::new(), col: 0,
+                out.push(crate::Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                 file: self.file.to_string(),
                 line: *ln,
                 function: String::new(),
@@ -751,7 +787,7 @@ impl<'a> StaleCtx<'a> {
                 // or redundant documentation — never a stale verdict
                 if self.lines_for(sig).is_empty() {
                     let delta = self.exemption_delta(sig);
-                    out.push(crate::Finding { seam_members: Vec::new(), col: 0,
+                    out.push(crate::Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                     file: self.file.to_string(),
                     line: *ln,
                     function: String::new(),
@@ -823,6 +859,7 @@ mod tests {
 
     fn finding(kind: &str, line: usize) -> Finding {
         Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             file: "x.rs".into(),
             line,
@@ -1140,6 +1177,7 @@ mod tests {
             spent: &mut std::collections::HashSet::new(),
         };
         let deep_magic = Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             col: 5,
             ..finding("magic-number", 2)
@@ -1162,9 +1200,10 @@ mod tests {
     #[test]
     fn marker_two_lines_above_does_not_bind_and_is_not_stale() {
         // Phase 4: a comment two lines above the finding (a decorator line
-        // intervenes) binds nothing — the window is the finding's own line
-        // and the line before. The family still fires, so the marker is
-        // documentation, never stale.
+        // intervenes) binds nothing — the window is the finding's own line and
+        // the line before (its logical line, when it has one, adds its own
+        // pair — these test findings carry none). The family still fires, so
+        // the marker is documentation, never stale.
         let comments = vec![(1, "// lucidlint: ignore magic-number the gate threshold".to_string())];
         let mut books = SuppressionBooks {
             pre_used: &PreUsedSuppressions::default(),
@@ -1185,7 +1224,8 @@ mod tests {
     #[test]
     fn window_is_bounded_far_comment_does_not_suppress() {
         // Phase 4 guard: the window stays adjacent — a comment 3+ lines above
-        // is NOT a suppression of the finding.
+        // is NOT a suppression of the finding (and the finding carries no
+        // logical line to widen the window).
         let comments = vec![(1, "// lucidlint: ignore magic-number far away".to_string())];
         let mut books = SuppressionBooks {
             pre_used: &PreUsedSuppressions::default(),
@@ -1200,6 +1240,53 @@ mod tests {
             &[],
         );
         assert!(fs.iter().any(|f| f.kind == "magic-number"), "{:?}", fs);
+    }
+
+    #[test]
+    fn logical_window_binds_on_the_logical_line_and_stays_bounded() {
+        // Phase 4a: a finding on line 5 whose construct starts on line 2 (a
+        // multi-line signature arm) is bound by a marker on the logical line
+        // or the line before — the marker at 2 sits two lines above the
+        // finding's own line and a plain two-line window would miss it.
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let sig = Finding {
+            logical_start: Some(2),
+            ..finding("record-shape", 5)
+        };
+        let bound = apply_suppressions_impl(
+            vec![sig],
+            &[(2, "// lucidlint: ignore record-shape the wire payload".to_string())],
+            "x.rs",
+            "//",
+            &mut books,
+            &[],
+        );
+        assert!(!bound.iter().any(|f| f.kind == "record-shape"), "{bound:?}");
+        assert!(!bound.iter().any(|f| f.kind == "stale-suppression"), "{bound:?}");
+
+        // two lines above the logical line binds nothing — and because the
+        // family still fires the marker is documentation, never stale
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let far = Finding {
+            logical_start: Some(3),
+            ..finding("record-shape", 5)
+        };
+        let left = apply_suppressions_impl(
+            vec![far],
+            &[(1, "// lucidlint: ignore record-shape too far".to_string())],
+            "x.rs",
+            "//",
+            &mut books,
+            &[],
+        );
+        assert!(left.iter().any(|f| f.kind == "record-shape"), "{left:?}");
+        assert!(!left.iter().any(|f| f.kind == "stale-suppression"), "{left:?}");
     }
 }
 

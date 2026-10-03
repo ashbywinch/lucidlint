@@ -227,6 +227,17 @@ Residual:
    helper in the repo so the per-site markers disappear; a repo change,
    not a tool change.
 
+### Phase 4a result (measured)
+
+The logical-line anchor landed: the marker window is the finding's own
+line, the line before it, the logical line's first source line, or the
+line before that. Houses fails fell from 187 to 139 with the same
+baseline — 48 signatures the repo had marked above their defs bind
+again. The internal logical-start line is `#[serde(skip)]`, so the JSON
+stays schema 4. 401 scanner tests. Two markers in scanner/src/main.rs
+went stale (no record-shape fires in that file) and were deleted; the
+guidance sentence states the logical-line rule.
+
 ## Order of work
 
 1. Phase 1, then Phase 6 — the consistency and completeness defects.

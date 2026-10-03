@@ -117,6 +117,65 @@ pub fn parse_suppressions(source: &str, tokens: &Tokens) -> crate::common::Suppr
     crate::common::suppressions_from_comments(&comment_lines(source, tokens))
 }
 
+/// Map every 1-based source line to the first line of its LOGICAL line.
+///
+/// One line of code can span several source lines — a multi-line `def`, a
+/// wrapped call, a split literal. Python joins those physical lines into one
+/// logical line (implicit joining inside brackets, explicit `\` joining); the
+/// token stream marks the logical breaks with `Newline` and the joins with
+/// `NonLogicalNewline`, so the first significant token after each logical
+/// break is the logical line's first source line. Comments and blank lines
+/// are not part of any logical line: they map to themselves, and a finding
+/// never anchors on them.
+pub fn logical_line_starts(source: &str, tokens: &Tokens) -> Vec<usize> {
+    let nlines = source.lines().count();
+    // identity by default: a line is its own logical start
+    let mut starts: Vec<usize> = (0..=nlines).collect();
+    let mut cur: Option<usize> = None;
+    let mut filled = 0usize;
+    for tok in tokens.iter() {
+        let line = line_of(source, tok.range().start()).min(nlines);
+        if line > filled {
+            match tok.kind() {
+                TokenKind::Newline => {
+                    // the logical line ends here — every line from the last
+                    // break to this one belongs to `cur`
+                    let val = cur.take();
+                    for slot in starts.iter_mut().take(line + 1).skip(filled + 1) {
+                        let l = filled + 1;
+                        *slot = match val {
+                            Some(v) if v <= l => v,
+                            _ => l,
+                        };
+                        filled = l;
+                    }
+                    filled = line;
+                }
+                // markers, joins, block structure: any of these can be the
+                // only token on its line without starting a logical line
+                TokenKind::Comment
+                | TokenKind::NonLogicalNewline
+                | TokenKind::Indent
+                | TokenKind::Dedent
+                | TokenKind::EndOfFile => {}
+                _ => {
+                    if cur.is_none() {
+                        cur = Some(line);
+                    }
+                }
+            }
+        }
+    }
+    let val = cur;
+    for (offset, slot) in starts.iter_mut().enumerate().take(nlines + 1).skip(filled + 1) {
+        *slot = match val {
+            Some(v) if v <= offset => v,
+            _ => offset,
+        };
+    }
+    starts
+}
+
 /// Filter findings through the suppressions + emit the why-less suppression
 /// findings — shared logic over this language's comment lines (the parse
 /// itself lives in `common::suppressions_from_comments`). `pre_used` carries
@@ -152,7 +211,7 @@ pub fn type_ignore_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Fi
         }
         let rest = text.split_once("type: ignore").map(|(_, r)| r).unwrap_or("");
         if !rest.contains('#') {
-            out.push(Finding { seam_members: Vec::new(), col: 0,
+            out.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                             file: file.to_string(),
                             line: ln,
                             function: String::new(),
@@ -204,6 +263,7 @@ pub fn noqa_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Finding> 
         let rest = text.split_once(marker).map(|(_, r)| r).unwrap_or("");
         if !noqa_reason(rest) {
             out.push(Finding {
+                logical_start: None,
                 seam_members: Vec::new(),
                 col: 0,
                 file: file.to_string(),
@@ -230,19 +290,17 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
     if let Stmt::Global(g) = stmt {
         let line = stmt_line(state.source, stmt);
         let names: Vec<&str> = g.names.iter().map(|n| n.as_str()).collect();
-        state.findings.push(Finding {
-            seam_members: Vec::new(),
-            col: 0,
-            file: state.file.to_string(),
-            line,
-            function: fn_name.clone(),
-            kind: "global-state".into(),
-            severity: "fail".into(),
-            message: format!(
-                "{} is a module-level variable: a global read that binds at import time. Callers cannot inject or vary it without monkeypatching the module. Find the class this value serves; make it that class's attribute.",
-                names.join(", ")
-            ),
-        });
+        state.findings.push(Finding { logical_start: None, seam_members: Vec::new(),
+        col: 0,
+        file: state.file.to_string(),
+        line,
+        function: fn_name.clone(),
+        kind: "global-state".into(),
+        severity: "fail".into(),
+        message: format!(
+            "{} is a module-level variable: a global read that binds at import time. Callers cannot inject or vary it without monkeypatching the module. Find the class this value serves; make it that class's attribute.",
+            names.join(", ")
+        ), });
         return;
     }
     if module_level {
@@ -272,18 +330,16 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
                 continue; // a service/framework registration, not a domain value
             }
             let line = stmt_line(state.source, stmt);
-            state.findings.push(Finding {
-                seam_members: Vec::new(),
-                col: 0,
-                file: state.file.to_string(),
-                line,
-                function: fn_name.clone(),
-                kind: "global-state".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "{name} is a module-level variable: a global read that binds at import time. Callers cannot inject or vary it without monkeypatching the module. Find the class this value serves; make it that class's attribute."
-                ),
-            });
+            state.findings.push(Finding { logical_start: None, seam_members: Vec::new(),
+            col: 0,
+            file: state.file.to_string(),
+            line,
+            function: fn_name.clone(),
+            kind: "global-state".into(),
+            severity: "fail".into(),
+            message: format!(
+                "{name} is a module-level variable: a global read that binds at import time. Callers cannot inject or vary it without monkeypatching the module. Find the class this value serves; make it that class's attribute."
+            ), });
         }
     }
 }
@@ -294,6 +350,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         for a in &f.parameters.posonlyargs {
             if SHADOWED_BUILTINS.contains(&a.parameter.name.as_str()) {
                 state.findings.push(Finding {
+                    logical_start: None,
                     seam_members: Vec::new(),
                     col: 0,
                     file: state.file.to_string(),
@@ -311,6 +368,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         for a in &f.parameters.args {
             if SHADOWED_BUILTINS.contains(&a.parameter.name.as_str()) {
                 state.findings.push(Finding {
+                    logical_start: None,
                     seam_members: Vec::new(),
                     col: 0,
                     file: state.file.to_string(),
@@ -328,6 +386,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         for a in &f.parameters.kwonlyargs {
             if SHADOWED_BUILTINS.contains(&a.parameter.name.as_str()) {
                 state.findings.push(Finding {
+                    logical_start: None,
                     seam_members: Vec::new(),
                     col: 0,
                     file: state.file.to_string(),
@@ -345,6 +404,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         if let Some(v) = &f.parameters.vararg {
             if SHADOWED_BUILTINS.contains(&v.name.as_str()) {
                 state.findings.push(Finding {
+                    logical_start: None,
                     seam_members: Vec::new(),
                     col: 0,
                     file: state.file.to_string(),
@@ -359,6 +419,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
         if let Some(k) = &f.parameters.kwarg {
             if SHADOWED_BUILTINS.contains(&k.name.as_str()) {
                 state.findings.push(Finding {
+                    logical_start: None,
                     seam_members: Vec::new(),
                     col: 0,
                     file: state.file.to_string(),
@@ -380,6 +441,7 @@ pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
                 if SHADOWED_BUILTINS.contains(&n.id.as_str()) {
                     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
                     state.findings.push(Finding {
+                        logical_start: None,
                         seam_members: Vec::new(),
                         col: 0,
                         file: state.file.to_string(),
@@ -426,6 +488,7 @@ pub fn boolean_arg_findings(state: &mut ScanState, call: &ExprCall, source: &str
                 continue;
             }
             state.findings.push(Finding {
+                logical_start: None,
                 seam_members: Vec::new(),
                 col: 0,
                 file: state.file.to_string(),
@@ -499,7 +562,7 @@ pub fn positional_literals_findings(state: &mut ScanState, call: &ExprCall, sour
     } else {
         " — fix: positional-literals --params <names>"
     };
-    state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+    state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
             file: state.file.to_string(),
             line: line_of(source, call.range().start()),
             function: fn_name,
@@ -555,7 +618,7 @@ pub fn detached_method_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
     }
     let fn_name = f.name.to_string();
     let line = line_of(source, f.name.range().start());
-    state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+    state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
             file: state.file.to_string(),
             line,
             function: fn_name.clone(),
@@ -614,7 +677,7 @@ pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
         }
     }
     if n > 5 && !is_trivial_stub(&f.body) {
-        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+        state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
         file: state.file.to_string(),
         line: line_of(source, f.name.range().start()),
         function: f.name.to_string(),
@@ -693,7 +756,7 @@ pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
             } else {
                 "except that swallows"
             };
-            state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+            state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                             file: state.file.to_string(),
                             line,
                             function: fn_name.clone(),
@@ -705,7 +768,7 @@ pub fn except_findings(state: &mut ScanState, stmt: &Stmt) {
         } else if let Some(ty) = type_opt {
             let base = annotation_base_name(ty);
             if matches!(base.as_deref(), Some("Exception") | Some("BaseException")) {
-                state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                     file: state.file.to_string(),
                                     line: except_header_colon_line(state.source, eh),
                                     function: fn_name.clone(),
@@ -1008,6 +1071,7 @@ pub fn closure_findings(state: &mut ScanState, stmt: &Stmt, cc: u32, span: u32) 
         )
     };
     state.findings.push(Finding {
+        logical_start: None,
         seam_members: Vec::new(),
         col: 0,
         file: state.file.to_string(),
@@ -1392,7 +1456,7 @@ pub fn misplaced_method_findings(state: &mut ScanState, body: &[Stmt]) {
                         })
                     });
                     if matched {
-                        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                        state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                                     file: state.file.to_string(),
                                                     line: *def_line,
                                                     function: fn_name.id.to_string(),
@@ -1782,6 +1846,7 @@ fn emit_wide_tuple(state: &mut ScanState, ann: Option<&Expr>, what: &str, line: 
     // detector reads the pair from the construction.
     if n >= 4 {
         state.findings.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             col: 0,
             file: state.file.to_string(),
@@ -1793,6 +1858,7 @@ fn emit_wide_tuple(state: &mut ScanState, ann: Option<&Expr>, what: &str, line: 
         });
     } else {
         state.findings.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             col: 0,
             file: state.file.to_string(),
@@ -1896,7 +1962,7 @@ pub fn tuple_record_findings(state: &mut ScanState, body: &[Stmt]) {
     for (name, (arity, line)) in &records {
         let reads = counts.get(name).copied().unwrap_or(0);
         if reads >= 3 {
-            state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+            state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                             file: state.file.to_string(),
                             line: *line,
                             function: String::new(),
@@ -2007,7 +2073,7 @@ pub fn assembly_class_findings(state: &mut ScanState, body: &[Stmt]) {
         }
         let Some(base) = base else { continue };
         let chain_names: Vec<&str> = calls.iter().map(|(n, _)| n.as_str()).collect();
-        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+        state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                     file: state.file.to_string(),
                     line,
                     function: f.name.to_string(),
@@ -2113,22 +2179,20 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
         }
         params.sort();
         params.dedup();
-        state.findings.push(Finding {
-            seam_members: params.clone(),
-            col: 0,
-            file: state.file.to_string(),
-            line,
-            function: anchor,
-            kind: "data-clump".into(),
-            severity: "fail".into(),
-            // A3: the message names the FIRST qualifying pair and only ITS
-            // functions — each pair has its OWN >= 3 functions (PR #15)
-            message: format!(
-                "{names_count} functions near here ({names}) pass the same parameter pair {pair_text} together. The pair is one thing in the domain, and passing it as two parameters never says what that thing is. Make a class whose name states that thing, and pass one instance. — fix: extract-class",
-                names_count = pair_names.len(),
-                names = pair_names.join(", "),
-            ),
-        });
+        state.findings.push(Finding { logical_start: None, seam_members: params.clone(),
+        col: 0,
+        file: state.file.to_string(),
+        line,
+        function: anchor,
+        kind: "data-clump".into(),
+        severity: "fail".into(),
+        // A3: the message names the FIRST qualifying pair and only ITS
+        // functions — each pair has its OWN >= 3 functions (PR #15)
+        message: format!(
+            "{names_count} functions near here ({names}) pass the same parameter pair {pair_text} together. The pair is one thing in the domain, and passing it as two parameters never says what that thing is. Make a class whose name states that thing, and pass one instance. — fix: extract-class",
+            names_count = pair_names.len(),
+            names = pair_names.join(", "),
+        ), });
     }
 }
 
@@ -2271,7 +2335,7 @@ pub fn feature_envy_findings(state: &mut ScanState, body: &[Stmt]) {
                     continue;
                 }
                 let line = line_of(state.source, f.name.range().start());
-                state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                     file: state.file.to_string(),
                                     line,
                                     function: f.name.to_string(),
@@ -2444,6 +2508,7 @@ pub fn undeclared_findings(scans: &[crate::UndeclScan]) -> Vec<Finding> {
                 )
             };
             out.push(Finding {
+                logical_start: None,
                 seam_members: Vec::new(),
                 col: 0,
                 file: s.rel.clone(),
@@ -2498,7 +2563,7 @@ pub fn god_class_findings(state: &mut ScanState, body: &[Stmt]) {
             continue;
         }
         let line = line_of(state.source, c.name.range().start());
-        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+        state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                     file: state.file.to_string(),
                     line,
                     function: c.name.to_string(),
@@ -2578,7 +2643,7 @@ pub fn duplicate_field_findings(state: &mut ScanState, body: &[Stmt]) {
                 continue;
             }
             let line = line_of(state.source, c.name.range().start());
-            state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+            state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                             file: state.file.to_string(),
                             line,
                             function: c.name.to_string(),
@@ -2721,6 +2786,7 @@ pub fn static_husk_findings(state: &mut ScanState, body: &[Stmt]) {
         }
         let line = stmt_line(state.source, s);
         state.findings.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             col: 0,
             file: state.file.to_string(),
@@ -2730,12 +2796,12 @@ pub fn static_husk_findings(state: &mut ScanState, body: &[Stmt]) {
             severity: "warn".into(),
             message: format!(
                 "Class {} has no state of its own and only staticmethods — a namespace wearing a domain noun. \
-                 The fix: find the state these operations work on and put it IN the class (fields + method bodies \
-                 reading them); if there is no such state, the operations still belong with SOME abstraction or \
-                 another — possibly more than one: the class(es) that own the state they work on. Finding it is \
-                 the task; reconsider whether THIS class is the correct abstraction. The methods stop being static: \
-                 give the class a constructor that takes the state, instance attributes that hold it, and instance \
-                 methods that read it.",
+             The fix: find the state these operations work on and put it IN the class (fields + method bodies \
+             reading them); if there is no such state, the operations still belong with SOME abstraction or \
+             another — possibly more than one: the class(es) that own the state they work on. Finding it is \
+             the task; reconsider whether THIS class is the correct abstraction. The methods stop being static: \
+             give the class a constructor that takes the state, instance attributes that hold it, and instance \
+             methods that read it.",
                 name
             ),
         });
@@ -2893,6 +2959,7 @@ pub fn delegating_husk_findings(state: &mut ScanState, body: &[Stmt]) {
         }
         let line = stmt_line(state.source, s);
         state.findings.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             col: 0,
             file: state.file.to_string(),
@@ -2902,9 +2969,9 @@ pub fn delegating_husk_findings(state: &mut ScanState, body: &[Stmt]) {
             severity: "warn".into(),
             message: format!(
                 "class '{}' only forwards to module functions — every method is exactly `return F(<all params>)` \
-                 with no behavior of its own: callers could reach the functions directly, and the class name is a \
-                 namespace for others' work. Dissolve the husk — rewire its callers to the module functions and \
-                 delete the class; NEVER inline the functions' bodies into it — fix: dissolve-husk",
+             with no behavior of its own: callers could reach the functions directly, and the class name is a \
+             namespace for others' work. Dissolve the husk — rewire its callers to the module functions and \
+             delete the class; NEVER inline the functions' bodies into it — fix: dissolve-husk",
                 cls.name.as_str()
             ),
         });
@@ -3121,6 +3188,7 @@ pub fn forwarding_chain_findings(
             )
         };
         out.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             col: 0,
             file: head.rel.clone(),
@@ -3180,18 +3248,16 @@ pub fn process_class_findings(state: &mut ScanState, body: &[Stmt]) {
             continue;
         }
         let line = stmt_line(state.source, s);
-        state.findings.push(Finding {
-            seam_members: Vec::new(),
-            col: 0,
-            file: state.file.to_string(),
-            line,
-            function: name.to_string(),
-            kind: "process-class".into(),
-            severity: "fail".into(),
-            message: format!(
-                "class {name} is named for a process, not a thing. Keep the name only when all three hold: 1) the domain calls this component by that name; 2) the data it operates on is all already represented by well-designed classes; 3) data and logic still remain that legitimately fit better in a process class. If the data it operates on is still raw dicts, lists, or loose fields, represent it with classes first, then re-check 2 and 3."
-            ),
-        });
+        state.findings.push(Finding { logical_start: None, seam_members: Vec::new(),
+        col: 0,
+        file: state.file.to_string(),
+        line,
+        function: name.to_string(),
+        kind: "process-class".into(),
+        severity: "fail".into(),
+        message: format!(
+            "class {name} is named for a process, not a thing. Keep the name only when all three hold: 1) the domain calls this component by that name; 2) the data it operates on is all already represented by well-designed classes; 3) data and logic still remain that legitimately fit better in a process class. If the data it operates on is still raw dicts, lists, or loose fields, represent it with classes first, then re-check 2 and 3."
+        ), });
     }
 }
 
@@ -3349,6 +3415,7 @@ pub fn closure_cluster_findings(state: &mut ScanState, body: &[Stmt], source: &s
                 .join("; ");
             let line = line_of(source, method.name.range().start());
             state.findings.push(Finding {
+                logical_start: None,
                 seam_members: Vec::new(),
                 col: 0,
                 file: state.file.to_string(),
@@ -3358,9 +3425,9 @@ pub fn closure_cluster_findings(state: &mut ScanState, body: &[Stmt], source: &s
                 severity: "warn".into(),
                 message: format!(
                     "method '{}.{}' has nested closures split into {} groups over disjoint locals: {groups_text} — \
-                     a class-in-a-method: each group is a cohesive unit that could be its own class. The split is \
-                     structurally visible but may be a deliberate cohesive serving method — extract by hand when it is, \
-                     and only when it reads better",
+                 a class-in-a-method: each group is a cohesive unit that could be its own class. The split is \
+                 structurally visible but may be a deliberate cohesive serving method — extract by hand when it is, \
+                 and only when it reads better",
                     cls.name.as_str(),
                     method.name.as_str(),
                     cluster_comps.len()
@@ -3421,20 +3488,18 @@ pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &
             return;
         }
         let line = line_of(state.source, cls.name.range().start());
-        state.findings.push(Finding {
-            seam_members: Vec::new(),
-            col: 0,
-            file: state.file.to_string(),
-            line,
-            function: cls.name.to_string(),
-            kind: "class-module".into(),
-            severity: "fail".into(),
-            message: format!(
-                "{rel} holds one class named '{cls}' — readers browse the codebase by file structure, and a differently named file hides the class from that walk. Rename the file to '{stem}.py' (exception: closely related models).",
-                cls = cls.name.as_str(),
-                stem = cls.name.to_lowercase()
-            ),
-        });
+        state.findings.push(Finding { logical_start: None, seam_members: Vec::new(),
+        col: 0,
+        file: state.file.to_string(),
+        line,
+        function: cls.name.to_string(),
+        kind: "class-module".into(),
+        severity: "fail".into(),
+        message: format!(
+            "{rel} holds one class named '{cls}' — readers browse the codebase by file structure, and a differently named file hides the class from that walk. Rename the file to '{stem}.py' (exception: closely related models).",
+            cls = cls.name.as_str(),
+            stem = cls.name.to_lowercase()
+        ), });
         return;
     }
     // multi arm: the misplaced public classes move to files named after them
@@ -3465,20 +3530,18 @@ pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &
         .collect();
     let Stmt::ClassDef(first) = misplaced[0] else { return };
     let line = line_of(state.source, first.name.range().start());
-    state.findings.push(Finding {
-        seam_members: Vec::new(),
-        col: 0,
-        file: state.file.to_string(),
-        line,
-        function: names.join(", "),
-        kind: "class-module".into(),
-        severity: "fail".into(),
-        message: format!(
-            "module '{rel}' holds the classes {all} but {misplaced} don't match the file's name — each public class belongs in a file named after it — fix: split-module",
-            all = all_names.join(", "),
-            misplaced = names.join(", "),
-        ),
-    });
+    state.findings.push(Finding { logical_start: None, seam_members: Vec::new(),
+    col: 0,
+    file: state.file.to_string(),
+    line,
+    function: names.join(", "),
+    kind: "class-module".into(),
+    severity: "fail".into(),
+    message: format!(
+        "module '{rel}' holds the classes {all} but {misplaced} don't match the file's name — each public class belongs in a file named after it — fix: split-module",
+        all = all_names.join(", "),
+        misplaced = names.join(", "),
+    ), });
 }
 
 /// Vague role-suffix class names hiding load-bearing code.
@@ -3496,7 +3559,7 @@ pub fn vague_name_findings(state: &mut ScanState, module_body: &[Stmt]) {
                 break; // thin role class — the name is the communication
             }
             let line = stmt_line(state.source, s);
-            state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+            state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                             file: state.file.to_string(),
                             line,
                             function: cls.name.to_string(),
@@ -3550,20 +3613,18 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
         members.sort_by_key(|m| m.1);
         let names: Vec<String> = members.iter().map(|(n, l)| format!("{n} (line {l})")).collect();
         let line = members[0].1;
-        state.findings.push(Finding {
-            seam_members: members.iter().map(|(n, _)| n.clone()).collect(),
-            col: 0,
-            file: state.file.to_string(),
-            line,
-            function: String::new(),
-            kind: "strewing".into(),
-            severity: "fail".into(),
-            message: format!(
-                "{} free functions all take '{base}' as their first argument — a '{base}' class is missing, and these functions are its methods: {} — fix: extract-class",
-                members.len(),
-                names.join(", ")
-            ),
-        });
+        state.findings.push(Finding { logical_start: None, seam_members: members.iter().map(|(n, _)| n.clone()).collect(),
+        col: 0,
+        file: state.file.to_string(),
+        line,
+        function: String::new(),
+        kind: "strewing".into(),
+        severity: "fail".into(),
+        message: format!(
+            "{} free functions all take '{base}' as their first argument — a '{base}' class is missing, and these functions are its methods: {} — fix: extract-class",
+            members.len(),
+            names.join(", ")
+        ), });
     }
 }
 
@@ -3631,7 +3692,7 @@ pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
                 let exempt = stub || (overloaded.contains(&name) && impl_def_line.get(&name).copied() == Some(line));
                 if !exempt {
                     if let Some((_, first_line)) = seen.iter().find(|(n, _)| *n == name) {
-                        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                        state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                                     file: state.file.to_string(),
                                                     line,
                                                     function: name.clone(),
@@ -3778,7 +3839,7 @@ pub fn restating_docstring_findings(state: &mut ScanState, module_body: &[Stmt])
         let covered = words.iter().filter(|w| tokens.contains(w.as_str())).count();
         if covered as f64 / words.len() as f64 >= 0.9 {
             let line = stmt_line(state.source, s);
-            state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+            state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                             file: state.file.to_string(),
                             line,
                             function: String::new(),
@@ -3889,7 +3950,7 @@ pub fn duplicate_block_findings(state: &mut ScanState, module_body: &[Stmt]) {
                     // but no fix — agents delete by hand (review bot)
                     let exact = (0..BLOCK_WINDOW).all(|k| stmt_exact_key(flat[i + k]) == stmt_exact_key(flat[j + k]));
                     let directive = if exact { " — fix: duplicate-block" } else { "" };
-                    state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                    state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                             file: state.file.to_string(),
                                             line,
                                             function: String::new(),
@@ -4467,7 +4528,7 @@ pub fn guard_clause_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                 let len = chain_len(s);
                 if len >= 3 {
                     let line = line_of(source, s.range().start());
-                    state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                    state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                             file: state.file.to_string(),
                                             line,
                                             function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
@@ -4559,7 +4620,7 @@ pub fn conditional_polymorphism_findings(state: &mut ScanState, body: &[Stmt], s
                     let keys: Vec<Option<String>> = arms.iter().map(|t| dispatch_key(t)).collect();
                     if keys.iter().all(|k| k.is_some()) && keys.windows(2).all(|w| w[0] == w[1]) {
                         let line = chain_line;
-                        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                        state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                                     file: state.file.to_string(),
                                                     line,
                                                     function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
@@ -4607,7 +4668,7 @@ pub fn special_case_findings(state: &mut ScanState, body: &[Stmt], source: &str)
     v.sort_by_key(|(_, (_, l))| *l);
     for (name, (n, line)) in v {
         if *n >= 3 {
-            state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+            state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                             file: state.file.to_string(),
                             line: *line,
                             function: String::new(),
@@ -4641,7 +4702,7 @@ pub fn middle_man_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                             if let Some(v) = &r.value {
                                 if is_self_call(v) {
                                     let line = line_of(source, f.name.range().start());
-                                    state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                                    state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                                                             file: state.file.to_string(),
                                                                             line,
                                                                             function: f.name.to_string(),
@@ -4725,6 +4786,7 @@ pub fn unused_setter_findings(
             format!("setter '{name}' ({rel}:{line}) is never referenced — Remove Setting Method: delete it")
         };
         out.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             file: rel.to_string(),
             line: *line,
@@ -5013,6 +5075,7 @@ struct LoopFunctionCtx<'a, 'b> {
 impl<'a, 'b> LoopFunctionCtx<'a, 'b> {
     fn push_finding(&mut self, line: usize, kind: &str, message: String) {
         self.state.findings.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             col: 0,
             file: self.state.file.to_string(),
@@ -5176,7 +5239,7 @@ fn loop_module_walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
                         .is_none_or(|t| !module_bindings.get(&t).copied().unwrap_or(false));
                     if fresh && loop_body_is_pipeline(&f.body) {
                         let line = line_of(source, f.range().start());
-                        state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                        state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                         file: state.file.to_string(),
                         line,
                         function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
@@ -5473,7 +5536,7 @@ pub fn latent_visitor_findings(state: &mut ScanState, body: &[Stmt], source: &st
     v.sort_by_key(|(_, (_, l))| *l);
     for (family, (n, line)) in v {
         if *n >= 2 {
-            state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+            state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                             file: state.file.to_string(),
                             line: *line,
                             function: String::new(),
@@ -6593,16 +6656,14 @@ pub fn duplicate_module_findings(entities: &[SkeletonModule]) -> Vec<Finding> {
                 )
             };
             Some((
-                Finding {
-                    seam_members: Vec::new(),
-                    col: 0,
-                    file: later.rel.clone(),
-                    line: later.line,
-                    function: later.name.clone(),
-                    kind: "duplicate-module".into(),
-                    severity: "fail".into(),
-                    message,
-                },
+                Finding { logical_start: None, seam_members: Vec::new(),
+                col: 0,
+                file: later.rel.clone(),
+                line: later.line,
+                function: later.name.clone(),
+                kind: "duplicate-module".into(),
+                severity: "fail".into(),
+                message, },
                 earlier.rel.clone(),
                 later.rel.clone(),
                 later.entity == "class",
@@ -6677,19 +6738,17 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
             }
             if let Some((j, sim)) = best {
                 let dup = &fns[j];
-                return Some(Finding {
-                    seam_members: Vec::new(),
-                    col: 0,
-                    file: dup.rel.clone(),
-                    line: dup.line,
-                    function: dup.name.clone(),
-                    kind: "duplicate".into(),
-                    severity: "warn".into(),
-                    message: format!(
-                        "function '{}' ({}:{}) is {:.0}% similar to '{}' ({}:{}) — copy-paste; extract the shared logic into one function",
-                        dup.name, dup.rel, dup.line, sim * 100.0, fr.name, fr.rel, fr.line
-                    ),
-                });
+                return Some(Finding { logical_start: None, seam_members: Vec::new(),
+                col: 0,
+                file: dup.rel.clone(),
+                line: dup.line,
+                function: dup.name.clone(),
+                kind: "duplicate".into(),
+                severity: "warn".into(),
+                message: format!(
+                    "function '{}' ({}:{}) is {:.0}% similar to '{}' ({}:{}) — copy-paste; extract the shared logic into one function",
+                    dup.name, dup.rel, dup.line, sim * 100.0, fr.name, fr.rel, fr.line
+                ), });
             }
             None
         })
@@ -6799,6 +6858,7 @@ pub fn unused_findings(
             )
         };
         out.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             col: 0,
             file: rel.clone(),
@@ -7538,6 +7598,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                                 format!("{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists.")
                             };
                             state.findings.push(Finding {
+                                logical_start: None,
                                 seam_members: Vec::new(),
                                 col: 0,
                                 file: state.file.to_string(),
@@ -7577,6 +7638,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                                 format!("{fname} returns a dict that holds the fields of a record; the shape has no name at the call site. Type the return with the class that models the shape; create that class if none exists.", fname = f.name.as_str())
                             };
                             state.findings.push(Finding {
+                                logical_start: None,
                                 seam_members: Vec::new(),
                                 col: 0,
                                 file: state.file.to_string(),
@@ -7645,6 +7707,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
             ),
         };
         state.findings.push(Finding {
+            logical_start: None,
             seam_members: Vec::new(),
             file: state.file.to_string(),
             line: h.line,
@@ -7806,19 +7869,17 @@ pub fn partition_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
             };
             let metric: usize = groups.iter().map(|g| g.len()).sum();
             let _ = metric;
-            state.findings.push(Finding {
-                seam_members: groups.iter().flatten().cloned().collect(),
-                col: 0,
-                file: state.file.to_string(),
-                line: line_of(source, cls.name.range().start()),
-                function: cls.name.to_string(),
-                kind: "partition".into(),
-                severity: "fail".into(),
-                message: format!(
-                    "methods split into {count} field-disjoint groups ({groups_text}), connectors removed: {conn_text} — each group touches only its own fields, so the class is really {count} independent classes. Split it into {count} classes. — fix: extract-class",
-                    count = groups.len()
-                ),
-            });
+            state.findings.push(Finding { logical_start: None, seam_members: groups.iter().flatten().cloned().collect(),
+            col: 0,
+            file: state.file.to_string(),
+            line: line_of(source, cls.name.range().start()),
+            function: cls.name.to_string(),
+            kind: "partition".into(),
+            severity: "fail".into(),
+            message: format!(
+                "methods split into {count} field-disjoint groups ({groups_text}), connectors removed: {conn_text} — each group touches only its own fields, so the class is really {count} independent classes. Split it into {count} classes. — fix: extract-class",
+                count = groups.len()
+            ), });
         }
     }
 }
@@ -7929,7 +7990,7 @@ pub fn monkeypatch_findings(state: &mut ScanState, body: &[Stmt], source: &str) 
 }
 
 fn mp_finding(state: &mut ScanState, desc: &str, line: usize) {
-    state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+    state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
             file: state.file.to_string(),
             line,
             function: String::new(),
@@ -7961,6 +8022,7 @@ fn is_pytest_mark_skip(a: &ExprAttribute) -> bool {
 fn parked_skip_finding(state: &mut ScanState, source: &str, offset: ruff_text_size::TextSize) {
     let line = line_of(source, offset);
     state.findings.push(Finding {
+        logical_start: None,
         seam_members: Vec::new(),
         col: 0,
         file: state.file.to_string(),
@@ -8002,7 +8064,7 @@ pub fn skipif_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                                 .collect();
                             let cond = cond_parts.join(" ");
                             if SKIPIF_NEEDLES.iter().any(|needle| cond.contains(needle)) {
-                                state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                                state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                                                     file: state.file.to_string(),
                                                                     line: line_of(source, call.range().start()),
                                                                     function: String::new(),
@@ -8181,7 +8243,7 @@ pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                     fi += 1;
                 }
                 if real_fs && !needs_real {
-                    state.findings.push(Finding { seam_members: Vec::new(), col: 0,
+                    state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                             file: state.file.to_string(),
                                             line,
                                             function: f.name.to_string(),
@@ -8241,16 +8303,14 @@ pub fn no_assert_test_findings(state: &mut ScanState, body: &[Stmt], source: &st
         if let Q::N(n) = queue[qi] {
             if let AnyNodeRef::StmtFunctionDef(f) = n {
                 if f.name.as_str().starts_with("test_") && !has_assertion(&f.body) {
-                    state.findings.push(Finding {
-                        seam_members: Vec::new(),
-                        col: 0,
-                        file: state.file.to_string(),
-                        line: line_of(source, f.name.range().start()),
-                        function: f.name.to_string(),
-                        kind: "no-assert-test".into(),
-                        severity: "fail".into(),
-                        message: "test has no assertion — it can never fail, so it proves nothing. Add an assertion or delete the test.".to_string(),
-                    });
+                    state.findings.push(Finding { logical_start: None, seam_members: Vec::new(),
+                    col: 0,
+                    file: state.file.to_string(),
+                    line: line_of(source, f.name.range().start()),
+                    function: f.name.to_string(),
+                    kind: "no-assert-test".into(),
+                    severity: "fail".into(),
+                    message: "test has no assertion — it can never fail, so it proves nothing. Add an assertion or delete the test.".to_string(), });
                 }
             }
             skel_children(n, &mut queue);
@@ -8480,7 +8540,7 @@ pub fn abstraction_findings(scans: &[(String, Vec<crate::ClassInfo>, Vec<crate::
     for ((rel, name), subs) in entries {
         if subs.len() == 1 {
             let line = classes.get(&(rel.clone(), name.clone())).map(|c| c.line).unwrap_or(1);
-            out.push(Finding { seam_members: Vec::new(), col: 0,
+            out.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                             file: rel.clone(),
                             line,
                             function: name.clone(),

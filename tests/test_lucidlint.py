@@ -947,7 +947,10 @@ def test_suppression_advice_states_marker_window(capsys):
     ch._render_file_group("x.py", [a])
     out = capsys.readouterr().out
     assert "suppress with: inline-import" in out
-    assert "binds by its signal name on this finding's own line or on the line immediately before it" in out
+    assert (
+        "binds by its signal name on this finding's own line, the line before it,"
+        " the logical line's first source line" in out
+    )
     assert "the why text may end mid-word at the line end and still bind" in out
     assert "a marker further up does not" not in out
 
