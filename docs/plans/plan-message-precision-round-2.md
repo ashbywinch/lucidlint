@@ -149,13 +149,19 @@ Actions:
 
 Acceptance: round-8 proposer reports no mutation-loop misfire.
 
-## Phase 7 — removed
+## Phase 7 — the conversion states the hidden half-step
 
-The forwarding husk is not a separate case: the state the methods
-forward to belongs in the class — moving a reference shares the object,
-nothing is copied, and a module singleton is itself a global-state
-finding. The static-husk message stays as it is; the "keep and document
-the seam" scoped text is dropped.
+The forwarding husk is not a separate case: the state belongs in the
+class, and a module singleton is itself a global-state finding. But the
+remedy has a half-step the message never states. A class attribute on a
+staticmethod class does not clear the finding — the rule fires on
+"no self.X AND every member a @staticmethod", so the class must ALSO
+stop being static: a constructor that takes the state, instance
+attributes, instance methods that read them. The static-husk message
+gains the explicit sentence: the methods stop being static and read the
+state from the instance. Without it, a reader keeps the statics and
+produces a class that still fires — the trap behind the reviewers'
+resistance.
 
 ## Order of work
 
