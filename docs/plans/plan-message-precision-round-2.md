@@ -153,11 +153,18 @@ Acceptance: round-8 proposer reports no mutation-loop misfire.
 
 Actions:
 
-1. When the husk's members forward to module-level singletons or DI
-   defaults, the message names that case and the honest action
-   (document the seam) instead of the open-ended "find the state"
-   instruction.
-2. Fixture: a DI default adapter renders the scoped text.
+1. When every staticmethod of a husk forwards to module-level
+   callables (the DI-default shape — state lives in the module
+   singletons and the container), the message adds the scoped text:
+   "These members forward to module-level functions — the state lives
+   there, and putting it in this class would duplicate it. If this is a
+   DI default or adapter seam, keep it and document the seam;
+   otherwise the operations belong on the class that owns the state
+   they work on." Husks that compute locally keep the original
+   open-ended text.
+2. Fixtures: a husk whose statics all forward to module-level names
+   renders the scoped text; a locally-computing husk renders the
+   original text; the exemption fixtures stay green.
 
 Acceptance: round-8 proposer reads the static-husk guidance without the
 DI-default confusion.
