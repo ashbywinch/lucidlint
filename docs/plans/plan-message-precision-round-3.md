@@ -103,18 +103,15 @@ Actions:
 Acceptance: round-9's marker CONFUSING entries are absent; no marker
 binds from a distance greater than one line.
 
-## Phase 5 — a same-value name elsewhere is linked
+## Phase 5 — removed
 
-Actions:
-
-1. When a flagged literal's value matches a name bound in the same
-   module (a named constant or an exempt unit-named field), the
-   message appends: "the same value is named at {file}:{line}".
-2. Fixture: a flagged 30 with a named 30 elsewhere in the module
-   renders the cross-reference; no name anywhere renders nothing.
-
-Acceptance: round-9 proposer sees the domain.py:119 / transit.py:161
-pair as one value, not two decisions.
+Value equality is not relatedness. 30, 60, and 100 recur across
+unrelated code, and the detector knows only the number; a cross-
+reference would invite wrong merges — two unrelated constants made one
+— and asserts a relationship the tool cannot know. The round-8
+observation was mild (one site exempt, one flagged, no wrong action),
+and the asymmetry is correct: the exempt site's name states the value's
+role, the flagged site's does not.
 
 ## Phase 6 — duplicate-module compares function skeletons too
 
@@ -161,7 +158,7 @@ stays absent when every acknowledged key matches.
 
 1. Phase 1, then Phase 6 — the consistency and completeness defects.
 2. Phases 2 and 3 — the wrong claims.
-3. Phases 4, 5, 7 — the guidance and message texts.
+3. Phases 4 and 7 — the guidance and message texts.
 4. Phase 8 — the verified run; rebuild the release binary after the
    last scanner edit; full battery; eval round 9 on houses with
    --baseline passed; section J items absent from its CONFUSING list.
