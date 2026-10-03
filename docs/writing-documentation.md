@@ -107,7 +107,6 @@ way."
 
 ✓ "The line above the findings names the code whose change would cost the
 most."
-.
 
 ## API keys never go in docs
 
@@ -187,8 +186,9 @@ Write each section by these rules:
 - Keep sentences under 30 words.
 - Do not start a sentence with "There is" or "There are".
 - Do not use weasel words: enable, leverage, robust, seamless, transparent.
-- Define tool terms (finding, seam, stamp, directive, baseline, action,
-  family) in plain words at first use.
+- Define project-specific jargon in plain words at first use — house
+  terms such as finding, seam, stamp, directive, baseline, action, and
+  family included.
 
 Write each section so it gives the reader one of:
 - a command to run, or a file to edit or open
