@@ -52,19 +52,20 @@ Acceptance: every named-type map on houses renders the collection
 message with the member-function instruction; round-9 proposer reports
 no two-message inconsistency and no "alias suffices" reading.
 
-## Phase 2 — the family claim dies; the general message is the whole action
+## Phase 2 — both mechanisms named, the family left to the reader
 
 Actions:
 
-1. The duration and physical family sentences leave the message. The
-   suggestion forms (timedelta, pint) leave with them: the family is
-   inferred from tokens, and the 60-division case proves the inference
-   wrong. The magic message is the general form everywhere: nothing
-   states what it means or why this size — write it as a named
-   constant and say so in the name or one comment.
-2. Fixtures: the 60-division site renders the general text, never
-   "is a duration"; the retry-cap site renders the same, with no
-   timedelta mention.
+1. The family assertion leaves the message; the mechanisms stay. The
+   magic message names both alternatives and never claims which
+   applies: "Write it as a named constant where the computation uses
+   it, and state what it means and why this size in the name or in one
+   comment beside it. If the value is a duration, express it as a
+   timedelta; if it is a physical quantity, express it as a pint
+   Quantity." The family is the reader's judgment.
+2. Fixtures: the 60-division site renders the general text plus both
+   mechanism sentences, never "is a duration"; the retry-cap site
+   renders the same; no unit is named for either.
 
 Acceptance: no round-9 CONFUSING item about durations versus
 conversion factors.
