@@ -82,20 +82,26 @@ Actions:
 
 Acceptance: round-9 proposer names no async pipeline recipe.
 
-## Phase 4 — the anchors are stated in the guidance
+## Phase 4 — a marker binds on the finding's line or the line before
 
 Actions:
 
-1. The suppression guidance sentence names the anchors and the window
-   positions exactly: a record-shape finding anchors at the def, the
-   parameter, or the literal it names; a marker binds within the 3
-   lines ending at the anchor, on the line above the def, or on its
-   own line. A marker on the body's first line binds nothing unless a
-   finding sits there; the guidance says so, and the report adds no
-   new finding and no marker advice.
+1. The binding window is exactly two lines: the finding's own line and
+   the line immediately before it. This supersedes the 3-line window,
+   the def-window union (round 2, Phase 2), and the def-1/def variant:
+   all of them admitted markers that were not on the finding's line or
+   the line before, which no reader regards as related.
+2. The anchors stay on the problem lines — the parameter's line for a
+   parameter's type, the return annotation, the literal the finding
+   names — so the practiced "one line above the def" placement binds
+   single-line signatures (finding on the def line) and is one line
+   high only where the problem is an interior parameter line, which the
+   reader can see and fix in one line.
+3. The guidance sentence states the rule in one sentence; the existing
+   3-line tests are rewritten to the two-line rule.
 
-Acceptance: round-9 proposer's marker questions are answered by the
-guidance sentence, not by discovery.
+Acceptance: round-9's marker CONFUSING entries are absent; no marker
+binds from a distance greater than one line.
 
 ## Phase 5 — a same-value name elsewhere is linked
 
