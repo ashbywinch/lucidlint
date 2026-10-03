@@ -144,12 +144,14 @@ Actions:
    nested functions close over the enclosing locals. The accumulator
    phrase renders only when the closures mutate a captured local.
 2. The process-class message states the three-part test that clears
-   it: the domain calls this component that name; every kind of thing
-   it operates on has its own class; and it still holds data and logic
-   of its own once those classes exist. The message names the part the
-   detector can see (its methods work on raw dicts, lists, or loose
-   fields) and the action when the missing classes are the finding:
-   create them first, then check the other two.
+   it: "{Class} is named for a process, not a thing. Keep the name only
+   when all three hold: 1) the domain calls this component by that
+   name; 2) the data it operates on is all already represented by
+   well-designed classes; 3) data and logic still remain that
+   legitimately fit better in a process class. If the data it operates
+   on is still raw dicts, lists, or loose fields, represent it with
+   classes first, then re-check 2 and 3." The detector states the part
+   it can see; the reader runs the test.
 3. record-shape does not fire on a return that is an annotated
    accessor copy of the class's own state (return self.X). Awaiting
    the verdict.
