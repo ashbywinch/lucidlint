@@ -103,6 +103,25 @@ Actions:
 Acceptance: round-9's marker CONFUSING entries are absent; no marker
 binds from a distance greater than one line.
 
+### Phase 4a — the logical line is also an anchor
+
+One line of code can span several source lines: a multi-line def, a
+wrapped call, a split literal. A marker binds when it sits on or one
+line above the finding's own source line, OR on or one line above the
+logical line containing that code — its first source line (the def
+line for a signature, the statement's first line for a wrapped call).
+Statement-level precision survives: a marker on the specific physical
+line still wins, innermost first.
+
+Implementation: the emitter records each finding's logical start line
+in an internal field marked `#[serde(skip)]` (JSON stays schema 4); the
+binder's window becomes {logical_start-1, logical_start} ∪ {line-1,
+line}. Fixtures: a marker above a multi-line def binds every parameter
+and return finding in that signature; a marker above a wrapped call's
+first line binds the finding inside it; a marker on the physical line
+binds; two lines above either anchor binds nothing. The guidance
+sentence states the logical-line rule.
+
 ## Phase 5 — removed
 
 Value equality is not relatedness. 30, 60, and 100 recur across
