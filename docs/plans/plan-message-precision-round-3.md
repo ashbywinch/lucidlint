@@ -143,12 +143,16 @@ Actions:
 1. The latent-class closures message states only what is true: the
    nested functions close over the enclosing locals. The accumulator
    phrase renders only when the closures mutate a captured local.
-2. The process-class message states the clearing bar in decision
-   terms: keep the class when the domain genuinely names the stateful
-   component; otherwise the operations belong on the objects they
-   operate on.
+2. The process-class message states the three-part test that clears
+   it: the domain calls this component that name; every kind of thing
+   it operates on has its own class; and it still holds data and logic
+   of its own once those classes exist. The message names the part the
+   detector can see (its methods work on raw dicts, lists, or loose
+   fields) and the action when the missing classes are the finding:
+   create them first, then check the other two.
 3. record-shape does not fire on a return that is an annotated
-   accessor copy of the class's own state (return self.X).
+   accessor copy of the class's own state (return self.X). Awaiting
+   the verdict.
 
 Acceptance: round-9 proposer reports neither misdescription.
 
