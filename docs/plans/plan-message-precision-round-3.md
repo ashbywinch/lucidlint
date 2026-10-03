@@ -117,19 +117,21 @@ role, the flagged site's does not.
 
 Actions:
 
-1. The constants pre-filter requires identical tokens AND non-empty;
-   the http_error pair (dag/, houses/) has no module-level constants —
-   its 500/429 sit inside functions — so both sides are empty and the
-   gate skips the pair before the Dice check runs. Drop the emptiness
-   requirement: identical constant tokens, including both empty, plus
-   the structural bar (>= 0.9 Dice, the length window, compatible
-   entity kinds).
-2. If the pair still misses on Dice or the length window once the
-   pre-filter is removed, measure it and bring the number back; do not
-   loosen the structural bar on a guess.
-3. Fixtures: the http_error pair fires; a pair with differing
-   non-empty constants stays skipped; the schools config-variant pair
-   keeps the shared-base message.
+1. The similarity measure stands alone: compatible entity kinds plus
+   Dice >= 0.9 over the skeleton bigrams. The constants leave the gate
+   entirely — no identity requirement, no non-empty requirement, no
+   member-name requirement. The http_error pair (dag/, houses/) has no
+   module-level constants at all, which is what silenced it; it fires
+   once the gate is the measure.
+2. The message stops claiming constants by default: the "with
+   identical constants {…}" clause renders only when the constants
+   exist and match; the matched members stay as reader information.
+3. Two subclasses of one base keep the config-variant message (the
+   detector sees the shared base, and the fork prose is false there).
+4. Fixtures: the http_error pair fires; the schools config-variant
+   pair keeps its message; a pair below 0.9 stays silent. Any
+   lookalike-but-unrelated pair the widened gate surfaces is brought
+   to the round-9 acceptance rather than pre-filtered away.
 
 Acceptance: round-9 proposer sees the http_error pair flagged and no
 COMФUSING asymmetry entry.
