@@ -149,25 +149,13 @@ Actions:
 
 Acceptance: round-8 proposer reports no mutation-loop misfire.
 
-## Phase 7 — static-husk's fix text is scoped
+## Phase 7 — removed
 
-Actions:
-
-1. When every staticmethod of a husk forwards to module-level
-   callables (the DI-default shape — state lives in the module
-   singletons and the container), the message adds the scoped text:
-   "These members forward to module-level functions — the state lives
-   there, and putting it in this class would duplicate it. If this is a
-   DI default or adapter seam, keep it and document the seam;
-   otherwise the operations belong on the class that owns the state
-   they work on." Husks that compute locally keep the original
-   open-ended text.
-2. Fixtures: a husk whose statics all forward to module-level names
-   renders the scoped text; a locally-computing husk renders the
-   original text; the exemption fixtures stay green.
-
-Acceptance: round-8 proposer reads the static-husk guidance without the
-DI-default confusion.
+The forwarding husk is not a separate case: the state the methods
+forward to belongs in the class — moving a reference shares the object,
+nothing is copied, and a module singleton is itself a global-state
+finding. The static-husk message stays as it is; the "keep and document
+the seam" scoped text is dropped.
 
 ## Order of work
 
