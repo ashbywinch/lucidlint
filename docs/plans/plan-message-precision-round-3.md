@@ -38,14 +38,17 @@ Actions:
 1. The collection classifier fires in every arm for every resolvable
    named-type map; the attempt.py:424 shape is a fixture and must
    render the collection message.
-2. When the module binds a named alias of the map's shape
-   (`Sources = dict[str, Provenance]`), the collection's name exists:
-   do not emit. A typed, named collection is the rule's answer, and
-   the message states it only when the name is absent.
+2. A raw-dict alias (`Sources = dict[str, Provenance]`) is NOT an
+   exemption: an alias names the shape, it carries no behavior. The
+   message names the difference and the full move: "Make a class for
+   the collection, named with a domain noun — an alias to dict names
+   the problem, it does not solve it; move the operations that take,
+   build, or read this map onto the class as methods." The operations
+   threaded around the map are the class's latent member functions.
 
 Acceptance: every named-type map on houses renders the collection
-message or is alias-named; round-9 proposer reports no two-message
-inconsistency.
+message with the member-function instruction; round-9 proposer reports
+no two-message inconsistency and no "alias suffices" reading.
 
 ## Phase 2 — the family claim dies; the general message is the whole action
 
