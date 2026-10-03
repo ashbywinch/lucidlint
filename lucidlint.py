@@ -134,6 +134,7 @@ class _RenderCtx:
     suppression_census: dict[str, int] | None = None
     config_ignore_keys: dict[str, str] = field(default_factory=dict)  # B5: signal -> config key
     baseline_migration: str = ""  # B3: pre-round baseline note ("" = none)
+    stale_count: int = 0  # Phase 5: acknowledged keys matching no current finding
 
     def _config_ignored_detail(self) -> str:
         """The §9 debt ledger's per-kind detail: the config-ignored families
@@ -166,18 +167,27 @@ class _RenderCtx:
         reported = fails + warnings and total = reported + acknowledged +
         config-ignored + comment-suppressed are stated HERE, and the gate
         line repeats none of them. The baseline-activation clause rides the
-        acknowledged term. None only when there is literally nothing to
-        state."""
+        acknowledged term; Phase 5 appends the stale clause to it too — "N
+        acknowledged entries match no current finding" renders ONLY when
+        nonzero. None only when there is literally nothing to state."""
         ignored = sum(self.ignored_by_signal.values()) if self.ignored_by_signal else 0
         census = sum(self.suppression_census.values()) if self.suppression_census else 0
         reported = len(fails) + len(warns)
         acknote = self._baseline_acknote()
-        if not reported and not acks and not ignored and not census and not acknote:
+        stale_clause = ""
+        if self.stale_count:
+            n = self.stale_count
+            stale_clause = (
+                f" — {n} acknowledged entr{'y' if n == 1 else 'ies'} "
+                f"match{'es' if n == 1 else ''} no current finding — "
+                "re-acknowledge with --update-baseline"
+            )
+        if not reported and not acks and not ignored and not census and not acknote and not self.stale_count:
             return None
         total = reported + len(acks) + ignored + census
         return (
             f"{total} findings — {reported} reported ({len(fails)} fails + {len(warns)} warnings) "
-            f"+ {len(acks)} acknowledged (baseline){acknote}"
+            f"+ {len(acks)} acknowledged (baseline){acknote}{stale_clause}"
             f" + {ignored} config-ignored{self._config_ignored_detail()}"
             f" + {census} comment-suppressed"
         )
@@ -221,19 +231,22 @@ class _RenderCtx:
         )
 
     def render_summary(self, fails: list[Action], warns: list[Action], acks: list[Action]) -> None:
-        """Gate verdict, scope, and formula lines."""
+        """Gate verdict, scope, and fail-bar lines."""
         args = self.args
         coverage_source = self.coverage_source
         graph_preferred = self.graph_preferred
-        top = fails[0]
         bits = []
         # H7: the counts live in the LEDGER — the gate repeats none of them;
-        # it states the mode, the scope (distinct targets), and the single
-        # highest change-cost line. The baseline honesty clause carries no
-        # count and stays here ("no baseline — cannot tell what is new"); the
-        # activation clause for a repo-root lucidlint.json rides the ledger's
-        # acknowledged term (Phase 4: "95 acknowledged action(s)" read as
-        # "+0 acknowledged" — round-3 CONFUSING)
+        # it states the mode, the scope (distinct targets), and the fail
+        # bars. The baseline honesty clause carries no count and stays here
+        # ("no baseline — cannot tell what is new"); the activation clause
+        # for a repo-root lucidlint.json rides the ledger's acknowledged
+        # term (Phase 4: "95 acknowledged action(s)" read as "+0
+        # acknowledged" — round-3 CONFUSING).
+        # Phase 4: the highest change-cost line and the percentile legend
+        # are GONE — the composite read as urgency (round-7: RISK99 beside
+        # a rejected finding). The raw metrics stay, rendered per-item as
+        # named facts (_facts_line) — never a percentile, never "risk".
         if args.baseline is None and not self.baseline_migration:
             current, _ = _baseline_file_state(self.repo / "lucidlint.json")
             if not current:
@@ -241,31 +254,15 @@ class _RenderCtx:
         mine_txt = (", " + ", ".join(bits)) if bits else ""
         targets = len({(a.file, a.function) for a in fails})
         verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
-        print(
-            f"{verdict} — across {targets} distinct targets{mine_txt}, "
-            # B2: the top line names the ACTUAL rule (the raw-risk percentile
-            # the formula line below defines) — never "the hotspot", a
-            # definition the top item may not satisfy; F5: it is the code
-            # whose change costs the most — fixing it first lowers future
-            # change cost
-            f"highest change-cost: {top.file}:{top.line} ({top.function or top.kind}) [RISK{top.priority:02d}]"
-        )
-        print(
-            "priority ranks change-cost (churn x fan-in), not brokenness — which item is worth "
-            "fixing first is a judgement call; the hotspot entries are the usual starting set"
-        )
+        print(f"{verdict} — across {targets} distinct targets{mine_txt}")
         if graph_preferred:
             print(
                 "WARNING: coverage snapshot predates the repo's tests — hard 'untested' claims are suppressed; "
                 "run --refresh-coverage (make coverage) for definite test-status verdicts"
             )
         print(
-            "priority = percentile of raw risk (metric norm x sqrt(1 + churn/30) x (1 + callers/5)); "
-            "norms: CC/40, lines/200, edges/400, risk/1 "
-            "(norm capped at 1.0, churn/30 capped at 1.5 with its root taken, callers factor at 1.0) "
-            "— the displayed thresholds are the fail bars, not the norms; "
-            "thresholds: CC>=15, fn>=120 lines, file>=150 edges, risk>=0.8, hotspot top 10% "
-            + f"by churn with CC>=15; coverage: {coverage_source}"
+            "fail bars: CC>=15, fn>=120 lines, file>=150 edges, hotspot top 10% "
+            f"by churn with CC>=15; coverage: {coverage_source}"
         )
 
     def render_text(self, unique: list[Action], fails: list[Action], warns: list[Action], acks: list[Action]) -> None:
@@ -1324,6 +1321,29 @@ def _load_baseline(path) -> _Baseline:
     return _Baseline(set(), {})
 
 
+def _facts_line(a: Action) -> str | None:
+    """Phase 4: the raw metrics render as NAMED FACTS on one extra line —
+    never a percentile, never "risk" (the composite read as urgency). A
+    clause per notable fact: CC >= 15, or >= 10 changes in the history, or
+    >= 10 callers; a metric that is absent (the scanner default of 1.0)
+    skips its clause. The subject is "This function" — "This code" only
+    when the finding anchors no function."""
+    facts = []
+    if a.metric >= 15:
+        facts.append(f"is complex ({int(a.metric)} decision points)")
+    if a.churn >= 10:
+        facts.append(f"changed often ({a.churn} changes)")
+    if len(a.callers) >= 10:
+        facts.append(f"has {len(a.callers)} callers")
+    if not facts:
+        return None
+    subject = "This function" if a.function else "This code"
+    if len(facts) == 1:
+        return f"{subject} {facts[0]}."
+    joiner = ", and " if len(facts) > 2 else " and "
+    return f"{subject} " + ", ".join(facts[:-1]) + joiner + facts[-1] + "."
+
+
 def _render_file_group(
     file: str, items: list[Action], ignore_keys: dict[str, str] | None = None
 ) -> None:
@@ -1338,7 +1358,8 @@ def _render_file_group(
         # Phase 4: the per-item RISKxx bracket is gone — it read as a
         # brokenness order (the valuable fail carried the lowest display
         # value); severity survives as the [warn] marker for warnings, and
-        # the header's single highest change-cost line carries the percentile
+        # the raw metrics render as the facts line (_facts_line) — never a
+        # percentile, never "risk"
         tag = "warn" if a.severity == "warn" else ""
         # a latent-class variant's display kind (latent-class) IS its
         # suppression family — nothing to teach, and a suppression recipe
@@ -1392,6 +1413,12 @@ def _render_file_group(
         # appears exactly once (the messages no longer embed suppression
         # wording — the pointer is renderer data)
         print(f"  {bracket} {loc}{churn} — {a.message}{suppress}" + (f" [{stamp}]" if stamp else ""))
+        # Phase 4: the raw metrics render right under the message as NAMED
+        # FACTS (one extra line, a clause per notable fact) — the composite
+        # and its percentile left the report (see _facts_line)
+        facts = _facts_line(a)
+        if facts:
+            print(f"      -> {facts}")
         if a.note:
             print(f"      -> {a.note}")
 
@@ -1572,40 +1599,19 @@ def _render_actions(
 def _apply_baseline(unique: list[Action], baseline_keys: set[str]) -> list[str]:
     """Mark acknowledged actions so they report but never fail the gate.
 
-    Both-direction lock (the pyrefly-lock rule, same lesson): a baseline
-    entry whose finding the code no longer produces is STALE drift and
-    fails the gate — a one-way baseline lets a fix silently rot the
-    baseline until someone re-runs update-baseline. Returns the stale keys.
+    Exact-identity matching, the pyrefly pattern (Phase 5): an acknowledged
+    key (kind:file:line:function) that matches NO current finding is stale —
+    drifted, fixed, and deleted are the same case; no reconciliation is
+    attempted. --update-baseline regenerates the keys, as it does for
+    pyrefly and mypy-baseline. Returns the matchless keys; the count renders
+    in the ledger so the reader sees why acknowledged debt re-reports.
     """
-    # Stale comparison is location-INSENSITIVE: the key embeds file:line, so
-    # an edit that shifts a function's line would otherwise make every
-    # acknowledged entry look stale (false failures + baseline churn — the
-    # line-keyed pyrefly baseline cost us exactly this all session). The
-    # identity is (kind, file, function): the same debt at a new line is
-    # still acknowledged; only debt that is genuinely gone is stale.
-    current_ids = {(a.kind, a.file, a.function) for a in unique if a.severity != "warn"}
-    baseline_ids = {_baseline_identity(k) for k in baseline_keys}
-    stale = sorted(k for k in baseline_keys if _baseline_identity(k) not in current_ids)
+    current_keys = {action_key(a) for a in unique if a.severity != "warn"}
+    matched = current_keys & baseline_keys
     for a in unique:
-        if (a.kind, a.file, a.function) in baseline_ids:
+        if action_key(a) in matched:
             a.severity = "ack"
-    return stale
-
-
-class BaselineIdentity(NamedTuple):
-    """An action's (kind, file, function) — the line is excluded so location
-    shifts do not rot acknowledged debt."""
-
-    kind: str
-    file: str
-    function: str
-
-
-def _baseline_identity(key: str) -> BaselineIdentity:
-    parts = key.split(":", 3)
-    if len(parts) == 4:
-        return BaselineIdentity(kind=parts[0], file=parts[1], function=parts[3])
-    return BaselineIdentity(kind=key, file="", function="")
+    return sorted(baseline_keys - current_keys)
 
 
 # the gate reports DISPLAY kinds (final_kind output: strewing shows as
@@ -2091,6 +2097,7 @@ class _GateRunner:
             suppression_census=self.suppression_census,
             config_ignore_keys=self.config_ignore_keys,
             baseline_migration=self.baseline_migration,
+            stale_count=len(self.stale),
         )
 
         if self.args.json:
@@ -2476,10 +2483,13 @@ def _gate_exit(stale: list[str], fails: list[Action], args) -> int:
     if args.warn:
         return 0
     if stale:
+        # Phase 5: drift/fix/delete are the same case — the KEY matches no
+        # current finding; the ledger (stdout) shows the count and remedy
         log(
-            f"{len(stale)} stale baseline entr{'y' if len(stale) == 1 else 'ies'} — the code no longer "
-            f"produces these findings: {', '.join(stale[:5])}{'...' if len(stale) > 5 else ''}; "
-            f"run --update-baseline to shrink the baseline"
+            f"{len(stale)} stale baseline entr{'y' if len(stale) == 1 else 'ies'} match no current finding — "
+            f"drifted, fixed, or deleted are the same case: {', '.join(stale[:5])}"
+            f"{'...' if len(stale) > 5 else ''}; "
+            f"run --update-baseline to re-lock the baseline"
         )
     if fails:
         log(f"{len(fails)} action(s) found — failing (use --warn to run informational)")

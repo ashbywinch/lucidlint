@@ -330,9 +330,6 @@ def test_merge_warn_into_fail_target():
     assert "WARN: m2" in out[0].note  # the differing message lands in the note
 
 
-def test_baseline_identity_fallback():
-    assert ch._baseline_identity("complexity:a.py:3:alpha") == ch.BaselineIdentity("complexity", "a.py", "alpha")
-    assert ch._baseline_identity("short") == ch.BaselineIdentity("short", "", "")
 
 
 def test_rust_finding_rel_unmappable(tmp_path):
@@ -692,8 +689,8 @@ def test_per_item_lines_keep_severity_marker_not_risk_tag(capsys):
     # Phase 4: the [RISKxx] tag is dropped from per-item finding lines — it
     # read as a brokenness order (the only true complexity fail carried the
     # LOWEST display value). Severity survives as the [warn] marker; fail
-    # findings carry none (the GATE line and the header's single highest
-    # change-cost line carry the risk percentile).
+    # findings carry none — the raw metrics render as the facts line
+    # (_facts_line): named facts, never a percentile, never "risk".
     fail = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 1, 0, "", "", priority=99)
     ch._render_file_group("x.py", [fail])
     out = capsys.readouterr().out
@@ -706,18 +703,67 @@ def test_per_item_lines_keep_severity_marker_not_risk_tag(capsys):
     assert "[RISK" not in out
 
 
-def test_summary_top_line_names_the_actual_rule(tmp_path, capsys):
-    # B2: the header's top line must not claim the top action is "the
-    # hotspot" (a definition it may not satisfy) — it names the actual rule,
-    # the raw-risk percentile (round: "top P99 tools/adopt.py" while :116 is
-    # not CC>=15)
+def test_facts_line_names_complex_and_churn_facts(capsys):
+    # Phase 4: the raw metrics stay as NAMED FACTS on ONE extra line — a
+    # clause per notable fact (CC >= 15, churn >= 10, callers >= 10), joined
+    # with "and"; never a percentile, never "risk". A CC-17 high-churn
+    # finding renders the exact plan sentence.
+    a = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 17.0, 14, "", "")
+    ch._render_file_group("x.py", [a])
+    out = capsys.readouterr().out
+    assert (
+        "-> This function is complex (17 decision points) and changed often (14 changes)." in out
+    ), out
+
+
+def test_facts_line_absent_on_quiet_finding(capsys):
+    # Phase 4: a CC-4 finding that never changed meets no bar — no facts
+    # line renders.
+    a = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 4.0, 0, "", "")
+    ch._render_file_group("x.py", [a])
+    out = capsys.readouterr().out
+    assert "-> This function" not in out
+    assert "decision points" not in out
+    assert "changed often" not in out
+
+
+def test_facts_line_skips_absent_metrics_and_names_callers():
+    # Phase 4: "use only what is present" — a metric that is absent (the
+    # scanner default of 1.0), no churn, no callers renders nothing; the
+    # callers clause fires only when the fan-in list is present and >= 10.
+    quiet = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "")
+    assert ch._facts_line(quiet) is None
+    few = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "",
+                    callers=[f"c{i}" for i in range(9)])
+    assert ch._facts_line(few) is None
+    many = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "",
+                     callers=[f"c{i}" for i in range(11)])
+    assert ch._facts_line(many) == "This function has 11 callers."
+    triple = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 20.0, 12, "", "",
+                       callers=[f"c{i}" for i in range(10)])
+    assert ch._facts_line(triple) == (
+        "This function is complex (20 decision points), changed often (12 changes), and has 10 callers."
+    )
+    # a finding that anchors no function says "This code", never a lie
+    noloc = ch.Action("standard", "fail", "x.py", 3, "", "m", 1.0, 12, "", "")
+    assert ch._facts_line(noloc) == "This code changed often (12 changes)."
+
+
+def test_summary_header_names_scope_not_change_cost(tmp_path, capsys):
+    # B2 + Phase 4: the header no longer names any action — the "highest
+    # change-cost ... [RISK99]" line and its legend leave the report (the
+    # composite read as urgency; round: "top P99 tools/adopt.py" while
+    # :116 is not CC>=15). The gate names the mode and the scope only; no
+    # line carries a percentile or the words "risk"/"change-cost".
     repo = make_repo(tmp_path)
     top = ch.Action("record-shape", "fail", "tools/adopt.py", 116, "from_dict", "m", 1.0, 0, "", "", priority=99)
     ch._RenderCtx(repo, gate_args(), "main", "abc1234", "no coverage", False).render_summary([top], [], [])
     out = capsys.readouterr().out
-    assert "highest change-cost: tools/adopt.py:116 (from_dict) [RISK99]" in out
+    assert "GATE: FAIL — across 1 distinct targets" in out
+    assert "tools/adopt.py" not in out  # the header names no action
     assert "top P99 tools/adopt.py" not in out
-
+    for word in ("RISK", "risk", "change-cost", "percentile"):
+        assert word not in out, out
 
 def test_legacy_baseline_prints_migration_line(tmp_path, capsys):
     # B3: a baseline carrying the pre-round 'actions' schema (line-less keys)
@@ -832,7 +878,7 @@ def test_ledger_single_home_of_numbers_gate_repeats_none(tmp_path, capsys):
     # fails + warnings; total = reported + acknowledged + config-ignored +
     # comment-suppressed; the baseline-activation clause rides the
     # acknowledged term), and the GATE line repeats none of them — it keeps
-    # the mode, the target count, and the highest change-cost line only
+    # the mode and the target count only (Phase 4: no change-cost line).
     src = (
         SWALLOW_SRC  # 1 reported fail
         + "\ndef m():\n    return 60 * 24\n"  # magic-number warn -> config-ignored
@@ -855,7 +901,8 @@ def test_ledger_single_home_of_numbers_gate_repeats_none(tmp_path, capsys):
     assert reported + acked + ignored + census == total, out
     assert out.count(" findings — ") == 1, out
     gate = next(line for line in out.splitlines() if line.startswith("GATE:"))
-    assert re.search(r"across \d+ distinct targets", gate) and "highest change-cost:" in gate, gate
+    assert re.search(r"across \d+ distinct targets", gate), gate
+    assert "change-cost" not in gate and "RISK" not in gate, gate
     for count_word in (
         "action(s)", "reported", " acknowledged", " config-ignored", " comment-suppressed",
         "warnings never-fail", "fails +",
@@ -1645,17 +1692,24 @@ def test_main_json_meta(tmp_path, capsys):
 
 
 
-def test_main_priority_percentile(tmp_path, capsys):
-    # Phase 4: the [RISKxx] tag is gone from per-item finding lines — it
-    # read as a brokenness order. The header's single highest change-cost
-    # line keeps the bracket; per-item lines carry only the severity marker.
+def test_report_renders_no_risk_or_percentile(tmp_path, capsys):
+    # Phase 4: the percentile, the highest change-cost line, and its legend
+    # leave the report — the composite read as urgency (round-7: RISK99
+    # beside a rejected finding). No report line carries "risk", "RISK",
+    # "change-cost", or a percentile; per-item lines carry the severity
+    # marker only. (The tmp-dir path may echo inside the re-run footer —
+    # strip it; the words are the report's, not the harness's.)
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     run_main(repo, "--warn")
     out = capsys.readouterr().out
-    assert re.search(r"highest change-cost: \S+:\d+ \([^)]*\) \[RISK\d{2}\]", out), out
+    assert "highest change-cost" not in out, out
+    assert "priority ranks" not in out, out  # the legend sentence is gone
     for line in out.splitlines():
         if line.startswith("  [") and " — " in line:
             assert "[RISK" not in line, line
+    report = out.replace(str(repo), "<repo>")
+    for word in ("RISK", "risk", "change-cost", "percentile"):
+        assert word not in report, out
 
 
 def test_update_baseline_excludes_warns(tmp_path):
@@ -1776,14 +1830,56 @@ def test_stale_baseline_clears_after_update(tmp_path):
     assert run_main(repo, "--baseline", str(baseline)) == 0
 
 
-def test_baseline_line_shift_is_not_stale(tmp_path):
+def test_baseline_line_drift_is_stale_and_clause_renders(tmp_path, capsys):
+    # Phase 5: exact-identity matching (the pyrefly pattern) — a baselined
+    # key (kind:file:line:function) that matches NO current finding is
+    # stale: a line shift re-reports the debt (drifted = fixed = deleted,
+    # no reconciliation) and the LEDGER says why, appending the count to
+    # the acknowledged term.
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     baseline = tmp_path / "lucidlint.json"
     run_main(repo, "--update-baseline", "--baseline", str(baseline))
     # add a line above the finding — same function, new line
     shifted = "# comment\n" * 3 + SWALLOW_SRC
     (repo / "houses" / "app.py").write_text(shifted)
+    assert run_main(repo, "--baseline", str(baseline)) == 1
+    out = capsys.readouterr().out
+    assert "except that swallows at line 7" in out  # the finding re-reports
+    assert (
+        "1 acknowledged entry matches no current finding — re-acknowledge with --update-baseline" in out
+    ), out
+
+
+def test_baseline_exact_key_is_acknowledged_no_clause(tmp_path, capsys):
+    # Phase 5: the same key at the current line acknowledges as before, and
+    # the ledger renders NO stale clause (the count is zero).
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    baseline = tmp_path / "lucidlint.json"
+    run_main(repo, "--update-baseline", "--baseline", str(baseline))
     assert run_main(repo, "--baseline", str(baseline)) == 0
+    out = capsys.readouterr().out
+    assert "acknowledged (baseline)" in out
+    assert "match no current finding" not in out
+
+
+def test_baseline_fixed_finding_renders_same_clause_undistinguished(tmp_path, capsys):
+    # Phase 5: a key for a genuinely FIXED finding is the same case as
+    # drift — the clause renders identically ("the same clause,
+    # undistinguished"), no reconciliation, no "fixed"/"drifted" split.
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    baseline = tmp_path / "lucidlint.json"
+    run_main(repo, "--update-baseline", "--baseline", str(baseline))
+    (repo / "houses" / "app.py").write_text(APP_SRC)  # the finding is gone
+    assert run_main(repo, "--baseline", str(baseline)) == 1
+    out = capsys.readouterr().out
+    clause = "1 acknowledged entry matches no current finding — re-acknowledge with --update-baseline"
+    assert clause in out, out
+    # exactly the clause the drift fixture renders — nothing distinguishes a
+    # fixed entry from a drifted one (path-stripped: the tmp dir's name is
+    # the harness's, not the report's)
+    report = out.replace(str(tmp_path), "<tmp>")
+    assert "fixed" not in report
+    assert "drifted" not in report
 
 
 def test_baseline_gone_function_is_stale(tmp_path, capsys):

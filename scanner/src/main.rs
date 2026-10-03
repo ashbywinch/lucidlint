@@ -122,10 +122,9 @@ struct ScanState<'a> {
     /// (P2) Literals exempted by a unit-stating name (assignment target or
     /// enclosing parameter).
     magic_unit_named_exempts: HashSet<usize>,
-    /// (P2/H3) Literals whose surroundings state a unit — offset -> the
-    /// unit-family rendering: timedelta for duration units, pint for
-    /// physical units; the concrete unit rides only when the context names
-    /// EXACTLY ONE token (H3 — never a fabricated unit).
+    /// (P2/P3) Literals whose surroundings state a unit — offset -> the
+    /// unit-FAMILY rendering: timedelta for duration units, pint for
+    /// physical units. The suggestion never names a unit (P3).
     magic_unit_surroundings: std::collections::HashMap<usize, checks::UnitContext>,
     /// Every referenced name (Name nodes + import aliases) in this file.
     refs: HashSet<String>,
@@ -827,18 +826,15 @@ impl<'a> ScanState<'a> {
         // P2: surroundings state the unit — a trailing comment on the
         // literal's own line (`a * 5  # 5 km/h`) or a same-statement name —
         // so the message suggests the unit mechanism instead of a bare name.
-        // H3: the family (timedelta vs pint) and the explicit unit clause
-        // ride only when the context names EXACTLY ONE unit token; an
-        // ambiguous or multi-token context gets the family's "in its unit"
-        // form, never a fabricated unit; tokens from both families (or no
-        // unit) fall back to the H8 generic text.
+        // P3: the family split (timedelta vs pint) comes from the token
+        // classification, nothing more — the suggestion NEVER names a unit,
+        // so both forms say "in its unit"; tokens from both families (or no
+        // unit) fall back to the A5 generic text.
         let message = match self.magic_unit_surroundings.get(&at) {
-            Some(checks::UnitContext::Duration(u)) => format!("magic number {value}{in_fn} — {value} is a duration — express it as a timedelta (timedelta({u}={value})), so the unit rides with the value. — fix: magic-number --fix-name <CONST>"),
-            Some(checks::UnitContext::DurationAmbiguous) => format!("magic number {value}{in_fn} — {value} is a duration — express it as a timedelta in its unit, so the unit rides with the value. — fix: magic-number --fix-name <CONST>"),
-            Some(checks::UnitContext::Pint(label)) => format!("magic number {value}{in_fn} — this is a quantity, not a bare number: express it as a pint Quantity (Quantity({value}, '{label}')) so the unit rides with the value and conversions are checked; name it where the computation owns it. — fix: magic-number --fix-name <CONST>"),
-            Some(checks::UnitContext::PintAmbiguous) => format!("magic number {value}{in_fn} — this is a quantity, not a bare number: express it as a pint Quantity in its unit so conversions are checked; name it where the computation owns it. — fix: magic-number --fix-name <CONST>"),
-            Some(checks::UnitContext::Generic) | None => format!("magic number {value}{in_fn} — nothing states what it means or why this magnitude. Write it as a named constant where the computation uses it, and state what it means and why this size in the name or in one comment beside it. Collection-literal data tables (>= 3 same-kind numeric siblings) are exempt. — fix: magic-number --fix-name <CONST>"),
-        };
+            Some(checks::UnitContext::Duration) => format!("magic number {value}{in_fn} — {value} is a duration — express it as a timedelta in its unit, so the unit rides with the value. — fix: magic-number --fix-name <CONST>"),
+            Some(checks::UnitContext::Pint) => format!("magic number {value}{in_fn} — this is a quantity, not a bare number: express it as a pint Quantity in its unit so the unit rides with the value and conversions are checked; name it where the computation owns it. — fix: magic-number --fix-name <CONST>"),
+             Some(checks::UnitContext::Generic) | None => format!("magic number {value}{in_fn} — nothing states what it means or why this magnitude. Write it as a named constant where the computation uses it, and state what it means and why this size in the name or in one comment beside it. Collection-literal data tables (>= 3 same-kind numeric siblings) are exempt. — fix: magic-number --fix-name <CONST>"),
+         };
         self.findings.push(Finding {
             seam_members: Vec::new(),
             file: self.file.to_string(),
@@ -2534,9 +2530,10 @@ mod tests {
 
     #[test]
     fn magic_unit_comment_gets_pint_suggestion_plain_gets_a5() {
-        // P2: a literal with a unit-stating trailing comment is a quantity,
-        // not a bare number — the message suggests a pint Quantity with the
-        // mapped unit (km -> kilometer); a plain literal keeps the A5 text.
+        // P2/P3: a literal with a unit-stating trailing comment is a
+        // quantity, not a bare number — the message suggests a pint
+        // Quantity IN ITS UNIT, never naming a unit (no Quantity(5,
+        // 'kilometer')); a plain literal keeps the A5 text.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/magic_unit_pint_suggestion__01.py"
         ));
@@ -2548,7 +2545,13 @@ mod tests {
             "{}",
             pint.message
         );
-        assert!(pint.message.contains("Quantity(5, 'kilometer')"), "{}", pint.message);
+        assert!(
+            pint.message.contains("express it as a pint Quantity in its unit"),
+            "{}",
+            pint.message
+        );
+        assert!(!pint.message.contains("kilometer"), "{}", pint.message);
+        assert!(!pint.message.contains("Quantity("), "{}", pint.message);
         assert!(pint.message.contains("--fix-name <CONST>"), "{}", pint.message);
         let plain = m.iter().find(|x| x.line == 6).expect("plain line fires");
         assert!(
@@ -2563,13 +2566,12 @@ mod tests {
 
     #[test]
     fn magic_unit_ambiguous_context_gets_generic_pint_text() {
-        // F2/H3: the explicit unit clause fires only when the literal's own
-        // context (its line's trailing comment or its statement's names)
-        // names EXACTLY ONE unit token. A comment naming minutes and
-        // seconds, or a statement whose names carry two duration units, is
-        // a DURATION with an ambiguous unit — the timedelta form in its
-        // unit, never a fabricated unit; a single-token name context keeps
-        // the explicit timedelta clause.
+        // P3: the family split (timedelta vs pint) is all the token
+        // classification decides — a comment naming minutes and seconds or
+        // a statement whose names carry two duration units is a DURATION;
+        // the suggestion is the timedelta "in its unit" form, and a
+        // single-token name context renders the SAME form — no unit is ever
+        // named.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/magic_unit_pint_suggestion_ambiguous__01.py"
         ));
@@ -2588,13 +2590,19 @@ mod tests {
             assert!(!x.message.contains("pint"), "{}", x.message);
         }
         let named = m.iter().find(|x| x.line == 12).expect("single-token name line fires");
-        assert!(named.message.contains("timedelta(seconds=5)"), "{}", named.message);
+        assert!(
+            named.message.contains("express it as a timedelta in its unit"),
+            "{}",
+            named.message
+        );
+        assert!(!named.message.contains("timedelta("), "{}", named.message);
     }
 
     #[test]
     fn magic_unit_duration_gets_timedelta_form() {
-        // H3: a duration unit in the literal's own context — express it as
-        // a timedelta with the concrete unit (timedelta(days=5)), never a
+        // P3: a duration unit in the literal's own context — express it as
+        // a timedelta in its unit, NEVER with a concrete unit
+        // (timedelta(days=5) appears in no emitted message), and never a
         // pint Quantity.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/magic_unit_duration_timedelta__01.py"
@@ -2602,7 +2610,12 @@ mod tests {
         let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
         assert_eq!(m.len(), 1, "{f:?}");
         assert!(m[0].message.contains("5 is a duration"), "{}", m[0].message);
-        assert!(m[0].message.contains("timedelta(days=5)"), "{}", m[0].message);
+        assert!(
+            m[0].message.contains("express it as a timedelta in its unit"),
+            "{}",
+            m[0].message
+        );
+        assert!(!m[0].message.contains("timedelta("), "{}", m[0].message);
         assert!(!m[0].message.contains("pint"), "{}", m[0].message);
     }
 
@@ -4119,6 +4132,16 @@ mod tests {
         assert_eq!(hits.len(), 1, "{f:?}");
         assert!(hits[0].message.contains("no state of its own"), "{}", hits[0].message);
         assert!(hits[0].message.contains("put it IN the class"), "{}", hits[0].message);
+        // P7: the remedy states the hidden half-step — the methods stop
+        // being static and read the state from the instance.
+        assert!(
+            hits[0].message.contains(
+                "The methods stop being static: give the class a constructor that takes the state, \
+                 instance attributes that hold it, and instance methods that read it"
+            ),
+            "{}",
+            hits[0].message
+        );
     }
     #[test]
     fn static_husk_exclusions_do_not_fire() {
@@ -5441,6 +5464,75 @@ mod tests {
     }
 
     #[test]
+    fn record_named_type_values_render_the_collection_message_in_every_arm() {
+        // P1: the dict value element is classified by AST name resolution,
+        // never capitalization — a module class (Provenance), an imported
+        // name (from decimal import Decimal), and a known builtin
+        // constructor (list) are named types, and the collection message
+        // renders in EVERY arm: parameter annotation, return annotation,
+        // and dict literal. The unbound-capitalized case keeps its existing
+        // behavior (record_class_value_in_signature_keeps_the_finding).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_named_type_value_map_renders_collection_message__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 4, "{f:?}");
+        assert!(
+            rs.iter()
+                .any(|x| x.message.contains("data is a map whose values are Decimal")),
+            "{f:?}"
+        );
+        assert!(
+            rs.iter()
+                .any(|x| x.message.contains("convert returns a map whose values are Decimal")),
+            "{f:?}"
+        );
+        assert!(
+            rs.iter()
+                .any(|x| x.message.contains("rows is a map whose values are list")),
+            "{f:?}"
+        );
+        assert!(
+            rs.iter()
+                .any(|x| x.message.contains("This dict is a map whose values are Provenance")),
+            "{f:?}"
+        );
+        for x in &rs {
+            assert!(
+                x.message
+                    .contains("Make a class for the collection, named with a domain noun, and pass that"),
+                "{}",
+                x.message
+            );
+            assert!(!x.message.contains("fixed-shape record"), "{}", x.message);
+        }
+    }
+
+    #[test]
+    fn record_unresolvable_value_element_keeps_the_g1_path() {
+        // P1: a value element that resolves to nothing is NOT a named type —
+        // dict[str, Any] keeps the fixed-shape text (grab-bag) and a scalar
+        // map stays silent; neither renders the collection message.
+        let f = scan_src("def send(data: dict[str, Any]) -> None:\n    pass\n");
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(
+            rs[0]
+                .message
+                .contains("data is a dict; its value is a fixed-shape record"),
+            "{}",
+            rs[0].message
+        );
+        assert!(
+            !rs[0].message.contains("is a map whose values are"),
+            "{}",
+            rs[0].message
+        );
+        let g = scan_src("def f(dep_timestamps: dict[str, str]):\n    return dep_timestamps\n");
+        assert!(!g.iter().any(|x| x.kind == "record-shape"), "{g:?}");
+    }
+
+    #[test]
     fn record_signature_findings_anchor_at_the_parameter_line() {
         // H2: a parameter finding anchors at the annotated parameter's own
         // line and a return finding at the return annotation's line — never
@@ -5462,6 +5554,45 @@ mod tests {
         let src = "def f(\n    # lucidlint: ignore record-shape the payload is the wire form\n    data: dict,\n) -> None:\n    pass\n";
         let f = scan_src(src);
         assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_signature_def_above_marker_binds_every_parameter() {
+        // P2: the codebase puts the suppression one line above the def — on
+        // a MULTI-LINE signature the parameter-anchored findings sit 3+
+        // lines below the def, out of the plain 3-line window. The binder
+        // extends a signature finding's window to [param-2..param] ∪
+        // [def-1..def], so ONE def-above marker covers all four params.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_def_above_marker_binds_multiline_signature__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_signature_def_line_marker_binds_every_parameter() {
+        // P2: the marker on the def line itself is part of the extended
+        // window too — the signature's whole def site is one decision.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_def_line_marker_binds_multiline_signature__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_signature_gap_marker_does_not_bind_and_is_not_stale() {
+        // P2: a marker at def+2 with no finding on its own line is beyond
+        // every parameter window AND the def-above pair — the finding still
+        // fires, the marker stays as documentation, and no stale verdict is
+        // emitted (the family still fires).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_signature_gap_marker_does_not_bind__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
         assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
     }
 
@@ -5771,6 +5902,22 @@ mod tests {
         assert!(f.iter().any(|x| x.kind == "loop-pipeline"));
         let ok = scan_src(include_str!("../../tests/fixtures/rust/loop_pipeline_detected__02.py"));
         assert!(!ok.iter().any(|x| x.kind == "loop-pipeline"));
+    }
+
+    #[test]
+    fn loop_pipeline_gate_excludes_mutation_of_existing_collections() {
+        // P6: the pipeline gate checks the target's binding — a loop that
+        // mutates a parameter (fill), a name bound earlier with content
+        // (apply), or a module name bound before the function (update)
+        // builds nothing new and emits NOTHING. The pure-build shape (a
+        // fresh name or one created empty in the statement before the
+        // loop) still fires.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_mutation_of_existing_collection_emits_nothing__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "loop-pipeline"), "{f:?}");
+        let build = scan_src(include_str!("../../tests/fixtures/rust/loop_pipeline_detected__01.py"));
+        assert!(build.iter().any(|x| x.kind == "loop-pipeline"), "{build:?}");
     }
 
     #[test]

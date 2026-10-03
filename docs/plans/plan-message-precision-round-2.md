@@ -163,6 +163,53 @@ state from the instance. Without it, a reader keeps the statics and
 produces a class that still fires — the trap behind the reviewers'
 resistance.
 
+## J. Round-8 acceptance (2026-10-02) — cleared and residual
+
+Cleared by the round-2 implementation (394 scanner + 240 pytest green,
+self-check at zero, coverage 86%): the collection message resolved
+Decimal and Provenance at most sites; the def-above marker binds; no
+unit is named in any suggestion; the mutation-of-existing loop gate
+silenced the settings_payload shapes; the static-to-instance sentence
+is in the husk message; the ledger is additive, the change-cost line and
+legend are gone, and the stale-acknowledged clause is test-verified
+(renders with --baseline).
+
+Residual and new:
+
+1. Collection-message coverage is inconsistent: attempt.py:424
+   (dict[str, Provenance]) still renders "its value is a fixed-shape
+   record" while attempt.py:626 renders the collection message — same
+   shape, two arms, two messages. The resolution must cover every site
+   of a named-type map, in every arm, and the round-8 proposer asks a
+   rule question the message must answer: when a typed, documented map
+   is kept, what does "Make a class for the collection" ask that the
+   annotation has not already given?
+2. The duration family claim misfires on conversion factors: bus.py:192
+   and commute_router.py:663 divide by 60, and the message says the 60
+   is a duration. The family inference needs the same certainty bar the
+   unit got — or the family sentence drops and the general message's
+   "write it as a named constant" is the whole action.
+3. Async loops (property_nodes:828,830; park_and_ride_augment_node:227)
+   carry the loop-pipeline tag and its "Replace Loop with Pipeline"
+   recipe although no async comprehension exists; the tag suppresses
+   for async loops or names asyncio.gather.
+4. The report never states which anchor a record-shape variant uses
+   (def, parameter, return literal, nested literal); round-8 spent a
+   CONFUSING bullet on exactly that, alongside the body-first-line
+   placement that still misses def-anchored findings with no
+   explanation.
+5. Cross-site magic values: domain.py:119 is exempt as unit-named while
+   transit.py:161 flags the same default; no view links the two, so one
+   drifting value reads as two decisions.
+6. Duplicate-module asymmetry: http_error's near-duplicate pair goes
+   unflagged while schools.py:140 (a 6-line constant difference) fires;
+   the similarity thresholds need the pair's two sides named.
+7. Process-class and latent-class boilerplate: unclear what clears the
+   bar; api_router.py:530 and capture_dom.py:394 are misdescribed; a
+   defensive accessor-copy carve-out is asked for registered_nodes.
+8. P5's stale clause is unit-tested; the acceptance run passed no
+   --baseline, so the clause's live rendering awaits a baselined run.
+
 ## Order of work
 
 1. Phase 1, then Phase 6 — the two premise/goal defects.
