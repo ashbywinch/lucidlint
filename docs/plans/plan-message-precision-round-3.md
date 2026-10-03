@@ -40,11 +40,13 @@ Actions:
    render the collection message.
 2. A raw-dict alias (`Sources = dict[str, Provenance]`) is NOT an
    exemption: an alias names the shape, it carries no behavior. The
-   message names the difference and the full move: "Make a class for
-   the collection, named with a domain noun — an alias to dict names
-   the problem, it does not solve it; move the operations that take,
-   build, or read this map onto the class as methods." The operations
-   threaded around the map are the class's latent member functions.
+   message names the difference and the move: "Make a class for the
+   collection, named with a domain noun — an alias to dict names the
+   problem, it does not solve it. Move the operations that take, build,
+   or read this map onto the class as methods, splitting them where the
+   class does not own all the work; which operations belong there is
+   the judgement call." The operations threaded around the map are the
+   class's latent member functions; the split is the reader's call.
 
 Acceptance: every named-type map on houses renders the collection
 message with the member-function instruction; round-9 proposer reports
