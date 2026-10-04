@@ -14,6 +14,8 @@
 //! functions report cyclomatic complexity, exactly as radon does (nested
 //! functions and class bodies contribute no decisions to their parent).
 
+// lucidlint: ignore-file large-function scan_source_impl is the CLI's one-pass pipeline — extracting
+// helpers would thread six collections through a parameter object for no reader gain
 use rayon::prelude::*;
 use ruff_python_ast::visitor::source_order::{walk_expr, walk_stmt, SourceOrderVisitor};
 use ruff_python_ast::{AnyNodeRef, Expr, ModModule, Stmt, StmtIf};
@@ -56,6 +58,28 @@ pub struct Finding {
     kind: String,
     severity: String,
     message: String,
+    /// The clump identity for seam grouping (#34): the shared parameter-pair
+    /// names (data-clump), the disjoint method-group members (partition),
+    /// the functions sharing a leading parameter (strewing). Always emitted
+    /// (empty on non-carriers — BQ4); never scraped from message prose.
+    pub seam_members: Vec<String>,
+
+    /// The first source line of the LOGICAL line holding this finding — the
+    /// `def`/`async def` line for a signature finding, the enclosing
+    /// statement's first source line for a wrapped call or split literal.
+    /// One line of code can span several source lines, and a marker binds on
+    /// the logical line too (Phase 4a). `None` = the finding's own line, the
+    /// usual case; internal only (never serialized — the JSON stays schema 4).
+    #[serde(skip)]
+    logical_start: Option<usize>,
+}
+
+impl Finding {
+    /// The finding's logical line: its own line when no construct spans
+    /// several source lines, else the construct's first source line.
+    pub(crate) fn logical_line(&self) -> usize {
+        self.logical_start.unwrap_or(self.line)
+    }
 }
 
 /// One function's cyclomatic complexity — radon-equivalent counting.
@@ -91,13 +115,7 @@ struct ScanState<'a> {
     claimed_dispatch: std::collections::HashSet<usize>,
     /// Parent chain for the magic-number position check — exprs plus the
     /// non-expr layers (stmt, keyword) that break the direct-parent link.
-    parent_stack: Vec<ParentEntry>,
-    /// Module-scope container names (List/Dict/Set) — mutations of these
-    /// inside functions are global-state findings.
-    module_mutables: HashSet<String>,
-    /// Module containers whose literal was flagged (non-constant) — their
-    /// in-function mutations are not double-reported (Python's `flagged`).
-    module_flagged: HashSet<String>,
+    parent_stack: Vec<ParentEntry<'a>>,
     /// Module-level function definitions (name, line) — non-test files.
     defs: Vec<(String, usize)>,
     /// set_* methods and property setters (name, line) — repo-wide pass.
@@ -105,9 +123,22 @@ struct ScanState<'a> {
     /// `self.<attr> = ...` sites in top-level classes — undeclared-
     /// attribute's repo-wide raw material.
     self_assigns: Vec<SelfAssign>,
-    /// Offsets of numeric literals in data-table collections (>= 3 same-kind
-    /// siblings) — magic-number exempt.
+    /// Module-level CLASS definitions (name, line) — the unused scan's
+    /// dead-class arm (#28).
+    class_defs: Vec<(String, usize)>,
+    /// Duplicate-module identities (#26) — modules + top-level classes with
+    /// their structural skeletons and constant tokens.
+    skeleton_modules: Vec<checks::SkeletonModule>,
+    /// Forwarding-chain raw material (#30) — see collect_forwarders.
+    forwarder_fns: Vec<checks::ForwarderFn>,
+    forwarder_methods: Vec<checks::ForwarderMethod>,
+    repo_methods: Vec<checks::RepoMethod>,
     magic_table_exempts: HashSet<usize>,
+    magic_const_rhs_exempts: HashSet<usize>,
+    magic_len_guard_exempts: HashSet<usize>,
+    /// (P2) Literals exempted by a unit-stating name (assignment target or
+    /// enclosing parameter).
+    magic_unit_named_exempts: HashSet<usize>,
     /// Every referenced name (Name nodes + import aliases) in this file.
     refs: HashSet<String>,
     /// String literal values (prod files only).
@@ -116,6 +147,10 @@ struct ScanState<'a> {
     decorated: HashSet<String>,
     /// Duplicate candidates with their structural skeletons.
     skeletons: Vec<SkeletonFn>,
+    /// Per-source-line logical-line start (1-based): the first source line of
+    /// the construct a line belongs to (a multi-line `def`, a wrapped call, a
+    /// split literal). Index = physical line; value = logical start.
+    logical_starts: Vec<usize>,
     /// File is under a test path — reference-scan split + skeleton skip.
     is_test: bool,
 }
@@ -206,10 +241,20 @@ fn parent_kind(e: &Expr) -> ParentExprKind {
     }
 }
 
-enum ParentEntry {
+enum ParentEntry<'a> {
     Expr(ParentExprKind),
+    /// A positional argument of a call — the callee's name (P2: the
+    /// unit-constructor exemption).
+    CallArg {
+        callee: &'a str,
+    },
+    /// A keyword argument of a call — callee + the keyword's name (P2: a
+    /// unit-naming keyword — timedelta(minutes=20) — states the unit).
+    CallKw {
+        callee: &'a str,
+        kw: &'a str,
+    },
     Stmt,
-    Keyword,
 }
 
 impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
@@ -308,10 +353,14 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 self.current_fn = was_fn;
                 return;
             }
-            Stmt::ClassDef(_) => {
+            Stmt::ClassDef(cls) => {
+                self.in_class += 1;
                 // class bodies: no decisions, but walked (imports/exprs inside
                 // still get visited with their function attribution)
-                self.in_class += 1;
+                if module_level && !self.is_test {
+                    let def_line = line_of(self.source, cls.name.range().start());
+                    self.class_defs.push((cls.name.to_string(), def_line));
+                }
                 walk_stmt(self, stmt);
                 self.in_class -= 1;
                 return;
@@ -337,11 +386,9 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             Stmt::Assign(_) => {
                 global_state_findings(self, stmt, module_level);
                 shadow_findings(self, stmt);
-                mutation_findings(self, stmt);
             }
             Stmt::AugAssign(_) | Stmt::AnnAssign(_) | Stmt::Delete(_) => {
                 global_state_findings(self, stmt, module_level);
-                mutation_findings(self, stmt);
             }
             _ => {}
         }
@@ -383,6 +430,8 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             {
                 let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
                 self.findings.push(Finding {
+                    logical_start: None,
+                    seam_members: Vec::new(),
                     file: self.file.to_string(),
                     line: line_of(source, call.range().start()),
                     col: 0,
@@ -392,29 +441,34 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                     message: "breakpoint() left in production code — remove it".into(),
                 });
             }
+            let callee: &'a str = match call.func.as_ref() {
+                Expr::Name(n) => n.id.as_str(),
+                Expr::Attribute(a) => a.attr.as_str(),
+                _ => "",
+            };
             self.parent_stack.push(ParentEntry::Expr(parent_kind(expr)));
             self.visit_expr(&call.func);
             for arg in &call.arguments.args {
+                self.parent_stack.push(ParentEntry::CallArg { callee });
                 self.visit_expr(arg);
+                self.parent_stack.pop();
             }
             for kw in &call.arguments.keywords {
-                self.parent_stack.push(ParentEntry::Keyword);
+                let name: &'a str = kw.arg.as_ref().map(|n| n.id.as_str()).unwrap_or("");
+                self.parent_stack.push(ParentEntry::CallKw { callee, kw: name });
                 self.visit_expr(&kw.value);
                 self.parent_stack.pop();
             }
             self.parent_stack.pop();
             return;
         }
-        // magic numbers (a warn finding — distinct from the CC that radonc owns)
-        // Class BODIES are not reported for magic numbers (matching the
-        // pre-radonc behavior) — but ONLY the report is skipped here, never
-        // the descent: an early return cut every class-body expression walk
-        // (lambda bodies, attribute reads, strings), so the reference scan
-        // went blind inside methods and live code read as unused.
+        // magic numbers (a warn finding — distinct from the CC that radonc owns).
+        // Magic fires ANYWHERE expressions are walked — class bodies and
+        // methods included (radon/reference parity): the fixer's constant
+        // becomes a CLASS ATTRIBUTE of the enclosing class, so a class-body
+        // finding is the rule's primary case (third-pass 4).
         if let Expr::NumberLiteral(n) = expr {
-            if self.in_class == 0 {
-                self.magic_check(n);
-            }
+            self.magic_check(n);
         }
         self.parent_stack.push(ParentEntry::Expr(parent_kind(expr)));
         walk_expr(self, expr);
@@ -720,7 +774,22 @@ fn rule_battery_shape(body: &[Stmt]) -> Option<String> {
 impl<'a> ScanState<'a> {
     /// Magic numbers: int/float literals outside (0, 1, 2) whose parent is an
     /// operation — mirrors the Python implementation's position rule.
+    /// Exempt (B8): octal/hex/binary spellings (0o600 is intent-bearing, and
+    /// the old code rendered it as "384"), plain subscript indexes, len()
+    /// length guards, module-level named-constant RHS values, and >= 3
+    /// same-kind data-table siblings in one collection literal.
     fn magic_check(&mut self, n: &ruff_python_ast::ExprNumberLiteral) {
+        // B8: an 0x/0o/0b spelling states its meaning in the literal itself
+        let text = &self.source[n.range()];
+        if text.len() >= 2 {
+            let prefix = &text[..2];
+            if prefix.eq_ignore_ascii_case("0x")
+                || prefix.eq_ignore_ascii_case("0o")
+                || prefix.eq_ignore_ascii_case("0b")
+            {
+                return;
+            }
+        }
         let value = match &n.value {
             ruff_python_ast::Number::Int(i) => i.to_string(),
             ruff_python_ast::Number::Float(f) => f.to_string(),
@@ -736,18 +805,57 @@ impl<'a> ScanState<'a> {
                 ParentExprKind::BinOp
                     | ParentExprKind::Compare
                     | ParentExprKind::UnaryOp
-                    | ParentExprKind::Subscript
                     | ParentExprKind::Call
             )
-        );
+        ) || matches!(self.parent_stack.last(), Some(ParentEntry::CallArg { .. }));
         if !parent_is_op {
+            return; // a bare subscript index is a position code, not domain magic
+        }
+        let at = n.range().start().to_usize();
+        if self.magic_table_exempts.contains(&at)
+            || self.magic_const_rhs_exempts.contains(&at)
+            || self.magic_len_guard_exempts.contains(&at)
+            || self.magic_unit_named_exempts.contains(&at)
+        {
             return;
         }
-        if self.magic_table_exempts.contains(&n.range().start().to_usize()) {
-            return; // data-table entry: >= 3 same-kind numeric siblings in one collection literal
+        // P2: the nearest enclosing call's callee is a unit constructor
+        // (Quantity, timedelta, TimeDelta, Distance) or its keyword names a
+        // unit (timedelta(minutes=20)) — the unit is stated at the site, so
+        // the literal is named there.
+        let nearest_call = self.parent_stack.iter().rev().find_map(|e| match e {
+            ParentEntry::CallArg { callee } => Some((*callee, "")),
+            ParentEntry::CallKw { callee, kw } => Some((*callee, *kw)),
+            _ => None,
+        });
+        if let Some((callee, kw)) = nearest_call {
+            let unit_ctor = matches!(callee, "Quantity" | "timedelta" | "TimeDelta" | "Distance");
+            let unit_kw = !kw.is_empty() && checks::name_states_unit(kw);
+            if unit_ctor || unit_kw {
+                return;
+            }
         }
         let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-        self.findings.push(Finding { file: self.file.to_string(), line: line_of(self.source, n.range.start()), col: col_of(self.source, n.range.start()), function: fn_name, kind: "magic-number".into(), severity: "warn".into(), message: format!("magic number {value} — name it with a domain noun (what it means here), never its value spelled out; collection-literal data tables (>= 3 same-kind numeric siblings) are exempt — fix: magic-number --fix-name <CONST>") });
+        let in_fn = if fn_name.is_empty() {
+            String::new()
+        } else {
+            format!(" in {fn_name}")
+        };
+        // P2: both mechanisms are named as glossed examples; the family is
+        // the reader's judgment, so the same message renders at every firing
+        // site and the suggestion NEVER names a unit or claims which applies.
+        let message = format!("magic number {value}{in_fn} — nothing states what it means or why this magnitude. Write it as a named constant where the computation uses it, and state what it means and why this size in the name or in one comment beside it. If the value carries units, express it in a type that understands them — Python's timedelta for durations, or a Quantity from the pint units library for physical measures. Collection-literal data tables (>= 3 same-kind numeric siblings) are exempt. — fix: magic-number --fix-name <CONST>");
+        self.findings.push(Finding {
+            logical_start: None,
+            seam_members: Vec::new(),
+            file: self.file.to_string(),
+            line: line_of(self.source, n.range.start()),
+            col: col_of(self.source, n.range.start()),
+            function: fn_name,
+            kind: "magic-number".into(),
+            severity: "warn".into(),
+            message,
+        });
     }
 
     /// No-op statements: expression statements that discard their value.
@@ -770,6 +878,8 @@ impl<'a> ScanState<'a> {
         if !harmless {
             let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
             self.findings.push(Finding {
+                logical_start: None,
+                seam_members: Vec::new(),
                 file: self.file.to_string(),
                 line: line_of(self.source, v.range().start()),
                 col: 0,
@@ -789,6 +899,8 @@ impl<'a> ScanState<'a> {
         if !self.fn_stack.is_empty() {
             let line = stmt_line(self.source, stmt);
             self.findings.push(Finding {
+                logical_start: None,
+                seam_members: Vec::new(),
                 col: 0,
                 file: self.file.to_string(),
                 line,
@@ -817,6 +929,8 @@ impl<'a> ScanState<'a> {
                             format!("{}.{}", im.module.as_ref().map(|m| m.as_str()).unwrap_or(""), name)
                         };
                         self.findings.push(Finding {
+                            logical_start: None,
+                            seam_members: Vec::new(),
                             file: self.file.to_string(),
                             line: stmt_line(self.source, stmt),
                             col: 0,
@@ -833,6 +947,8 @@ impl<'a> ScanState<'a> {
                     let name = alias.name.as_str();
                     if name.split('.').any(|seg| seg.starts_with('_')) {
                         self.findings.push(Finding {
+                            logical_start: None,
+                            seam_members: Vec::new(),
                             file: self.file.to_string(),
                             line: stmt_line(self.source, stmt),
                             col: 0,
@@ -866,6 +982,8 @@ impl<'a> ScanState<'a> {
                     if let Some(dead) = list.get(i + 1) {
                         let line = stmt_line(self.source, dead);
                         self.findings.push(Finding {
+                            logical_start: None,
+                            seam_members: Vec::new(),
                             col: 0,
                             file: self.file.to_string(),
                             line,
@@ -1049,11 +1167,13 @@ pub struct FileScan {
     pub cc: Vec<FnCc>,
     pub errors: usize,
     pub defs: Vec<(String, usize)>,
+    pub class_defs: Vec<(String, usize)>,
     pub setters: Vec<(String, usize)>,
     pub refs: HashSet<String>,
     pub strings: Vec<String>,
-    pub decorated: HashSet<String>,
     pub skeletons: Vec<SkeletonFn>,
+    pub skeleton_modules: Vec<SkeletonModule>,
+    pub decorated: HashSet<String>,
     pub classes: Vec<ClassInfo>,
     pub imports: Vec<ImportInfo>,
     pub self_assigns: Vec<SelfAssign>,
@@ -1064,6 +1184,9 @@ pub struct FileScan {
     /// (line, signal) pairs the per-file pass consumed — stage-2 repo-wide
     /// re-honoring must not spend them again (innermost-peel capacity).
     pub supps_spent: HashSet<(usize, String)>,
+    pub forwarder_fns: Vec<checks::ForwarderFn>,
+    pub forwarder_methods: Vec<checks::ForwarderMethod>,
+    pub repo_methods: Vec<checks::RepoMethod>,
 }
 
 impl FileScan {
@@ -1112,6 +1235,10 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     feature_envy_findings(state, body);
     collect_self_assigns(state, body);
     god_class_findings(state, body);
+    static_husk_findings(state, body);
+    delegating_husk_findings(state, body);
+    process_class_findings(state, body);
+    closure_cluster_findings(state, body, source);
     duplicate_field_findings(state, body);
     record_shape_findings(state, body, source);
     partition_findings(state, body, source);
@@ -1128,6 +1255,8 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     middle_man_findings(state, body, source);
     collect_setters(state, body);
     loop_pipeline_findings(state, body, source);
+    collect_skeleton_modules(state, body, name);
+    collect_forwarders(state, body);
 }
 
 /// Per-buffer scans never run the repo-wide families (unused, unused-setter,
@@ -1135,7 +1264,6 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
 /// their markers cannot bind here and a stale finding for one is a false
 /// fail artifact. The gate path keeps stale reporting: its merge consumes
 /// those markers and drops exactly the stale findings that survive it.
-// lucidlint: ignore record-shape Finding is the core finding type consumed repo-wide — one more consumer is not a new record
 fn drop_repo_wide_stale_artifacts(findings: &mut Vec<Finding>) {
     findings.retain(|f| {
         f.kind != "stale-suppression"
@@ -1163,9 +1291,11 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     let mut state = ScanState {
         file: name,
         source,
-        module_mutables: module_container_names(&body),
-        module_flagged: module_flagged_names(&body),
+        logical_starts: checks::logical_line_starts(source, parsed.tokens()),
         magic_table_exempts: checks::magic_table_exempt_offsets(&body),
+        magic_const_rhs_exempts: checks::magic_const_rhs_offsets(&body),
+        magic_len_guard_exempts: checks::magic_len_guard_offsets(&body),
+        magic_unit_named_exempts: checks::magic_unit_named_offsets(&body),
         is_test: is_test_path(name),
         ..Default::default()
     };
@@ -1205,6 +1335,20 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
             qi += 1;
         }
     }
+    // Phase 4a: label every emitted finding with its logical line — the first
+    // source line of the construct it sits in (a multi-line `def`/`async def`,
+    // a wrapped call, a split literal). The binder then admits a marker on the
+    // logical line or the line before it in addition to the finding's own line
+    // pair. Single-line constructs keep `None` (the finding's own line).
+    {
+        let starts = &state.logical_starts;
+        for f in &mut state.findings {
+            let line = f.line;
+            if f.logical_start.is_none() {
+                f.logical_start = starts.get(line).copied().filter(|&start| start < line);
+            }
+        }
+    }
     let tokens = parsed.tokens();
     let supps = checks::parse_suppressions(source, tokens);
     // complexity findings are generated from the cc array after this pass —
@@ -1235,11 +1379,24 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         });
     }
     let mut supps_spent = HashSet::new();
+    // G4: the exemption-kind labels among the file's still-present
+    // magic-number candidates — threaded into the stale message so it names
+    // exactly the exemptions that apply (never unit/constant/table for
+    // indices).
+    let magic_exempt_labels = checks::magic_exemption_labels(
+        &body,
+        source,
+        &state.magic_table_exempts,
+        &state.magic_const_rhs_exempts,
+        &state.magic_len_guard_exempts,
+        &state.magic_unit_named_exempts,
+    );
     let mut books = crate::common::SuppressionBooks {
         pre_used: &pre_used,
         spent: &mut supps_spent,
     };
-    let findings = checks::apply_suppressions_impl(state.findings, source, name, tokens, &mut books);
+    let findings =
+        checks::apply_suppressions_impl(state.findings, source, name, tokens, &mut books, &magic_exempt_labels);
     let mut all = type_ignore_findings(source, name, tokens);
     all.extend(noqa_findings(source, name, tokens));
     all.extend(findings);
@@ -1254,6 +1411,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         cc: state.cc,
         errors,
         defs: state.defs,
+        class_defs: state.class_defs,
         setters: state.setters,
         refs: state.refs,
         strings: state.strings,
@@ -1264,6 +1422,10 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         self_assigns: state.self_assigns,
         supps,
         supps_spent,
+        skeleton_modules: state.skeleton_modules,
+        forwarder_fns: state.forwarder_fns,
+        forwarder_methods: state.forwarder_methods,
+        repo_methods: state.repo_methods,
     }
 }
 
@@ -1339,7 +1501,7 @@ pub(crate) fn repo_files(root: &Path) -> Vec<PathBuf> {
 /// scans and re-runs only this pure in-memory aggregation on save.
 pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collections::HashMap<String, Vec<Finding>> {
     let mut skeletons = Vec::new();
-    let mut definitions: Vec<(String, String, usize)> = Vec::new();
+    let mut definitions: Vec<(String, String, usize, bool)> = Vec::new();
     let mut setters: Vec<(String, String, usize)> = Vec::new();
     let mut prod_refs = HashSet::new();
     let mut test_refs = HashSet::new();
@@ -1359,7 +1521,10 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
             });
         }
         for (name, line) in &scan.defs {
-            definitions.push((rel.clone(), name.clone(), *line));
+            definitions.push((rel.clone(), name.clone(), *line, false));
+        }
+        for (name, line) in &scan.class_defs {
+            definitions.push((rel.clone(), name.clone(), *line, true));
         }
         for (name, line) in &scan.setters {
             setters.push((rel.clone(), name.clone(), *line));
@@ -1374,8 +1539,27 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         supps_by_rel.insert(rel.clone(), scan.supps.clone());
         supps_spent_by_rel.insert(rel.clone(), scan.supps_spent.clone());
     }
+    let mut module_entities = Vec::new();
+    let mut heads = Vec::new();
+    let mut fns = Vec::new();
+    let mut repo_methods = Vec::new();
+    let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
+    for scan in scans {
+        module_entities.extend(scan.skeleton_modules.iter().cloned());
+        heads.extend(scan.forwarder_methods.iter().cloned());
+        fns.extend(scan.forwarder_fns.iter().cloned());
+        repo_methods.extend(scan.repo_methods.iter().cloned());
+        imports_by_rel.insert(scan.rel_of(root_s), scan.imports.clone());
+    }
     let mut additions: Vec<Finding> = Vec::new();
     additions.extend(checks::duplicate_findings(&skeletons));
+    additions.extend(checks::duplicate_module_findings(&module_entities));
+    additions.extend(checks::forwarding_chain_findings(
+        &heads,
+        &fns,
+        &repo_methods,
+        &imports_by_rel,
+    ));
     let mut repo_wide_unused = checks::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
     repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
     reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
@@ -1409,11 +1593,16 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         cc: rs.cc.clone(),
         errors: rs.errors,
         defs: Vec::new(),
+        class_defs: Vec::new(),
         setters: Vec::new(),
         refs: HashSet::new(),
         strings: Vec::new(),
         decorated: HashSet::new(),
         skeletons: rs.skeletons.clone(),
+        skeleton_modules: Vec::new(),
+        forwarder_fns: Vec::new(),
+        forwarder_methods: Vec::new(),
+        repo_methods: Vec::new(),
         classes: Vec::new(),
         imports: Vec::new(),
         self_assigns: Vec::new(),
@@ -1421,8 +1610,6 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         supps_spent: rs.supps_spent.clone(),
     }
 }
-
-///
 /// The finding model's final action kind — the JSON contract carries it so
 /// the Python orchestrator consumes findings without further mapping.
 ///
@@ -1513,7 +1700,6 @@ fn sig_of_stale(msg: &str) -> String {
 /// the file's suppressions for those repo-wide findings (family-aware, widened
 /// window) and drop the stale-suppression findings the consumed comments
 /// caused (review-log B3). The survivors are appended to `all` in place.
-// lucidlint: ignore record-shape Finding is the core finding type consumed repo-wide — one more consumer is not a new record
 pub(crate) fn reconcile_repo_wide(
     all: &mut Vec<Finding>,
     repo_wide: Vec<Finding>,
@@ -1617,7 +1803,7 @@ fn bulk_suppression_findings(
                 top = Some((rel, sites));
             }
         }
-        out.push(Finding { file: top.map(|(r, _)| r.clone()).unwrap_or_default(), line: 1, col: 0, function: String::new(), kind: "bulk-suppression".into(), severity: "warn".into(), message: format!(
+        out.push(Finding { logical_start: None, seam_members: Vec::new(), file: top.map(|(r, _)| r.clone()).unwrap_or_default(), line: 1, col: 0, function: String::new(), kind: "bulk-suppression".into(), severity: "warn".into(), message: format!(
             "{kind} suppressed at {n} sites - repeated identical whys are POLICY, not per-site judgment: \
         move the rule into [lucidlint.guidance] config guidance or a documented config ignore, or fix the recurring cause"
         ) });
@@ -1793,7 +1979,7 @@ fn main() {
     // (Python reference scan; Rust's dead code is rustc's, so Rust scans
     // carry no defs/refs and never fire the unused family)
     let mut skeletons = Vec::new();
-    let mut definitions: Vec<(String, String, usize)> = Vec::new();
+    let mut definitions: Vec<(String, String, usize, bool)> = Vec::new();
     let mut setters: Vec<(String, String, usize)> = Vec::new();
     let mut prod_refs = HashSet::new();
     let mut test_refs = HashSet::new();
@@ -1811,7 +1997,10 @@ fn main() {
         }
 
         for (name, line) in &scan.defs {
-            definitions.push((rel.clone(), name.clone(), *line));
+            definitions.push((rel.clone(), name.clone(), *line, false));
+        }
+        for (name, line) in &scan.class_defs {
+            definitions.push((rel.clone(), name.clone(), *line, true));
         }
         for (name, line) in &scan.setters {
             setters.push((rel.clone(), name.clone(), *line));
@@ -1843,10 +2032,20 @@ fn main() {
         .collect();
     let suppression_census = suppression_counts(scans.iter().map(|s| &s.supps));
     let bulk_suppressions = bulk_suppression_findings(&suppression_census, &supps_by_rel, 10);
-    for scan in scans {
-        all_findings.extend(scan.findings);
-        all_cc.extend(scan.cc);
+    let mut module_entities = Vec::new();
+    let mut heads = Vec::new();
+    let mut fns = Vec::new();
+    let mut repo_methods = Vec::new();
+    let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
+    for scan in &scans {
+        all_findings.extend(scan.findings.clone());
+        all_cc.extend(scan.cc.clone());
         total_errors += scan.errors;
+        module_entities.extend(scan.skeleton_modules.iter().cloned());
+        heads.extend(scan.forwarder_methods.iter().cloned());
+        fns.extend(scan.forwarder_fns.iter().cloned());
+        repo_methods.extend(scan.repo_methods.iter().cloned());
+        imports_by_rel.insert(rel_of(&scan.file_name, &root), scan.imports.clone());
     }
     all_findings.extend(bulk_suppressions);
     // per-language duplicate pools: a Python fn and a Rust fn with the same
@@ -1862,6 +2061,13 @@ fn main() {
     }
     all_findings.extend(duplicate_findings(&py_skeletons));
     all_findings.extend(duplicate_findings(&rs_skeletons));
+    all_findings.extend(checks::duplicate_module_findings(&module_entities));
+    all_findings.extend(checks::forwarding_chain_findings(
+        &heads,
+        &fns,
+        &repo_methods,
+        &imports_by_rel,
+    ));
     // unused is a repo-wide family computed AFTER the per-file suppression
     // pass — reconcile it through those suppressions so an `ignore unused <why>`
     // comment suppresses the finding and is not reported stale (review-log B3)
@@ -1996,12 +2202,13 @@ fn main() {
                 "function": e.function,
                 "kind": "complexity",
                 "severity": "fail",
-                "metric": e.cc,
                 "message": common::full_fix_command(
                     &e.file,
                     e.line,
                     &common::complexity_message(e.cc, e.shape, &e.shape_detail),
                 ),
+                "fix_kind": checks::fix_kind_of_message(&common::complexity_message(e.cc, e.shape, &e.shape_detail))
+                    .unwrap_or("extract-method"),
             }));
         }
     }
@@ -2065,11 +2272,13 @@ fn main() {
                 "signal": f.kind,
                 "severity": f.severity,
                 "message": common::full_fix_command(&f.file, f.line, &f.message),
+                "seam_members": f.seam_members,
+                "fix_kind": fix_kind_of_message(&f.message).unwrap_or_else(|| kind_fix_default(&f.kind)),
             })
         })
         .collect();
     let out = serde_json::json!({
-        "schema_version": 3,
+        "schema_version": 4,
         "header": common::REPORT_HEADER,
         "suppressions": suppression_census,
         "files": paths.len(),
@@ -2243,13 +2452,79 @@ mod tests {
     }
 
     #[test]
-    fn magic_operand_and_index_found() {
+    fn magic_operand_found_index_exempt() {
+        // B8: a plain integer subscript index is a position code, not domain
+        // magic — cols[7] does not fire; the operand 60 still does, and the
+        // message names the function (A5)
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/magic_operand_and_index_found__01.py"
         ));
         let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
-        assert_eq!(m.len(), 2);
+        assert_eq!(m.len(), 1, "{f:?}");
         assert_eq!(m[0].function, "f");
+        assert!(
+            m[0].message
+                .contains("magic number 60 in f — nothing states what it means or why this magnitude"),
+            "{}",
+            m[0].message
+        );
+        assert!(
+            m[0].message
+                .contains("Write it as a named constant where the computation uses it"),
+            "{}",
+            m[0].message
+        );
+    }
+
+    #[test]
+    fn magic_octal_hex_binary_literals_are_intent_bearing() {
+        // B8: 0o600/0xFF/0b1010 are intent-bearing spellings — the meaning is
+        // in the literal (the old code rendered 0o600 as "magic number 384")
+        let f = scan_src(
+            "import os\ndef f(db, flags, x):\n    os.chmod(db, 0o600)\n    y = flags & 0xFF\n    z = x | 0b1010\n    return y or z\n",
+        );
+        assert!(!f.iter().any(|x| x.kind == "magic-number"), "{f:?}");
+        // the same VALUES in decimal form are not intent-bearing — still flagged
+        let dec = scan_src("import os\ndef f(db):\n    os.chmod(db, 384)\n");
+        assert!(dec.iter().any(|x| x.kind == "magic-number"), "{dec:?}");
+    }
+
+    #[test]
+    fn magic_named_constant_rhs_is_exempt() {
+        // B8: the RHS of a module-level named constant IS the why — the whole
+        // value is exempt (`RATE = 2 * 60`, `MARGIN = -12`); the same literal
+        // inside a function still fires
+        let f = scan_src("RATE = 2 * 60\n");
+        assert!(!f.iter().any(|x| x.kind == "magic-number"), "{f:?}");
+        let neg = scan_src("MARGIN = -12\n");
+        assert!(!neg.iter().any(|x| x.kind == "magic-number"), "{neg:?}");
+        let g = scan_src("def f():\n    return 2 * 60\n");
+        assert!(g.iter().any(|x| x.kind == "magic-number"), "{g:?}");
+    }
+
+    #[test]
+    fn magic_length_guards_and_subscript_indexes_are_not_findings() {
+        // B8: a tuple index and a len() length guard are structural, not
+        // domain magic
+        let f = scan_src("def f(parts):\n    if len(parts) >= 4:\n        return parts[3]\n    return parts[0]\n");
+        assert!(!f.iter().any(|x| x.kind == "magic-number"), "{f:?}");
+        // an operand in the same function still fires
+        let g = scan_src("def f(parts):\n    return parts[3] * 60\n");
+        let m: Vec<&Finding> = g.iter().filter(|x| x.kind == "magic-number").collect();
+        assert_eq!(m.len(), 1, "{g:?}");
+        assert!(m[0].message.contains("60"), "{}", m[0].message);
+    }
+
+    #[test]
+    fn magic_data_table_pair_in_dict_initializer_clears_the_bar() {
+        // B8: the 4x12 pair in one dict initializer is table data — the
+        // >= 3 same-kind siblings exemption counts by numeric kind (int vs
+        // float), so a third sibling clears the bar
+        let f = scan_src("S = {\"cols\": 4 * 12, \"rows\": 12 * 4, \"gap\": 2 * 6}\n");
+        assert!(!f.iter().any(|x| x.kind == "magic-number"), "{f:?}");
+        // two siblings alone do NOT clear the >= 3 bar — still flagged
+        let g = scan_src("S = {\"size\": 4 * 12}\n");
+        assert!(g.iter().filter(|x| x.kind == "magic-number").count() >= 2, "{g:?}");
     }
 
     #[test]
@@ -2258,6 +2533,70 @@ mod tests {
             "../../tests/fixtures/rust/magic_keyword_value_is_not_a_finding__01.py"
         ));
         assert!(!f.iter().any(|x| x.kind == "magic-number"));
+    }
+    #[test]
+    fn magic_unit_constructor_call_is_exempt() {
+        // P2: the unit is stated at the call site — Quantity(20, 'minute')
+        // and timedelta(minutes=20) name their unit (constructor callee or a
+        // unit-naming keyword); the literal is named there, no finding.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_unit_constructor_exempt__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "magic-number"), "{f:?}");
+    }
+
+    #[test]
+    fn magic_unit_named_assignment_and_param_are_exempt() {
+        // P2: a literal whose nearest assignment target — or an enclosing
+        // function's parameter — names the unit (max_walk_km = 2 * 30,
+        // distance_m * 30) is named by that name, not magic.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_unit_named_assignment_exempt__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "magic-number"), "{f:?}");
+    }
+
+    #[test]
+    fn magic_number_message_names_both_mechanisms_and_never_the_family() {
+        // Phase 2: the Duration/Pint/Generic split is removed — the same
+        // message renders at every firing site, naming both mechanisms as
+        // glossed examples, never claiming which applies, and never naming a
+        // unit. The 60-division conversion factor and the retry cap render
+        // identical text; "is a duration" appears nowhere.
+        let general = "nothing states what it means or why this magnitude";
+        let mechanisms = "If the value carries units, express it in a type that understands them — Python's timedelta for durations, or a Quantity from the pint units library for physical measures";
+        for (fx, src) in [
+            (
+                "divisor-60",
+                include_str!("../../tests/fixtures/rust/magic_number_divisor_60_general__01.py"),
+            ),
+            (
+                "retry-cap",
+                include_str!("../../tests/fixtures/rust/magic_number_retry_cap_general__01.py"),
+            ),
+        ] {
+            let f = scan_src(src);
+            let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
+            assert_eq!(m.len(), 1, "{fx}: {f:?}");
+            assert!(m[0].message.contains(general), "{fx}: {}", m[0].message);
+            assert!(m[0].message.contains(mechanisms), "{fx}: {}", m[0].message);
+            assert!(!m[0].message.contains("is a duration"), "{fx}: {}", m[0].message);
+            assert!(!m[0].message.contains("Quantity("), "{fx}: {}", m[0].message);
+            assert!(!m[0].message.contains("timedelta("), "{fx}: {}", m[0].message);
+            assert!(m[0].message.contains("--fix-name <CONST>"), "{fx}: {}", m[0].message);
+        }
+        // a unit-stating trailing comment no longer selects a family — the
+        // same message, and no unit is named
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/magic_unit_pint_suggestion__01.py"
+        ));
+        let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "magic-number").collect();
+        assert_eq!(m.len(), 2, "{f:?}");
+        for x in &m {
+            assert!(x.message.contains(general), "{}", x.message);
+            assert!(x.message.contains(mechanisms), "{}", x.message);
+            assert!(!x.message.contains("kilometer"), "{}", x.message);
+        }
     }
 
     #[test]
@@ -2559,14 +2898,35 @@ mod tests {
         ));
         let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
         assert_eq!(gs.len(), 2);
+        // A4: the message names the mechanism (import-time binding) and the
+        // owning-class action — no invented "configuration" escape
+        for g in &gs {
+            assert!(
+                g.message
+                    .contains("is a module-level variable: a global read that binds at import time"),
+                "{}",
+                g.message
+            );
+            assert!(
+                g.message
+                    .contains("Find the class this value serves; make it that class's attribute."),
+                "{}",
+                g.message
+            );
+        }
     }
 
     #[test]
-    fn negative_literals_stay_constant_tables() {
+    fn constant_table_is_a_module_level_variable() {
+        // third-pass ruling 3: ANY module-level variable assignment fires —
+        // a constant table is still a module-level variable; the negative
+        // literals INSIDE it stay magic-number-exempt
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/negative_literals_stay_constant_tables__01.py"
         ));
-        assert!(!f.iter().any(|x| x.kind == "global-state"));
+        let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
+        assert_eq!(gs.len(), 1, "{f:?}");
+        assert_eq!(gs[0].line, 1);
     }
 
     #[test]
@@ -2597,8 +2957,20 @@ mod tests {
         let lp: Vec<&Finding> = f.iter().filter(|x| x.kind == "long-param-list").collect();
         assert_eq!(lp.len(), 1);
         assert!(lp[0].message.contains("7 parameters"));
+        // A7: the message names the call-site cost and the grouping action
+        assert!(
+            lp[0].message.contains("the call site cannot see what each value means"),
+            "{}",
+            lp[0].message
+        );
+        assert!(
+            lp[0]
+                .message
+                .contains("Group the parameters that belong together into one object"),
+            "{}",
+            lp[0].message
+        );
     }
-
     #[test]
     fn long_param_list_counts_leading_self_out() {
         let f = scan_src(include_str!(
@@ -2615,6 +2987,28 @@ mod tests {
             "../../tests/fixtures/rust/short_param_list_and_five_plus_self_pass__01.py"
         ));
         assert!(!f.iter().any(|x| x.kind == "long-param-list"));
+    }
+    #[test]
+    fn trailing_marker_on_multiline_except_header_binds() {
+        // Phase 3: a marker riding the except header's closing line (the
+        // server.py:704 shape — `except (…):  # lucidlint: ignore …`) binds
+        // and clears: the finding anchors at the header's colon line, where
+        // a trailing marker sits — the single-line trailing-marker case
+        // (marker on the `except` line) already bound; this is its
+        // multi-line twin.
+        let src = "try:\n    work()\nexcept (\n    ValueError,\n    TypeError,\n):  # lucidlint: ignore swallow boundary is logged upstream\n    log('blip')\n";
+        let f = scan_src(src);
+        assert!(!f.iter().any(|x| x.kind == "swallow"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+
+        // control: the same header without a marker still fires, anchored
+        // at the header's colon line (where a trailing marker would sit)
+        let src2 = "try:\n    work()\nexcept (\n    ValueError,\n    TypeError,\n):\n    log('blip')\n";
+        let f2 = scan_src(src2);
+        let s: Vec<&Finding> = f2.iter().filter(|x| x.kind == "swallow").collect();
+        assert_eq!(s.len(), 1, "{f2:?}");
+        assert_eq!(s[0].line, 6, "{f2:?}");
+        assert!(!f2.iter().any(|x| x.kind == "stale-suppression"), "{f2:?}");
     }
 
     // ------------------------------------------------------------- except family
@@ -2650,9 +3044,9 @@ mod tests {
 
     #[test]
     fn swallow_message_names_the_antipattern_and_the_bar() {
-        // the message must teach WHY a log-only handler is still a swallow:
-        // a caller exists that needs to decide, and the terminal-boundary
-        // escape hatch is conditional on no caller existing
+        // H6: the message states the mechanism (a caller exists that needs
+        // to decide) and the surface-by list, and carries NO suppression
+        // pointer — the renderer owns that (writing-messages.md).
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/swallow_message_names_the_antipattern_and_the_bar__01.py"
         ));
@@ -2663,8 +3057,19 @@ mod tests {
             s.message
         );
         assert!(
-            s.message.contains("no caller exists to propagate to"),
-            "message must make the terminal-boundary bar explicit: {}",
+            s.message
+                .contains("surface by return, raise, break, continue, sys.exit"),
+            "{}",
+            s.message
+        );
+        assert!(
+            !s.message.contains("lucidlint: ignore"),
+            "suppression pointers are renderer data: {}",
+            s.message
+        );
+        assert!(
+            !s.message.contains("no caller exists"),
+            "the terminal-boundary escape is no longer in the message: {}",
             s.message
         );
     }
@@ -2706,6 +3111,36 @@ mod tests {
             "expected no swallow, got {:?}",
             f.iter().map(|x| (x.kind.as_str(), x.line)).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn swallow_mutated_name_inside_returned_dict_surfaces() {
+        // H4: server.py:704 shape — the except mutates db and the RETURNED
+        // dict literal carries it (`return {"status": ..., "db": db}`); the
+        // value surfaces, so no swallow.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/swallow_return_dict_carries_mutated_db__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "swallow"), "{f:?}");
+    }
+
+    #[test]
+    fn swallow_mutated_name_inside_returned_fstring_surfaces() {
+        // H4: the mutated name inside a returned f-string field surfaces too.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/swallow_return_fstring_carries_mutated_db__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "swallow"), "{f:?}");
+    }
+
+    #[test]
+    fn swallow_mutated_name_not_referenced_in_return_fires() {
+        // H4 guard: mutating db with NO reference anywhere in the return
+        // expression tree still swallows the error.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/swallow_mutated_name_not_in_return_fires__01.py"
+        ));
+        assert!(f.iter().any(|x| x.kind == "swallow"), "{f:?}");
     }
 
     #[test]
@@ -2776,6 +3211,23 @@ mod tests {
         assert_eq!(r.len(), 1, "{f:?}");
     }
 
+    #[test]
+    fn closures_collaborator_write_drops_the_accumulator_claim() {
+        // Phase 7a: a mutating call on an attribute of a captured local
+        // (`prop.payers.push`) still makes the closures finding fire — the
+        // object is shared state — but the LOCAL is not being accumulated, so
+        // the message states only that the closures close over the enclosing
+        // locals and makes no accumulator claim.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/closures_collaborator_write_no_accumulator__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "closures").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("closing over its state"), "{}", r[0].message);
+        assert!(!r[0].message.contains("accumulator"), "{}", r[0].message);
+        assert!(!r[0].message.contains("captured local"), "{}", r[0].message);
+    }
+
     // ------------------------------------ misplaced-method / tuple-record / assembly
     #[test]
     fn misplaced_method_fires_when_class_state_is_passed() {
@@ -2834,7 +3286,6 @@ mod tests {
     #[test]
     fn assembly_class_ignores_plain_pipeline() {
         // a linear a = f(x); b = g(a) chain has no shared base — the
-        // functional style is not a class in waiting
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/assembly_class_ignores_plain_pipeline__01.py"
         ));
@@ -2847,7 +3298,21 @@ mod tests {
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/class_module_name_mismatch__01.py"
         ));
-        assert!(f.iter().any(|x| x.kind == "class-module"));
+        let cm: Vec<&Finding> = f.iter().filter(|x| x.kind == "class-module").collect();
+        assert_eq!(cm.len(), 1, "{f:?}");
+        // A7: the message names the class, the file-structure mechanism, and
+        // the rename target (lowercase stem)
+        assert!(
+            cm[0].message.contains("holds one class named 'Config'"),
+            "{}",
+            cm[0].message
+        );
+        assert!(
+            cm[0].message.contains("Rename the file to 'config.py'"),
+            "{}",
+            cm[0].message
+        );
+        assert!(cm[0].message.contains("closely related models"), "{}", cm[0].message);
     }
 
     // ------------------------------------------------------------- strewing
@@ -2937,7 +3402,24 @@ mod tests {
         ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "data-clump").collect();
         assert_eq!(r.len(), 1, "{f:?}");
-        assert!(r[0].message.contains("em"), "{}", r[0].message);
+        // A3: the message names the pair, the two-parameter mechanism, and
+        // the class action
+        assert!(
+            r[0].message.contains("pass the same parameter pair (em, vm) together"),
+            "{}",
+            r[0].message
+        );
+        assert!(
+            r[0].message
+                .contains("passing it as two parameters never says what that thing is"),
+            "{}",
+            r[0].message
+        );
+        assert!(
+            r[0].message.contains("Make a class whose name states that thing"),
+            "{}",
+            r[0].message
+        );
     }
 
     #[test]
@@ -2950,52 +3432,42 @@ mod tests {
     }
     #[test]
     fn data_clump_pairs_aggregate_per_anchor() {
-        // Two pairs sharing one anchor = ONE finding naming both: per-pair
-        // findings stacked at the same def line could never be per-site
-        // suppressed (one marker consumes one finding).
+        // Two pairs sharing one anchor = ONE finding; the message names the
+        // FIRST sorted pair and only ITS functions (each pair has its OWN
+        // >= 3 functions — never claim one function set shares them all)
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/data_clump_pairs_aggregate_per_anchor__01.py"
         ));
         let clumps: Vec<&Finding> = f.iter().filter(|x| x.kind == "data-clump").collect();
         assert_eq!(clumps.len(), 1, "{f:?}");
-        assert!(clumps[0].message.contains("(em, vm)"), "{}", clumps[0].message);
-        assert!(clumps[0].message.contains("(em, x)"), "{}", clumps[0].message);
         assert!(
-            clumps[0].message.contains("data clumps: the parameter pairs"),
+            clumps[0]
+                .message
+                .contains("pass the same parameter pair (em, vm) together"),
             "{}",
             clumps[0].message
         );
-        assert!(clumps[0].message.contains("(em, vm)"), "{}", clumps[0].message);
-        assert!(clumps[0].message.contains("(em, x)"), "{}", clumps[0].message);
-        assert!(
-            !clumps[0].message.contains("share the parameter"),
-            "{}",
-            clumps[0].message
-        );
+        // the aggregated UNION (a, b, c, d) is not all on (em, vm) — the
+        // pair's own functions (a, b, c) are named
+        assert!(clumps[0].message.contains("(a, b, c)"), "{}", clumps[0].message);
+        assert!(!clumps[0].message.contains("(em, x)"), "{}", clumps[0].message);
     }
     #[test]
-    fn data_clump_presents_both_fold_and_own_class() {
-        // Issue #22: the clump's parameter set is accounted for by an
-        // existing class's fields (exact `lines`, derived `unit` via
-        // `scale: PageScale` whose class declares `unit`). The suggestion
-        // presents BOTH directions: fold into that class (never re-invent a
-        // verb-named class review rejects on the noun principle), OR give
-        // the clump its own class — a subset of the larger record may be a
-        // legit value that travels on its own. The no-match fallback
-        // ("split out a class per clump") is not the matched message.
+    fn data_clump_names_the_pair_and_the_class_action() {
+        // issue #22's matched-class fixture now carries the same uniform
+        // A3 message — the fold-into-existing-class clause is gone
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/data_clump_suggests_existing_class__01.py"
         ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "data-clump").collect();
         assert_eq!(r.len(), 1, "{f:?}");
-        assert!(r[0].message.contains("methods of Writing"), "{}", r[0].message);
         assert!(
-            r[0].message.contains("its own class named with a domain noun"),
+            r[0].message.contains("pass the same parameter pair"),
             "{}",
             r[0].message
         );
         assert!(
-            !r[0].message.contains("split out a class per clump"),
+            r[0].message.contains("Make a class whose name states that thing"),
             "{}",
             r[0].message
         );
@@ -3349,6 +3821,22 @@ mod tests {
         ));
         let e: Vec<&Finding> = exact.iter().filter(|x| x.kind == "duplicate-block").collect();
         assert_eq!(e.len(), 1, "{exact:?}");
+        // C1: the message names the mechanism (duplicated work) and the
+        // paste-vs-twin decision; the [MECHANICAL] delete wording is gone
+        assert!(
+            e[0].message
+                .contains("appears twice in this function — duplicated work."),
+            "{}",
+            e[0].message
+        );
+        assert!(
+            e[0].message
+                .contains("If one block is a paste copy of the other, delete it."),
+            "{}",
+            e[0].message
+        );
+        assert!(e[0].message.contains("extract the shared part"), "{}", e[0].message);
+        assert!(!e[0].message.contains("delete the second copy"), "{}", e[0].message);
         assert!(e[0].message.contains("fix: duplicate-block"), "{}", e[0].message);
         let renamed = scan_src(include_str!(
             "../../tests/fixtures/rust/duplicate_block_directive_only_for_exact_duplicates__02.py"
@@ -3360,6 +3848,21 @@ mod tests {
             "a renamed duplicate is not deep-equal — no directive: {}",
             r[0].message
         );
+    }
+
+    #[test]
+    fn duplicate_block_never_pairs_across_functions() {
+        // C1 gate: only blocks within the SAME function pair — two functions
+        // that each contain the block once (flat 4 < 2*3, so no same-function
+        // duplicate exists) must NOT produce a cross-function finding
+        let src = "def a():\n    t = transcribe(p)\n    write(t)\n    mark(p)\n    done = True\n\ndef b():\n    t = transcribe(p)\n    write(t)\n    mark(p)\n    done = True\n";
+        let f = scan_src(src);
+        assert!(!f.iter().any(|x| x.kind == "duplicate-block"), "{f:?}");
+        // and the same-function twins still fire (the rightmove_scraper case)
+        let twins = scan_src(
+            "def run(pages):\n    for p in pages:\n        t = transcribe(p)\n        write(t)\n        mark(p)\n    t = transcribe(p)\n    write(t)\n    mark(p)\n",
+        );
+        assert!(twins.iter().any(|x| x.kind == "duplicate-block"), "{twins:?}");
     }
 
     #[test]
@@ -3470,23 +3973,16 @@ mod tests {
     // ------------------------------------------------- global-state edges
     #[test]
     fn constant_table_mutated_in_function_is_still_state() {
-        // the all-constant literal passes at module level (carve-out), but a
-        // function mutation of the container is still module state
+        // the all-constant literal fires AT THE ASSIGNMENT (the expanded
+        // rule: any module-level variable), and the machine inside the
+        // function is not double-reported — the mutation arm merged into the
+        // assignment finding (one family, one message)
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/constant_table_mutated_in_function_is_still_state__01.py"
         ));
         let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
         assert_eq!(gs.len(), 1);
-        assert_eq!(gs[0].line, 3);
-    }
-
-    // ------------------------------------------------- class-module pass
-    #[test]
-    fn class_module_matching_name_and_multi_class_pass() {
-        let f = scan_src(include_str!(
-            "../../tests/fixtures/rust/class_module_matching_name_and_multi_class_pass__01.py"
-        ));
-        assert!(!f.iter().any(|x| x.kind == "class-module"));
+        assert_eq!(gs[0].line, 1);
     }
 
     // ------------------------------------------------- shadow pass
@@ -3564,6 +4060,136 @@ mod tests {
         assert!(f.is_empty());
     }
 
+    // ------------------------------------------------- class-module multi
+    #[test]
+    fn class_module_multi_misplaced_public_class_fails() {
+        // User/Team in prod_mod.py: neither matches the stem — the multi arm
+        // fires even though no single class "is" the module (was the old
+        // multi-class PASS fixture; inverted per plan #31)
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_multi_misplaced_fails__01.py"
+        ));
+        assert!(
+            f.iter()
+                .any(|x| x.kind == "class-module" && x.message.contains("fix: split-module")),
+            "{f:?}"
+        );
+        let hit = f.iter().find(|x| x.kind == "class-module").unwrap();
+        assert!(
+            hit.message.contains("User, Team"),
+            "names the misplaced: {}",
+            hit.message
+        );
+    }
+
+    // ------------------------------------------- #27 husks, #28 process, #32 closures
+    #[test]
+    fn static_husk_fires_on_stateless_static_only_class() {
+        let f = scan_src(include_str!("../../tests/fixtures/rust/static_husk_fires__01.py"));
+        let hits: Vec<_> = f.iter().filter(|x| x.kind == "static-husk").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("no state of its own"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("put it IN the class"), "{}", hits[0].message);
+        // P7: the remedy states the hidden half-step — the methods stop
+        // being static and read the state from the instance.
+        assert!(
+            hits[0].message.contains(
+                "The methods stop being static: give the class a constructor that takes the state, \
+                 instance attributes that hold it, and instance methods that read it"
+            ),
+            "{}",
+            hits[0].message
+        );
+    }
+    #[test]
+    fn static_husk_exclusions_do_not_fire() {
+        for (fx, src) in [
+            (
+                "static_husk_inherited_base_exempt__01.py",
+                include_str!("../../tests/fixtures/rust/static_husk_inherited_base_exempt__01.py"),
+            ),
+            (
+                "static_husk_abc_exempt__01.py",
+                include_str!("../../tests/fixtures/rust/static_husk_abc_exempt__01.py"),
+            ),
+            (
+                "static_husk_error_name_exempt__01.py",
+                include_str!("../../tests/fixtures/rust/static_husk_error_name_exempt__01.py"),
+            ),
+        ] {
+            let f = scan_src(src);
+            assert!(!f.iter().any(|x| x.kind == "static-husk"), "{fx}: {f:?}");
+        }
+    }
+    #[test]
+    fn delegating_husk_fires_on_pure_forwarder_class() {
+        let f = scan_src(include_str!("../../tests/fixtures/rust/delegating_husk_fires__01.py"));
+        let hits: Vec<_> = f.iter().filter(|x| x.kind == "delegating-husk").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("fix: dissolve-husk"), "{}", hits[0].message);
+    }
+    #[test]
+    fn delegating_husk_depth2_hands_off_to_forwarding_chain() {
+        // Facade.fetch -> get_stored -> Store.load: the depth-2 chain is #30's
+        // shape, NOT a husk — the forwarder target itself forwards
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/delegating_husk_depth2_hands_off__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "delegating-husk"), "{f:?}");
+    }
+    #[test]
+    fn process_class_fires_with_the_three_part_test_message() {
+        let f = scan_src(include_str!("../../tests/fixtures/rust/process_class_fires__01.py"));
+        let hits: Vec<_> = f.iter().filter(|x| x.kind == "process-class").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        for part in [
+            "is named for a process, not a thing",
+            "Keep the name only when all three hold",
+            "1) the domain calls this component by that name",
+            "2) the data it operates on is all already represented by well-designed classes",
+            "3) data and logic still remain that legitimately fit better in a process class",
+            "represent it with classes first, then re-check 2 and 3",
+        ] {
+            assert!(hits[0].message.contains(part), "missing {part}: {}", hits[0].message);
+        }
+    }
+    #[test]
+    fn process_class_gof_names_pass() {
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/process_class_gof_exempt__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "process-class"), "{f:?}");
+    }
+    #[test]
+    fn closure_cluster_fires_on_disjoint_local_closure_groups() {
+        let f = scan_src(include_str!("../../tests/fixtures/rust/closure_cluster_fires__01.py"));
+        let hits: Vec<_> = f.iter().filter(|x| x.kind == "closure-cluster").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("class-in-a-method"), "{}", hits[0].message);
+        assert_eq!(hits[0].function, "main", "{:?}", hits[0]);
+    }
+    #[test]
+    fn class_module_multi_each_public_class_matches_stem_passes() {
+        // ProdMod in prod_mod.py matches the stem; _Helper is private — the
+        // module's public identity is findable, no finding
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_multi_each_class_matches_stem_pass__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "class-module"), "{f:?}");
+    }
+    #[test]
+    fn class_module_mixed_names_only_the_misplaced() {
+        // User matches nothing, ProdMod matches prod_mod — the finding names
+        // ONLY the misplaced class
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_mixed_names_only_misplaced__01.py"
+        ));
+        let hits: Vec<_> = f.iter().filter(|x| x.kind == "class-module").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("User"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("ProdMod"), "{}", hits[0].message);
+    }
+
     // ------------------------------------------------- record-shape
     #[test]
     fn record_grab_bag_and_collection_params_fail() {
@@ -3589,7 +4215,12 @@ mod tests {
         ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1);
-        assert!(r[0].message.contains("as return type"));
+        assert!(
+            r[0].message
+                .contains("returns a dict that holds the fields of a record"),
+            "{}",
+            r[0].message
+        );
     }
 
     #[test]
@@ -3600,7 +4231,12 @@ mod tests {
         ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1);
-        assert!(r[0].message.contains("pair"));
+        assert!(
+            r[0].message
+                .contains("pair is a dict; its value is a fixed-shape record"),
+            "{}",
+            r[0].message
+        );
     }
 
     #[test]
@@ -3613,7 +4249,11 @@ mod tests {
         ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1, "{f:?}");
-        assert!(r[0].message.contains("serialisation is no excuse"), "{}", r[0].message);
+        assert!(
+            r[0].message.contains("Type raw with the class that models this shape"),
+            "{}",
+            r[0].message
+        );
         assert!(!r[0].message.contains("to_dict"), "{}", r[0].message);
     }
 
@@ -3624,7 +4264,7 @@ mod tests {
         ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1);
-        assert!(r[0].message.contains("dict with constant keys"));
+        assert!(r[0].message.contains("This dict has constant keys"));
         assert_eq!(r[0].line, 2);
     }
 
@@ -3637,7 +4277,7 @@ mod tests {
         ));
         let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(r.len(), 1, "{f:?}");
-        assert!(r[0].message.contains("{Content-Type, X}"), "{f:?}");
+        assert!(r[0].message.contains("(Content-Type, X)"), "{f:?}");
     }
 
     #[test]
@@ -3667,6 +4307,105 @@ mod tests {
             "../../tests/fixtures/rust/record_dict_call_all_constant_passes__01.py"
         ));
         assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+    }
+    #[test]
+    fn record_scalar_map_literal_is_a_lookup_not_a_record() {
+        // P1: the scalar-map sub-family — a dict whose EVERY value is a
+        // scalar literal is a lookup keyed by identity, not a record: no
+        // record-shape finding. A collection value keeps the finding (the
+        // dict holds shape, not identities).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_scalar_map_literal_passes__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        let g = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_collection_value_dict_still_fires__01.py"
+        ));
+        let r: Vec<&Finding> = g.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1, "{g:?}");
+        assert!(r[0].message.contains("This dict has constant keys"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn record_from_dict_functions_carry_the_wire_message() {
+        // P1: the wire-parse sub-family — a dict arriving as a parameter or
+        // return of a from_dict/from_json function is built at the parse
+        // boundary, never ad hoc; the A1 premise ("call sites build it ad
+        // hoc") is false there, so the message names the wire form, the
+        // parse boundary, and the from_dict ingestion instead.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_from_dict_wire_message__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 2, "{f:?}");
+        let param = r
+            .iter()
+            .find(|x| x.message.contains("raw is the wire form of a record"))
+            .expect("param arm fires");
+        assert!(
+            param.message.contains("the parse boundary has no type"),
+            "{}",
+            param.message
+        );
+        assert!(
+            param.message.contains("ingest the wire with its from_dict"),
+            "{}",
+            param.message
+        );
+        assert!(
+            !param.message.contains("call sites build it ad hoc"),
+            "{}",
+            param.message
+        );
+        let ret = r
+            .iter()
+            .find(|x| x.message.contains("from_json returns the wire form of a record"))
+            .expect("return arm fires");
+        assert!(
+            ret.message.contains("the parse boundary has no type"),
+            "{}",
+            ret.message
+        );
+        assert!(
+            ret.message.contains("ingest the wire with its from_dict"),
+            "{}",
+            ret.message
+        );
+        assert!(!ret.message.contains("call sites build it ad hoc"), "{}", ret.message);
+    }
+
+    #[test]
+    fn record_wire_functions_with_ingestion_class_emit_nothing() {
+        // F1: a from_dict/from_json function whose module defines a class
+        // that carries from_dict already IS the recommended shape — the wire
+        // message's advice (give the shape a named record and ingest the
+        // wire with its from_dict) describes a step already taken. No
+        // record-shape finding at those parse boundaries.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_from_dict_with_ingestion_class_passes__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+    }
+
+    #[test]
+    fn record_wire_functions_without_ingestion_class_keep_the_wire_message() {
+        // F1: only wire-named functions whose module has NO from_dict class
+        // keep the wire message — the parse boundary genuinely has no type.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_from_json_wire_message_fires__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(
+            r[0].message.contains("from_json returns the wire form of a record"),
+            "{}",
+            r[0].message
+        );
+        assert!(
+            r[0].message.contains("ingest the wire with its from_dict"),
+            "{}",
+            r[0].message
+        );
     }
 
     #[test]
@@ -3711,7 +4450,11 @@ mod tests {
         }
         src.push_str("\"\"\"\n        return 1\n");
         let f = scan_src(&src);
-        assert!(f.iter().any(|x| x.kind == "partition"));
+        let p: Vec<&Finding> = f.iter().filter(|x| x.kind == "partition").collect();
+        assert_eq!(p.len(), 1, "{f:?}");
+        // A7: the missing action is appended — "Split it into N classes."
+        assert!(p[0].message.contains("Split it into 2 classes."), "{}", p[0].message);
+        assert!(p[0].message.contains("fix: extract-class"), "{}", p[0].message);
     }
 
     #[test]
@@ -3821,7 +4564,14 @@ mod tests {
         let na: Vec<&Finding> = f.iter().filter(|x| x.kind == "no-assert-test").collect();
         assert_eq!(na.len(), 1);
         assert_eq!(na[0].function, "test_x");
-        assert!(na[0].message.contains("can never fail"));
+        // A7: the message names why (proves nothing) and the action
+        assert!(
+            na[0]
+                .message
+                .contains("it can never fail, so it proves nothing. Add an assertion or delete the test."),
+            "{}",
+            na[0].message
+        );
     }
 
     #[test]
@@ -3859,6 +4609,11 @@ mod tests {
         let mut spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
             std::collections::HashMap::new();
         let root = "repo";
+        let mut module_entities = Vec::new();
+        let mut heads = Vec::new();
+        let mut fns = Vec::new();
+        let mut repo_methods = Vec::new();
+        let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
         for (name, src) in files {
             let mut scan = scan_source(src, name);
             scan.file_name = name.to_string();
@@ -3875,8 +4630,16 @@ mod tests {
                     skeleton: s.skeleton.clone(),
                 });
             }
+            module_entities.extend(scan.skeleton_modules.iter().cloned());
+            heads.extend(scan.forwarder_methods.iter().cloned());
+            fns.extend(scan.forwarder_fns.iter().cloned());
+            repo_methods.extend(scan.repo_methods.iter().cloned());
+            imports_by_rel.insert(name.to_string(), scan.imports.clone());
             for (fn_name, line) in &scan.defs {
-                definitions.push((rel.clone(), fn_name.clone(), *line));
+                definitions.push((rel.clone(), fn_name.clone(), *line, false));
+            }
+            for (cls_name, line) in &scan.class_defs {
+                definitions.push((rel.clone(), cls_name.clone(), *line, true));
             }
             for (name, line) in &scan.setters {
                 setters.push((rel.clone(), name.clone(), *line));
@@ -3902,7 +4665,9 @@ mod tests {
         let undeclared = undeclared_findings(&undecl_scans);
         reconcile_repo_wide(&mut all, undeclared, &supps_by_rel, &spent_by_rel);
         // the suppression census + its bulk warning mirror main()'s report
+        all.extend(duplicate_module_findings(&module_entities));
         let census = suppression_counts(supps_by_rel.values());
+        all.extend(forwarding_chain_findings(&heads, &fns, &repo_methods, &imports_by_rel));
         all.extend(bulk_suppression_findings(&census, &supps_by_rel, 10));
         // mirror the production finalize: repo-wide findings honor per-file
         // suppressions too (family-aware, widened window), and a suppression
@@ -4064,6 +4829,38 @@ mod tests {
         assert_eq!(d[0].line, 9);
     }
 
+    // ------------------------------------------------- forwarding-chain (#30)
+    #[test]
+    fn forwarding_chain_coupled_chain_fires() {
+        // Facade.fetch -> get_stored -> Store.load all in one module: C's
+        // module already depends on D's module (same file) — the dead
+        // indirection is flagged
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/delegating_husk_depth2_hands_off__01.py"
+        ));
+        let hits: Vec<_> = f.iter().filter(|x| x.kind == "forwarding-chain").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("fix: collapse-chain"), "{}", hits[0].message);
+        assert_eq!(hits[0].function, "fetch", "{:?}", hits[0]);
+    }
+    #[test]
+    fn forwarding_chain_boundary_between_independent_modules_is_silent() {
+        // Server in server.py never imports store.py — the chain is the ONLY
+        // coupling between the modules: a deliberate boundary, NO finding and
+        // NO message (severity principle, 2026-09-30)
+        let f = scan_corpus(&[
+            (
+                "server.py",
+                include_str!("../../tests/fixtures/rust/forwarding_chain_boundary_silent__01.py"),
+            ),
+            (
+                "store.py",
+                include_str!("../../tests/fixtures/rust/forwarding_chain_boundary_silent__02.py"),
+            ),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "forwarding-chain"), "{f:?}");
+    }
+
     #[test]
     fn dice_partial_similarity_below_threshold() {
         let a: Vec<String> = "A B C D E".split(' ').map(str::to_string).collect();
@@ -4073,27 +4870,147 @@ mod tests {
         assert_eq!(common::dice_similarity(&a, &same), 1.0);
     }
 
+    // ------------------------------------------------- duplicate-module (#26)
+    #[test]
+    fn duplicate_module_fork_pair_fires_with_matched_members() {
+        let f = scan_corpus(&[
+            (
+                "config_a.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_fork_pair__01.py"),
+            ),
+            (
+                "config_b.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_fork_pair__02.py"),
+            ),
+        ]);
+        let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-module").collect();
+        assert_eq!(d.len(), 1, "{f:?}");
+        assert!(d[0].message.contains("identical constants"), "{}", d[0].message);
+        assert!(
+            d[0].message.contains("matched members: close, connect"),
+            "{}",
+            d[0].message
+        );
+    }
+
+    #[test]
+    fn duplicate_module_base_class_pair_gets_the_subclass_message() {
+        // C2: two classes inheriting the SAME base with identical shape get
+        // the subclass message — the fork prose is false for base-class pairs
+        let f = scan_corpus(&[
+            (
+                "config_a.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_base_class_pair__01.py"),
+            ),
+            (
+                "config_b.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_base_class_pair__02.py"),
+            ),
+        ]);
+        let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-module").collect();
+        assert_eq!(d.len(), 1, "{f:?}");
+        assert!(
+            d[0].message
+                .contains("are two subclasses of one base with identical shape"),
+            "{}",
+            d[0].message
+        );
+        assert!(
+            d[0].message
+                .contains("move the constants into the base and delete the duplicate subclasses"),
+            "{}",
+            d[0].message
+        );
+        assert!(
+            d[0].message
+                .contains("If they were meant to differ, one is missing its override."),
+            "{}",
+            d[0].message
+        );
+        // the fork prose must NOT appear for the base-class pair
+        assert!(!d[0].message.contains("a fix lands in one copy"), "{}", d[0].message);
+    }
+    #[test]
+    fn duplicate_module_three_statement_floor_never_fires() {
+        // the small file is a fragment of the fork (same constants) but its
+        // <3 statements keep it out of the pairing entirely
+        let f = scan_corpus(&[
+            (
+                "config_a.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_fork_pair__01.py"),
+            ),
+            (
+                "config_b.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_fork_pair__02.py"),
+            ),
+            (
+                "frag.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_small_file_never_fires__01.py"),
+            ),
+        ]);
+        let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-module").collect();
+        assert_eq!(d.len(), 1, "{f:?}");
+        assert!(!d[0].file.ends_with("frag.py"), "{}", d[0].file);
+    }
+    #[test]
+    fn duplicate_module_ignore_file_silences() {
+        let f = scan_corpus(&[
+            (
+                "config_a.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_fork_pair__01.py"),
+            ),
+            (
+                "config_b.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_ignored_file__02.py"),
+            ),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "duplicate-module"), "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_module_fires_without_constants_and_claims_none() {
+        // Phase 6: the constants leave the gate — two near-identical modules
+        // with NO module-level constants are still a fork, and the message
+        // makes no constants claim when there are none.
+        let f = scan_corpus(&[
+            (
+                "dag_error.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_http_error_pair__01.py"),
+            ),
+            (
+                "houses_error.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_http_error_pair__02.py"),
+            ),
+        ]);
+        let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-module").collect();
+        assert_eq!(d.len(), 1, "{f:?}");
+        assert!(!d[0].message.contains("identical constants"), "{}", d[0].message);
+        assert!(d[0].message.contains("— a fork:"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn duplicate_module_below_the_similarity_bar_stays_silent() {
+        // Phase 6: Dice >= 0.9 alone decides — a pair of similar-length
+        // classes with different structure stays silent.
+        let f = scan_corpus(&[
+            (
+                "alpha.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_below_threshold__01.py"),
+            ),
+            (
+                "beta.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_below_threshold__02.py"),
+            ),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "duplicate-module"), "{f:?}");
+    }
+
     // ------------------------------------------------- unused
     #[test]
     fn message_wording_states_the_real_fix_and_the_exemption() {
         // the wording must steer agents away from non-fixes (value-shaped
         // names) and bulk suppression: each message names what a real fix
         // is AND the only legitimate suppression
-        let m = scan_src(include_str!(
-            "../../tests/fixtures/rust/message_wording_states_the_real_fix_and_the_exemption__01.py"
-        ));
-        let mn = m.iter().find(|x| x.kind == "magic-number").expect("magic-number fires");
-        assert!(mn.message.contains("domain noun"), "{}", mn.message);
-
-        let r = scan_src(include_str!(
-            "../../tests/fixtures/rust/message_wording_states_the_real_fix_and_the_exemption__02.py"
-        ));
-        let rs = r.iter().find(|x| x.kind == "record-shape").expect("record-shape fires");
-        assert!(rs.message.contains("class named with a domain noun"), "{}", rs.message);
-        assert!(rs.message.contains("serialisation is no excuse"), "{}", rs.message);
-        assert!(!rs.message.contains("to_dict()"), "{}", rs.message);
-        assert!(rs.message.contains("wire payload is still a record"), "{}", rs.message);
-
         let b = scan_src(include_str!(
             "../../tests/fixtures/rust/message_wording_states_the_real_fix_and_the_exemption__03.py"
         ));
@@ -4101,19 +5018,44 @@ mod tests {
         assert!(be.message.contains("blast radius"), "{}", be.message);
         assert!(be.message.contains("catch what you actually handle"), "{}", be.message);
 
-        let t = scan_src_test(include_str!(
+        let scan_magic = scan_src_test(include_str!(
             "../../tests/fixtures/rust/message_wording_states_the_real_fix_and_the_exemption__04.py"
         ));
-        let ff = t.iter().find(|x| x.kind == "fakefs").expect("fakefs fires");
+        let mn = scan_magic
+            .iter()
+            .find(|x| x.kind == "magic-number")
+            .expect("magic-number fires");
         assert!(
-            ff.message.contains("citing the standard that permits real FS here"),
+            mn.message
+                .contains("magic number 60 in f — nothing states what it means or why this magnitude"),
             "{}",
-            ff.message
+            mn.message
         );
-    }
+        assert!(
+            mn.message
+                .contains("Write it as a named constant where the computation uses it"),
+            "{}",
+            mn.message
+        );
+        assert!(mn.message.contains("why this size"), "{}", mn.message);
+        assert!(mn.message.contains("data tables"), "{}", mn.message);
 
-    #[test]
-    fn bulk_suppression_warns_at_ten_or_more_sites() {
+        let r = scan_src(include_str!(
+            "../../tests/fixtures/rust/message_wording_states_the_real_fix_and_the_exemption__02.py"
+        ));
+        let rs = r.iter().find(|x| x.kind == "record-shape").expect("record-shape fires");
+        assert!(rs.message.contains("g returns a dict"), "{}", rs.message);
+        assert!(
+            rs.message
+                .contains("Type the return with the class that models the shape"),
+            "{}",
+            rs.message
+        );
+        assert!(
+            rs.message.contains("create that class if none exists"),
+            "{}",
+            rs.message
+        );
         let mut files: Vec<(&str, &str)> = Vec::new();
         for i in 0..11 {
             files.push((
@@ -4145,6 +5087,24 @@ mod tests {
         let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "unused").collect();
         assert_eq!(u.len(), 1);
         assert!(u[0].message.contains("never referenced"));
+    }
+    #[test]
+    fn unused_class_arm_finds_never_referenced_class() {
+        // #28 dead-class arm: a class defined in production code that
+        // nothing references is as dead as an unreferenced function
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unused_class_never_referenced_is_found__01.py"
+        ));
+        let u: Vec<&Finding> = f.iter().filter(|x| x.kind == "unused").collect();
+        assert_eq!(u.len(), 1, "{f:?}");
+        assert!(u[0].message.contains("class 'Orphan'"), "{}", u[0].message);
+    }
+    #[test]
+    fn unused_class_arm_passes_when_referenced() {
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unused_class_referenced_not_flagged__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "unused"), "{f:?}");
     }
 
     #[test]
@@ -4353,19 +5313,36 @@ mod tests {
         assert_eq!(rs.len(), 2, "{f:?}");
         assert_ne!(rs[0].col, rs[1].col, "twin anchors must differ: {rs:?}");
         assert_ne!(rs[0].message, rs[1].message, "twin messages must name their keys");
-        assert!(rs.iter().any(|x| x.message.contains("{a, b}")), "{rs:?}");
-        assert!(rs.iter().any(|x| x.message.contains("{x, y}")), "{rs:?}");
+        // A2: the dict-literal message names the constant keys, the drift
+        // mechanism, and the class action
+        for r in &rs {
+            assert!(r.message.contains("This dict has constant keys"), "{}", r.message);
+            assert!(r.message.contains("the copies can drift apart"), "{}", r.message);
+            assert!(
+                r.message.contains("Make a class with these fields and build it once"),
+                "{}",
+                r.message
+            );
+        }
+        assert!(rs.iter().any(|x| x.message.contains("(a, b)")), "{rs:?}");
+        assert!(rs.iter().any(|x| x.message.contains("(x, y)")), "{rs:?}");
     }
 
     #[test]
     fn suppression_peels_innermost_first() {
-        // markers stack directly above the target line; each marker comment
-        // exempts ONE anchor, inner-first (schema-3 col). One marker peels
-        // only the innermost record; two peel inner then outer.
+        // Phase 4/4a: the window is the finding's own line, the line before,
+        // and the logical line's pair — here the return statement is one
+        // source line, so the logical line is the finding's own. Stacked
+        // markers reach only the line-before marker, so one marker peels the
+        // innermost record (highest col) and the outer remains.
         let src_two =
             "def deep(user):\n    # lucidlint: ignore record-shape outer seam\n    # lucidlint: ignore record-shape inner seam\n    return {\"a\": {\"x\": user, \"y\": user}, \"b\": 1}\n";
         let two = scan_src(src_two);
-        assert!(!two.iter().any(|x| x.kind == "record-shape"), "{two:?}");
+        assert_eq!(
+            two.iter().filter(|x| x.kind == "record-shape").count(),
+            1,
+            "only the line-before marker binds; the outer record remains: {two:?}"
+        );
 
         let src_one =
             "def deep(user):\n    # lucidlint: ignore record-shape inner seam\n    return {\"a\": {\"x\": user, \"y\": user}, \"b\": 1}\n";
@@ -4373,13 +5350,12 @@ mod tests {
         let left: Vec<&Finding> = one.iter().filter(|x| x.kind == "record-shape").collect();
         assert_eq!(left.len(), 1, "{one:?}");
         assert!(
-            left[0].message.contains("{a, b}"),
+            left[0].message.contains("(a, b)"),
             "outer must remain: {}",
             left[0].message
         );
         assert!(!one.iter().any(|x| x.kind == "stale-suppression"), "{one:?}");
     }
-
     #[test]
     fn record_shape_fires_on_call_argument() {
         // uniform descent: a record built at a call site is a record — the
@@ -4389,35 +5365,493 @@ mod tests {
         ));
         assert!(
             f.iter()
-                .any(|x| x.kind == "record-shape" && x.message.contains("{user, stamp}")),
+                .any(|x| x.kind == "record-shape" && x.message.contains("(user, stamp)")),
+            "{f:?}"
+        );
+        assert!(
+            f.iter()
+                .any(|x| x.kind == "record-shape" && x.message.contains("This dict has constant keys")),
             "{f:?}"
         );
     }
 
     #[test]
-    fn complexity_suppression_three_lines_above_not_stale() {
-        // B7: a decorator line may intervene between the suppression comment
-        // and the def. With a 3-line window the comment directly above the
-        // decorator still suppresses the cc finding, and the used suppression
-        // is not flagged stale (the cc retain records the SAME window).
+    fn record_shape_parameter_names_the_param_and_the_action() {
+        // A1: the parameter arm names the parameter, the untyped-dict
+        // mechanism, and the class action
+        let f = scan_src("def send(data: dict[str, Any]) -> None:\n    pass\n");
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(
+            rs[0]
+                .message
+                .contains("data is a dict; its value is a fixed-shape record"),
+            "{}",
+            rs[0].message
+        );
+        assert!(
+            rs[0]
+                .message
+                .contains("call sites build it ad hoc, and field changes go unchecked"),
+            "{}",
+            rs[0].message
+        );
+        assert!(
+            rs[0]
+                .message
+                .contains("Type data with the class that models this shape"),
+            "{}",
+            rs[0].message
+        );
+    }
+    #[test]
+    fn record_scalar_map_signature_is_a_lookup_not_a_record() {
+        // G1: a parameter or return typed with a dict whose VALUE element is
+        // scalar (str/None/bool stamps and keys) is a lookup, not a record —
+        // derived_node's dep_timestamps: dict[str, str] shape emits nothing.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_scalar_map_signature_passes__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_class_value_in_signature_keeps_the_finding() {
+        // H1: a dict whose value element is class-name-like (capitalized)
+        // holds shaped objects — the finding stays, with the COLLECTION as
+        // the object of the fix (the value's class is already named by the
+        // annotation), never the fixed-shape-record pointer.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_class_value_signature_keeps_finding__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(
+            rs[0].message.contains("data is a map whose values are User"),
+            "{}",
+            rs[0].message
+        );
+        assert!(
+            rs[0]
+                .message
+                .contains("Make a class for the collection, named with a domain noun — an alias to dict names the problem, it does not solve it"),
+            "{}",
+            rs[0].message
+        );
+        assert!(!rs[0].message.contains("fixed-shape record"), "{}", rs[0].message);
+    }
+
+    #[test]
+    fn record_class_value_map_names_the_collection_not_the_value() {
+        // H1: dict[str, SomeClass] — the collection is the unnamed shape;
+        // the message names the MAP (sources), never the value (Provenance
+        // is already named by the annotation).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_class_value_map_collection_message__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(
+            rs[0].message.contains("sources is a map whose values are Provenance"),
+            "{}",
+            rs[0].message
+        );
+        assert!(
+            rs[0]
+                .message
+                .contains("Make a class for the collection, named with a domain noun — an alias to dict names the problem, it does not solve it"),
+            "{}",
+            rs[0].message
+        );
+        assert!(!rs[0].message.contains("fixed-shape record"), "{}", rs[0].message);
+    }
+
+    #[test]
+    fn record_named_type_values_render_the_collection_message_in_every_arm() {
+        // P1: the dict value element is classified by AST name resolution,
+        // never capitalization — a module class (Provenance), an imported
+        // name (from decimal import Decimal), and a known builtin
+        // constructor (list) are named types, and the collection message
+        // renders in EVERY arm: parameter annotation, return annotation,
+        // and dict literal. The unbound-capitalized case keeps its existing
+        // behavior (record_class_value_in_signature_keeps_the_finding).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_named_type_value_map_renders_collection_message__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 4, "{f:?}");
+        assert!(
+            rs.iter()
+                .any(|x| x.message.contains("data is a map whose values are Decimal")),
+            "{f:?}"
+        );
+        assert!(
+            rs.iter()
+                .any(|x| x.message.contains("convert returns a map whose values are Decimal")),
+            "{f:?}"
+        );
+        assert!(
+            rs.iter()
+                .any(|x| x.message.contains("rows is a map whose values are list")),
+            "{f:?}"
+        );
+        assert!(
+            rs.iter()
+                .any(|x| x.message.contains("This dict is a map whose values are Provenance")),
+            "{f:?}"
+        );
+        for x in &rs {
+            assert!(
+                x.message
+                    .contains("Make a class for the collection, named with a domain noun — an alias to dict names the problem, it does not solve it"),
+                "{}",
+                x.message
+            );
+            assert!(!x.message.contains("fixed-shape record"), "{}", x.message);
+        }
+    }
+
+    #[test]
+    fn record_optional_and_aliased_named_type_maps_render_the_collection_message() {
+        // Phase 1: the union wrapper (`dict[str, Provenance] | None`) and the
+        // raw-dict alias (`Sources = dict[str, Provenance]`) both resolve to
+        // the same map — the collection message renders in every arm, and the
+        // alias names the problem rather than exempting it.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_optional_named_type_map__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(
+            rs[0].message.contains("sources is a map whose values are Provenance"),
+            "{}",
+            rs[0].message
+        );
+        assert!(
+            rs[0]
+                .message
+                .contains("an alias to dict names the problem, it does not solve it"),
+            "{}",
+            rs[0].message
+        );
+        assert!(!rs[0].message.contains("fixed-shape record"), "{}", rs[0].message);
+
+        let a = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_raw_dict_alias_does_not_exempt__01.py"
+        ));
+        let ars: Vec<&Finding> = a.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(ars.len(), 1, "{a:?}");
+        assert!(
+            ars[0].message.contains("sources is a map whose values are Provenance"),
+            "{}",
+            ars[0].message
+        );
+        assert!(
+            ars[0]
+                .message
+                .contains("an alias to dict names the problem, it does not solve it"),
+            "{}",
+            ars[0].message
+        );
+        assert!(
+            ars[0]
+                .message
+                .contains("Move the operations that take, build, or read this map onto the class as methods"),
+            "{}",
+            ars[0].message
+        );
+    }
+
+    #[test]
+    fn record_unresolvable_value_element_keeps_the_g1_path() {
+        // P1: a value element that resolves to nothing is NOT a named type —
+        // dict[str, Any] keeps the fixed-shape text (grab-bag) and a scalar
+        // map stays silent; neither renders the collection message.
+        let f = scan_src("def send(data: dict[str, Any]) -> None:\n    pass\n");
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(
+            rs[0]
+                .message
+                .contains("data is a dict; its value is a fixed-shape record"),
+            "{}",
+            rs[0].message
+        );
+        assert!(
+            !rs[0].message.contains("is a map whose values are"),
+            "{}",
+            rs[0].message
+        );
+        let g = scan_src("def f(dep_timestamps: dict[str, str]):\n    return dep_timestamps\n");
+        assert!(!g.iter().any(|x| x.kind == "record-shape"), "{g:?}");
+    }
+
+    #[test]
+    fn record_signature_findings_anchor_at_the_parameter_line() {
+        // H2: a parameter finding anchors at the annotated parameter's own
+        // line and a return finding at the return annotation's line — never
+        // the def line for a multi-line signature.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_multiline_signature_anchors_param_line__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        let mut lines: Vec<usize> = rs.iter().map(|x| x.line).collect();
+        lines.sort_unstable();
+        assert_eq!(lines, vec![2, 3, 10], "{f:?}");
+    }
+
+    #[test]
+    fn record_signature_marker_binds_on_the_parameter_line() {
+        // H2: the marker window is resolution-invariant — a marker on the
+        // parameter's own line binds the finding anchored there, and is not
+        // stale.
+        let src = "def f(\n    # lucidlint: ignore record-shape the payload is the wire form\n    data: dict,\n) -> None:\n    pass\n";
+        let f = scan_src(src);
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_def_above_marker_binds_every_parameter() {
+        // Phase 4/4a: the binding window is the finding's own line, the line
+        // before, and the logical line's pair (nothing extra here — the def
+        // is one source line). A single-line def anchors every parameter
+        // finding at the def line, so ONE marker one line above the def binds
+        // all four params — the def site is one decision.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_def_above_marker_binds_def_site__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_def_line_marker_binds_every_parameter() {
+        // Phase 4: a marker ON the def line (a trailing comment) is the
+        // finding's own line — it binds every parameter anchored there.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_def_line_marker_binds_def_site__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_logical_def_above_marker_binds_multiline_signature() {
+        // Phase 4a: one line of code can span several source lines. The
+        // marker sits one line above the def, the parameter and return
+        // findings anchor on their own interior lines — the def line is the
+        // signature's LOGICAL line, so the single marker binds every finding
+        // in the signature and is not stale (the round-9 shape:
+        // dag/attempt.py:298 marker -> :304 finding).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_logical_def_above_marker_binds_multiline_signature__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_logical_def_line_marker_binds_multiline_signature() {
+        // Phase 4a: a marker ON the def line binds every finding in a
+        // multi-line signature — the def line is the logical line the
+        // parameter and return findings belong to.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_logical_def_line_marker_binds_multiline_signature__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_logical_wrapped_call_marker_binds() {
+        // Phase 4a: the record literal's own line is inside a wrapped call,
+        // whose logical line starts at `send(`. A marker one line above the
+        // call's first line binds the argument's finding and is not stale.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_logical_wrapped_call_marker_binds__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_logical_physical_line_marker_binds_inside_wrapped_call() {
+        // Phase 4a: statement-level precision survives — a marker on the
+        // finding's own source line binds it even when the construct started
+        // on an earlier line.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_logical_physical_line_marker_binds__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_logical_two_lines_above_binds_nothing_and_is_not_stale() {
+        // Phase 4a guard: a marker two lines above the logical line (and
+        // above the physical line too) is beyond the union window — the
+        // finding fires, the marker stays as documentation, and no stale
+        // verdict is emitted (the family still fires).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_logical_two_lines_above_binds_nothing__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_signature_gap_marker_does_not_bind_and_is_not_stale() {
+        // Phase 4/4a: a marker at def+2 binds neither the finding's own line
+        // pair nor the signature's logical line pair — it is beyond the union
+        // window, so the finding still fires, the marker stays as
+        // documentation, and no stale verdict is emitted (the family still
+        // fires).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_signature_gap_marker_does_not_bind__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_union_with_module_from_dict_class_emits_the_union_message() {
+        // G2: `X | dict` where X is a class IN THE MODULE with from_dict —
+        // tfl_client's _disambiguate_national_rail shape. The message states
+        // the union and directs the ingestion; the from_dict method itself
+        // is a typed parse boundary and emits nothing (F1).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_union_with_module_from_dict_class__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(
+            rs[0]
+                .message
+                .contains("data accepts the wire dict alongside the _TflJourneyResponse class"),
+            "{}",
+            rs[0].message
+        );
+        assert!(
+            rs[0].message.contains(
+                "Ingest the wire at entry with _TflJourneyResponse.from_dict and drop the dict from the union"
+            ),
+            "{}",
+            rs[0].message
+        );
+    }
+
+    #[test]
+    fn record_union_without_module_class_keeps_the_ad_hoc_text() {
+        // G2: the same union with NO in-module from_dict class stays on the
+        // existing path — the ad-hoc dict text, not the union message.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_union_without_module_class_keeps_ad_hoc__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(
+            rs[0]
+                .message
+                .contains("data is a dict; its value is a fixed-shape record"),
+            "{}",
+            rs[0].message
+        );
+        assert!(
+            !rs[0].message.contains("accepts the wire dict alongside"),
+            "{}",
+            rs[0].message
+        );
+    }
+
+    #[test]
+    fn record_suppression_one_line_above_def_binds_the_def_site() {
+        // Phase 4/4a: the marker on the line before the def binds the
+        // def-anchored return finding — the window is the finding's own line,
+        // the line before it, and the logical line's pair (here the def is one
+        // source line).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_suppression_one_line_above_def_binds__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn record_suppression_one_marker_binds_the_def_site_twins() {
+        // G3 extract_bus_fares shape: two record-shaped params on one def
+        // line both report at the def anchor (col 0) — ONE marker above the
+        // def binds both; the site is one decision.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_suppression_one_marker_binds_def_site__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn suppression_marker_above_class_binds_the_class_finding() {
+        // G3 class anchor: a marker one line above a class binds a finding
+        // reported at the class line (process-class) and is not stale.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/suppression_marker_above_class_binds__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "process-class"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn suppression_far_above_def_does_not_bind_and_is_not_stale() {
+        // Phase 4/4a guard: a marker 3+ lines above the def is beyond the
+        // union window — the def is one source line, so its logical line adds
+        // no earlier anchor. The finding fires, the marker stays as
+        // documentation, and no stale verdict is emitted (api_router's 9-line
+        // gap).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_suppression_far_above_does_not_bind__01.py"
+        ));
+        let rs: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 1, "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn truncated_marker_binds_by_signal_alone() {
+        // G5: a repo marker cut mid-expression at line end (bus.py:122 —
+        // "…→ Attempt (dict[str,") still binds: the why may truncate; only
+        // the signal matters, and the why is not empty, so the why-less
+        // rule never applies.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_truncated_marker_binds__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "stale-suppression"), "{f:?}");
+    }
+
+    #[test]
+    fn complexity_marker_binding_follows_the_two_line_window() {
+        // Phase 4/4a: the window is the finding's own line and the line
+        // before. Complexity summaries are not Finding records and carry no
+        // logical line, so the plain two-line window governs here. The cc
+        // retain uses the same window, so a marker on the line before the def
+        // is consumed (not stale); a marker two lines above (a decorator
+        // intervenes) binds nothing, and since the findings stream carries no
+        // complexity finding it is reported stale.
         let mut body = String::new();
         for i in 0..16 {
-            body.push_str(&format!("    if c{i}:\n        x{i} = {i}\n"));
+            body.push_str(&format!("    if a{i}:\n        x{i} = {i}\n"));
         }
-        let src = format!(
-            "# lucidlint: ignore complexity calibrated\n@deco\ndef f({c0}, {c1}, {c2}, {c3}, {c4}, {c5}, {c6}, {c7}, {c8}, {c9}, {c10}, {c11}, {c12}, {c13}, {c14}, {c15}):\n{body}    return 0\n",
-            c0 = "a", c1 = "b", c2 = "c", c3 = "d", c4 = "e", c5 = "f", c6 = "g", c7 = "h",
-            c8 = "i", c9 = "j", c10 = "k", c11 = "l", c12 = "m", c13 = "n", c14 = "o", c15 = "p",
-        );
-        let f = scan_src(&src);
-        assert!(
-            !f.iter().any(|x| x.kind == "complexity"),
-            "the windowed suppression must hold"
-        );
-        assert!(
-            !f.iter().any(|x| x.kind == "stale-suppression"),
-            "a used suppression is not stale"
-        );
+        let params = "a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15";
+        let bound = format!("# lucidlint: ignore complexity calibrated\ndef f({params}):\n{body}    return 0\n");
+        let b = scan_src(&bound);
+        assert!(!b.iter().any(|x| x.kind == "stale-suppression"), "{b:?}");
+
+        let out = format!("# lucidlint: ignore complexity calibrated\n@deco\ndef f({params}):\n{body}    return 0\n");
+        let o = scan_src(&out);
+        assert!(o.iter().any(|x| x.kind == "stale-suppression"), "{o:?}");
     }
 
     #[test]
@@ -4592,67 +6026,129 @@ mod tests {
     }
 
     #[test]
-    fn loop_sequence_shared_accumulator_is_a_pipeline() {
-        // the same accumulator fed by two loops is a pipeline: each pass
-        // feeds the next (review-bot, PR #274)
+    fn loop_pipeline_skips_async_functions() {
+        // Phase 3: an async function's loops carry no loop-pipeline finding —
+        // the recipe's comprehension cannot prove the awaits belong inside an
+        // async comprehension. The sync pure-build shape still fires.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_pipeline_async_emits_nothing__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "loop-pipeline"), "{f:?}");
+        let sync =
+            scan_src("def collect(xs):\n    out = []\n    for x in xs:\n        out.append(x)\n    return out\n");
+        assert!(sync.iter().any(|x| x.kind == "loop-pipeline"), "{sync:?}");
+    }
+
+    #[test]
+    fn loop_pipeline_gate_excludes_mutation_of_existing_collections() {
+        // P6: the pipeline gate checks the target's binding — a loop that
+        // mutates a parameter (fill), a name bound earlier with content
+        // (apply), or a module name bound before the function (update)
+        // builds nothing new and emits NOTHING. The pure-build shape (a
+        // fresh name or one created empty in the statement before the
+        // loop) still fires.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_mutation_of_existing_collection_emits_nothing__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "loop-pipeline"), "{f:?}");
+        let build = scan_src(include_str!("../../tests/fixtures/rust/loop_pipeline_detected__01.py"));
+        assert!(build.iter().any(|x| x.kind == "loop-pipeline"), "{build:?}");
+    }
+
+    #[test]
+    fn loop_dict_build_subscript_store_still_fires() {
+        // P5: the pure dict-build shape (eval_context.py:42 —
+        // `result[k] = f(v)` in one per-item pass) IS a comprehension in
+        // disguise — loop-pipeline still fires.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_dict_build_subscript_store_is_found__01.py"
+        ));
+        let p: Vec<&Finding> = f.iter().filter(|x| x.kind == "loop-pipeline").collect();
+        assert_eq!(p.len(), 1, "{f:?}");
+        assert!(p[0].message.contains("use a comprehension"), "{}", p[0].message);
+        assert!(!f.iter().any(|x| x.kind == "loop-hoist"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "mutating-loop"), "{f:?}");
+    }
+
+    #[test]
+    fn loop_pump_and_polling_shapes_emit_nothing() {
+        // P5: a PriorityQueue drain (pop/append/requeue) and a polling
+        // sleep-schedule are not comprehension shapes — no loop finding at
+        // all, no fold advice, no sequence verdict.
+        let pump = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_pump_priority_queue_drain_emits_nothing__01.py"
+        ));
+        assert!(!pump.iter().any(|x| x.kind == "loop-pipeline"), "{pump:?}");
+        assert!(!pump.iter().any(|x| x.kind == "loop-hoist"), "{pump:?}");
+        assert!(!pump.iter().any(|x| x.kind == "mutating-loop"), "{pump:?}");
+        let poll = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_polling_sleep_emits_nothing__01.py"
+        ));
+        assert!(!poll.iter().any(|x| x.kind == "loop-pipeline"), "{poll:?}");
+        assert!(!poll.iter().any(|x| x.kind == "loop-hoist"), "{poll:?}");
+        assert!(!poll.iter().any(|x| x.kind == "mutating-loop"), "{poll:?}");
+        assert!(!poll.iter().any(|x| x.kind == "loop-sequence"), "{poll:?}");
+    }
+
+    #[test]
+    fn loop_shared_accumulator_passes_each_fire_pipeline_no_sequence_verdict() {
+        // P5: the sequence judgement is gone — a loop either reduces to a
+        // comprehension (loop-pipeline) or emits nothing. Two `chunks +=
+        // [p]` loops are each a comprehension shape and still fire as
+        // pipelines; there is no loop-sequence verdict on top.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/loop_sequence_shared_accumulator_is_a_pipeline__01.py"
         ));
-        let seq: Vec<&Finding> = f.iter().filter(|x| x.kind == "loop-sequence").collect();
-        assert_eq!(seq.len(), 1, "{f:?}");
-        assert!(seq[0].message.contains("pipeline"), "{}", seq[0].message);
-        let pipes = f.iter().filter(|x| x.kind == "loop-pipeline").count();
-        assert_eq!(pipes, 2, "{f:?}");
+        let pipes: Vec<&Finding> = f.iter().filter(|x| x.kind == "loop-pipeline").collect();
+        assert_eq!(pipes.len(), 2, "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-sequence"), "{f:?}");
     }
 
     #[test]
-    fn loop_sequence_independent_passes_get_extraction_advice() {
-        // independent per-target loops are a sequence, but extraction advice
-        // (one helper per pass) — they are NOT one pipeline
+    fn loop_sequences_emit_only_the_pipeline_shape() {
+        // P5: independent appended loops each fire loop-pipeline; the
+        // sequence extraction advice is gone, and a fold rebind (latest-
+        // wins with per-iteration temps) emits nothing at all.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/loop_sequence_independent_passes_get_extraction_advice__01.py"
         ));
-        let seq = f
-            .iter()
-            .find(|x| x.kind == "loop-sequence")
-            .expect("loop-sequence fires");
-        assert!(seq.message.contains("named helper"), "{}", seq.message);
-        // a fold (latest-wins) with per-iteration temps is still a fold —
-        // the temps do not make it a mutating loop
+        assert_eq!(f.iter().filter(|x| x.kind == "loop-pipeline").count(), 2, "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-sequence"), "{f:?}");
         let t = scan_src(include_str!(
             "../../tests/fixtures/rust/loop_sequence_independent_passes_get_extraction_advice__02.py"
         ));
+        assert!(!t.iter().any(|x| x.kind == "loop-pipeline"), "{t:?}");
+        assert!(!t.iter().any(|x| x.kind == "loop-hoist"), "{t:?}");
         assert!(!t.iter().any(|x| x.kind == "mutating-loop"), "{t:?}");
-        let d = t.iter().find(|x| x.kind == "loop-hoist").expect("fold advice fires");
-        assert!(d.message.contains("fold"), "{}", d.message);
     }
-
     #[test]
-    fn mutating_loop_requires_two_or_more_surviving_state_writes() {
-        // three surviving state writes -> mutating-loop (sequential writes
-        // to out/counts/total)
+    fn multi_accumulator_loops_emit_nothing() {
+        // P5: a loop writing three accumulators is stateful, not a
+        // comprehension — no mutating-loop verdict and no fold advice; the
+        // single reduction emits nothing too.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/mutating_loop_requires_two_or_more_surviving_state_writes__01.py"
         ));
-        assert!(f.iter().any(|x| x.kind == "mutating-loop"), "{f:?}");
-        // a single reduction is a fold, not a mutation
+        assert!(!f.iter().any(|x| x.kind == "mutating-loop"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-pipeline"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-hoist"), "{f:?}");
         let ok = scan_src(include_str!(
             "../../tests/fixtures/rust/mutating_loop_requires_two_or_more_surviving_state_writes__02.py"
         ));
         assert!(!ok.iter().any(|x| x.kind == "mutating-loop"), "{ok:?}");
+        assert!(!ok.iter().any(|x| x.kind == "loop-hoist"), "{ok:?}");
+        assert!(!ok.iter().any(|x| x.kind == "loop-pipeline"), "{ok:?}");
     }
-
     #[test]
-    fn loop_sequence_feed_chain_is_a_pipeline() {
-        // the second pass consumes the first pass's output — a feed chain
+    fn loop_feed_chain_loops_each_fire_pipeline_no_sequence_verdict() {
+        // P5: the second pass consumes the first pass's output — each loop
+        // is itself a comprehension shape and fires as pipeline; the feed
+        // chain verdict is gone.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/loop_sequence_feed_chain_is_a_pipeline__01.py"
         ));
-        let seq = f
-            .iter()
-            .find(|x| x.kind == "loop-sequence")
-            .expect("loop-sequence fires");
-        assert!(seq.message.contains("pipeline"), "{}", seq.message);
+        assert_eq!(f.iter().filter(|x| x.kind == "loop-pipeline").count(), 2, "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-sequence"), "{f:?}");
     }
 
     #[test]
@@ -4687,32 +6183,36 @@ mod tests {
     }
 
     #[test]
-    fn loop_hoist_fires_on_single_mutation_long_body_loops() {
-        // a long per-item calculation feeding one accumulator is a hoist —
-        // the body becomes a helper and the loop a comprehension
+    fn non_pipeline_loop_bodies_emit_nothing() {
+        // P5: a long per-item calculation feeding one accumulator is NOT a
+        // comprehension shape — no hoist advice, no fold; only the pure
+        // append loop still fires, as loop-pipeline.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/loop_hoist_fires_on_single_mutation_long_body_loops__01.py"
         ));
-        let hoist = f.iter().find(|x| x.kind == "loop-hoist").expect("loop-hoist fires");
-        assert!(hoist.message.contains("hoist the calculation"), "{}", hoist.message);
-        assert!(
-            hoist.message.contains("Replace Loop with Pipeline"),
-            "{}",
-            hoist.message
-        );
-        // a multi-statement fold with a guarded assignment is still a fold
+        assert!(!f.iter().any(|x| x.kind == "loop-hoist"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-pipeline"), "{f:?}");
         let g = scan_src(include_str!(
             "../../tests/fixtures/rust/loop_hoist_fires_on_single_mutation_long_body_loops__02.py"
         ));
-        let d = g.iter().find(|x| x.kind == "loop-hoist").expect("fold advice fires");
-        assert!(!d.message.contains("hoist the calculation"), "{}", d.message);
-        assert!(d.message.contains("fold"), "{}", d.message);
-        // a pure append loop hoists nothing — pipeline advice covers it
+        assert!(!g.iter().any(|x| x.kind == "loop-hoist"), "{g:?}");
+        assert!(!g.iter().any(|x| x.kind == "loop-pipeline"), "{g:?}");
         let p = scan_src(include_str!(
             "../../tests/fixtures/rust/loop_hoist_fires_on_single_mutation_long_body_loops__03.py"
         ));
         assert!(!p.iter().any(|x| x.kind == "loop-hoist"), "{p:?}");
         assert!(p.iter().any(|x| x.kind == "loop-pipeline"), "{p:?}");
+    }
+
+    #[test]
+    fn multi_statement_accumulator_loop_emits_nothing() {
+        // P5: the old B7 hoist shape — a multi-statement body feeding one
+        // member accumulator — is not a comprehension; nothing emits (the
+        // member-name render belonged to the removed hoist advice).
+        let src = "class C:\n    def go(self, xs):\n        self.result = []\n        for x in xs:\n            v = x * 2\n            w = v + 1\n            if w:\n                self.result.append(w)\n        return self.result\n";
+        let f = scan_src(src);
+        assert!(!f.iter().any(|x| x.kind == "loop-hoist"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "loop-pipeline"), "{f:?}");
     }
 
     #[test]

@@ -23,6 +23,7 @@ binary path (`.venv/bin/lucidlint`, `venv/Scripts/lucidlint.exe`) or a
 prefix like `python3 dist/lucidlint-dev-x86_64/bin/lucidlint.py` for the
 release bundle (which has no console script).
 """
+# lucidlint: ignore-file global-state deploy script constants are the tool's configuration surface
 
 from __future__ import annotations
 

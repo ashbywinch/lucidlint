@@ -36,10 +36,17 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | How the tool is built | `docs/TECHSPEC.md` |
 | Phased delivery and gates | `docs/PLAN.md` |
 | Suppression-guardrails workstream (decisions, remaining steps, anti-goals) | `docs/plan-suppression-guardrails.md` |
+| Plan for resolving issues #26–#34 (branch `fix/github-issues-26-34`) | `docs/plans/plan-github-issues-26-34.md` |
+| Proposals from the #26–#34 subtask evaluation (message clarity, render fixes) | `docs/plans/plan-26-34-eval-proposals.md` |
+| Next round: message precision (record-shape premises, suppression window, loop gating) | `docs/plans/plan-message-precision-round.md` |
+| Message precision round 2 (section I residuals) | `docs/plans/plan-message-precision-round-2.md` |
+| Message precision round 3 (section J residuals) | `docs/plans/plan-message-precision-round-3.md` |
 | Coding standards (canonical + language conventions) | `docs/coding-standards.md` |
 | Testing standards | `docs/testing-standards.md` |
 | UX standards | `docs/ux-standards.md` |
 | What good documentation is | `docs/writing-documentation.md` |
+| Writing finding messages (the message standard) | `docs/writing-messages.md` |
+| Run the two-repo usefulness evaluation (proposer + critic round) | `skills/lucidlint-usefulness-eval/SKILL.md` |
 | Required doc set and folder structure | `docs/documentation-structure.md` |
 | What each tool does | `README.md` (below) |
 
@@ -59,6 +66,11 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 - Never commit to main; branch + PR.
 - Every behavior change ships with a test — fakes only, no monkeypatch.
 - The tool passes itself: `make self-check` is green before any PR.
+- The tool exists for code lucidity. Never design a rule, threshold, or
+  message from mechanics (deduplication, size, call counts); findings are
+  pointers for the reader's judgment. The question is always: what is the
+  best way to make this code more maintainable, lucid, and obviously
+  correct? (stated in RULES.md's preamble)
 
 ## Repo self-checks
 

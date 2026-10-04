@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-# lucidlint: ignore-file complexity the orchestrator's git functions are single-pass protocol
+# are the gate's configuration tables — a config class is the eventual home, not this round
+# lucidlint: ignore-file global-state module-level constants (excluded dirs, action kinds, thresholds, fix aliases)
 # walks — decisions are path branches, not branching logic
+# lucidlint: ignore-file complexity the orchestrator's git functions are single-pass protocol
 
 """lucidlint.py — the deterministic lucidlint gate: a thin orchestrator
 over the Rust scan core.
@@ -16,7 +18,7 @@ baselines, dedupe/merge, priority, diff marking, exit codes.
     python3 lucidlint.py --repo /path/to/repo --json
     echo $?   # 1 when there is work to do
 
-The scan thresholds live in the binary (schema 2): CC>=15, fn>=120 lines,
+The scan thresholds live in the binary (schema 4): CC>=15, fn>=120 lines,
 file>=150 edges, risk>=0.8, hotspot top 10% by churn with CC>=15.
 Philosophy: the metrics are *proxies* for code that is obviously correct
 and cheap to change; each message says what to do in those terms.
@@ -117,6 +119,7 @@ class _ScanFlags:
 
 
 @dataclass
+# lucidlint: ignore partition the render-context accessors are by-feature read helpers on one record
 class _RenderCtx:
     """The shared render context — one object instead of a 9-parameter tail."""
 
@@ -129,16 +132,65 @@ class _RenderCtx:
     ignored_by_signal: Counter | None = None
     report_header: str = ""
     suppression_census: dict[str, int] | None = None
+    config_ignore_keys: dict[str, str] = field(default_factory=dict)  # B5: signal -> config key
+    baseline_migration: str = ""  # B3: pre-round baseline note ("" = none)
+    stale_count: int = 0  # Phase 5: acknowledged keys matching no current finding
 
-    def _config_ignored_note(self) -> str:
-        """The §9 debt ledger: config-ignored findings are filtered BEFORE the
-        verdict — without a count they vanish entirely, and the ignore can
-        grow without the gate ever showing it."""
+    def _config_ignored_detail(self) -> str:
+        """The §9 debt ledger's per-kind detail: the config-ignored families
+        and their counts (magic-number=2, ...) — without them the ignore can
+        grow without the gate ever showing WHICH kinds it hides."""
         if not self.ignored_by_signal:
             return ""
         top = ", ".join(f"{sig}={n}" for sig, n in self.ignored_by_signal.most_common(4))
-        total = sum(self.ignored_by_signal.values())
-        return f", {total} config-ignored ({top})"
+        return f" ({top})"
+
+    def _baseline_acknote(self) -> str:
+        """H7: the baseline-activation clause rides the LEDGER (the single
+        home of the numbers) — the gate repeats no count. Phase 4: a
+        repo-root lucidlint.json holding acknowledged actions reads as "+0
+        acknowledged" until --baseline is passed; the note attaches the flag
+        itself so the reader learns it from the message (round-3 CONFUSING:
+        "95 acknowledged action(s)" read as "+0 acknowledged")."""
+        if self.args.baseline is not None or self.baseline_migration:
+            return ""
+        current, _ = _baseline_file_state(self.repo / "lucidlint.json")
+        if not current:
+            return ""
+        return (
+            f" — {current} acknowledged in lucidlint.json — "
+            "pass --baseline lucidlint.json to activate"
+        )
+
+    def _suppression_ledger(self, fails: list[Action], warns: list[Action], acks: list[Action]) -> str | None:
+        """H7: ONE additive line — the single home of the report's numbers:
+        reported = fails + warnings and total = reported + acknowledged +
+        config-ignored + comment-suppressed are stated HERE, and the gate
+        line repeats none of them. The baseline-activation clause rides the
+        acknowledged term; Phase 5 appends the stale clause to it too — "N
+        acknowledged entries match no current finding" renders ONLY when
+        nonzero. None only when there is literally nothing to state."""
+        ignored = sum(self.ignored_by_signal.values()) if self.ignored_by_signal else 0
+        census = sum(self.suppression_census.values()) if self.suppression_census else 0
+        reported = len(fails) + len(warns)
+        acknote = self._baseline_acknote()
+        stale_clause = ""
+        if self.stale_count:
+            n = self.stale_count
+            stale_clause = (
+                f" — {n} acknowledged entr{'y' if n == 1 else 'ies'} "
+                f"match{'es' if n == 1 else ''} no current finding — "
+                "re-acknowledge with --update-baseline"
+            )
+        if not reported and not acks and not ignored and not census and not acknote and not self.stale_count:
+            return None
+        total = reported + len(acks) + ignored + census
+        return (
+            f"{total} findings — {reported} reported ({len(fails)} fails + {len(warns)} warnings) "
+            f"+ {len(acks)} acknowledged (baseline){acknote}{stale_clause}"
+            f" + {ignored} config-ignored{self._config_ignored_detail()}"
+            f" + {census} comment-suppressed"
+        )
 
     def render_json(self, unique: list[Action]) -> None:
         repo = self.repo
@@ -146,10 +198,8 @@ class _RenderCtx:
         branch, commit = self.branch, self.commit
         coverage_source = self.coverage_source
         print(
-            # lucidlint: ignore record-shape this dict IS the JSON report —
             json.dumps(
                 {
-                    # lucidlint: ignore record-shape this meta section IS part of
                     # the JSON report wire format (PRD R18)
                     "meta": {
                         "repo": str(repo),
@@ -171,46 +221,48 @@ class _RenderCtx:
                     "header": self.report_header,
                     "suppressions": dict(self.suppression_census or {}),
                     "actions": [asdict(a) for a in unique],
+                    "naming_notice": _NAMING_NOTICE
+                    if any(_stamp_of(a) == "JUDGEMENT" for a in unique)
+                    else None,
+                    "groups": _seam_groups(unique),
                 },
                 indent=2,
             )
         )
 
     def render_summary(self, fails: list[Action], warns: list[Action], acks: list[Action]) -> None:
-        """Gate verdict, scope, and formula lines."""
+        """Gate verdict, scope, and fail-bar lines."""
         args = self.args
         coverage_source = self.coverage_source
         graph_preferred = self.graph_preferred
-        top = fails[0]
         bits = []
-        # without a baseline nothing is acknowledged — say so plainly
-        if args.baseline is None:
-            bits.append("no baseline — cannot tell what is new")
-        mine_txt = ("; " + "; ".join(bits)) if bits else ""
+        # H7: the counts live in the LEDGER — the gate repeats none of them;
+        # it states the mode, the scope (distinct targets), and the fail
+        # bars. The baseline honesty clause carries no count and stays here
+        # ("no baseline — cannot tell what is new"); the activation clause
+        # for a repo-root lucidlint.json rides the ledger's acknowledged
+        # term (Phase 4: "95 acknowledged action(s)" read as "+0
+        # acknowledged" — round-3 CONFUSING).
+        # Phase 4: the highest change-cost line and the percentile legend
+        # are GONE — the composite read as urgency (round-7: RISK99 beside
+        # a rejected finding). The raw metrics stay, rendered per-item as
+        # named facts (_facts_line) — never a percentile, never "risk".
+        if args.baseline is None and not self.baseline_migration:
+            current, _ = _baseline_file_state(self.repo / "lucidlint.json")
+            if not current:
+                bits.append("no baseline — cannot tell what is new")
+        mine_txt = (", " + ", ".join(bits)) if bits else ""
         targets = len({(a.file, a.function) for a in fails})
         verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
-        print(
-            f"{verdict} — {len(fails)} action(s) across {targets} distinct targets "
-            f"(+{len(acks)} acknowledged in baseline, {len(warns)} warnings never-fail"
-            f"{self._config_ignored_note()}){mine_txt}, "
-            f"top P{top.priority} {top.file}:{top.line} ({top.function or top.kind})"
-        )
-        print(
-            "priority ranks change-cost (churn x fan-in), not brokenness — which item is worth "
-            "fixing first is a judgement call; the hotspot entries are the usual starting set"
-        )
+        print(f"{verdict} — across {targets} distinct targets{mine_txt}")
         if graph_preferred:
             print(
                 "WARNING: coverage snapshot predates the repo's tests — hard 'untested' claims are suppressed; "
                 "run --refresh-coverage (make coverage) for definite test-status verdicts"
             )
         print(
-            "priority = percentile of raw risk (metric norm x (1 + churn/30) x (1 + callers/5)); "
-            "norms: CC/40, lines/200, edges/400, risk/1 "
-            "(norm capped at 1.0, churn factor at 1.5, callers factor at 1.0) "
-            "— the displayed thresholds are the fail bars, not the norms; "
-            "thresholds: CC>=15, fn>=120 lines, file>=150 edges, risk>=0.8, hotspot top 10% "
-            + f"by churn with CC>=15; coverage: {coverage_source}"
+            "fail bars: CC>=15, fn>=120 lines, file>=150 edges, hotspot top 10% "
+            f"by churn with CC>=15; coverage: {coverage_source}"
         )
 
     def render_text(self, unique: list[Action], fails: list[Action], warns: list[Action], acks: list[Action]) -> None:
@@ -218,30 +270,47 @@ class _RenderCtx:
         if self.report_header:
             print(self.report_header)
             print()
+        # #33(b): the naming lesson is issued ONCE per report, iff any finding
+        # is judge-true — never copied onto every message
+        if any(_stamp_of(a) == "JUDGEMENT" for a in unique):
+            print(_NAMING_NOTICE)
+            print()
+        # #34: shared-seam clusters render ONE heading before the findings
+        groups = _seam_groups(unique)
+        if groups:
+            print("\n".join(g["heading"] for g in groups))
+            print()
+        # B3: a pre-round baseline schema is a file-format problem, named ONCE
+        if self.baseline_migration:
+            print(self.baseline_migration)
+            print()
+        # H7: the LEDGER is the single home of the numbers — the additive
+        # relationship (reported = fails + warnings; total = reported +
+        # acknowledged + config-ignored + comment-suppressed) is stated ONCE
+        # here, and every GATE line repeats none of it
+        ledger = self._suppression_ledger(fails, warns, acks)
+        if ledger:
+            print(ledger)
+            print()
         if not unique:
             # the ledger must show even when the config-ignores ate every
             # action — "clean" while debt is hidden is the invisibility the
             # ledger exists to remove (review finding)
-            ignored_note = self._config_ignored_note()
-            print(f"GATE: PASS — clean, no actions{ignored_note}")
+            print("GATE: PASS — clean, no actions")
             return
         if not fails:
-            warn_note = f" ({len(warns)} warnings reported, never fail)" if warns else ""
-            ignored_note = self._config_ignored_note()
-            print(f"GATE: PASS — {len(acks)} action(s) acknowledged in baseline{warn_note}{ignored_note}")
+            print("GATE: PASS")
             if warns:
                 print(f"by kind — warnings: {_kind_counts(warns)}")
-                _render_actions(repo, args, warns, [], self.suppression_census)
+                _render_actions(repo, args, warns, [], self.suppression_census, self.config_ignore_keys)
             return
         self.render_summary(fails, warns, acks)
         print(f"by kind — fails: {_kind_counts(fails)}; warnings: {_kind_counts(warns)}")
-        _render_actions(repo, args, fails, acks, self.suppression_census)
+        _render_actions(repo, args, fails, acks, self.suppression_census, self.config_ignore_keys)
         if warns:
             print(f"\nwarnings (reported, never fail) — {len(warns)}:")
             # the census was printed with the fails group — once per report
-            _render_actions(repo, args, warns, [], None)
-
-
+            _render_actions(repo, args, warns, [], None, self.config_ignore_keys)
 @dataclass
 class Action:
     """One finding. Kind families: complexity/large-function merge per target;
@@ -264,6 +333,11 @@ class Action:
     kinds: list[str] = field(default_factory=list)
     callers: list[str] = field(default_factory=list)
     col: int = 0  # schema-3 anchor column; 0 = line-level
+    seam_members: tuple[str, ...] = ()  # clump identity (#34) — the seam
+    # grouping keys on this; the three carriers carry it, others empty
+    fix_kind: str = ""  # the structured fix kind (schema 4) — the directive's
+    # kind when present, else the rule's default link (Rule.fix); empty =
+    # fix-less finding, never constructed into a Fix
 
 
 
@@ -334,12 +408,16 @@ def _numbits_to_lines(numbits: bytes) -> set[int]:
 
 
 def _raw_score(kind: str, metric: float, churn: int, callers: int | None = None) -> float:
-    """Continuous risk score: normalized metric x churn factor (x fan-in for high-risk).
+    """Continuous risk score: normalized metric x root-weighted churn factor
+    (x fan-in for high-risk).
 
     Normalized to a 1-99 percentile ranking in main, so the list spreads
-    instead of saturating at 99.
+    instead of saturating at 99. The churn factor is the SQUARE ROOT of the
+    linear one: a 10x churn gap is ~3.2x raw risk, not 10x, so complexity
+    and size keep equal weight with churn (F5 — the top line names the code
+    whose change costs the most, and a big untouched function costs more
+    than a small heavily-churned one).
     """
-    # lucidlint: ignore record-shape a static priority-norm lookup table —
     # kind -> norm constant; naming each entry hides the table
     norm = {
         "latent-class": 0.7,
@@ -355,7 +433,7 @@ def _raw_score(kind: str, metric: float, churn: int, callers: int | None = None)
         "hotspot": min(metric / 40, 1.0),
         "high-risk": min(metric, 1.0),
     }.get(kind, 0.5)
-    score = norm * (1 + min(churn / 30, 1.5))
+    score = norm * ((1 + min(churn / 30, 1.5)) ** 0.5)
     if kind == "high-risk" and callers:
         score *= 1 + min(callers / 5, 1.0)
     return score
@@ -462,8 +540,8 @@ def _gitignored_docs(repo: Path) -> tuple[str, ...]:
                 capture_output=True,
                 text=True,
             )
-        except OSError as e:  # lucidlint: ignore swallow terminal boundary — gitless env, no caller to propagate to
             # no git binary — the referenced-absent-doc query degrades; the
+        except OSError as e:  # lucidlint: ignore swallow terminal boundary — gitless env, no caller to propagate to
             # walk's pygit2 answer still stands (gitless mode, review bot)
             log(f"git check-ignore unavailable ({e}) — referenced-absent docs stay visible")
         else:
@@ -565,6 +643,10 @@ class RustFinding(NamedTuple):
     message: str
     metric: float = 1.0
     col: int = 0  # 1-based anchor column; 0 = line-level (schema 3)
+    seam_members: tuple[str, ...] = ()  # clump identity (#34) — data-clump/
+    # partition/strewing only, empty elsewhere (schema 4)
+    fix_kind: str = ""  # the structured fix kind (schema 4) — the
+    # directive's kind when present, else the rule's default link
 
 @dataclass(frozen=True)
 class RustFixRequest:
@@ -822,9 +904,9 @@ class _RustScan:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=str(repo))
                 if proc.returncode == 0:
                     data = json.loads(proc.stdout)
-                    if data.get("schema_version") != 3:
+                    if data.get("schema_version") != 4:
                         raise RuntimeError(
-                            f"scanner contract schema {data.get('schema_version')} — expected 3; "
+                            f"scanner contract schema {data.get('schema_version')} — expected 4; "
                             "rebuild the binary (make scanner-check)"
                         )
                     header = str(data.get("header", ""))
@@ -845,6 +927,8 @@ class _RustScan:
                                 function=f.get("function", ""),
                                 message=f.get("message", ""),
                                 metric=float(f.get("metric", 1.0)),
+                                seam_members=tuple(str(m) for m in f.get("seam_members", [])),
+                                fix_kind=str(f.get("fix_kind", "") or ""),
                             )
                         )
                     for e in data.get("cc", []):
@@ -904,8 +988,8 @@ def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
         # resolve BOTH sides: with --repo . (relative), a relative base makes
         # relative_to raise and the finding would be silently dropped
         rel = Path(file_val).resolve().relative_to(repo.resolve()).as_posix()
-    except (ValueError, OSError):  # lucidlint: ignore swallow an unmappable path means the finding
         # is for a file outside this scan set — drop it, not a failure to surface
+    except (ValueError, OSError):  # lucidlint: ignore swallow an unmappable path means the finding
         rel = ""
     return rel if rel in rels else None
 
@@ -933,7 +1017,6 @@ _FAMILY_OF_VARIANT = {
 }
 
 # Cache for config loading
-# lucidlint: ignore global-state per-repo cache of the config file — one entry per repo per run
 _CONFIG_CACHE: dict[Path, _LucidlintConfig] = {}
 
 
@@ -988,7 +1071,6 @@ class _GraphContract:
                 for file_path in store.get_all_files():
                     for gnode in store.get_nodes_by_file(file_path):
                         nodes.append(
-                            # lucidlint: ignore record-shape graph nodes ARE the wire format exported
                             # to the external code-review-graph store
                             {
                                 "kind": gnode.kind,
@@ -1005,7 +1087,6 @@ class _GraphContract:
                 edges = []
                 for e in store.get_all_edges():
                     edges.append(
-                        # lucidlint: ignore record-shape graph edges ARE the wire format exported
                         # to the external code-review-graph store
                         {
                             "kind": e.kind,
@@ -1017,7 +1098,6 @@ class _GraphContract:
                 communities = {}
                 for row in store.get_communities_list():
                     communities[str(row["id"])] = row["name"]
-            # lucidlint: ignore record-shape wire-format envelope — a class is ceremony for JSON
             contract = {
                 "contract_version": CONTRACT_VERSION,
                 "nodes": nodes,
@@ -1143,6 +1223,7 @@ def _version() -> str:
 _VERSION = _version()
 
 
+# lucidlint: ignore strewing the shared leading parameter is the render context — the functions ARE the render pipeline
 def action_key(a: Action) -> str:
     return f"{a.kind}:{a.file}:{a.line}:{a.function}"
 
@@ -1181,29 +1262,91 @@ def _merge_key(a: Action) -> tuple:
 
 class _Baseline(NamedTuple):
     """The acknowledged-action keys + config-ignored counts from the baseline
-    file — a named record instead of a bare tuple."""
+    file — a named record instead of a bare tuple. `legacy` counts the
+    pre-round 'actions' entries that cannot map to current key identities."""
 
     keys: set[str]
     ignored: dict[str, int]
+    legacy: int = 0
+
+
+def _baseline_entry_is_current(entry: Any) -> bool:
+    """True when a baseline 'actions' entry is the current key shape
+    (kind:file:line:function with a numeric line). Pre-round files stored
+    other shapes — line-less keys, action dicts — which are legacy (#26-#34
+    B3): they cannot match current findings and must never read as
+    acknowledged debt, fail as phantom-stale, or crash the loader."""
+    if not isinstance(entry, str):
+        return False
+    parts = entry.split(":", 3)
+    return len(parts) == 4 and parts[2].isdigit()
+
+
+def _baseline_file_state(path) -> tuple[int, int]:
+    """(current-format entries, legacy entries) in a baseline file; (0, 0)
+    when absent or unreadable. Used to recognize a repo's own lucidlint.json
+    when no --baseline was passed (#26-#34 B3)."""
+    if not path or not path.exists():
+        return (0, 0)
+    try:
+        entries = json.loads(path.read_text()).get("actions", [])
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+        return (0, 0)
+    if not isinstance(entries, list):
+        return (0, 0)
+    return (
+        sum(1 for e in entries if _baseline_entry_is_current(e)),
+        sum(1 for e in entries if not _baseline_entry_is_current(e)),
+    )
 
 
 def _load_baseline(path) -> _Baseline:
     """Acknowledged action keys + the config-ignored counts (the §9 growth
-    ledger) from the baseline file (best-effort)."""
+    ledger) from the baseline file (best-effort). Pre-round 'actions' entries
+    are counted and dropped, so the caller prints ONE migration line instead
+    of reading the file as empty debt (#26-#34 B3)."""
 
     if path and path.exists():
         try:
             data = json.loads(path.read_text())
-            keys = set(data.get("actions", []))
+            entries = data.get("actions", [])
+            entries = entries if isinstance(entries, list) else []
+            keys = {e for e in entries if _baseline_entry_is_current(e)}
+            legacy = sum(1 for e in entries if not _baseline_entry_is_current(e))
             ignored = dict(data.get("config_ignored", {}))
-            return _Baseline(keys, {k: int(v) for k, v in ignored.items()})
+            return _Baseline(keys, {k: int(v) for k, v in ignored.items()}, legacy)
         # lucidlint: ignore swallow corrupt baseline; gate unbaselined
         except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
             log(f"baseline {path} unreadable — ignoring")
     return _Baseline(set(), {})
 
 
-def _render_file_group(file: str, items: list[Action]) -> None:
+def _facts_line(a: Action) -> str | None:
+    """Phase 4: the raw metrics render as NAMED FACTS on one extra line —
+    never a percentile, never "risk" (the composite read as urgency). A
+    clause per notable fact: CC >= 15, or >= 10 changes in the history, or
+    >= 10 callers; a metric that is absent (the scanner default of 1.0)
+    skips its clause. The subject is "This function" — "This code" only
+    when the finding anchors no function."""
+    facts = []
+    if a.metric >= 15:
+        facts.append(f"is complex ({int(a.metric)} decision points)")
+    if a.churn >= 10:
+        facts.append(f"changed often ({a.churn} changes)")
+    if len(a.callers) >= 10:
+        facts.append(f"has {len(a.callers)} callers")
+    if not facts:
+        return None
+    subject = "This function" if a.function else "This code"
+    if len(facts) == 1:
+        return f"{subject} {facts[0]}."
+    joiner = ", and " if len(facts) > 2 else " and "
+    return f"{subject} " + ", ".join(facts[:-1]) + joiner + facts[-1] + "."
+
+
+def _render_file_group(
+    file: str, items: list[Action], ignore_keys: dict[str, str] | None = None
+) -> None:
     """One file's actions, priority-ordered, with notes."""
     print(f"\n{file}")
     for a in items:
@@ -1212,23 +1355,191 @@ def _render_file_group(file: str, items: list[Action]) -> None:
         loc = f":{a.line}" + (f":{a.col}" if a.col else "") + (f" ({a.function})" if a.function else "")
         churn = f" [churn {a.churn}x]" if a.churn else ""
         kinds = ",".join(a.kinds) if a.kinds else a.kind
-        tag = f"P{a.priority:02d}" if a.severity != "warn" else "warn"
+        # Phase 4: the per-item RISKxx bracket is gone — it read as a
+        # brokenness order (the valuable fail carried the lowest display
+        # value); severity survives as the [warn] marker for warnings, and
+        # the raw metrics render as the facts line (_facts_line) — never a
+        # percentile, never "risk"
+        tag = "warn" if a.severity == "warn" else ""
         # a latent-class variant's display kind (latent-class) IS its
         # suppression family — nothing to teach, and a suppression recipe
         # beside "create the class" invites hiding the defect. Only a
         # display identity that cannot be suppressed (standard) names the
         # raw signal.
-        suppress = (
-            f" — suppress with: {a.signal}"
-            if a.signal
+        marker = (
+            a.signal
             and a.signal != a.kind
             and a.signal not in a.kinds
             and a.signal not in _FAMILY_OF_VARIANT
-            else ""
         )
-        print(f"  [{tag}][{kinds}]{suppress} {loc}{churn} — {a.message}")
+        # Phase 4: when a family's suppression identity and its fix are two
+        # words (class-module -> split-module), the line links them — the
+        # reader saw "suppress with: class-module" beside "fix: --kind
+        # split-module" as two unrelated commands (round-3 CONFUSING)
+        fix_link = f" (this family's fix: {a.fix_kind})" if a.fix_kind and a.fix_kind != a.signal else ""
+        # B5: a bare per-site marker is the wrong remedy when the family is
+        # config-ignored (a house decision, made elsewhere) — say so and name
+        # the config key; otherwise state the marker window POSITIVELY: a
+        # marker binds by its signal name on the finding's own line or within
+        # the 3 lines ending at it — never advice to relocate a marker (Phase
+        # 3: a mis-placed marker is documentation, not something to move).
+        # G5: the why is free text — one cut mid-word at the line end still
+        # binds, because the signal name is the binding token
+        ck = (ignore_keys or {}).get(a.signal) if a.signal else None
+        if marker and ck:
+            suppress = (
+                f" — suppress with: {a.signal}{fix_link} — this family is config-ignored under "
+                f"{ck}: fix the finding or extend the ignore scope (a per-site marker "
+                "is redundant)"
+            )
+        elif marker:
+            suppress = (
+                f" — suppress with: {a.signal}{fix_link} — a lucidlint: ignore comment binds "
+                "by its signal name on this finding's own line, the line before it, the "
+                "logical line's first source line, or the line before that; the why text "
+                "may end mid-word at the line end and still bind"
+            )
+        elif ck:
+            suppress = (
+                f" — this family is config-ignored under {ck}: fix the finding or "
+                "extend the ignore scope"
+            )
+        else:
+            suppress = ""
+        stamp = _stamp_of(a)
+        bracket = "".join(f"[{t}]" for t in (tag, kinds) if t)
+        # H6: the MESSAGE leads — the suppression pointer (and the
+        # config-ignored advisory / marker-window sentence where they apply)
+        # appends AFTER it, so the action reads first and the pointer
+        # appears exactly once (the messages no longer embed suppression
+        # wording — the pointer is renderer data)
+        print(f"  {bracket} {loc}{churn} — {a.message}{suppress}" + (f" [{stamp}]" if stamp else ""))
+        # Phase 4: the raw metrics render right under the message as NAMED
+        # FACTS (one extra line, a clause per notable fact) — the composite
+        # and its percentile left the report (see _facts_line)
+        facts = _facts_line(a)
+        if facts:
+            print(f"      -> {facts}")
         if a.note:
             print(f"      -> {a.note}")
+
+# --------------------------------------------------------------------------- #33/#34 render aids
+
+
+def _fix_of(a: Action) -> rule_metadata.Fix | None:
+    """The per-finding Fix (Fifth-pass): constructed from the finding's
+    STRUCTURED fix_kind (schema 4) + its anchor — the stamps, the NAMING
+    notice trigger, and command() all read this object, never message text."""
+    if not a.fix_kind:
+        return None  # fix-less — never constructed, never stamped
+    return rule_metadata.Fix(kind=a.fix_kind, file=a.file, line=a.line, col=a.col)
+
+
+def _stamp_of(a: Action) -> str:
+    """#33(a)+H5: render-time only — `JUDGEMENT` when the finding's fix needs
+    a name (the registry says so via name_required) OR its kind is
+    judgement-marked (H5: split-module's split is a grouping decision — a
+    judgement, not a mechanical fact, even though its package name is
+    optional); `MECHANICAL` for fixable kinds outside both; fix-less
+    findings get neither."""
+    fix = _fix_of(a)
+    if fix is None:
+        return ""
+    return "JUDGEMENT" if fix.judgement else "MECHANICAL"
+
+
+_NAMING_NOTICE = (
+    "NAMING — a name is the commitment: what the domain calls the THING. Verb names "
+    "(-er/-or) name a process — stateful process = name the state; stateless = the "
+    "operations belong to the abstraction that owns their state — find it; an -er/-or "
+    "is honest only when the domain calls a stateful component that. Generic containers "
+    "(Options/Context/Parameters/Config) and tool jargon (Seam/Clump/Accumulator) name "
+    "the means, not the thing."
+)
+
+
+# owns
+# hop for one consumer
+# lucidlint: ignore closures the nested visitors are one-purpose probe walks — hoisting names nothing the domain owns
+def _seam_groups(actions: list[Action]) -> list[dict[str, Any]]:
+    """#34: N findings sharing ONE seam are one design decision. Seams:
+    (a) complexity/large-function -> (file, function); (b) the carriers
+    (data-clump/partition/strewing) -> their seam_members sets. Union-find
+    transitive closure over overlapping seams (cross-kind groups allowed).
+    Groups with >=3 findings render a heading; the array is ALWAYS present
+    (empty when no cluster)."""
+
+    def seam_of(a: Action) -> Any:
+        if a.kind in ("complexity", "large-function"):
+            return ("loc", a.file, a.function)
+        if a.seam_members:
+            return ("members", frozenset(a.seam_members))
+        return None
+
+    seams = [seam_of(a) for a in actions]
+    parent = list(range(len(actions)))
+
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i in range(len(actions)):
+        si = seams[i]
+        if si is None:
+            continue
+        for j in range(i + 1, len(actions)):
+            sj = seams[j]
+            if sj is None or si[0] != sj[0]:
+                continue
+            if si[0] == "loc":
+                if si == sj:
+                    union(i, j)
+            elif not si[1].isdisjoint(sj[1]):
+                union(i, j)
+
+    by_root: dict[int, list[int]] = {}
+    for i in range(len(actions)):
+        by_root.setdefault(find(i), []).append(i)
+    groups = []
+    for members in by_root.values():
+        if len(members) < 3:
+            continue
+        members_sorted = sorted(members, key=lambda i: (actions[i].file, actions[i].line, i))
+        member_seams = [seams[i] for i in members_sorted if seams[i] is not None]
+        shared_loc = next((s for s in member_seams if s[0] == "loc"), None)
+        shared_members: set[str] | None = None
+        for s in member_seams:
+            if s[0] == "members":
+                shared_members = set(s[1]) if shared_members is None else shared_members & set(s[1])
+        seam_label = (
+            f"{shared_loc[1]} ({shared_loc[2]})"
+            if shared_loc is not None
+            else (", ".join(sorted(shared_members)) if shared_members else "")
+        )
+        # B1: an empty member list must never render "(the seams: )" — a
+        # transitive cluster has no member present in every finding, so there
+        # is no seam NAME to print; drop the parenthetical instead
+        paren = f" (the seams: {seam_label})" if seam_label else ""
+        groups.append(
+            {
+                "heading": (
+                    f"these {len(members_sorted)} findings share ONE seam — design the target "
+                    f"type once, for all of them{paren}"
+                ),
+                "seam": seam_label,
+                "findings": members_sorted,
+            }
+        )
+    groups.sort(key=lambda g: (actions[g["findings"][0]].file, actions[g["findings"][0]].line))
+    return groups
 
 
 def _kind_counts(actions: list[Action]) -> str:
@@ -1238,16 +1549,32 @@ def _kind_counts(actions: list[Action]) -> str:
     return ", ".join(f"{k}={v}" for k, v in counts.most_common())
 
 
+# lucidlint: ignore closures the render helpers are one-purpose local walks
+# lucidlint: ignore long-param-list the report pass context is a (repo, args, actions) trio
 def _render_actions(
-    repo: Path, args, fails: list[Action], acks: list[Action], census: dict[str, int] | None = None
+    repo: Path,
+    args,
+    fails: list[Action],
+    acks: list[Action],
+    census: dict[str, int] | None = None,
+    ignore_keys: dict[str, str] | None = None,
 ) -> None:
     """Per-file grouped action lines, baseline acknowledgements, the footer,
     and the suppression census (what the gate did NOT report on)."""
+    # B6: a bulk-suppression finding is a repo-wide count — its anchor file
+    # is arbitrary (the file with the most suppressed sites), so it renders
+    # ONCE at report level, never inside a per-file section
+    bulk = [a for a in fails if a.kind == "bulk-suppression"]
+    rest = [a for a in fails if a.kind != "bulk-suppression"]
+    if bulk:
+        print("\nbulk suppression (policy — a repo-level decision, not a file site):")
+        for a in sorted(bulk, key=lambda a: a.message):
+            print(f"  {a.message}")
     by_file: dict[str, list[Action]] = {}
-    for a in fails:
+    for a in rest:
         by_file.setdefault(a.file, []).append(a)
     for file, items in sorted(by_file.items(), key=lambda kv: -max(i.priority for i in kv[1])):
-        _render_file_group(file, items)
+        _render_file_group(file, items, ignore_keys)
     if acks:
         print(
             f"\nacknowledged in baseline ({len(acks)}): "
@@ -1273,40 +1600,19 @@ def _render_actions(
 def _apply_baseline(unique: list[Action], baseline_keys: set[str]) -> list[str]:
     """Mark acknowledged actions so they report but never fail the gate.
 
-    Both-direction lock (the pyrefly-lock rule, same lesson): a baseline
-    entry whose finding the code no longer produces is STALE drift and
-    fails the gate — a one-way baseline lets a fix silently rot the
-    baseline until someone re-runs update-baseline. Returns the stale keys.
+    Exact-identity matching, the pyrefly pattern (Phase 5): an acknowledged
+    key (kind:file:line:function) that matches NO current finding is stale —
+    drifted, fixed, and deleted are the same case; no reconciliation is
+    attempted. --update-baseline regenerates the keys, as it does for
+    pyrefly and mypy-baseline. Returns the matchless keys; the count renders
+    in the ledger so the reader sees why acknowledged debt re-reports.
     """
-    # Stale comparison is location-INSENSITIVE: the key embeds file:line, so
-    # an edit that shifts a function's line would otherwise make every
-    # acknowledged entry look stale (false failures + baseline churn — the
-    # line-keyed pyrefly baseline cost us exactly this all session). The
-    # identity is (kind, file, function): the same debt at a new line is
-    # still acknowledged; only debt that is genuinely gone is stale.
-    current_ids = {(a.kind, a.file, a.function) for a in unique if a.severity != "warn"}
-    baseline_ids = {_baseline_identity(k) for k in baseline_keys}
-    stale = sorted(k for k in baseline_keys if _baseline_identity(k) not in current_ids)
+    current_keys = {action_key(a) for a in unique if a.severity != "warn"}
+    matched = current_keys & baseline_keys
     for a in unique:
-        if (a.kind, a.file, a.function) in baseline_ids:
+        if action_key(a) in matched:
             a.severity = "ack"
-    return stale
-
-
-class BaselineIdentity(NamedTuple):
-    """An action's (kind, file, function) — the line is excluded so location
-    shifts do not rot acknowledged debt."""
-
-    kind: str
-    file: str
-    function: str
-
-
-def _baseline_identity(key: str) -> BaselineIdentity:
-    parts = key.split(":", 3)
-    if len(parts) == 4:
-        return BaselineIdentity(kind=parts[0], file=parts[1], function=parts[3])
-    return BaselineIdentity(kind=key, file="", function="")
+    return sorted(baseline_keys - current_keys)
 
 
 # the gate reports DISPLAY kinds (final_kind output: strewing shows as
@@ -1337,8 +1643,12 @@ class _LucidlintConfig:
 
 
 # lucidlint: ignore-file god-class the gate pipeline is ONE responsibility —
+# lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
 # the runner owns the repo scan end to end; the partition rule finds no
+# lucidlint: ignore-file record-shape a class per helper hop is ceremony
 # field-disjoint method groups, so the size is a review signal, not a split
+# the domain's
+# lucidlint: ignore process-class _GateRunner is the CLI's one pipeline object — its state is real and the name is
 class _GateRunner:
     """The repo-scan gate flow. The pipeline state (history, coverage,
     actions, baselines) lives on the runner instead of threading through
@@ -1356,6 +1666,11 @@ class _GateRunner:
         self.suppression_census: dict[str, int] = {}
         self.ignored_config: _LucidlintConfig = _LucidlintConfig(set(), [])
         self.ignored_by_signal: Counter[str] = Counter()
+        # B5: signal -> the config key that ignores it (per-path glob or the
+        # repo-wide list) — per-item suppression advice must name it
+        self.config_ignore_keys: dict[str, str] = {}
+        # B3: the one-line pre-round baseline migration note ("" = none)
+        self.baseline_migration: str = ""
         self.unique: list[Action] = []
         self.stale: list[str] = []
         self.baseline_ignored: dict[str, int] = {}
@@ -1395,6 +1710,14 @@ class _GateRunner:
         ever wrong")."""
         self.ignored_config = self._load_lucidlint_config()
         self.ignored_by_signal = Counter()
+        # B5: remember which config key ignores each signal, so a finding's
+        # per-item advisory can name it instead of offering a bare site marker
+        self.config_ignore_keys = {}
+        for sig in self.ignored_config.global_ignore:
+            self.config_ignore_keys.setdefault(sig, "the repo-wide ignore list")
+        for pattern, path_ignored in self.ignored_config.per_path_ignore:
+            for sig in path_ignored:
+                self.config_ignore_keys.setdefault(sig, f"'{pattern}'")
         for a in self.actions:
             house_rule = self.ignored_config.guidance.get(a.signal)
             if house_rule is not None:
@@ -1486,7 +1809,6 @@ class _GateRunner:
             try:
                 (self.repo / ".lucidlint-cache").mkdir(exist_ok=True)
                 (self.repo / ".lucidlint-cache" / cache_key).write_text(
-                    # lucidlint: ignore record-shape the cache entry IS the
                     # persisted wire format — round-trips verbatim across runs
                     json.dumps({"churn": dict(churn), "last_modified": last})
                 )
@@ -1724,8 +2046,27 @@ class _GateRunner:
 
         if self.args.update_baseline:
             return self._write_baseline(self.unique, self.ignored_by_signal)
-        baseline_keys, self.baseline_ignored = _load_baseline(self.args.baseline)
+        bl = _load_baseline(self.args.baseline)
+        baseline_keys, self.baseline_ignored = bl.keys, bl.ignored
         self.stale = _apply_baseline(self.unique, baseline_keys)
+        # B3: a pre-round 'actions' schema (line-less keys or action dicts)
+        # cannot map to current identities — ONE migration line, never a
+        # silent "+0 acknowledged"/"cannot tell what is new", never
+        # phantom-stale failures. With a --baseline file the note names it;
+        # without one, a repo-root lucidlint.json is recognized the same way.
+        self.baseline_migration = ""
+        if self.args.baseline and bl.legacy:
+            self.baseline_migration = (
+                f"{self.args.baseline.name} uses a pre-round 'actions' schema — re-acknowledge "
+                f"with --update-baseline to migrate ({bl.legacy} actions ignored)"
+            )
+        elif self.args.baseline is None:
+            _, legacy = _baseline_file_state(self.repo / "lucidlint.json")
+            if legacy:
+                self.baseline_migration = (
+                    "lucidlint.json uses a pre-round 'actions' schema — re-acknowledge "
+                    f"with --update-baseline to migrate ({legacy} actions ignored)"
+                )
         # the §9 growth signal: a config-ignored family whose count GREW since
         # the baseline is debt being added to, not held — the ignore's scope is
         # wrong. A warning, never a gate failure (growing repos legitimately
@@ -1755,9 +2096,15 @@ class _GateRunner:
             ignored_by_signal=self.ignored_by_signal,
             report_header=self.report_header,
             suppression_census=self.suppression_census,
+            config_ignore_keys=self.config_ignore_keys,
+            baseline_migration=self.baseline_migration,
+            stale_count=len(self.stale),
         )
 
         if self.args.json:
+            # stdout is the JSON document — the migration note rides stderr
+            if self.baseline_migration:
+                log(self.baseline_migration)
             self.rc.render_json(self.unique)
         else:
             self.rc.render_text(self.unique, fails, warns, acks)
@@ -2044,6 +2391,8 @@ class _FixCommand:
             # the origin file; the created module's content is the preview
             # the agent already reviewed
             _print_trimmed_diff(before, target.read_text(encoding="utf-8"), self.args.file)
+        if req.extra_writes or req.deletes:
+            self._verify_multi_file(req)
         return 0
 
     def _reattach_or_silence(self, req, moved: bool) -> int:
@@ -2060,12 +2409,44 @@ class _FixCommand:
             req.line = lines[0]
             req.source = None
             req.decline = None
+            # the reattached line's anchor column — same-line twins need the
+            # finding's col just like the direct path (schema-3)
+            anchors = [
+                f.col
+                for f in _File(self.repo, self.args.file).scan_single_file()
+                if f.signal == (self.fix_kind if self.fix_kind != "extract-record-class" else "record-shape")
+                and f.line == req.line
+                and f.col
+            ]
+            req.col = max(anchors) if anchors else 0
             return self._apply(req, moved=True)
         if len(lines) > 1:
             print(f"fix: {self.fix_kind} anchor moved — live findings at "
                   f"{', '.join(map(str, lines))} — pass --line to pick one")
         return 0  # nothing of this kind remains — R28 silence
 
+    def _verify_multi_file(self, req) -> None:
+        """R8: a multi-file fix is verified by the REPO-WIDE scan — the
+        finding kind must be gone (scan_single_file cannot see a chain or a
+        split's cross-file layout). A scan failure is NOT flipped into a
+        fix failure — the apply already succeeded."""
+        try:
+            rust = _scan_rust(self.repo, self.args, Counter(), None)
+        except Exception:
+            return
+        remaining = [
+            f
+            for fs in rust.by_rel.values()
+            for f in fs
+            if f.signal in {"forwarding-chain", "class-module", "delegating-husk"}
+        ]
+        if remaining:
+            rels = sorted({f.file for f in remaining})[:3]
+            print(
+                f"fix: {self.fix_kind} applied at {self.args.file}:{req.line} — re-scan still finds "
+                f"{len(remaining)} related finding(s) in {', '.join(rels)}{'…' if len(rels) > 3 else ''}: "
+                "iterate the fix"
+            )
 
 def main() -> int:
     args = parse_args()
@@ -2103,10 +2484,13 @@ def _gate_exit(stale: list[str], fails: list[Action], args) -> int:
     if args.warn:
         return 0
     if stale:
+        # Phase 5: drift/fix/delete are the same case — the KEY matches no
+        # current finding; the ledger (stdout) shows the count and remedy
         log(
-            f"{len(stale)} stale baseline entr{'y' if len(stale) == 1 else 'ies'} — the code no longer "
-            f"produces these findings: {', '.join(stale[:5])}{'...' if len(stale) > 5 else ''}; "
-            f"run --update-baseline to shrink the baseline"
+            f"{len(stale)} stale baseline entr{'y' if len(stale) == 1 else 'ies'} match no current finding — "
+            f"drifted, fixed, or deleted are the same case: {', '.join(stale[:5])}"
+            f"{'...' if len(stale) > 5 else ''}; "
+            f"run --update-baseline to re-lock the baseline"
         )
     if fails:
         log(f"{len(fails)} action(s) found — failing (use --warn to run informational)")
@@ -2146,6 +2530,8 @@ def _actions_from_rust(
                     last_modified=last_modified.get(rel, ""),
                     tested="",
                     raw=_raw_score(f.kind, f.metric or 1, churn),
+                    seam_members=f.seam_members,
+                    fix_kind=f.fix_kind,
                 )
             )
     return actions
@@ -2155,7 +2541,7 @@ def _scan_rust(repo: Path, args, file_churn: Counter[str], only_rel: str | None 
     """Every finding family computes in the Rust core (per-file, partition,
     test rules, duplicate/unused, record-shape, complexity, the graph
     families, hotspot, abstraction, docs). The thresholds live in the binary
-    (schema 2); the report header and suppression census ride on the result
+    (schema 4); the report header and suppression census ride on the result
     for the banner + footer ledger."""
     if not RUST_SCAN.active(repo):
         # no Python fallback — the binary is required; a silent empty scan

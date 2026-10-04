@@ -7,7 +7,7 @@ How the product in `docs/PRD.md` is built. Requirements by name: R1–R20
 
 | Component | Responsibility | Provides | Consumes |
 |---|---|---|---|
-| `scanner/` (Rust binary `lucidlint`) | the finding engine: every family (per-file, partition, test rules, duplicate/unused, record-shape, complexity, graph, hotspot, abstraction, docs) computed in Rust; thresholds live here (schema 2) | language-neutral findings JSON (`schema_version` 2) + CC array | repo `.py`/`.rs`/`.md` files, the graph contract JSON (exported from `.code-review-graph/graph.db`), churn JSON, docs root |
+| `scanner/` (Rust binary `lucidlint`) | the finding engine: every family (per-file, partition, test rules, duplicate/unused, record-shape, complexity, graph, hotspot, abstraction, docs) computed in Rust; thresholds live here (schema 4) | language-neutral findings JSON (`schema_version` 4) + CC array | repo `.py`/`.rs`/`.md` files, the graph contract JSON (exported from `.code-review-graph/graph.db`), churn JSON, docs root |
 | `scanner/radonc` (Rust crate) | the radon-mirroring CC API (visitors, cc_rank, cc_visit) — parity-tested against radon 6.0.1 | `function_cc`, block linenos | ruff-python-ast (pinned `=0.0.9`) |
 | `lucidlint.py` | the orchestrator: prepare the file set (pygit2 or rglob fallback), run the binary (fail-fast when missing), convert findings → actions, rank (churn × metric × fan-in), baseline, report, gate verdict, and the `fix` subcommand (R27: the tool owns its coordinates) | CLI + testable functions; `lucidlint fix --kind/--file/--line` (R27) | the Rust binary, git history (pygit2, optional `git` extra), coverage.xml |
 | `fix_engine.py` | the auto-fix transforms (libcst): mechanical (stale-suppression, noop, unreachable, positional-literals) + structural (extract-method, extract-class, magic-number, vague-name, long-param-list) | `fix:` directives in finding messages | optional `fix` extra (libcst) |
@@ -64,7 +64,7 @@ flowchart LR
     D --> B
     E[git history / pygit2] --> F[file list + churn]
     F --> B
-    B --> G[findings JSON schema 2]
+    B --> G[findings JSON schema 4]
     G --> H[lucidlint.py: actions, rank, baseline]
     H --> I[report + gate verdict]
     I --> J[exit code]
@@ -101,16 +101,18 @@ is retry semantics, and `_mutates_returned` treats a handler that stores
 into or mutates a name the enclosing function returns (accumulator
 pattern) as surfacing too. `_noop_statement_findings` flags expression
 statements that discard their value (non-Call/Constant/Await/Yield/Lambda/
-NamedExpr). `_all_constant`/`_container_all_constant` treat UnaryOp
-constants (`-4.0`) as literals. `_kind_counts` renders the per-kind
+NamedExpr). `is_constant_value` treats UnaryOp constants (`-4.0`, `+1`) as
+literals, so a lookup table of such values reads as constant to the
+magic-number and record checks — a separate question from the module-state
+rule, which flags the table's NAME binding. `_kind_counts` renders the per-kind
 roll-up line. In check_records, `record_literal_lines` skips dicts with
-spread keys (`**` — None-key on 3.14, DictUnpack on 3.5-3.13), and
-`_is_constant_value` handles UnaryOp constants. `ReferenceScan` splits `prod_references` vs
+spread keys (`**` — None-key on 3.14, DictUnpack on 3.5-3.13). `ReferenceScan` splits `prod_references` vs
 `test_references`: decorated module functions are registered by their
 decorator, and a function referenced only from tests is a conditional
-test-seam finding. `_global_state_findings` covers typed AnnAssign
-literals and `_mutation_findings` catches module collections mutated
-inside functions. `_hub_edge_counts` excludes CALLS to true builtins.
+test-seam finding. `global_state_findings` is the one module-state walker: a
+`global` statement, or ANY module-level assignment (bare, annotated, or
+augmented) except a dunder name or a call-valued registration. `_hub_edge_counts`
+excludes CALLS to true builtins.
 `_dedupe_merge` ranks by
 churn × complexity × fan-in (R8); `_suppressions` reads
 `# lucidlint: ignore <signal> <why>` exemptions via tokenize COMMENT

@@ -330,9 +330,6 @@ def test_merge_warn_into_fail_target():
     assert "WARN: m2" in out[0].note  # the differing message lands in the note
 
 
-def test_baseline_identity_fallback():
-    assert ch._baseline_identity("complexity:a.py:3:alpha") == ch.BaselineIdentity("complexity", "a.py", "alpha")
-    assert ch._baseline_identity("short") == ch.BaselineIdentity("short", "", "")
 
 
 def test_rust_finding_rel_unmappable(tmp_path):
@@ -492,7 +489,7 @@ def test_scanner_failure_raises(tmp_path):
 def test_scanner_garbage_findings_dropped(tmp_path, capsys):
     repo = make_repo(tmp_path)
     scan_json = json.dumps({
-        "schema_version": 3,
+        "schema_version": 4,
         "findings": [{
             "kind": "standard", "signal": "standard", "severity": "fail",
             "file": "/elsewhere/x.py", "line": 1, "function": "", "message": "drop me",
@@ -583,6 +580,536 @@ def test_render_latent_class_variant_shows_no_suppression_recipe(capsys):
     ch._render_file_group("x.py", [a])
     assert "suppress with:" not in capsys.readouterr().out
 
+
+
+def test_render_stamps_judgement_and_mechanical(capsys):
+    # #33(a): a name-required fix renders [JUDGEMENT]; a fixable kind outside
+    # it renders [MECHANICAL]; fix-less findings get neither — the stamp is
+    # render-time, computed from the structured fix_kind
+    judge = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 1, 0, "", "", fix_kind="extract-method")
+    mech = ch.Action("standard", "fail", "y.py", 4, "g", "m", 1, 0, "", "", fix_kind="loop-pipeline")
+    plain = ch.Action("standard", "fail", "z.py", 5, "h", "m", 1, 0, "", "")
+    ch._render_file_group("x.py", [judge, mech, plain])
+    out = capsys.readouterr().out
+    assert "[JUDGEMENT]" in out, out
+    assert "[MECHANICAL]" in out, out
+    assert out.count("[JUDGEMENT]") == 1, out
+    assert out.count("[MECHANICAL]") == 1, out
+
+
+def test_render_stamps_split_module_judgement_and_fixers_mechanical(capsys):
+    # H5: split-module's name is OPTIONAL (stem-derivable) yet the split is a
+    # grouping decision, not a mechanical fact — the judgement marker makes
+    # the stamp render [JUDGEMENT] for a class-module finding; dissolve-husk
+    # and collapse-chain keep [MECHANICAL]
+    judge = ch.Action("standard", "fail", "x.py", 1, "Employee", "m", 1, 0, "", "", fix_kind="split-module")
+    judge.signal = "class-module"
+    husk = ch.Action("standard", "fail", "y.py", 4, "g", "m", 1, 0, "", "", fix_kind="dissolve-husk")
+    chain = ch.Action("standard", "fail", "z.py", 5, "h", "m", 1, 0, "", "", fix_kind="collapse-chain")
+    ch._render_file_group("x.py", [judge, husk, chain])
+    out = capsys.readouterr().out
+    assert "[JUDGEMENT]" in out, out
+    assert out.count("[JUDGEMENT]") == 1, out
+    assert out.count("[MECHANICAL]") == 2, out
+
+
+def test_naming_notice_printed_once_iff_judge_true(tmp_path, capsys):
+    # #33(b): the lesson is issued ONCE per report, only when a judge-true
+    # finding exists — never repeated per finding
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "def f(a):\n"
+        "    if a:\n        return 1\n"
+        "    if a:\n        return 2\n"
+        "    if a:\n        return 3\n"
+        "    if a:\n        return 4\n"
+        "    if a:\n        return 5\n"
+        "    if a:\n        return 6\n"
+        "    if a:\n        return 7\n"
+        "    if a:\n        return 8\n"
+        "    if a:\n        return 9\n"
+        "    if a:\n        return 10\n"
+        "    if a:\n        return 11\n"
+        "    if a:\n        return 12\n"
+        "    if a:\n        return 13\n"
+        "    if a:\n        return 14\n"
+        "    if a:\n        return 15\n"
+        "    if a:\n        return 16\n"
+        "    return 0\n"
+    )
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert out.count("NAMING —") == 1, out
+    assert "what the domain calls the THING" in out, out
+
+    # a report with no judge-true finding prints no notice
+    (
+        repo / "houses" / "app.py"
+    ).write_text("def g(items):\n    out = []\n    for i in items:\n        out.append(i)\n    return out\n")
+    run_main(repo, "--warn")
+    assert "NAMING —" not in capsys.readouterr().out
+
+
+def test_seam_groups_combine_overlapping_member_sets():
+    # #34: union-find over overlapping seam_members sets — the issue's
+    # 62-findings case renders ONE heading; the groups array is always present
+    actions = [
+        ch.Action("latent-class", "fail", "a.py", i, f"f{i}", "m", 1, 0, "", "",
+                  seam_members=("fingerprint", "folder"), fix_kind="extract-class")
+        for i in (1, 2, 3)
+    ]
+    groups = ch._seam_groups(actions)
+    assert len(groups) == 1, groups
+    findings = cast(list[int], groups[0]["findings"])
+    assert len(findings) == 3
+    heading = cast(str, groups[0]["heading"])
+    assert "share ONE seam" in heading
+    assert ch._seam_groups(actions[:1]) == []  # below the >=3 bar
+
+# ------------------------------------------------------------------ #26-#34 evaluation round: render mechanics (B1-B6)
+def test_seam_heading_never_renders_empty_member_list():
+    # B1: three findings transitively share seams but no single member is in
+    # all of them — the heading must drop the parenthetical, never render
+    # "the seams: )" (round: "these 14 findings share ONE seam (the seams: )")
+    actions = [
+        ch.Action("latent-class", "fail", "a.py", i, f"f{i}", "m", 1, 0, "", "",
+                  seam_members=members, fix_kind="extract-class")
+        for i, members in enumerate((("a", "b"), ("b", "c"), ("c", "d")), start=1)
+    ]
+    groups = ch._seam_groups(actions)
+    assert len(groups) == 1, groups
+    heading = cast(str, groups[0]["heading"])
+    assert "share ONE seam" in heading
+    assert "(the seams: )" not in heading
+    assert "()" not in heading
+    assert heading == "these 3 findings share ONE seam — design the target type once, for all of them"
+
+
+def test_per_item_lines_keep_severity_marker_not_risk_tag(capsys):
+    # Phase 4: the [RISKxx] tag is dropped from per-item finding lines — it
+    # read as a brokenness order (the only true complexity fail carried the
+    # LOWEST display value). Severity survives as the [warn] marker; fail
+    # findings carry none — the raw metrics render as the facts line
+    # (_facts_line): named facts, never a percentile, never "risk".
+    fail = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 1, 0, "", "", priority=99)
+    ch._render_file_group("x.py", [fail])
+    out = capsys.readouterr().out
+    assert "[RISK" not in out
+    assert "[P99]" not in out
+    warn = ch.Action("magic-number", "warn", "x.py", 5, "g", "m", 1, 0, "", "", priority=42)
+    ch._render_file_group("x.py", [warn])
+    out = capsys.readouterr().out
+    assert "[warn]" in out
+    assert "[RISK" not in out
+
+
+def test_facts_line_names_complex_and_churn_facts(capsys):
+    # Phase 4: the raw metrics stay as NAMED FACTS on ONE extra line — a
+    # clause per notable fact (CC >= 15, churn >= 10, callers >= 10), joined
+    # with "and"; never a percentile, never "risk". A CC-17 high-churn
+    # finding renders the exact plan sentence.
+    a = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 17.0, 14, "", "")
+    ch._render_file_group("x.py", [a])
+    out = capsys.readouterr().out
+    assert (
+        "-> This function is complex (17 decision points) and changed often (14 changes)." in out
+    ), out
+
+
+def test_facts_line_absent_on_quiet_finding(capsys):
+    # Phase 4: a CC-4 finding that never changed meets no bar — no facts
+    # line renders.
+    a = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 4.0, 0, "", "")
+    ch._render_file_group("x.py", [a])
+    out = capsys.readouterr().out
+    assert "-> This function" not in out
+    assert "decision points" not in out
+    assert "changed often" not in out
+
+
+def test_facts_line_skips_absent_metrics_and_names_callers():
+    # Phase 4: "use only what is present" — a metric that is absent (the
+    # scanner default of 1.0), no churn, no callers renders nothing; the
+    # callers clause fires only when the fan-in list is present and >= 10.
+    quiet = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "")
+    assert ch._facts_line(quiet) is None
+    few = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "",
+                    callers=[f"c{i}" for i in range(9)])
+    assert ch._facts_line(few) is None
+    many = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "",
+                     callers=[f"c{i}" for i in range(11)])
+    assert ch._facts_line(many) == "This function has 11 callers."
+    triple = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 20.0, 12, "", "",
+                       callers=[f"c{i}" for i in range(10)])
+    assert ch._facts_line(triple) == (
+        "This function is complex (20 decision points), changed often (12 changes), and has 10 callers."
+    )
+    # a finding that anchors no function says "This code", never a lie
+    noloc = ch.Action("standard", "fail", "x.py", 3, "", "m", 1.0, 12, "", "")
+    assert ch._facts_line(noloc) == "This code changed often (12 changes)."
+
+
+def test_summary_header_names_scope_not_change_cost(tmp_path, capsys):
+    # B2 + Phase 4: the header no longer names any action — the "highest
+    # change-cost ... [RISK99]" line and its legend leave the report (the
+    # composite read as urgency; round: "top P99 tools/adopt.py" while
+    # :116 is not CC>=15). The gate names the mode and the scope only; no
+    # line carries a percentile or the words "risk"/"change-cost".
+    repo = make_repo(tmp_path)
+    top = ch.Action("record-shape", "fail", "tools/adopt.py", 116, "from_dict", "m", 1.0, 0, "", "", priority=99)
+    ch._RenderCtx(repo, gate_args(), "main", "abc1234", "no coverage", False).render_summary([top], [], [])
+    out = capsys.readouterr().out
+    assert "GATE: FAIL — across 1 distinct targets" in out
+    assert "tools/adopt.py" not in out  # the header names no action
+    assert "top P99 tools/adopt.py" not in out
+    for word in ("RISK", "risk", "change-cost", "percentile"):
+        assert word not in out, out
+
+def test_legacy_baseline_prints_migration_line(tmp_path, capsys):
+    # B3: a baseline carrying the pre-round 'actions' schema (line-less keys)
+    # must print ONE migration line — never read as "+0 acknowledged" debt,
+    # never failed as phantom-stale entries
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    baseline = tmp_path / "lucidlint.json"
+    baseline.write_text(json.dumps({
+        "actions": [
+            "record-shape:houses/app.py:from_dict",
+            "swallow:houses/app.py:f",
+        ]
+    }))
+    rc = run_main(repo, "--baseline", str(baseline))
+    out, err = capsys.readouterr()
+    assert rc == 1  # the current swallow finding is unacknowledged
+    assert (
+        "lucidlint.json uses a pre-round 'actions' schema — re-acknowledge with"
+        " --update-baseline to migrate (2 actions ignored)" in out
+    )
+    assert "stale baseline" not in err
+
+
+def test_repo_root_lucidlint_json_legacy_replaces_cannot_tell(tmp_path, capsys):
+    # B3: with no --baseline, a repo-root lucidlint.json that plainly holds
+    # pre-round acknowledgements must not be silently read as "no baseline —
+    # cannot tell what is new" — the migration note names it
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    (repo / "lucidlint.json").write_text(json.dumps({
+        "actions": ["record-shape:houses/app.py:from_dict", "swallow:houses/app.py:f"]
+    }))
+    run_main(repo)
+    out = capsys.readouterr().out
+    assert "lucidlint.json uses a pre-round 'actions' schema" in out
+    assert "no baseline — cannot tell what is new" not in out
+
+
+def test_ledger_names_baseline_flag_with_repo_root_acks(tmp_path, capsys):
+    # Phase 4 + H7: a repo-root lucidlint.json holding acknowledged actions
+    # reads as "+0 acknowledged" until --baseline is passed — the LEDGER
+    # line (the single home of the numbers; the gate repeats no count)
+    # attaches the flag itself so the reader learns it from the message
+    # (round-3: "95 acknowledged action(s)" read as "+0 acknowledged")
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    (repo / "lucidlint.json").write_text(json.dumps({
+        "actions": [
+            "swallow:houses/app.py:4:f",
+            "record-shape:houses/app.py:1:from_dict",
+        ]
+    }))
+    run_main(repo)
+    out = capsys.readouterr().out
+    assert (
+        "+ 0 acknowledged (baseline) — "
+        "2 acknowledged in lucidlint.json — "
+        "pass --baseline lucidlint.json to activate"
+    ) in out
+    gate = next(line for line in out.splitlines() if line.startswith("GATE:"))
+    assert "acknowledged" not in gate and "action(s)" not in gate, gate
+    assert "no baseline — cannot tell what is new" not in out
+    assert "lucidlint.json holds" not in out  # the standalone clause is gone
+
+
+def test_suppression_ledger_reconciles_all_three_accounts(tmp_path, capsys):
+    # H7: ONE additive header line is the single home of the numbers —
+    # reported = fails + warnings and total = reported + acknowledged +
+    # config-ignored + comment-suppressed (baseline-acknowledged /
+    # config-ignored / comment-suppressed) hold on the same line, and the
+    # gate repeats none of them. The fixture exercises both the
+    # config-ignore and census accounts; the absolute counts belong to the
+    # scanner.
+    src = (
+        SWALLOW_SRC  # reported fail
+        + "\ndef m():\n    return 60 * 24\n"  # magic-number warn -> config-ignored
+        + 'RECORD = {"a": 1}  # lucidlint: ignore record-shape data table row\n'  # census
+    )
+    repo = make_repo(tmp_path, app_src=src)
+    (repo / ".lucidlint.toml").write_text('[lucidlint]\nignore = ["magic-number"]\n')
+    run_main(repo)
+    out = capsys.readouterr().out
+    m = re.search(
+        r"(\d+) findings — (\d+) reported \((\d+) fails \+ (\d+) warnings\) \+ (\d+) acknowledged "
+        r"\(baseline\) \+ (\d+) config-ignored \([^)]*\) \+ (\d+) comment-suppressed",
+        out,
+    )
+    assert m, out
+    total, reported, fails, warns, acked, ignored, census = (int(g) for g in m.groups())
+    assert fails + warns == reported, out
+    assert reported + acked + ignored + census == total, out
+    assert ignored >= 1 and census >= 1 and acked == 0, out
+
+    # acknowledged debt appears in the ledger too: lock today's findings and
+    # re-run — the ledger still reconciles
+    baseline = tmp_path / "lucidlint.json"
+    assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
+    run_main(repo, "--baseline", str(baseline))
+    out = capsys.readouterr().out
+    m = re.search(
+        r"(\d+) findings — (\d+) reported \((\d+) fails \+ (\d+) warnings\) \+ (\d+) acknowledged "
+        r"\(baseline\) \+ (\d+) config-ignored \([^)]*\) \+ (\d+) comment-suppressed",
+        out,
+    )
+    assert m, out
+    total, reported, fails, warns, acked, ignored, census = (int(g) for g in m.groups())
+    assert fails + warns == reported, out
+    assert reported + acked + ignored + census == total, out
+    assert acked >= 1, out
+
+
+def test_ledger_single_home_of_numbers_gate_repeats_none(tmp_path, capsys):
+    # H7: the LEDGER states each account number EXACTLY ONCE (reported =
+    # fails + warnings; total = reported + acknowledged + config-ignored +
+    # comment-suppressed; the baseline-activation clause rides the
+    # acknowledged term), and the GATE line repeats none of them — it keeps
+    # the mode and the target count only (Phase 4: no change-cost line).
+    src = (
+        SWALLOW_SRC  # 1 reported fail
+        + "\ndef m():\n    return 60 * 24\n"  # magic-number warn -> config-ignored
+        + 'RECORD = {"a": 1}  # lucidlint: ignore record-shape data table row\n'  # census
+    )
+    repo = make_repo(tmp_path, app_src=src)
+    (repo / ".lucidlint.toml").write_text('[lucidlint]\nignore = ["magic-number"]\n')
+    (repo / "lucidlint.json").write_text(json.dumps({"actions": ["swallow:houses/app.py:4:f"]}))
+    run_main(repo)
+    out = capsys.readouterr().out
+    m = re.search(
+        r"(\d+) findings — (\d+) reported \((\d+) fails \+ (\d+) warnings\) \+ (\d+) acknowledged "
+        r"\(baseline\) — \d+ acknowledged in lucidlint\.json — pass --baseline lucidlint\.json "
+        r"to activate \+ (\d+) config-ignored \([^)]*\) \+ (\d+) comment-suppressed",
+        out,
+    )
+    assert m, out
+    total, reported, fails, warns, acked, ignored, census = (int(g) for g in m.groups())
+    assert fails + warns == reported, out
+    assert reported + acked + ignored + census == total, out
+    assert out.count(" findings — ") == 1, out
+    gate = next(line for line in out.splitlines() if line.startswith("GATE:"))
+    assert re.search(r"across \d+ distinct targets", gate), gate
+    assert "change-cost" not in gate and "RISK" not in gate, gate
+    for count_word in (
+        "action(s)", "reported", " acknowledged", " config-ignored", " comment-suppressed",
+        "warnings never-fail", "fails +",
+    ):
+        assert count_word not in gate, gate
+
+
+def test_config_ignored_family_advisory_names_config_key(tmp_path, capsys):
+    # B5: a finding whose family is config-ignored elsewhere must not be
+    # offered a bare per-site marker as the remedy — the per-item line says
+    # the family is config-ignored and names the config key (round:
+    # "suppress with:" next to "Fix findings instead of suppressing")
+    repo = make_repo(tmp_path, app_src="def f():\n    return 60 * 24\n")
+    (repo / "scripts" / "oneoff.py").write_text("def main():\n    return 60 * 24\n")
+    (repo / ".lucidlint.toml").write_text('[lucidlint."houses/**"]\nignore = ["magic-number"]\n')
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "this family is config-ignored under 'houses/**': fix the finding or extend the ignore scope" in out
+
+
+def test_config_ignored_family_advisory_skips_marker_remedy(capsys):
+    # B5 (unit): for a displayed-family finding (kind != signal) whose signal
+    # is config-ignored, the suppress line names the config key instead of a
+    # bare per-site marker as the remedy
+    a = ch.Action("standard", "fail", "scripts/oneoff.py", 3, "main", "m", 1, 0, "", "")
+    a.signal = "global-state"
+    ch._render_file_group("scripts/oneoff.py", [a], ignore_keys={"global-state": "'houses/**'"})
+    out = capsys.readouterr().out
+    assert "suppress with: global-state" in out
+    assert "config-ignored under 'houses/**'" in out
+
+
+def test_suppression_advice_states_marker_window(capsys):
+    # Phase 3: the suppression guidance states the window positively — a
+    # marker binds on the finding's OWN line or within the 3 lines ending at
+    # it; the tool never tells the reader a marker further up "does not"
+    # bind (that read as advice to move the marker — there is no such advice).
+    # G5: the sentence gains the truncated-why statement — binding is keyed by
+    # the SIGNAL NAME, so a why text cut mid-word at the line end still binds
+    a = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a.signal = "inline-import"
+    ch._render_file_group("x.py", [a])
+    out = capsys.readouterr().out
+    assert "suppress with: inline-import" in out
+    assert (
+        "binds by its signal name on this finding's own line, the line before it,"
+        " the logical line's first source line" in out
+    )
+    assert "the why text may end mid-word at the line end and still bind" in out
+    assert "a marker further up does not" not in out
+
+
+def test_render_links_suppression_signal_to_family_fix(capsys):
+    # Phase 4: a finding whose suppression identity and fix kind differ
+    # (class-module -> split-module) links them in ONE line — "suppress
+    # with: class-module" beside "fix: --kind split-module" read as two
+    # unrelated commands (round-3 CONFUSING)
+    a = ch.Action("standard", "fail", "x.py", 1, "Employee", "m", 1, 0, "", "", fix_kind="split-module")
+    a.signal = "class-module"
+    ch._render_file_group("x.py", [a])
+    out = capsys.readouterr().out
+    assert "suppress with: class-module (this family's fix: split-module)" in out
+
+
+def test_render_message_leads_suppression_pointer(capsys):
+    # H6: the MESSAGE renders first — the suppression pointer (and the
+    # marker-window sentence / config-ignored advisory where they apply)
+    # appends AFTER it, so the action reads first and the pointer appears
+    # exactly once (the messages themselves carry no suppression wording)
+    a = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a.signal = "inline-import"
+    b = ch.Action("standard", "fail", "y.py", 4, "g", "cfg-msg", 1, 0, "", "")
+    b.signal = "global-state"
+    ch._render_file_group("x.py", [a, b], ignore_keys={"global-state": "'houses/**'"})
+    out = capsys.readouterr().out
+    assert out.index("— m") < out.index("suppress with: inline-import"), out
+    assert "binds by its signal name" in out
+    assert out.index("— cfg-msg") < out.index("config-ignored under 'houses/**'"), out
+    assert out.count("suppress with:") == 2, out
+
+
+def test_same_line_trailing_marker_suppresses_finding(tmp_path, capsys):
+    # Phase 3: a trailing comment on the finding's OWN line is a suppression
+    # marker for that finding (the marker text names the signal) — the
+    # server.py:704 shape binds and clears: no finding renders, the census
+    # counts the site marker
+    src = SWALLOW_SRC.replace(
+        "    except Exception:\n        pass",
+        "    except Exception:  # lucidlint: ignore swallow the fallback is fine\n        pass",
+    )
+    repo = make_repo(tmp_path, app_src=src)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "except that swallows at line" not in out
+    assert "suppressed: swallow×1" in out
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    assert "swallow" not in [a["signal"] for a in data["actions"]]
+    assert data["suppressions"].get("swallow") == 1
+
+
+def test_marker_one_line_above_window_renders_finding_no_stale(tmp_path, capsys):
+    # Phase 3: a marker OUTSIDE the window is documentation, not staleness —
+    # when the signal fires nearby, the finding renders and the report
+    # mentions NOTHING about the marker (no stale verdict, no advice; the
+    # tool never tells the reader to move a marker). "Stale — remove it" is
+    # reserved for a signal that fires NOWHERE in the file. (rightmove_url
+    # shape: marker one line past the window reported 'stale' round 2/3)
+    src = (
+        "def f():\n"
+        "    # lucidlint: ignore magic-number deliberate ordering constant\n"
+        "    pass\n"
+        "def g():\n"
+        "    return 60 * 24\n"
+    )
+    repo = make_repo(tmp_path, app_src=src)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "magic number 60 in g" in out  # the finding fires
+    assert "stale-suppression" not in out  # the marker draws no stale verdict
+    assert "no longer fires" not in out
+    assert "remove it" not in out  # nothing advises deleting or moving the marker
+
+
+def test_marker_one_line_above_def_suppresses_def_line_finding(tmp_path, capsys):
+    # F3 (round-4): a marker one line above a def binds a finding ANCHORED
+    # on the def line — the window resolves against the finding's reported
+    # line (the def line), so def_line - 1 is inside the 3 lines ending at
+    # it (extract_bus_fares:174/175 shape; round-4 CONFUSING: "markers one
+    # line above a def do not bind")
+    big = (
+        "def busy(a, b, c, d):\n"
+        + "".join(
+            f"    if a == {i} and b == {i * 2}:\n"
+            f"        x = a + b + c + d + {i}\n"
+            f"        y = x * {i}\n"
+            "    elif b is None:\n"
+            "        pass\n"
+            for i in range(20)
+        )
+        + "    return x + y\n"
+    )
+    repo = make_repo(tmp_path, app_src="# lucidlint: ignore complexity the dispatch chain is the registry\n" + big)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "cyclomatic complexity" not in out  # the def-line finding is gone
+    assert "suppressed: complexity×1" in out  # the marker is counted, not stale
+    assert "stale-suppression" not in out
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    assert "complexity" not in [a["kind"] for a in data["actions"]]
+    assert data["suppressions"].get("complexity") == 1
+    # control: the same shape WITHOUT the comment renders the finding
+    plain = make_repo(tmp_path / "plain", app_src=big)
+    run_main(plain, "--warn")
+    out = capsys.readouterr().out
+    assert "cyclomatic complexity" in out
+
+
+def test_marker_one_line_above_class_suppresses_class_line_finding(tmp_path, capsys):
+    # F3: the def-line window anchoring holds for CLASS anchors too — an
+    # unused-class finding reports at the class line; a marker one line
+    # above the class binds it (the window counts from the class line).
+    # The class is named after the file stem so class-module does not fire
+    # and merge away the unused finding (both render kind "standard")
+    src = "class App:\n    pass\n"
+    repo = make_repo(tmp_path, app_src="# lucidlint: ignore unused kept for the repl\n" + src)
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    assert "unused" not in [a["signal"] for a in data["actions"]]
+    assert data["suppressions"].get("unused") == 1
+    plain = make_repo(tmp_path / "plain", app_src=src)
+    run_main(plain, "--warn")
+    out = capsys.readouterr().out
+    assert "class 'App'" in out and "defined but never referenced" in out
+
+
+def test_bulk_suppression_renders_at_report_level(capsys):
+    # B6: a bulk-suppression finding is a repo-wide count — it must render
+    # ONCE at report level, NOT inside a per-file section at its arbitrary
+    # anchor file (round: layout.py:1)
+    bulk = ch.Action(
+        "bulk-suppression", "warn", "layout.py", 1, "",
+        "record-shape suppressed at 12 sites - repeated identical whys are POLICY, "
+        "not per-site judgment: move the rule into [lucidlint.guidance] config guidance "
+        "or a documented config ignore, or fix the recurring cause",
+        1, 0, "", "",
+    )
+    warn = ch.Action("magic-number", "warn", "x.py", 3, "f", "m1", 1, 0, "", "")
+    ch._render_actions(Path("repo"), argparse.Namespace(baseline=None), [bulk, warn], [])
+    out = capsys.readouterr().out
+    assert "layout.py" not in out
+    assert "bulk suppression (policy — a repo-level decision, not a file site):" in out
+    assert "record-shape suppressed at 12 sites" in out
+    assert out.index("bulk suppression") < out.index("x.py")
+
+
+
+def test_json_carries_naming_notice_and_groups(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    (repo / "houses" / "app.py").write_text(
+        "def f(a):\n" + "    if a:\n        return 1\n" * 16 + "    return 0\n"
+    )
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    assert data["naming_notice"] is not None, (data["naming_notice"] is not None)
+    assert "groups" in data and data["groups"] == []
 
 def test_render_standard_bucket_keeps_the_suppression_signal(capsys):
     """A finding collapsed to the `standard` catch-all has NO display-bucket
@@ -736,8 +1263,19 @@ def test_raw_score_uses_the_metric():
     complexity/large-function finding to the same priority)."""
     assert ch._raw_score("complexity", 60, 10) > ch._raw_score("complexity", 15, 10)
     assert ch._raw_score("large-function", 300, 5) > ch._raw_score("large-function", 100, 5)
-    # the churn factor still scales within a metric
+    # the churn factor still scales within a metric — but root-weighted: a
+    # 6x churn gap is ~1.31x raw risk, not the linear 1.71x (F5: complexity
+    # and size must keep equal weight with churn)
     assert ch._raw_score("complexity", 20, 30) > ch._raw_score("complexity", 20, 5)
+    assert ch._raw_score("complexity", 20, 30) < ch._raw_score("complexity", 20, 5) * 1.5
+
+
+def test_high_complexity_low_churn_outranks_low_complexity_high_churn():
+    # F5: the churn factor is the square root of the linear one, so
+    # complexity/size get equal weight with churn — a CC-40 never-touched
+    # function outranks a CC-20 heavily-churned one (the linear factor
+    # ordered them 1.0 vs 1.25 the other way)
+    assert ch._raw_score("complexity", 40, 0) > ch._raw_score("complexity", 20, 200)
 
 
 def test_preview_refusal_on_no_seam_is_silent(tmp_path, capsys):
@@ -757,15 +1295,12 @@ def test_preview_refusal_on_no_seam_is_silent(tmp_path, capsys):
 
 
 def test_magic_fix_cli_derives_anchor_column(tmp_path, capsys):
-    # the schema-3 col reaches the fix engine for magic-number too — two
-    # literals on one line, the CLI must rewrite the ANCHORED one, not the
-    # first (the anchor scan only ran for extract-record-class) (review bot)
-    src = "def f():\n    return a * 60 + b * 90\n"
+    src = "class W:\n    def f(self):\n        return a * 60 + b * 90\n"
     repo = make_repo(tmp_path, app_src=src)
     (repo / "houses" / "app.py").write_text(src)
     rc = run_main(
         repo, "fix", "--kind", "magic-number", "--file", "houses/app.py",
-        "--line", "2", "--name", "NINETY",
+        "--line", "3", "--name", "NINETY",
     )
     assert rc == 0
     fixed = (repo / "houses" / "app.py").read_text()
@@ -1140,7 +1675,10 @@ def test_main_baseline_ack(tmp_path, capsys):
     assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
     assert run_main(repo, "--baseline", str(baseline)) == 0
     out = capsys.readouterr().out
-    assert "acknowledged in baseline" in out
+    # H7: the acknowledged account lives in the LEDGER line (the gate's
+    # PASS line repeats no counts)
+    assert "acknowledged (baseline)" in out
+    assert re.search(r"GATE: PASS\b", out), out
 
 
 def test_main_json_meta(tmp_path, capsys):
@@ -1157,11 +1695,24 @@ def test_main_json_meta(tmp_path, capsys):
 
 
 
-def test_main_priority_percentile(tmp_path, capsys):
+def test_report_renders_no_risk_or_percentile(tmp_path, capsys):
+    # Phase 4: the percentile, the highest change-cost line, and its legend
+    # leave the report — the composite read as urgency (round-7: RISK99
+    # beside a rejected finding). No report line carries "risk", "RISK",
+    # "change-cost", or a percentile; per-item lines carry the severity
+    # marker only. (The tmp-dir path may echo inside the re-run footer —
+    # strip it; the words are the report's, not the harness's.)
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     run_main(repo, "--warn")
     out = capsys.readouterr().out
-    assert "P0" in out or "P1" in out or "P2" in out or "warn" in out
+    assert "highest change-cost" not in out, out
+    assert "priority ranks" not in out, out  # the legend sentence is gone
+    for line in out.splitlines():
+        if line.startswith("  [") and " — " in line:
+            assert "[RISK" not in line, line
+    report = out.replace(str(repo), "<repo>")
+    for word in ("RISK", "risk", "change-cost", "percentile"):
+        assert word not in report, out
 
 
 def test_update_baseline_excludes_warns(tmp_path):
@@ -1191,7 +1742,8 @@ def test_text_report_opens_with_header_banner(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     run_main(repo)
     out = capsys.readouterr().out
-    assert "readable, maintainable, and obviously correct" in out.splitlines()[0]
+    assert "maintainable, lucid, and obviously correct" in out.splitlines()[0]
+    assert "pointers, not orders" in out.splitlines()[0]
     assert out.index("obviously correct") < out.index("GATE:")
 
 
@@ -1281,14 +1833,56 @@ def test_stale_baseline_clears_after_update(tmp_path):
     assert run_main(repo, "--baseline", str(baseline)) == 0
 
 
-def test_baseline_line_shift_is_not_stale(tmp_path):
+def test_baseline_line_drift_is_stale_and_clause_renders(tmp_path, capsys):
+    # Phase 5: exact-identity matching (the pyrefly pattern) — a baselined
+    # key (kind:file:line:function) that matches NO current finding is
+    # stale: a line shift re-reports the debt (drifted = fixed = deleted,
+    # no reconciliation) and the LEDGER says why, appending the count to
+    # the acknowledged term.
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     baseline = tmp_path / "lucidlint.json"
     run_main(repo, "--update-baseline", "--baseline", str(baseline))
     # add a line above the finding — same function, new line
     shifted = "# comment\n" * 3 + SWALLOW_SRC
     (repo / "houses" / "app.py").write_text(shifted)
+    assert run_main(repo, "--baseline", str(baseline)) == 1
+    out = capsys.readouterr().out
+    assert "except that swallows at line 7" in out  # the finding re-reports
+    assert (
+        "1 acknowledged entry matches no current finding — re-acknowledge with --update-baseline" in out
+    ), out
+
+
+def test_baseline_exact_key_is_acknowledged_no_clause(tmp_path, capsys):
+    # Phase 5: the same key at the current line acknowledges as before, and
+    # the ledger renders NO stale clause (the count is zero).
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    baseline = tmp_path / "lucidlint.json"
+    run_main(repo, "--update-baseline", "--baseline", str(baseline))
     assert run_main(repo, "--baseline", str(baseline)) == 0
+    out = capsys.readouterr().out
+    assert "acknowledged (baseline)" in out
+    assert "match no current finding" not in out
+
+
+def test_baseline_fixed_finding_renders_same_clause_undistinguished(tmp_path, capsys):
+    # Phase 5: a key for a genuinely FIXED finding is the same case as
+    # drift — the clause renders identically ("the same clause,
+    # undistinguished"), no reconciliation, no "fixed"/"drifted" split.
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    baseline = tmp_path / "lucidlint.json"
+    run_main(repo, "--update-baseline", "--baseline", str(baseline))
+    (repo / "houses" / "app.py").write_text(APP_SRC)  # the finding is gone
+    assert run_main(repo, "--baseline", str(baseline)) == 1
+    out = capsys.readouterr().out
+    clause = "1 acknowledged entry matches no current finding — re-acknowledge with --update-baseline"
+    assert clause in out, out
+    # exactly the clause the drift fixture renders — nothing distinguishes a
+    # fixed entry from a drifted one (path-stripped: the tmp dir's name is
+    # the harness's, not the report's)
+    report = out.replace(str(tmp_path), "<tmp>")
+    assert "fixed" not in report
+    assert "drifted" not in report
 
 
 def test_baseline_gone_function_is_stale(tmp_path, capsys):

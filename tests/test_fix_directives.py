@@ -57,7 +57,7 @@ def test_rust_finding_tails_name_rust_fixable_kinds():
 
 
 def test_fix_refuses_a_check_without_an_auto_fix(tmp_path, capsys):
-    """`fix --kind data-clump` says the check can't be fixed by this command
+    """`fix --kind unused` says the check can't be fixed by this command
     and points at the report — not a traceback, not a silent success, and
     not a bare 'no auto-fix exists' (R31: the message addresses the
     mistake)."""
@@ -65,10 +65,10 @@ def test_fix_refuses_a_check_without_an_auto_fix(tmp_path, capsys):
     (repo / ".git").mkdir(parents=True)
     (repo / "houses").mkdir(parents=True)
     (repo / "houses" / "app.py").write_text("x = 1\n")
-    rc = run_fix(repo, "fix", "--kind", "data-clump", "--file", "houses/app.py", "--line", "1")
+    rc = run_fix(repo, "fix", "--kind", "unused", "--file", "houses/app.py", "--line", "1")
     assert rc == 1
     out = capsys.readouterr().out
-    assert "data-clump" in out and "cannot be fixed by this command" in out, out
+    assert "unused" in out and "cannot be fixed by this command" in out, out
     assert "report line" in out, out
     assert "Traceback" not in out
 

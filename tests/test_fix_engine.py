@@ -118,15 +118,15 @@ def test_applied_reports_the_reattached_line(tmp_path, capsys):
     names L, not the stale --line from the directive — the output must never
     contradict the announced move (review-bot finding on PR #14)."""
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
-    (repo / "houses" / "app.py").write_text("def f():\n    x = 3 * 60\n    return x\n")
+    (repo / "houses" / "app.py").write_text("class W:\n    def f(self):\n        x = 3 * 60\n        return x\n")
     rc = run_main(
         repo, "fix", "--kind", "magic-number", "--file", "houses/app.py",
         "--line", "1", "--name", "SECONDS_PER_MINUTE",
     )
     assert rc == 0
     out = capsys.readouterr().out
-    assert "anchor moved" in out and "now at houses/app.py:2" in out, out
-    assert "fix: applied magic-number at houses/app.py:2" in out, out
+    assert "anchor moved" in out and "now at houses/app.py:3" in out, out
+    assert "fix: applied magic-number at houses/app.py:3" in out, out
     assert "houses/app.py:1" not in out, out
 
 def test_feature_envy_moves_the_envied_reads_into_a_method(tmp_path):
@@ -434,17 +434,42 @@ FIX_NAMES = {
 }
 
 
-def test_magic_literal_becomes_constant(tmp_path):
-    src = "def g():\n    return 60 * 24\n"
+def test_magic_literal_becomes_class_attribute(tmp_path):
+    # third-pass 4: the constant lands as a CLASS ATTRIBUTE of the enclosing
+    # class — module-top constants are themselves global-state findings
+    src = "class Window:\n    def g(self):\n        return 60 * 24\n"
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     (repo / "houses" / "app.py").write_text(src)
     out = _fix_finding(
-        "magic-number", "houses/app.py", repo, 2, fix_engine.FixOptions(name="MINUTES_PER_DAY")
+        "magic-number", "houses/app.py", repo, 3, fix_engine.FixOptions(name="MINUTES_PER_DAY")
     )
     assert out is not None
     fixed = (repo / "houses" / "app.py").read_text()
     assert "MINUTES_PER_DAY = 60" in fixed
     assert "return MINUTES_PER_DAY * 24" in fixed
+    assert fixed.startswith("class Window:"), fixed  # not parked at module top
+
+
+
+def test_magic_literal_refuses_without_owning_class(tmp_path):
+    # a literal in a module-level function has no class to own its constant —
+    # refuse with a why, never park it at module top
+    src = "def g():\n    return 60 * 24\n"
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    req = fix_engine._FixRequest(
+        kind="magic-number",
+        repo=repo,
+        rel="houses/app.py",
+        line=2,
+        opts=fix_engine.FixOptions(name="MINUTES_PER_DAY"),
+        col=0,
+    )
+    out = req.fix_finding()
+    assert out is None
+    assert req.decline is not None and "no class to own its constant" in req.decline
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert fixed == src
 
 
 
@@ -468,16 +493,16 @@ def test_extract_record_class_rejects_placeholder_name(tmp_path):
 def test_magic_literal_fix_honors_column_anchor(tmp_path):
     # two numeric literals on the target line — the schema-3 col pins the
     # anchored one; the fix must not rewrite the first literal (review bot)
-    src = "def f():\n    return a * 60 + b * 90\n"
+    src = "class W:\n    def f(self):\n        return a * 60 + b * 90\n"
     repo = make_repo(tmp_path, app_src=src)
-    # 60 sits at 1-based byte col 16, 90 at col 25 — anchor the 90
+    # 60 sits at 1-based byte col 20, 90 at col 29 — anchor the 90
     req = fix_engine._FixRequest(
         kind="magic-number",
         repo=repo,
         rel="houses/app.py",
-        line=2,
+        line=3,
         opts=fix_engine.FixOptions(name="NINETY"),
-        col=25,
+        col=29,
     )
     out = req.propose_finding()
     assert out is not None
@@ -485,7 +510,6 @@ def test_magic_literal_fix_honors_column_anchor(tmp_path):
     assert new_source is not None, out
     assert "a * 60 + b * NINETY" in new_source, new_source
     assert "return a * 60" in new_source, "the unanchored first literal must stay: {new_source}"
-
 def test_vague_name_rename(tmp_path):
     src = "class DataManager:\n    def run(self):\n        return 1\n\n\ndef use():\n    return DataManager()\n"
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
@@ -1004,6 +1028,632 @@ def test_strewing_message_tees_up_the_fix(tmp_path, capsys):
     assert "fix: lucidlint fix --kind extract-class" in strewing[0]["message"], strewing[0]["message"]
 
 
+def test_dissolve_husk_rewires_calls_and_deletes_class(tmp_path):
+    # #27: Memory only forwards to module functions — its callers reach the
+    # functions directly, the husk is deleted (never inline)
+    src = (
+        "def fetch_name(user):\n"
+        "    return user.name\n"
+        "\n"
+        "class Memory:\n"
+        "    def name(self, user):\n"
+        "        return fetch_name(user)\n"
+        "\n"
+        "def use():\n"
+        "    return Memory().name('a')\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    req = fix_engine._FixRequest(
+        kind="dissolve-husk",
+        repo=repo,
+        rel="houses/app.py",
+        line=4,
+        opts=fix_engine.FixOptions(),
+    )
+    desc = req.fix_finding()
+    assert desc is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "class Memory" not in fixed, fixed
+    assert "fetch_name('a')" in fixed, fixed
+
+
+def test_dissolve_husk_rewires_instance_variable_sites(tmp_path):
+    # `h = Memory(); h.name(x)` -> `h` deleted, call rewired to the module fn
+    src = (
+        "def fetch_name(user):\n"
+        "    return user.name\n"
+        "\n"
+        "class Memory:\n"
+        "    def name(self, user):\n"
+        "        return fetch_name(user)\n"
+        "\n"
+        "def use():\n"
+        "    h = Memory()\n"
+        "    return h.name('x')\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    req = fix_engine._FixRequest(
+        kind="dissolve-husk",
+        repo=repo,
+        rel="houses/app.py",
+        line=4,
+        opts=fix_engine.FixOptions(),
+    )
+    desc = req.fix_finding()
+    assert desc is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "class Memory" not in fixed, fixed
+    assert "h = Memory()" not in fixed, fixed
+    assert "fetch_name('x')" in fixed, fixed
+
+
+def test_dissolve_husk_refuses_escaping_instance(tmp_path):
+    # a construction that escapes (stored/returned) can't be dissolved
+    # blindly — refuse with a why
+    src = (
+        "def fetch_name(user):\n"
+        "    return user.name\n"
+        "\n"
+        "class Memory:\n"
+        "    def name(self, user):\n"
+        "        return fetch_name(user)\n"
+        "\n"
+        "def escape():\n"
+        "    return Memory()\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    req = fix_engine._FixRequest(
+        kind="dissolve-husk",
+        repo=repo,
+        rel="houses/app.py",
+        line=4,
+        opts=fix_engine.FixOptions(),
+    )
+    desc = req.fix_finding()
+    assert desc is None
+    assert req.decline is not None and "escapes" in req.decline, req.decline
+
+
+
+def test_collapse_chain_rewires_real_terminal(tmp_path):
+    # #30: Store has identity (self.cache) — fetch rewires to store.load
+    # directly, the middle forwarder is deleted, D survives
+    src = (
+        "class Store:\n"
+        "    def __init__(self):\n"
+        "        self.cache = {}\n"
+        "    def load(self, key):\n"
+        "        return self.cache[key]\n"
+        "\n"
+        "def get_stored(store, key):\n"
+        "    return store.load(key)\n"
+        "\n"
+        "class Facade:\n"
+        "    def fetch(self, store, key):\n"
+        "        return get_stored(store, key)\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    req = fix_engine._FixRequest(
+        kind="collapse-chain",
+        repo=repo,
+        rel="houses/app.py",
+        line=11,
+        opts=fix_engine.FixOptions(),
+    )
+    desc = req.fix_finding()
+    assert desc is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "return store.load(key)" in fixed, fixed
+    assert "get_stored" not in fixed, fixed
+    assert "class Store" in fixed, fixed  # D is real — never dissolved
+
+
+def test_collapse_chain_promotes_stateless_terminal(tmp_path):
+    # D has no identity (only forwarders) and zero external refs — N is
+    # promoted to C, D dissolves
+    src = (
+        "def fetch_key(key):\n"
+        "    return key\n"
+        "\n"
+        "class Store:\n"
+        "    def load(self, key):\n"
+        "        return fetch_key(key)\n"
+        "\n"
+        "def get_stored(store, key):\n"
+        "    return store.load(key)\n"
+        "\n"
+        "class Facade:\n"
+        "    def fetch(self, store, key):\n"
+        "        return get_stored(store, key)\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    req = fix_engine._FixRequest(
+        kind="collapse-chain",
+        repo=repo,
+        rel="houses/app.py",
+        opts=fix_engine.FixOptions(),
+        line=12,
+    )
+    desc = req.fix_finding()
+    assert desc is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "class Store" not in fixed, fixed
+    assert "get_stored" not in fixed, fixed
+    assert "self.load(key)" in fixed or "def load(self, key)" in fixed, fixed
+
+
+def test_collapse_chain_refuses_boundary_between_modules(tmp_path):
+    # the chain is the ONLY coupling between independent modules — refuse
+    src = (
+        "class Server:\n"
+        "    def handle(self, store, key):\n"
+        "        return get_stored(store, key)\n"
+        "\n"
+        "def get_stored(store, key):\n"
+        "    return store.load(key)\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    (repo / "houses" / "store.py").write_text(
+        "class Store:\n    def load(self, key):\n        return key\n"
+    )
+    req = fix_engine._FixRequest(
+        kind="collapse-chain",
+        repo=repo,
+        rel="houses/app.py",
+        line=2,
+        opts=fix_engine.FixOptions(),
+    )
+    desc = req.fix_finding()
+    assert desc is None
+    assert req.decline is not None and "boundary" in req.decline, req.decline
+
+
+# --------------------------------------------------------------------------- split-module (#31)
+
+
+def test_split_module_flat_singleton_moves_class_and_rewrites_callsites(tmp_path):
+    # User is misplaced (stem prod_mod); ProdMod matches the stem and stays,
+    # _Helper is private and stays, the module fn stays — the FLAT singleton
+    # split rewrites `from prod_mod import User` and `prod_mod.User` repo-wide
+    src = (
+        "class User:\n"
+        "    def name(self):\n"
+        "        return 'u'\n"
+        "\n"
+        "class ProdMod:\n"
+        "    def name(self):\n"
+        "        return 'p'\n"
+        "\n"
+        "class _Helper:\n"
+        "    def tag(self):\n"
+        "        return 'h'\n"
+        "\n"
+        "def make_user():\n"
+        "    return User()\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "prod_mod.py").write_text(src)
+    (repo / "consumer.py").write_text(
+        "import prod_mod\n"
+        "from prod_mod import User\n"
+        "def go():\n"
+        "    return User(), prod_mod.User()\n"
+    )
+    req = fix_engine._FixRequest(
+        kind="split-module",
+        repo=repo,
+        rel="prod_mod.py",
+        line=1,
+        opts=fix_engine.FixOptions(),
+    )
+    desc = req.fix_finding()
+    assert desc is not None
+    user = (repo / "user.py").read_text()
+    assert "class User" in user and "class ProdMod" not in user, user
+    origin = (repo / "prod_mod.py").read_text()
+    assert "class User" not in origin, origin
+    assert "class ProdMod" in origin and "class _Helper" in origin
+    assert "def make_user" in origin
+    assert "from user import User" in origin, origin
+    consumer = (repo / "consumer.py").read_text()
+    assert "from user import User" in consumer, consumer
+    assert "user.User()" in consumer, consumer
+    assert "from prod_mod import User" not in consumer
+    # the produced layout is stem-clean — a re-scan would emit no
+    # class-module finding (every public class now matches its file stem)
+    user = (repo / "user.py").read_text()
+    assert user.count("class ") == 1 and "class User" in user, user
+    assert "class ProdMod" not in user and "class _Helper" not in user
+    origin = (repo / "prod_mod.py").read_text()
+    assert "class User" not in origin and "class ProdMod" in origin, origin
+
+
+def test_split_module_whole_cluster_package_by_stem(tmp_path):
+    # Team reads User and both share the class-level LABEL attribute — one
+    # cohesive cluster -> PACKAGE named by the stem; `from prod_mod import
+    # User` keeps resolving (zero caller rewrites)
+    src = (
+        "class User:\n"
+        "    LABEL = 'user'\n"
+        "    def name(self):\n"
+        "        return 'u'\n"
+        "\n"
+        "class Team:\n"
+        "    LABEL = 'team'\n"
+        "    def member(self):\n"
+        "        return User().name()\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "prod_mod.py").write_text(src)
+    (repo / "consumer.py").write_text(
+        "import prod_mod\n"
+        "from prod_mod import User\n"
+        "def go():\n"
+        "    return User(), prod_mod.Team()\n"
+    )
+    req = fix_engine._FixRequest(
+        kind="split-module",
+        repo=repo,
+        rel="prod_mod.py",
+        line=1,
+        opts=fix_engine.FixOptions(),
+    )
+    desc = req.fix_finding()
+    assert desc is not None
+    assert not (repo / "prod_mod.py").exists(), "the origin file is replaced by the package"
+    init = (repo / "prod_mod" / "__init__.py").read_text()
+    assert "from .User import User" in init, init
+    assert "from .Team import Team" in init, init
+    assert "class User" not in init and "class Team" not in init, init
+    user = (repo / "prod_mod" / "User.py").read_text()
+    assert "class User" in user and "LABEL = 'user'" in user, user
+    team = (repo / "prod_mod" / "Team.py").read_text()
+    assert "class Team" in team and "from .User import User" in team, team
+    consumer = (repo / "consumer.py").read_text()
+    assert "from prod_mod import User" in consumer, consumer
+    assert "import prod_mod" in consumer
+    # the produced layout is stem-clean — a re-scan would emit no
+    # class-module finding: one class per member file, named after it
+    import libcst
+
+    for member in ("User.py", "Team.py"):
+        mod = libcst.parse_module((repo / "prod_mod" / member).read_text())
+        classes = [s.name.value for s in mod.body if isinstance(s, libcst.ClassDef)]
+        assert classes == [member[:-3]], f"{member}: {classes}"
+
+
+def test_split_module_sub_cluster_package_requires_name(tmp_path):
+    # User<->Team are cohesive (Team reads User); Extra is independent — the
+    # proper sub-cluster needs --name: absent -> DECLINE (never
+    # flat-for-convenience); present -> the package holds the cluster, Extra
+    # goes flat
+    src = (
+        "class User:\n"
+        "    def name(self):\n"
+        "        return 'u'\n"
+        "\n"
+        "class Team:\n"
+        "    def member(self):\n"
+        "        return User().name()\n"
+        "\n"
+        "class Extra:\n"
+        "    def extra(self):\n"
+        "        return 'x'\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "prod_mod.py").write_text(src)
+    (repo / "consumer.py").write_text(
+        "from prod_mod import Team, Extra\n"
+        "def go():\n"
+        "    return Team(), Extra()\n"
+    )
+    req = fix_engine._FixRequest(
+        kind="split-module",
+        repo=repo,
+        rel="prod_mod.py",
+        line=1,
+        opts=fix_engine.FixOptions(),
+    )
+    assert req.fix_finding() is None
+    assert req.decline is not None and "name" in req.decline, req.decline
+    assert "class User" in (repo / "prod_mod.py").read_text()  # nothing written
+
+    req = fix_engine._FixRequest(
+        kind="split-module",
+        repo=repo,
+        rel="prod_mod.py",
+        line=1,
+        opts=fix_engine.FixOptions(name="models"),
+    )
+    desc = req.fix_finding()
+    assert desc is not None
+    init = (repo / "models" / "__init__.py").read_text()
+    assert "from .User import User" in init and "from .Team import Team" in init, init
+    assert (repo / "models" / "User.py").exists()
+    assert (repo / "models" / "Team.py").exists()
+    extra = (repo / "extra.py").read_text()
+    assert "class Extra" in extra, extra
+    consumer = (repo / "consumer.py").read_text()
+    assert "from models import Team" in consumer, consumer
+    assert "from extra import Extra" in consumer, consumer
+    assert "from prod_mod import" not in consumer
+    assert not (repo / "prod_mod.py").exists()  # the residual is empty -> deleted
+
+
+def test_split_module_refuses_target_collision(tmp_path):
+    # a cohesive pair wants the stem package but prod_mod/ exists and no
+    # --name is given -> decline (never flat-for-convenience); a flat target
+    # collision (user.py exists) also declines
+    src = (
+        "class User:\n"
+        "    def member(self):\n"
+        "        return Team().name()\n"
+        "\n"
+        "class Team:\n"
+        "    def name(self):\n"
+        "        return 't'\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "prod_mod.py").write_text(src)
+    (repo / "prod_mod").mkdir()
+    req = fix_engine._FixRequest(
+        kind="split-module",
+        repo=repo,
+        rel="prod_mod.py",
+        line=1,
+        opts=fix_engine.FixOptions(),
+    )
+    assert req.fix_finding() is None
+    assert req.decline is not None and "prod_mod" in req.decline and "name" in req.decline, req.decline
+
+    repo2 = make_repo(tmp_path / "b", app_src="def alpha(a):\n    return a\n")
+    (repo2 / "prod_mod.py").write_text(
+        "class User:\n"
+        "    def name(self):\n"
+        "        return 'u'\n"
+        "\n"
+        "class ProdMod:\n"
+        "    pass\n"
+    )
+    (repo2 / "user.py").write_text("EXISTING = True\n")
+    req2 = fix_engine._FixRequest(
+        kind="split-module",
+        repo=repo2,
+        rel="prod_mod.py",
+        line=1,
+        opts=fix_engine.FixOptions(),
+    )
+    assert req2.fix_finding() is None
+    assert req2.decline is not None and "user.py" in req2.decline, req2.decline
+
+
+def test_split_module_refuses_import_cycle(tmp_path):
+    # User and Team reference each other — the produced class files would
+    # import each other (a genuine circular import): refuse with a reason
+    src = (
+        "class User:\n"
+        "    def name(self):\n"
+        "        return Team.NAME\n"
+        "\n"
+        "class Team:\n"
+        "    NAME = 't'\n"
+        "    def member(self):\n"
+        "        return User().name()\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "prod_mod.py").write_text(src)
+    req = fix_engine._FixRequest(
+        kind="split-module",
+        repo=repo,
+        rel="prod_mod.py",
+        line=1,
+        opts=fix_engine.FixOptions(),
+    )
+    assert req.fix_finding() is None
+    assert req.decline is not None and "cycle" in req.decline, req.decline
+
+
+def test_split_module_relative_import_in_origin_falls_back_to_flat(tmp_path):
+    # prod_mod.py lives in a package and imports a sibling (from .common) —
+    # the package layout would change the path root: refuse PACKAGE and split
+    # flat (the class files are siblings, the relative imports keep resolving)
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "common.py").write_text("def fmt(s):\n    return s\n")
+    (repo / "houses" / "prod_mod.py").write_text(
+        "from .common import fmt\n"
+        "\n"
+        "class User:\n"
+        "    def name(self):\n"
+        "        return 'u'\n"
+        "\n"
+        "class Team:\n"
+        "    def member(self):\n"
+        "        return fmt(User().name())\n"
+    )
+    (repo / "houses" / "app.py").write_text(
+        "from .prod_mod import User, Team\n"
+        "def go():\n"
+        "    return User(), Team()\n"
+    )
+    req = fix_engine._FixRequest(
+        kind="split-module",
+        repo=repo,
+        rel="houses/prod_mod.py",
+        line=3,
+        opts=fix_engine.FixOptions(),
+    )
+    desc = req.fix_finding()
+    assert desc is not None
+    assert not (repo / "houses" / "prod_mod").exists(), "no package: fell back to flat"
+    user = (repo / "houses" / "user.py").read_text()
+    assert "class User" in user, user
+    team = (repo / "houses" / "team.py").read_text()
+    assert "class Team" in team and "from .common import fmt" in team, team
+    origin = (repo / "houses" / "prod_mod.py").read_text()
+    assert "class User" not in origin and "class Team" not in origin, origin
+    assert "from .common import fmt" in origin
+    app = (repo / "houses" / "app.py").read_text()
+    assert "from .user import User" in app and "from .team import Team" in app, app
+
+
+def test_split_module_refuses_executable_statements_between_classes(tmp_path):
+    # configure() runs between the subject classes — splitting would reorder
+    # it relative to the classes: refuse with a reason
+    src = (
+        "class User:\n"
+        "    def name(self):\n"
+        "        return 'u'\n"
+        "\n"
+        "configure()\n"
+        "\n"
+        "class Team:\n"
+        "    def name(self):\n"
+        "        return 't'\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "prod_mod.py").write_text(src)
+    req = fix_engine._FixRequest(
+        kind="split-module",
+        repo=repo,
+        rel="prod_mod.py",
+        line=1,
+        opts=fix_engine.FixOptions(),
+    )
+    assert req.fix_finding() is None
+    assert req.decline is not None and "class" in req.decline, req.decline
+
+
+def test_split_module_constant_moves_into_owning_class(tmp_path):
+    # THRESHOLD is read only by the misplaced User — it moves INTO User as a
+    # class attribute and the method reference becomes User.THRESHOLD; no
+    # module-level constant survives in either layout (BQ6)
+    src = (
+        "THRESHOLD = 10\n"
+        "\n"
+        "class User:\n"
+        "    def allowed(self):\n"
+        "        return THRESHOLD\n"
+        "\n"
+        "class ProdMod:\n"
+        "    pass\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "prod_mod.py").write_text(src)
+    req = fix_engine._FixRequest(
+        kind="split-module",
+        repo=repo,
+        rel="prod_mod.py",
+        line=3,
+        opts=fix_engine.FixOptions(),
+    )
+    assert req.fix_finding() is not None
+    user = (repo / "user.py").read_text()
+    assert "class User" in user
+    assert "THRESHOLD = 10" in user, user
+    assert "User.THRESHOLD" in user, user
+    origin = (repo / "prod_mod.py").read_text()
+    assert "THRESHOLD" not in origin, origin
+    assert "class ProdMod" in origin
+
+
+def test_split_module_ownerless_constant_stays_in_residual(tmp_path):
+    # LIMIT has no owning class — it stays with the residual origin module
+    # (never stranded, never moved into a class file's top level)
+    src = (
+        "LIMIT = 5\n"
+        "\n"
+        "class User:\n"
+        "    pass\n"
+        "\n"
+        "class ProdMod:\n"
+        "    pass\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "prod_mod.py").write_text(src)
+    req = fix_engine._FixRequest(
+        kind="split-module",
+        repo=repo,
+        rel="prod_mod.py",
+        line=3,
+        opts=fix_engine.FixOptions(),
+    )
+    assert req.fix_finding() is not None
+    origin = (repo / "prod_mod.py").read_text()
+    assert "LIMIT = 5" in origin, origin
+    assert "class ProdMod" in origin
+    user = (repo / "user.py").read_text()
+    assert "LIMIT" not in user, user
+
+
+def test_split_module_package_refuses_imported_constant(tmp_path):
+    # LIMIT is imported from another file — it cannot move into a class; the
+    # package __init__ may hold no constants (BQ6): refuse, never strand
+    src = (
+        "LIMIT = 5\n"
+        "\n"
+        "class User:\n"
+        "    def member(self):\n"
+        "        return Team().name()\n"
+        "\n"
+        "class Team:\n"
+        "    def name(self):\n"
+        "        return 't'\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "prod_mod.py").write_text(src)
+    (repo / "consumer.py").write_text("from prod_mod import LIMIT\n")
+    req = fix_engine._FixRequest(
+        kind="split-module",
+        repo=repo,
+        rel="prod_mod.py",
+        line=4,
+        opts=fix_engine.FixOptions(),
+    )
+    assert req.fix_finding() is None
+    assert req.decline is not None and "LIMIT" in req.decline, req.decline
+    assert "class User" in (repo / "prod_mod.py").read_text()
+
+
+def test_split_module_two_independent_classes_go_flat_and_origin_deleted(tmp_path):
+    # no edges between User and Team -> two singleton FLAT files; the origin
+    # becomes empty and, with no import naming it, is deleted
+    src = (
+        "class User:\n"
+        "    def name(self):\n"
+        "        return 'u'\n"
+        "\n"
+        "class Team:\n"
+        "    def name(self):\n"
+        "        return 't'\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "prod_mod.py").write_text(src)
+    (repo / "consumer.py").write_text(
+        "from prod_mod import User, Team\n"
+        "def go():\n"
+        "    return User(), Team()\n"
+    )
+    req = fix_engine._FixRequest(
+        kind="split-module",
+        repo=repo,
+        rel="prod_mod.py",
+        line=1,
+        opts=fix_engine.FixOptions(),
+    )
+    assert req.fix_finding() is not None
+    assert (repo / "user.py").exists() and (repo / "team.py").exists()
+    assert not (repo / "prod_mod.py").exists(), "the empty origin is deleted"
+    consumer = (repo / "consumer.py").read_text()
+    assert "from user import User" in consumer, consumer
+    assert "from team import Team" in consumer, consumer
+    assert "from prod_mod import" not in consumer
+
 def test_fix_without_line_resolves_single_finding(tmp_path, capsys):
     """R27: no --fix-line needed when the file has exactly one finding of the
     kind — the tool scans and owns the coordinates."""
@@ -1076,11 +1726,6 @@ DIRECTIVE_CASES = [
         "positional-literals",
         "def set_limits(min_v, max_v):\n    return min_v\n\ndef g():\n    return set_limits(10, 20)\n",
         "g()", "g()", "10", None,
-    ),
-    (
-        "magic-number",
-        "def g():\n    return 60 * 2\n",
-        "g()", "g()", "120", "MAX_RETRIES",
     ),
     (
         "vague-name",
@@ -2165,3 +2810,272 @@ def test_loop_hoist_refuses_unsafe_bodies(tmp_path):
     out4, fixed4 = _hoist_fix(tmp_path, "loop_hoist_bad.py", "b_nested", name="score")
     assert out4 is not None
     assert "def _score(it):" in fixed4
+
+
+# --------------------------------------------- shape-routed extract-class (wide-tuple/clump/partition)
+
+
+def test_wide_tuple_becomes_a_record_class(tmp_path):
+    """A fixed-arity tuple annotation becomes a record: the field names come
+    from the build site's element expressions, every same-shape annotation in
+    the file is retargeted, and each build site constructs the class."""
+    src = (
+        "state: tuple[str, int, float, bool] = (mode, level, ratio, alive)\n"
+        "backup: tuple[str, int, float, bool] = (mode, level, ratio, alive)\n"
+        "\n"
+        "\n"
+        "def reset():\n"
+        "    return state\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    out = _fix_finding(
+        "wide-tuple", "houses/app.py", repo, 1, fix_engine.FixOptions(name="RunState")
+    )
+    assert out is not None
+    fixed = p.read_text()
+    assert "class RunState:" in fixed
+    assert "def __init__(self, mode, level, ratio, alive):" in fixed
+    assert "self.ratio = ratio" in fixed
+    assert "state: RunState = RunState(mode, level, ratio, alive)" in fixed
+    assert "backup: RunState = RunState(mode, level, ratio, alive)" in fixed
+    assert "tuple[str, int, float, bool]" not in fixed
+
+
+def test_wide_tuple_refuses_an_ambiguous_anchor(tmp_path):
+    """Two wide-tuple annotations anchored on one line cannot be told apart —
+    the fixer declines instead of guessing which one becomes the record."""
+    src = "first: tuple[int, int, int] = (1, 2, 3); second: tuple[int, int, int] = (4, 5, 6)\n"
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    req = _req("wide-tuple", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Triple"), source=src)
+    assert req.fix_finding() is None
+    assert req.decline and "ambiguous" in req.decline, req.decline
+    assert p.read_text() == src
+
+
+def test_data_clump_pair_becomes_a_parameter_object(tmp_path):
+    """The shared parameter pair threads as one object: the clump's functions
+    take the instance instead of the two values, their bodies read the pair
+    as attributes, and module-scope call sites construct the instance."""
+    src = (
+        "def save(folder, fingerprint, payload):\n"
+        "    return folder + fingerprint + payload\n"
+        "\n"
+        "\n"
+        "def load(folder, fingerprint):\n"
+        "    return folder + fingerprint\n"
+        "\n"
+        "\n"
+        "def verify(folder, fingerprint, strict):\n"
+        "    return folder + fingerprint + strict\n"
+        "\n"
+        "\n"
+        "def main():\n"
+        '    return save("a", "b", "c")\n'
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    out = _fix_finding(
+        "data-clump", "houses/app.py", repo, 1, fix_engine.FixOptions(name="FolderFingerprint")
+    )
+    assert out is not None
+    fixed = p.read_text()
+    assert "class FolderFingerprint:" in fixed
+    assert "def __init__(self, folder, fingerprint):" in fixed
+    assert "def save(folder_fingerprint, payload):" in fixed
+    assert "def load(folder_fingerprint):" in fixed
+    assert "def verify(folder_fingerprint, strict):" in fixed
+    assert "return folder_fingerprint.folder + folder_fingerprint.fingerprint + payload" in fixed
+    assert 'save(FolderFingerprint("a", "b"), "c")' in fixed
+
+
+def test_data_clump_refuses_a_cross_module_caller(tmp_path):
+    """A clump function imported by another module cannot be threaded — the
+    other caller's call site is outside the fixer's resolvable scope."""
+    src = (
+        "def save(folder, fingerprint, payload):\n"
+        "    return folder + fingerprint + payload\n"
+        "\n"
+        "\n"
+        "def load(folder, fingerprint):\n"
+        "    return folder + fingerprint\n"
+        "\n"
+        "\n"
+        "def verify(folder, fingerprint, strict):\n"
+        "    return folder + fingerprint + strict\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    (repo / "consumer.py").write_text("from houses.app import save\n")
+    req = _req("data-clump", "houses/app.py", repo, 1, fix_engine.FixOptions(name="FolderFingerprint"))
+    assert req.fix_finding() is None
+    assert req.decline and "consumer" in req.decline, req.decline
+    assert p.read_text() == src
+
+
+def test_partition_splits_field_disjoint_groups(tmp_path):
+    """A class whose methods form two field-disjoint groups splits into two
+    classes: each keeps the shared base and only its own fields and methods,
+    and the first group keeps the base class's name."""
+    src = (
+        "class BaseReport:\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "class Report(BaseReport):\n"
+        "    def __init__(self):\n"
+        "        self.rows = []\n"
+        "        self.total = 0\n"
+        '        self.title = ""\n'
+        '        self.author = ""\n'
+        "\n"
+        "    def add_row(self, row):\n"
+        "        self.rows.append(row)\n"
+        "\n"
+        "    def row_count(self):\n"
+        "        return len(self.rows)\n"
+        "\n"
+        "    def clear_rows(self):\n"
+        "        self.rows = []\n"
+        "        self.total = 0\n"
+        "\n"
+        "    def set_title(self, title):\n"
+        "        self.title = title\n"
+        "\n"
+        "    def set_author(self, author):\n"
+        "        self.author = author\n"
+        "\n"
+        "    def describe(self):\n"
+        "        return self.title + self.author\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    out = _fix_finding("partition", "houses/app.py", repo, 5, fix_engine.FixOptions(name="Report"))
+    assert out is not None
+    fixed = p.read_text()
+    head, tail = fixed.split("class ReportAuthor(BaseReport):")
+    assert "class Report(BaseReport):" in head
+    assert "class BaseReport:" in head
+    assert "def add_row(self, row):" in head
+    assert "self.total = 0" in head  # the rows group keeps its field initializers
+    assert "def describe(self):" in tail
+    assert "self.title = \"\"" in tail  # the title/author group's initializer moved
+    assert "def set_author(self, author):" in tail
+    assert "add_row" not in tail
+    assert "describe" not in head
+
+
+def test_partition_refuses_a_connector_method(tmp_path):
+    """A method touching two groups' fields is a connector — the class is not
+    field-disjoint, so the fixer declines instead of splitting it wrongly."""
+    src = (
+        "class Report:\n"
+        "    def __init__(self):\n"
+        "        self.rows = []\n"
+        "        self.total = 0\n"
+        '        self.title = ""\n'
+        '        self.author = ""\n'
+        "\n"
+        "    def add_row(self, row):\n"
+        "        self.rows.append(row)\n"
+        "\n"
+        "    def row_count(self):\n"
+        "        return len(self.rows)\n"
+        "\n"
+        "    def clear_rows(self):\n"
+        "        self.rows = []\n"
+        "        self.total = 0\n"
+        "\n"
+        "    def set_title(self, title):\n"
+        "        self.title = title\n"
+        "\n"
+        "    def set_author(self, author):\n"
+        "        self.author = author\n"
+        "\n"
+        "    def describe(self):\n"
+        "        return self.title + self.author\n"
+        "\n"
+        "    def summary(self):\n"
+        "        return self.title + str(self.total)\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    req = _req("partition", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Report"))
+    assert req.fix_finding() is None
+    assert req.decline is not None, "a refusal must say why"
+    assert p.read_text() == src
+
+
+def test_wide_tuple_function_annotation_creates_the_record(tmp_path):
+    """A tuple annotation with no assignment still yields the record: the
+    parameter's annotation is retargeted, and the matching return literals of
+    the function annotated with the same shape construct the class."""
+    src = (
+        "def build(state: tuple[str, int, float], flag) -> None:\n"
+        "    print(state, flag)\n"
+        "\n"
+        "\n"
+        "def grid() -> tuple[str, int, float]:\n"
+        "    return (name, rows, ratio)\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    out = _fix_finding(
+        "wide-tuple", "houses/app.py", repo, 1, fix_engine.FixOptions(name="RunState")
+    )
+    assert out is not None
+    fixed = p.read_text()
+    assert "class RunState:" in fixed
+    assert "def __init__(self, f0, f1, f2):" in fixed  # no build site names them
+    assert "def build(state: RunState, flag) -> None:" in fixed
+    assert "return RunState(name, rows, ratio)" in fixed
+
+
+def test_data_clump_derives_the_class_name_without_a_name(tmp_path):
+    """Without --name the class name is derived from the pair (the anchor's
+    signature order) and only the PREVIEW is produced — the apply needs the
+    explicit name, so nothing is written here."""
+    src = (
+        "def save(folder, fingerprint, payload):\n"
+        "    return folder + fingerprint + payload\n"
+        "\n"
+        "\n"
+        "def load(folder, fingerprint):\n"
+        "    return folder + fingerprint\n"
+        "\n"
+        "\n"
+        "def verify(folder, fingerprint, strict):\n"
+        "    return folder + fingerprint + strict\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    new_source, description = _propose_finding("data-clump", "houses/app.py", repo, 1)
+    assert new_source is not None
+    assert "class FolderFingerprint:" in new_source
+    assert "def save(folder_fingerprint, payload):" in new_source
+    assert description
+    assert p.read_text() == src  # the preview writes nothing
+
+
+def test_extract_class_directive_fixes_a_wide_tuple_finding(tmp_path):
+    """The scanner's directive for these families names `extract-class` (one
+    entry point), so the extract-class invocation must pick the arm from the
+    anchor's shape — not fall through to the strewing group."""
+    src = "state: tuple[str, int, float] = (mode, level, ratio)\n"
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    out = _fix_finding("extract-class", "houses/app.py", repo, 1, fix_engine.FixOptions(name="RunState"))
+    assert out is not None
+    fixed = p.read_text()
+    assert "class RunState:" in fixed
+    assert "state: RunState = RunState(mode, level, ratio)" in fixed
