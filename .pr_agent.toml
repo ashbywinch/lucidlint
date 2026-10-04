@@ -71,7 +71,12 @@ handle_push_trigger = true
 # it every push re-reviews the WHOLE PR diff (family-history-album 2026-08):
 # the incremental flag makes each push review only the commits since the
 # previous review, so a 12-push PR costs 12 small reviews, not 12 full ones.
-push_commands = ["/review -i", "/improve"]
+# /improve (code suggestions) is dropped: its runaway generations (285K
+# output tokens on a 9.3K prompt, 2026-10-04) come back empty at the token
+# ceiling, and the fail-loud wrapper fails the whole action on that recorded
+# tool error — the review itself had posted clean. The review is what the
+# gate exists for; the suggestions pass was never a requirement.
+push_commands = ["/review -i"]
 # The omp harness pushes through its GitHub App token, so the synchronize
 # event's sender is a Bot — with the upstream default (ignore_bot_commits)
 # the review is skipped on every agent push and the fail-loud check-review

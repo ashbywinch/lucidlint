@@ -1513,13 +1513,24 @@ def test_package_and_crate_versions_agree():
     # pyproject.toml and scanner/Cargo.toml are the TWO real version sources
     # (lucidlint.py derives its dev fallback from pyproject; the LSP
     # serverInfo comes from the crate at build time) — a release bumps both
-    # and they must never drift (the version/README drift class)
+    # and they must never drift (the version/README drift class). The two
+    # lockfiles record the same version, so a hand-bump that skips them
+    # leaves a released tree whose locks name the PREVIOUS version.
     import tomllib
 
     root = Path(__file__).resolve().parent.parent
     py = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
     cargo = tomllib.loads((root / "scanner" / "Cargo.toml").read_text())["package"]["version"]
     assert py == cargo, f"pyproject version {py} != Cargo.toml version {cargo}"
+    crate_lock = [
+        p["version"]
+        for p in tomllib.loads((root / "scanner" / "Cargo.lock").read_text())["package"]
+        if p["name"] == "lucidlint"
+    ]
+    assert crate_lock == [py], f"scanner/Cargo.lock records {crate_lock}, not {py}"
+    uv_lock = tomllib.loads((root / "uv.lock").read_text())
+    uv_pkg = [p["version"] for p in uv_lock["package"] if p["name"] == "lucidlint"]
+    assert uv_pkg == [py], f"uv.lock records {uv_pkg}, not {py}"
 
 
 def test_bundle_version_file_is_read_and_normalized(tmp_path):
