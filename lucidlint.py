@@ -1206,16 +1206,36 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _version_from_bundle(here: Path) -> str | None:
+    """The version.txt a release bundle ships (the tag, written with a
+    leading v) — None when the file is absent or empty. The bundle has no
+    pyproject.toml, so without this the bundle's Python entry point
+    reports 0.0.0.dev while bin/lucidlint reports the tag."""
+    try:
+        raw = (here / "version.txt").read_text().strip().lstrip("v")
+    except OSError:
+        return None
+    return raw or None
+
+
 def _version() -> str:
-    """The installed package version, or the source-checkout version from
-    pyproject.toml — NEVER a hardcoded literal (the README/version drift
-    class; pyproject.toml is the single source, tests pin it equal to the
-    Rust crate version)."""
+    """The artifact's own stamp (a bundle's version.txt, the tag written
+    at release time), else the installed package version, else the
+    source-checkout version from pyproject.toml — NEVER a hardcoded
+    literal (the README/version drift class; pyproject.toml is the single
+    source for a checkout, tests pin it equal to the Rust crate version,
+    and the release workflow writes version.txt from the tag). The
+    artifact's stamp wins: a bundle run inside an environment that has
+    some other lucidlint installed still reports its own tag."""
+    here = Path(__file__).resolve().parent
+    bundled = _version_from_bundle(here)
+    if bundled is not None:
+        return bundled
     try:
         return metadata.version("lucidlint")
     except Exception:
         try:
-            with (Path(__file__).resolve().parent / "pyproject.toml").open("rb") as f:
+            with (here / "pyproject.toml").open("rb") as f:
                 return str(tomllib.load(f)["project"]["version"])
         except Exception:
             return "0.0.0.dev"
