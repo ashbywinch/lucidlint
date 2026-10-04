@@ -1522,6 +1522,23 @@ def test_package_and_crate_versions_agree():
     assert py == cargo, f"pyproject version {py} != Cargo.toml version {cargo}"
 
 
+def test_bundle_version_file_is_read_and_normalized(tmp_path):
+    """A release bundle ships version.txt (the tag, with the leading v) and
+    NO pyproject.toml, so the bundle's Python entry point must read it —
+    otherwise a released bundle reports 0.0.0.dev (the released 0.6.3
+    bundle did exactly that while bin/lucidlint reported v0.6.3)."""
+    bundled = tmp_path / "bundle"
+    bundled.mkdir()
+    (bundled / "version.txt").write_text("v9.9.9\n")
+    assert ch._version_from_bundle(bundled) == "9.9.9"
+    (bundled / "version.txt").write_text("0.6.3\n")
+    assert ch._version_from_bundle(bundled) == "0.6.3"
+    (bundled / "version.txt").write_text("   \n")
+    assert ch._version_from_bundle(bundled) is None
+    (bundled / "version.txt").unlink()
+    assert ch._version_from_bundle(bundled) is None
+
+
 def test_rules_md_is_generated():
     """The RULES.md rule tables are generated from rule_metadata.py (`make
     rules`) — a new family, a severity change, or a hand edit that leaves
