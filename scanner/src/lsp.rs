@@ -426,9 +426,9 @@ pub fn dispatch(state: &mut LspState, msg: &serde_json::Value, out: &mut impl Wr
                 &id,
                 serde_json::json!({
                     "capabilities": {
-                        "textDocumentSync": {"openClose": true, "change": 1},
-                        "serverInfo": {"name": "lucidlint", "version": env!("CARGO_PKG_VERSION")}
-                    }
+                        "textDocumentSync": {"openClose": true, "change": 1}
+                    },
+                    "serverInfo": {"name": "lucidlint", "version": env!("CARGO_PKG_VERSION")}
                 }),
                 out,
             );
@@ -581,14 +581,27 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_initialize_responds_with_capabilities() {
+    fn dispatch_initialize_reports_server_info_beside_capabilities() {
+        // serverInfo is a SIBLING of capabilities in the InitializeResult
+        // (LSP 3.17). Nested inside capabilities a client ignores it as an
+        // unknown key and the server reports no version at all — which is
+        // how 0.6.6 shipped: `lucidlint --lsp` answered with the version
+        // buried in capabilities, so `initialize` looked version-less.
         let mut docs = LspState::new();
         let mut out = Vec::new();
         let msg = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
         assert!(dispatch(&mut docs, &msg, &mut out));
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("textDocumentSync"));
-        assert!(text.contains("\"id\":1"));
+        let body = text.split("\r\n\r\n").nth(1).unwrap_or(&text);
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["id"], 1);
+        assert!(parsed["result"]["capabilities"]["textDocumentSync"].is_object());
+        assert!(
+            parsed["result"]["capabilities"]["serverInfo"].is_null(),
+            "serverInfo must not be nested inside capabilities — clients ignore it there"
+        );
+        assert_eq!(parsed["result"]["serverInfo"]["name"], "lucidlint");
+        assert_eq!(parsed["result"]["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
