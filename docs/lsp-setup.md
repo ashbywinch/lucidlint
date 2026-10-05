@@ -59,6 +59,12 @@ language-servers = ["lucidlint"]
 
 ## Notes
 
+- Confirm which build your editor is running: the `initialize` response
+  carries `serverInfo.version` (the crate version compiled into the
+  binary). Editors that show a server log display it; any LSP client can
+  read it, and `lucidlint --version` must agree. An editor pointed at an
+  old copy of the binary keeps reporting that old version, so check this
+  after every install or update.
 - macOS: the first run of a downloaded (unsigned) binary needs
   `xattr -d com.apple.quarantine /path/to/lucidlint`.
 - The LSP publishes the same findings as the gate, including the
