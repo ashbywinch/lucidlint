@@ -136,7 +136,9 @@ lockfile fix for exactly that reason).
 Verify the published artifacts, not just the workflow's success: a bundle
 must report its own tag (`python3 lucidlint.py --version` → `lucidlint
 X.Y.Z`, `bin/lucidlint --version` → `lucidlint vX.Y.Z`) and the sdist's
-four version sources must agree. The packaging checks assert the bundle
+packaged version sources must agree (`pyproject.toml`,
+`scanner/Cargo.toml`, `scanner/Cargo.lock` — `uv.lock` is repo-only and
+is not packaged). The packaging checks assert the bundle
 version and the version test asserts the four sources; both exist because
 v0.6.3 shipped a bundle whose Python entry point said `0.0.0.dev`.
 
