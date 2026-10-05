@@ -111,10 +111,11 @@ lucidlint --repo .
 ## Versioning
 
 lucidlint follows [Semantic Versioning](https://semver.org/). The version
-lives in two places that a test pins equal — `pyproject.toml` (the Python
-package) and `scanner/Cargo.toml` (the Rust crate); the binary and the LSP
-report the version derived from them, never a hardcoded literal. The
-README intentionally carries no version number so it cannot go stale.
+lives in FOUR places that a test pins equal — `pyproject.toml` and
+`uv.lock` (the Python package), `scanner/Cargo.toml` and
+`scanner/Cargo.lock` (the Rust crate); the binary and the LSP report the
+version derived from them, never a hardcoded literal. The README
+intentionally carries no version number so it cannot go stale.
 
 To cut a release, classify the changes since the last tag
 (`git log $(git tag --sort=-v:refname | head -1)..HEAD`):
@@ -124,8 +125,20 @@ To cut a release, classify the changes since the last tag
 - a backwards-compatible feature (a new rule, fix, or option) → **MINOR** (`Y`),
 - bug fixes only → **PATCH** (`Z`).
 
-Bump both version files, commit, tag `vX.Y.Z`, push the tag — the release
-workflow builds and publishes the bundles and wheels.
+**Land everything the release contains first.** A tag is a snapshot of
+`main`'s tip: merge every PR meant for this version, then bump all four
+version files in one commit, tag `vX.Y.Z` on that merge commit, and push
+the tag — the release workflow builds and publishes the bundles and
+wheels. Tagging and then merging more work leaves the tag behind `main`
+and the release missing it (v0.6.4 lagged `main` by a review-config and
+lockfile fix for exactly that reason).
+
+Verify the published artifacts, not just the workflow's success: a bundle
+must report its own tag (`python3 lucidlint.py --version` → `lucidlint
+X.Y.Z`, `bin/lucidlint --version` → `lucidlint vX.Y.Z`) and the sdist's
+four version sources must agree. The packaging checks assert the bundle
+version and the version test asserts the four sources; both exist because
+v0.6.3 shipped a bundle whose Python entry point said `0.0.0.dev`.
 
 
 The pip install gives the `lucidlint` command (no `.py`, no flags with
