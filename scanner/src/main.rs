@@ -4407,6 +4407,47 @@ mod tests {
             r[0].message
         );
     }
+    #[test]
+    fn record_export_edges_on_record_classes_emit_nothing() {
+        // Issue #42, the export mirror of F1: a to_dict/to_json method whose
+        // enclosing class DECLARES fields returns the class's own shape. The
+        // class names it, so neither the `-> dict` return annotation nor the
+        // literal rebuilding those fields has advice left to give.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_export_to_dict_class_fields_passes__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+    }
+
+    #[test]
+    fn record_export_literal_with_uncovered_key_keeps_the_literal_finding() {
+        // The literal exemption is keyed on the class's OWN fields: a
+        // returned literal adding a key the class does not declare holds a
+        // shape the class does not name — the literal arm still reports it.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_export_to_dict_uncovered_key_fires__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(
+            r[0].message.contains("This dict has constant keys (rid, fresh, extra)"),
+            "{}",
+            r[0].message
+        );
+        assert_eq!(r[0].line, 10);
+    }
+
+    #[test]
+    fn record_export_exemption_needs_both_the_name_and_the_class_fields() {
+        // No export edge: a to_dict on a class that declares no field, a
+        // non-export-named method on a field-bearing class, and a
+        // module-level to_dict all keep both arms.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_export_non_edge_to_dict_keeps_findings__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 6, "{f:?}");
+    }
 
     #[test]
     fn record_dict_call_as_inline_argument_is_found() {
@@ -5772,7 +5813,9 @@ mod tests {
         // Phase 4/4a: the marker on the line before the def binds the
         // def-anchored return finding — the window is the finding's own line,
         // the line before it, and the logical line's pair (here the def is one
-        // source line).
+        // source line). The method is deliberately NOT to_dict/to_json: an
+        // export-named method on a field-bearing class emits no finding at all
+        // (issue #42), which would leave the marker stale rather than binding.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/record_suppression_one_line_above_def_binds__01.py"
         ));

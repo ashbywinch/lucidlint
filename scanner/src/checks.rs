@@ -7511,6 +7511,61 @@ fn module_has_from_dict_class(body: &[Stmt]) -> bool {
     false
 }
 
+/// Issue #42, the export mirror of F1: a `to_dict`/`to_json` method on a
+/// class that DECLARES fields. The class names the shape the method returns,
+/// so neither the `-> dict` return annotation nor a literal rebuilding those
+/// fields has advice left to give.
+struct ExportEdge {
+    /// The method NAME's offset — the signature arm's key (unique per file).
+    name_start: ruff_text_size::TextSize,
+    /// The method's line span — the literal arm's containment test.
+    start_line: usize,
+    end_line: usize,
+    /// The class's declared field names.
+    fields: HashSet<String>,
+}
+
+/// Export-edge method names, mirroring the ingestion side's from_dict/from_json
+/// pair.
+fn is_export_name(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("to_dict") || n.contains("to_json")
+}
+
+/// The module's export edges, in every class (nested ones included). A class
+/// DECLARES fields by annotating them in the class body or in __init__, or by
+/// assigning self.<x> in a method; a class with no declared field names no
+/// shape, so its to_dict is not an edge.
+fn module_export_edges(body: &[Stmt], source: &str) -> Vec<ExportEdge> {
+    let mut out = Vec::new();
+    let mut sq: Vec<&Stmt> = body.iter().collect();
+    while let Some(s) = sq.pop() {
+        if let Stmt::ClassDef(c) = s {
+            let mut fields: HashSet<String> = class_field_names(c).into_iter().map(|(n, _)| n).collect();
+            fields.extend(class_attr_names(&c.body));
+            if !fields.is_empty() {
+                for m in &c.body {
+                    let Stmt::FunctionDef(f) = m else { continue };
+                    if !is_export_name(&f.name) {
+                        continue;
+                    }
+                    out.push(ExportEdge {
+                        name_start: f.name.range().start(),
+                        start_line: line_of(source, f.range().start()),
+                        end_line: line_of(source, f.range().end()),
+                        fields: fields.clone(),
+                    });
+                }
+            }
+        }
+        match s {
+            Stmt::FunctionDef(f) => sq.extend(&f.body),
+            _ => push_stmt_children(s, &mut sq),
+        }
+    }
+    out
+}
+
 /// The collection message's shared continuation: the map is the unnamed
 /// shape; the alias answer and the member-function move are the action.
 const COLLECTION_MESSAGE_TAIL: &str = "The map itself has no name and no role: call sites pass a bare dict, and nothing says what the collection means. Make a class for the collection, named with a domain noun — an alias to dict names the problem, it does not solve it. Move the operations that take, build, or read this map onto the class as methods, splitting them where the class does not own all the work; which operations belong there is the judgement call.";
@@ -7526,6 +7581,8 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
     // G2: the module's from_dict classes — a union-typed parameter blending
     // one of them with the wire dict gets the union message.
     let from_dict_classes = module_from_dict_class_names(body);
+    // Issue #42: the module's export edges — the F1 mirror on the export side.
+    let export_edges = module_export_edges(body, source);
     // P1: the module's type bindings — the dict value element's resolution
     // table (module classes, import aliases, known constructors).
     let bindings = module_type_bindings(body);
@@ -7533,6 +7590,12 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
         if let Q::N(n) = queue[qi] {
             if let AnyNodeRef::StmtFunctionDef(f) = n {
                 let def_line = line_of(source, f.name.range().start());
+                // Issue #42: this function IS an export edge (a to_dict/to_json
+                // method whose enclosing class declares fields) — the class
+                // names the returned shape, so the return annotation has
+                // nothing left to ask for. The literal arm filters per literal,
+                // on field coverage.
+                let export_edge = export_edges.iter().any(|e| e.name_start == f.name.range().start());
                 let mut params: Vec<(&str, Option<&Expr>, usize)> = Vec::new();
                 for pwd in f
                     .parameters
@@ -7611,7 +7674,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                         }
                     }
                     if let Some(r) = &f.returns {
-                        if annotation_is_record(r.as_ref(), &bindings) {
+                        if !export_edge && annotation_is_record(r.as_ref(), &bindings) {
                             // H2: a return finding anchors at the return
                             // annotation's position; the def line only when
                             // that cannot be resolved.
@@ -7694,6 +7757,16 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
         }
     }
     for h in unique {
+        // Issue #42: a literal inside a to_dict/to_json method whose keys are
+        // the enclosing class's own declared fields rebuilds a shape the class
+        // already names — the export mirror of F1.
+        if !h.keys.is_empty()
+            && export_edges
+                .iter()
+                .any(|e| h.line >= e.start_line && h.line <= e.end_line && h.keys.iter().all(|k| e.fields.contains(k)))
+        {
+            continue;
+        }
         let keys = display_keys(&h.keys);
         // P1: a literal whose values ALL name one type is a map of that
         // type — the collection message; any other shape keeps the
