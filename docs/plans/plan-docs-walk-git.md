@@ -51,6 +51,10 @@ run is the acceptance instrument.
    `docs/` + the two roots — a scope the harvest has no business deciding).
 3. Every read is guarded (`except OSError: continue`): one dangling symlink
    or unreadable doc is no longer fatal.
+4. Both enumerations carry a 30 s timeout, so they catch
+   `subprocess.TimeoutExpired` too — it is NOT an `OSError`, so a hung git
+   would have crashed the scan the enumerations were added to protect (PR
+   review finding; the check-ignore call's own timeout is left as it was).
 
 ## Measured behaviour deltas
 
@@ -84,10 +88,12 @@ run is the acceptance instrument.
 - `test_gitignored_docs_ignores_an_ignored_docs_own_refs` — an ignored doc is
   never enumerated, so its references need no entry.
 - `test_gitignored_docs_survives_missing_git` /
-  `..._survives_missing_check_ignore` — the two degradations.
+  `..._survives_missing_check_ignore` / `..._survives_a_hung_git` — the three
+  degradations (the last one is the `TimeoutExpired` guard).
 - `test_gitignored_docs_resolves_sibling_refs_against_the_file` — kept,
   now routing the enumeration call.
-- Four of the seven fail against the pre-change implementation (verified by
+- Four of the eight fail against the pre-change implementation (verified by
   restoring 5c893cb's `lucidlint.py`): missing-git, the dangling symlink,
   the nested checkout, the ignored doc's own refs. The harvest-scope test
-  fails against the roots-only revision (ae74189) instead.
+  fails against the roots-only revision (ae74189), and the hung-git test
+  against this PR's first push (no `TimeoutExpired` catch).

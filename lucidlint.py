@@ -461,7 +461,9 @@ def _git_ignored_md(repo: Path) -> tuple[str, ...]:
             text=True,
             timeout=30,
         )
-    except OSError as e:  # lucidlint: ignore swallow git missing — a gitless run has nothing ignored
+    # TimeoutExpired is NOT an OSError: the timeout below is the reason a hung
+    # git is caught here at all
+    except (OSError, subprocess.TimeoutExpired) as e:  # lucidlint: ignore swallow git missing — nothing is ignored
         log(f"git ls-files --ignored: {e}")
         return ()
     if proc.returncode != 0:
@@ -484,7 +486,7 @@ def _repo_md_paths(repo: Path) -> tuple[str, ...]:
             text=True,
             timeout=30,
         )
-    except OSError as e:  # lucidlint: ignore swallow git missing — a gitless run harvests nothing
+    except (OSError, subprocess.TimeoutExpired) as e:  # lucidlint: ignore swallow git missing — nothing harvested
         log(f"git ls-files: {e}")
         return ()
     if proc.returncode != 0:

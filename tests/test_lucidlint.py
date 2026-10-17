@@ -441,6 +441,34 @@ def test_gitignored_docs_survives_missing_git(tmp_path):
         assert ch._gitignored_docs(repo) == ()
 
 
+def test_gitignored_docs_survives_a_hung_git(tmp_path):
+    # the enumerations carry a timeout, and TimeoutExpired is NOT an OSError —
+    # an uncaught one would crash the scan on a hung git instead of degrading
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "guide.md").write_text("# g\n")
+
+    class HungGit:
+        """A subprocess whose every call times out. The module's `except`
+        clause reads `subprocess.TimeoutExpired` off this fake, so the real
+        class must be reachable through it."""
+
+        TimeoutExpired = subprocess.TimeoutExpired
+
+        @staticmethod
+        def run(args, **kwargs):
+            raise subprocess.TimeoutExpired(args, kwargs.get("timeout") or 0)
+
+    saved = ch.subprocess
+    ch.subprocess = cast(Any, HungGit())
+    try:
+        assert ch._gitignored_docs(repo) == ()
+    finally:
+        ch.subprocess = saved
+
+
 def test_gitignored_docs_survives_missing_check_ignore(tmp_path):
     # git gone for the referenced-absent query only: the ls-files answer still
     # stands, so a present private doc stays suppressed (the absent one, known
