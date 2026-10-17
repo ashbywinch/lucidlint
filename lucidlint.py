@@ -447,109 +447,104 @@ class SourceFile:
     rel: str
 
 
-# dirs that never hold shipped docs — pruning the walk keeps it off
-# node_modules (thousands of .md files; rglob would descend tens of
-# thousands of entries) plus venvs/caches/build output
-_SKIP_DIRS = frozenset(
-    {
-        ".git",
-        ".venv",
-        "venv",
-        "node_modules",
-        "__pycache__",
-        ".lucidlint-cache",
-        ".ruff_cache",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".pyrefly-cache",
-        "htmlcov",
-        "dist",
-        "build",
-        "target",
-        ".code-review-graph",
-        ".tox",
-        ".eggs",
-    }
-)
+def _git_ignored_md(repo: Path) -> tuple[str, ...]:
+    """The .md paths git itself reports as ignored — one `git ls-files` call,
+    no filesystem walk. `--exclude-standard` honours .gitignore,
+    .git/info/exclude and the global excludes file, and git does not descend a
+    nested checkout (another worktree of this repo is a single opaque entry),
+    so a sibling checkout's markdown is never enumerated. Empty when git or
+    the repository is missing — nothing is ignored then."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", "*.md"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except OSError as e:  # lucidlint: ignore swallow git missing — a gitless run has nothing ignored
+        log(f"git ls-files --ignored: {e}")
+        return ()
+    if proc.returncode != 0:
+        return ()
+    return tuple(sorted(p for p in proc.stdout.split("\0") if p.endswith(".md")))
+
+
+def _repo_md_paths(repo: Path) -> tuple[str, ...]:
+    """The repo's own .md files — git's answer (tracked plus
+    untracked-not-ignored), the enumeration `_py_files` uses. EVERY doc the
+    repo owns is enumerated, wherever it lives: the harvest must not decide
+    which markdown counts by re-deriving the scan's roots. Ignored docs are
+    not the shipped doc set and a nested checkout is one opaque entry to git,
+    so neither is enumerated — and a vendored tree is ignored, which is what
+    `--exclude-standard` answers."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "*.md"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except OSError as e:  # lucidlint: ignore swallow git missing — a gitless run harvests nothing
+        log(f"git ls-files: {e}")
+        return ()
+    if proc.returncode != 0:
+        return ()
+    return tuple(sorted(p for p in proc.stdout.split("\0") if p.endswith(".md")))
 
 
 def _gitignored_docs(repo: Path) -> tuple[str, ...]:
-    """Repo-relative .md paths the repo's own .gitignore excludes — private
-    docs (review-log R3). The docs-reachability scan must treat them as
-    intentionally absent: they are not shipped, so a link to one is not a
-    broken link and an orphan one is not an undiscoverable doc. Requires
-    pygit2's path_is_ignored; the no-git rglob fallback cannot know ignore
-    status and keeps the previous behavior (gitignored private docs stay
-    visible as documented findings)."""
-    if _pygit2 is None:
-        return ()
-    try:
-        r = _pygit2.Repository(str(repo))
-    except Exception:  # not a git repo — nothing is gitignored
-        return ()
-    ignored: list[str] = []
-    # the walk prunes vendored/tool dirs (node_modules holds thousands of
-    # .md files; the second walk's skip set already names them — one set,
-    # one pruning rule for both walks)
-    for root, dirs, files in os.walk(repo):
-        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
-        for fname in files:
-            if not fname.endswith(".md"):
-                continue
-            rel = Path(root).joinpath(fname).relative_to(repo).as_posix()
-            try:
-                if r.path_is_ignored(rel):
-                    ignored.append(rel)
-            except ValueError:  # lucidlint: ignore swallow ambiguous path — keep it visible
-                pass
-    # referenced-but-absent targets: an ignored private doc may never have
-    # been committed, so the walk cannot see it — `git check-ignore` answers
-    # for any path. Query the .md references the docs actually make (a loose
-    # over-approximation is fine — extra ignored paths only suppress more).
+    """Repo-relative .md paths git ignores — private docs (review-log R3). The
+    docs scan must treat them as intentionally absent: they are not shipped,
+    so a link to one is not a broken link and an orphan one is not an
+    undiscoverable doc. Both halves are git's answer: the ignored files from
+    `ls-files`, the referenced-but-absent ones from `check-ignore` on the
+    references the repo's own docs make (a private doc may never have been
+    committed, so no enumeration can see it — only the reference does)."""
+    ignored = set(_git_ignored_md(repo))
     refs: set[str] = set()
-    for root, dirs, files in os.walk(repo):
-        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
-        for fname in files:
-            if not fname.endswith(".md"):
+    for rel in _repo_md_paths(repo):
+        p = repo / rel
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        # a dangling symlink or an unreadable doc is not a reason to fail the
+        # scan — one stale link used to kill the whole run
+        except OSError:  # lucidlint: ignore swallow unreadable doc — it can carry no reference
+            continue
+        for hit in re.findall(r"`([^`]+\.md)`|\[[^\]]*\]\(([^)]+\.md)\)", text):
+            ref = hit[0] or hit[1]
+            # a parent-relative or absolute reference lies OUTSIDE the
+            # repo — `git check-ignore` aborts the whole batch on one
+            # (rc 128, no output); those are never repo-ignored anyway
+            if ref.startswith(("../", "/")):
                 continue
-            text = Path(root).joinpath(fname).read_text(encoding="utf-8", errors="replace")
-            for hit in re.findall(r"`([^`]+\.md)`|\[[^\]]*\]\(([^)]+\.md)\)", text):
-                ref = hit[0] or hit[1]
-                # a parent-relative or absolute reference lies OUTSIDE the
-                # repo — `git check-ignore` aborts the whole batch on one
-                # (rc 128, no output); those are never repo-ignored anyway
-                if ref.startswith(("../", "/")):
-                    continue
-                # references resolve like the Rust docs scan: `docs/`- and
-                # `standards/`-prefixed names against the repo ROOT, anything
-                # else (a sibling bare name) against the doc's own directory —
-                # `other.md` from docs/sub/guide.md is docs/sub/other.md, not
-                # repo-root other.md (review bot)
-                cand = repo / ref if ref.startswith(("docs/", "standards/")) else Path(root) / ref
-                try:
-                    refs.add(cand.resolve().relative_to(repo).as_posix())
-                except ValueError:
-                    continue  # resolved outside the repo
-
+            # references resolve like the Rust docs scan: `docs/`- and
+            # `standards/`-prefixed names against the repo ROOT, anything
+            # else (a sibling bare name) against the doc's own directory —
+            # `other.md` from docs/sub/guide.md is docs/sub/other.md, not
+            # repo-root other.md (review bot)
+            cand = repo / ref if ref.startswith(("docs/", "standards/")) else p.parent / ref
+            try:
+                refs.add(cand.resolve().relative_to(repo).as_posix())
+            except ValueError:
+                continue  # resolved outside the repo
     if refs:
-        queryable = sorted(refs)
         try:
             proc = subprocess.run(
                 ["git", "-C", str(repo), "check-ignore", "--stdin"],
-                input="\n".join(queryable),
+                input="\n".join(sorted(refs)),
                 capture_output=True,
                 text=True,
             )
-            # no git binary — the referenced-absent-doc query degrades; the
+        # no git binary — the referenced-absent-doc query degrades; the
+        # ls-files answer still stands (gitless mode, review bot)
         except OSError as e:  # lucidlint: ignore swallow terminal boundary — gitless env, no caller to propagate to
-            # walk's pygit2 answer still stands (gitless mode, review bot)
             log(f"git check-ignore unavailable ({e}) — referenced-absent docs stay visible")
         else:
             for line in proc.stdout.splitlines():
                 line = line.strip()
                 if line.endswith(".md"):
-                    ignored.append(line.replace(os.sep, "/"))
-    return tuple(sorted(set(ignored)))
+                    ignored.add(line.replace(os.sep, "/"))
+    return tuple(sorted(ignored))
 
 
 def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
