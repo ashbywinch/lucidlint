@@ -421,22 +421,139 @@ def test_no_pygit2_file_list_uses_git_and_honors_gitignore(tmp_path):
 
 
 def test_gitignored_docs_survives_missing_git(tmp_path):
-    # a machine without the git binary must not crash the gate — the
-    # referenced-absent-doc query degrades (the walk's pygit2 answer stands)
-    # instead of FileNotFoundError-ing the whole run (review bot)
+    # a machine without the git binary must not crash the gate: both halves of
+    # the answer come from git now (ls-files enumerates the ignored docs,
+    # check-ignore the referenced-but-absent ones), and each degrades to
+    # nothing instead of FileNotFoundError-ing the whole run (review bot)
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     (repo / "docs").mkdir()
     (repo / "docs" / "guide.md").write_text("# g\n")
+    (repo / "docs" / "private.md").write_text("# private\n")
     (repo / "AGENTS.md").write_text("# agents\n- [g](docs/guide.md)\n")
     (repo / ".gitignore").write_text("docs/private.md\n")
 
-    def is_check_ignore(args):
-        return args[:2] == ["git", "-C"] and args[3] == "check-ignore"
+    def is_git(args):
+        return args[:2] == ["git", "-C"]
 
-    with Env(routes=[(lambda a: is_check_ignore(a), FileNotFoundError, 0)]):
+    with Env(routes=[(is_git, FileNotFoundError, 0)]):
         assert ch._gitignored_docs(repo) == ()
+
+
+def test_gitignored_docs_survives_a_hung_git(tmp_path):
+    # the enumerations carry a timeout, and TimeoutExpired is NOT an OSError —
+    # an uncaught one would crash the scan on a hung git instead of degrading
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "guide.md").write_text("# g\n")
+
+    class HungGit:
+        """A subprocess whose every call times out. The module's `except`
+        clause reads `subprocess.TimeoutExpired` off this fake, so the real
+        class must be reachable through it."""
+
+        TimeoutExpired = subprocess.TimeoutExpired
+
+        @staticmethod
+        def run(args, **kwargs):
+            raise subprocess.TimeoutExpired(args, kwargs.get("timeout") or 0)
+
+    saved = ch.subprocess
+    ch.subprocess = cast(Any, HungGit())
+    try:
+        assert ch._gitignored_docs(repo) == ()
+    finally:
+        ch.subprocess = saved
+
+
+def test_gitignored_docs_survives_missing_check_ignore(tmp_path):
+    # git gone for the referenced-absent query only: the ls-files answer still
+    # stands, so a present private doc stays suppressed (the absent one, known
+    # only from the reference, goes back to being a visible finding)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "guide.md").write_text("see `docs/absent-private.md`\n")
+    (repo / "docs" / "private.md").write_text("# private\n")
+    (repo / ".gitignore").write_text("docs/private.md\ndocs/absent-private.md\n")
+    assert ch._gitignored_docs(repo) == ("docs/absent-private.md", "docs/private.md")
+
+    def is_git(args, sub):
+        return args[:2] == ["git", "-C"] and args[3] == sub
+
+    routes = [
+        (lambda a: is_git(a, "ls-files"), PASSTHROUGH, 0),
+        (lambda a: is_git(a, "check-ignore"), FileNotFoundError, 0),
+    ]
+    with Env(routes=routes):
+        assert ch._gitignored_docs(repo) == ("docs/private.md",)
+
+
+def test_gitignored_docs_survives_a_dangling_md_symlink(tmp_path):
+    # the harvest reads every .md the repo owns, so one unreadable doc — a
+    # stale agent worktree's dangling symlink farm — must be skipped, not
+    # fatal; it used to FileNotFoundError the whole run
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "guide.md").write_text("see `private.md`\n")
+    (repo / "docs" / "private.md").write_text("# private\n")
+    (repo / "docs" / "broken.md").symlink_to(repo / "docs" / "gone.md")
+    (repo / ".gitignore").write_text("docs/private.md\n")
+
+    assert ch._gitignored_docs(repo) == ("docs/private.md",)
+
+
+def test_gitignored_docs_ignores_a_nested_checkout(tmp_path):
+    # a nested checkout is ONE opaque entry to git: its markdown is neither
+    # enumerated nor read, so a reference made inside it cannot enter this
+    # repo's ignored set (the filesystem walk descended it and read it)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "guide.md").write_text("# g\n")
+    nested = repo / "nested"
+    (nested / "docs").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    (nested / "docs" / "inner.md").write_text("see `docs/absent-private.md`\n")
+    (repo / ".gitignore").write_text("nested/\ndocs/absent-private.md\n")
+
+    assert ch._gitignored_docs(repo) == ()
+
+
+def test_gitignored_docs_harvests_every_non_ignored_doc(tmp_path):
+    # the harvest reads the repo's OWN docs wherever they live — a reference
+    # from a root-level or subdirectory doc counts, not just one from docs/
+    # (the scan's roots are the core's business, not the harvest's)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "guide.md").write_text("# g\n")
+    (repo / "notes").mkdir()
+    (repo / "notes" / "plan.md").write_text("see `docs/absent-private.md`\n")
+    (repo / ".gitignore").write_text("docs/absent-private.md\n")
+
+    assert ch._gitignored_docs(repo) == ("docs/absent-private.md",)
+
+
+def test_gitignored_docs_ignores_an_ignored_docs_own_refs(tmp_path):
+    # an ignored doc is not part of the shipped doc set, so a reference made
+    # inside one needs no suppression entry — git never enumerates it
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "private.md").write_text("see `docs/absent-secret.md`\n")
+    (repo / ".gitignore").write_text("docs/private.md\ndocs/absent-secret.md\n")
+
+    assert ch._gitignored_docs(repo) == ("docs/private.md",)
 
 
 def test_gitignored_docs_resolves_sibling_refs_against_the_file(tmp_path):
@@ -451,10 +568,13 @@ def test_gitignored_docs_resolves_sibling_refs_against_the_file(tmp_path):
     (repo / "docs" / "sub" / "guide.md").write_text("see `other.md`\n")
     (repo / ".gitignore").write_text("docs/sub/other.md\n")
 
+    def ls_files(args):
+        return args[:2] == ["git", "-C"] and args[3] == "ls-files"
+
     def is_check_ignore(args):
         return args[:2] == ["git", "-C"] and args[3] == "check-ignore"
 
-    with Env(routes=[(lambda a: is_check_ignore(a), "", 0)]) as env:
+    with Env(routes=[(lambda a: ls_files(a), PASSTHROUGH, 0), (lambda a: is_check_ignore(a), "", 0)]) as env:
         ch._gitignored_docs(repo)
     idx = next(i for i, a in enumerate(env.fake.calls) if is_check_ignore(a))
     stdin = env.fake.call_kwargs[idx]["input"]
