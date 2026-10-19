@@ -35,35 +35,50 @@ unit tests); the two-repo run is the acceptance instrument.
 
 ## The change
 
-`module_middle_man_classes` reads the file's classes once: whether each is an
-interface (`ABC`/`ABCMeta`/`Protocol` base or an `@abstractmethod` member),
-its methods with their parameter shape (positional-required count, names with
-defaults, every non-receiver name), its bases, and which module class each
-`self.<attr>` is built from (an annotated field, `self.x: T`, or
-`self.x = T(...)`).
+`collect_middle_man` runs per file and hands the repo-wide pass two
+collections: the file's classes — whether each is an interface
+(`ABC`/`ABCMeta`/`Protocol` base or an `@abstractmethod` member), its methods
+with their parameter shape (positional-required count, names with defaults,
+every non-receiver name), its bases, and which class each `self.<attr>` is
+built from (an annotated field, `self.x: T`, or `self.x = T(...)`) — and its
+delegation candidates (owner class, attribute chain, the call's own shape,
+the wrapper's name and parameters). `middle_man_findings` then merges every
+file's classes into one index and decides.
+
+**Repo-wide, not per file.** One class per file is the house convention, so
+the target of a delegation usually lives in ANOTHER file: a file-local index
+reads almost every real target as "outside the codebase" and silently drops
+the finding for exactly the production wrappers the rule is for. (First cut
+was per-file; the reviewer's argument that a one-class-per-file codebase
+makes cross-file targets the NORM, not the exception, is what moved it.)
 
 A single-statement `return self.<chain>(...)` then fires only when ALL hold:
 
-1. the chain resolves to a method the file's own classes define (walking the
-   receiver class and its module-defined bases) — otherwise the target is
-   outside the scanned file and the wrapper is the adaptation point;
-2. no interface the file declares has a member of that name whose parameters
-   the wrapper accepts (a conforming implementation, not a name collision);
+1. the chain resolves to a member this codebase declares — the `self.<attr>`
+   steps resolve through the merged index (the attribute's class, then that
+   class's own attributes) and the member may sit on the receiver class or on
+   any base of it. Same-named classes merge (union of methods/bases/attrs):
+   an ambiguous name means "could be this target", which is what the
+   resolution asks, and the exemptions then read the union's most forgiving
+   declaration;
+2. no interface the codebase declares has a member of that name whose
+   parameters the wrapper accepts (a conforming implementation, not a name
+   collision);
 3. the call does not fix policy — no keyword the target defaults, no
    positional beyond the target's required ones (`**mapping` is forwarding,
    not policy).
 
 `self_call_chain` replaced the old `is_self_call`: it returns the attribute
-chain, so the receiver class is resolvable rather than assumed.
+chain, so the receiver class is resolvable rather than assumed. The candidate
+owns its own verdict (`policy_fixes`, `fires`, `finding`) — the tool's own
+`record-shape` finding asked for that on the first cut, twice.
 
-## Boundary (recorded, not a defect)
+## Single-buffer scans (recorded, not a defect)
 
-Resolution is per FILE, not repo-wide: a target defined in another module of
-the same repo is treated like a library target. Both houses removals that
-this affects are exempt for other reasons anyway (rule 2/3 would clear them
-too), so the two-repo outcome is identical to a repo-wide index — at a
-fraction of the machinery. The interface check is likewise file-scoped
-(interfaces are declared beside their implementations in these repos).
+`--file` and the LSP's typing path never run a repo-wide pass, so they decide
+against the file's own classes: a target in another file is invisible there
+and the rule stays silent (the conservative direction — fewer findings, never
+a wrong one). The gate and the LSP's save path use the repo-wide index.
 
 ## Tests
 
@@ -76,3 +91,9 @@ fraction of the machinery. The interface check is likewise file-scoped
 - `middle_man_delegation_detected` — kept; its first fixture now carries a
   resolvable target (`self.inner = Inner()`), since an attribute with no type
   evidence is exactly the case that no longer fires.
+- `middle_man_resolves_a_target_in_another_file` — the cross-file corpus: a
+  wrapper whose `Inner` lives in another file still fires (the per-file cut
+  was silent here), and a library target stays silent.
+- `middle_man_single_buffer_is_conservative` — `scan_source_impl(.., false)`
+  (the LSP typing path) stays silent alone and fires with the target in the
+  same buffer.

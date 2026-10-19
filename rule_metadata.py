@@ -638,13 +638,12 @@ CATALOG = RuleCatalog([
     Rule("middle-man", "warn", "advice", "Python",
          "A method that only forwards (`return self.x.y(...)`) — Remove Middle "
          "Man. Exempt where the advice cannot be taken: the delegated member is "
-         "not defined in the file's own classes (a library's method — the "
-         "wrapper is where that library meets our interface; the same holds for "
-         "a target in another module, which the per-file rule cannot see), the "
-         "method is a member of an `ABC`/`Protocol` the file declares whose "
-         "parameters it accepts (callers are typed against that interface), or "
-         "the call fixes an argument the target defaults "
-         "(`self.dump(by_alias=True)`) — the policy lives in the named method."),
+         "not declared anywhere in the scanned codebase (a library's method — the "
+         "wrapper is where that library meets our interface), the method is a "
+         "member of an `ABC`/`Protocol` the codebase declares whose parameters it "
+         "accepts (callers are typed against that interface), or the call fixes "
+         "an argument the target defaults (`self.dump(by_alias=True)`) — the "
+         "policy lives in the named method."),
     Rule("unused-setter", "warn", "advice", "Python",
          "A `set_*` method or property setter never referenced — Remove Setting "
          "Method."),
