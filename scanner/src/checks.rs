@@ -4681,56 +4681,351 @@ pub fn special_case_findings(state: &mut ScanState, body: &[Stmt], source: &str)
     }
 }
 
-/// Remove Middle Man: a method whose body is a single delegation call
-/// (`return self.x.y(...)` / `return self.y(...)`) — it only forwards.
-pub fn middle_man_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
-    fn is_self_call(e: &Expr) -> bool {
-        match e {
-            Expr::Call(c) => match c.func.as_ref() {
-                Expr::Attribute(a) => base_name_of(&a.value).as_deref() == Some("self"),
-                _ => false,
-            },
-            _ => false,
+/// One module-defined class, as the middle-man rule reads it: whether it is an
+/// interface, the methods it declares (with the parameter shape the policy
+/// check reads), its bases, and which module class each `self.<attr>` is built
+/// from.
+struct MiddleManClass {
+    name: String,
+    is_interface: bool,
+    methods: std::collections::HashMap<String, ParamShape>,
+    bases: Vec<String>,
+    attrs: std::collections::HashMap<String, String>,
+}
+
+/// A method's parameter shape: how many positionals a caller must pass, which
+/// names carry a default (the policy check reads that), and every
+/// non-receiver name (the interface-conformance comparison reads that).
+#[derive(Default, Clone)]
+struct ParamShape {
+    positional_required: usize,
+    optional: HashSet<String>,
+    names: HashSet<String>,
+}
+
+/// The receiver is skipped for the positional count (a `@staticmethod` has
+/// none), so the count is what a CALLER must supply.
+fn param_shape(f: &StmtFunctionDef) -> ParamShape {
+    let mut shape = ParamShape::default();
+    let skip_receiver = !has_decorator(f, "staticmethod");
+    let mut idx = 0usize;
+    for pwd in f.parameters.posonlyargs.iter().chain(&f.parameters.args) {
+        idx += 1;
+        if idx == 1 && skip_receiver {
+            continue;
+        }
+        let name = pwd.parameter.name.to_string();
+        if pwd.default.is_some() {
+            shape.optional.insert(name.clone());
+        } else {
+            shape.positional_required += 1;
+        }
+        shape.names.insert(name);
+    }
+    for k in &f.parameters.kwonlyargs {
+        let name = k.parameter.name.to_string();
+        if k.default.is_some() {
+            shape.optional.insert(name.clone());
+        }
+        shape.names.insert(name);
+    }
+    if let Some(v) = &f.parameters.vararg {
+        shape.names.insert(v.name.to_string());
+    }
+    if let Some(k) = &f.parameters.kwarg {
+        shape.names.insert(k.name.to_string());
+    }
+    shape
+}
+
+/// The base names of `class X(A, B[T])` — a subscripted base is the base it
+/// wraps (`Protocol[T]` is a Protocol).
+fn class_base_names(c: &StmtClassDef) -> Vec<String> {
+    let Some(args) = &c.arguments else {
+        return Vec::new();
+    };
+    args.args
+        .iter()
+        .filter_map(|b| match b {
+            Expr::Subscript(s) => annotation_base_name(&s.value),
+            _ => annotation_base_name(b),
+        })
+        .collect()
+}
+
+/// Which module class each `self.<attr>` is built from: an annotated attribute
+/// (a class-body field or `self.x: T` in a method) or a constructor call
+/// (`self.x = T(...)`). An attribute with no such evidence resolves to
+/// nothing — as far as this rule can tell, its target is not in the scanned
+/// codebase.
+fn class_attribute_classes(c: &StmtClassDef) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for m in &c.body {
+        if let Stmt::AnnAssign(a) = m {
+            if let (Expr::Name(n), Some(ty)) = (a.target.as_ref(), annotation_base_name(a.annotation.as_ref())) {
+                out.insert(n.id.to_string(), ty);
+            }
         }
     }
-    fn walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
-        for s in stmts {
+    for f in class_methods(c) {
+        let mut stack: Vec<&Stmt> = f.body.iter().collect();
+        while let Some(s) = stack.pop() {
             match s {
-                Stmt::FunctionDef(f) => {
-                    if f.body.len() == 1 {
-                        if let Stmt::Return(r) = &f.body[0] {
-                            if let Some(v) = &r.value {
-                                if is_self_call(v) {
-                                    let line = line_of(source, f.name.range().start());
-                                    state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
-                                                                            file: state.file.to_string(),
-                                                                            line,
-                                                                            function: f.name.to_string(),
-                                                                            kind: "middle-man".into(),
-                                                                            severity: "warn".into(),
-                                                                            message: format!(
-                                                                                "'{}' is a pure delegation to self — Remove Middle Man: call the target directly",
-                                                                                f.name
-                                                                            ), });
-                                }
+                Stmt::AnnAssign(a) => {
+                    if let (Expr::Attribute(at), Some(ty)) =
+                        (a.target.as_ref(), annotation_base_name(a.annotation.as_ref()))
+                    {
+                        if matches!(at.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self") {
+                            out.insert(at.attr.to_string(), ty);
+                        }
+                    }
+                }
+                Stmt::Assign(a) if a.targets.len() == 1 => {
+                    if let (Expr::Attribute(at), Expr::Call(call)) = (&a.targets[0], a.value.as_ref()) {
+                        if matches!(at.value.as_ref(), Expr::Name(n) if n.id.as_str() == "self") {
+                            if let Some(cls) = base_name_of(&call.func) {
+                                out.insert(at.attr.to_string(), cls);
                             }
                         }
                     }
                 }
-                Stmt::ClassDef(cd) => walk(state, &cd.body, source),
-                Stmt::For(f) => walk(state, &f.body, source),
-                Stmt::While(w) => walk(state, &w.body, source),
+                _ => {}
+            }
+            push_stmt_children(s, &mut stack);
+        }
+    }
+    out
+}
+
+impl MiddleManClass {
+    /// The member's parameter shape when this class declares it.
+    fn declares(&self, member: &str) -> Option<&ParamShape> {
+        self.methods.get(member)
+    }
+
+    /// The interface members this class declares: the name and the parameter
+    /// names a conforming implementation must accept. Empty when the class is
+    /// not an interface.
+    fn interface_declarations(&self) -> Vec<(&str, &HashSet<String>)> {
+        if !self.is_interface {
+            return Vec::new();
+        }
+        self.methods.iter().map(|(n, s)| (n.as_str(), &s.names)).collect()
+    }
+}
+
+/// The file's classes plus the queries the rule asks of them: one home for the
+/// resolution all three exemptions share.
+struct ModuleClasses {
+    classes: std::collections::HashMap<String, MiddleManClass>,
+    /// member name → the parameter-name sets the file's interfaces declare
+    /// (per declaration — an implementation conforms to at least one).
+    interface_members: std::collections::HashMap<String, Vec<HashSet<String>>>,
+}
+
+impl ModuleClasses {
+    /// Read the file's classes (nested ones included).
+    fn read(body: &[Stmt]) -> Self {
+        let mut classes = std::collections::HashMap::new();
+        let mut interface_members: std::collections::HashMap<String, Vec<HashSet<String>>> =
+            std::collections::HashMap::new();
+        let mut sq: Vec<&Stmt> = body.iter().collect();
+        while let Some(s) = sq.pop() {
+            if let Stmt::ClassDef(c) = s {
+                let methods = class_methods(c);
+                let is_interface = methods.iter().any(|f| has_decorator(f, "abstractmethod"))
+                    || class_base_names(c)
+                        .iter()
+                        .any(|b| b == "ABC" || b == "ABCMeta" || b == "Protocol");
+                let cls = MiddleManClass {
+                    name: c.name.to_string(),
+                    is_interface,
+                    methods: methods.iter().map(|f| (f.name.to_string(), param_shape(f))).collect(),
+                    bases: class_base_names(c),
+                    attrs: class_attribute_classes(c),
+                };
+                for (member, names) in cls.interface_declarations() {
+                    interface_members
+                        .entry(member.to_string())
+                        .or_default()
+                        .push(names.clone());
+                }
+                classes.insert(cls.name.clone(), cls);
+            }
+            match s {
+                Stmt::FunctionDef(f) => sq.extend(&f.body),
+                _ => push_stmt_children(s, &mut sq),
+            }
+        }
+        Self {
+            classes,
+            interface_members,
+        }
+    }
+
+    /// Resolve `self.<chain>` to the method it reaches. None = the chain leaves
+    /// the scanned file (a library's attribute, an attribute with no type
+    /// evidence): "call the target directly" is not advice anyone can take
+    /// there. A member may sit on the receiver class itself or on any
+    /// module-defined base of it.
+    fn resolve<'a>(&'a self, chain: &[String], owner: &'a MiddleManClass) -> Option<&'a ParamShape> {
+        let (member, path) = chain.split_last()?;
+        let mut cls = owner;
+        for step in path {
+            cls = self.classes.get(cls.attrs.get(step)?)?;
+        }
+        let mut queue: Vec<&MiddleManClass> = vec![cls];
+        let mut seen: HashSet<&str> = HashSet::new();
+        while let Some(c) = queue.pop() {
+            if !seen.insert(c.name.as_str()) {
+                continue;
+            }
+            if let Some(shape) = c.declares(member) {
+                return Some(shape);
+            }
+            for b in &c.bases {
+                if let Some(base) = self.classes.get(b) {
+                    queue.push(base);
+                }
+            }
+        }
+        None
+    }
+
+    /// Is the method required by an interface the file declares? The wrapper's
+    /// parameters must accept at least that member's — a conforming
+    /// implementation, not a name collision.
+    fn implements_interface_member(&self, name: &str, wrapper: &ParamShape) -> bool {
+        self.interface_members
+            .get(name)
+            .is_some_and(|decls| decls.iter().any(|d| d.is_subset(&wrapper.names)))
+    }
+}
+
+/// The attribute chain a call delegates through: `self.a.b(...)` → ["a", "b"].
+/// None when the call is not rooted at `self`.
+fn self_call_chain(e: &Expr) -> Option<Vec<String>> {
+    let Expr::Call(c) = e else {
+        return None;
+    };
+    let Expr::Attribute(a) = c.func.as_ref() else {
+        return None;
+    };
+    if base_name_of(&a.value).as_deref() != Some("self") {
+        return None;
+    }
+    let mut chain = vec![a.attr.to_string()];
+    let mut cur = a.value.as_ref();
+    while let Expr::Attribute(inner) = cur {
+        chain.push(inner.attr.to_string());
+        cur = inner.value.as_ref();
+    }
+    chain.reverse();
+    Some(chain)
+}
+
+/// Does the call fix policy — pass an argument the target does not require (a
+/// keyword the target defaults, or a positional beyond its required ones)?
+/// That IS the wrapper's job, so it is not a middle man. A `**mapping` keyword
+/// is forwarding, not policy.
+fn call_fixes_policy(call: &ExprCall, shape: &ParamShape) -> bool {
+    let mut positional = 0usize;
+    for a in &call.arguments.args {
+        if matches!(a, Expr::Starred(_)) {
+            continue;
+        }
+        positional += 1;
+        if positional > shape.positional_required {
+            return true;
+        }
+    }
+    call.arguments.keywords.iter().any(|k| match &k.arg {
+        Some(n) => shape.optional.contains(n.id.as_str()),
+        None => false,
+    })
+}
+
+/// Remove Middle Man: a method whose body is a single delegation call
+/// (`return self.x.y(...)` / `return self.y(...)`) — it only forwards.
+///
+/// Not a middle man when the advice cannot be taken (issue #44): the
+/// delegated member is not in the scanned file (a library's method — the
+/// wrapper is where that library meets our interface), the method is a member
+/// of an interface the file declares (callers are typed against it), or the
+/// call fixes an argument the target defaults (the policy lives in the named
+/// method).
+pub fn middle_man_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    let module = ModuleClasses::read(body);
+    fn walk(
+        state: &mut ScanState,
+        stmts: &[Stmt],
+        source: &str,
+        module: &ModuleClasses,
+        owner: Option<&MiddleManClass>,
+    ) {
+        for s in stmts {
+            match s {
+                Stmt::FunctionDef(f) => {
+                    if f.body.len() != 1 {
+                        continue;
+                    }
+                    let Stmt::Return(r) = &f.body[0] else {
+                        continue;
+                    };
+                    let Some(v) = &r.value else {
+                        continue;
+                    };
+                    let Some(chain) = self_call_chain(v.as_ref()) else {
+                        continue;
+                    };
+                    let Some(owner) = owner else {
+                        continue;
+                    };
+                    let Some(shape) = module.resolve(&chain, owner) else {
+                        continue;
+                    };
+                    let wrapper = param_shape(f);
+                    if module.implements_interface_member(&f.name, &wrapper) {
+                        continue;
+                    }
+                    if let Expr::Call(call) = v.as_ref() {
+                        if call_fixes_policy(call, shape) {
+                            continue;
+                        }
+                    }
+                    let line = line_of(source, f.name.range().start());
+                    state.findings.push(Finding {
+                        logical_start: None,
+                        seam_members: Vec::new(),
+                        col: 0,
+                        file: state.file.to_string(),
+                        line,
+                        function: f.name.to_string(),
+                        kind: "middle-man".into(),
+                        severity: "warn".into(),
+                        message: format!(
+                            "'{}' is a pure delegation to self — Remove Middle Man: call the target directly",
+                            f.name
+                        ),
+                    });
+                }
+                Stmt::ClassDef(cd) => {
+                    let ctx = module.classes.get(cd.name.as_str()).or(owner);
+                    walk(state, &cd.body, source, module, ctx);
+                }
+                Stmt::For(f) => walk(state, &f.body, source, module, owner),
+                Stmt::While(w) => walk(state, &w.body, source, module, owner),
                 Stmt::If(i) => {
-                    walk(state, &i.body, source);
+                    walk(state, &i.body, source, module, owner);
                     for cl in &i.elif_else_clauses {
-                        walk(state, &cl.body, source);
+                        walk(state, &cl.body, source, module, owner);
                     }
                 }
                 _ => {}
             }
         }
     }
-    walk(state, body, source);
+    walk(state, body, source, &module, None);
 }
 
 /// Collect `set_*` methods (and property setters) for the repo-wide

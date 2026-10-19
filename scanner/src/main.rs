@@ -6021,6 +6021,40 @@ mod tests {
     }
 
     #[test]
+    fn middle_man_exempts_the_encapsulation_shapes() {
+        // Issue #44: four shapes where "call the target directly" is not
+        // advice anyone can take — the delegated member is a library's method,
+        // the method is an interface member, the call fixes an argument the
+        // target defaults, or the attribute has no type evidence at all.
+        for src in [
+            include_str!("../../tests/fixtures/rust/middle_man_library_target_passes__01.py"),
+            include_str!("../../tests/fixtures/rust/middle_man_protocol_conformance_passes__01.py"),
+            include_str!("../../tests/fixtures/rust/middle_man_policy_argument_passes__01.py"),
+            include_str!("../../tests/fixtures/rust/middle_man_unknown_target_passes__01.py"),
+        ] {
+            let f = scan_src(src);
+            assert!(!f.iter().any(|x| x.kind == "middle-man"), "{f:?}");
+        }
+    }
+
+    #[test]
+    fn middle_man_keeps_the_delegation_this_codebase_can_answer() {
+        // the rule's own case: the target class is here, the call adds nothing
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/middle_man_real_delegation_fires__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "middle-man").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("Remove Middle Man"), "{}", r[0].message);
+        // a name collision with an interface member is not conformance: this
+        // wrapper does not accept the interface's parameter
+        let g = scan_src(include_str!(
+            "../../tests/fixtures/rust/middle_man_interface_arity_mismatch_fires__01.py"
+        ));
+        assert!(g.iter().any(|x| x.kind == "middle-man"), "{g:?}");
+    }
+
+    #[test]
     fn unused_setter_detected() {
         let f = scan_src(include_str!("../../tests/fixtures/rust/unused_setter_detected__01.py"));
         assert!(f.iter().any(|x| x.kind == "unused-setter"));
