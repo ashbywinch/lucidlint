@@ -31,6 +31,24 @@ custom_model_max_tokens = 128000
 max_model_tokens = 128000
 ai_timeout = 1800  # reviews on large diffs take minutes; the upstream default is too low
 fallback_models = []
+# DeepSeek V4 is a reasoning model, and with thinking on it returns
+# reasoning-only responses for large review prompts: measured 2026-10-19,
+# two calls (2h19m / 101,965 output tokens; 25m / 25,333) came back with
+# finish_reason length/stop and content NULL — pr-agent raised
+# EmptyTruncatedResponseError and posted no review at all. The fix is the
+# knob upstream added for exactly this (PR #3460): turn thinking off for the
+# review call. Measured elsewhere on the same model: no reasoning_effort →
+# 1,309 reasoning tokens; "none" → 0 reasoning tokens, content produced
+# (pr-agent issue #3459), and with thinking disabled 12/12 requests returned
+# non-empty content (vLLM #52640). OpenRouter accepts reasoning_effort as an
+# OpenAI-style enum including "none".
+#
+# The second key is the gate: reasoning_effort is only forwarded for model ids
+# in the built-in list, so our gateway route id has to opt in. Matching is by
+# suffix, so the bare route name works (the handler sees
+# "openai/dynamic/fallback2"). Needs the action pin at v0.48.0+.
+reasoning_effort = "none"
+additional_reasoning_effort_models = ["dynamic/fallback2"]
 repo_context_from_default_branch = false
 repo_context_files = [
     "docs/PRD.md",
