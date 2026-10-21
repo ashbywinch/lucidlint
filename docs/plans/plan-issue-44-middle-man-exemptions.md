@@ -98,6 +98,33 @@ a wrong one). The gate and the LSP's save path use the repo-wide index.
   `ClassDef` bodies but never a nested `FunctionDef` body, so a nested class's
   `__init__` was already unreachable from the enclosing class's walk (a fixture
   for it passes before and after the suggested guard, so no guard was added).
+- **An attribute with no type evidence resolves to nothing.** `self._inner =
+  get_inner()` is read as "outside the scanned codebase" and the rule stays
+  silent: `class_attribute_classes` reads an annotation (`self.x: T`) or a
+  constructor call (`self.x = T(...)`) and nothing else, and a factory's
+  return type needs inference the scanner does not do. Treating the unknown as
+  in-codebase would re-fire on exactly the library-target shape this exemption
+  exists for. Probe: `self._inner = get_inner()` + `return
+  self._inner.render()` → 0 findings; `self._inner = Inner()` → 1.
+- **A chain step whose class is outside the codebase ends the resolution.**
+  `declarations` returns empty and `fires` returns false — the library-target
+  exemption itself: a library class's members are invisible to the scan, so no
+  member of it can be judged.
+- **`self.a().b()` is not a chain.** `self_call_chain` reads attribute steps
+  from `self`, and the receiver here is a call's result (`base_name_of` reads
+  `Name`/`Attribute` only), so there is no candidate. Deliberate: resolving it
+  needs `a()`'s return type, and "call the target directly" would mean
+  re-invoking `a()` at every call site — the wrapper is where that call
+  belongs. Probe: `return self.build().render()` → 0 findings.
+- **A wrapper class defined inside a `try` is not walked.**
+  `middle_man_candidates::walk` descends `If`/`For`/`While`/`ClassDef` but not
+  `Try`. The *target* inside a `try` IS read (`ModuleClasses::read` walks via
+  `push_stmt_children`, which descends `Try`), so a conditionally defined
+  target resolves and fires; only the conditional *wrapper* is missed, in the
+  conservative direction. The review's claimed case — a delegation inside a
+  `try` — is unreachable for a different reason: a candidate's body must be
+  exactly one `return`, and a `try`-wrapped delegation's body is one `Try`.
+  Probes: target in `try` → 1; wrapper in `try` → 0; delegation in `try` → 0.
 
 ## Tests
 
