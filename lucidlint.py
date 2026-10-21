@@ -1659,11 +1659,8 @@ class _LucidlintConfig:
     guidance: dict[str, str] = field(default_factory=dict)
 
 
-# lucidlint: ignore-file god-class the gate pipeline is ONE responsibility —
 # lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
-# the runner owns the repo scan end to end; the partition rule finds no
 # lucidlint: ignore-file record-shape a class per helper hop is ceremony
-# field-disjoint method groups, so the size is a review signal, not a split
 # the domain's
 # lucidlint: ignore process-class _GateRunner is the CLI's one pipeline object — its state is real and the name is
 class _GateRunner:

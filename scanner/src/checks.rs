@@ -2543,38 +2543,15 @@ fn slot_names(e: &Expr) -> Option<Vec<String>> {
 }
 
 // ------------------------------------------------------------- latent-class
-// the size + duplication counterweights: a class too large to review, and
-// domain state duplicated across a containment edge.
-
-/// A class so large it strains review: 20 or more methods, or 12 or more
-/// methods over a 250-line span. A WARN — the split is only sound where the
-/// partition rule finds field-disjoint method groups; size alone never
-/// forces a bad split.
-pub fn god_class_findings(state: &mut ScanState, body: &[Stmt]) {
-    for s in body {
-        let Stmt::ClassDef(c) = s else { continue };
-        let methods = c.body.iter().filter(|m| matches!(m, Stmt::FunctionDef(_))).count();
-        if methods < 12 {
-            continue;
-        }
-        let span = line_of(state.source, c.range().end()).saturating_sub(line_of(state.source, c.range().start()));
-        let big = methods >= 20 || (methods >= 12 && span >= 250);
-        if !big {
-            continue;
-        }
-        let line = line_of(state.source, c.name.range().start());
-        state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
-                    file: state.file.to_string(),
-                    line,
-                    function: c.name.to_string(),
-                    kind: "god-class".into(),
-                    severity: "warn".into(),
-                    message: format!(
-                        "'{}' has {methods} methods over {span} lines — a large class; split it ONLY where the partition rule finds field-disjoint method groups (size alone is a review signal, not a split order)",
-                        c.name.as_str()
-                    ), });
-    }
-}
+// the duplication counterweight: domain state duplicated across a containment
+// edge.
+//
+// The size counterweight that used to live here (`god-class`: >=20 methods, or
+// >=12 methods over >=250 lines) is GONE: its own message said "split it ONLY
+// where the partition rule finds field-disjoint method groups", so at a
+// cohesive class it ordered nothing, and the reader's only way to clear it was
+// a suppression the bulk-suppression census then chased (issue #47). Size
+// alone is not a split order; the seam case keeps its own finding, `partition`.
 
 /// A class's field names (class-level annotated declarations + self.X
 /// assignments in __init__), with the annotation type where present.

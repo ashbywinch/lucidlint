@@ -420,11 +420,6 @@ CATALOG = RuleCatalog([
          "finding: declare it.",
          display_name="undeclared-attribute", display_group=None,
          fix="undeclared-attribute"),
-    Rule("god-class", "warn", "architecture", "Python",
-         "A class with >=20 methods, or >=12 methods over >=250 lines — a "
-         "large class. A review signal, not a split order: split only where "
-         "the partition rule finds field-disjoint method groups.",
-         display_name="god-class → latent-class", display_group="latent-class"),
     Rule("duplicate-field", "fail", "architecture", "Python",
          "A class and a class it CONTAINS both hold the same >=2 fields — "
          "duplicated domain state across a containment edge; one source of "
