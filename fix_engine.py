@@ -130,15 +130,12 @@ class _ModuleProposal(NamedTuple):
     module: str
 
 
-# lucidlint: ignore-file god-class the fix engine is ONE responsibility — 20
 # lucidlint: ignore-file global-state the module constants are this tool's configuration tables —
 # lucidlint: ignore-file global-state a config class is the eventual home
 # lucidlint: ignore-file misplaced-method the repo helpers serve module-level callers too — moving them
 # lucidlint: ignore-file misplaced-method onto _FixRequest would strand half
 # lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
-# cohesive methods over the request state; the partition rule finds no
 # lucidlint: ignore-file record-shape a class per helper hop is ceremony
-# field-disjoint split, so the size is a review signal, not a split order
 @dataclass
 class _FixRequest:
     """The whole fix context: which file (repo/rel), what kind, where

@@ -1242,7 +1242,6 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     data_clump_findings(state, body);
     feature_envy_findings(state, body);
     collect_self_assigns(state, body);
-    god_class_findings(state, body);
     static_husk_findings(state, body);
     delegating_husk_findings(state, body);
     process_class_findings(state, body);
@@ -3723,25 +3722,23 @@ mod tests {
     }
 
     #[test]
-    fn god_class_fires_on_large_cohesive_class() {
-        // 20 methods over 400 lines — the size signal (a warn, not a split
-        // order: the partition rule decides whether a split is sound)
+    fn a_large_cohesive_class_is_not_a_finding() {
+        // Size alone is not a split order: this class has no field-disjoint
+        // method groups for the partition rule to find, so there is nothing
+        // to point the reader at. It used to be a `god-class` warn whose own
+        // message said "split it ONLY where the partition rule finds
+        // field-disjoint method groups" — an instruction with no antecedent
+        // at exactly the sites that produced it, escapable only by a
+        // suppression the census then chased (issue #47). The seam-bearing
+        // case keeps its own finding: partition_field_disjoint_groups_is_found.
         let mut src = String::from("class Big:\n");
         for i in 0..20 {
             src.push_str(&format!("    def m{i}(self):\n        return {i}\n"));
         }
         let f = scan_src(&src);
-        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "god-class").collect();
-        assert_eq!(r.len(), 1, "{f:?}");
-        assert_eq!(r[0].severity, "warn");
-    }
-
-    #[test]
-    fn god_class_ignores_small_class() {
-        let f = scan_src(include_str!(
-            "../../tests/fixtures/rust/god_class_ignores_small_class__01.py"
-        ));
-        assert!(!f.iter().any(|x| x.kind == "god-class"), "{f:?}");
+        for kind in ["god-class", "latent-class", "partition"] {
+            assert!(!f.iter().any(|x| x.kind == kind), "{kind} in {f:?}");
+        }
     }
 
     #[test]
