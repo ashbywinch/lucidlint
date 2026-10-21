@@ -1131,14 +1131,17 @@ pub fn fix_loop_sequence(source: &str, line: usize) -> Result<String, String> {
 }
 
 /// The hoist plan: the single accumulator the body appends to, the push sites'
-/// argument spans (the helper's return value), and their RECEIVER spans — the
-/// retarget rewrites those ranges and the shape decision counts them, never a
-/// text search over the body (a string literal naming the accumulator would
-/// read as a second push site).
+/// argument spans (the helper's return value), their RECEIVER spans (the
+/// retarget rewrites those ranges) and their STATEMENT spans (the Option shape
+/// replaces each statement by the return) — the shape decision counts the
+/// receivers, never a text search over the body (a string literal naming the
+/// accumulator would read as a second push site, and an argument containing a
+/// `;` would end a statement scan early).
 struct HoistPlan {
     acc: String,
     push_args: Vec<proc_macro2::Span>,
     receiver_spans: Vec<proc_macro2::Span>,
+    push_stmts: Vec<proc_macro2::Span>,
 }
 /// The single accumulator the body pushes to, plus the push-receiver
 /// paths (a mid-build READ check must not mistake a receiver for a read).
@@ -1154,9 +1157,19 @@ fn hoist_push_accum(
         receivers: Vec<*const syn::ExprPath>,
         push_args: Vec<proc_macro2::Span>,
         receiver_spans: Vec<proc_macro2::Span>,
+        push_stmts: Vec<proc_macro2::Span>,
+        stmt_span: Option<proc_macro2::Span>,
         decline: Option<String>,
     }
     impl syn::visit::Visit<'_> for PushScan<'_> {
+        fn visit_stmt(&mut self, node: &syn::Stmt) {
+            // the innermost enclosing statement, so a push site's replacement
+            // range is its own statement — never a needle search plus a `;` scan
+            let prev = self.stmt_span;
+            self.stmt_span = Some(node.span());
+            syn::visit::visit_stmt(self, node);
+            self.stmt_span = prev;
+        }
         fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
             let method = node.method.to_string();
             let outer_base = match node.receiver.as_ref() {
@@ -1188,6 +1201,9 @@ fn hoist_push_accum(
                     if let syn::Expr::Path(p) = node.receiver.as_ref() {
                         self.receivers.push(p as *const syn::ExprPath);
                         self.receiver_spans.push(p.span());
+                        if let Some(s) = self.stmt_span {
+                            self.push_stmts.push(s);
+                        }
                     }
                     if let Some(arg0) = node.args.first() {
                         self.push_args.push(arg0.span());
@@ -1203,6 +1219,8 @@ fn hoist_push_accum(
         receivers: Vec::new(),
         push_args: Vec::new(),
         receiver_spans: Vec::new(),
+        push_stmts: Vec::new(),
+        stmt_span: None,
         decline: None,
     };
     for s in body {
@@ -1222,6 +1240,7 @@ fn hoist_push_accum(
             acc,
             push_args: scan.push_args,
             receiver_spans: scan.receiver_spans,
+            push_stmts: scan.push_stmts,
         },
         scan.receivers,
     ))
@@ -1376,14 +1395,15 @@ fn fresh_name(source: &str, base: &str) -> String {
 /// receiver SPANS the plan recorded. A text pass over the body would also
 /// rewrite the needle inside a string literal or a comment (a message naming
 /// the accumulator), and the shape decision would read that literal as a
-/// second push site.
+/// second push site. A span that does not lie inside the body is a bug in the
+/// plan, not a case to skip: refuse rather than rewrite the wrong range.
 fn hoist_retarget_pushes(
     moved: &mut String,
     body_start: usize,
     source: &str,
     receiver_spans: &[proc_macro2::Span],
     helper_local: &str,
-) {
+) -> Result<(), String> {
     let mut ranges: Vec<(usize, usize)> = receiver_spans
         .iter()
         .map(|s| {
@@ -1395,10 +1415,15 @@ fn hoist_retarget_pushes(
         .collect();
     ranges.sort_unstable();
     for (start, end) in ranges.into_iter().rev() {
-        if start < end && end <= moved.len() {
-            moved.replace_range(start..end, helper_local);
+        if start >= end || end > moved.len() {
+            return Err(format!(
+                "a push receiver's span [{start}..{end}) does not lie inside the loop body ({} bytes) — refusing rather than rewriting the wrong range",
+                moved.len()
+            ));
         }
+        moved.replace_range(start..end, helper_local);
     }
+    Ok(())
 }
 
 /// The empty `let mut <acc>` DIRECTLY before the loop (attributes may sit
@@ -1505,7 +1530,15 @@ struct HelperBody {
     conditional: bool,
 }
 
-fn hoist_helper_text(source: &str, sig: &HelperSig, body: &HelperBody, push_args: &[proc_macro2::Span]) -> String {
+/// `push_sites`: each push STATEMENT's moved-relative range, paired with its
+/// argument's span. Spans, never a needle search plus a `;` scan: an argument
+/// containing a `;` (a block or a closure) would end that scan mid-argument.
+fn hoist_helper_text(
+    source: &str,
+    sig: &HelperSig,
+    body: &HelperBody,
+    push_sites: &[(usize, usize, proc_macro2::Span)],
+) -> String {
     let HelperSig {
         helper_name,
         param,
@@ -1519,39 +1552,26 @@ fn hoist_helper_text(source: &str, sig: &HelperSig, body: &HelperBody, push_args
     if !conditional {
         return format!("fn {helper_name}({param}: {item_ty}) -> {item_ty} {{\n{moved}    {helper_local}\n}}\n\n");
     }
-    // Option shape: wrap each push arg in Some(..), append `None` as
-    // the fallthrough, return the Option. The arg text comes from the
-    // push-call spans the plan recorded — syn spans, not a paren scan, so
-    // nested calls and string literals (`format!("({})", x)`) slice exactly.
-    let needle = format!("{helper_local}.push(");
+    // Option shape: wrap each push arg in Some(..), append `None` as the
+    // fallthrough, return the Option. Each push statement's span becomes the
+    // return, and the arg text slices from its own span — nested calls, string
+    // literals (`format!("({})", x)`) and blocks with their own `;` all exact.
     let mut rebuilt = String::with_capacity(moved.len() + 16);
-    let mut rest: &str = moved;
-    let mut spans = push_args.iter();
-    while let Some(pos) = rest.find(&needle) {
-        rebuilt.push_str(&rest[..pos]);
-        let arg = match spans.next() {
-            Some(span) => span_text(source, *span)
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|_| String::new()),
-
-            // span/statement drift (should not happen — the spans were
-            // recorded from this same body): fall back to no rewrite
-            None => {
-                rebuilt.push_str(&rest[pos..]);
-                rest = "";
-                break;
-            }
-        };
+    let mut cursor = 0usize;
+    for (start, end, arg_span) in push_sites {
+        // a site already covered by an earlier range (a nested push in the same
+        // statement) is left as it stands
+        if *start < cursor || *end > moved.len() {
+            continue;
+        }
+        rebuilt.push_str(&moved[cursor..*start]);
+        let arg = span_text(source, *arg_span)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
         rebuilt.push_str(&format!("return Some({arg});"));
-        // skip past this push statement: the next `;` ends it
-        let tail_start = pos + needle.len();
-        let semi = rest[tail_start..]
-            .find(';')
-            .map(|i| tail_start + i + 1)
-            .unwrap_or(rest.len());
-        rest = &rest[semi..];
+        cursor = *end;
     }
-    rebuilt.push_str(rest);
+    rebuilt.push_str(&moved[cursor..]);
     format!("fn {helper_name}({param}: {item_ty}) -> Option<{item_ty}> {{\n{rebuilt}    None\n}}\n\n")
 }
 
@@ -1599,7 +1619,7 @@ pub fn fix_loop_hoist(source: &str, line: usize, name: &str) -> Result<String, S
     let body_end = byte_offset(source, f.body.brace_token.span.close().end()) - 1;
     let body_text = source[body_start..body_end].to_string();
     let mut moved = body_text;
-    hoist_retarget_pushes(&mut moved, body_start, source, &plan.receiver_spans, &helper_local);
+    hoist_retarget_pushes(&mut moved, body_start, source, &plan.receiver_spans, &helper_local)?;
     let (item_ty, param) = hoist_item_ty(source, stmts, init_idx, acc, &target_pat)?;
     // the body's push ARGUMENT decides value-vs-Option: a conditional push
     // (push behind if, or two push sites) means some items contribute
@@ -1612,6 +1632,18 @@ pub fn fix_loop_hoist(source: &str, line: usize, name: &str) -> Result<String, S
             Stmt::Expr(Expr::ForLoop(f), _)
                 if !matches!(f.body.stmts.as_slice(), [_])
         );
+    let push_sites: Vec<(usize, usize, proc_macro2::Span)> = plan
+        .push_stmts
+        .iter()
+        .zip(&plan.push_args)
+        .map(|(stmt, arg)| {
+            (
+                byte_offset(source, stmt.start()).saturating_sub(body_start),
+                byte_offset(source, stmt.end()).saturating_sub(body_start),
+                *arg,
+            )
+        })
+        .collect();
     let helper = hoist_helper_text(
         source,
         &HelperSig {
@@ -1624,7 +1656,7 @@ pub fn fix_loop_hoist(source: &str, line: usize, name: &str) -> Result<String, S
             helper_local,
             conditional,
         },
-        &plan.push_args,
+        &push_sites,
     );
     // the loop becomes the combinator over the helper: filter_map for the
     // Option shape, map for the direct shape
@@ -1703,6 +1735,20 @@ mod hoist_tests {
         assert!(out.contains("fn _label(x: String) -> String"), "{out}");
         assert!(!out.contains("filter_map"), "{out}");
         assert!(!out.contains("None"), "{out}");
+        syn::parse_str::<syn::File>(&out).expect("fixed source parses");
+    }
+
+    #[test]
+    fn hoist_option_arg_with_a_block_containing_a_semicolon() {
+        // the rebuild found each push by text and then skipped to the next
+        // `;` — a block in the argument ends that scan mid-argument, leaving
+        // the push (and an undeclared helper-local) in the helper
+        let src = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out: Vec<u32> = Vec::new();\n    for x in xs {\n        let scaled = *x * 2;\n        if scaled > 1 {\n            out.push((|y: u32| { let z = y * 2; z })(scaled));\n        }\n    }\n    out\n}\n";
+        let out = fix_loop_hoist(src, 3, "label").expect("fix applies");
+        assert!(
+            out.contains("return Some((|y: u32| { let z = y * 2; z })(scaled));"),
+            "{out}"
+        );
         syn::parse_str::<syn::File>(&out).expect("fixed source parses");
     }
 }
