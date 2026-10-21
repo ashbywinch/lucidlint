@@ -4779,6 +4779,18 @@ fn class_base_names(c: &StmtClassDef) -> Vec<String> {
         .collect()
 }
 
+/// The name in `class X(metaclass=ABCMeta)`. The metaclass is how an interface
+/// is spelled without a base — `class X(ABC)` and `class X(metaclass=ABCMeta)`
+/// declare the same thing — so the interface check reads both. None when the
+/// class names no metaclass.
+fn class_metaclass_name(c: &StmtClassDef) -> Option<String> {
+    let args = c.arguments.as_ref()?;
+    args.keywords
+        .iter()
+        .find(|k| k.arg.as_ref().is_some_and(|n| n.id.as_str() == "metaclass"))
+        .and_then(|k| annotation_base_name(&k.value))
+}
+
 /// Which module class each `self.<attr>` is built from: an annotated attribute
 /// (a class-body field or `self.x: T` in a method) or a constructor call
 /// (`self.x = T(...)`). An attribute with no such evidence resolves to
@@ -4863,7 +4875,8 @@ impl ModuleClasses {
                 let is_interface = methods.iter().any(|f| has_decorator(f, "abstractmethod"))
                     || class_base_names(c)
                         .iter()
-                        .any(|b| b == "ABC" || b == "ABCMeta" || b == "Protocol");
+                        .any(|b| b == "ABC" || b == "ABCMeta" || b == "Protocol")
+                    || class_metaclass_name(c).as_deref() == Some("ABCMeta");
                 let cls = MiddleManClass {
                     name: c.name.to_string(),
                     is_interface,

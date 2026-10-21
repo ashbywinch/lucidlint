@@ -6163,6 +6163,24 @@ mod tests {
     }
 
     #[test]
+    fn middle_man_reads_the_metaclass_spelling_of_an_interface() {
+        // `class X(ABC)` and `class X(metaclass=ABCMeta)` declare the same
+        // thing, so the interface exemption must read both — otherwise the
+        // wrapper of a conforming implementation is told to remove the
+        // middle man (the pre-fix reading: 1 finding).
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/middle_man_metaclass_interface_passes__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "middle-man"), "{f:?}");
+        // a metaclass that is not ABCMeta declares no interface: the same
+        // shape still fires
+        let g = scan_src(include_str!(
+            "../../tests/fixtures/rust/middle_man_non_interface_metaclass_fires__01.py"
+        ));
+        assert!(g.iter().any(|x| x.kind == "middle-man"), "{g:?}");
+    }
+
+    #[test]
     fn unused_setter_detected() {
         let f = scan_src(include_str!("../../tests/fixtures/rust/unused_setter_detected__01.py"));
         assert!(f.iter().any(|x| x.kind == "unused-setter"));
