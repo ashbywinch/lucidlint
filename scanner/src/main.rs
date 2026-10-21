@@ -133,6 +133,12 @@ struct ScanState<'a> {
     forwarder_fns: Vec<checks::ForwarderFn>,
     forwarder_methods: Vec<checks::ForwarderMethod>,
     repo_methods: Vec<checks::RepoMethod>,
+    /// Middle-man raw material (#44): the file's classes (the repo-wide index
+    /// is their union) and its single-statement delegations, which the
+    /// repo-wide pass resolves — one class per file, so the target is usually
+    /// in another file.
+    middle_man_classes: Vec<checks::MiddleManClass>,
+    middle_man_candidates: Vec<checks::MiddleManCandidate>,
     magic_table_exempts: HashSet<usize>,
     magic_const_rhs_exempts: HashSet<usize>,
     magic_len_guard_exempts: HashSet<usize>,
@@ -1187,6 +1193,8 @@ pub struct FileScan {
     pub forwarder_fns: Vec<checks::ForwarderFn>,
     pub forwarder_methods: Vec<checks::ForwarderMethod>,
     pub repo_methods: Vec<checks::RepoMethod>,
+    pub middle_man_classes: Vec<checks::MiddleManClass>,
+    pub middle_man_candidates: Vec<checks::MiddleManCandidate>,
 }
 
 impl FileScan {
@@ -1223,7 +1231,7 @@ pub fn scan_source_lsp(source: &str, name: &str) -> FileScan {
 /// The module-level post-passes — structural families + the advisory
 /// refactorings — kept out of scan_source_impl (which was crossing the
 /// large-function line).
-fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: &str) {
+fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: &str, repo_wide: bool) {
     class_module_findings(state, body, name);
     vague_name_findings(state, body);
     strewing_findings(state, body);
@@ -1252,7 +1260,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     latent_visitor_findings(state, body, source); // claims chains first — polymorphism skips them
     conditional_polymorphism_findings(state, body, source);
     special_case_findings(state, body, source);
-    middle_man_findings(state, body, source);
+    collect_middle_man(state, body, source, repo_wide);
     collect_setters(state, body);
     loop_pipeline_findings(state, body, source);
     collect_skeleton_modules(state, body, name);
@@ -1302,7 +1310,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     for stmt in &body {
         state.visit_stmt(stmt);
     }
-    module_post_passes(&mut state, &body, name, source);
+    module_post_passes(&mut state, &body, name, source, repo_wide);
     if state.is_test {
         // the rules that live in tests — scanned for alone or with --include-tests
         monkeypatch_findings(&mut state, &body, source);
@@ -1426,6 +1434,8 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         forwarder_fns: state.forwarder_fns,
         forwarder_methods: state.forwarder_methods,
         repo_methods: state.repo_methods,
+        middle_man_classes: state.middle_man_classes,
+        middle_man_candidates: state.middle_man_candidates,
     }
 }
 
@@ -1493,6 +1503,32 @@ pub(crate) fn repo_files(root: &Path) -> Vec<PathBuf> {
     }
     paths.sort();
     paths
+}
+
+/// The repo-wide middle-man family (#44) over a set of scans: the index is the
+/// union of every file's classes — one class per file is the house convention,
+/// so the target of a delegation usually lives in another file and a
+/// file-local index would read almost every real target as outside the
+/// codebase. A candidate a single-buffer scan already reported (same file and
+/// line) is not reported a second time.
+fn middle_man_repo_wide(scans: &[FileScan], root_s: &str) -> Vec<Finding> {
+    let mut classes: Vec<checks::MiddleManClass> = Vec::new();
+    let mut candidates: Vec<checks::MiddleManCandidate> = Vec::new();
+    let mut already: HashSet<(String, usize)> = HashSet::new();
+    for scan in scans {
+        let rel = scan.rel_of(root_s);
+        classes.extend(scan.middle_man_classes.iter().cloned());
+        candidates.extend(scan.middle_man_candidates.iter().cloned());
+        for f in &scan.findings {
+            if f.kind == "middle-man" {
+                already.insert((rel.clone(), f.line));
+            }
+        }
+    }
+    checks::middle_man_findings(&candidates, &classes)
+        .into_iter()
+        .filter(|f| !already.contains(&(f.file.clone(), f.line)))
+        .collect()
 }
 
 /// The repo-wide merge (duplicate + unused + unused-setter, reconciled
@@ -1574,6 +1610,12 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         .collect();
     let undeclared = checks::undeclared_findings(&undecl_scans);
     reconcile_repo_wide(&mut additions, undeclared, &supps_by_rel, &supps_spent_by_rel);
+    reconcile_repo_wide(
+        &mut additions,
+        middle_man_repo_wide(scans, root_s),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
     let mut by_file: std::collections::HashMap<String, Vec<Finding>> = std::collections::HashMap::new();
     for f in additions {
         by_file.entry(f.file.clone()).or_default().push(f);
@@ -1603,6 +1645,8 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         forwarder_fns: Vec::new(),
         forwarder_methods: Vec::new(),
         repo_methods: Vec::new(),
+        middle_man_classes: Vec::new(),
+        middle_man_candidates: Vec::new(),
         classes: Vec::new(),
         imports: Vec::new(),
         self_assigns: Vec::new(),
@@ -2074,6 +2118,12 @@ fn main() {
     let mut repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
     repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
     reconcile_repo_wide(&mut all_findings, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
+    reconcile_repo_wide(
+        &mut all_findings,
+        middle_man_repo_wide(&scans, &root),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
     // import cycles for Rust crates: the local mod/use graph (the
     // code-review-graph contract is Python-only; Rust resolves itself)
     if !rust_scans.is_empty() {
@@ -4654,6 +4704,8 @@ mod tests {
         let mut heads = Vec::new();
         let mut fns = Vec::new();
         let mut repo_methods = Vec::new();
+        let mut mm_classes: Vec<checks::MiddleManClass> = Vec::new();
+        let mut mm_candidates: Vec<checks::MiddleManCandidate> = Vec::new();
         let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
         for (name, src) in files {
             let mut scan = scan_source(src, name);
@@ -4675,6 +4727,8 @@ mod tests {
             heads.extend(scan.forwarder_methods.iter().cloned());
             fns.extend(scan.forwarder_fns.iter().cloned());
             repo_methods.extend(scan.repo_methods.iter().cloned());
+            mm_classes.extend(scan.middle_man_classes.iter().cloned());
+            mm_candidates.extend(scan.middle_man_candidates.iter().cloned());
             imports_by_rel.insert(name.to_string(), scan.imports.clone());
             for (fn_name, line) in &scan.defs {
                 definitions.push((rel.clone(), fn_name.clone(), *line, false));
@@ -4705,6 +4759,12 @@ mod tests {
         reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel, &spent_by_rel);
         let undeclared = undeclared_findings(&undecl_scans);
         reconcile_repo_wide(&mut all, undeclared, &supps_by_rel, &spent_by_rel);
+        reconcile_repo_wide(
+            &mut all,
+            checks::middle_man_findings(&mm_candidates, &mm_classes),
+            &supps_by_rel,
+            &spent_by_rel,
+        );
         // the suppression census + its bulk warning mirror main()'s report
         all.extend(duplicate_module_findings(&module_entities));
         let census = suppression_counts(supps_by_rel.values());
@@ -6018,6 +6078,88 @@ mod tests {
             "../../tests/fixtures/rust/middle_man_delegation_detected__02.py"
         ));
         assert!(!ok.iter().any(|x| x.kind == "middle-man"));
+    }
+
+    #[test]
+    fn middle_man_resolves_a_target_in_another_file() {
+        // one class per file is the house convention, so the target of a
+        // delegation usually lives in ANOTHER file — a file-local index would
+        // read it as outside the codebase and silently drop the finding
+        let f = scan_corpus(&[
+            (
+                "inner.py",
+                "class Inner:\n    def render(self) -> str:\n        return \"x\"\n",
+            ),
+            (
+                "wrapper.py",
+                "class Wrapper:\n    def __init__(self) -> None:\n        self._inner = Inner()\n\n    def render(self) -> str:\n        return self._inner.render()\n",
+            ),
+        ]);
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "middle-man").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert_eq!(r[0].file, "wrapper.py");
+        assert_eq!(r[0].line, 5);
+        // and the library case stays silent: no class of that name anywhere
+        let g = scan_corpus(&[(
+            "boundary.py",
+            "class Boundary(BaseModel):\n    def to_dict(self) -> dict:\n        return self.model_dump(by_alias=True)\n",
+        )]);
+        assert!(!g.iter().any(|x| x.kind == "middle-man"), "{g:?}");
+    }
+
+    #[test]
+    fn middle_man_single_buffer_is_conservative() {
+        // the LSP's typing path sees one buffer and no repo-wide pass, so a
+        // target in another file is invisible there: the rule stays silent
+        // rather than guessing, and fires once the target is in the buffer
+        let wrapper = "class Wrapper:\n    def __init__(self) -> None:\n        self._inner = Inner()\n\n    def render(self) -> str:\n        return self._inner.render()\n";
+        let alone = scan_source_impl(wrapper, "wrapper.py", false);
+        assert!(
+            !alone.findings.iter().any(|f| f.kind == "middle-man"),
+            "{:?}",
+            alone.findings
+        );
+        let together = format!("class Inner:\n    def render(self) -> str:\n        return \"x\"\n\n\n{wrapper}");
+        let both = scan_source_impl(&together, "wrapper.py", false);
+        assert!(
+            both.findings.iter().any(|f| f.kind == "middle-man"),
+            "{:?}",
+            both.findings
+        );
+    }
+
+    #[test]
+    fn middle_man_exempts_the_encapsulation_shapes() {
+        // Issue #44: four shapes where "call the target directly" is not
+        // advice anyone can take — the delegated member is a library's method,
+        // the method is an interface member, the call fixes an argument the
+        // target defaults, or the attribute has no type evidence at all.
+        for src in [
+            include_str!("../../tests/fixtures/rust/middle_man_library_target_passes__01.py"),
+            include_str!("../../tests/fixtures/rust/middle_man_protocol_conformance_passes__01.py"),
+            include_str!("../../tests/fixtures/rust/middle_man_policy_argument_passes__01.py"),
+            include_str!("../../tests/fixtures/rust/middle_man_unknown_target_passes__01.py"),
+        ] {
+            let f = scan_src(src);
+            assert!(!f.iter().any(|x| x.kind == "middle-man"), "{f:?}");
+        }
+    }
+
+    #[test]
+    fn middle_man_keeps_the_delegation_this_codebase_can_answer() {
+        // the rule's own case: the target class is here, the call adds nothing
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/middle_man_real_delegation_fires__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "middle-man").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("Remove Middle Man"), "{}", r[0].message);
+        // a name collision with an interface member is not conformance: this
+        // wrapper does not accept the interface's parameter
+        let g = scan_src(include_str!(
+            "../../tests/fixtures/rust/middle_man_interface_arity_mismatch_fires__01.py"
+        ));
+        assert!(g.iter().any(|x| x.kind == "middle-man"), "{g:?}");
     }
 
     #[test]

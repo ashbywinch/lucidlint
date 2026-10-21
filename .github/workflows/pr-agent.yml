@@ -65,7 +65,12 @@ jobs:
       issues: write
       actions: read  # the fail-loud check reads the bot's own log for the failure reason
     steps:
-      - uses: the-pr-agent/pr-agent@f6af7d77554ff8d26adffded077e6461329e92fa   # v0.42.0 tag SHA — pin a real release SHA, @latest does not resolve
+      # v0.48.0 — bumped from v0.42.0 (f6af7d7) for config.additional_reasoning_effort_models
+      # (upstream PR #3460): the pin is what lets a custom OpenAI-compatible model id opt into
+      # config.reasoning_effort, which is how the review turns DeepSeek's thinking off
+      # (see the [config] notes on the pr-agent-config branch). Pin a real release SHA;
+      # @latest does not resolve.
+      - uses: the-pr-agent/pr-agent@981344be2755e303df501e18e3f60b848a188a80
         id: pr-agent
         env:
           # Cloudflare AI Gateway (OpenCode -> DeepSeek fallback) — same
