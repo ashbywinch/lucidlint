@@ -62,28 +62,38 @@ language-servers = ["lucidlint"]
 The server the editors/agents run is the binary at
 `~/.local/share/lucidlint/bin/lucidlint` (that path is the install — an
 old binary there keeps serving old rules until replaced AND restarted).
-To update it in one pass:
+To update it in one pass — the release to install is the latest one, so the
+tag is read, never typed:
 
 ```sh
-VER=v0.5.0   # the release to install
-gh release download $VER --repo ashbywinch/lucidlint \
-  -p "lucidlint-$VER-x86_64-unknown-linux-musl.tar.gz"
-tar xzf "lucidlint-$VER-x86_64-unknown-linux-musl.tar.gz"
-install -m 755 "lucidlint-$VER-x86_64-unknown-linux-musl/bin/lucidlint" \
+VER=$(gh release view --repo ashbywinch/lucidlint --json tagName --jq .tagName)
+TMPDIR=$(mktemp -d)
+gh release download "$VER" --repo ashbywinch/lucidlint \
+  -p "lucidlint-$VER-x86_64-unknown-linux-musl.tar.gz" -D "$TMPDIR"
+tar xzf "$TMPDIR/lucidlint-$VER-x86_64-unknown-linux-musl.tar.gz" -C "$TMPDIR"
+install -m 755 "$TMPDIR/lucidlint-$VER-x86_64-unknown-linux-musl/bin/lucidlint" \
   ~/.local/share/lucidlint/bin/lucidlint
+rm -rf "$TMPDIR"
 pkill -f 'lucidlint --lsp'   # running clients keep serving the old rules;
                               # the editor/omp respawns on the next request
 ```
 
 Then VERIFY what is served, not just that a file moved — a stdio
-`initialize` handshake answers with the served version:
+`initialize` handshake answers with the served version. The two answers name
+the same release in its two spellings: `--version` prints the TAG the bundle
+was built from, the handshake the CRATE version (the same number, no leading
+`v`):
 
 ```sh
+~/.local/share/lucidlint/bin/lucidlint --version    # lucidlint vX.Y.Z
 INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 printf 'Content-Length: %d\r\n\r\n%s' "${#INIT}" "$INIT" \
-  | timeout 3 ~/.local/share/lucidlint/bin/lucidlint --lsp | grep -o '"version":"[^"]*"'
-# expect: "version":"v0.5.0" (the tag the bundle was built from)
+  | timeout 3 ~/.local/share/lucidlint/bin/lucidlint --lsp \
+  | grep -o '"version":"[^"]*"'                     # "version":"X.Y.Z"
 ```
+
+Both must name `$VER`. An editor pointed at an old copy of the binary keeps
+reporting that old version.
 
 Do NOT confuse this with `~/.local/bin/lucid-lint` (hyphenated) — that is
 an unrelated prose-accessibility linter. It is not lucidlint; leave it
