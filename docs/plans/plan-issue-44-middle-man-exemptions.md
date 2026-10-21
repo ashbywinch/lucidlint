@@ -80,6 +80,25 @@ against the file's own classes: a target in another file is invisible there
 and the rule stays silent (the conservative direction — fewer findings, never
 a wrong one). The gate and the LSP's save path use the repo-wide index.
 
+## Known limitations (recorded from the PR review, 2026-10-21)
+
+- **Same-named classes merge** (union of methods/bases/attrs), so a chain
+  resolving to `Inner` may read a `render` declared by an unrelated `Inner`.
+  Deliberate: an ambiguous name means "could be this target", and a scanner
+  with no name resolution cannot pick the right one; the union's most
+  forgiving declaration decides. Revisit only if the eval shows it firing on
+  real code.
+- **Interface conformance compares parameter NAMES, not types.** A wrapper
+  whose parameter has the wrong type but the right name is exempted. The
+  alternative — comparing annotation text — would fire on compatible-but-
+  different spellings (`Sequence[str]` vs `list[str]`), trading a rare false
+  negative for a common false positive in a tool with no type checker.
+- **A nested class's attributes are not read as the enclosing class's.** The
+  review flagged this as reachable; it is not: `push_stmt_children` descends
+  `ClassDef` bodies but never a nested `FunctionDef` body, so a nested class's
+  `__init__` was already unreachable from the enclosing class's walk (a fixture
+  for it passes before and after the suggested guard, so no guard was added).
+
 ## Tests
 
 - `middle_man_exempts_the_encapsulation_shapes` — the four exempt fixtures
