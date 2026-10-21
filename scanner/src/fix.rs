@@ -1632,7 +1632,7 @@ pub fn fix_loop_hoist(source: &str, line: usize, name: &str) -> Result<String, S
             Stmt::Expr(Expr::ForLoop(f), _)
                 if !matches!(f.body.stmts.as_slice(), [_])
         );
-    let push_sites: Vec<(usize, usize, proc_macro2::Span)> = plan
+    let mut push_sites: Vec<(usize, usize, proc_macro2::Span)> = plan
         .push_stmts
         .iter()
         .zip(&plan.push_args)
@@ -1644,6 +1644,9 @@ pub fn fix_loop_hoist(source: &str, line: usize, name: &str) -> Result<String, S
             )
         })
         .collect();
+    // the rebuild walks the sites ascending; a nested site (its range inside
+    // the previous one) is then the only skip, and it is skipped on purpose
+    push_sites.sort_by_key(|(start, _, _)| *start);
     let helper = hoist_helper_text(
         source,
         &HelperSig {
