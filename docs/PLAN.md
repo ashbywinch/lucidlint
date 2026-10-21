@@ -9,7 +9,7 @@ never depend on a later phase.
 > binary (`scanner/`, ruff parser pinned `=0.0.9`); `lucidlint.py` is the
 > orchestrator (fail-fast when the binary is missing). See TECHSPEC D8.
 
-- **Inputs:** repo path; the Rust binary's findings JSON (schema 2);
+- **Inputs:** repo path; the Rust binary's findings JSON (schema 4);
   code-review-graph contract export; git log via pygit2 (optional).
 - **Outputs:** a prioritized action list: complexity, large functions,
   hub files, hotspots (volatile functions named, with per-function churn),
@@ -30,12 +30,12 @@ never depend on a later phase.
   report as a workable fix list; coverage field never contradicts the
   prose; stale snapshots say "verify".
 
-## Phase 3 — Baselines and diff awareness
+## Phase 3 — Baselines
 
-- **Inputs:** Phase 2 report, git branch, baseline file.
-- **Outputs:** `--baseline`/`--update-baseline` locking; in-diff marking;
-  "no baseline — cannot tell what is new" honesty; lifecycle facts for
-  low-churn scripts.
+- **Inputs:** Phase 2 report, baseline file.
+- **Outputs:** `--baseline`/`--update-baseline` locking; "no baseline —
+  cannot tell what is new" honesty; lifecycle facts for low-churn
+  scripts.
 - **Quality gate:** a repo can lock today's debt and go green on NEW
   actions only; the gate's own repo demonstrates it.
 

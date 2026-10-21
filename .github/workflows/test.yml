@@ -71,3 +71,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: make setup
       - run: make wheel-check
+
+  # The release-bundle distribution channel: the self-contained tarball
+  # (modules + bin/lucidlint + the vendored libcst in deps/). bundle-check
+  # assembles a dev bundle exactly like the release workflow and drives the
+  # packaged fix path through scan -> fix -> re-scan PASS — the regression
+  # gate for the v0.5.0 bug where the shipped linux bundle's libcst
+  # dependency never made it into the tarball and released fixes broke.
+  verify-bundle-deployment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: make setup
+      - run: make bundle-check

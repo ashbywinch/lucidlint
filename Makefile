@@ -14,7 +14,7 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-.PHONY: help setup deps uv-sync install-hooks check lint lint-check lint-github typecheck typecheck-update-baseline format test scanner-check coverage self-check lucidlint wheel wheel-check clean
+.PHONY: help setup deps uv-sync install-hooks check lint lint-check lint-github typecheck typecheck-update-baseline format test scanner-check coverage self-check lucidlint wheel wheel-check bundle-check clean
 
 # Tool paths. uv is the package manager (installs itself if missing).
 PYTHON := .venv/bin/python
@@ -81,8 +81,15 @@ scanner-test:
 	@cd scanner && cargo test --release 2>&1 | tail -30
 	@echo "${GREEN}✓ scanner tests passed${NC}"
 
+# `touch` after a successful build: cargo skips the relink when only the
+# lockfile's version line changed (a checkout or a version bump rewrites
+# Cargo.lock), leaving the binary older than a watched file — the gate then
+# refuses the stale core and names THIS target as the fix, so the target must
+# clear the condition. The stamp is faithful: cargo just certified the
+# artifact current against these sources.
 scanner-check:
 	@cd scanner && cargo build --release 2>&1 | tail -30
+	@touch scanner/target/release/lucidlint
 	@echo "${GREEN}✓ scanner built${NC}"
 
 rules:
@@ -111,6 +118,24 @@ wheel-check: wheel
 	$(PYTHON) scripts/deploy-check.py --lucidlint $$tmp/venv/bin/lucidlint --project $$tmp/project; \
 	rm -rf $$tmp; \
 	echo "${GREEN}✓ pip wheel: clean-venv install scans + fixes a mini project${NC}"
+
+# The release-bundle deployment check: assemble a dev bundle exactly as the
+# release workflow does (the shipped modules + bin/lucidlint + the vendored
+# libcst in deps/), then drive it through scan -> fix -> re-scan PASS with
+# scripts/deploy-check.py. The bundle's fix path was never tested post
+# packaging (v0.5.0 shipped a linux bundle whose libcst dep never made it
+# into the tarball) — this is the PR-time gate for that step.
+bundle-check: scanner-check
+	@tmp=$$(mktemp -d); \
+	mkdir -p $$tmp/bundle/bin; \
+	cp lucidlint.py rule_metadata.py fix_engine.py release/Makefile $$tmp/bundle/; \
+	cp scanner/target/release/lucidlint $$tmp/bundle/bin/; \
+	printf '%s\n' dev > $$tmp/bundle/version.txt; \
+	test "$$($(PYTHON) $$tmp/bundle/lucidlint.py --version)" = "lucidlint dev" || { echo "${RED}bundle reports the wrong version${NC}"; exit 1; }; \
+	$(UV) pip install --quiet --python $(PYTHON) --target $$tmp/bundle/deps "libcst>=1.9.0"; \
+	$(PYTHON) scripts/deploy-check.py --lucidlint "$(abspath $(PYTHON)) $$tmp/bundle/lucidlint.py" --project $$tmp/project; \
+	rm -rf $$tmp; \
+	echo "${GREEN}✓ release bundle: the packaged fix path scans + fixes a mini project${NC}"
 
 
 coverage: deps scanner-check

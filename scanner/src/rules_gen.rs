@@ -28,6 +28,12 @@ pub const FAMILY_KINDS: &[&str] = &[
     "record-shape",
     "detached-method",
     "duplicate",
+    "duplicate-module",
+    "static-husk",
+    "delegating-husk",
+    "process-class",
+    "forwarding-chain",
+    "closure-cluster",
     "layer-mix",
     "folder-mix",
     "magic-number",
@@ -68,6 +74,9 @@ pub const FAMILY_KINDS: &[&str] = &[
     "middle-man",
     "unused-setter",
     "loop-pipeline",
+    "mutating-loop",
+    "loop-sequence",
+    "loop-hoist",
     "hub-file",
     "high-risk",
     "hotspot",
@@ -115,25 +124,66 @@ pub const FAMILY_VARIANTS: &[(&str, &[&str])] = &[
             "feature-envy",
             "god-class",
             "duplicate-field",
+            "closure-cluster",
         ],
     ),
     ("docs", &["docs-link", "docs-undiscoverable"]),
+    (
+        "loop-pipeline",
+        &["loop-pipeline", "mutating-loop", "loop-sequence", "loop-hoist"],
+    ),
 ];
 
-/// Kinds whose fix needs a name the tool cannot invent
-/// (--name/--fix-name): the LSP marks its code action
-/// `needsName` from this table; the CLI refuses a missing or
-/// invalid name with an explicit message.
+/// Fix kinds whose inputs declare a required `name` — the
+/// judge-true set (Fifth-pass): the LSP marks its code
+/// action `needsName` from this table; the CLI refuses a
+/// missing or invalid name with an explicit message.
 pub const NAME_REQUIRED_KINDS: &[&str] = &[
-    "complexity",
     "extract-class",
+    "extract-method",
     "extract-module",
     "extract-record-class",
     "feature-envy",
     "long-param-list",
+    "loop-hoist",
     "magic-number",
     "tuple-record",
     "vague-name",
+];
+
+/// kind -> the rule's default fix kind (Rule.fix) — the
+/// scanner's structured `fix_kind` for findings whose message
+/// carries no shape-routed directive (Sixth-pass BQ1: the
+/// directive is the rendering of this value, no
+/// linked-vs-offered divergence).
+pub const KIND_FIX: &[(&str, &str)] = &[
+    ("complexity", "extract-method"),
+    ("long-param-list", "long-param-list"),
+    ("large-function", "extract-method"),
+    ("partition", "extract-class"),
+    ("strewing", "extract-class"),
+    ("tuple-record", "tuple-record"),
+    ("wide-tuple", "extract-class"),
+    ("data-clump", "extract-class"),
+    ("feature-envy", "feature-envy"),
+    ("undeclared-attribute", "undeclared-attribute"),
+    ("module-cohesion", "extract-module"),
+    ("record-shape", "extract-record-class"),
+    ("delegating-husk", "dissolve-husk"),
+    ("forwarding-chain", "collapse-chain"),
+    ("magic-number", "magic-number"),
+    ("noop-statement", "noop-statement"),
+    ("unreachable", "unreachable"),
+    ("vague-name", "vague-name"),
+    ("class-module", "split-module"),
+    ("positional-literals", "positional-literals"),
+    ("duplicate-def", "duplicate-def"),
+    ("restating-docstring", "restating-docstring"),
+    ("duplicate-block", "duplicate-block"),
+    ("stale-suppression", "stale-suppression"),
+    ("loop-pipeline", "loop-pipeline"),
+    ("loop-sequence", "loop-sequence"),
+    ("loop-hoist", "loop-hoist"),
 ];
 
 /// kind -> display bucket — the lookup table final_kind scans.
@@ -159,6 +209,12 @@ pub const DISPLAY_BUCKETS: &[(&str, &str)] = &[
     ("record-shape", "record-shape"),
     ("detached-method", "detached-method"),
     ("duplicate", "standard"),
+    ("duplicate-module", "duplicate-module"),
+    ("static-husk", "static-husk"),
+    ("delegating-husk", "delegating-husk"),
+    ("process-class", "process-class"),
+    ("forwarding-chain", "forwarding-chain"),
+    ("closure-cluster", "latent-class"),
     ("layer-mix", "layer-mix"),
     ("folder-mix", "folder-mix"),
     ("magic-number", "magic-number"),
@@ -199,13 +255,15 @@ pub const DISPLAY_BUCKETS: &[(&str, &str)] = &[
     ("middle-man", "middle-man"),
     ("unused-setter", "unused-setter"),
     ("loop-pipeline", "loop-pipeline"),
+    ("mutating-loop", "loop-pipeline"),
+    ("loop-sequence", "loop-pipeline"),
+    ("loop-hoist", "loop-pipeline"),
     ("hub-file", "hub-file"),
     ("high-risk", "high-risk"),
     ("hotspot", "hotspot"),
     ("churn-untested", "churn-untested"),
     ("over-abstraction", "standard"),
 ];
-
 /// The display bucket for a finding kind — `final_kind` output.
 pub fn final_kind(kind: &str) -> &'static str {
     for (k, bucket) in DISPLAY_BUCKETS {
@@ -225,14 +283,18 @@ pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {
             &[
                 "assembly-class",
                 "churn-untested",
+                "closure-cluster",
                 "closures",
                 "complexity",
                 "data-clump",
+                "delegating-husk",
                 "detached-method",
                 "duplicate",
                 "duplicate-field",
+                "duplicate-module",
                 "feature-envy",
                 "folder-mix",
+                "forwarding-chain",
                 "god-class",
                 "high-risk",
                 "hotspot",
@@ -244,7 +306,9 @@ pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {
                 "module-cohesion",
                 "over-abstraction",
                 "partition",
+                "process-class",
                 "record-shape",
+                "static-husk",
                 "strewing",
                 "tuple-record",
                 "undeclared-attribute",
@@ -269,9 +333,12 @@ pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {
                 "import-cycle",
                 "inline-import",
                 "latent-visitor",
+                "loop-hoist",
                 "loop-pipeline",
+                "loop-sequence",
                 "magic-number",
                 "middle-man",
+                "mutating-loop",
                 "noop-statement",
                 "positional-literals",
                 "private-import",

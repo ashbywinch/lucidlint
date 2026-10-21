@@ -152,11 +152,9 @@ rather than a number.
   acknowledges current actions so the gate fails only on new ones — and on
   STALE ones (see below); the report states exactly how many are
   acknowledged.
-- **R10 — Diff awareness, honestly worded.** Actions in files the current
-  branch touches are marked; the header says "actions in files your diff
-  touches" and admits when no baseline means "cannot tell what is new". The
-  lock is both-direction (the pyrefly-lock rule): a stale baseline entry —
-  a finding the code no longer produces — fails the run with "run
+- **R10 — Stale baseline entries fail the run.** The lock is
+  both-direction (the pyrefly-lock rule): a stale baseline entry — a
+  finding the code no longer produces — fails the run with "run
   --update-baseline", so paying debt without shrinking the baseline is
   drift, never silent. Staleness is compared on (kind, file, function) —
   the location dimension is excluded, because an edit that shifts a
@@ -302,10 +300,17 @@ rather than a number.
   accumulator the enclosing function returns (`issues.append(...)`) rides
   the error out in the result and is not a swallow. The fail-fast
   rule is distinct from broad-except linting (ruff BLE001 owns that;
-  this tool only adds the house rule). Module-level state includes typed
-  `AnnAssign` literals and collections mutated inside functions, not
-  just non-constant `Assign` literals (negative literals like `-4.0` are
-  still constants — the UnaryOp wrapper is not state). A dict spread
+  this tool only adds the house rule). Module-level state is ANY assignment
+  at module scope — bare, annotated (`AnnAssign`), or augmented — because a
+  value bound at import time is a class's private internals wherever it
+  sits, tables of literals included (2026-09-30: the container exemptions
+  were dropped, so a lookup table is state too). This is about WHERE the
+  name lives, not what the value is: R13's "constant lookup tables stay
+  anonymous" exempts the table from becoming a record class; the module-state
+  rule still moves that table onto the class that owns it as a class
+  attribute. Dunder names (`__all__`,
+  `__version__`) and call-valued registrations are exempt — module protocol
+  metadata and framework wiring, not domain values. A dict spread
   merge (`{**session, "x": v}`) updates an existing shape and is not a
   record being built; `__init__` bodies are excluded from the
   near-duplicate scan (init boilerplate is convention, not copy-paste).

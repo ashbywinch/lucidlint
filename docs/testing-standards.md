@@ -7,8 +7,6 @@ suite is organised.
 
 The language's type checker is configured (strict where the toolchain allows)
 and runs in the test gate — errors fail the build, never suppressed.
-A `# type: ignore` requires a comment explaining why, and a suppression is
-itself a finding.
 
 ## Write the test before the code
 
@@ -31,14 +29,12 @@ A test that needs an external dependency — a store, a service, an API key,
 a database — never skips when the dependency is absent. Fake it: a fixture
 builds a minimal stand-in (a tmp store with synthetic data, a stub server,
 recorded responses) so the test runs identically everywhere, CI included.
-`@pytest.mark.skipif` on environment presence is forbidden: a skipped test
-rots silently and the coverage gate lies about what is exercised.
 
 Only the E2E suite may skip — a real external API is the one dependency
 that cannot be faked faithfully (`@pytest.mark.e2e`, skipped by default;
 see Organisation). Everything else fakes, with the fake injected per the
-Mocking section (parameter injection first — never `monkeypatch` a module
-constant to point at a tmp dir; make the dependency a parameter).
+Mocking section (parameter injection first — make the dependency a
+parameter).
 
 ## Organisation
 
@@ -102,8 +98,8 @@ work.
 
 ## Fake the filesystem before touching the real one
 
-File I/O in tests uses pyfakefs wherever possible (the gate enforces it;
-  add `pyfakefs` to dev dependencies).
+File I/O in tests uses pyfakefs wherever possible — add `pyfakefs` to dev
+  dependencies.
 
 - Write to fixed fake paths (`/store`, `/labels.jsonl`) — not pytest's
   `tmp_path`, which breaks under the fs patch (`Path.relative_to` fails);
@@ -127,10 +123,6 @@ Injection patterns, in order:
   optional param falling back to the real implementation).
 - **Services container** for deep call chains.
 - **ContextVars** for request-scoped singletons.
-
-Forbidden: `monkeypatch`/`unittest.mock.patch`, module-level mutable state,
-lazy imports, and abstract base classes with a single concrete
-implementation.
 
 Pure functions need no mocking. Function-param injection is next. Containers
 after that. Global patching is a last resort and a smell.

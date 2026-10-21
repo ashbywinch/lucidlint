@@ -122,15 +122,14 @@ fn check_target(
         return; // intentionally private — not a broken link
     }
     if !abs.exists() {
-        out.push(Finding {
-            file: rel.to_string(),
-            line: 0,
-            col: 0,
-            function: String::new(),
-            kind: "docs-link".into(),
-            severity: "fail".into(),
-            message: format!("{what} '{target}' from {rel} does not resolve — a doc that links nowhere is a finding"),
-        });
+        out.push(Finding { logical_start: None, seam_members: Vec::new(),
+        file: rel.to_string(),
+        line: 0,
+        col: 0,
+        function: String::new(),
+        kind: "docs-link".into(),
+        severity: "fail".into(),
+        message: format!("{what} '{target}' from {rel} does not resolve — a link that leads nowhere misleads the reader. Fix the target or remove the link."), });
     }
 }
 
@@ -311,6 +310,8 @@ fn docs_reachability(repo: &Path, gitignored: &HashSet<String>) -> Vec<Finding> 
     message.push_str(&unreachable.join(", "));
     message.push_str(". Link each from its group's index");
     out.push(Finding {
+        logical_start: None,
+        seam_members: Vec::new(),
         file: "AGENTS.md".into(),
         line: 0,
         col: 0,
@@ -353,7 +354,16 @@ mod tests {
         std::fs::create_dir_all(dir.join("docs")).unwrap();
         std::fs::write(dir.join("docs/guide.md"), "see [missing](nope.md)\n").unwrap();
         let f = docs_findings(&dir, &std::collections::HashSet::new());
-        assert!(f.iter().any(|x| x.kind == "docs-link" && x.message.contains("nope.md")));
+        let broken: Vec<&Finding> = f.iter().filter(|x| x.kind == "docs-link").collect();
+        assert_eq!(broken.len(), 1, "{f:?}");
+        // A7: the message names the broken target and the two actions
+        assert!(
+            broken[0]
+                .message
+                .contains("link to 'nope.md' from docs/guide.md does not resolve — a link that leads nowhere misleads the reader. Fix the target or remove the link."),
+            "{}",
+            broken[0].message
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

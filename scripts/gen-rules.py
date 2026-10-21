@@ -23,6 +23,7 @@ It validates as it goes:
 Usage: `make rules` (writes both files) or `scripts/gen-rules.py --check`
 (fails when either is stale — the gate runs this).
 """
+# lucidlint: ignore-file global-state generator constants (markers, non-literal kinds) are the generator's configuration
 
 import re
 import subprocess
@@ -34,7 +35,17 @@ sys.path.insert(0, str(ROOT))
 
 import rule_metadata  # noqa: E402  # the sys.path bootstrap above precedes the import — inherent to the pattern
 
-NON_LITERAL_KINDS = {"complexity"}
+NON_LITERAL_KINDS = {
+    # the scanner never emits these as a literal kind/severity pair: the
+    # loop family's mutating/sequence variants all flow through
+    # LoopFunctionCtx.push_finding (kind is a parameter, severities warn).
+    # The severity string IS literal in the construction, but the regex
+    # needs the pair in one match — metadata is trusted for these.
+    "complexity",
+    "mutating-loop",
+    "loop-sequence",
+    "loop-hoist",
+}
 
 START = "<!-- RULES-GENERATED:START -->"
 END = "<!-- RULES-GENERATED:END -->"
@@ -113,8 +124,21 @@ def validate() -> list[str]:
             problems.append(
                 f"kind '{rule.kind}': metadata says {rule.severity}, scanner emits {emitted_sev}"
             )
-        if rule.display_group not in rule_metadata.GROUP_INFO:
-            problems.append(f"kind '{rule.kind}': unknown display group '{rule.display_group}'")
+        if rule.section not in rule_metadata.GROUP_INFO:
+            problems.append(f"kind '{rule.kind}': unknown section '{rule.section}'")
+    # Sixth-pass BQ1 drift gate: a finding message advertises its fix as
+    # `— fix: <kind>`; that kind MUST be a registered fix (FIX_REGISTRY) or
+    # the stamp/notice/judgement machinery cannot classify it. Shape-routed
+    # kinds (dispatch-registry, rule-table) are registered like any other.
+    directive_kinds: set[str] = set()
+    for src in scanner_sources():
+        for m in re.finditer(r"— fix: (?!lucidlint )([a-z-]+)", _prod_text(src)):
+            directive_kinds.add(m.group(1))
+    for kind in sorted(directive_kinds - set(rule_metadata.FIX_REGISTRY.kinds())):
+        problems.append(
+            f"fix kind '{kind}' is advertised in a scanner message but not registered in FIX_REQUIRED_INPUTS"
+        )
+
     return problems
 
 
@@ -125,13 +149,12 @@ def render_rules_md() -> str:
         raise SystemExit("rule_metadata drift:\n  " + "\n  ".join(problems))
     out = [START]
     for group, (header, intro) in rule_metadata.GROUP_INFO.items():
-        rows = [r for r in rule_metadata.CATALOG.rules if r.display_group == group]
+        rows = [r for r in rule_metadata.CATALOG.rules if r.section == group]
         out.append("")
         out.append(f"## {header}")
         if intro:
             out.append("")
             out.append(intro)
-        out.append("")
         out.append("| Rule | Severity | Language | What it checks |")
         out.append("|---|---|---|---|")
         for rule in rows:
@@ -186,34 +209,41 @@ def render_rules_rs() -> str:
         out.append(f'    ("{fam}", &[{", ".join(f'"{m}"' for m in members)}]),')
     out.append("];")
     out.append("")
-    # the LSP reads the DIRECTIVE's fix kind, which differs from the rule
-    # kind where a fix has its own name (record-shape -> extract-record-class,
-    # module-cohesion -> extract-module, data-clump -> extract-class) — the
-    # table must carry the fix kinds or needsName never fires (review bot)
-    fix_kind_of = {
-        "record-shape": "extract-record-class",
-        "module-cohesion": "extract-module",
-        "data-clump": "extract-class",
-    }
+    # The judgement signal is a property of the linked fix's REGISTRY inputs
+    # (Fifth-pass): "requires a name" is derived from FIX_REQUIRED_INPUTS,
+    # never a per-rule boolean. The table carries the FIX kinds (the LSP
+    # reads the DIRECTIVE's kind — extract-record-class for a record-shape
+    # finding), so the registry is the one source for both surfaces.
     name_required = sorted(
-        set(fix_kind_of.get(r.kind, r.kind) for r in rules if r.fix_name_required)
+        k for k, inputs in rule_metadata.FIX_REQUIRED_INPUTS.items() if "name" in inputs
     )
     out.append("")
-    out.append("/// Kinds whose fix needs a name the tool cannot invent")
-    out.append("/// (--name/--fix-name): the LSP marks its code action")
-    out.append("/// `needsName` from this table; the CLI refuses a missing or")
-    out.append("/// invalid name with an explicit message.")
+    out.append("/// Fix kinds whose inputs declare a required `name` — the")
+    out.append("/// judge-true set (Fifth-pass): the LSP marks its code")
+    out.append("/// action `needsName` from this table; the CLI refuses a")
+    out.append("/// missing or invalid name with an explicit message.")
     out.append(f"pub const NAME_REQUIRED_KINDS: &[&str] = &[{', '.join(f'"{k}"' for k in name_required)}];")
+    out.append("")
+    out.append("/// kind -> the rule's default fix kind (Rule.fix) — the")
+    out.append("/// scanner's structured `fix_kind` for findings whose message")
+    out.append("/// carries no shape-routed directive (Sixth-pass BQ1: the")
+    out.append("/// directive is the rendering of this value, no")
+    out.append("/// linked-vs-offered divergence).")
+    out.append("pub const KIND_FIX: &[(&str, &str)] = &[")
+    for r in rules:
+        if r.fix:
+            out.append(f'    ("{r.kind}", "{r.fix}"),')
+    out.append("];")
+    out.append("")
     out.append("")
     out.append("/// kind -> display bucket — the lookup table final_kind scans.")
     out.append("/// A match of 50+ arms would be a complexity finding; data")
     out.append("/// stays flat (a linear scan over the entries is nothing).")
     out.append("pub const DISPLAY_BUCKETS: &[(&str, &str)] = &[")
     for r in rules:
-        bucket = r.display or r.kind
+        bucket = r.display_group or r.kind
         out.append(f'    ("{r.kind}", "{bucket}"),')
     out.append("];")
-    out.append("")
     out.append("/// The display bucket for a finding kind — `final_kind` output.")
     out.append("pub fn final_kind(kind: &str) -> &'static str {")
     out.append("    for (k, bucket) in DISPLAY_BUCKETS {")
@@ -238,11 +268,15 @@ def render_rules_rs() -> str:
 
 
 def _fmt_rust(code: str) -> str:
-    """Run the generated Rust through rustfmt so the committed file is
-    fmt-clean and the --check comparison is byte-stable. rustfmt is a
-    required tool (the lint gate runs cargo fmt) — a missing binary is a
-    broken environment, and a raw fallback would make --check report a
-    freshly generated file as stale (review finding)."""
+    """Run the generated Rust through rustfmt FROM scanner/ so it picks up
+    scanner/rustfmt.toml (max_width 120 — the house .editorconfig) — the
+    same config `cargo fmt` uses, which is the lint gate's formatter. A
+    generator formatting with the default config (run from the repo root)
+    disagreed with cargo fmt on tuple/array layout and made make-rules
+    output fail `cargo fmt --check` (the loop-pipeline family entry).
+    rustfmt is a required tool (the lint gate runs cargo fmt) — a missing
+    binary is a broken environment, and a raw fallback would make --check
+    report a freshly generated file as stale (review finding)."""
     try:
         proc = subprocess.run(
             ["rustfmt", "--emit", "stdout"],
@@ -250,6 +284,7 @@ def _fmt_rust(code: str) -> str:
             capture_output=True,
             text=True,
             timeout=30,
+            cwd=str(ROOT / "scanner"),
         )
     except OSError as e:
         raise SystemExit(

@@ -16,6 +16,7 @@ own commits on main after branching.
 
 Run via: `make test-fixture` (regenerates the tarball).
 """
+# lucidlint: ignore-file global-state test-repo builder constants are one-off configuration
 
 from __future__ import annotations
 

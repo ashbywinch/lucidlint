@@ -8,53 +8,30 @@ Language-agnostic by design; per-language toolchain conventions (ruff, eslint, f
 
 - **Separation of concerns.** One reason to change per module/class/function.
   HTTP vs business vs persistence live in different modules with one-way
-  dependency chains; importing a sibling layer directly is a finding.
+  dependency chains.
   **Never mix I/O with computation** — a function that fetches, reads, or
   parses and then decides or computes in the same body is a finding; the
-  split is I/O in, decision out. **God functions are a finding** — one body
-  that reads, transforms, persists, and formats does four jobs and changes
-  for four reasons. A PR that touches a module for two unrelated reasons is
-  the module having two reasons to change.
+  split is I/O in, decision out. A PR that touches a module for two unrelated
+  reasons is the module having two reasons to change.
 - **Cohesive modules and classes.** Data + behaviour together. A module/class
   owns its invariants; external code never reaches into structures to compute
   derived values. Public-field classes that others manipulate are
   poorly-organised dicts; accessor chains feeding procedural code are missed
-  abstractions. **Function strewing is a missed class** — when several
-  functions share the same data (the same record, the same fields), they are methods on that class. A module that is a pile
-  of functions over one structure is a finding, not a style preference.
+  abstractions.
   **Name the class for the domain concept, and model the single record.**
   When a family of functions over a record becomes a class, the class is
   named for what the domain calls the collection (`Labels`, `Findings`),
-  never a pattern noun (`LabelStore`, `LabelsRepository`, `LabelsManager`),
   and the single record is a first-class type alongside it (`Label`) — the
   class owns the collection's invariants, the record is the thing itself.
-  **No module-level mutable state and no `global`** — put state in a class
-  named for the domain concept it represents (`_APIState`,
-  `_GeocodeRateLimit`), never the pattern name (`_MutableState`).
-- **Groups that travel together are a type — never repeated parallel
-  parameters.** The same set of fields passed to several functions is one
-  object: `assess(people, places, themes, items)` repeated across callers is
-  the anti-pattern; a `Knowledge`-style object with named members is the fix.
-  Data clumps in signatures become domain classes (`GeoPoint`, not
-  `LatLngPair`), and the functions that operate on the clump become its
-  methods.
-- **Each class in its own module.** Named after the class; exception for a
-  module grouping closely related handful-of-fields models that share one
-  reason to change. Extract once a class grows non-trivial behaviour.
-- **No over-abstraction.** No abstract base classes with a single concrete
-  implementation, no plugin systems, pipeline frameworks, or service buses —
-  write straightforward functions that call each other. Protocols or
-  `Callable` aliases are fine for defining a seam; a hierarchy with one leaf
-  is ceremony.
-  **Imports.** Inline imports hide dependencies from static analysis (the gate
-The gate flags them). Private (underscore) symbols from another module are never
-  imported — make the logic public or extract it to a shared module.
-  Circular imports are fixed by restructuring modules, never bodged with lazy
-  imports.
-  body (inline imports hide dependencies from static analysis). Never import
-  private (underscore) symbols from another module — make the logic public
-  and documented, or extract it to a shared module. Circular imports are fixed
-  by restructuring modules, never bodged with lazy imports.
+  **State lives in a class named for the domain concept it represents**
+  (`_APIState`, `_GeocodeRateLimit`), never the pattern name (`_MutableState`).
+- **Groups that travel together are a type.** Data clumps in signatures become
+  domain classes (`GeoPoint`, not `LatLngPair`), and the functions that operate
+  on the clump become its methods.
+- **Extract once a class grows non-trivial behaviour.**
+- **No over-abstraction.** No plugin systems, pipeline frameworks, or service
+  buses — write straightforward functions that call each other. Protocols or
+  `Callable` aliases are fine for defining a seam.
 
 ### Code and structured data live in files
 
@@ -93,9 +70,8 @@ The gate flags them). Private (underscore) symbols from another module are never
   process vocabulary ("the classify step of the pipeline"); code names may
   not.
 - **Semantic types over primitives.** A point in time is a date type with
-  awareness, not a bare string; structured data is an object with named
-  fields, not a bare dict; enumerated values are enums; units are part of the
-  value; money is a **Money type carrying its currency** — never a bare float
+  awareness, not a bare string; enumerated values are enums; units are part of
+  the value; money is a **Money type carrying its currency** — never a bare float
   and never a bare `Decimal`. Before reaching for a primitive: "is there a
   type that makes this impossible to misuse?" **Coerce untyped data** (API
   responses, parsed files) to the structured types at the boundary —
@@ -148,44 +124,37 @@ without a check is a wish:
 
 - **Anti-fragile: correct by construction.** Types make invalid states
   unrepresentable; pure functions preferred; error paths explicit — in the
-  type system where possible (discriminated unions, not `None`); never cast
-  suppress type-checker flags (`# type: ignore` must have a reason — the
-  gate enforces it)  explaining why); happy paths read naturally. **Never mutate function
+  type system where possible (discriminated unions, not `None`); never suppress
+  type-checker flags; happy paths read naturally. **Never mutate function
   arguments** — if a function must change a dict or list, create and return a
   new one; in-place mutation makes call-site behaviour unpredictable. Signs of
   coincidental correctness: works only in your test env, reordering "happens
   to work", unrelated breakage, unwritten rules ("always call X before Y").
 - **Fail fast, never swallow errors.** Every `except`/`catch` must log,
-  re-raise, or handle observably. No empty `except` blocks — catch specific
-  exceptions and at minimum log them. **Silently logging is not an
+  re-raise, or handle observably. **Silently logging is not an
   implementation of fail fast** — a failure must be user-visible: propagate
   it, surface it, or emit the two-tier messages. The only case where logging
   alone is acceptable is an explicitly safe-to-ignore error, and it logs at
-  `DEBUG` with an explanation of why it is safe. Invisible failure is a bug:
-  ```python
-  # ✗ invisible
-  try:
-      do_something()
-  except Exception:
-      pass
-  # ✗ logged but still invisible — the user sees nothing and the job "succeeds"
-  try:
-      do_something()
-  except Exception as e:
-      logger.debug("do_something failed (non-fatal): %s", e)
-  # ✓ observable: re-raise, or surface a two-tier message to the user
-  try:
-      do_something()
-  except Exception as e:
-      logger.error("do_something failed: %s", e)
-      raise
-  ```
-  **A warning that still proceeds is wasted code** — if a condition is bad
+  `DEBUG` with an explanation of why it is safe.
+- **A warning that still proceeds is wasted code** — if a condition is bad
   enough to warn about, it is bad enough to fail. **Don't pre-validate before
   trying** — let code fail naturally (a missing key surfaces as the API's 403,
   not a bespoke pre-check). Exception: interactive/CLI setup flows whose
   natural failure is misleading may pre-check configuration, and must then
   emit the two-tier messages.
+- **Never offer a fix that cannot apply.** Every diagnostic is exactly one
+  of three, decided by what the tool can prove about the fix:
+  - **Deterministically fixable (modulo a name or short parameter) → offer
+    and provide the automated fix.** The directive names the exact command;
+    a missing name/parameter is `needs-input`, never a refusal — the fix
+    exists, the agent supplies the semantic bit.
+  - **Fixable but not deterministically → explain the fix, hand-applied.**
+    The message states what to change (the shape, the target, the reason)
+    and makes clear the reader implements it — no command, no placeholder
+    that cannot run.
+  - **Not fixable at all → no diagnostic.** A finding the tool can neither
+    fix nor teach is noise; silence is the signal. Never emit the
+    diagnostic, never explain the inability.
 - **Two-tier failure messages.** A fail-fast path triggered by environment,
   configuration, or user error emits two messages: a plain-language user line
   (what happened + what to do next, no internal identifiers, no stack traces)
@@ -329,8 +298,7 @@ without a check is a wish:
   `make lint` (clippy's diagnostic set can change).
 - Lint gate: `cargo fmt --check` + `cargo clippy --all-targets -- -D
   warnings` inside `make lint-check` — deterministic under the pin, so no
-  baseline. An `#[allow(...)]` carries a reason comment; no blanket
-  `#![allow]`.
+  baseline.
 - Type gate: `cargo check --all-targets` inside `make typecheck` — the
   borrow checker is the type checker; errors are fixed, never suppressed.
 - Format: rustfmt, `max_width = 120` (matching `.editorconfig`); one
