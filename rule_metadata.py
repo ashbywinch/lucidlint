@@ -431,7 +431,10 @@ CATALOG = RuleCatalog([
          fix="extract-module"),
     Rule("record-shape", "fail", "architecture", "Both",
          "A function takes a struct/class with ≥5 fields and no methods — the "
-         "struct's rules belong as methods on it.",
+         "struct's rules belong as methods on it. A map whose values are the "
+         "class that names them still asks for the collection class, except a "
+         "parameter the function only reads: its content is already named, and "
+         "no operation belongs to the collection.",
          fix="extract-record-class"),
     Rule("detached-method", "warn", "architecture", "Both",
          "A method that never touches its receiver — a classmethod should "
