@@ -3479,11 +3479,65 @@ pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &
         ), });
         return;
     }
-    // multi arm: the misplaced public classes move to files named after them
+    // multi arm: the misplaced public classes move to files named after them —
+    // except a Protocol the module's OWN named class inherits: the interface
+    // exists because that class does, so it belongs beside it (issue #52).
+    // Two boundaries the ticket states: inheritance, not structural
+    // conformance (a Protocol the named class does not declare as a base stays
+    // misplaced), and a public DATACLASS keeps its own module even when it also
+    // types the seam — "they belong in their own module; this exemption must
+    // not swallow that".
+    /// The names this module binds to `dataclasses.dataclass` — the decorator can
+    /// be aliased (`from dataclasses import dataclass as dc`), and the ticket's
+    /// constraint reads the class's ROLE, not the decorator's spelling.
+    fn dataclass_names(module_body: &[Stmt]) -> std::collections::HashSet<String> {
+        let mut out: std::collections::HashSet<String> = std::collections::HashSet::from(["dataclass".to_string()]);
+        for s in module_body {
+            let Stmt::ImportFrom(im) = s else { continue };
+            if im.module.as_ref().map(|m| m.as_str()) != Some("dataclasses") {
+                continue;
+            }
+            for a in &im.names {
+                if a.name.as_str() == "dataclass" {
+                    out.insert(a.asname.as_ref().map_or("dataclass".to_string(), |n| n.to_string()));
+                }
+            }
+        }
+        out
+    }
+    /// A class decorated `@dataclass`, bare or called (`@dataclass(frozen=True)`),
+    /// under any of this module's names for it.
+    fn decorated_dataclass(c: &StmtClassDef, names: &std::collections::HashSet<String>) -> bool {
+        c.decorator_list.iter().any(|d| {
+            let e = match &d.expression {
+                Expr::Call(call) => call.func.as_ref(),
+                other => other,
+            };
+            match e {
+                Expr::Name(n) => names.contains(n.id.as_str()),
+                Expr::Attribute(a) => a.attr.as_str() == "dataclass",
+                _ => false,
+            }
+        })
+    }
+    let named_bases: std::collections::HashSet<String> = public
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::ClassDef(c) if matches_stem(c.name.as_str()) => Some(class_base_names(c)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let dataclass_decorators = dataclass_names(module_body);
+    let is_the_seam = |c: &StmtClassDef| {
+        class_base_names(c).iter().any(|b| b == "Protocol")
+            && named_bases.contains(c.name.as_str())
+            && !decorated_dataclass(c, &dataclass_decorators)
+    };
     let misplaced: Vec<&Stmt> = public
         .iter()
         .filter(|s| match s {
-            Stmt::ClassDef(c) => !matches_stem(c.name.as_str()),
+            Stmt::ClassDef(c) => !matches_stem(c.name.as_str()) && !is_the_seam(c),
             _ => false,
         })
         .copied()

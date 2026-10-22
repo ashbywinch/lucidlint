@@ -4237,6 +4237,56 @@ mod tests {
         assert!(hits[0].message.contains("ProdMod"), "{}", hits[0].message);
     }
 
+    #[test]
+    fn class_module_exempts_a_protocol_the_named_class_inherits() {
+        // issue #52: the interface exists because the cohabiting class does, so
+        // it belongs beside it. The exemption reads INHERITANCE — the class the
+        // file is named for must declare the Protocol as a base.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_protocol_beside_its_class_passes__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "class-module"), "{f:?}");
+        // the named class does not inherit it: the Protocol stays misplaced
+        let g = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_protocol_not_inherited_fails__01.py"
+        ));
+        let hits: Vec<&Finding> = g.iter().filter(|x| x.kind == "class-module").collect();
+        assert_eq!(hits.len(), 1, "{g:?}");
+        assert!(hits[0].message.contains("ProdModLike"), "{}", hits[0].message);
+        // inherited by another class in the module: not this class's interface
+        let h = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_protocol_inherited_by_other_fails__01.py"
+        ));
+        let hits: Vec<&Finding> = h.iter().filter(|x| x.kind == "class-module").collect();
+        assert_eq!(hits.len(), 1, "{h:?}");
+        assert!(hits[0].message.contains("ProdModLike, Helper"), "{}", hits[0].message);
+        // a public DATACLASS keeps its own module even when it also types the
+        // seam: issue #52's own constraint. (@dataclass on a Protocol is not
+        // valid typing — pyrefly/ty reject it — but the scanner reads AST, and
+        // the constraint is stated, so the guard holds it.)
+        let d = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_dataclass_protocol_beside_its_class_fails__01.py"
+        ));
+        let hits: Vec<&Finding> = d.iter().filter(|x| x.kind == "class-module").collect();
+        assert_eq!(hits.len(), 1, "{d:?}");
+        assert!(hits[0].message.contains("ProdModLike"), "{}", hits[0].message);
+        // the Protocol spelled through its module (`te.Protocol`) is the same
+        // base: the exemption reads the last name, never the spelling
+        let p = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_protocol_through_its_module_passes__01.py"
+        ));
+        assert!(!p.iter().any(|x| x.kind == "class-module"), "{p:?}");
+        // an ALIASED dataclass decorator (`from dataclasses import dataclass as
+        // dc`) is still a dataclass: the ticket's constraint reads the class's
+        // role, so the exemption refuses it under any of the module's names
+        let q = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_dataclass_alias_beside_its_class_fails__01.py"
+        ));
+        let hits: Vec<&Finding> = q.iter().filter(|x| x.kind == "class-module").collect();
+        assert_eq!(hits.len(), 1, "{q:?}");
+        assert!(hits[0].message.contains("ProdModLike"), "{}", hits[0].message);
+    }
+
     // ------------------------------------------------- record-shape
     #[test]
     fn record_grab_bag_and_collection_params_fail() {
