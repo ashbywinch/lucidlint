@@ -7971,6 +7971,61 @@ fn module_export_edges(body: &[Stmt], source: &str) -> Vec<ExportEdge> {
 /// shape; the alias answer and the member-function move are the action.
 const COLLECTION_MESSAGE_TAIL: &str = "The map itself has no name and no role: call sites pass a bare dict, and nothing says what the collection means. Make a class for the collection, named with a domain noun — an alias to dict names the problem, it does not solve it. Move the operations that take, build, or read this map onto the class as methods, splitting them where the class does not own all the work; which operations belong there is the judgement call.";
 
+/// Does this function MUTATE the named parameter? Issue #46: a map that only
+/// arrives and is read already has its content named — the value class in its
+/// annotation — and no operation for a collection class to own. One the function
+/// stores into, deletes from, or mutates through a dict method is a collection
+/// being built here, and keeps the finding.
+fn param_is_mutated(body: &[Stmt], name: &str) -> bool {
+    /// `sources[…]`, `del sources[…]`, and the augmented forms. `sources["a"]
+    /// ["b"] = …` stores into `sources["a"]`, so the chain walks to its root.
+    fn subscript_of(e: &Expr, name: &str) -> bool {
+        match e {
+            Expr::Subscript(s) => rooted_at(&s.value, name),
+            _ => false,
+        }
+    }
+    fn rooted_at(e: &Expr, name: &str) -> bool {
+        match e {
+            Expr::Name(n) => n.id.as_str() == name,
+            Expr::Subscript(s) => rooted_at(&s.value, name),
+            Expr::Attribute(a) => rooted_at(&a.value, name),
+            _ => false,
+        }
+    }
+    const MUTATORS: [&str; 7] = [
+        "pop",
+        "popitem",
+        "update",
+        "clear",
+        "setdefault",
+        "__setitem__",
+        "__delitem__",
+    ];
+    let mut sq: Vec<&Stmt> = body.iter().collect();
+    while let Some(s) = sq.pop() {
+        let stored = match s {
+            Stmt::Assign(a) => a.targets.iter().any(|t| subscript_of(t, name)),
+            Stmt::AnnAssign(a) => subscript_of(&a.target, name),
+            Stmt::AugAssign(a) => subscript_of(&a.target, name),
+            Stmt::Delete(d) => d.targets.iter().any(|t| subscript_of(t, name)),
+            _ => false,
+        };
+        let mutated = stmt_exprs(s).iter().any(|e| match e {
+            Expr::Call(c) => match c.func.as_ref() {
+                Expr::Attribute(at) => MUTATORS.contains(&at.attr.as_str()) && rooted_at(&at.value, name),
+                _ => false,
+            },
+            _ => false,
+        });
+        if stored || mutated {
+            return true;
+        }
+        push_stmt_children(s, &mut sq);
+    }
+    false
+}
+
 /// The record-shape family: signature findings + record dict literals,
 /// walking the module in ast.walk BFS order (nested functions included).
 pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
@@ -7982,6 +8037,15 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
     // G2: the module's from_dict classes — a union-typed parameter blending
     // one of them with the wire dict gets the union message.
     let from_dict_classes = module_from_dict_class_names(body);
+    // Issue #46: the module's OWN class names — a map parameter whose value
+    // class this module declares is exempt when the function only reads it.
+    let module_classes: HashSet<String> = body
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::ClassDef(c) => Some(c.name.to_string()),
+            _ => None,
+        })
+        .collect();
     // Issue #42: the module's export edges — the F1 mirror on the export side.
     let export_edges = module_export_edges(body, source);
     // P1: the module's type bindings — the dict value element's resolution
@@ -8056,7 +8120,23 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                                 // H1/P1: the collection is the unnamed shape —
                                 // the message names the MAP, never the value
                                 // (the annotation already names the value's
-                                // class).
+                                // class). Issue #46: a READ-ONLY parameter whose
+                                // value class this module declares is the one
+                                // shape with no missing noun — it comes in named
+                                // and nothing is built here — so it is exempt;
+                                // a map the function mutates keeps the finding.
+                                // The shape must be SPELLED OUT: an alias
+                                // (`Sources = dict[str, X]`) or a union
+                                // (`dict[str, X] | None`) hides it behind a name,
+                                // which is what the rule exists to make explicit
+                                // (record_raw_dict_alias_does_not_exempt,
+                                // record_optional_named_type_map).
+                                if matches!(a, Expr::Subscript(_))
+                                    && module_classes.contains(record.as_str())
+                                    && !param_is_mutated(&f.body, arg)
+                                {
+                                    continue;
+                                }
                                 format!("{arg} is a map whose values are {record}. {COLLECTION_MESSAGE_TAIL}")
                             } else {
                                 format!("{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists.")

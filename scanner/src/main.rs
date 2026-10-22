@@ -5574,6 +5574,9 @@ mod tests {
         // renders in EVERY arm: parameter annotation, return annotation,
         // and dict literal. The unbound-capitalized case keeps its existing
         // behavior (record_class_value_in_signature_keeps_the_finding).
+        // Issue #46 narrowed ONE parameter case: a read-only parameter whose
+        // value class this module declares is exempt — see
+        // record_shape_exempts_a_read_only_typed_map_parameter.
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/record_named_type_value_map_renders_collection_message__01.py"
         ));
@@ -5607,6 +5610,31 @@ mod tests {
                 x.message
             );
             assert!(!x.message.contains("fixed-shape record"), "{}", x.message);
+        }
+    }
+
+    #[test]
+    fn record_shape_exempts_a_read_only_typed_map_parameter() {
+        // Issue #46: the map arrives typed with the class that names its
+        // values, and the function only reads it — the content is named and
+        // no operation belongs to the collection, so there is no missing noun
+        // to point at. A map the function mutates is being built here: it
+        // keeps the collection message.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_named_type_map_parameter_read_only_passes__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "record-shape"), "{f:?}");
+        let g = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_named_type_map_parameter_mutated_fails__01.py"
+        ));
+        let rs: Vec<&Finding> = g.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(rs.len(), 2, "{g:?}");
+        for x in &rs {
+            assert!(
+                x.message.contains("is a map whose values are Provenance"),
+                "{}",
+                x.message
+            );
         }
     }
 
