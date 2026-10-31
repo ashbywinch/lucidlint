@@ -1245,6 +1245,11 @@ def action_key(a: Action) -> str:
     return f"{a.kind}:{a.file}:{a.line}:{a.function}"
 
 
+def _position_key(a: Action) -> str:
+    """record-shape reports per annotated position; its message names the
+    parameter or return, so two positions on one signature line stay
+    distinct. Other kinds are per-line — their duplicates are echoes."""
+    return a.message if a.kind == "record-shape" else ""
 
 
 def _coverage_context(repo: Path, covered, coverage_source: str) -> CoverageContext:
@@ -1271,10 +1276,12 @@ def _merge_key(a: Action) -> tuple:
     """complexity + large-function on the same function are ONE fix; every
     other kind is per-LINE — two positional-literals calls in one function
     are two different fixes at two lines, and merging them would hide one
-    finding behind the other (the fix loop would thrash)."""
+    finding behind the other (the fix loop would thrash). record-shape is
+    per-POSITION: its message names the parameter or return, so two
+    annotated positions on one signature line stay distinct."""
     if a.kind in ("complexity", "large-function"):
         return (a.file, a.function, "fn")
-    return (a.file, a.function, a.line, a.kind)
+    return (a.file, a.function, a.line, a.kind, _position_key(a))
 
 
 class _Baseline(NamedTuple):
@@ -2004,10 +2011,11 @@ class _GateRunner:
         return 0
 
     def _dedupe(self, actions: list[Action]) -> list[Action]:
-        """Same kind+file+line+function fires once (graph and radon can both flag a function)."""
+        """Same kind+file+line+function+position fires once (graph and radon
+        can both flag a function; record-shape's positions share a line)."""
         seen: dict[tuple, Action] = {}
         for a in actions:
-            key = (a.kind, a.file, a.line, a.function)
+            key = (a.kind, a.file, a.line, a.function, _position_key(a))
             if key not in seen or a.raw > seen[key].raw:
                 seen[key] = a
         return list(seen.values())

@@ -83,17 +83,24 @@ the repro and split cases.
 branch on it. The fixed-tuple test now asserts the tuple text and the
 list fixture asserts the list text.
 
-### Phase 4 — verification
+### Phase 4 — same-line record positions (done)
+
+The scanner keeps the line-level suppression anchor (`col` 0), so one
+marker still covers a signature site. `_position_key` joins record-shape's
+identity in `_dedupe` and `_merge_key` using its message, which names the
+parameter or return; two annotated positions on one signature line are
+two findings.
+
+### Phase 5 — catalog description (done)
+
+`record-shape`'s catalog row now names the shapes the scanner detects
+(bare dict, dict of records, fixed tuple including a 2-tuple pair, list
+of records, constant-key literals). `make rules` regenerates RULES.md
+and `rules_gen.rs`.
+
+### Phase 6 — verification (done)
 
 `cargo test`, `make check`, `make test`, `make self-check`, and the
 issue repro. Expected: no `latent-class` finding; the tuple
-`record-shape` finding remains with tuple wording.
-
-## Out of scope
-
-- `lucidlint.py`'s dedupe key `(kind, file, line, function)` collapses
-  the second tuple parameter on a one-line signature; the repro reports
-  one `record-shape` finding for two tuple parameters.
-- `record-shape`'s catalog description describes a struct-with-fields
-  arm that the scanner does not implement, so RULES.md still drifts
-  from the signature/literal behavior.
+`record-shape` finding remains with tuple wording, and both parameters
+of a one-line signature report.
