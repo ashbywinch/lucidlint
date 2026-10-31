@@ -44,6 +44,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | Issue #42: record-shape export exemption for to_dict/to_json | `docs/plans/plan-issue-42-export-exemption.md` |
 | Docs walk: ask git for ignored docs, guard unreadable reads | `docs/plans/plan-docs-walk-git.md` |
 | Issue #44: middle-man exemptions (library targets, interface members, fixed defaults) | `docs/plans/plan-issue-44-middle-man-exemptions.md` |
+| Issue #57: data-clump parameter-type grouping + record-shape tuple wording | `docs/plans/plan-issue-57-param-type-clump.md` |
 | Coding standards (canonical + language conventions) | `docs/coding-standards.md` |
 | Testing standards | `docs/testing-standards.md` |
 | UX standards | `docs/ux-standards.md` |

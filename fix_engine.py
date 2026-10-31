@@ -6548,20 +6548,83 @@ def _plain_args(fn: cst.FunctionDef) -> list[str]:
     return [param.name.value for param in fn.params.params]
 
 
-# lucidlint: ignore complexity the shape analyzers dispatch over libcst node kinds — splitting scatters one table
+def _type_alias_value(node: cst.BaseExpression) -> bool:
+    """A type expression, not a runtime value: the scanner's alias table
+    accepts names, attributes, subscripts, and `|` unions."""
+    if isinstance(node, (cst.Name, cst.Attribute, cst.Subscript)):
+        return True
+    return isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.BitOr)
+
+
+def _module_aliases(module: cst.Module) -> dict[str, cst.BaseExpression]:
+    """Module-level type aliases (`WallAlias = Wall`), the fixer's mirror of
+    the scanner's `module_type_bindings` resolution."""
+    aliases: dict[str, cst.BaseExpression] = {}
+    for stmt in module.body:
+        if not isinstance(stmt, cst.SimpleStatementLine):
+            continue
+        for small in stmt.body:
+            if isinstance(small, cst.Assign) and len(small.targets) == 1:
+                target = small.targets[0].target
+                if isinstance(target, cst.Name) and _type_alias_value(small.value):
+                    aliases[target.value] = small.value
+            elif isinstance(small, cst.AnnAssign) and isinstance(small.target, cst.Name):
+                if small.value is not None and _type_alias_value(small.value):
+                    aliases[small.target.value] = small.value
+    return aliases
+
+
+def _annotation_key(
+    annotation: cst.BaseExpression | None,
+    module: cst.Module,
+    aliases: dict[str, cst.BaseExpression],
+) -> str:
+    """The parameter's grouping key: annotation source text without
+    whitespace, resolved through module aliases. `""` is unannotated."""
+    node = annotation
+    seen: set[str] = set()
+    while isinstance(node, cst.Name) and node.value in aliases and node.value not in seen:
+        seen.add(node.value)
+        node = aliases[node.value]
+    if node is None:
+        return ""
+    return "".join(module.code_for_node(node).split())
+
+
+def _typed_args(
+    fn: cst.FunctionDef,
+    module: cst.Module,
+    aliases: dict[str, cst.BaseExpression],
+) -> list[tuple[str, str]]:
+    """The regular positional parameters with their grouping keys."""
+    return [
+        (
+            param.name.value,
+            _annotation_key(
+                param.annotation.annotation if param.annotation else None,
+                module,
+                aliases,
+            ),
+        )
+        for param in fn.params.params
+    ]
+
+
+# lucidlint: ignore complexity,assembly-class libcst shape dispatch; module and aliases are parse inputs
 def _clump_at(module: cst.Module, line: int, positions) -> _Clump | None:
     """The clump anchored at `line`: the module-level defs sharing a regular-
     parameter pair (>= 3 of them, the scanner's rule), the pair in the
     anchor's signature order. None when no pair qualifies there (a stale
-    anchor)."""
+    anchor). Pairs that share names but not annotations stay separate."""
     fns = [stmt for stmt in module.body if isinstance(stmt, cst.FunctionDef)]
-    pairs: dict[tuple[str, str], list[cst.FunctionDef]] = {}
+    aliases = _module_aliases(module)
+    pairs: dict[tuple[tuple[str, str], tuple[str, str]], list[cst.FunctionDef]] = {}
     for fn in fns:
-        names = _plain_args(fn)
-        for i in range(len(names)):
-            for j in range(i + 1, len(names)):
-                left, right = names[i], names[j]
-                key: tuple[str, str] = (left, right) if left <= right else (right, left)
+        params = _typed_args(fn, module, aliases)
+        for i in range(len(params)):
+            for j in range(i + 1, len(params)):
+                left, right = params[i], params[j]
+                key = (left, right) if left[0] <= right[0] else (right, left)
                 pairs.setdefault(key, []).append(fn)
     anchor = next((f for f in fns if _as_range(positions[f]).start.line == line), None)
     if anchor is None:
@@ -6572,7 +6635,7 @@ def _clump_at(module: cst.Module, line: int, positions) -> _Clump | None:
     pair = qualifying[0]
     order = _plain_args(anchor)
     kept = {id(f) for f in pairs[pair]}
-    ordered = tuple(sorted(pair, key=order.index))
+    ordered = tuple(sorted((pair[0][0], pair[1][0]), key=order.index))
     return _Clump((ordered[0], ordered[1]), tuple(f for f in fns if id(f) in kept))
 
 

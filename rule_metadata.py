@@ -430,11 +430,12 @@ CATALOG = RuleCatalog([
          "holds several sub-domains — split the module at the domain seams.",
          fix="extract-module"),
     Rule("record-shape", "fail", "architecture", "Both",
-         "A function takes a struct/class with ≥5 fields and no methods — the "
-         "struct's rules belong as methods on it. A map whose values are the "
-         "class that names them still asks for the collection class, except a "
-         "parameter the function only reads: its content is already named, and "
-         "no operation belongs to the collection.",
+         "A signature or literal leaves a record unnamed: a bare dict/grab-bag, "
+         "a dict of records, a fixed-size tuple (including a 2-tuple pair), or a "
+         "list of records, plus a dict literal with constant keys. Type the shape "
+         "as a class; a map whose values are the class that names them still asks "
+         "for the collection class, except a parameter the function only reads: "
+         "its content is already named, and no operation belongs to the collection.",
          fix="extract-record-class"),
     Rule("detached-method", "warn", "architecture", "Both",
          "A method that never touches its receiver — a classmethod should "

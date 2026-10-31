@@ -318,6 +318,22 @@ def test_merge_keeps_distinct_line_findings(tmp_path, capsys):
     assert {a["line"] for a in pl} == {2, 3}
 
 
+def test_record_shape_keeps_same_line_parameter_findings(tmp_path, capsys):
+    """Two record parameters on one signature line are two findings. The
+    message names the position; the per-line dedupe and merge must not hide
+    the second behind the first (issue #57 follow-up)."""
+    repo = make_repo(
+        tmp_path,
+        app_src="def pair(first: tuple[int, int], second: tuple[int, int]) -> None:\n    pass\n",
+    )
+    run_main(repo, "--warn", "--json")
+    data = json.loads(capsys.readouterr().out)
+    rs = [a for a in data["actions"] if a["kind"] == "record-shape"]
+    assert len(rs) == 2, f"expected two findings, got {len(rs)}"
+    assert {a["line"] for a in rs} == {1}
+    assert len({a["message"] for a in rs}) == 2
+
+
 def test_merge_warn_into_fail_target():
     fail = ch.Action("complexity", "fail", "houses/app.py", 3, "alpha", "m1", 1, 0, "", "", note="n1", raw=2)
     # same target (file+function+kind-group) but a different line — distinct dedupe keys,
