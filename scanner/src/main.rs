@@ -3523,6 +3523,62 @@ mod tests {
     }
 
     #[test]
+    fn data_clump_splits_mismatched_param_types() {
+        // Issue #57: shared names alone are not evidence. Wall, Point, and a
+        // fixed tuple are three different pairs, so no group reaches the
+        // three-function threshold.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/data_clump_splits_mismatched_param_types__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "data-clump"), "{f:?}");
+    }
+
+    #[test]
+    fn data_clump_fires_on_agreeing_param_types() {
+        // Annotations that agree keep the pair as one clump.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/data_clump_fires_on_agreeing_param_types__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "data-clump").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("(combine, intersect, union)"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn data_clump_resolves_param_type_aliases() {
+        // `WallAlias = Wall` is the same type; the alias must not split the
+        // clump from the functions spelling `Wall` directly.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/data_clump_resolves_param_type_aliases__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "data-clump").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("(combine, intersect, union)"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn data_clump_splits_typed_from_unannotated() {
+        // Split policy: an absent annotation is its own key. Two typed
+        // functions plus one unannotated one are not a group of three.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/data_clump_splits_typed_from_unannotated__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "data-clump"), "{f:?}");
+    }
+
+    #[test]
+    fn data_clump_mixed_group_names_only_the_typed_functions() {
+        // Three typed functions reach the threshold on their own; the
+        // unannotated function stays out of the claim.
+        let src = "def a(first: int, second: int) -> int:\n    return first\n\ndef b(first: int, second: int) -> int:\n    return second\n\ndef c(first: int, second: int) -> int:\n    return first + second\n\ndef d(first, second):\n    return first, second\n";
+        let f = scan_src(src);
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "data-clump").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(r[0].message.contains("(a, b, c)"), "{}", r[0].message);
+        assert!(!r[0].message.contains("a, b, c, d"), "{}", r[0].message);
+    }
+
+    #[test]
     fn per_buffer_scan_does_not_stale_repo_wide_markers() {
         // The repo-wide-only families never fire per-file, so their markers
         // cannot bind in a per-buffer scan — flagging them stale there was
@@ -4330,10 +4386,56 @@ mod tests {
         assert_eq!(r.len(), 1);
         assert!(
             r[0].message
-                .contains("pair is a dict; its value is a fixed-shape record"),
+                .contains("pair is a fixed-size tuple; its positions are an unnamed record"),
             "{}",
             r[0].message
         );
+        assert!(!r[0].message.contains("is a dict"), "{}", r[0].message);
+    }
+
+    #[test]
+    fn record_fixed_tuple_message_names_the_tuple() {
+        // Issue #57: a fixed tuple is a record, but the message must say so
+        // instead of claiming the annotation is a dict. Both arms — parameter
+        // and return — name the actual shape.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_fixed_tuple_message_names_the_tuple__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 2, "{f:?}");
+        let param = r.iter().find(|x| x.line == 2).expect("parameter arm");
+        assert!(
+            param
+                .message
+                .contains("pair is a fixed-size tuple; its positions are an unnamed record"),
+            "{}",
+            param.message
+        );
+        assert!(!param.message.contains("is a dict"), "{}", param.message);
+        let ret = r.iter().find(|x| x.line == 3).expect("return arm");
+        assert!(
+            ret.message
+                .contains("stats returns a fixed-size tuple; its positions are an unnamed record"),
+            "{}",
+            ret.message
+        );
+        assert!(!ret.message.contains("returns a dict"), "{}", ret.message);
+    }
+
+    #[test]
+    fn record_list_message_names_the_list() {
+        // The list arm says what the annotation is, not "dict".
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/record_list_message_names_the_list__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "record-shape").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert!(
+            r[0].message.contains("items is a list whose items are unnamed records"),
+            "{}",
+            r[0].message
+        );
+        assert!(!r[0].message.contains("is a dict"), "{}", r[0].message);
     }
 
     #[test]

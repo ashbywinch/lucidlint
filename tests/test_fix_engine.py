@@ -2893,6 +2893,84 @@ def test_data_clump_pair_becomes_a_parameter_object(tmp_path):
     assert 'save(FolderFingerprint("a", "b"), "c")' in fixed
 
 
+def test_data_clump_declines_when_the_shared_names_have_mismatched_types(tmp_path):
+    """Issue #57: Wall, Point, and a tuple share parameter names but not
+    types. No typed group reaches three, so there is no clump to thread and
+    the fixer must decline instead of generating a false shared class."""
+    src = (
+        "from dataclasses import dataclass\n"
+        "\n"
+        "\n"
+        "@dataclass(frozen=True)\n"
+        "class Wall:\n"
+        "    low: int\n"
+        "    high: int\n"
+        "\n"
+        "\n"
+        "@dataclass(frozen=True)\n"
+        "class Point:\n"
+        "    x: int\n"
+        "    y: int\n"
+        "\n"
+        "\n"
+        "def combine(first: Wall, second: Wall) -> Wall:\n"
+        "    return Wall(min(first.low, second.low), max(first.high, second.high))\n"
+        "\n"
+        "\n"
+        "def distance(first: Point, second: Point) -> float:\n"
+        "    return ((first.x - second.x) ** 2 + (first.y - second.y) ** 2) ** 0.5\n"
+        "\n"
+        "\n"
+        "def ranges_touch(\n"
+        "    first: tuple[int, int], second: tuple[int, int], tolerance: int\n"
+        ") -> bool:\n"
+        "    return min(first[1], second[1]) + tolerance >= max(first[0], second[0])\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    req = _req("data-clump", "houses/app.py", repo, 16)
+    assert req.fix_finding() is None
+    assert req.decline and "no parameter pair" in req.decline, req.decline
+    assert p.read_text() == src
+
+
+def test_data_clump_fix_resolves_a_param_type_alias(tmp_path):
+    """The fixer groups by resolved annotations, matching the scanner: an
+    alias spelling of the same type keeps the clump threadable."""
+    src = (
+        "class Wall:\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "WallAlias = Wall\n"
+        "\n"
+        "\n"
+        "def combine(first: WallAlias, second: WallAlias):\n"
+        "    return first, second\n"
+        "\n"
+        "\n"
+        "def union(first: Wall, second: Wall):\n"
+        "    return first, second\n"
+        "\n"
+        "\n"
+        "def intersect(first: Wall, second: Wall):\n"
+        "    return first, second\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    p = repo / "houses" / "app.py"
+    p.write_text(src)
+    out = _fix_finding(
+        "data-clump", "houses/app.py", repo, 8, fix_engine.FixOptions(name="WallPair")
+    )
+    assert out is not None
+    fixed = p.read_text()
+    assert "class WallPair:" in fixed
+    assert "def combine(wall_pair):" in fixed
+    assert "def union(wall_pair):" in fixed
+    assert "def intersect(wall_pair):" in fixed
+
+
 def test_data_clump_refuses_a_cross_module_caller(tmp_path):
     """A clump function imported by another module cannot be threaded — the
     other caller's call site is outside the fixer's resolvable scope."""

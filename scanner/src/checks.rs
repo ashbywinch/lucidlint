@@ -2095,38 +2095,63 @@ pub fn assembly_class_findings(state: &mut ScanState, body: &[Stmt]) {
 // the declaration/ownership half of the family: shared parameter pairs,
 // cross-object field reads, and quiet member assignment.
 
+/// One parameter's grouping identity: its name and annotation key.
+type ParamKey = (String, String);
+/// The unordered parameter pair; each annotation travels with its name.
+type PairKey = (ParamKey, ParamKey);
+
 /// One anchor's clump: the functions sharing it and the pairs they share.
 #[derive(Default)]
 struct AnchorClump {
     functions: Vec<String>,
-    pairs: Vec<(String, String)>,
+    /// Each pair's NAME plus the annotation key attached to each name, so
+    /// two clumps that share names but not types stay separate.
+    pairs: Vec<PairKey>,
     /// Each pair's OWN function set — the union is not shared by every pair
     /// (review-bot, PR #15).
     pair_fns: Vec<Vec<String>>,
+}
+
+/// One parameter's grouping identity: its name and its annotation's
+/// whitespace-normalized, alias-resolved source text. `""` is the
+/// unannotated key and matches only other unannotated parameters — an
+/// absent annotation is not evidence that two parameters share a type.
+fn param_annotation_key(p: &ruff_python_ast::ParameterWithDefault, bindings: &TypeBindings, source: &str) -> ParamKey {
+    let name = p.parameter.name.to_string();
+    let annotation = p
+        .parameter
+        .annotation
+        .as_deref()
+        .map(|a| {
+            let resolved = resolve_alias(a, bindings);
+            source[resolved.range()]
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect()
+        })
+        .unwrap_or_default();
+    (name, annotation)
 }
 
 /// Three or more module functions sharing the same unordered parameter
 /// pair — the pair travels together, so it is a data clump; introduce a
 /// parameter object.
 pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
-    let mut funcs: Vec<(&StmtFunctionDef, Vec<String>)> = Vec::new();
+    let bindings = module_type_bindings(body);
+    let mut funcs: Vec<(&StmtFunctionDef, Vec<ParamKey>)> = Vec::new();
     for s in body {
         let Stmt::FunctionDef(f) = s else { continue };
         let mut params = Vec::new();
-        for a in &f.parameters.posonlyargs {
-            params.push(a.parameter.name.to_string());
-        }
-        for a in &f.parameters.args {
-            params.push(a.parameter.name.to_string());
+        for a in f.parameters.posonlyargs.iter().chain(&f.parameters.args) {
+            params.push(param_annotation_key(a, &bindings, state.source));
         }
         funcs.push((f, params));
     }
-    let mut pairs: std::collections::HashMap<(String, String), Vec<&StmtFunctionDef>> =
-        std::collections::HashMap::new();
+    let mut pairs: std::collections::HashMap<PairKey, Vec<&StmtFunctionDef>> = std::collections::HashMap::new();
     for (f, params) in &funcs {
         for i in 0..params.len() {
             for j in (i + 1)..params.len() {
-                let (a, b) = if params[i] < params[j] {
+                let (a, b) = if params[i].0 < params[j].0 {
                     (params[i].clone(), params[j].clone())
                 } else {
                     (params[j].clone(), params[i].clone())
@@ -2141,7 +2166,7 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
     // suppressed — the whack-a-mole the houses sweep hit (suppress the
     // visible one, the next pair surfaces).
     let mut by_anchor: std::collections::HashMap<(usize, String), AnchorClump> = std::collections::HashMap::new();
-    let mut reported: HashSet<(String, String)> = HashSet::new();
+    let mut reported: HashSet<PairKey> = HashSet::new();
     for ((a, b), fs) in &pairs {
         if fs.len() < 3 || !reported.insert((a.clone(), b.clone())) {
             continue;
@@ -2165,15 +2190,15 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
     anchors.sort_by_key(|((line, _), _)| *line);
     for ((line, anchor), clump) in anchors {
         // the pairs travel with their own function sets through the sort
-        let mut paired: Vec<((String, String), Vec<String>)> = clump.pairs.into_iter().zip(clump.pair_fns).collect();
+        let mut paired: Vec<(PairKey, Vec<String>)> = clump.pairs.into_iter().zip(clump.pair_fns).collect();
         paired.sort();
-        let Some(((pa, pb), pair_names)) = paired.first().cloned() else {
+        let Some((((pa, _), (pb, _)), pair_names)) = paired.first().cloned() else {
             continue;
         };
         let pair_text = format!("({pa}, {pb})");
         // seam grouping keeps every clump parameter (schema-3 disambiguation)
         let mut params: Vec<String> = Vec::new();
-        for ((a, b), _) in &paired {
+        for (((a, _), (b, _)), _) in &paired {
             params.push(a.clone());
             params.push(b.clone());
         }
@@ -7733,6 +7758,32 @@ fn annotation_is_record(e: &Expr, bindings: &TypeBindings) -> bool {
     false
 }
 
+/// The annotation's collection form for the record-shape message: the
+/// message must name the shape the reader wrote (fixed tuple, list), never
+/// hard-code "dict". A union takes its record member's form.
+#[derive(Clone, Copy, PartialEq)]
+enum SignatureRecordShape {
+    Dict,
+    FixedTuple,
+    List,
+}
+
+fn signature_record_shape(e: &Expr, bindings: &TypeBindings) -> SignatureRecordShape {
+    let e = resolve_alias(e, bindings);
+    let mut wrapped = Vec::new();
+    ann_unwrap(e, &mut wrapped);
+    for node in wrapped {
+        if let Expr::Subscript(s) = node {
+            match ann_base_name(&s.value).as_deref() {
+                Some("tuple") if !is_variadic_tuple(node) => return SignatureRecordShape::FixedTuple,
+                Some("list") => return SignatureRecordShape::List,
+                _ => {}
+            }
+        }
+    }
+    SignatureRecordShape::Dict
+}
+
 /// A SCALAR LITERAL value: a string, number, bool, or None literal (unary
 /// +/- on a number stays scalar — `-1` IS the literal -1). A dict whose
 /// every value is scalar is a lookup keyed by identity, not a record
@@ -8193,7 +8244,11 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                                 }
                                 format!("{arg} is a map whose values are {record}. {COLLECTION_MESSAGE_TAIL}")
                             } else {
-                                format!("{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists.")
+                                match signature_record_shape(a, &bindings) {
+                                    SignatureRecordShape::FixedTuple => format!("{arg} is a fixed-size tuple; its positions are an unnamed record, so call sites pass positionally and a position change is silent. Type {arg} with a class whose fields name the positions; create that class if none exists."),
+                                    SignatureRecordShape::List => format!("{arg} is a list whose items are unnamed records; each item's shape has no name at the call site. Type each item with a class whose fields name the shape; create that class if none exists."),
+                                    SignatureRecordShape::Dict => format!("{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists."),
+                                }
                             };
                             state.findings.push(Finding {
                                 logical_start: None,
@@ -8233,7 +8288,11 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                                     fname = f.name.as_str()
                                 )
                             } else {
-                                format!("{fname} returns a dict that holds the fields of a record; the shape has no name at the call site. Type the return with the class that models the shape; create that class if none exists.", fname = f.name.as_str())
+                                match signature_record_shape(r.as_ref(), &bindings) {
+                                    SignatureRecordShape::FixedTuple => format!("{fname} returns a fixed-size tuple; its positions are an unnamed record, so a position change is silent at the call site. Type the return with a class whose fields name the positions; create that class if none exists.", fname = f.name.as_str()),
+                                    SignatureRecordShape::List => format!("{fname} returns a list whose items are unnamed records; each item's shape has no name at the call site. Type each item with a class whose fields name the shape; create that class if none exists.", fname = f.name.as_str()),
+                                    SignatureRecordShape::Dict => format!("{fname} returns a dict that holds the fields of a record; the shape has no name at the call site. Type the return with the class that models the shape; create that class if none exists.", fname = f.name.as_str()),
+                                }
                             };
                             state.findings.push(Finding {
                                 logical_start: None,
