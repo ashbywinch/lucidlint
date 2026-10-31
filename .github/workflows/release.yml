@@ -58,7 +58,7 @@ jobs:
             os: ubuntu-latest
             cross: true
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-apple-darwin
             os: macos-15-intel
           - target: x86_64-pc-windows-msvc
@@ -174,7 +174,7 @@ jobs:
           CODE_HEALTH_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
           # widen the pip tag beyond the runner's OS: 11.0 is the arm64
           # floor (Rust's aarch64-apple-darwin minimum), 10.13 for x64
-          MACOSX_DEPLOYMENT_TARGET: ${{ startsWith(matrix.os, 'macos-14') && '11.0' || startsWith(matrix.os, 'macos-15') && '10.13' || '' }}
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.target == 'aarch64-apple-darwin' && '11.0' || matrix.target == 'x86_64-apple-darwin' && '10.13' || '' }}
       - name: Post-packaging check — the pip wheel (clean-venv install, scan + fix)
         # What a real pip user gets: the freshly built wheel installed into a
         # CLEAN venv, driven through scan -> fix -> re-scan PASS. A wheel
