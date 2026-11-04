@@ -53,9 +53,12 @@ opinion repeated, plus a minority of varied findings.
   home — instead of "find the class this value serves".
 - `duplicate`: same-file span containment is skipped (a nested definition
   is not a copy).
-- `flat-folder`: the action matches the folder's contents, the threshold is
-  stated, and the message says to leave a deliberate single-family folder
-  and record why, never to invent a `misc/` or numbered bucket.
+- `flat-folder`: the action matches the folder's contents and the threshold
+  is stated. The message prescribes the split — coherent domain subsets, one
+  subfolder per thing its members are about — and names the candidate nouns
+  the folder's own filenames repeat (the family noun excluded). "Leave it if
+  the names form one family" was removed: a large folder is one family by
+  construction, and that is exactly the family to subdivide.
 - `fakefs`: the message's carve-out now names the case the round found — a
   test whose subject is a checked-in file the repo ships (a workflow, a
   build script) — alongside real FS semantics.
@@ -69,9 +72,11 @@ opinion repeated, plus a minority of varied findings.
 
 Houses, same worktree: **11 → 9 reported**. The `sibling-value-class` false
 positive and the nested `duplicate` are gone. A fresh proposer acted on 5 of
-9, moved no directory, and used the new flat-folder wording to record the
-five verdicts instead of inventing folders. Album: 478 → 460 (18 type
-aliases exempted), with the census and lifecycle defects fixed.
+9; it kept the five flat-folder findings flat, which the first wording
+permitted ("leave the folder and record why") — the wording has since been
+changed to prescribe the subdivision, so that re-run is no longer the
+acceptance for this family. Album: 478 → 460 (18 type aliases exempted),
+with the census and lifecycle defects fixed.
 
 ## Deferred, with the evidence
 

@@ -494,8 +494,10 @@ CATALOG = RuleCatalog([
          "together."),
     Rule("flat-folder", "warn", "architecture", "Both",
          "A directory holding 20+ browsable files (source modules and docs, "
-         "combined) — a folder that large is a bag, not a structure; group the "
-         "modules under the domain nouns their names already carry."),
+         "combined) — a folder that large stops telling a reader which files "
+         "belong together; split it into coherent domain subsets, one "
+         "subfolder per thing its members are about, never by file kind, size "
+         "or number."),
     # ---- style
     Rule("magic-number", "warn", "style", "Both",
          "Numeric literal (outside 0/1/2) used as an operand — name it as a "
