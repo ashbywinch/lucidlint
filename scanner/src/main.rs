@@ -4364,12 +4364,21 @@ mod tests {
             "../../tests/fixtures/rust/class_module_protocol_beside_its_class_passes__01.py"
         ));
         assert!(!f.iter().any(|x| x.kind == "class-module"), "{f:?}");
-        // the named class does not inherit it: the Protocol stays misplaced
+        // the namesake class satisfies the Protocol structurally without
+        // inheriting it: the interface exists because that class does, so it
+        // belongs beside it (issue #52 — the DI seam is not always declared as
+        // a base)
         let g = scan_src(include_str!(
-            "../../tests/fixtures/rust/class_module_protocol_not_inherited_fails__01.py"
+            "../../tests/fixtures/rust/class_module_protocol_implemented_without_inheritance_passes__01.py"
         ));
-        let hits: Vec<&Finding> = g.iter().filter(|x| x.kind == "class-module").collect();
-        assert_eq!(hits.len(), 1, "{g:?}");
+        assert!(!g.iter().any(|x| x.kind == "class-module"), "{g:?}");
+        // a Protocol the namesake class only PARTLY satisfies is not its
+        // interface — it stays misplaced
+        let u = scan_src(include_str!(
+            "../../tests/fixtures/rust/class_module_protocol_unimplemented_member_fires__01.py"
+        ));
+        let hits: Vec<&Finding> = u.iter().filter(|x| x.kind == "class-module").collect();
+        assert_eq!(hits.len(), 1, "{u:?}");
         assert!(hits[0].message.contains("ProdModLike"), "{}", hits[0].message);
         // inherited by another class in the module: not this class's interface
         let h = scan_src(include_str!(
