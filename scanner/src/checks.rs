@@ -2700,12 +2700,28 @@ fn self_attr_name(e: &Expr) -> Option<String> {
     }
 }
 
+/// The annotation's base name, including a string forward reference
+/// (`"BatchPaths"`, `"other_module.BatchPaths"`): the sibling pass compares
+/// class names, and a quoted annotation is a name it must still read.
+fn sibling_annotation_name(ann: &Expr) -> Option<String> {
+    if let Some(n) = annotation_base_name(ann) {
+        return Some(n);
+    }
+    let Expr::StringLiteral(s) = ann else { return None };
+    let text = s.value.to_str();
+    let last = text.rsplit('.').next()?.trim();
+    if !last.is_empty() && last.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Some(last.to_string());
+    }
+    None
+}
+
 /// The declared type of a field's assigned value: a parameter's annotation, a
 /// constructor's class, or nothing.
 fn inferred_field_type(value: &Expr, params: &std::collections::HashMap<String, String>) -> Option<String> {
     match value {
         Expr::Name(n) => params.get(n.id.as_str()).cloned(),
-        Expr::Call(c) => annotation_base_name(c.func.as_ref()).map(|s| s.to_string()),
+        Expr::Call(c) => sibling_annotation_name(c.func.as_ref()),
         _ => None,
     }
 }
@@ -2769,8 +2785,8 @@ fn sibling_class(c: &StmtClassDef, source: &str) -> SiblingClass {
         if let Stmt::AnnAssign(a) = m {
             if let Expr::Name(n) = a.target.as_ref() {
                 fields.insert(n.id.to_string());
-                if let Some(t) = annotation_base_name(a.annotation.as_ref()) {
-                    types.insert(t.to_string());
+                if let Some(t) = sibling_annotation_name(a.annotation.as_ref()) {
+                    types.insert(t);
                 }
             }
         }
@@ -2781,14 +2797,14 @@ fn sibling_class(c: &StmtClassDef, source: &str) -> SiblingClass {
         let mut params: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut mentions: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for p in &f.parameters.args {
-            if let Some(t) = p.parameter.annotation.as_ref().and_then(|a| annotation_base_name(a)) {
-                params.insert(p.parameter.name.to_string(), t.to_string());
-                mentions.insert(t.to_string());
+            if let Some(t) = p.parameter.annotation.as_ref().and_then(|a| sibling_annotation_name(a)) {
+                params.insert(p.parameter.name.to_string(), t.clone());
+                mentions.insert(t);
             }
         }
         if let Some(r) = &f.returns {
-            if let Some(t) = annotation_base_name(r.as_ref()) {
-                mentions.insert(t.to_string());
+            if let Some(t) = sibling_annotation_name(r.as_ref()) {
+                mentions.insert(t);
             }
         }
         collect_field_assignments(&f.body, &params, &mut fields, &mut types);

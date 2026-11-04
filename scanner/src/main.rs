@@ -5237,6 +5237,19 @@ mod tests {
     }
 
     #[test]
+    fn sibling_value_class_reads_a_forward_reference_as_containment() {
+        // `paths: "BatchPaths"` is the same containment as the unquoted form —
+        // a missed quoted annotation would report a composed pair as siblings
+        let src =
+            include_str!("../../tests/fixtures/rust/sibling_value_class_forward_reference_containment_passes__01.py");
+        let parsed = parse_module(src).expect("fixture parses");
+        let body = parsed.syntax().body.clone();
+        let classes = checks::collect_sibling_classes(&body, src);
+        let f = checks::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
+        assert!(!f.iter().any(|x| x.kind == "sibling-value-class"), "{f:?}");
+    }
+
+    #[test]
     fn sibling_value_class_spans_files_in_one_package() {
         // one class per file is the house convention — the rule must read the
         // package, not the file
