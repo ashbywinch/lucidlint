@@ -1694,6 +1694,16 @@ fn repo_root_impl(paths: &[String], cwd: &Path) -> String {
     if paths.is_empty() {
         return String::new();
     }
+    // Relative inputs are resolved against the cwd FIRST, and the orchestrator
+    // passes REPO-RELATIVE paths with its cwd AT the repo root — so the cwd IS
+    // the scan root. The common prefix cannot know that: it loses a package
+    // segment shared by every file (pkg/a.py + pkg/b.py -> .../pkg), which
+    // silently breaks every repo-wide rel mapping — duplicate, unused,
+    // duplicate-module, forwarding-chain and the graph families all vanished
+    // for the common src/ or lib/ layout. Absolute inputs keep prefix logic.
+    if paths.iter().all(|p| !Path::new(p).is_absolute()) {
+        return cwd.to_string_lossy().to_string();
+    }
     let abs: Vec<String> = paths
         .iter()
         .map(|p| {
@@ -2387,6 +2397,22 @@ mod tests {
             cwd,
         );
         assert_eq!(root, "/work/repo");
+    }
+
+    #[test]
+    fn repo_root_relative_paths_in_one_directory_is_the_cwd() {
+        // every scanned source in ONE package: the common prefix of
+        // pkg/a.py + pkg/b.py is .../pkg, which is not the repo root. The
+        // repo-wide families then report "a.py", the orchestrator cannot map
+        // it back into the scan set, and duplicate/unused silently vanish
+        // (the single-package src/ or lib/ layout — the common case).
+        // Relative inputs are resolved against the cwd FIRST, so the cwd IS
+        // the scan root the caller passed them from.
+        let cwd = Path::new("/work/repo");
+        let root = repo_root_impl(&["pkg/a.py".to_string(), "pkg/b.py".to_string()], cwd);
+        assert_eq!(root, "/work/repo");
+        let single = repo_root_impl(&["pkg/only.py".to_string()], cwd);
+        assert_eq!(single, "/work/repo");
     }
 
     #[test]

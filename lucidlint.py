@@ -909,9 +909,11 @@ class _RustScan:
                     header = str(data.get("header", ""))
                     suppression_census = {str(k): int(v) for k, v in (data.get("suppressions") or {}).items()}
                     rels_set = set(rels)
+                    unmapped: set[str] = set()
                     for f in data.get("findings", []) + data.get("complexity", []):
                         rel = _rust_finding_rel(f.get("file", ""), repo, rels_set)
                         if rel is None:
+                            unmapped.add(str(f.get("file", "")))
                             continue
                         result.setdefault(rel, []).append(
                             RustFinding(
@@ -931,10 +933,13 @@ class _RustScan:
                     for e in data.get("cc", []):
                         rel = _rust_finding_rel(e.get("file", ""), repo, rels_set)
                         if rel is None:
+                            unmapped.add(str(e.get("file", "")))
                             continue
                         cc_result.setdefault(rel, []).append(
                             (e.get("function", ""), int(e.get("line", 0)), int(e.get("cc", 0)))
                         )
+                    if unmapped:
+                        log(_unmapped_note(unmapped))
                 else:
                     result = None
             except _SCANNER_FAILURES:  # lucidlint: ignore swallow degraded runs report nothing — visible
@@ -989,6 +994,20 @@ def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
     except (ValueError, OSError):  # lucidlint: ignore swallow an unmappable path means the finding
         rel = ""
     return rel if rel in rels else None
+
+
+def _unmapped_note(values: set[str]) -> str:
+    """The diagnostic for findings whose file cannot be mapped into the scan
+    set. This used to be a silent `continue`, which hid every repo-wide family
+    for single-package layouts (the inferred root lost the package segment);
+    a finding file that cannot be mapped is a root-resolution mismatch, not a
+    clean run."""
+    shown = ", ".join(sorted(values)[:5])
+    more = "" if len(values) <= 5 else f" (+{len(values) - 5} more)"
+    return (
+        f"dropped findings for {len(values)} file(s) outside the scan set: {shown}{more} — "
+        "a finding file that cannot be mapped back is a root-resolution mismatch, not a clean run"
+    )
 
 
 # Rule groups — reference by name in the config file to suppress whole

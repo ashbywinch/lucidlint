@@ -353,8 +353,90 @@ def test_rust_finding_rel_unmappable(tmp_path):
     rels = {"houses/app.py", "scripts/oneoff.py"}
     assert ch._rust_finding_rel("houses/app.py", repo, rels) == "houses/app.py"
     assert ch._rust_finding_rel(str(repo / "houses" / "app.py"), repo, rels) == "houses/app.py"
-    assert ch._rust_finding_rel("/elsewhere/x.py", repo, rels) is None  # outside the repo — dropped
+    assert ch._rust_finding_rel("/elsewhere/x.py", repo, rels) is None  # outside the repo
     assert ch._rust_finding_rel("houses/missing.py", repo, rels) is None  # not in this scan set
+
+
+def test_unmapped_finding_files_are_reported_not_swallowed(tmp_path, capsys):
+    # a finding whose rel cannot be mapped is a root-resolution mismatch —
+    # the silent `continue` it used to take hid every repo-wide family for
+    # single-package layouts, so the loader must say so
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    script = tmp_path / "lucidlint"
+    script.write_text(
+        "#!/bin/sh\n"
+        "cat <<'JSON'\n"
+        '{"schema_version": 4, "header": "", "parse_errors": 0, "cc": [], "suppressions": {},'
+        ' "findings": [{"kind": "standard", "signal": "unused", "severity": "warn",'
+        ' "file": "a.py", "line": 1, "col": 0, "function": "f", "message": "m",'
+        ' "metric": 1.0, "seam_members": [], "fix_kind": ""}]}\n'
+        "JSON\n"
+    )
+    script.chmod(0o755)
+    scan = ch._RustScan()
+    scan._binary_cache[repo] = script
+    files = [ch.SourceFile(py=repo / "pkg" / "a.py", rel="pkg/a.py")]
+    scan.load_with(repo, files, ch._ScanFlags(None, None, False, None, ()))
+    err = capsys.readouterr().err
+    assert "a.py" in err and "dropped" in err
+
+
+DUPLICATE_COLLECT_SRC = '''def collect(rows):
+    out = []
+    for row in rows:
+        text = str(row).strip()
+        if not text:
+            continue
+        out.append(text)
+    return out
+
+
+def never_called() -> int:
+    return 42
+'''
+
+DUPLICATE_GATHER_SRC = '''def gather(items):
+    out = []
+    for item in items:
+        text = str(item).strip()
+        if not text:
+            continue
+        out.append(text)
+    return out
+'''
+
+
+def _single_package_repo(tmp_path) -> Path:
+    """Every scanned source in ONE directory — the src/ or lib/ layout that
+    used to lose every repo-wide finding."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "a.py").write_text(DUPLICATE_COLLECT_SRC)
+    (repo / "pkg" / "b.py").write_text(DUPLICATE_GATHER_SRC)
+    return repo
+
+
+def test_repo_wide_findings_survive_a_single_package_layout(tmp_path, capsys):
+    repo = _single_package_repo(tmp_path)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "duplicate" in out  # cross-module copy in pkg/a.py + pkg/b.py
+    assert "never_called" in out  # unused — also a repo-wide family
+
+
+def test_repo_wide_findings_report_at_the_repo_root_too(tmp_path, capsys):
+    # the control: the same two modules at the repo root — pins that the fix
+    # is layout-independent rather than a second special case
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "a.py").write_text(DUPLICATE_COLLECT_SRC)
+    (repo / "b.py").write_text(DUPLICATE_GATHER_SRC)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "duplicate" in out
+    assert "never_called" in out
 
 
 # --------------------------------------------------------------------------- end-to-end edges
