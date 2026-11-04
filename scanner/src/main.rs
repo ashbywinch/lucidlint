@@ -1195,6 +1195,8 @@ pub struct FileScan {
     pub repo_methods: Vec<checks::RepoMethod>,
     pub middle_man_classes: Vec<checks::MiddleManClass>,
     pub middle_man_candidates: Vec<checks::MiddleManCandidate>,
+    /// The file's class shapes for the repo-wide sibling pass (#61).
+    pub sibling_classes: Vec<checks::SiblingClass>,
 }
 
 impl FileScan {
@@ -1412,6 +1414,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     }
     let classes = collect_classes(&body, source);
     let imports = collect_imports(&body, source);
+    let sibling_classes = checks::collect_sibling_classes(&body, source);
     FileScan {
         file_name: name.to_string(),
         findings: all,
@@ -1435,6 +1438,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         repo_methods: state.repo_methods,
         middle_man_classes: state.middle_man_classes,
         middle_man_candidates: state.middle_man_candidates,
+        sibling_classes,
     }
 }
 
@@ -1615,6 +1619,16 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         &supps_by_rel,
         &supps_spent_by_rel,
     );
+    let sibling_scans: Vec<(String, Vec<checks::SiblingClass>)> = scans
+        .iter()
+        .map(|s| (s.rel_of(root_s), s.sibling_classes.clone()))
+        .collect();
+    reconcile_repo_wide(
+        &mut additions,
+        checks::sibling_value_class_findings(&sibling_scans),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
     let mut by_file: std::collections::HashMap<String, Vec<Finding>> = std::collections::HashMap::new();
     for f in additions {
         by_file.entry(f.file.clone()).or_default().push(f);
@@ -1646,6 +1660,7 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         repo_methods: Vec::new(),
         middle_man_classes: Vec::new(),
         middle_man_candidates: Vec::new(),
+        sibling_classes: Vec::new(),
         classes: Vec::new(),
         imports: Vec::new(),
         self_assigns: Vec::new(),
@@ -2148,6 +2163,16 @@ fn main() {
     reconcile_repo_wide(
         &mut all_findings,
         middle_man_repo_wide(&scans, &root),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
+    let sibling_scans: Vec<(String, Vec<checks::SiblingClass>)> = scans
+        .iter()
+        .map(|s| (rel_of(&s.file_name, &root), s.sibling_classes.clone()))
+        .collect();
+    reconcile_repo_wide(
+        &mut all_findings,
+        checks::sibling_value_class_findings(&sibling_scans),
         &supps_by_rel,
         &supps_spent_by_rel,
     );

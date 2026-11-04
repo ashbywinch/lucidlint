@@ -2661,6 +2661,246 @@ pub fn duplicate_field_findings(state: &mut ScanState, body: &[Stmt]) {
     }
 }
 
+// ------------------------------------------- sibling value classes (#61)
+
+/// One method's shape for the sibling pass: the body's skeleton (compared with
+/// the duplicate machinery), the `self.<x>` attributes it reads, and the
+/// annotation names in its signature (a pair that mentions the other class is
+/// composition, not duplication).
+#[derive(Clone)]
+pub struct SiblingMethod {
+    pub name: String,
+    pub skeleton: Vec<String>,
+    pub uses: Vec<String>,
+    pub mentions: Vec<String>,
+}
+
+/// One class's shape for the sibling pass: the instance fields it holds and
+/// what its methods read — enough to compare two value classes without
+/// borrowing the file they came from (one class per file is the house
+/// convention, so a same-file-only rule would barely fire).
+#[derive(Clone)]
+pub struct SiblingClass {
+    pub name: String,
+    pub line: usize,
+    /// instance field names: class-body annotations + `self.x =` assignments
+    pub fields: Vec<String>,
+    /// annotation base names of those fields, when present
+    pub field_types: Vec<String>,
+    pub bases: Vec<String>,
+    pub methods: Vec<SiblingMethod>,
+}
+
+/// The `self.<x>` attribute name of an expression, when it is one.
+fn self_attr_name(e: &Expr) -> Option<String> {
+    let Expr::Attribute(a) = e else { return None };
+    match a.value.as_ref() {
+        Expr::Name(n) if n.id.as_str() == "self" => Some(a.attr.to_string()),
+        _ => None,
+    }
+}
+
+/// The declared type of a field's assigned value: a parameter's annotation, a
+/// constructor's class, or nothing.
+fn inferred_field_type(value: &Expr, params: &std::collections::HashMap<String, String>) -> Option<String> {
+    match value {
+        Expr::Name(n) => params.get(n.id.as_str()).cloned(),
+        Expr::Call(c) => annotation_base_name(c.func.as_ref()).map(|s| s.to_string()),
+        _ => None,
+    }
+}
+
+fn collect_field_assignments(
+    stmts: &[Stmt],
+    params: &std::collections::HashMap<String, String>,
+    fields: &mut std::collections::BTreeSet<String>,
+    types: &mut std::collections::BTreeSet<String>,
+) {
+    let mut stack: Vec<&Stmt> = stmts.iter().collect();
+    while let Some(s) = stack.pop() {
+        match s {
+            Stmt::Assign(a) => {
+                for t in &a.targets {
+                    if let Some(x) = self_attr_name(t) {
+                        fields.insert(x);
+                        if let Some(ty) = inferred_field_type(a.value.as_ref(), params) {
+                            types.insert(ty);
+                        }
+                    }
+                }
+            }
+            Stmt::AnnAssign(a) => {
+                if let Some(x) = self_attr_name(a.target.as_ref()) {
+                    fields.insert(x);
+                    if let Some(t) = annotation_base_name(a.annotation.as_ref()) {
+                        types.insert(t.to_string());
+                    }
+                }
+            }
+            Stmt::AugAssign(a) => {
+                if let Some(x) = self_attr_name(a.target.as_ref()) {
+                    fields.insert(x);
+                }
+            }
+            _ => {}
+        }
+        push_stmt_children(s, &mut stack);
+    }
+}
+
+fn self_attributes_read(stmts: &[Stmt]) -> Vec<String> {
+    let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut stack: Vec<&Stmt> = stmts.iter().collect();
+    while let Some(s) = stack.pop() {
+        for e in stmt_exprs(s) {
+            if let Some(x) = self_attr_name(e) {
+                out.insert(x);
+            }
+        }
+        push_stmt_children(s, &mut stack);
+    }
+    out.into_iter().collect()
+}
+
+fn sibling_class(c: &StmtClassDef, source: &str) -> SiblingClass {
+    let mut fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut types: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for m in &c.body {
+        if let Stmt::AnnAssign(a) = m {
+            if let Expr::Name(n) = a.target.as_ref() {
+                fields.insert(n.id.to_string());
+                if let Some(t) = annotation_base_name(a.annotation.as_ref()) {
+                    types.insert(t.to_string());
+                }
+            }
+        }
+    }
+    let mut methods = Vec::new();
+    for m in &c.body {
+        let Stmt::FunctionDef(f) = m else { continue };
+        let mut params: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut mentions: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for p in &f.parameters.args {
+            if let Some(t) = p.parameter.annotation.as_ref().and_then(|a| annotation_base_name(a)) {
+                params.insert(p.parameter.name.to_string(), t.to_string());
+                mentions.insert(t.to_string());
+            }
+        }
+        if let Some(r) = &f.returns {
+            if let Some(t) = annotation_base_name(r.as_ref()) {
+                mentions.insert(t.to_string());
+            }
+        }
+        collect_field_assignments(&f.body, &params, &mut fields, &mut types);
+        methods.push(SiblingMethod {
+            name: f.name.to_string(),
+            skeleton: fn_skeleton(f),
+            uses: self_attributes_read(&f.body),
+            mentions: mentions.into_iter().collect(),
+        });
+    }
+    SiblingClass {
+        name: c.name.to_string(),
+        line: line_of(source, c.name.range().start()),
+        fields: fields.into_iter().collect(),
+        field_types: types.into_iter().collect(),
+        bases: class_base_names(c),
+        methods,
+    }
+}
+
+/// The classes a file declares, for the repo-wide sibling pass.
+pub fn collect_sibling_classes(body: &[Stmt], source: &str) -> Vec<SiblingClass> {
+    body.iter()
+        .filter_map(|s| match s {
+            Stmt::ClassDef(c) => Some(sibling_class(c, source)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Two classes over the same data in one package: same fields, same derived
+/// accessors, no containment — one of them is the duplicate (issue #61).
+pub fn sibling_value_class_findings(scans: &[(String, Vec<SiblingClass>)]) -> Vec<Finding> {
+    use std::collections::{BTreeMap, HashSet};
+    let mut per_dir: BTreeMap<String, Vec<(&String, &SiblingClass)>> = BTreeMap::new();
+    for (rel, classes) in scans {
+        let dir = rel.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string());
+        per_dir.entry(dir).or_default().extend(classes.iter().map(|c| (rel, c)));
+    }
+    let mut out = Vec::new();
+    for (_, classes) in per_dir {
+        for i in 0..classes.len() {
+            for j in (i + 1)..classes.len() {
+                let (rel_a, a) = classes[i];
+                let (rel_b, b) = classes[j];
+                let shared: Vec<&str> = a
+                    .fields
+                    .iter()
+                    .filter(|f| b.fields.contains(f))
+                    .map(|f| f.as_str())
+                    .collect();
+                // one generic name is coincidence; two shared fields is the
+                // same value seen twice
+                if shared.len() < 2 {
+                    continue;
+                }
+                // containment / inheritance / a signature that names the other
+                // class: composition or duplicate-field, not a sibling
+                if a.bases.contains(&b.name)
+                    || b.bases.contains(&a.name)
+                    || a.field_types.contains(&b.name)
+                    || b.field_types.contains(&a.name)
+                    || a.methods.iter().any(|m| m.mentions.contains(&b.name))
+                    || b.methods.iter().any(|m| m.mentions.contains(&a.name))
+                {
+                    continue;
+                }
+                let shared_set: HashSet<&str> = shared.iter().copied().collect();
+                let accessors: Vec<&str> = a
+                    .methods
+                    .iter()
+                    .filter(|m| !m.name.starts_with("__") && !m.uses.is_empty())
+                    .filter(|m| m.uses.iter().all(|u| shared_set.contains(u.as_str())))
+                    .filter(|m| {
+                        b.methods.iter().any(|n| {
+                            !n.name.starts_with("__")
+                                && !n.uses.is_empty()
+                                && n.uses.iter().all(|u| shared_set.contains(u.as_str()))
+                                && crate::common::dice_similarity(&m.skeleton, &n.skeleton) >= 0.9
+                        })
+                    })
+                    .map(|m| m.name.as_str())
+                    .collect();
+                if accessors.len() < 2 {
+                    continue;
+                }
+                let (dup, rel) = if b.line > a.line { (b, rel_b) } else { (a, rel_a) };
+                let keep = if std::ptr::eq(dup, a) { b } else { a };
+                let shown = accessors.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+                out.push(Finding {
+                    logical_start: None,
+                    seam_members: Vec::new(),
+                    col: 0,
+                    file: rel.clone(),
+                    line: dup.line,
+                    function: format!("{}, {}", keep.name, dup.name),
+                    kind: "sibling-value-class".into(),
+                    severity: "warn".into(),
+                    message: format!(
+                        "'{}' and '{}' share the fields {} and the derived accessors {} with no containment — one of these is the duplicate. Keep one class and move the other's extra accessors onto it.",
+                        keep.name,
+                        dup.name,
+                        shared.join(", "),
+                        shown
+                    ),
+                });
+            }
+        }
+    }
+    out
+}
+
 pub fn inner_function_count(fn_stmt: &Stmt) -> u32 {
     let mut count = 0;
     let mut stack: Vec<&Stmt> = Vec::new();
