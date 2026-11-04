@@ -492,6 +492,10 @@ CATALOG = RuleCatalog([
     Rule("folder-mix", "fail", "architecture", "Graph",
          "Files in a directory are split across graph communities — they belong "
          "together."),
+    Rule("flat-folder", "warn", "architecture", "Both",
+         "A directory holding 20+ browsable files (source modules and docs, "
+         "combined) — a folder that large is a bag, not a structure; group the "
+         "modules under the domain nouns their names already carry."),
     # ---- style
     Rule("magic-number", "warn", "style", "Both",
          "Numeric literal (outside 0/1/2) used as an operand — name it as a "

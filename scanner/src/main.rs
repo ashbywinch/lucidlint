@@ -1457,6 +1457,13 @@ pub(crate) fn scan_file(path: &Path) -> FileScan {
 
 /// Directories a repo-wide scan never enters (venvs, caches, build output —
 /// the orchestrator's git-ls-files equivalent without git).
+/// The repo-wide merge for the LSP's save path: every Python file under
+/// `root` scanned with the repo-wide flag, then the families that need the
+/// whole repo (duplicate, unused — reconciled through each file's
+/// suppressions, review-log B3). Returns the ADDITIONS per repo-relative
+/// file; the per-file findings travel via the buffer scan so nothing is
+/// double-reported. Lives here (the composition root) so lsp stays a
+/// standalone scan-core module (layers test).
 const SCAN_SKIP_DIRS: &[&str] = &[
     ".git",
     ".venv",
@@ -1477,13 +1484,6 @@ const SCAN_SKIP_DIRS: &[&str] = &[
     ".eggs",
 ];
 
-/// The repo-wide merge for the LSP's save path: every Python file under
-/// `root` scanned with the repo-wide flag, then the families that need the
-/// whole repo (duplicate, unused — reconciled through each file's
-/// suppressions, review-log B3). Returns the ADDITIONS per repo-relative
-/// file; the per-file findings travel via the buffer scan so nothing is
-/// double-reported. Lives here (the composition root) so lsp stays a
-/// standalone scan-core module (layers test).
 /// Every Python file under `root` (the scan walk; `SCAN_SKIP_DIRS` prunes
 /// venvs/caches/build output). Shared by the full gate scan and the LSP's
 /// incremental save path — the LSP stats these paths instead of re-scanning.
@@ -2148,6 +2148,24 @@ fn main() {
     all_findings.extend(duplicate_findings(&py_skeletons));
     all_findings.extend(duplicate_findings(&rs_skeletons));
     all_findings.extend(checks::duplicate_module_findings(&module_entities));
+    // flat-folder: what a reader browses per directory — modules + docs,
+    // counted from the scan set and the docs root (no graph needed)
+    let mut module_rels: Vec<String> = Vec::new();
+    let mut doc_rels: Vec<String> = Vec::new();
+    for p in &paths {
+        let rel = rel_of(p, &root);
+        // count what the scan browses: production code unless the caller asked
+        // for tests, and never upstream's vendored tree
+        if (!include_tests && is_test_path(&rel)) || checks::is_vendored(&rel) {
+            continue;
+        }
+        if p.ends_with(".md") {
+            doc_rels.push(rel);
+        } else {
+            module_rels.push(rel);
+        }
+    }
+    all_findings.extend(checks::flat_folder_findings(&module_rels, &doc_rels));
     all_findings.extend(checks::forwarding_chain_findings(
         &heads,
         &fns,
@@ -5273,6 +5291,61 @@ mod tests {
         let f = checks::sibling_value_class_findings(&classes);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].file, "pkg/b.py");
+    }
+
+    #[test]
+    fn flat_folder_fires_at_twenty_and_names_the_split() {
+        // a directory is a filing system, not a bag: 20+ browsable files in
+        // one folder (modules + docs) has no structure to browse
+        let modules: Vec<String> = (0..18).map(|i| format!("pkg/m{i}.py")).collect();
+        let docs: Vec<String> = (0..2).map(|i| format!("pkg/d{i}.md")).collect();
+        let f = checks::flat_folder_findings(&modules, &docs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].kind, "flat-folder");
+        assert_eq!(f[0].severity, "warn");
+        assert_eq!(f[0].file, "pkg");
+        assert!(f[0].message.contains("18 modules"), "{}", f[0].message);
+        assert!(f[0].message.contains("2 docs"), "{}", f[0].message);
+    }
+
+    #[test]
+    fn flat_folder_stays_silent_below_twenty() {
+        let modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
+        assert!(checks::flat_folder_findings(&modules, &[]).is_empty());
+    }
+
+    #[test]
+    fn flat_folder_counts_docs_and_skips_init() {
+        let docs: Vec<String> = (0..21).map(|i| format!("docs/d{i}.md")).collect();
+        let f = checks::flat_folder_findings(&[], &docs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].file, "docs");
+        // `__init__.py` is not a browsable module — 19 real modules + one
+        // init is still a clean folder
+        let mut modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
+        modules.push("pkg/__init__.py".to_string());
+        assert!(checks::flat_folder_findings(&modules, &[]).is_empty());
+    }
+
+    #[test]
+    fn flat_folder_never_counts_a_package_marker() {
+        // a root-level __init__.py and a package one are both markers, not
+        // modules the reader opens
+        let mut modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
+        modules.push("__init__.py".to_string());
+        assert!(checks::flat_folder_findings(&modules, &[]).is_empty());
+    }
+
+    #[test]
+    fn flat_folder_keeps_directories_apart() {
+        // 19 modules and 19 docs in the SAME folder is 38 files — one finding,
+        // not two, and never summed across sibling folders
+        let modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
+        let docs: Vec<String> = (0..19).map(|i| format!("pkg/d{i}.md")).collect();
+        let f = checks::flat_folder_findings(&modules, &docs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].message.contains("19 modules"), "{}", f[0].message);
+        assert!(f[0].message.contains("19 docs"), "{}", f[0].message);
     }
 
     #[test]

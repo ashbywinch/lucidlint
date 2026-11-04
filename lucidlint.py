@@ -983,16 +983,28 @@ class _RustScan:
 
 def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
     """The binary reports per-file findings with the path as passed and the
-    repo-wide ones (duplicate/unused) with the repo-relative path — normalize."""
+    repo-wide ones (duplicate/unused) with the repo-relative path — normalize.
+    A directory-level finding (`flat-folder`, `folder-mix`) names a directory
+    or `.`; both are accepted when the path resolves inside the repo."""
     if file_val in rels:
         return file_val
+    if file_val in ("", "."):
+        return "."
     try:
         # resolve BOTH sides: with --repo . (relative), a relative base makes
-        # relative_to raise and the finding would be silently dropped
-        rel = Path(file_val).resolve().relative_to(repo.resolve()).as_posix()
+        # relative_to raise and the finding would be silently dropped. A
+        # relative finding path is repo-relative (the binary runs at the repo
+        # root), so join it to the repo — resolving it against THIS process's
+        # cwd loses every directory-level finding (flat-folder, folder-mix)
+        p = Path(file_val)
+        if not p.is_absolute():
+            p = repo / p
+        rel = p.resolve().relative_to(repo.resolve()).as_posix()
         # is for a file outside this scan set — drop it, not a failure to surface
     except (ValueError, OSError):  # lucidlint: ignore swallow an unmappable path means the finding
         rel = ""
+    if rel and rel not in rels and (repo / rel).is_dir():
+        return rel  # a directory-level finding (flat-folder, folder-mix)
     return rel if rel in rels else None
 
 
