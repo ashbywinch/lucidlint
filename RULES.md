@@ -114,6 +114,7 @@ with a why).
 | **closure-cluster → latent-class** | **warn** | Python | A method whose nested closures partition its locals — a class-in-a-method; the split is structurally visible but often a deliberate cohesive serving method, so a warning, not a demand. |
 | **layer-mix** | fail | Graph | A file calls into multiple architectural layers (determined via the code-review-graph contract) — files belong in one layer. |
 | **folder-mix** | fail | Graph | Files in a directory are split across graph communities — they belong together. |
+| **flat-folder** | **warn** | Both | A directory holding 20+ browsable files (source modules and docs, combined) — a folder that large is a bag, not a structure; group the modules under the domain nouns their names already carry. |
 
 ## Group 2: Style & correctness
 | Rule | Severity | Language | What it checks |

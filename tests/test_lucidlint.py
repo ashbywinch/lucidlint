@@ -382,6 +382,72 @@ def test_unmapped_finding_files_are_reported_not_swallowed(tmp_path, capsys):
     assert "a.py" in err and "dropped" in err
 
 
+def _many_module_repo(tmp_path, count: int) -> Path:
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "pkg").mkdir()
+    for i in range(count):
+        (repo / "pkg" / f"m{i}.py").write_text(f"def f{i}() -> int:\n    return {i}\n")
+    return repo
+
+
+def test_flat_folder_fires_at_twenty_modules(tmp_path, capsys):
+    repo = _many_module_repo(tmp_path, 20)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "flat-folder" in out
+    assert "20 modules" in out
+
+
+def test_flat_folder_stays_silent_below_twenty(tmp_path, capsys):
+    repo = _many_module_repo(tmp_path, 19)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "flat-folder" not in out
+
+
+def test_flat_folder_ignores_test_files_without_include_tests(tmp_path, capsys):
+    # a package with real modules AND its tests in one folder must count only
+    # what the scan browses — the test half arrives only with --include-tests
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "pkg").mkdir()
+    for i in range(15):
+        (repo / "pkg" / f"m{i}.py").write_text(f"def f{i}() -> int:\n    return {i}\n")
+    for i in range(10):
+        (repo / "pkg" / f"test_t{i}.py").write_text(f"def test_g{i}():\n    assert True\n")
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "flat-folder" not in out
+    run_main(repo, "--warn", "--include-tests")
+    out = capsys.readouterr().out
+    assert "flat-folder" in out
+    assert "25 modules" in out
+
+
+def test_flat_folder_ignores_vendored_files(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "vendor").mkdir()
+    for i in range(20):
+        (repo / "vendor" / f"m{i}.py").write_text(f"def f{i}() -> int:\n    return {i}\n")
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "flat-folder" not in out
+
+
+def test_flat_folder_counts_docs(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "docs").mkdir()
+    for i in range(21):
+        (repo / "docs" / f"d{i}.md").write_text(f"# doc {i}\n")
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "flat-folder" in out
+    assert "21 docs" in out
+
+
 DUPLICATE_COLLECT_SRC = '''def collect(rows):
     out = []
     for row in rows:
