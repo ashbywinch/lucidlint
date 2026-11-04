@@ -442,6 +442,28 @@ def test_config_ignored_advice_does_not_invite_extending_the_scope(capsys):
     assert "tools/eval_memory.py" in out, out
 
 
+def test_bundle_deps_picks_the_interpreter_tag(tmp_path):
+    # compiled extensions serve one Python ABI: three versions ship side by
+    # side, and the running interpreter picks its own
+    (tmp_path / "deps" / "cp312" / "libcst").mkdir(parents=True)
+    (tmp_path / "deps" / "cp314" / "libcst").mkdir(parents=True)
+    assert ch._vendor_path(str(tmp_path), (3, 14)) == str(tmp_path / "deps" / "cp314")
+    assert ch._vendor_path(str(tmp_path), (3, 12)) == str(tmp_path / "deps" / "cp312")
+    # an unsupported version falls back to a flat deps/ (dev bundle) ...
+    assert ch._vendor_path(str(tmp_path), (3, 11)) == str(tmp_path / "deps")
+    # ... and reports nothing to import from when there is no deps/ at all
+    empty = tmp_path / "no-deps"
+    empty.mkdir()
+    assert ch._vendor_path(str(empty), (3, 14)) is None
+
+
+def test_bundle_deps_flat_fallback_still_loads(tmp_path):
+    # a bundle built before the per-version split has one flat deps/
+    flat = tmp_path / "deps" / "libcst"
+    flat.mkdir(parents=True)
+    assert ch._vendor_path(str(tmp_path), (3, 12)) == str(tmp_path / "deps")
+
+
 def test_report_names_its_own_version(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     run_main(repo, "--warn")

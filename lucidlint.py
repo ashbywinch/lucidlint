@@ -56,8 +56,29 @@ import rule_metadata
 # bundle, not a wheel install), prefer it so the fix path works with no pip
 # step. A wheel/source install has no `deps/` and uses site-packages libcst.
 _here = os.path.dirname(os.path.abspath(__file__))
-_vendor = os.path.join(_here, "deps")
-if os.path.isdir(_vendor) and _vendor not in sys.path:
+
+
+def _vendor_path(here: str, version: tuple[int, int] | None = None) -> str | None:
+    """The bundled deps directory THIS interpreter can load.
+
+    libcst's parser is a compiled extension, so one build serves one Python
+    ABI. The release bundle ships one per supported version (`deps/cp312`,
+    `deps/cp313`, `deps/cp314`) and this picks the match; a flat `deps/` is
+    the fallback (a dev bundle, or a bundle from before the split).
+
+    Returns None when neither exists — the fix command then reports the
+    libcst requirement instead of failing at import.
+    """
+    major, minor = version or sys.version_info[:2]
+    tagged = os.path.join(here, "deps", f"cp{major}{minor}")
+    for candidate in (tagged, os.path.join(here, "deps")):
+        if os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+_vendor = _vendor_path(_here)
+if _vendor is not None and _vendor not in sys.path:
     sys.path.insert(0, _vendor)
 try:
     import fix_engine

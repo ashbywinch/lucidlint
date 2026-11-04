@@ -76,6 +76,7 @@ jobs:
         run: cargo build --release --manifest-path Cargo.toml --target ${{ matrix.target }}
         env:
           CODE_HEALTH_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+      - uses: astral-sh/setup-uv@v5
       - name: Assemble the bundle
         shell: bash
         run: |
@@ -92,16 +93,21 @@ jobs:
           cp fix_engine.py "dist/${dir}/"
           cp release/Makefile "dist/${dir}/Makefile"
           printf '%s\n' "$ver" > "dist/${dir}/version.txt"
-          # self-contain the fix engine's libcst in deps/ so the fix path
-          # works from the bundle with no pip step (review-log B8). lucidlint.py
-          # prepends this sibling deps/ to sys.path when present. libcst >= 1.0
-          # has NO pure-Python parser — the compiled libcst.native extension is
-          # ABI-locked to the CPython/glibc that built it, so a runner-built
-          # wheel only imports under the SAME ABI. The x86_64-musl bundle serves
+          # self-contain the fix engine's libcst so the fix path works from
+          # the bundle with no pip step (review-log B8). libcst >= 1.0 has NO
+          # pure-Python parser — the compiled libcst.native extension is
+          # ABI-locked to one CPython version, so a single build serves one
+          # interpreter. Ship one per supported Python (3.12/3.13/3.14 — the
+          # requires-python floor is 3.12) under deps/cpXY; lucidlint.py picks
+          # the running interpreter's tag. The x86_64-musl bundle serves
           # static/Alpine hosts where a glibc libcst cannot load — it keeps no
           # deps/ and the fix path reports its requirement there.
           if [ "$target" != "x86_64-unknown-linux-musl" ]; then
-            python3 -m pip install --quiet --target "dist/${dir}/deps" "libcst>=1.9.0"
+            for v in 3.12 3.13 3.14; do
+              uv python install "$v" >/dev/null
+              uv pip install --quiet --python "$(uv python find "$v")" \
+                --target "dist/${dir}/deps/cp${v/./}" "libcst>=1.9.0"
+            done
           fi
           tar -C dist -czf "dist/${dir}.tar.gz" "${dir}"
       - name: Post-packaging check — the bundle (imports resolve, gate runs, consumer flow)
@@ -160,7 +166,6 @@ jobs:
           set -e
           [ "$rc" -eq 1 ] || { echo "musl fix must exit 1, got $rc"; cat "${RUNNER_TEMP}/musl-fix.txt"; exit 1; }
           grep -q "requires libcst" "${RUNNER_TEMP}/musl-fix.txt"
-      - uses: astral-sh/setup-uv@v5
       - name: Build the pip wheel (host-target Rust core)
         # The cross action on the musl row exports CARGO_BUILD_TARGET=...musl;
         # setup.py's build_py runs `cargo build --release` (host) and copies

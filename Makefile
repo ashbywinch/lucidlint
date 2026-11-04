@@ -132,7 +132,7 @@ bundle-check: scanner-check
 	cp scanner/target/release/lucidlint $$tmp/bundle/bin/; \
 	printf '%s\n' dev > $$tmp/bundle/version.txt; \
 	test "$$($(PYTHON) $$tmp/bundle/lucidlint.py --version)" = "lucidlint dev" || { echo "${RED}bundle reports the wrong version${NC}"; exit 1; }; \
-	$(UV) pip install --quiet --python $(PYTHON) --target $$tmp/bundle/deps "libcst>=1.9.0"; \
+	$(UV) pip install --quiet --python $(PYTHON) --target "$$tmp/bundle/deps/cp$$($(PYTHON) -c 'import sys; print(f"{sys.version_info[0]}{sys.version_info[1]}")')" "libcst>=1.9.0"; \
 	$(PYTHON) scripts/deploy-check.py --lucidlint "$(abspath $(PYTHON)) $$tmp/bundle/lucidlint.py" --project $$tmp/project; \
 	rm -rf $$tmp; \
 	echo "${GREEN}✓ release bundle: the packaged fix path scans + fixes a mini project${NC}"
