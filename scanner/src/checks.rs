@@ -7168,6 +7168,50 @@ pub fn duplicate_module_findings(entities: &[SkeletonModule]) -> Vec<Finding> {
     out
 }
 
+/// A directory whose browsable files (modules + docs) cross the threshold —
+/// the material of a structure with no structure. Refs are repo-relative;
+/// the caller filters `__init__.py`, vendored and ignored dirs, so this is a
+/// pure count over what the reader actually browses.
+pub const FLAT_FOLDER_THRESHOLD: usize = 20;
+
+pub fn flat_folder_findings(modules: &[String], docs: &[String]) -> Vec<Finding> {
+    use std::collections::BTreeMap;
+    let mut per_dir: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for rel in modules {
+        if rel.rsplit('/').next() == Some("__init__.py") {
+            continue; // a package marker, not a module the reader opens
+        }
+        let dir = rel.rsplit_once('/').map_or("", |(d, _)| d);
+        per_dir.entry(dir.to_string()).or_default().0 += 1;
+    }
+    for rel in docs {
+        let dir = rel.rsplit_once('/').map_or("", |(d, _)| d);
+        per_dir.entry(dir.to_string()).or_default().1 += 1;
+    }
+    let mut out = Vec::new();
+    for (dir, (mods, txt)) in per_dir {
+        if mods + txt < FLAT_FOLDER_THRESHOLD {
+            continue;
+        }
+        let label = if dir.is_empty() { "the repo root" } else { dir.as_str() };
+        out.push(Finding {
+            logical_start: None,
+            seam_members: Vec::new(),
+            col: 0,
+            file: if dir.is_empty() { ".".to_string() } else { dir.clone() },
+            line: 0,
+            function: String::new(),
+            kind: "flat-folder".into(),
+            severity: "warn".into(),
+            message: format!(
+                "'{label}' holds {} files ({mods} modules, {txt} docs) — a folder with that many files is a bag: nothing in the path says which belong together. Group the modules under the domain nouns their names already carry, and split the docs by the topics they share.",
+                mods + txt
+            ),
+        });
+    }
+    out
+}
+
 /// Cross-file copy-paste findings (`_duplicate_actions`).
 ///
 /// Not O(n²): the tolerance guard (`|len_a - len_b| <= max(2, len/5)`) means
