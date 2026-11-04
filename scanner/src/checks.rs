@@ -7708,7 +7708,7 @@ pub fn flat_folder_findings(modules: &[String], docs: &[String]) -> Vec<Finding>
             kind: "flat-folder".into(),
             severity: "warn".into(),
             message: format!(
-                "'{label}' holds {} files ({mods} modules, {txt} docs) — past the {FLAT_FOLDER_THRESHOLD}-file mark, the path stops telling a reader which belong together. {action} If the names already form one family, leave the folder and record why; never invent a `misc/` or numbered bucket.",
+                "'{label}' holds {} files ({mods} modules, {txt} docs) — at {FLAT_FOLDER_THRESHOLD}+ files, the path stops telling a reader which belong together. {action} If the names already form one family, leave the folder and record why; never invent a `misc/` or numbered bucket.",
                 mods + txt
             ),
         });
@@ -9477,7 +9477,7 @@ pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                                             kind: "fakefs".into(),
                                             severity: "fail".into(),
                                             message: format!(
-                                                "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach a real tmp_path only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3) and comment why",
+                                                "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach the real filesystem only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3), or when the test's subject is a checked-in file the repo ships (a workflow, a build script); comment why",
                                                 f.name.as_str()
                                             ), });
                 }

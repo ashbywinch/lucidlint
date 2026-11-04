@@ -211,6 +211,7 @@ class _RenderCtx:
                     # the JSON report wire format (PRD R18)
                     "meta": {
                         "repo": str(repo),
+                        "tool_version": _VERSION,
                         "branch": branch,
                         "commit": commit,
                         "generated_at": datetime.date.today().isoformat(),
@@ -260,9 +261,11 @@ class _RenderCtx:
             if not current:
                 bits.append("no baseline — cannot tell what is new")
         mine_txt = (", " + ", ".join(bits)) if bits else ""
+        # a target is the (file, function) a fail anchors — say so; "distinct
+        # targets" alone read as directories or languages
         targets = len({(a.file, a.function) for a in fails})
         verdict = "GATE: FAIL" if not args.warn else "GATE: INFORMATIONAL (--warn)"
-        print(f"{verdict} — across {targets} distinct targets{mine_txt}")
+        print(f"{verdict} — across {targets} failing target{'' if targets == 1 else 's'}{mine_txt}")
         if graph_preferred:
             print(
                 "WARNING: coverage snapshot predates the repo's tests — hard 'untested' claims are suppressed; "
@@ -277,6 +280,11 @@ class _RenderCtx:
         repo, args = self.repo, self.args
         if self.report_header:
             print(self.report_header)
+            print()
+            prov = f"lucidlint {_VERSION}"
+            if self.commit:
+                prov += f" @ {self.commit}"
+            print(prov)
             print()
         # #33(b): the naming lesson is issued ONCE per report, iff any finding
         # is judge-true — never copied onto every message

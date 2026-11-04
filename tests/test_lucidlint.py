@@ -442,6 +442,13 @@ def test_config_ignored_advice_does_not_invite_extending_the_scope(capsys):
     assert "tools/eval_memory.py" in out, out
 
 
+def test_report_names_its_own_version(tmp_path, capsys):
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert f"lucidlint {ch._VERSION}" in out, out[:400]
+
+
 def test_rust_finding_rel_unmappable(tmp_path):
     repo = make_repo(tmp_path)
     rels = {"houses/app.py", "scripts/oneoff.py"}
@@ -1138,7 +1145,7 @@ def test_summary_header_names_scope_not_change_cost(tmp_path, capsys):
     top = ch.Action("record-shape", "fail", "tools/adopt.py", 116, "from_dict", "m", 1.0, 0, "", "", priority=99)
     ch._RenderCtx(repo, gate_args(), "main", "abc1234", "no coverage", False).render_summary([top], [], [])
     out = capsys.readouterr().out
-    assert "GATE: FAIL — across 1 distinct targets" in out
+    assert "GATE: FAIL — across 1 failing target" in out
     assert "tools/adopt.py" not in out  # the header names no action
     assert "top P99 tools/adopt.py" not in out
     for word in ("RISK", "risk", "change-cost", "percentile"):
@@ -1280,7 +1287,7 @@ def test_ledger_single_home_of_numbers_gate_repeats_none(tmp_path, capsys):
     assert reported + acked + ignored + census == total, out
     assert out.count(" findings — ") == 1, out
     gate = next(line for line in out.splitlines() if line.startswith("GATE:"))
-    assert re.search(r"across \d+ distinct targets", gate), gate
+    assert re.search(r"across \d+ failing targets?", gate), gate
     assert "change-cost" not in gate and "RISK" not in gate, gate
     for count_word in (
         "action(s)", "reported", " acknowledged", " config-ignored", " comment-suppressed",

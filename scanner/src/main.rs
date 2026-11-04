@@ -5369,7 +5369,7 @@ mod tests {
         // a docs pile has no modules to group: the action must match the shape
         assert!(!f[0].message.contains("Group the modules"), "{}", f[0].message);
         assert!(f[0].message.contains("Split the docs"), "{}", f[0].message);
-        assert!(f[0].message.contains("20-file mark"), "{}", f[0].message);
+        assert!(f[0].message.contains("at 20+ files"), "{}", f[0].message);
         assert!(f[0].message.contains("never invent"), "{}", f[0].message);
         // `__init__.py` is not a browsable module — 19 real modules + one
         // init is still a clean folder
