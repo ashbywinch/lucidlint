@@ -142,7 +142,15 @@ class _RenderCtx:
         grow without the gate ever showing WHICH kinds it hides."""
         if not self.ignored_by_signal:
             return ""
-        top = ", ".join(f"{sig}={n}" for sig, n in self.ignored_by_signal.most_common(4))
+        total = sum(self.ignored_by_signal.values())
+        top_items = self.ignored_by_signal.most_common(4)
+        top = ", ".join(f"{sig}={n}" for sig, n in top_items)
+        # the listed families must reconcile with the total beside them — a
+        # truncated list that sums short reads as a miscount (album round:
+        # 238+201+123+37 = 599 against "627 config-ignored")
+        rest = total - sum(n for _, n in top_items)
+        if rest:
+            top += f", +{rest} more"
         return f" ({top})"
 
     def _baseline_acknote(self) -> str:
@@ -1376,6 +1384,14 @@ def _load_baseline(path) -> _Baseline:
     return _Baseline(set(), {})
 
 
+def _iso_day(value: str) -> str:
+    """The epoch git hands us, as a date a reader can place in time."""
+    try:
+        return datetime.date.fromtimestamp(int(value)).isoformat()
+    except (ValueError, OSError, OverflowError):
+        return value
+
+
 def _facts_line(a: Action) -> str | None:
     """Phase 4: the raw metrics render as NAMED FACTS on one extra line —
     never a percentile, never "risk" (the composite read as urgency). A
@@ -1392,11 +1408,15 @@ def _facts_line(a: Action) -> str | None:
         facts.append(f"has {len(a.callers)} callers")
     if not facts:
         return None
-    subject = "This function" if a.function else "This code"
+    # the anchor field carries a function OR a class name (latent-class,
+    # record-shape on a class) — "This function changed often" on a class is
+    # a mislabel, so the line states the facts without a guessed subject
     if len(facts) == 1:
-        return f"{subject} {facts[0]}."
-    joiner = ", and " if len(facts) > 2 else " and "
-    return f"{subject} " + ", ".join(facts[:-1]) + joiner + facts[-1] + "."
+        sentence = facts[0]
+    else:
+        joiner = ", and " if len(facts) > 2 else " and "
+        sentence = ", ".join(facts[:-1]) + joiner + facts[-1]
+    return sentence[0].upper() + sentence[1:] + "."
 
 
 def _render_file_group(
@@ -1443,9 +1463,8 @@ def _render_file_group(
         ck = (ignore_keys or {}).get(a.signal) if a.signal else None
         if marker and ck:
             suppress = (
-                f" — suppress with: {a.signal}{fix_link} — this family is config-ignored under "
-                f"{ck}: fix the finding or extend the ignore scope (a per-site marker "
-                "is redundant)"
+                f" — suppress with: {a.signal}{fix_link} — a config entry ignores this signal "
+                f"for {ck} only; this site is not covered — fix it, or add a per-site why here"
             )
         elif marker:
             suppress = (
@@ -1455,10 +1474,7 @@ def _render_file_group(
                 "may end mid-word at the line end and still bind"
             )
         elif ck:
-            suppress = (
-                f" — this family is config-ignored under {ck}: fix the finding or "
-                "extend the ignore scope"
-            )
+            suppress = f" — this signal is config-ignored under {ck}"
         else:
             suppress = ""
         stamp = _stamp_of(a)
@@ -2086,7 +2102,7 @@ class _GateRunner:
         for a in unique:
             if a.file.startswith(("scripts/", "tools/")) and a.churn <= 2 and a.last_modified:
                 a.note = (
-                    a.note + f" Lifecycle: {a.churn}x churn, last touched {a.last_modified} — "
+                    a.note + f" Lifecycle: {a.churn}x churn, last touched {_iso_day(a.last_modified)} — "
                     f"low-change file under scripts/tools."
                 ).strip()
 

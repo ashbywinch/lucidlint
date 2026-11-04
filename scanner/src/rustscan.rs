@@ -539,6 +539,7 @@ impl<'a> RsState<'a> {
                         rel: self.file.to_string(),
                         name: sig.ident.to_string(),
                         line,
+                        end_line: block.span().end().line,
                         skeleton: skel,
                     });
                 }
@@ -2432,12 +2433,14 @@ mod tests {
             rel: "a.rs".into(),
             name: s.name.clone(),
             line: s.line,
+            end_line: s.end_line,
             skeleton: s.skeleton.clone(),
         }));
         pool.extend(sb.skeletons.iter().map(|s| common::SkeletonFn {
             rel: "b.rs".into(),
             name: s.name.clone(),
             line: s.line,
+            end_line: s.end_line,
             skeleton: s.skeleton.clone(),
         }));
         let dups = crate::checks::duplicate_findings(&pool);

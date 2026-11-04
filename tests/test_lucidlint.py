@@ -392,6 +392,56 @@ def test_sibling_value_class_names_both_classes(tmp_path, capsys):
     assert "work_dir" in out and "guess_dir" in out
 
 
+def test_config_ignored_detail_reconciles_with_the_total():
+    # a truncated list that sums short reads as a miscount: the ledger states
+    # a total the detail beside it must explain (album round: 599 vs 627)
+    ctx = ch._RenderCtx(
+        repo=Path("."),
+        args=gate_args(),
+        branch="b",
+        commit="c",
+        coverage_source="none",
+        graph_preferred=False,
+    )
+    ctx.ignored_by_signal = Counter(
+        {"fakefs": 238, "magic-number": 201, "record-shape": 123, "unused": 37, "class-module": 20}
+    )
+    detail = ctx._config_ignored_detail()
+    assert "+20 more" in detail, detail
+
+
+def test_facts_line_never_guesses_the_anchor_kind():
+    # the anchor field carries a class name too — "This function changed
+    # often" on a class is a mislabel
+    a = ch.Action(
+        "latent-class", "fail", "x.py", 10, "BatchPaths", "m", 1.0, 12, "1700000000", ""
+    )
+    line = ch._facts_line(a)
+    assert line is not None
+    assert "function" not in line.lower(), line
+    assert "changed often" in line.lower(), line
+
+
+def test_lifecycle_note_renders_a_date_not_an_epoch(tmp_path):
+    a = ch.Action(
+        "unused", "warn", "tools/scan.py", 10, "f", "m", 1.0, 2, "1792686177", ""
+    )
+    runner = ch._GateRunner(Path("."), gate_args())
+    runner._lifecycle_notes([a])
+    assert "2026-10-22" in a.note, a.note
+    assert "1792686177" not in a.note, a.note
+
+
+def test_config_ignored_advice_does_not_invite_extending_the_scope(capsys):
+    a = ch.Action(
+        "standard", "warn", "tools/archive.py", 10, "_slug", "m", 1.0, 0, "", "", signal="duplicate"
+    )
+    ch._render_file_group("tools/archive.py", [a], {"duplicate": "tools/eval_memory.py"})
+    out = capsys.readouterr().out
+    assert "extend the ignore scope" not in out, out
+    assert "tools/eval_memory.py" in out, out
+
+
 def test_rust_finding_rel_unmappable(tmp_path):
     repo = make_repo(tmp_path)
     rels = {"houses/app.py", "scripts/oneoff.py"}
@@ -1040,7 +1090,7 @@ def test_facts_line_names_complex_and_churn_facts(capsys):
     ch._render_file_group("x.py", [a])
     out = capsys.readouterr().out
     assert (
-        "-> This function is complex (17 decision points) and changed often (14 changes)." in out
+        "-> Is complex (17 decision points) and changed often (14 changes)." in out
     ), out
 
 
@@ -1066,15 +1116,16 @@ def test_facts_line_skips_absent_metrics_and_names_callers():
     assert ch._facts_line(few) is None
     many = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "",
                      callers=[f"c{i}" for i in range(11)])
-    assert ch._facts_line(many) == "This function has 11 callers."
+    assert ch._facts_line(many) == "Has 11 callers."
     triple = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 20.0, 12, "", "",
                        callers=[f"c{i}" for i in range(10)])
     assert ch._facts_line(triple) == (
-        "This function is complex (20 decision points), changed often (12 changes), and has 10 callers."
+        "Is complex (20 decision points), changed often (12 changes), and has 10 callers."
     )
-    # a finding that anchors no function says "This code", never a lie
+    # the anchor may be a class name (latent-class, record-shape on a class):
+    # the line states the facts, never a guessed "function"
     noloc = ch.Action("standard", "fail", "x.py", 3, "", "m", 1.0, 12, "", "")
-    assert ch._facts_line(noloc) == "This code changed often (12 changes)."
+    assert ch._facts_line(noloc) == "Changed often (12 changes)."
 
 
 def test_summary_header_names_scope_not_change_cost(tmp_path, capsys):
@@ -1248,7 +1299,7 @@ def test_config_ignored_family_advisory_names_config_key(tmp_path, capsys):
     (repo / ".lucidlint.toml").write_text('[lucidlint."houses/**"]\nignore = ["magic-number"]\n')
     run_main(repo, "--warn")
     out = capsys.readouterr().out
-    assert "this family is config-ignored under 'houses/**': fix the finding or extend the ignore scope" in out
+    assert "this signal is config-ignored under 'houses/**'" in out
 
 
 def test_config_ignored_family_advisory_skips_marker_remedy(capsys):
@@ -1260,7 +1311,7 @@ def test_config_ignored_family_advisory_skips_marker_remedy(capsys):
     ch._render_file_group("scripts/oneoff.py", [a], ignore_keys={"global-state": "'houses/**'"})
     out = capsys.readouterr().out
     assert "suppress with: global-state" in out
-    assert "config-ignored under 'houses/**'" in out
+    assert "a config entry ignores this signal for 'houses/**' only" in out
 
 
 def test_suppression_advice_states_marker_window(capsys):
@@ -1308,7 +1359,7 @@ def test_render_message_leads_suppression_pointer(capsys):
     out = capsys.readouterr().out
     assert out.index("— m") < out.index("suppress with: inline-import"), out
     assert "binds by its signal name" in out
-    assert out.index("— cfg-msg") < out.index("config-ignored under 'houses/**'"), out
+    assert out.index("— cfg-msg") < out.index("for 'houses/**' only"), out
     assert out.count("suppress with:") == 2, out
 
 

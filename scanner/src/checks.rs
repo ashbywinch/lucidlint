@@ -278,6 +278,56 @@ pub fn noqa_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Finding> 
     out
 }
 
+/// Is this assignment value a TYPE rather than a value? Union aliases
+/// (`ToolArgs = A | B`) and typing subscripts (`Answer = tuple[str, int]`,
+/// `Callback = Callable[[int], bool]`) are names for types — nothing a caller
+/// can vary, inject, or mutate, so the global-state message is false for them
+/// (album round: five aliases reported as "module-level variables").
+fn is_type_alias_value(value: &Expr) -> bool {
+    /// Subscription heads whose argument is a type expression.
+    const TYPE_HEADS: &[&str] = &[
+        "list",
+        "dict",
+        "tuple",
+        "set",
+        "frozenset",
+        "type",
+        "Callable",
+        "Union",
+        "Optional",
+        "Literal",
+        "Annotated",
+        "Sequence",
+        "Mapping",
+        "Iterable",
+        "Iterator",
+        "Awaitable",
+        "TypeVar",
+        "TypeAlias",
+    ];
+    fn is_type_term(e: &Expr) -> bool {
+        match e {
+            Expr::Name(_) | Expr::Attribute(_) => true,
+            Expr::Subscript(s) => is_type_term(s.value.as_ref()),
+            Expr::BinOp(b) => {
+                matches!(b.op, Operator::BitOr) && is_type_term(b.left.as_ref()) && is_type_term(b.right.as_ref())
+            }
+            _ => false,
+        }
+    }
+    match value {
+        // `A | B | None` — every operand a name/attribute/subscript
+        Expr::BinOp(b) => {
+            matches!(b.op, Operator::BitOr) && is_type_term(b.left.as_ref()) && is_type_term(b.right.as_ref())
+        }
+        Expr::Subscript(s) => match s.value.as_ref() {
+            Expr::Name(n) => TYPE_HEADS.contains(&n.id.as_str()),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// Module-level variable assignments (ANY — mutable or constant, mutated or
 /// not; third-pass ruling 3: "values are a class's private internals") plus
 /// `global` statements. The narrow "mutable container mutated inside a
@@ -329,6 +379,9 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
             if call_valued {
                 continue; // a service/framework registration, not a domain value
             }
+            if value.is_some_and(is_type_alias_value) {
+                continue; // a name for a type, not a variable a caller varies
+            }
             let line = stmt_line(state.source, stmt);
             state.findings.push(Finding { logical_start: None, seam_members: Vec::new(),
             col: 0,
@@ -338,7 +391,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
             kind: "global-state".into(),
             severity: "fail".into(),
             message: format!(
-                "{name} is a module-level variable: a global read that binds at import time. Callers cannot inject or vary it without monkeypatching the module. Find the class this value serves; make it that class's attribute."
+                "{name} binds at import time and every reader shares it. If it is state a caller should be able to vary, give it to the class that owns the work; if it is a constant the module's own functions read, keep it here and say what it measures — a class invented to hold one number is ceremony. If another module spells the same value, give the value one home and import it: two spellings drift."
             ), });
         }
     }
@@ -2764,14 +2817,95 @@ fn collect_field_assignments(
     }
 }
 
+/// Every `self.<attr>` read in an expression tree, including the containers
+/// `push_expr_tree` does not descend: a f-string (`f"{self.a}/{self.b}"`) and
+/// a list/tuple literal (`[self.a, self.b]`) are the commonest accessor
+/// bodies, and missing them makes the sibling rule blind to the accessors it
+/// is built to compare.
+fn collect_self_attrs(e: &Expr, out: &mut std::collections::BTreeSet<String>) {
+    if let Some(x) = self_attr_name(e) {
+        out.insert(x);
+    }
+    match e {
+        Expr::Call(c) => {
+            collect_self_attrs(c.func.as_ref(), out);
+            for a in &c.arguments.args {
+                collect_self_attrs(a, out);
+            }
+            for k in &c.arguments.keywords {
+                collect_self_attrs(&k.value, out);
+            }
+        }
+        Expr::Attribute(a) => collect_self_attrs(a.value.as_ref(), out),
+        Expr::BinOp(b) => {
+            collect_self_attrs(b.left.as_ref(), out);
+            collect_self_attrs(b.right.as_ref(), out);
+        }
+        Expr::BoolOp(b) => b.values.iter().for_each(|v| collect_self_attrs(v, out)),
+        Expr::UnaryOp(u) => collect_self_attrs(u.operand.as_ref(), out),
+        Expr::Compare(c) => {
+            collect_self_attrs(c.left.as_ref(), out);
+            c.comparators.iter().for_each(|v| collect_self_attrs(v, out));
+        }
+        Expr::Subscript(s) => {
+            collect_self_attrs(s.value.as_ref(), out);
+            collect_self_attrs(s.slice.as_ref(), out);
+        }
+        Expr::List(l) => l.elts.iter().for_each(|v| collect_self_attrs(v, out)),
+        Expr::Tuple(t) => t.elts.iter().for_each(|v| collect_self_attrs(v, out)),
+        Expr::Set(st) => st.elts.iter().for_each(|v| collect_self_attrs(v, out)),
+        Expr::Dict(d) => {
+            for k in d.items.iter().filter_map(|i| i.key.as_ref()) {
+                collect_self_attrs(k, out);
+            }
+            d.items.iter().for_each(|i| collect_self_attrs(&i.value, out));
+        }
+        Expr::FString(s) => {
+            for part in s.value.elements() {
+                if let ruff_python_ast::InterpolatedStringElement::Interpolation(i) = part {
+                    collect_self_attrs(i.expression.as_ref(), out);
+                }
+            }
+        }
+        Expr::If(i) => {
+            collect_self_attrs(i.test.as_ref(), out);
+            collect_self_attrs(i.body.as_ref(), out);
+            collect_self_attrs(i.orelse.as_ref(), out);
+        }
+        Expr::Starred(st) => collect_self_attrs(st.value.as_ref(), out),
+        Expr::Await(a) => collect_self_attrs(a.value.as_ref(), out),
+        Expr::Named(n) => collect_self_attrs(n.value.as_ref(), out),
+        Expr::ListComp(c) => {
+            collect_self_attrs(c.elt.as_ref(), out);
+            for g in &c.generators {
+                collect_self_attrs(&g.iter, out);
+                g.ifs.iter().for_each(|v| collect_self_attrs(v, out));
+            }
+        }
+        Expr::Generator(c) => {
+            collect_self_attrs(c.elt.as_ref(), out);
+            for g in &c.generators {
+                collect_self_attrs(&g.iter, out);
+                g.ifs.iter().for_each(|v| collect_self_attrs(v, out));
+            }
+        }
+        Expr::SetComp(c) => {
+            collect_self_attrs(c.elt.as_ref(), out);
+            for g in &c.generators {
+                collect_self_attrs(&g.iter, out);
+                g.ifs.iter().for_each(|v| collect_self_attrs(v, out));
+            }
+        }
+        _ => {}
+    }
+}
+
 fn self_attributes_read(stmts: &[Stmt]) -> Vec<String> {
     let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut stack: Vec<&Stmt> = stmts.iter().collect();
     while let Some(s) = stack.pop() {
         for e in stmt_exprs(s) {
-            if let Some(x) = self_attr_name(e) {
-                out.insert(x);
-            }
+            collect_self_attrs(e, &mut out);
         }
         push_stmt_children(s, &mut stack);
     }
@@ -2870,12 +3004,42 @@ impl SiblingClass {
             .collect()
     }
 
-    /// How the two classes are joined — containment, inheritance, or a
-    /// signature that names the other class. Composition, not duplication: the
-    /// containment case belongs to `duplicate-field`.
+    /// Framework bases that do not make two classes variants of one DOMAIN
+    /// abstraction — a shared pydantic/Protocol base still leaves two duplicate
+    /// value classes to reconcile.
+    const FRAMEWORK_BASES: &'static [&'static str] = &[
+        "object",
+        "BaseModel",
+        "Protocol",
+        "ABC",
+        "ABCMeta",
+        "NamedTuple",
+        "TypedDict",
+        "Generic",
+        "Enum",
+        "IntEnum",
+        "StrEnum",
+        "Flag",
+        "Exception",
+    ];
+
+    /// Two operators of one formula language, two node kinds of one pipeline:
+    /// they share a domain base, so the shared half already has a home — the
+    /// base. Reporting them as duplicates invites merging variants into one
+    /// class with a flag, which erases the distinction they exist for.
+    fn shares_domain_base(&self, other: &Self) -> bool {
+        self.bases
+            .iter()
+            .any(|b| other.bases.contains(b) && !Self::FRAMEWORK_BASES.contains(&b.as_str()))
+    }
+
+    /// How the two classes are joined — containment, inheritance, a shared
+    /// domain base, or a signature that names the other class. Composition,
+    /// not duplication: the containment case belongs to `duplicate-field`.
     fn composed_with(&self, other: &Self) -> bool {
         self.bases.contains(&other.name)
             || other.bases.contains(&self.name)
+            || self.shares_domain_base(other)
             || self.field_types.contains(&other.name)
             || other.field_types.contains(&self.name)
             || self.methods.iter().any(|m| m.mentions.contains(&other.name))
@@ -2926,7 +3090,7 @@ impl SiblingClass {
             kind: "sibling-value-class".into(),
             severity: "warn".into(),
             message: format!(
-                "'{}' and '{}' share the fields {} and the derived accessors {} with no containment — one of these is the duplicate. Keep one class and move the other's extra accessors onto it.",
+                "'{}' and '{}' both hold {} and derive {} the same way, with no containment — the same data has two homes. If they are variants of one thing, give them the base that owns the shared half; if they are the same value, keep one and move the other's extra accessors onto it. Decide which before editing: merging two variants erases the distinction they exist for.",
                 self.name,
                 other.name,
                 shared.join(", "),
@@ -7527,6 +7691,13 @@ pub fn flat_folder_findings(modules: &[String], docs: &[String]) -> Vec<Finding>
             continue;
         }
         let label = if dir.is_empty() { "the repo root" } else { dir.as_str() };
+        // the action must name what the folder actually holds: a docs pile has
+        // no modules to group (round: "'docs' holds 31 docs … group the modules")
+        let action = match (mods, txt) {
+            (0, _) => "Split the docs by the topics their titles share.",
+            (_, 0) => "Group the modules under a domain noun their names already carry.",
+            _ => "Group the modules under a domain noun their names already carry, and split the docs by the topics their titles share.",
+        };
         out.push(Finding {
             logical_start: None,
             seam_members: Vec::new(),
@@ -7537,7 +7708,7 @@ pub fn flat_folder_findings(modules: &[String], docs: &[String]) -> Vec<Finding>
             kind: "flat-folder".into(),
             severity: "warn".into(),
             message: format!(
-                "'{label}' holds {} files ({mods} modules, {txt} docs) — a folder with that many files is a bag: nothing in the path says which belong together. Group the modules under the domain nouns their names already carry, and split the docs by the topics they share.",
+                "'{label}' holds {} files ({mods} modules, {txt} docs) — past the {FLAT_FOLDER_THRESHOLD}-file mark, the path stops telling a reader which belong together. {action} If the names already form one family, leave the folder and record why; never invent a `misc/` or numbered bucket.",
                 mods + txt
             ),
         });
@@ -7586,6 +7757,18 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
                 for &j in &bucket[start..] {
                     let sim = dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j));
                     if sim >= 0.9 {
+                        // a function nested inside another always resembles it:
+                        // the span contains the other's — containment, not
+                        // copy-paste (houses: `_fetch` inside `api_fetch`)
+                        // line numbers are per file: only a SAME-FILE pair can
+                        // be nested (two files' copies share the same numbers)
+                        let one = (fr.line, fr.end_line);
+                        let two = (fns[j].line, fns[j].end_line);
+                        let nested = fr.rel == fns[j].rel
+                            && ((one.0 <= two.0 && two.1 <= one.1) || (two.0 <= one.0 && one.1 <= two.1));
+                        if nested {
+                            continue;
+                        }
                         if best.is_none_or(|(b, _)| j < b) {
                             best = Some((j, sim));
                         }

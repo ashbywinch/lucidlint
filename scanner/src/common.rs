@@ -65,6 +65,9 @@ pub struct SkeletonFn {
     pub rel: String,
     pub name: String,
     pub line: usize,
+    /// last line of the definition — a function nested in another always sits
+    /// inside its parent's span, which is containment, not copy-paste
+    pub end_line: usize,
     pub skeleton: Vec<String>,
 }
 
