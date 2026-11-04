@@ -518,7 +518,9 @@ CATALOG = RuleCatalog([
          "exactly one class whose name doesn't match the filename, or >=2 "
          "public classes where any name doesn't match the stem — rename the "
          "file to match, or split the module so every public class lives in "
-         "a file named after it.",
+         "a file named after it. Exception: a declarations-only Protocol/ABC "
+         "the module's namesake class satisfies (the DI seam exists because "
+         "that class does, and it belongs beside it).",
          display_group="standard",
          fix="split-module"),
     Rule("builtin-shadow", "fail", "style", "Python",

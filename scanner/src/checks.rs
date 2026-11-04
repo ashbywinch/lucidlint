@@ -3829,10 +3829,68 @@ pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &
         .flatten()
         .collect();
     let dataclass_decorators = dataclass_names(module_body);
+    /// The members a class declares (its own defs) — the interface's contract.
+    fn declared_members(c: &StmtClassDef) -> std::collections::HashSet<String> {
+        c.body
+            .iter()
+            .filter_map(|m| match m {
+                Stmt::FunctionDef(f) => Some(f.name.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+    /// A body that only DECLARES: docstrings, `...`, `pass`, and defs whose own
+    /// bodies are only those. The shape of an interface, not an implementation.
+    fn declarations_only(c: &StmtClassDef) -> bool {
+        fn decl(stmts: &[Stmt]) -> bool {
+            stmts.iter().all(|s| match s {
+                Stmt::Pass(_) => true,
+                Stmt::Expr(e) => matches!(e.value.as_ref(), Expr::EllipsisLiteral(_) | Expr::StringLiteral(_)),
+                _ => false,
+            })
+        }
+        c.body.iter().all(|s| match s {
+            Stmt::Pass(_) => true,
+            Stmt::Expr(e) => matches!(e.value.as_ref(), Expr::EllipsisLiteral(_) | Expr::StringLiteral(_)),
+            Stmt::FunctionDef(f) => decl(&f.body),
+            _ => false,
+        })
+    }
+    // every member the module's namesake class implements — the evidence that a
+    // declarations-only interface exists because that class does
+    let namesake_members: std::collections::HashSet<String> = public
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::ClassDef(c) if matches_stem(c.name.as_str()) => Some(declared_members(c)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    // a Protocol with ANOTHER implementer in this module is not the namesake
+    // class's own seam (issue #52: "the namesake class and test doubles")
+    let has_other_implementer = |name: &str| {
+        public.iter().any(|s| match s {
+            Stmt::ClassDef(c) => c.name.as_str() != name && class_base_names(c).iter().any(|b| b == name),
+            _ => false,
+        })
+    };
     let is_the_seam = |c: &StmtClassDef| {
-        class_base_names(c).iter().any(|b| b == "Protocol")
-            && named_bases.contains(c.name.as_str())
-            && !decorated_dataclass(c, &dataclass_decorators)
+        let interface = class_base_names(c).iter().any(|b| b == "Protocol" || b == "ABC");
+        if !interface || decorated_dataclass(c, &dataclass_decorators) {
+            return false;
+        }
+        // the namesake class declares it as a base (PR for #52) …
+        if named_bases.contains(c.name.as_str()) {
+            return true;
+        }
+        // … or satisfies it structurally: declarations-only, every declared
+        // member implemented by the namesake class, and no other implementer
+        // in this module
+        let members = declared_members(c);
+        declarations_only(c)
+            && !members.is_empty()
+            && members.iter().all(|m| namesake_members.contains(m))
+            && !has_other_implementer(c.name.as_str())
     };
     let misplaced: Vec<&Stmt> = public
         .iter()
