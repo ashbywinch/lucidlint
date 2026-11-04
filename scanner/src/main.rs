@@ -1335,6 +1335,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
                             rel: name.to_string(),
                             name: f.name.to_string(),
                             line: def_line,
+                            end_line: line_of(source, f.range().end()),
                             skeleton: skel,
                         });
                     }
@@ -1556,6 +1557,7 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
                 rel: rel.clone(),
                 name: s.name.clone(),
                 line: s.line,
+                end_line: s.end_line,
                 skeleton: s.skeleton.clone(),
             });
         }
@@ -2078,6 +2080,7 @@ fn main() {
                 rel: rel.clone(),
                 name: s.name.clone(),
                 line: s.line,
+                end_line: s.end_line,
                 skeleton: s.skeleton.clone(),
             });
         }
@@ -3052,21 +3055,21 @@ mod tests {
         ));
         let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
         assert_eq!(gs.len(), 2);
-        // A4: the message names the mechanism (import-time binding) and the
-        // owning-class action — no invented "configuration" escape
+        // the message names the mechanism (import-time binding) and gives the
+        // reader the decision: state -> the owning class, constant -> keep it
+        // here with its meaning, duplicated vocabulary -> one home
         for g in &gs {
             assert!(
-                g.message
-                    .contains("is a module-level variable: a global read that binds at import time"),
+                g.message.contains("binds at import time and every reader shares it"),
                 "{}",
                 g.message
             );
             assert!(
-                g.message
-                    .contains("Find the class this value serves; make it that class's attribute."),
+                g.message.contains("give it to the class that owns the work"),
                 "{}",
                 g.message
             );
+            assert!(g.message.contains("give the value one home"), "{}", g.message);
         }
     }
 
@@ -4983,6 +4986,7 @@ mod tests {
                     rel: rel.clone(),
                     name: s.name.clone(),
                     line: s.line,
+                    end_line: s.end_line,
                     skeleton: s.skeleton.clone(),
                 });
             }
@@ -5234,6 +5238,48 @@ mod tests {
         assert_eq!(common::dice_similarity(&a, &same), 1.0);
     }
 
+    #[test]
+    fn global_state_exempts_type_aliases_but_keeps_constants() {
+        // a union/subscript alias is a type, not a value a caller varies
+        // (album round: ToolArgs, ToolHit, RowRuns were all reported)
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/global_state_type_aliases_pass__01.py"
+        ));
+        let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
+        assert_eq!(gs.len(), 1, "{gs:?}");
+        assert!(gs[0].message.contains("MAX_ROWS"), "{}", gs[0].message);
+    }
+
+    #[test]
+    fn sibling_value_class_stays_silent_on_a_shared_domain_base() {
+        // two operators of one family: the shared half belongs on the base
+        // they already have, not in a merge of the variants
+        let src = include_str!("../../tests/fixtures/rust/sibling_value_class_shared_base_passes__01.py");
+        let parsed = parse_module(src).expect("fixture parses");
+        let body = parsed.syntax().body.clone();
+        let classes = checks::collect_sibling_classes(&body, src);
+        let f = checks::sibling_value_class_findings(&[("pkg/expr.py".to_string(), classes)]);
+        assert!(!f.iter().any(|x| x.kind == "sibling-value-class"), "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_skips_a_nested_function_and_its_parent() {
+        // a closure always resembles the function that defines it — the
+        // similarity is containment, not copy-paste (houses: _fetch/api_fetch)
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/duplicate_nested_in_parent_passes__01.py"
+        ));
+        // the independent twin beside it still fires, so the skip is a
+        // containment test and not a blanket silence
+        let dups: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate").collect();
+        assert!(
+            dups.iter()
+                .all(|d| !(d.message.contains("api_fetch") && d.message.contains("'_fetch'"))),
+            "{dups:?}"
+        );
+        assert!(dups.iter().any(|d| d.message.contains("other_fetch")), "{dups:?}");
+    }
+
     // ------------------------------------------------- duplicate-module (#26)
     #[test]
     fn sibling_value_class_fires_on_shared_fields_and_accessors() {
@@ -5320,6 +5366,11 @@ mod tests {
         let f = checks::flat_folder_findings(&[], &docs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].file, "docs");
+        // a docs pile has no modules to group: the action must match the shape
+        assert!(!f[0].message.contains("Group the modules"), "{}", f[0].message);
+        assert!(f[0].message.contains("Split the docs"), "{}", f[0].message);
+        assert!(f[0].message.contains("at 20+ files"), "{}", f[0].message);
+        assert!(f[0].message.contains("never invent"), "{}", f[0].message);
         // `__init__.py` is not a browsable module — 19 real modules + one
         // init is still a clean folder
         let mut modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
