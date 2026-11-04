@@ -105,8 +105,13 @@ jobs:
           if [ "$target" != "x86_64-unknown-linux-musl" ]; then
             for v in 3.12 3.13 3.14; do
               uv python install "$v" >/dev/null
-              uv pip install --quiet --python "$(uv python find "$v")" \
-                --target "dist/${dir}/deps/cp${v/./}" "libcst>=1.9.0"
+              py="$(uv python find "$v")"
+              dest="dist/${dir}/deps/cp${v/./}"
+              uv pip install --quiet --python "$py" --target "$dest" "libcst>=1.9.0"
+              # prove the vendored tree loads under ITS interpreter before it
+              # ships: a wheel for the wrong ABI installs silently and only
+              # fails when a user runs fix (the 0.7.0 defect)
+              PYTHONPATH="$dest" "$py" -c "import libcst, yaml; print('deps ok', libcst.__version__)"
             done
           fi
           tar -C dist -czf "dist/${dir}.tar.gz" "${dir}"
