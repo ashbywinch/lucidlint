@@ -120,7 +120,11 @@ jobs:
         run: |
           set -euo pipefail
           dir="lucidlint-${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}-${{ matrix.target }}"
-          version_line=$(python3 "dist/${dir}/lucidlint.py" --version)
+          # the bundle supports Python >= 3.12; a macOS runner's default
+          # `python3` is older, so the checks run under a supported one
+          uv python install 3.12 >/dev/null
+          py="$(uv python find 3.12)"
+          version_line=$("$py" "dist/${dir}/lucidlint.py" --version)
           printf '%s\n' "$version_line"
           # the bundle's version.txt is the ONLY version source it ships, so
           # a tag build MUST report the tag — v0.6.3 shipped a bundle whose
@@ -129,12 +133,12 @@ jobs:
             refs/tags/v*) printf '%s' "$version_line" | grep -q "lucidlint ${GITHUB_REF_NAME#v}$" ;;
             *) printf '%s' "$version_line" | grep -q "lucidlint dev$" ;;
           esac
-          python3 "dist/${dir}/lucidlint.py" --repo .
+          "$py" "dist/${dir}/lucidlint.py" --repo .
           # the documented consumer flow — `make -C <bundle> lucidlint` —
           # must work from the tarball layout (bundle Makefile present).
           # Guarded to the non-windows rows: the windows runner has no `make`.
           if [ "${{ matrix.target }}" != "x86_64-pc-windows-msvc" ]; then
-            make -C "dist/${dir}" lucidlint REPO="$GITHUB_WORKSPACE" BASELINE=
+            make -C "dist/${dir}" lucidlint REPO="$GITHUB_WORKSPACE" BASELINE= PYTHON="$py"
           fi
       - name: Post-packaging check — the bundle's fix path works end to end
         # The regression gate for the v0.5.0 bug: the shipped linux bundle
@@ -155,7 +159,9 @@ jobs:
           # as escapes (D:\a\... glues to D:alucidlint...) - normalize to
           # forward slashes before the value reaches shlex.
           bundle="${GITHUB_WORKSPACE//\\//}/dist/${dir}/lucidlint.py"
-          python3 scripts/deploy-check.py --lucidlint "python3 ${bundle}" --project "${RUNNER_TEMP}/bundle-check"
+          uv python install 3.12 >/dev/null
+          py="$(uv python find 3.12)"
+          "$py" scripts/deploy-check.py --lucidlint "$py ${bundle}" --project "${RUNNER_TEMP}/bundle-check"
       - name: Post-packaging check — musl bundle degrades honestly (no libcst by design)
         # The static bundle cannot load glibc-built libcst, so it ships
         # without deps/ and the fix path must REPORT its requirement — never
@@ -165,8 +171,10 @@ jobs:
         run: |
           set -euo pipefail
           dir="lucidlint-${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}-${{ matrix.target }}"
+          uv python install 3.12 >/dev/null
+          py="$(uv python find 3.12)"
           set +e
-          python3 "dist/${dir}/lucidlint.py" fix --kind extract-method --file lucidlint.py --line 1 > "${RUNNER_TEMP}/musl-fix.txt" 2>&1
+          "$py" "dist/${dir}/lucidlint.py" fix --kind extract-method --file lucidlint.py --line 1 > "${RUNNER_TEMP}/musl-fix.txt" 2>&1
           rc=$?
           set -e
           [ "$rc" -eq 1 ] || { echo "musl fix must exit 1, got $rc"; cat "${RUNNER_TEMP}/musl-fix.txt"; exit 1; }
@@ -195,7 +203,8 @@ jobs:
         run: |
           set -euo pipefail
           tmp="$(mktemp -d)"
-          python3 -m venv "${tmp}/venv"
+          uv python install 3.12 >/dev/null
+          "$(uv python find 3.12)" -m venv "${tmp}/venv"
           if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then PY="${tmp}/venv/Scripts/python.exe"; else PY="${tmp}/venv/bin/python"; fi
           "${PY}" -m pip install --quiet pip-dist/*.whl
           "${PY}" -m lucidlint --version
@@ -215,7 +224,8 @@ jobs:
           set -euo pipefail
           unset CARGO_BUILD_TARGET  # the cross action leaks it; see the wheel step above
           tmp="$(mktemp -d)"
-          python3 -m venv "${tmp}/venv"
+          uv python install 3.12 >/dev/null
+          "$(uv python find 3.12)" -m venv "${tmp}/venv"
           PY="${tmp}/venv/bin/python"
           "${PY}" -m pip install --quiet pip-dist/*.tar.gz
           "${PY}" scripts/deploy-check.py --lucidlint "${PY} -m lucidlint" --project "${tmp}/project"
