@@ -56,6 +56,9 @@ opinion repeated, plus a minority of varied findings.
 - `flat-folder`: the action matches the folder's contents, the threshold is
   stated, and the message says to leave a deliberate single-family folder
   and record why, never to invent a `misc/` or numbered bucket.
+- `fakefs`: the message's carve-out now names the case the round found — a
+  test whose subject is a checked-in file the repo ships (a workflow, a
+  build script) — alongside real FS semantics.
 - Report: the config-ignored detail reconciles with its total (`+N more`),
   the lifecycle note renders an ISO date, the facts line no longer guesses
   "function", the config-ignored advice no longer invites widening an
