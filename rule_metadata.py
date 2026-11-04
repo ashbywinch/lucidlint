@@ -420,6 +420,12 @@ CATALOG = RuleCatalog([
          "finding: declare it.",
          display_name="undeclared-attribute", display_group=None,
          fix="undeclared-attribute"),
+    Rule("sibling-value-class", "warn", "architecture", "Python",
+         "Two classes in one package over the same data — >=2 shared instance "
+         "fields and >=2 structurally equivalent accessors reading only those "
+         "fields, with no containment or inheritance: one of them is the "
+         "duplicate; keep one class and move the other's extra accessors "
+         "onto it."),
     Rule("duplicate-field", "fail", "architecture", "Python",
          "A class and a class it CONTAINS both hold the same >=2 fields — "
          "duplicated domain state across a containment edge; one source of "

@@ -348,6 +348,50 @@ def test_merge_warn_into_fail_target():
 
 
 
+SIBLING_VALUES_SRC = '''from pathlib import Path
+
+
+class BatchPaths:
+    def __init__(self, work_dir: Path, batch_id: str) -> None:
+        self.work_dir = work_dir
+        self.batch_id = batch_id
+
+    @property
+    def guess_dir(self) -> Path:
+        return self.work_dir / self.batch_id / "ocr-guess"
+
+    @property
+    def oriented_dir(self) -> Path:
+        return self.work_dir / self.batch_id / "oriented"
+
+
+class BatchReadings:
+    def __init__(self, work_dir: Path, batch_id: str) -> None:
+        self.work_dir = work_dir
+        self.batch_id = batch_id
+
+    @property
+    def guess_dir(self) -> Path:
+        return self.work_dir / self.batch_id / "ocr-guess"
+
+    @property
+    def oriented_dir(self) -> Path:
+        return self.work_dir / self.batch_id / "oriented"
+'''
+
+
+def test_sibling_value_class_names_both_classes(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "values.py").write_text(SIBLING_VALUES_SRC)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "sibling-value-class" in out
+    assert "BatchPaths" in out and "BatchReadings" in out
+    assert "work_dir" in out and "guess_dir" in out
+
+
 def test_rust_finding_rel_unmappable(tmp_path):
     repo = make_repo(tmp_path)
     rels = {"houses/app.py", "scripts/oneoff.py"}

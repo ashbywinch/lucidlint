@@ -1195,6 +1195,8 @@ pub struct FileScan {
     pub repo_methods: Vec<checks::RepoMethod>,
     pub middle_man_classes: Vec<checks::MiddleManClass>,
     pub middle_man_candidates: Vec<checks::MiddleManCandidate>,
+    /// The file's class shapes for the repo-wide sibling pass (#61).
+    pub sibling_classes: Vec<checks::SiblingClass>,
 }
 
 impl FileScan {
@@ -1412,6 +1414,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     }
     let classes = collect_classes(&body, source);
     let imports = collect_imports(&body, source);
+    let sibling_classes = checks::collect_sibling_classes(&body, source);
     FileScan {
         file_name: name.to_string(),
         findings: all,
@@ -1435,6 +1438,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         repo_methods: state.repo_methods,
         middle_man_classes: state.middle_man_classes,
         middle_man_candidates: state.middle_man_candidates,
+        sibling_classes,
     }
 }
 
@@ -1615,6 +1619,16 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         &supps_by_rel,
         &supps_spent_by_rel,
     );
+    let sibling_scans: Vec<(String, Vec<checks::SiblingClass>)> = scans
+        .iter()
+        .map(|s| (s.rel_of(root_s), s.sibling_classes.clone()))
+        .collect();
+    reconcile_repo_wide(
+        &mut additions,
+        checks::sibling_value_class_findings(&sibling_scans),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
     let mut by_file: std::collections::HashMap<String, Vec<Finding>> = std::collections::HashMap::new();
     for f in additions {
         by_file.entry(f.file.clone()).or_default().push(f);
@@ -1646,6 +1660,7 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         repo_methods: Vec::new(),
         middle_man_classes: Vec::new(),
         middle_man_candidates: Vec::new(),
+        sibling_classes: Vec::new(),
         classes: Vec::new(),
         imports: Vec::new(),
         self_assigns: Vec::new(),
@@ -2166,6 +2181,16 @@ fn main() {
     reconcile_repo_wide(
         &mut all_findings,
         middle_man_repo_wide(&scans, &root),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
+    let sibling_scans: Vec<(String, Vec<checks::SiblingClass>)> = scans
+        .iter()
+        .map(|s| (rel_of(&s.file_name, &root), s.sibling_classes.clone()))
+        .collect();
+    reconcile_repo_wide(
+        &mut all_findings,
+        checks::sibling_value_class_findings(&sibling_scans),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -5210,6 +5235,64 @@ mod tests {
     }
 
     // ------------------------------------------------- duplicate-module (#26)
+    #[test]
+    fn sibling_value_class_fires_on_shared_fields_and_accessors() {
+        let src = include_str!("../../tests/fixtures/rust/sibling_value_class_shared_accessors_fires__01.py");
+        let parsed = parse_module(src).expect("fixture parses");
+        let body = parsed.syntax().body.clone();
+        let classes = checks::collect_sibling_classes(&body, src);
+        let f = checks::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].kind, "sibling-value-class");
+        assert_eq!(f[0].severity, "warn");
+        assert!(f[0].message.contains("BatchPaths"), "{}", f[0].message);
+        assert!(f[0].message.contains("BatchReadings"), "{}", f[0].message);
+        assert!(f[0].message.contains("work_dir"), "{}", f[0].message);
+        assert!(f[0].message.contains("guess_dir"), "{}", f[0].message);
+    }
+
+    #[test]
+    fn sibling_value_class_stays_silent_on_containment() {
+        // the second class holds the first and names it in a signature — the
+        // containment case duplicate-field owns, not a sibling
+        let src = include_str!("../../tests/fixtures/rust/sibling_value_class_containment_passes__01.py");
+        let parsed = parse_module(src).expect("fixture parses");
+        let body = parsed.syntax().body.clone();
+        let classes = checks::collect_sibling_classes(&body, src);
+        let f = checks::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
+        assert!(!f.iter().any(|x| x.kind == "sibling-value-class"), "{f:?}");
+    }
+
+    #[test]
+    fn sibling_value_class_reads_a_forward_reference_as_containment() {
+        // `paths: "BatchPaths"` is the same containment as the unquoted form —
+        // a missed quoted annotation would report a composed pair as siblings
+        let src =
+            include_str!("../../tests/fixtures/rust/sibling_value_class_forward_reference_containment_passes__01.py");
+        let parsed = parse_module(src).expect("fixture parses");
+        let body = parsed.syntax().body.clone();
+        let classes = checks::collect_sibling_classes(&body, src);
+        let f = checks::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
+        assert!(!f.iter().any(|x| x.kind == "sibling-value-class"), "{f:?}");
+    }
+
+    #[test]
+    fn sibling_value_class_spans_files_in_one_package() {
+        // one class per file is the house convention — the rule must read the
+        // package, not the file
+        let a = "from pathlib import Path\n\n\nclass BatchPaths:\n    def __init__(self, work_dir: Path, batch_id: str) -> None:\n        self.work_dir = work_dir\n        self.batch_id = batch_id\n\n    @property\n    def guess_dir(self) -> Path:\n        return self.work_dir / self.batch_id\n\n    @property\n    def oriented_dir(self) -> Path:\n        return self.work_dir / self.batch_id\n";
+        let b = a.replace("BatchPaths", "BatchReadings");
+        let mut classes = Vec::new();
+        for (rel, src) in [("pkg/a.py", a), ("pkg/b.py", b.as_str())] {
+            let parsed = parse_module(src).expect("source parses");
+            let body = parsed.syntax().body.clone();
+            classes.push((rel.to_string(), checks::collect_sibling_classes(&body, src)));
+        }
+        let f = checks::sibling_value_class_findings(&classes);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].file, "pkg/b.py");
+    }
+
     #[test]
     fn flat_folder_fires_at_twenty_and_names_the_split() {
         // a directory is a filing system, not a bag: 20+ browsable files in
