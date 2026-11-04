@@ -5368,14 +5368,52 @@ mod tests {
         assert_eq!(f[0].file, "docs");
         // a docs pile has no modules to group: the action must match the shape
         assert!(!f[0].message.contains("Group the modules"), "{}", f[0].message);
-        assert!(f[0].message.contains("Split the docs"), "{}", f[0].message);
+        assert!(f[0].message.contains("coherent topic subsets"), "{}", f[0].message);
         assert!(f[0].message.contains("at 20+ files"), "{}", f[0].message);
-        assert!(f[0].message.contains("never invent"), "{}", f[0].message);
+        assert!(f[0].message.contains("not a subset"), "{}", f[0].message);
+        assert!(!f[0].message.contains("leave the folder"), "{}", f[0].message);
         // `__init__.py` is not a browsable module — 19 real modules + one
         // init is still a clean folder
         let mut modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
         modules.push("pkg/__init__.py".to_string());
         assert!(checks::flat_folder_findings(&modules, &[]).is_empty());
+    }
+
+    #[test]
+    fn flat_folder_names_the_subsets_the_filenames_offer() {
+        // the action's evidence: a folder's own names already carry the domain
+        // nouns a split should use — and a family token shared by most files
+        // (`node` here) is the folder's identity, not a subset
+        let mut modules: Vec<String> = Vec::new();
+        for i in 0..6 {
+            modules.push(format!("pkg/commute_{i}.py"));
+        }
+        for i in 0..4 {
+            modules.push(format!("pkg/school_{i}.py"));
+        }
+        for i in 0..15 {
+            modules.push(format!("pkg/thing_node_{i}.py"));
+        }
+        let f = checks::flat_folder_findings(&modules, &[]);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].message.contains("coherent domain subsets"), "{}", f[0].message);
+        assert!(f[0].message.contains("commute (6)"), "{}", f[0].message);
+        assert!(f[0].message.contains("school (4)"), "{}", f[0].message);
+        // the family token is not offered as a subset
+        assert!(!f[0].message.contains("node (15)"), "{}", f[0].message);
+    }
+
+    #[test]
+    fn flat_folder_never_offers_the_family_noun_as_a_subset() {
+        // `nodes/` is the family; `node` is its name, not a subset of it
+        let modules: Vec<String> = (0..12)
+            .map(|i| format!("houses/nodes/thing_node_{i}.py"))
+            .chain((0..8).map(|i| format!("houses/nodes/commute_{i}.py")))
+            .collect();
+        let f = checks::flat_folder_findings(&modules, &[]);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].message.contains("commute (8)"), "{}", f[0].message);
+        assert!(!f[0].message.contains("node ("), "{}", f[0].message);
     }
 
     #[test]
