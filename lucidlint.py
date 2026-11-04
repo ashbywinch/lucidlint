@@ -883,7 +883,7 @@ class _RustScan:
         else:
             result = {}
             try:
-                cmd = [str(binary)]
+                cmd = [str(binary), "--root", str(repo.resolve())]
                 if flags.graph is not None:
                     cmd += ["--graph", str(flags.graph)]
                 if flags.churn_json is not None:

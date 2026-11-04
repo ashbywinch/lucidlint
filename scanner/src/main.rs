@@ -1681,6 +1681,16 @@ fn repo_root(paths: &[String]) -> String {
     repo_root_impl(paths, &cwd)
 }
 
+/// The scan root: the explicit `--root` the orchestrator passes, else the
+/// inferred one. Explicit wins so the caller's contract does not depend on
+/// the file layout it happens to pass.
+fn scan_root(paths: &[String], root_override: Option<&str>) -> String {
+    match root_override {
+        Some(r) => r.to_string(),
+        None => repo_root(paths),
+    }
+}
+
 /// The longest common prefix of the passed paths, backed off to the last
 /// path separator. Paths are resolved against `cwd` FIRST: the orchestrator
 /// passes REPO-RELATIVE paths (the binary runs with the repo as its cwd),
@@ -1694,14 +1704,17 @@ fn repo_root_impl(paths: &[String], cwd: &Path) -> String {
     if paths.is_empty() {
         return String::new();
     }
-    // Relative inputs are resolved against the cwd FIRST, and the orchestrator
+    // A relative input is defined relative to the cwd, and the orchestrator
     // passes REPO-RELATIVE paths with its cwd AT the repo root — so the cwd IS
-    // the scan root. The common prefix cannot know that: it loses a package
-    // segment shared by every file (pkg/a.py + pkg/b.py -> .../pkg), which
-    // silently breaks every repo-wide rel mapping — duplicate, unused,
-    // duplicate-module, forwarding-chain and the graph families all vanished
-    // for the common src/ or lib/ layout. Absolute inputs keep prefix logic.
-    if paths.iter().all(|p| !Path::new(p).is_absolute()) {
+    // the scan root whenever ANY input is relative. The common prefix cannot
+    // know that: it loses a package segment shared by every file (pkg/a.py +
+    // pkg/b.py -> .../pkg), which silently breaks every repo-wide rel mapping
+    // — duplicate, unused, duplicate-module, forwarding-chain and the graph
+    // families all vanished for the common src/ or lib/ layout. Pure absolute
+    // input (an external caller, the LSP) keeps the prefix logic; a mixed
+    // caller is anchored at the cwd because that is what its relative half
+    // means.
+    if paths.iter().any(|p| !Path::new(p).is_absolute()) {
         return cwd.to_string_lossy().to_string();
     }
     let abs: Vec<String> = paths
@@ -1975,6 +1988,7 @@ fn main() {
     let mut churn_path: Option<String> = None;
     let mut docs_root: Option<String> = None;
     let mut gitignored_json: Option<String> = None;
+    let mut root_override: Option<String> = None;
     let mut include_tests = false;
     let mut i = 0usize;
     let mut paths: Vec<String> = Vec::new();
@@ -1996,12 +2010,16 @@ fn main() {
                 i += 1;
                 gitignored_json = args.get(i).cloned();
             }
+            "--root" => {
+                i += 1;
+                root_override = args.get(i).cloned();
+            }
             "--include-tests" => include_tests = true,
             _ => paths.push(args[i].clone()),
         }
         i += 1;
     }
-    let root = repo_root(&paths);
+    let root = scan_root(&paths, root_override.as_deref());
     let mut scans = Vec::new();
     // per-file scans are independent — parse in parallel (rayon), then the
     // repo-wide passes consume the scans in ORDER (duplicate first-seen,
@@ -2413,6 +2431,24 @@ mod tests {
         assert_eq!(root, "/work/repo");
         let single = repo_root_impl(&["pkg/only.py".to_string()], cwd);
         assert_eq!(single, "/work/repo");
+    }
+
+    #[test]
+    fn repo_root_mixed_inputs_anchor_at_the_cwd() {
+        // a relative half is defined relative to the cwd — the prefix of a
+        // mixed pair cannot be trusted
+        let cwd = Path::new("/work/repo");
+        let root = repo_root_impl(&["/elsewhere/core.py".to_string(), "pkg/a.py".to_string()], cwd);
+        assert_eq!(root, "/work/repo");
+    }
+
+    #[test]
+    fn explicit_root_beats_inference() {
+        // the orchestrator names the scan root; the file layout must not
+        // decide it
+        let paths = vec!["pkg/a.py".to_string(), "pkg/b.py".to_string()];
+        assert_eq!(scan_root(&paths, Some("/work/repo")), "/work/repo");
+        assert_eq!(scan_root(&paths, None), repo_root(&paths));
     }
 
     #[test]
