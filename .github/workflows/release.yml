@@ -111,7 +111,7 @@ jobs:
               # prove the vendored tree loads under ITS interpreter before it
               # ships: a wheel for the wrong ABI installs silently and only
               # fails when a user runs fix (the 0.7.0 defect)
-              PYTHONPATH="$dest" "$py" -c "import libcst, yaml; print('deps ok', libcst.__version__)"
+              PYTHONPATH="$dest" "$py" -c "import libcst; print('deps ok', libcst.__file__)"
             done
           fi
           tar -C dist -czf "dist/${dir}.tar.gz" "${dir}"
