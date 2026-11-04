@@ -283,7 +283,7 @@ pub fn noqa_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Finding> 
 /// `Callback = Callable[[int], bool]`) are names for types — nothing a caller
 /// can vary, inject, or mutate, so the global-state message is false for them
 /// (album round: five aliases reported as "module-level variables").
-fn is_type_alias_value(value: &Expr) -> bool {
+fn is_type_alias_value(name: &str, value: &Expr) -> bool {
     /// Subscription heads whose argument is a type expression.
     const TYPE_HEADS: &[&str] = &[
         "list",
@@ -305,6 +305,12 @@ fn is_type_alias_value(value: &Expr) -> bool {
         "TypeVar",
         "TypeAlias",
     ];
+    /// A CamelCase target names a type; ALL_CAPS and snake_case name values.
+    fn camel_case(name: &str) -> bool {
+        name.chars().next().is_some_and(|c| c.is_uppercase())
+            && name.chars().any(|c| c.is_lowercase())
+            && !name.contains('_')
+    }
     fn is_type_term(e: &Expr) -> bool {
         match e {
             Expr::Name(_) | Expr::Attribute(_) => true,
@@ -322,8 +328,14 @@ fn is_type_alias_value(value: &Expr) -> bool {
         }
         Expr::Subscript(s) => match s.value.as_ref() {
             Expr::Name(n) => TYPE_HEADS.contains(&n.id.as_str()),
+            // `collections.abc.Sequence[int]` — the head is an attribute
+            Expr::Attribute(a) => TYPE_HEADS.contains(&a.attr.as_str()),
             _ => false,
         },
+        // `MyAlias = SomeExistingType` / `Base = pydantic.BaseModel` — a bare
+        // reference is an alias when the target is CamelCase; `X = os.environ`
+        // is a value, not a type
+        Expr::Name(_) | Expr::Attribute(_) => camel_case(name),
         _ => false,
     }
 }
@@ -379,7 +391,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
             if call_valued {
                 continue; // a service/framework registration, not a domain value
             }
-            if value.is_some_and(is_type_alias_value) {
+            if value.is_some_and(|v| is_type_alias_value(name, v)) {
                 continue; // a name for a type, not a variable a caller varies
             }
             let line = stmt_line(state.source, stmt);
