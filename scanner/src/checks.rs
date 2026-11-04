@@ -7743,35 +7743,55 @@ pub fn flat_folder_findings(modules: &[String], docs: &[String]) -> Vec<Finding>
     out
 }
 
+/// The lower-case tokens a filename carries: split on separators
+/// (`_`, `-`, `.`) AND CamelCase boundaries, so `CommuteNode`,
+/// `commute.node` and `commute_node` all offer `commute` and `node`.
+fn name_tokens(stem: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for piece in stem.split(|c: char| !c.is_alphanumeric()) {
+        let mut start = 0usize;
+        let chars: Vec<char> = piece.chars().collect();
+        for (i, c) in chars.iter().enumerate() {
+            let boundary = i > start && c.is_uppercase() && chars[i - 1].is_lowercase();
+            if boundary || i + 1 == chars.len() {
+                let end = if i + 1 == chars.len() { i + 1 } else { i };
+                let token: String = chars[start..end].iter().collect::<String>().to_lowercase();
+                if token.len() > 2 {
+                    out.push(token);
+                }
+                start = i;
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// The nouns the folder's filenames already repeat: tokens shared by >= 3
 /// files and by less than 60% of them (a token in most files is the folder's
 /// own family — `node` in `nodes/` — not a subset). Up to three, most common
 /// first. These are candidates for a reader to check, never orders.
 fn subset_candidates(names: &[&String], dir: &str) -> String {
     use std::collections::BTreeMap;
-    // the folder's own name (singularised) is the family's name — `node` in
-    // `nodes/`, `api` in `apis/` — never one of its subsets
-    let family = dir
-        .rsplit('/')
-        .next()
-        .unwrap_or(dir)
-        .trim_end_matches('s')
-        .to_lowercase();
+    // The folder's own name is the family's name — `nodes/`, `apis/`, `bus/` —
+    // never one of its subsets. Plain and plural forms of the same word are
+    // matched by suffix, so a singular folder (`bus`) is not singularised into
+    // nonsense (`bu`).
+    let family = dir.rsplit('/').next().unwrap_or(dir).to_lowercase();
+    let is_family = |token: &str| token == family || format!("{token}s") == family || format!("{token}es") == family;
     let mut per_token: BTreeMap<String, usize> = BTreeMap::new();
     for rel in names {
         let stem = rel.rsplit('/').next().unwrap_or(rel);
         let stem = stem.rsplit_once('.').map_or(stem, |(s, _)| s);
-        let mut seen: Vec<&str> = stem.split(['_', '-']).filter(|t| t.len() > 2).collect();
-        seen.sort_unstable();
-        seen.dedup();
-        for token in seen {
-            *per_token.entry(token.to_string()).or_default() += 1;
+        for token in name_tokens(stem) {
+            *per_token.entry(token).or_default() += 1;
         }
     }
     let limit = (names.len() as f64 * 0.6).max(3.0) as usize;
     let mut candidates: Vec<(String, usize)> = per_token
         .into_iter()
-        .filter(|(token, n)| *n >= 3 && *n < limit && token.to_lowercase() != family)
+        .filter(|(token, n)| *n >= 3 && *n < limit && !is_family(token))
         .collect();
     candidates.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     candidates

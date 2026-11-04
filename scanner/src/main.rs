@@ -5404,6 +5404,36 @@ mod tests {
     }
 
     #[test]
+    fn flat_folder_family_noun_survives_a_singular_folder_name() {
+        // `bus/` ends in `s` and is not a plural: the family is `bus`, and the
+        // candidate list must not offer it (the naive singularisation read
+        // `bu`)
+        let modules: Vec<String> = (0..6)
+            .map(|i| format!("bus/bus_stop_{i}.py"))
+            .chain((0..5).map(|i| format!("bus/bus_route_{i}.py")))
+            .chain((0..9).map(|i| format!("bus/thing_{i}.py")))
+            .collect();
+        let f = checks::flat_folder_findings(&modules, &[]);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(!f[0].message.contains("bus ("), "{}", f[0].message);
+        assert!(f[0].message.contains("stop (6)"), "{}", f[0].message);
+    }
+
+    #[test]
+    fn flat_folder_reads_camel_case_filenames() {
+        // `CommuteStop` carries two nouns; a split on `_` alone would see one
+        let modules: Vec<String> = (0..6)
+            .map(|i| format!("pkg/CommuteStop{i}.py"))
+            .chain((0..4).map(|i| format!("pkg/SchoolGate{i}.py")))
+            .chain((0..10).map(|i| format!("pkg/ThingNode{i}.py")))
+            .collect();
+        let f = checks::flat_folder_findings(&modules, &[]);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].message.contains("commute (6)"), "{}", f[0].message);
+        assert!(f[0].message.contains("school (4)"), "{}", f[0].message);
+    }
+
+    #[test]
     fn flat_folder_never_offers_the_family_noun_as_a_subset() {
         // `nodes/` is the family; `node` is its name, not a subset of it
         let modules: Vec<String> = (0..12)
