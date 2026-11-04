@@ -5209,6 +5209,51 @@ mod tests {
 
     // ------------------------------------------------- duplicate-module (#26)
     #[test]
+    fn sibling_value_class_fires_on_shared_fields_and_accessors() {
+        let src = include_str!("../../tests/fixtures/rust/sibling_value_class_shared_accessors_fires__01.py");
+        let parsed = parse_module(src).expect("fixture parses");
+        let body = parsed.syntax().body.clone();
+        let classes = checks::collect_sibling_classes(&body, src);
+        let f = checks::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].kind, "sibling-value-class");
+        assert_eq!(f[0].severity, "warn");
+        assert!(f[0].message.contains("BatchPaths"), "{}", f[0].message);
+        assert!(f[0].message.contains("BatchReadings"), "{}", f[0].message);
+        assert!(f[0].message.contains("work_dir"), "{}", f[0].message);
+        assert!(f[0].message.contains("guess_dir"), "{}", f[0].message);
+    }
+
+    #[test]
+    fn sibling_value_class_stays_silent_on_containment() {
+        // the second class holds the first and names it in a signature — the
+        // containment case duplicate-field owns, not a sibling
+        let src = include_str!("../../tests/fixtures/rust/sibling_value_class_containment_passes__01.py");
+        let parsed = parse_module(src).expect("fixture parses");
+        let body = parsed.syntax().body.clone();
+        let classes = checks::collect_sibling_classes(&body, src);
+        let f = checks::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
+        assert!(!f.iter().any(|x| x.kind == "sibling-value-class"), "{f:?}");
+    }
+
+    #[test]
+    fn sibling_value_class_spans_files_in_one_package() {
+        // one class per file is the house convention — the rule must read the
+        // package, not the file
+        let a = "from pathlib import Path\n\n\nclass BatchPaths:\n    def __init__(self, work_dir: Path, batch_id: str) -> None:\n        self.work_dir = work_dir\n        self.batch_id = batch_id\n\n    @property\n    def guess_dir(self) -> Path:\n        return self.work_dir / self.batch_id\n\n    @property\n    def oriented_dir(self) -> Path:\n        return self.work_dir / self.batch_id\n";
+        let b = a.replace("BatchPaths", "BatchReadings");
+        let mut classes = Vec::new();
+        for (rel, src) in [("pkg/a.py", a), ("pkg/b.py", b.as_str())] {
+            let parsed = parse_module(src).expect("source parses");
+            let body = parsed.syntax().body.clone();
+            classes.push((rel.to_string(), checks::collect_sibling_classes(&body, src)));
+        }
+        let f = checks::sibling_value_class_findings(&classes);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].file, "pkg/b.py");
+    }
+
+    #[test]
     fn duplicate_module_fork_pair_fires_with_matched_members() {
         let f = scan_corpus(&[
             (

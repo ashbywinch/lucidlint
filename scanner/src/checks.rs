@@ -2822,7 +2822,7 @@ pub fn collect_sibling_classes(body: &[Stmt], source: &str) -> Vec<SiblingClass>
 /// Two classes over the same data in one package: same fields, same derived
 /// accessors, no containment — one of them is the duplicate (issue #61).
 pub fn sibling_value_class_findings(scans: &[(String, Vec<SiblingClass>)]) -> Vec<Finding> {
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::BTreeMap;
     let mut per_dir: BTreeMap<String, Vec<(&String, &SiblingClass)>> = BTreeMap::new();
     for (rel, classes) in scans {
         let dir = rel.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string());
@@ -2832,73 +2832,92 @@ pub fn sibling_value_class_findings(scans: &[(String, Vec<SiblingClass>)]) -> Ve
     for (_, classes) in per_dir {
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {
-                let (rel_a, a) = classes[i];
+                let (_, a) = classes[i];
                 let (rel_b, b) = classes[j];
-                let shared: Vec<&str> = a
-                    .fields
-                    .iter()
-                    .filter(|f| b.fields.contains(f))
-                    .map(|f| f.as_str())
-                    .collect();
-                // one generic name is coincidence; two shared fields is the
-                // same value seen twice
-                if shared.len() < 2 {
-                    continue;
+                if let Some(f) = a.duplicate_of(rel_b, b) {
+                    out.push(f);
                 }
-                // containment / inheritance / a signature that names the other
-                // class: composition or duplicate-field, not a sibling
-                if a.bases.contains(&b.name)
-                    || b.bases.contains(&a.name)
-                    || a.field_types.contains(&b.name)
-                    || b.field_types.contains(&a.name)
-                    || a.methods.iter().any(|m| m.mentions.contains(&b.name))
-                    || b.methods.iter().any(|m| m.mentions.contains(&a.name))
-                {
-                    continue;
-                }
-                let shared_set: HashSet<&str> = shared.iter().copied().collect();
-                let accessors: Vec<&str> = a
-                    .methods
-                    .iter()
-                    .filter(|m| !m.name.starts_with("__") && !m.uses.is_empty())
-                    .filter(|m| m.uses.iter().all(|u| shared_set.contains(u.as_str())))
-                    .filter(|m| {
-                        b.methods.iter().any(|n| {
-                            !n.name.starts_with("__")
-                                && !n.uses.is_empty()
-                                && n.uses.iter().all(|u| shared_set.contains(u.as_str()))
-                                && crate::common::dice_similarity(&m.skeleton, &n.skeleton) >= 0.9
-                        })
-                    })
-                    .map(|m| m.name.as_str())
-                    .collect();
-                if accessors.len() < 2 {
-                    continue;
-                }
-                let (dup, rel) = if b.line > a.line { (b, rel_b) } else { (a, rel_a) };
-                let keep = if std::ptr::eq(dup, a) { b } else { a };
-                let shown = accessors.iter().take(3).copied().collect::<Vec<_>>().join(", ");
-                out.push(Finding {
-                    logical_start: None,
-                    seam_members: Vec::new(),
-                    col: 0,
-                    file: rel.clone(),
-                    line: dup.line,
-                    function: format!("{}, {}", keep.name, dup.name),
-                    kind: "sibling-value-class".into(),
-                    severity: "warn".into(),
-                    message: format!(
-                        "'{}' and '{}' share the fields {} and the derived accessors {} with no containment — one of these is the duplicate. Keep one class and move the other's extra accessors onto it.",
-                        keep.name,
-                        dup.name,
-                        shared.join(", "),
-                        shown
-                    ),
-                });
             }
         }
     }
     out
+}
+
+impl SiblingClass {
+    /// The fields both classes hold. One generic name is coincidence; two is
+    /// the same value seen twice.
+    fn shared_fields(&self, other: &Self) -> Vec<&str> {
+        self.fields
+            .iter()
+            .filter(|f| other.fields.contains(f))
+            .map(|f| f.as_str())
+            .collect()
+    }
+
+    /// How the two classes are joined — containment, inheritance, or a
+    /// signature that names the other class. Composition, not duplication: the
+    /// containment case belongs to `duplicate-field`.
+    fn composed_with(&self, other: &Self) -> bool {
+        self.bases.contains(&other.name)
+            || other.bases.contains(&self.name)
+            || self.field_types.contains(&other.name)
+            || other.field_types.contains(&self.name)
+            || self.methods.iter().any(|m| m.mentions.contains(&other.name))
+            || other.methods.iter().any(|m| m.mentions.contains(&self.name))
+    }
+
+    /// The accessors this class derives from `shared`, structurally equal
+    /// (dice >= 0.9) to one on `other` that reads the same fields.
+    fn matching_accessors<'a>(&'a self, other: &'a Self, shared: &[&str]) -> Vec<&'a str> {
+        let shared_set: std::collections::HashSet<&str> = shared.iter().copied().collect();
+        let reads_only_shared = |m: &&SiblingMethod| {
+            !m.name.starts_with("__") && !m.uses.is_empty() && m.uses.iter().all(|u| shared_set.contains(u.as_str()))
+        };
+        self.methods
+            .iter()
+            .filter(reads_only_shared)
+            .filter(|m| {
+                other
+                    .methods
+                    .iter()
+                    .filter(reads_only_shared)
+                    .any(|n| crate::common::dice_similarity(&m.skeleton, &n.skeleton) >= 0.9)
+            })
+            .map(|m| m.name.as_str())
+            .collect()
+    }
+
+    /// The finding when `other` is this class's duplicate — the later class in
+    /// scan order is the likely duplicate; the earlier one is what the
+    /// codebase already reaches for.
+    fn duplicate_of(&self, other_rel: &str, other: &Self) -> Option<Finding> {
+        let shared = self.shared_fields(other);
+        if shared.len() < 2 || self.composed_with(other) {
+            return None;
+        }
+        let accessors = self.matching_accessors(other, &shared);
+        if accessors.len() < 2 {
+            return None;
+        }
+        let shown = accessors.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+        Some(Finding {
+            logical_start: None,
+            seam_members: Vec::new(),
+            col: 0,
+            file: other_rel.to_string(),
+            line: other.line,
+            function: format!("{}, {}", self.name, other.name),
+            kind: "sibling-value-class".into(),
+            severity: "warn".into(),
+            message: format!(
+                "'{}' and '{}' share the fields {} and the derived accessors {} with no containment — one of these is the duplicate. Keep one class and move the other's extra accessors onto it.",
+                self.name,
+                other.name,
+                shared.join(", "),
+                shown
+            ),
+        })
+    }
 }
 
 pub fn inner_function_count(fn_stmt: &Stmt) -> u32 {
