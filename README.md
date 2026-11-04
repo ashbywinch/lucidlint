@@ -79,7 +79,8 @@ tested post packaging: the release pipeline installs each bundle/wheel in a
 clean environment and drives `scan → fix → re-scan PASS` before upload.
 
 ```
-linux x64   lucidlint-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz    (default — fixes included)
+linux x64   lucidlint-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz    (default — fixes included,
+                                                                 libcst for Python 3.12–3.14)
 linux musl  lucidlint-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz   (static/Alpine hosts — scan only:
                                                                  the fix engine needs libcst, which
                                                                  cannot load on musl, so fixes report
