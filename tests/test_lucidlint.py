@@ -406,6 +406,36 @@ def test_flat_folder_stays_silent_below_twenty(tmp_path, capsys):
     assert "flat-folder" not in out
 
 
+def test_flat_folder_ignores_test_files_without_include_tests(tmp_path, capsys):
+    # a package with real modules AND its tests in one folder must count only
+    # what the scan browses — the test half arrives only with --include-tests
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "pkg").mkdir()
+    for i in range(15):
+        (repo / "pkg" / f"m{i}.py").write_text(f"def f{i}() -> int:\n    return {i}\n")
+    for i in range(10):
+        (repo / "pkg" / f"test_t{i}.py").write_text(f"def test_g{i}():\n    assert True\n")
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "flat-folder" not in out
+    run_main(repo, "--warn", "--include-tests")
+    out = capsys.readouterr().out
+    assert "flat-folder" in out
+    assert "25 modules" in out
+
+
+def test_flat_folder_ignores_vendored_files(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "vendor").mkdir()
+    for i in range(20):
+        (repo / "vendor" / f"m{i}.py").write_text(f"def f{i}() -> int:\n    return {i}\n")
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "flat-folder" not in out
+
+
 def test_flat_folder_counts_docs(tmp_path, capsys):
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)

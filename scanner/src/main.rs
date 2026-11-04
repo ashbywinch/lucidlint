@@ -2139,6 +2139,11 @@ fn main() {
     let mut doc_rels: Vec<String> = Vec::new();
     for p in &paths {
         let rel = rel_of(p, &root);
+        // count what the scan browses: production code unless the caller asked
+        // for tests, and never upstream's vendored tree
+        if (!include_tests && is_test_path(&rel)) || checks::is_vendored(&rel) {
+            continue;
+        }
         if p.ends_with(".md") {
             doc_rels.push(rel);
         } else {
@@ -5227,6 +5232,15 @@ mod tests {
         // init is still a clean folder
         let mut modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
         modules.push("pkg/__init__.py".to_string());
+        assert!(checks::flat_folder_findings(&modules, &[]).is_empty());
+    }
+
+    #[test]
+    fn flat_folder_never_counts_a_package_marker() {
+        // a root-level __init__.py and a package one are both markers, not
+        // modules the reader opens
+        let mut modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
+        modules.push("__init__.py".to_string());
         assert!(checks::flat_folder_findings(&modules, &[]).is_empty());
     }
 
