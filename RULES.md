@@ -124,7 +124,7 @@ with a why).
 | **noop-statement** | fail | Both | Expression statement that discards its value (`x;`, `a + b;`) — dead statement. |
 | **unreachable** | fail | Both | Statement after an unconditional `return`/`break`/`continue`/`panic!` — dead code is deleted. |
 | **vague-name** | fail | Both | Type ending in Manager, Handler, Store, Repository, Controller, Utils, or Info with significant size/methods — the domain concept should name it. |
-| **class-module** | fail | Python | A Python module whose public class(es) aren't findable by name: exactly one class whose name doesn't match the filename, or >=2 public classes where any name doesn't match the stem — rename the file to match, or split the module so every public class lives in a file named after it. |
+| **class-module** | fail | Python | A Python module whose public class(es) aren't findable by name: exactly one class whose name doesn't match the filename, or >=2 public classes where any name doesn't match the stem — rename the file to match, or split the module so every public class lives in a file named after it. Exception: a declarations-only Protocol/ABC the module's namesake class satisfies (the DI seam exists because that class does, and it belongs beside it). |
 | **builtin-shadow** | fail | Python | A variable/parameter that shadows a Python builtin (`list`, `dict`, `str`, `id`...). |
 | **broad-except** | **warn** | Python | Bare `except:` — catch specific exceptions. |
 | **boolean-arg** | fail | Both | A boolean literal passed as a call argument (`connect(host, True)`) — name the flag at the call site. |
