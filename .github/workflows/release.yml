@@ -161,7 +161,10 @@ jobs:
           bundle="${GITHUB_WORKSPACE//\\//}/dist/${dir}/lucidlint.py"
           uv python install 3.12 >/dev/null
           py="$(uv python find 3.12)"
-          "$py" scripts/deploy-check.py --lucidlint "$py ${bundle}" --project "${RUNNER_TEMP}/bundle-check"
+          # deploy-check shlex-splits this value, and shlex treats a Windows
+          # backslash as an escape (the trap the workspace line names)
+          py_slash="${py//\\//}"
+          "$py" scripts/deploy-check.py --lucidlint "$py_slash ${bundle}" --project "${RUNNER_TEMP}/bundle-check"
       - name: Post-packaging check — musl bundle degrades honestly (no libcst by design)
         # The static bundle cannot load glibc-built libcst, so it ships
         # without deps/ and the fix path must REPORT its requirement — never
