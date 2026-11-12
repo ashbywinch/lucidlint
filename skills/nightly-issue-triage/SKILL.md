@@ -116,6 +116,12 @@ Work against `origin/main`, not the last release. For each issue:
    narrowing you propose must keep that case firing. Issue #44's exemption
    later silenced a real delegation (#65) because it matched a name repo-wide
    instead of the enclosing class's contract.
+5. Read the report for comprehension cost. If the reporter quotes a message and
+   asks what it means, follows the suggested action and gets rejected,
+   backtracks, tries several shapes before finding one the tool accepts, or
+   says they eventually worked it out, the message is a defect even when the
+   rule's behavior is correct. A report that cost the reader time is evidence
+   about the message, not just a support question.
 
 ## Step 3 — decide the verdict
 
@@ -141,6 +147,12 @@ Choose the change with this ladder — the first rung that removes the harm:
 A `fail` must name an action a reader can take without suppressing. If the
 detector has no action for a case, it must not be a fail — that is why
 `god-class` was deleted rather than demoted (#47).
+
+A message fix is a real fix, not a courtesy. Read `docs/writing-messages.md`:
+state the mechanism, then the action, name the exact referent, and do not
+invent an exemption the rule does not state. A report that shows the reader
+had to decode the message is evidence for rung 2 even when the rule's behavior
+is correct.
 
 ## Step 4 — implement
 
@@ -230,6 +242,7 @@ and read the old diff.
 | Wrong premise | "The rule evaluated this class" when an earlier gate rejected it; "the guard is undocumented" when the docs state it. | Reproduce the exact path. If the claimed mechanism never ran, the missing condition may be the real defect; do not accept the reporter's account of the run. |
 | Right harm, wrong remedy | "This fail has no action, so make it a warning." | A fail a reader cannot act on is a design bug. Remove the signal or give it an action; a warning only hides it. |
 | Message and rule disagree | "The message says keep the constant; the rule still fails it." | The reader cannot follow both. Decide which is correct, then make the other match; usually the message is the smaller change. |
+| Message caused a detour | The report quotes a finding, asks what it means, tries the suggested action and backtracks, or says it took several attempts to find the accepted shape. | Treat the comprehension cost as the finding. Rewrite the message to state the mechanism, the action, and the exact referent; if the suggested action leads to worse code, fix the directive or the fixer. A confusing message is a defect even when the verdict is right. |
 | Over-broad exemption | "Exempt this shape." | Exempt by a structural property the target owns — its base, its contract, its provenance — never by a name that appears anywhere in the repo. Add the positive case that must still fire. |
 | Several reports, one cause | Three reports all point at one rule's firing set or one missing signal. | Group by root cause before coding. One design decision, one PR; reference the others but do not stack competing patches. |
 | Proposed mechanism | "Add a flag, a config key, or a new rule." | Ask what harm the mechanism removes. Build the smallest change that removes it; the proposal is a hypothesis, not the spec. |
