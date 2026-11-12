@@ -31,7 +31,7 @@ is a report about the code, not a specification for the code.
 
 - Repo: the worktree this agent runs in. Confirm with
   `git rev-parse --show-toplevel`.
-- GitHub: `gh`, authenticated as the harness bot. Do not print tokens.
+- GitHub: `gh`, authenticated (bot or maintainer account). Do not print tokens.
 - State lives in labels: `nightly-triaged` (verdict recorded), `nightly-fix`
   (a PR is open), `nightly-needs-design` (owner decision needed).
 
