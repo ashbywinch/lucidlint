@@ -73,8 +73,8 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 
 - Never commit to main; branch + PR.
 - PRs arm auto-merge via `.github/workflows/automerge.yml`; the `protect-main`
-  ruleset's required checks (and any approval it demands) are the gate. Agents
-  never arm, approve, or merge a PR themselves.
+  ruleset's one approving review and required checks are the gate. Agents never
+  arm, approve, or merge a PR themselves.
 - Every behavior change ships with a test — fakes only, no monkeypatch.
 - The tool passes itself: `make self-check` is green before any PR.
 - The tool exists for code lucidity. Never design a rule, threshold, or

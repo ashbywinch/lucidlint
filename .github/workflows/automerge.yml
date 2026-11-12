@@ -2,8 +2,9 @@ name: Arm auto-merge
 
 # GitHub's auto-merge is a per-PR flag, and nothing sets it automatically: the
 # repo-level "allow auto-merge" setting only permits one to exist. This job arms
-# it on every PR, so the required checks (and any approval the ruleset demands)
-# are the only remaining gates; once they pass, the PR merges itself.
+# it on every PR, so the `protect-main` ruleset's one approving review and
+# required status checks are the only remaining gates; once they pass, the PR
+# merges itself.
 #
 # It does not approve anything. It only sets the flag; the `protect-main`
 # ruleset's required status checks are what hold the merge.
