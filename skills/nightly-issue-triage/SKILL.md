@@ -72,6 +72,27 @@ Keep an issue only when all are true:
 Process oldest first. Handle at most two issues per run. If none qualify,
 stop — no branch, no PR, no comment.
 
+### Build the coverage contract first
+
+The graph families — including `churn-untested`, which is the coverage verdict
+— read the code-review-graph contract. Without it they are skipped silently, so
+a green gate proves nothing. Build it after the reset, then freeze the repo's
+pre-existing findings as this run's baseline:
+
+```sh
+make deps scanner-check
+code-review-graph build --repo .
+.venv/bin/python lucidlint.py --repo . --update-baseline \
+  --baseline /tmp/opencode/nightly-baseline.json
+```
+
+The baseline is the run's contract for existing debt: every entry is
+pre-existing, and only a finding NOT in it fails the gate. Never edit the
+baseline to hide a finding your change introduced.
+
+If `code-review-graph` is unavailable, stop: without the contract the coverage
+families are skipped and the gate cannot judge the change.
+
 ## Step 2 — reproduce, then verify
 
 Work against `origin/main`, not the last release. For each issue:
@@ -133,9 +154,20 @@ Read `docs/coding-standards.md` and `docs/testing-standards.md` first. Then:
    removed true positive is a regression. The two-repo setup is in
    `skills/lucidlint-usefulness-eval/SKILL.md` — a full proposer/critic round is
    not required for every change, but the before/after finding diff is.
-5. Run `make test` and `make self-check` to green. If either fails for a
-   reason you cannot attribute to your change, stop: do not push, and name the
-   command and failure in the run output.
+5. Run `make test` to green. Then refresh the contract and run the gate
+   against the run's baseline:
+
+   ```sh
+   code-review-graph update --repo .
+   .venv/bin/python lucidlint.py --repo . \
+     --baseline /tmp/opencode/nightly-baseline.json
+   ```
+
+   A finding not in the baseline is new: fix it or stop. Do not substitute
+   `make self-check` — without the contract it passes vacuously, and with it it
+   reports the repo's acknowledged debt rather than your change. If the gate
+   fails for a reason you cannot attribute to your change, stop: do not push,
+   and name the command and failure in the run output.
 
 ## Step 5 — PR and record
 
