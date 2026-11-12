@@ -201,9 +201,13 @@ gh pr create --base main --head fix/issue-N-<slug> \
 
 The body must state:
 
+- A plain-language summary first: what the tool did wrong, what a user would
+  see, and what the fix changes. A reader with no codebase context must follow
+  it without the diff; define the rule's terms there. Keep it to three short
+  paragraphs at most.
 - `Closes #N` only when the fix fully resolves it; `Refs #N` otherwise.
-- The issue's claims with the `TRUE` / `FALSE` / `UNVERIFIABLE` verdicts and
-  citations.
+- After the summary: the issue's claims with the `TRUE` / `FALSE` /
+  `UNVERIFIABLE` verdicts and citations.
 - What the reporter got right, and what the correct change is if it differs.
 - The measurement, or "message-only; no detector change".
 - The tests that pin the fix and the inverse case.
