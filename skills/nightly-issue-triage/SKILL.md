@@ -81,7 +81,7 @@ pre-existing findings as this run's baseline:
 
 ```sh
 make deps scanner-check
-code-review-graph build --repo .
+.venv/bin/code-review-graph build --repo .
 .venv/bin/python lucidlint.py --repo . --update-baseline \
   --baseline /tmp/opencode/nightly-baseline.json
 ```
@@ -93,8 +93,8 @@ line, so an edit that moves a pre-existing finding can re-report it at the new
 line: match it to the baseline entry by kind, file, and function before
 calling it new.
 
-If `code-review-graph` is unavailable, stop: without the contract the coverage
-families are skipped and the gate cannot judge the change.
+If `.venv/bin/code-review-graph` is unavailable, stop: without the contract
+the coverage families are skipped and the gate cannot judge the change.
 
 ## Step 2 — reproduce, then verify
 
@@ -161,7 +161,7 @@ Read `docs/coding-standards.md` and `docs/testing-standards.md` first. Then:
    against the run's baseline:
 
    ```sh
-   code-review-graph update --repo .
+   .venv/bin/code-review-graph update --repo .
    .venv/bin/python lucidlint.py --repo . \
      --baseline /tmp/opencode/nightly-baseline.json
    ```
