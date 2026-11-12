@@ -6704,6 +6704,62 @@ mod tests {
     }
 
     #[test]
+    fn middle_man_interface_evidence_lives_with_the_class_it_serves() {
+        // Issue #65: the exemption is the class's OWN contract. A Protocol in
+        // the wrapper's own module is that module's seam (the #44 shape, and
+        // #52's "the interface lives with the class it serves"); a Protocol in
+        // an unrelated module that nothing names says nothing about this
+        // class, so the real delegation fires again.
+        let f = scan_corpus(&[
+            (
+                "case2_adapter.py",
+                include_str!("../../tests/fixtures/rust/middle_man_protocol_conformance_passes__01.py"),
+            ),
+            (
+                "case4_real_middle_man.py",
+                include_str!("../../tests/fixtures/rust/middle_man_real_delegation_fires__01.py"),
+            ),
+        ]);
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "middle-man").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert_eq!(r[0].file, "case4_real_middle_man.py");
+    }
+
+    #[test]
+    fn middle_man_interface_named_as_a_base_exempts_across_modules() {
+        // the other evidence the class owns: it names the interface. That is
+        // a statement about the class, wherever the interface is declared.
+        let f = scan_corpus(&[
+            (
+                "protocols.py",
+                "from typing import Protocol\n\n\nclass Renderer(Protocol):\n    def render(self) -> str: ...\n",
+            ),
+            (
+                "adapter.py",
+                "from protocols import Renderer\n\n\nclass ThirdPartyThing:\n    def emit(self) -> str:\n        return \"text\"\n\n\nclass Adapter(Renderer):\n    def __init__(self) -> None:\n        self._inner = ThirdPartyThing()\n\n    def render(self) -> str:\n        return self._inner.emit()\n",
+            ),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "middle-man"), "{f:?}");
+    }
+
+    #[test]
+    fn middle_man_skips_the_language_invoked_operators() {
+        // `__add__` is invoked by `a + b`: no call site exists where "call the
+        // target directly" can be taken, so the operator is the class's
+        // contract, not a forwarding layer.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/middle_man_dunder_delegation_passes__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "middle-man"), "{f:?}");
+        // the exemption is the operator naming, not the helper: the same
+        // helper called from an ordinary method is still a delegation
+        let g = scan_src(
+            "class Measurement:\n    def __init__(self, value):\n        self._value = value\n\n    def _combine(self, other):\n        return self._value + other\n\n    def plus(self, other):\n        return self._combine(other)\n",
+        );
+        assert!(g.iter().any(|x| x.kind == "middle-man"), "{g:?}");
+    }
+
+    #[test]
     fn unused_setter_detected() {
         let f = scan_src(include_str!("../../tests/fixtures/rust/unused_setter_detected__01.py"));
         assert!(f.iter().any(|x| x.kind == "unused-setter"));
