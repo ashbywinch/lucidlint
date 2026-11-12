@@ -5246,9 +5246,10 @@ pub fn special_case_findings(state: &mut ScanState, body: &[Stmt], source: &str)
     }
 }
 
-/// One module-defined class, as the middle-man rule reads it: whether it is an
-/// interface, the methods it declares (with the parameter shape the policy
-/// check reads), its bases, and which class each `self.<attr>` is built from.
+/// One module-defined class, as the middle-man rule reads it: the module it is
+/// declared in, whether it is an interface, the methods it declares (with the
+/// parameter shape the policy check reads), its bases, and which class each
+/// `self.<attr>` is built from.
 ///
 /// Carried to the repo-wide pass: one class per file is the house convention,
 /// so the target of a delegation usually lives in ANOTHER file — a file-local
@@ -5256,10 +5257,23 @@ pub fn special_case_findings(state: &mut ScanState, body: &[Stmt], source: &str)
 #[derive(Clone)]
 pub struct MiddleManClass {
     name: String,
+    module: String,
     is_interface: bool,
     methods: std::collections::HashMap<String, ParamShape>,
     bases: Vec<String>,
     attrs: std::collections::HashMap<String, String>,
+}
+
+/// One member an interface declares: which interface declares it, the module
+/// that interface lives in, and the parameter names a conforming
+/// implementation must accept. The interface and the module are the evidence
+/// that the declaration is about a particular wrapper (issue #65) — a name
+/// alone is not.
+#[derive(Clone)]
+struct InterfaceDeclaration {
+    interface: String,
+    module: String,
+    names: HashSet<String>,
 }
 
 /// A method's parameter shape: how many positionals a caller must pass, which
@@ -5421,14 +5435,14 @@ impl MiddleManClass {
 /// resolution all three exemptions share.
 struct ModuleClasses {
     classes: std::collections::HashMap<String, MiddleManClass>,
-    /// member name → the parameter-name sets the file's interfaces declare
-    /// (per declaration — an implementation conforms to at least one).
-    interface_members: std::collections::HashMap<String, Vec<HashSet<String>>>,
+    /// member name → the declarations that require it (per declaration — an
+    /// implementation conforms to at least one).
+    interface_members: std::collections::HashMap<String, Vec<InterfaceDeclaration>>,
 }
 
 impl ModuleClasses {
     /// Read the file's classes (nested ones included).
-    fn read(body: &[Stmt]) -> Self {
+    fn read(body: &[Stmt], module: &str) -> Self {
         let mut out = Self {
             classes: std::collections::HashMap::new(),
             interface_members: std::collections::HashMap::new(),
@@ -5444,11 +5458,13 @@ impl ModuleClasses {
                     || class_metaclass_name(c).as_deref() == Some("ABCMeta");
                 let cls = MiddleManClass {
                     name: c.name.to_string(),
+                    module: module.to_string(),
                     is_interface,
                     methods: methods.iter().map(|f| (f.name.to_string(), param_shape(f))).collect(),
                     bases: class_base_names(c),
                     attrs: class_attribute_classes(c),
                 };
+                out.declare_interface_members(&cls);
                 out.classes.insert(cls.name.clone(), cls);
             }
             match s {
@@ -5456,7 +5472,6 @@ impl ModuleClasses {
                 _ => push_stmt_children(s, &mut sq),
             }
         }
-        out.rebuild_interface_members();
         out
     }
 
@@ -5471,6 +5486,7 @@ impl ModuleClasses {
             interface_members: std::collections::HashMap::new(),
         };
         for c in classes {
+            out.declare_interface_members(c);
             out.classes
                 .entry(c.name.clone())
                 .and_modify(|e: &mut MiddleManClass| {
@@ -5481,21 +5497,22 @@ impl ModuleClasses {
                 })
                 .or_insert_with(|| c.clone());
         }
-        out.rebuild_interface_members();
         out
     }
 
-    /// member name → the parameter-name sets the interfaces declare (per
-    /// declaration — an implementation conforms to at least one).
-    fn rebuild_interface_members(&mut self) {
-        self.interface_members.clear();
-        for c in self.classes.values() {
-            for (member, names) in c.interface_declarations() {
-                self.interface_members
-                    .entry(member.to_string())
-                    .or_default()
-                    .push(names.clone());
-            }
+    /// Record the members a class declares as an interface. Every declaration
+    /// keeps the interface's own name and module: conformance alone is not
+    /// evidence that the interface is about a given wrapper (issue #65).
+    fn declare_interface_members(&mut self, cls: &MiddleManClass) {
+        for (member, names) in cls.interface_declarations() {
+            self.interface_members
+                .entry(member.to_string())
+                .or_default()
+                .push(InterfaceDeclaration {
+                    interface: cls.name.clone(),
+                    module: cls.module.clone(),
+                    names: names.clone(),
+                });
         }
     }
 
@@ -5538,13 +5555,40 @@ impl ModuleClasses {
         out
     }
 
-    /// Is the method required by an interface the repo declares? The wrapper's
-    /// parameters must accept at least that member's — a conforming
-    /// implementation, not a name collision.
-    fn implements_interface_member(&self, name: &str, wrapper: &ParamShape) -> bool {
-        self.interface_members
-            .get(name)
-            .is_some_and(|decls| decls.iter().any(|d| d.is_subset(&wrapper.names)))
+    /// The bases the owner names, directly or through another base this index
+    /// knows — the class's own statement that it implements them.
+    fn named_bases(&self, owner: &str) -> HashSet<String> {
+        let mut named: HashSet<String> = HashSet::new();
+        let mut queue: Vec<String> = vec![owner.to_string()];
+        while let Some(name) = queue.pop() {
+            if !named.insert(name.clone()) {
+                continue;
+            }
+            if let Some(c) = self.classes.get(&name) {
+                queue.extend(c.bases.iter().cloned());
+            }
+        }
+        named.remove(owner);
+        named
+    }
+
+    /// Is the method the owner's OWN interface contract? The wrapper's
+    /// parameters must accept the declared member's — a conforming
+    /// implementation, not a name collision — AND the declaration must be
+    /// about this class: either the interface lives in the owner's module (the
+    /// seam sits with the class, the same rule as `class-module`'s protocol
+    /// exemption), or the owner names it as a base, at any distance through the
+    /// repo's bases. An interface declared in an unrelated module that the
+    /// class does not name is not evidence about this class: repo-wide state
+    /// must not silence a delegation (issue #65).
+    fn implements_interface_member(&self, owner: &str, module: &str, name: &str, wrapper: &ParamShape) -> bool {
+        let Some(decls) = self.interface_members.get(name) else {
+            return false;
+        };
+        let named = self.named_bases(owner);
+        decls
+            .iter()
+            .any(|d| d.names.is_subset(&wrapper.names) && (d.module == module || named.contains(d.interface.as_str())))
     }
 }
 
@@ -5558,15 +5602,19 @@ impl MiddleManCandidate {
         self.positional_passed > shape.positional_required || self.keywords.iter().any(|k| shape.optional.contains(k))
     }
 
-    /// Fire? The chain resolves to a member this codebase declares, no
-    /// declared interface member of the wrapper's name is satisfied by it, and
-    /// no declaration of the target would be policy-fixed by the call.
+    /// Fire? The chain resolves to a member this codebase declares, the method
+    /// is not an operator the language invokes, no interface of the owner's own
+    /// is satisfied by it, and no declaration of the target would be
+    /// policy-fixed by the call.
     fn fires(&self, module: &ModuleClasses) -> bool {
+        if is_dunder(&self.function) {
+            return false;
+        }
         let decls = module.declarations(&self.owner, &self.chain);
         if decls.is_empty() {
             return false;
         }
-        if module.implements_interface_member(&self.function, &self.wrapper) {
+        if module.implements_interface_member(&self.owner, &self.rel, &self.function, &self.wrapper) {
             return false;
         }
         !decls.iter().any(|shape| self.policy_fixes(shape))
@@ -5589,6 +5637,14 @@ impl MiddleManCandidate {
             ),
         }
     }
+}
+
+/// A dunder method (`__add__`, `__len__`, `__enter__`): the language invokes
+/// it, so no call site exists where "call the target directly" can be taken —
+/// the method IS the operator's contract, not a forwarding layer. Delegation
+/// inside it is the implementation, not a removable seam.
+fn is_dunder(name: &str) -> bool {
+    name.len() > 4 && name.starts_with("__") && name.ends_with("__")
 }
 
 /// The attribute chain a call delegates through: `self.a.b(...)` → ["a", "b"].
@@ -5709,7 +5765,7 @@ pub fn middle_man_findings(candidates: &[MiddleManCandidate], classes: &[MiddleM
 /// own classes — the conservative reading, since a target in another file
 /// cannot be seen from one buffer.
 pub fn collect_middle_man(state: &mut ScanState, body: &[Stmt], source: &str, repo_wide: bool) {
-    let module = ModuleClasses::read(body);
+    let module = ModuleClasses::read(body, state.file);
     let mut candidates = middle_man_candidates(body, source);
     for c in &mut candidates {
         c.rel = state.file.to_string();
