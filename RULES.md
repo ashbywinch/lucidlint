@@ -9,8 +9,8 @@ every change leaves the code safer to change again, not merely passing today's
 tests. Name things with the domain's own nouns and verbs so the code connects
 to what the reader already knows. When a case is not covered by these rules,
 search for the current best practice and weigh it against them and the code in
-front of you; a practice is evidence, not a command. Metrics are proxies for
-these qualities, never the goals themselves.
+front of you; do not apply a practice the code does not support. Metrics are
+proxies for these qualities, never the goals themselves.
 
 Every rule below exists for one reason: code that is maintainable, lucid,
 and obviously correct. A finding is a pointer, not a verdict — its message

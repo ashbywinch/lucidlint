@@ -9,8 +9,8 @@ description: |
 
 # Nightly issue triage
 
-The run's job is to leave the repository better, not to close issues. An issue
-is a report about the code, not a specification for the code.
+The run's purpose is to improve the code. Use an issue as evidence about the
+code; do not treat it as a specification for what to build.
 
 ## Premise — read this first
 
@@ -120,8 +120,8 @@ Work against `origin/main`, not the last release. For each issue:
    asks what it means, follows the suggested action and gets rejected,
    backtracks, tries several shapes before finding one the tool accepts, or
    says they eventually worked it out, the message is a defect even when the
-   rule's behavior is correct. A report that cost the reader time is evidence
-   about the message, not just a support question.
+   rule's behavior is correct. Treat the time the reader lost as evidence about
+   the message; do not dismiss the report as a support question.
 
 ## Step 3 — decide the verdict
 
@@ -148,11 +148,11 @@ A `fail` must name an action a reader can take without suppressing. If the
 detector has no action for a case, it must not be a fail — that is why
 `god-class` was deleted rather than demoted (#47).
 
-A message fix is a real fix, not a courtesy. Read `docs/writing-messages.md`:
-state the mechanism, then the action, name the exact referent, and do not
-invent an exemption the rule does not state. A report that shows the reader
-had to decode the message is evidence for rung 2 even when the rule's behavior
-is correct.
+A message change follows the same process as a code change: read
+`docs/writing-messages.md`, state the mechanism, then the action, name the exact
+referent, and do not invent an exemption the rule does not state. A report that
+shows the reader had to decode the message is evidence for rung 2 even when the
+rule's behavior is correct.
 
 ## Step 4 — implement
 
@@ -205,8 +205,8 @@ The body must state:
 
 ### Wait for the PR to be green
 
-Opening the PR is not the end of the run. A red PR, or one with unaddressed
-review comments, is not a deliverable.
+After opening the PR, wait for every check to pass and address every review
+finding. Do not leave the PR red or with unaddressed comments.
 
 1. Wait for every check: `gh pr checks <n> --watch`.
 2. Read every finding source with `fetch-pr-findings.sh <n>` — inline
@@ -230,7 +230,7 @@ review comments, is not a deliverable.
 
 Never close the issue; the merged PR does that.
 
-## Pattern library — when the report is not the fix
+## Pattern library — reports that need a different fix
 
 A report can be wrong about the code, right about the harm but wrong about the
 remedy, or one of several reports of the same design decision. Recognise the
@@ -245,7 +245,7 @@ and read the old diff.
 | Message caused a detour | The report quotes a finding, asks what it means, tries the suggested action and backtracks, or says it took several attempts to find the accepted shape. | Treat the comprehension cost as the finding. Rewrite the message to state the mechanism, the action, and the exact referent; if the suggested action leads to worse code, fix the directive or the fixer. A confusing message is a defect even when the verdict is right. |
 | Over-broad exemption | "Exempt this shape." | Exempt by a structural property the target owns — its base, its contract, its provenance — never by a name that appears anywhere in the repo. Add the positive case that must still fire. |
 | Several reports, one cause | Three reports all point at one rule's firing set or one missing signal. | Group by root cause before coding. One design decision, one PR; reference the others but do not stack competing patches. |
-| Proposed mechanism | "Add a flag, a config key, or a new rule." | Ask what harm the mechanism removes. Build the smallest change that removes it; the proposal is a hypothesis, not the spec. |
+| Proposed mechanism | "Add a flag, a config key, or a new rule." | Ask what harm the mechanism removes. Build the smallest change that removes it; treat the proposal as a hypothesis and verify it against the code. |
 | Noise on a real repo | "This fires hundreds of times on our repo." | Separate the rule's target from that repo's convention. Measure both house repos; if the target is wrong, change the rule's design, not its threshold. |
 | Wrong fix preview | "The suggested transformation produces bad code." | Fix the fixer or make it decline with a reason. A real finding does not excuse a bad transform. |
 
