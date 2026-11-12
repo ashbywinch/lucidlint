@@ -19,8 +19,9 @@ of what lucidity means for this tool and how a change is judged; the issue
 reporter's definition of "correct" does not replace it.
 
 When two fixes are plausible, ask the preamble's question: which leaves a
-reader with no context — human or agent — better able to understand and change
-the code? Choose that one; if they tie, choose the smaller change.
+reader with no context — human or agent — better able to understand the code
+and change it safely again? Choose that one; if they tie, choose the smaller
+change.
 
 ## Boundaries — never
 
