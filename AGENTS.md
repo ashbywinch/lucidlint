@@ -45,6 +45,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | Docs walk: ask git for ignored docs, guard unreadable reads | `docs/plans/plan-docs-walk-git.md` |
 | Issue #44: middle-man exemptions (library targets, interface members, fixed defaults) | `docs/plans/plan-issue-44-middle-man-exemptions.md` |
 | Issue #57: data-clump parameter-type grouping + record-shape tuple wording | `docs/plans/plan-issue-57-param-type-clump.md` |
+| Issue #65: middle-man interface evidence (own module, or a named base) | `docs/plans/plan-issue-65-middle-man-interface-evidence.md` |
 | Duplicate near-rule and repeated-literal decisions (measurements) | `docs/plans/plan-duplicate-and-literal-decisions.md` |
 | Usefulness round 0.7.0 (houses + album: signals, fixes, deferred) | `docs/plans/plan-usefulness-round-0-7-0.md` |
 | Coding standards (canonical + language conventions) | `docs/coding-standards.md` |
