@@ -88,7 +88,10 @@ code-review-graph build --repo .
 
 The baseline is the run's contract for existing debt: every entry is
 pre-existing, and only a finding NOT in it fails the gate. Never edit the
-baseline to hide a finding your change introduced.
+baseline to hide a finding your change introduced. Baseline keys include the
+line, so an edit that moves a pre-existing finding can re-report it at the new
+line: match it to the baseline entry by kind, file, and function before
+calling it new.
 
 If `code-review-graph` is unavailable, stop: without the contract the coverage
 families are skipped and the gate cannot judge the change.
