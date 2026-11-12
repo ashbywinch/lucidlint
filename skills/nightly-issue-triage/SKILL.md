@@ -69,8 +69,17 @@ Keep an issue only when all are true:
 - no open PR already references it (search PR bodies for `#N`);
 - no remote branch matches `refs/heads/fix/issue-N-*`.
 
-Process oldest first. Handle at most two issues per run. If none qualify,
-stop — no branch, no PR, no comment.
+Read every candidate's body before choosing, even the ones you will not
+process. A body that quotes a message and says what it thought the message
+meant, follows the suggested action into a fail, backtracks, or describes
+working out an action the tool never named is a comprehension-cost report: the
+message cost the reader time. Give one of the two slots to the oldest such
+report; fill the other oldest-first. If several comprehension-cost reports share
+a root cause, treat them as one. Name the comprehension-cost reports you saw but
+did not process in the run output, so the next run picks them up.
+
+Handle at most two issues per run. If none qualify, stop — no branch, no PR, no
+comment.
 
 ### Build the coverage contract first
 
