@@ -203,8 +203,8 @@ The body must state:
 
 - A plain-language summary first: what the tool did wrong, what a user would
   see, and what the fix changes. A reader with no codebase context must follow
-  it without the diff; define the rule's terms there. Keep it to three short
-  paragraphs at most.
+  it without the diff; define the rule's terms there, and give one concrete
+  example of the behaviour. Keep it to three short paragraphs at most.
 - `Closes #N` only when the fix fully resolves it; `Refs #N` otherwise.
 - After the summary: the issue's claims with the `TRUE` / `FALSE` /
   `UNVERIFIABLE` verdicts and citations.
