@@ -75,8 +75,9 @@ meant, follows the suggested action into a fail, backtracks, or describes
 working out an action the tool never named is a comprehension-cost report: the
 message cost the reader time. Give one of the two slots to the oldest such
 report; fill the other oldest-first. If several comprehension-cost reports share
-a root cause, treat them as one. Name the comprehension-cost reports you saw but
-did not process in the run output, so the next run picks them up.
+a root cause, treat them as one. List the issue numbers of comprehension-cost
+reports you saw but did not process in the run output, so the next run picks
+them up.
 
 Handle at most two issues per run. If none qualify, stop — no branch, no PR, no
 comment.
