@@ -191,25 +191,50 @@ The body must state:
 - The tests that pin the fix and the inverse case.
 - Residuals: what this does not fix and what it exposes next.
 
-Then comment on the issue with the same verdict summary and add
-`nightly-triaged` plus `nightly-fix`. Never close the issue; the merged PR
-does that.
+### Wait for the PR to be green
 
-## When reports and the correct fix diverged here
+Opening the PR is not the end of the run. A red PR, or one with unaddressed
+review comments, is not a deliverable.
 
-Treat these as the pattern library, not as precedent to copy:
+1. Wait for every check: `gh pr checks <n> --watch`.
+2. Read every finding source with `fetch-pr-findings.sh <n>` — inline
+   comments, issue comments, and review threads. Do not rely on the rendered
+   PR page; it misses inline comments. If the helper is missing, read
+   `gh pr view <n> --json comments` and
+   `gh api repos/<owner>/<repo>/pulls/<n>/comments`.
+3. Fix the actionable findings in one batch. Reply to every inline comment
+   with the commit and the exact referent (`file:line`, config key, or doc
+   section) plus the one check that confirms it. Do not resolve the thread;
+   resolution is the reviewer's verdict.
+4. Push once per pass, only after the `pr-review` check has finished. A push
+   during a review discards it, and the next review then covers the whole
+   change in one pass. Return to step 1.
+5. Stop when every check passes and the remaining comments are stylistic,
+   pre-existing, or config self-reviews. Then add `nightly-triaged` and
+   `nightly-fix` to the issue and comment the verdict summary.
+6. Never merge, approve, force-push, or resolve a thread. If a check fails for
+   a reason you cannot attribute to the change, leave the PR open, comment the
+   failure on the PR, and do not label the issue as fixed.
 
-| Report | Reporter's claim | What the code showed | What was correct |
-|---|---|---|---|
-| #29(a) | the threshold is undocumented | `RULES.md` documented it | the docs claim was rejected; the real gap was elsewhere |
-| #29(b) | the partition rule evaluated a 25-method class | a 150-line span gate rejected the class before the partition ran | a new small-span check, not "act on the partition verdict" |
-| #32 | 37 methods and `GATE: PASS` | the issue's own evidence contradicted itself (37 >= 20 must fire) | the rule shape was kept; the claim was not accepted as stated |
-| #44 -> #65 | exempt delegations to interfaces | the exemption matched any `Protocol` repo-wide and silenced a real delegation | exempt by provenance; add the positive case |
-| #47 | make `god-class` a warning when there is no seam | the size signal had no action at all | the rule was deleted; `partition` keeps the actionable case |
-| #57 | group by type, and stop calling a tuple a dict | both were real, but they are separate defects | the detector groups by annotation; the message names the tuple |
-| #73 | compare field names and call siblings "siblings" | the harm is the false "fork" claim, not the missing comparison | correct the message; do not merge sibling records |
-| #74/#79/#80 | three different fixes for `global-state` | one design decision: what the rule targets, plus the missing module-cohesion signal | treat as one decision, not three mechanical patches |
-| #33/#34 | implement four naming mechanisms and cluster by seam | two mechanisms were right, one was held, one folded into another | implement the requirement, not the proposed mechanism |
+Never close the issue; the merged PR does that.
+
+## Pattern library — when the report is not the fix
+
+A report can be wrong about the code, right about the harm but wrong about the
+remedy, or one of several reports of the same design decision. Recognise the
+pattern from the report itself; the examples are self-contained, so do not go
+and read the old diff.
+
+| Pattern | What the report looks like | What to do |
+|---|---|---|
+| Wrong premise | "The rule evaluated this class" when an earlier gate rejected it; "the guard is undocumented" when the docs state it. | Reproduce the exact path. If the claimed mechanism never ran, the missing condition may be the real defect; do not accept the reporter's account of the run. |
+| Right harm, wrong remedy | "This fail has no action, so make it a warning." | A fail a reader cannot act on is a design bug. Remove the signal or give it an action; a warning only hides it. |
+| Message and rule disagree | "The message says keep the constant; the rule still fails it." | The reader cannot follow both. Decide which is correct, then make the other match; usually the message is the smaller change. |
+| Over-broad exemption | "Exempt this shape." | Exempt by a structural property the target owns — its base, its contract, its provenance — never by a name that appears anywhere in the repo. Add the positive case that must still fire. |
+| Several reports, one cause | Three reports all point at one rule's firing set or one missing signal. | Group by root cause before coding. One design decision, one PR; reference the others but do not stack competing patches. |
+| Proposed mechanism | "Add a flag, a config key, or a new rule." | Ask what harm the mechanism removes. Build the smallest change that removes it; the proposal is a hypothesis, not the spec. |
+| Noise on a real repo | "This fires hundreds of times on our repo." | Separate the rule's target from that repo's convention. Measure both house repos; if the target is wrong, change the rule's design, not its threshold. |
+| Wrong fix preview | "The suggested transformation produces bad code." | Fix the fixer or make it decline with a reason. A real finding does not excuse a bad transform. |
 
 ## Stop conditions
 
