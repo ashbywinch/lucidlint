@@ -1,0 +1,22 @@
+# The house PR auto-merge: one reusable workflow for every repo. It arms
+# auto-merge on PR events, refreshes a branch behind main before arming, and
+# updates approved or armed PRs whenever main moves. It never approves or
+# merges directly; the `protect-main` ruleset's one approving review and
+# required checks are the gate.
+name: PR auto-merge
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  pull_request_review:
+    types: [submitted]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  automerge:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ashbywinch/omp-config/.github/workflows/pr-automerge.yml@v0.2.6
