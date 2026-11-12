@@ -1,5 +1,13 @@
 # lucidlint rule reference
 
+Lucid means a reader who has never seen this code — a human or an agent — can
+understand it and change it safely without first reading the rest of the
+repository. Judge lucidity with common sense and the established practice for
+clear design: separation of concerns, effective encapsulation, code that is
+obviously correct. Name things with the domain's own nouns and verbs so the
+code connects to what the reader already knows. Metrics are proxies for these
+qualities, never the goals themselves.
+
 Every rule below exists for one reason: code that is maintainable, lucid,
 and obviously correct. A finding is a pointer, not a verdict — its message
 and suggested fix state the reasoning and exist to make the reader reflect.
