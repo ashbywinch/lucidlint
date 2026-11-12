@@ -153,7 +153,7 @@ does that.
 
 Treat these as the pattern library, not as precedent to copy:
 
-| Report | Reporter's claim | What the code showed | What shipped |
+| Report | Reporter's claim | What the code showed | What was correct |
 |---|---|---|---|
 | #29(a) | the threshold is undocumented | `RULES.md` documented it | the docs claim was rejected; the real gap was elsewhere |
 | #29(b) | the partition rule evaluated a 25-method class | a 150-line span gate rejected the class before the partition ran | a new small-span check, not "act on the partition verdict" |
@@ -161,7 +161,7 @@ Treat these as the pattern library, not as precedent to copy:
 | #44 -> #65 | exempt delegations to interfaces | the exemption matched any `Protocol` repo-wide and silenced a real delegation | exempt by provenance; add the positive case |
 | #47 | make `god-class` a warning when there is no seam | the size signal had no action at all | the rule was deleted; `partition` keeps the actionable case |
 | #57 | group by type, and stop calling a tuple a dict | both were real, but they are separate defects | the detector groups by annotation; the message names the tuple |
-| #73 | compare field names and call siblings "siblings" | the harm is the false "fork" claim, not the missing comparison | a message-only correction is a candidate; do not merge sibling records |
+| #73 | compare field names and call siblings "siblings" | the harm is the false "fork" claim, not the missing comparison | correct the message; do not merge sibling records |
 | #74/#79/#80 | three different fixes for `global-state` | one design decision: what the rule targets, plus the missing module-cohesion signal | treat as one decision, not three mechanical patches |
 | #33/#34 | implement four naming mechanisms and cluster by seam | two mechanisms were right, one was held, one folded into another | implement the requirement, not the proposed mechanism |
 
