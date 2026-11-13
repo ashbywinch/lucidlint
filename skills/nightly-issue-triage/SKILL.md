@@ -245,25 +245,26 @@ finding. Do not leave the PR red or with unaddressed comments.
    change in one pass. Return to step 1.
 5. Stop when every check passes and the remaining comments are stylistic,
    pre-existing, or config self-reviews. Then add `nightly-triaged` and
-   `nightly-fix` to the issue and post the customer-facing comment below.
+   `nightly-fix` to the issue. If the agent disagrees with the issue, post the
+   correction below.
 6. Never merge, approve, force-push, or resolve a thread. If a check fails for
    a reason you cannot attribute to the change, leave the PR open, comment the
    failure on the PR, and do not label the issue as fixed.
 
-### Comment on the issue
+### Correct the issue only if you disagree
 
-After the PR is green, write one concise comment in the customer's language:
+The customer-facing explanation belongs in the PR description; do not repeat it
+in an issue comment. Only when the agent disagrees with a diagnosis or claim,
+after the PR is green, post one concise, polite comment in the customer's
+language:
 
-- confirm the harm you reproduced;
-- if a diagnosis or claim was wrong, correct it politely and say what happens
-  instead, with the documented referent if there is one;
+- correct the specific point and say what happens instead, with the documented
+  referent if there is one;
 - link the PR as a hyperlink — `[#N](https://github.com/<owner>/<repo>/pull/N)`,
   never a bare `#N`;
-- keep it short. Do not paste the claim verdicts, file/line tables, or "the
-  reporter was wrong" language.
+- do not restate the PR description, the claim verdicts, or file/line tables.
 
-The claim-by-claim verification is for the run output and the plan doc; the
-issue comment is for the customer.
+No disagreement means no comment; the PR's `Closes`/`Refs` link is enough.
 
 Never close the issue; the merged PR does that.
 
