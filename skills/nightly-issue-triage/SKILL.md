@@ -257,7 +257,8 @@ After the PR is green, write one concise comment in the customer's language:
 - confirm the harm you reproduced;
 - if a diagnosis or claim was wrong, correct it politely and say what happens
   instead, with the documented referent if there is one;
-- link the PR;
+- link the PR as a hyperlink — `[#N](https://github.com/<owner>/<repo>/pull/N)`,
+  never a bare `#N`;
 - keep it short. Do not paste the claim verdicts, file/line tables, or "the
   reporter was wrong" language.
 
