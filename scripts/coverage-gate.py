@@ -34,8 +34,8 @@ def line_rate(report: Path) -> float | None:
         hits: dict[str, int] = {}
         for line in cls.findall("lines/line"):
             number = line.get("number") or ""
-            if not number.isdigit():
-                continue  # line 0 is not a source line — a malformed record adds no data
+            if not number.isdigit() or int(number) == 0:
+                continue  # a missing number or line 0 is not a source line — malformed record
             count = int(line.get("hits", "0") or 0)
             hits[number] = max(hits.get(number, 0), count)
         valid += len(hits)

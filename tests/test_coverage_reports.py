@@ -141,6 +141,19 @@ def test_gate_passes_at_the_floor_and_fails_below_it(tmp_path):
     assert "80.0% is below the 85% floor" in below.stderr
 
 
+def test_gate_skips_line_zero_records(tmp_path):
+    """The gate and the merger agree on line 0: it is not a source line, so an
+    uncovered line-0 record cannot drag the rate down (1/1, not 1/2)."""
+    report = tmp_path / "coverage.xml"
+    report.write_text(
+        '<?xml version="1.0"?><coverage version="t"><packages><package name="src">'
+        '<classes><class name="a" filename="a.py"><lines>'
+        '<line number="0" hits="0"/><line number="7" hits="1"/>'
+        "</lines></class></classes></package></packages></coverage>"
+    )
+    assert run(GATE, str(report), "100", "Python").returncode == 0
+
+
 def test_gate_refuses_an_unreadable_report(tmp_path):
     unreadable = tmp_path / "coverage.xml"
     unreadable.write_text("not xml at all")
