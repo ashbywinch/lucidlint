@@ -138,15 +138,23 @@ bundle-check: scanner-check
 	echo "${GREEN}✓ release bundle: the packaged fix path scans + fixes a mini project${NC}"
 
 
+# Every SHIPPED subject is measured and gated: the Python modules, the scan
+# core crate, and the radon-parity crate. The merged Cobertura file feeds the
+# PR comment (one row per subject). Each subject carries two bars: the MINIMUM
+# (below it the subject is in trouble) and the TARGET (the high bar the suite
+# must hit — the gate fails below the target, so a small drop cannot land
+# quietly). Move a bar deliberately, with its new measurement.
 coverage: deps scanner-check
 	@$(UV) run coverage run -m pytest tests/ -q --tb=short
 	@$(UV) run coverage report -m
 	@$(UV) run coverage xml
 	@$(UV) run coverage html
-	@cd scanner && cargo llvm-cov --lcov --output-path ../lcov.info 2>&1 | tail -30
-	# the CI summary action reads Cobertura XML — lcov is for local tooling only
 	@cd scanner && cargo llvm-cov --cobertura --output-path ../coverage-rust.xml 2>&1 | tail -5
-	@echo "${GREEN}Coverage reports: htmlcov/index.html + lcov.info + coverage-rust.xml${NC}"
+	@cd scanner/radonc && cargo llvm-cov --cobertura --output-path ../../coverage-radonc.xml 2>&1 | tail -5
+	@$(PYTHON) scripts/merge-coverage.py --report python coverage.xml "" --report scanner coverage-rust.xml scanner/ --report radonc coverage-radonc.xml scanner/radonc/ -o coverage-all.xml
+	@$(PYTHON) scripts/coverage-gate.py coverage-all.xml --subject python 85 90 --subject scanner 82 85 --subject radonc 62 70 -o coverage-summary.md
+	@cat coverage-summary.md
+	@echo "${GREEN}Coverage gate: each subject at its target (Python 90%, scanner 85%, radonc 70%) — reports: htmlcov/index.html + coverage-all.xml${NC}"
 
 lint: deps lint-check
 

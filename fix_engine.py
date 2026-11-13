@@ -544,9 +544,10 @@ class _FixRequest:
                 )
             ]
         )
-        origin_new = _replace_method_body(module, head.method, body).code
-        self.extra_writes.append((mid.rel, _remove_fn(mid.module, head.callee.name)))
-        return origin_new
+        origin_new = _replace_method_body(module, head.method, body, self.line).code
+        # F may live in the origin itself — deleting it from a FRESH parse
+        # would overwrite the rewire just applied above
+        return self._drop_middle(origin_new, head, mid)
 
     def _method_terminal(self, head: _ChainHead, mid: _ChainMiddle) -> _ChainTerminal | None:
         """The unique D.N the chain reaches through F. None when the method is
@@ -2420,8 +2421,12 @@ def _expr_names(e) -> set[str]:
 
 
 def _stmt_seq(x) -> list:
+    """A statement suite as a list: an IndentedBlock, an `else` clause's
+    block, or a plain list (None is empty)."""
     if isinstance(x, cst.IndentedBlock):
         return list(x.body)
+    if isinstance(x, (cst.Else, cst.Finally)):
+        return list(x.body.body)
     return list(x or [])
 
 
@@ -2450,9 +2455,8 @@ def _bind_children(stmt, bound: set[str]) -> None:
             seqs += _stmt_seq(h.body)
     elif isinstance(stmt, cst.With):
         for item in stmt.items:
-            optional = getattr(item, "optional_vars", None)
-            if optional is not None:
-                bound.update(_expr_names(optional))
+            if item.asname is not None:
+                bound.update(_expr_names(item.asname.name))
         seqs = _stmt_seq(stmt.body)
     elif isinstance(stmt, cst.Match):
         for case in stmt.cases:
@@ -2907,8 +2911,9 @@ def _target_bound_names(t) -> set[str]:
     if isinstance(t, (cst.Tuple, cst.List)):
         out: set[str] = set()
         for el in t.elements:
-            elem = el.value if isinstance(el, cst.StarredElement) else el
-            out |= _target_bound_names(elem)
+            # an Element wraps its expression; a StarredElement wraps the
+            # starred one — both carry the target at .value
+            out |= _target_bound_names(el.value)
         return out
     return set()
 
@@ -7105,10 +7110,19 @@ class _PartitionGroup(NamedTuple):
     fields: tuple[str, ...]
 
 
+class _GroupInit(NamedTuple):
+    """One group's synthesized __init__: the field assignments it keeps and
+    the parameters those assignments need (name, annotation, default)."""
+
+    statements: list[cst.BaseStatement]
+    params: list[cst.Param]
+
+
 class _PartitionPlan(NamedTuple):
     groups: tuple[_PartitionGroup, ...]
     init_fields: tuple[tuple[str, cst.BaseExpression], ...]
     init_docstring: cst.BaseStatement | None
+    init_params: tuple[tuple[str, cst.Annotation | None, cst.BaseExpression | None], ...]
 
 
 class _PartitionAttempt(NamedTuple):
@@ -7140,7 +7154,11 @@ def _reads_self(expr: cst.BaseExpression) -> bool:
 
 
 # the __init__ plan: the field initializers in order + the docstring statement
-_InitPlan = tuple[list[tuple[str, cst.BaseExpression]], cst.BaseStatement | None]
+_InitPlan = tuple[
+    list[tuple[str, cst.BaseExpression]],
+    cst.BaseStatement | None,
+    list[tuple[str, cst.Annotation | None, cst.BaseExpression | None]],
+]
 
 
 # lucidlint: ignore complexity the shape analyzers dispatch over libcst node kinds — splitting scatters one table
@@ -7149,7 +7167,13 @@ def _init_plan(init: cst.FunctionDef | None) -> _InitPlan | None:
     None when the body does anything else — a split would have to reorder or
     retarget that statement."""
     if init is None:
-        return [], None
+        return [], None, []
+    params = init.params
+    if params.posonly_params or params.kwonly_params or isinstance(params.star_arg, cst.Param) or params.star_kwarg:
+        return None
+    init_params = [
+        (param.name.value, param.annotation, param.default) for param in params.params[1:]
+    ]
     assigns: list[tuple[str, cst.BaseExpression]] = []
     docstring: cst.SimpleStatementLine | None = None
     for stmt in init.body.body:
@@ -7170,7 +7194,7 @@ def _init_plan(init: cst.FunctionDef | None) -> _InitPlan | None:
         ):
             return None
         assigns.append((target.attr.value, small.value))
-    return assigns, docstring
+    return assigns, docstring, init_params
 
 
 # lucidlint: ignore complexity the shape analyzers dispatch over libcst node kinds — splitting scatters one table
@@ -7203,7 +7227,7 @@ def _partition_plan(cls: cst.ClassDef) -> _PartitionAttempt:
             "the class's __init__ does more than assign self fields — a split would reorder or "
             "retarget a statement; split by hand",
         )
-    init_fields, init_docstring = parsed
+    init_fields, init_docstring, init_params = parsed
     fielded = [(method, _self_field_reads(method)) for method in methods if method is not init]
     fieldless = [method.name.value for method, fields in fielded if not fields]
     if fieldless:
@@ -7259,6 +7283,7 @@ def _partition_plan(cls: cst.ClassDef) -> _PartitionAttempt:
         ),
         init_fields=tuple(init_fields),
         init_docstring=init_docstring,
+        init_params=tuple(init_params),
     )
     return _PartitionAttempt(plan, "")
 
@@ -7279,18 +7304,19 @@ def _group_class(
     name: str,
     template: cst.ClassDef,
     methods: list[cst.FunctionDef],
-    init_stmts: list[cst.BaseStatement],
+    init: _GroupInit,
     head: list[cst.BaseStatement],
 ) -> cst.ClassDef:
     """One group's class: the template's decorators, bases, and keywords, a
-    synthesized __init__ over its own fields, then its methods."""
+    synthesized __init__ over its own fields (and the parameters they need),
+    then its methods."""
     body: list[cst.BaseStatement] = list(head)
-    if init_stmts:
+    if init.statements:
         body.append(
             cst.FunctionDef(
                 name=cst.Name("__init__"),
-                params=cst.Parameters(params=[cst.Param(cst.Name("self"))]),
-                body=cst.IndentedBlock(body=init_stmts),
+                params=cst.Parameters(params=[cst.Param(cst.Name("self")), *init.params]),
+                body=cst.IndentedBlock(body=init.statements),
             )
         )
     body.extend(methods)
@@ -7345,13 +7371,26 @@ def _partition_fix(req: _FixRequest) -> str | None:
         init_stmts: list[cst.BaseStatement] = []
         if i == 0 and plan.init_docstring is not None:
             init_stmts.append(plan.init_docstring)
-        init_stmts.extend(
-            _init_stmt(field, value) for field, value in plan.init_fields if field in group.fields
-        )
+        retained = [
+            (field, value) for field, value in plan.init_fields if field in group.fields
+        ]
+        init_stmts.extend(_init_stmt(field, value) for field, value in retained)
+        needed = set(group.fields)
+        for _field, value in retained:
+            needed |= set(_expr_names(value))
+        # a valid Python signature keeps its defaulted parameters last, so any
+        # kept subset is valid: a skipped parameter can never be required
+        init_params = [
+            cst.Param(name=cst.Name(name), annotation=annotation, default=default)
+            for name, annotation, default in plan.init_params
+            if name in needed
+        ]
         head: list[cst.BaseStatement] = []
         if i == 0 and class_docstring is not None:
             head.append(class_docstring)
-        group_cls = _group_class(class_names[i], cls, list(group.methods), init_stmts, head)
+        group_cls = _group_class(
+            class_names[i], cls, list(group.methods), _GroupInit(init_stmts, init_params), head
+        )
         if i:
             group_cls = group_cls.with_changes(leading_lines=[cst.EmptyLine()])
         replacements.append(group_cls)

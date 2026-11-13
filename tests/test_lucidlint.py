@@ -2466,3 +2466,220 @@ def test_rust_rule_groups_match_python():
     assert set(rust_groups) == set(RULE_GROUPS.groups()), "group names drifted"
     for name, kinds in RULE_GROUPS.items():
         assert rust_groups[name] == set(kinds), f"group '{name}' drifted"
+
+
+# --------------------------------------------------------------------------- helper contracts
+# The graph export, the baseline readers and the directive parser are the
+# boundaries the report stands on; these pin their wire shapes and refusals.
+
+
+class _FakeGraphNode:
+    def __init__(self, kind, name, qualified_name, file_path, line_start, line_end, params, return_type):
+        self.kind = kind
+        self.name = name
+        self.qualified_name = qualified_name
+        self.file_path = file_path
+        self.line_start = line_start
+        self.line_end = line_end
+        self.params = params
+        self.return_type = return_type
+
+
+class _FakeGraphEdge:
+    def __init__(self, kind, source_qualified, target_qualified, file_path):
+        self.kind = kind
+        self.source_qualified = source_qualified
+        self.target_qualified = target_qualified
+        self.file_path = file_path
+
+
+class _FakeGraphStore:
+    """The public GraphStore surface the exporter reads — nothing else."""
+
+    def __init__(self, db):
+        self.db = db
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_all_community_ids(self):
+        return {"pkg/a.py::f": 7}
+
+    def get_all_files(self):
+        return ["/repo/pkg/a.py"]
+
+    def get_nodes_by_file(self, path):
+        return [
+            _FakeGraphNode("Function", "f", "pkg/a.py::f", path, 1, 4, ["x"], "int")
+        ]
+
+    def get_all_edges(self):
+        return [_FakeGraphEdge("CALLS", "pkg/a.py::f", "pkg/b.py::g", "/repo/pkg/a.py")]
+
+    def get_communities_list(self):
+        return [{"id": 7, "name": "core"}]
+
+
+class _FakeRegistry:
+    def __init__(self, data_dir):
+        self.data_dir = data_dir
+
+    def get_data_dir_for_repo(self, repo):
+        return str(self.data_dir)
+
+
+def test_graph_contract_exports_the_store_wire_shape(tmp_path):
+    repo = make_repo(tmp_path)
+    data_dir = tmp_path / "graph"
+    data_dir.mkdir()
+    (data_dir / "graph.db").touch()
+    saved_store, saved_registry = ch._GraphStore, ch._Registry
+    saved_cache = dict(ch.GRAPH_CONTRACT._cache)
+    ch._GraphStore = cast(Any, _FakeGraphStore)
+    ch._Registry = cast(Any, lambda: _FakeRegistry(data_dir))  # the API is a zero-arg factory
+    try:
+        ch.GRAPH_CONTRACT._cache.clear()
+        path = ch.GRAPH_CONTRACT.contract(repo)
+        assert path is not None
+        exported = json.loads(path.read_text())
+    finally:
+        ch._GraphStore, ch._Registry = saved_store, saved_registry
+        ch.GRAPH_CONTRACT._cache.clear()
+        ch.GRAPH_CONTRACT._cache.update(saved_cache)
+
+    assert exported["contract_version"] == ch.CONTRACT_VERSION
+    assert exported["nodes"] == [
+        {
+            "kind": "Function",
+            "name": "f",
+            "qualified_name": "pkg/a.py::f",
+            "file_path": "/repo/pkg/a.py",
+            "line_start": 1,
+            "line_end": 4,
+            "params": ["x"],
+            "return_type": "int",
+            "community_id": 7,
+        }
+    ]
+    assert exported["edges"] == [
+        {"kind": "CALLS", "source": "pkg/a.py::f", "target": "pkg/b.py::g", "file_path": "/repo/pkg/a.py"}
+    ]
+    assert exported["communities"] == {"7": "core"}
+
+
+def test_graph_contract_degrades_without_a_store(tmp_path):
+    repo = make_repo(tmp_path)
+    saved = (ch._GraphStore, ch._Registry, dict(ch.GRAPH_CONTRACT._cache))
+    ch._GraphStore = None
+    try:
+        ch.GRAPH_CONTRACT._cache.clear()
+        assert ch.GRAPH_CONTRACT.contract(repo) is None
+    finally:
+        ch._GraphStore, ch._Registry = saved[0], saved[1]
+        ch.GRAPH_CONTRACT._cache.clear()
+        ch.GRAPH_CONTRACT._cache.update(saved[2])
+
+
+def test_graph_contract_degrades_when_the_db_or_store_is_broken(tmp_path):
+    """The graph tool is optional: a missing DB, a stale schema or a corrupt
+    store must yield None (the non-graph families), never crash the scan."""
+    repo = make_repo(tmp_path)
+    data_dir = tmp_path / "graph"
+    data_dir.mkdir()
+    saved = (ch._GraphStore, ch._Registry, dict(ch.GRAPH_CONTRACT._cache))
+    ch._Registry = cast(Any, lambda: _FakeRegistry(data_dir))
+    try:
+        ch.GRAPH_CONTRACT._cache.clear()
+        assert ch.GRAPH_CONTRACT.contract(repo) is None  # no graph.db
+
+        (data_dir / "graph.db").touch()
+
+        class _BrokenStore:
+            def __init__(self, db):
+                pass
+
+            def __enter__(self):
+                raise sqlite3.OperationalError("bad schema")
+
+        ch._GraphStore = cast(Any, _BrokenStore)
+        ch.GRAPH_CONTRACT._cache.clear()
+        assert ch.GRAPH_CONTRACT.contract(repo) is None
+    finally:
+        ch._GraphStore, ch._Registry = saved[0], saved[1]
+        ch.GRAPH_CONTRACT._cache.clear()
+        ch.GRAPH_CONTRACT._cache.update(saved[2])
+
+
+def test_fix_directive_kind_reads_both_message_forms():
+    command = "m — fix: lucidlint fix --kind extract-method --file a.py --line 3 --name <N>"
+    assert ch._fix_directive_kind(command) == "extract-method"
+    assert ch._fix_directive_kind("m — fix: magic-number --fix-name <CONST>") == "magic-number"
+    assert ch._fix_directive_kind("m — fix: lucidlint fix prose only") is None
+    assert ch._fix_directive_kind("no directive here") is None
+
+
+def test_baseline_entry_shapes_and_file_state(tmp_path):
+    assert ch._baseline_entry_is_current("swallow:a.py:3:f")
+    assert not ch._baseline_entry_is_current("swallow:a.py:f")  # line-less legacy
+    assert not ch._baseline_entry_is_current({"kind": "swallow"})
+    assert ch._baseline_file_state(tmp_path / "absent.json") == (0, 0)
+
+    unreadable = tmp_path / "bad.json"
+    unreadable.write_text("{not json")
+    assert ch._baseline_file_state(unreadable) == (0, 0)
+
+    not_a_list = tmp_path / "dict.json"
+    not_a_list.write_text('{"actions": {"a": 1}}')
+    assert ch._baseline_file_state(not_a_list) == (0, 0)
+
+    mixed = tmp_path / "mixed.json"
+    mixed.write_text(json.dumps({"actions": ["swallow:a.py:3:f", {"kind": "swallow"}]}))
+    assert ch._baseline_file_state(mixed) == (1, 1)
+
+
+def test_iso_day_formats_an_epoch_and_passes_garbage_through():
+    assert ch._iso_day("1700000000") == "2023-11-14"
+    assert ch._iso_day("not an epoch") == "not an epoch"
+    assert ch._iso_day("") == ""
+
+
+def test_fix_identifier_problem_names_the_bad_argument():
+    assert ch._fix_identifier_problem("magic-number", "9bad", None, "a.py:1")
+    assert ch._fix_identifier_problem("magic-number", None, ["ok", "no-dash"], "a.py:1")
+    assert ch._fix_identifier_problem("magic-number", "NINETY", ["tax"], "a.py:1") is None
+    # extract-method has no name requirement — the fixer derives a private name
+    assert ch._fix_identifier_problem("extract-method", "9bad", None, "a.py:1") is None
+
+
+def test_config_per_path_ignore_accepts_a_group_and_a_plain_signal(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / ".lucidlint.toml").write_text(
+        '[lucidlint."houses/*"]\nignore = ["group:architecture", "magic-number"]\n'
+    )
+    config = ch._GateRunner(repo, gate_args())._load_lucidlint_config()
+    patterns = dict(config.per_path_ignore)
+    assert set(patterns["houses/*"]) >= {"magic-number", "complexity", "large-function"}
+
+
+def test_fix_rust_refuses_a_missing_name(tmp_path, capsys):
+    """loop-hoist names the helper; a missing --name is an unsatisfied
+    prerequisite, refused before the binary can write a nameless fn."""
+    repo = make_repo(tmp_path)
+    lib = repo / "houses" / "lib.rs"
+    source = (
+        "pub fn f(xs: &[i32]) -> Vec<i32> {\n"
+        "    let mut out = Vec::new();\n"
+        "    for x in xs {\n"
+        "        out.push(*x);\n"
+        "    }\n"
+        "    out\n"
+        "}\n"
+    )
+    lib.write_text(source)
+    rc = run_main(repo, "fix", "--kind", "loop-hoist", "--file", "houses/lib.rs", "--line", "3")
+    assert rc == 0
+    assert "--name" in capsys.readouterr().out
+    assert lib.read_text() == source

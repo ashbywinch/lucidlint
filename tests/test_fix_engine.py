@@ -8,6 +8,10 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import cast
+
+import libcst as cst
+from libcst.metadata import MetadataWrapper
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from test_lucidlint import make_repo, run_main
@@ -2676,7 +2680,11 @@ def _fixture(name: str) -> str:
 
 def _fn_line(src: str, fn: str) -> int:
     """The 1-based line of `def fn` — the loop-sequence fixer's anchor."""
-    return next(i + 1 for i, line in enumerate(src.splitlines()) if line.startswith(f"def {fn}"))
+    return next(
+        i + 1
+        for i, line in enumerate(src.splitlines())
+        if line.startswith((f"def {fn}", f"async def {fn}"))
+    )
 
 
 def _loop_line(src: str, fn: str) -> int:
@@ -2685,7 +2693,7 @@ def _loop_line(src: str, fn: str) -> int:
     lines = src.splitlines()
     start = _fn_line(src, fn)
     for i in range(start, len(lines)):
-        if lines[i].lstrip().startswith(("for ", "while ")):
+        if lines[i].lstrip().startswith(("for ", "async for ", "while ")):
             return i + 1
     raise AssertionError(f"no loop under def {fn}")
 
@@ -3157,3 +3165,511 @@ def test_extract_class_directive_fixes_a_wide_tuple_finding(tmp_path):
     fixed = p.read_text()
     assert "class RunState:" in fixed
     assert "state: RunState = RunState(mode, level, ratio)" in fixed
+
+
+# --------------------------------------------------------------------------- helper contracts
+# The transforms above exercise the plans end to end; these pin the pure
+# helpers' own contracts — each is a decision table the fixers dispatch on, so
+# a branch that flips silently changes what the tool rewrites.
+
+
+def _wrapper(source: str) -> MetadataWrapper:
+    return MetadataWrapper(cst.parse_module(source))
+
+
+def test_flatten_stmts_walks_every_nested_block_kind():
+    module = cst.parse_module(
+        "if a:\n"
+        "    x = 1\n"
+        "elif b:\n"
+        "    y = 2\n"
+        "else:\n"
+        "    z = 3\n"
+        "for i in xs:\n"
+        "    p = i\n"
+        "else:\n"
+        "    q = 0\n"
+        "while c:\n"
+        "    r = 1\n"
+        "else:\n"
+        "    s = 2\n"
+        "try:\n"
+        "    t = 1\n"
+        "except E:\n"
+        "    u = 2\n"
+        "else:\n"
+        "    v = 3\n"
+        "with ctx:\n"
+        "    w = 4\n"
+        "match n:\n"
+        "    case 1:\n"
+        "        y2 = 5\n"
+    )
+    flat = []
+    fix_engine._flatten_stmts(module.body, flat)
+    kinds = [type(s) for s in flat]
+    assert len(flat) > len(module.body)  # nested bodies are included
+    for kind in (cst.If, cst.For, cst.While, cst.Try, cst.With, cst.Match):
+        assert kind in kinds, f"{kind} missing from the flatten"
+
+
+def test_module_level_names_covers_import_and_binding_shapes():
+    module = cst.parse_module(
+        "import os.path\n"
+        "import json as j\n"
+        "from m import n\n"
+        "from m import q as r\n"
+        "from m import *\n"
+        "A = 1\n"
+        "B, C = 2, 3\n"
+        "obj.attr = 4\n"
+        "D: int = 5\n"
+        "def f():\n"
+        "    return A\n"
+        "class K:\n"
+        "    pass\n"
+    )
+    names = fix_engine._module_level_names(module)
+    assert {"os", "j", "n", "r", "A", "B", "C", "D", "f", "K"} <= names
+    assert "obj" not in names  # an attribute store binds nothing at module scope
+
+
+def test_class_body_binds_recognises_every_member_shape():
+    cls = cast(cst.ClassDef, cst.parse_statement(
+        "class C:\n"
+        "    def run(self):\n"
+        "        pass\n"
+        "    class Inner:\n"
+        "        pass\n"
+        "    limit = 1\n"
+        "    name: str = 'x'\n"
+        "    from m import imported\n"
+    ))
+    assert fix_engine._class_body_binds(cls, "run")
+    assert fix_engine._class_body_binds(cls, "Inner")
+    assert fix_engine._class_body_binds(cls, "limit")
+    assert fix_engine._class_body_binds(cls, "name")
+    assert fix_engine._class_body_binds(cls, "imported")
+    assert not fix_engine._class_body_binds(cls, "absent")
+
+
+def test_name_ref_kind_reads_the_execution_context():
+    wrapper = _wrapper(
+        "X = 1\n"
+        "def deco(fn):\n"
+        "    return fn\n"
+        "@deco\n"
+        "def f(a, b=X):\n"
+        "    for i in range(2):\n"
+        "        v = i\n"
+        "    return v\n"
+        "class K:\n"
+        "    attr = X\n"
+    )
+    seen: dict[tuple[str, int], str] = {}
+
+    class Probe(cst.CSTVisitor):
+        METADATA_DEPENDENCIES = (fix_engine.PositionProvider,)
+
+        def visit_Name(self, node) -> None:  # noqa: N802 — libcst's visitor hook
+            line = fix_engine._as_range(self.get_metadata(fix_engine.PositionProvider, node)).start.line
+            seen[(node.value, line)] = fix_engine._name_ref_kind(wrapper, node)
+
+    wrapper.visit(Probe())
+    assert seen[("X", 1)] == "skip"  # the assignment target binds, not reads
+    assert seen[("deco", 4)] == "immediate"  # decorators evaluate at def time
+    assert seen[("X", 5)] == "immediate"  # a default evaluates at def time
+    assert seen[("a", 5)] == "skip"  # a parameter binds
+    assert seen[("i", 6)] == "skip"  # a for target binds
+    assert seen[("i", 7)] == "deferred"  # a function-body read runs at call time
+    assert seen[("X", 10)] == "immediate"  # a class-body read runs at class creation
+
+
+def test_infer_member_type_names_only_what_it_can_prove():
+    def infer(text: str, param_types: dict[str, str] | None = None) -> str | None:
+        return fix_engine._infer_member_type(
+            cst.parse_expression(text), param_types or {}
+        )
+
+    assert infer("1") == "int"
+    assert infer("1.5") == "float"
+    assert infer("'s'") == "str"
+    assert infer("[]") == "list"
+    assert infer("{}") == "dict"
+    assert infer("{1}") == "set"
+    assert infer("()") == "tuple"
+    assert infer("x", {"x": "Money"}) == "Money"  # the parameter's own annotation
+    assert infer("Money()") == "Money"  # a construction names its class
+    assert infer("obj.attr") is None  # unnameable — leave the member bare
+    assert infer("unknown") is None
+
+
+def test_subscript_mutation_plan_maps_a_dict_store_only():
+    def plan(text: str):
+        statement = cst.parse_statement(text)
+        assert isinstance(statement, cst.SimpleStatementLine)
+        return fix_engine._subscript_mutation_plan(cast(cst.Assign, statement.body[0]))
+
+    mapped = plan("d[k] = v\n")
+    assert mapped is not None
+    assert (mapped.acc, mapped.collection) == ("d", "dict")
+    assert isinstance(mapped.key, cst.Name) and mapped.key.value == "k"
+    assert plan("d[a, b] = v\n") is None  # a tuple slice is not one dict key
+    assert plan("d.k = v\n") is None  # an attribute store is not a subscript
+    assert plan("x = v\n") is None
+
+
+def test_exec_time_names_defer_function_bodies():
+    wrapper = _wrapper("C = 1\ndef f():\n    return C\nD = C\n")
+    names = fix_engine._exec_time_names(wrapper, wrapper.module)
+    assert "C" in names  # `D = C` runs at import time
+    assert fix_engine._name_ref_kind  # the classifier the walk uses
+    assert fix_engine._exec_time_names(wrapper, wrapper.module.body[0]) == set()  # a binding reads nothing
+
+
+def test_dataclass_import_is_recognised_and_prepended_once():
+    assert fix_engine._is_dataclass_import(cst.parse_statement("from dataclasses import dataclass\n"))
+    assert not fix_engine._is_dataclass_import(cst.parse_statement("from dataclasses import *\n"))
+    assert not fix_engine._is_dataclass_import(cst.parse_statement("import dataclasses\n"))
+    assert not fix_engine._is_dataclass_import(cst.parse_statement("from other import dataclass\n"))
+    assert not fix_engine._is_dataclass_import(cst.parse_statement("x = 1\n"))
+    missing = [cst.parse_statement("x = 1\n")]
+    once = fix_engine._ensure_dataclasses_import(list(missing))
+    assert fix_engine._is_dataclass_import(once[0])
+    assert fix_engine._ensure_dataclasses_import(list(once)) == once  # already present
+
+
+def test_loop_hoist_refuses_each_unsafe_loop_shape(tmp_path):
+    # the refusals are distinct decisions — a runner collapsing them to one
+    # "cannot fix" message would lose the reason the reader needs
+    src = _fixture("loop_hoist_edges.py")
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    target = repo / "houses" / "app.py"
+    cases = {
+        "h_else": "without an else",
+        "h_pair": "simple name",
+        "h_async": "async for-loop",
+        "h_no_init": "initialized to an empty",
+        "h_prior": "initialized to an empty",
+    }
+    for fn, reason in cases.items():
+        target.write_text(src)
+        req = _req(
+            "loop-hoist", "houses/app.py", repo, _loop_line(src, fn), fix_engine.FixOptions(name="part")
+        )
+        assert req.fix_finding() is None, fn
+        assert req.decline is not None
+        assert reason in req.decline, (fn, req.decline)
+        assert target.read_text() == src, fn  # nothing written
+
+
+def test_loop_sequence_refuses_an_async_chain(tmp_path):
+    src = _fixture("loop_sequence_edges.py")
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    target = repo / "houses" / "app.py"
+    target.write_text(src)
+    req = _req("loop-sequence", "houses/app.py", repo, _fn_line(src, "s_async"))
+    assert req.fix_finding() is None
+    assert req.decline is not None
+    assert "async for-loop" in req.decline
+    assert target.read_text() == src
+
+
+def test_data_clump_threads_one_parameter_object(tmp_path):
+    src = (
+        "def area(width: int, height: int, scale: int) -> int:\n"
+        "    return width * height * scale\n"
+        "\n"
+        "def perimeter(width: int, height: int, scale: int) -> int:\n"
+        "    return 2 * (width + height) * scale\n"
+        "\n"
+        "def diagonal(width: int, height: int) -> float:\n"
+        "    return (width ** 2 + height ** 2) ** 0.5\n"
+        "\n"
+        "def report() -> str:\n"
+        "    return str(area(2, 3, 1) + perimeter(2, 3, 1) + diagonal(2, 3))\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    req = _req("extract-class", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Rect"))
+    assert req.fix_finding() is not None, req.decline
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "class Rect:" in fixed, fixed
+    # the pair is threaded: signatures take the object, bodies read its fields
+    assert "def area(rect, scale: int)" in fixed, fixed
+    assert "rect.width * rect.height * scale" in fixed, fixed
+    # module-scope call sites construct the instance
+    assert "area(Rect(2, 3), 1)" in fixed, fixed
+
+
+def test_data_clump_refuses_variadic_parameters(tmp_path):
+    src = (
+        "def area(width: int, height: int, *rest) -> int:\n"
+        "    return width * height\n"
+        "\n"
+        "def perimeter(width: int, height: int) -> int:\n"
+        "    return 2 * (width + height)\n"
+        "\n"
+        "def diagonal(width: int, height: int) -> float:\n"
+        "    return (width ** 2 + height ** 2) ** 0.5\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    target = repo / "houses" / "app.py"
+    target.write_text(src)
+    req = _req("data-clump", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Rect"))
+    assert req.fix_finding() is None
+    assert req.decline is not None
+    assert "variadic" in req.decline
+    assert target.read_text() == src
+
+
+def test_partition_splits_field_disjoint_methods(tmp_path):
+    src = (
+        "class Account:\n"
+        "    def __init__(self, balance: int, limit: int, name: str, title: str):\n"
+        "        self.balance = balance\n"
+        "        self.limit = limit\n"
+        "        self.name = name\n"
+        "        self.title = title\n"
+        "\n"
+        "    def deposit(self, amount: int) -> int:\n"
+        "        self.balance += min(amount, self.limit)\n"
+        "        return self.balance\n"
+        "\n"
+        "    def withdraw(self, amount: int) -> int:\n"
+        "        self.balance -= min(amount, self.limit)\n"
+        "        return self.balance\n"
+        "\n"
+        "    def fee(self) -> int:\n"
+        "        return self.balance // self.limit\n"
+        "\n"
+        "    def label(self) -> str:\n"
+        "        return self.name.upper() + self.title\n"
+        "\n"
+        "    def greet(self) -> str:\n"
+        "        return 'Hi ' + self.name + ' ' + self.title\n"
+        "\n"
+        "    def rename(self, name: str) -> None:\n"
+        "        self.name = name\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    req = _req("extract-class", "houses/app.py", repo, 1, fix_engine.FixOptions())
+    assert req.fix_finding() is not None, req.decline
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "class Account:" in fixed
+    assert "class AccountName:" in fixed  # the second field group's class
+    assert "def deposit" in fixed and "def label" in fixed
+    # each group's __init__ keeps only its own fields
+    assert "def __init__(self, balance: int, limit: int):" in fixed, fixed
+    assert "def __init__(self, name: str, title: str):" in fixed, fixed
+
+
+def test_partition_refuses_a_fieldless_method(tmp_path):
+    src = (
+        "class Mixed:\n"
+        "    def __init__(self, left: int, right: int):\n"
+        "        self.left = left\n"
+        "        self.right = right\n"
+        "\n"
+        "    def a(self) -> int:\n"
+        "        return self.left\n"
+        "\n"
+        "    def b(self) -> int:\n"
+        "        return self.left + 1\n"
+        "\n"
+        "    def c(self) -> int:\n"
+        "        return self.right\n"
+        "\n"
+        "    def d(self) -> int:\n"
+        "        return self.right + 1\n"
+        "\n"
+        "    def ping(self) -> int:\n"
+        "        return 1\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    target = repo / "houses" / "app.py"
+    target.write_text(src)
+    req = _req("partition", "houses/app.py", repo, 1, fix_engine.FixOptions())
+    assert req.fix_finding() is None
+    assert req.decline is not None
+    assert "touches no self fields" in req.decline
+    assert target.read_text() == src
+
+
+def test_collapse_chain_rewires_a_module_function_terminal(tmp_path):
+    # M -> F -> G where G is a MODULE function (not a method): the head calls
+    # G directly and the middle forwarder is deleted
+    src = (
+        "def format_currency(value):\n"
+        "    return f'{value:.2f}'\n"
+        "\n"
+        "def show_price(value):\n"
+        "    return format_currency(value)\n"
+        "\n"
+        "class Panel:\n"
+        "    def display(self, value):\n"
+        "        return show_price(value)\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    (repo / "houses" / "app.py").write_text(src)
+    req = _req("collapse-chain", "houses/app.py", repo, 8, fix_engine.FixOptions())
+    assert req.fix_finding() is not None, req.decline
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "return format_currency(value)" in fixed, fixed
+    assert "show_price" not in fixed, fixed
+
+
+def test_bind_children_walks_every_compound_statement():
+    def bound(src: str) -> set[str]:
+        names: set[str] = set()
+        fix_engine._bind_children(cst.parse_statement(src), names)
+        return names
+
+    assert {"i", "a"} <= bound("for i in xs:\n    a = 1\n")
+    assert {"w", "n"} <= bound("while cond:\n    w = 1\nelse:\n    n = 2\n")
+    assert {"z", "y"} <= bound("if cond:\n    z = 1\nelse:\n    y = 2\n")
+    assert {"t", "h", "e", "f"} <= bound(
+        "try:\n    t = 1\nexcept E:\n    h = 2\nelse:\n    e = 3\nfinally:\n    f = 4\n"
+    )
+    assert "handle" in bound("with open(p) as handle:\n    pass\n")
+    assert "m" in bound("match x:\n    case 1:\n        m = 1\n")
+
+
+def test_name_ref_kind_skips_definition_positions():
+    wrapper = _wrapper(
+        "x: int = 1\n"
+        "import os as operating\n"
+        "from m import n as en\n"
+        "with open(p) as handle:\n"
+        "    pass\n"
+        "if (walrus := 1):\n"
+        "    pass\n"
+        "def g(key=None):\n"
+        "    [item\n"
+        "     for item in xs]\n"
+        "class K:\n"
+        "    attr = obj.value\n"
+    )
+    seen: dict[tuple[str, int], str] = {}
+
+    class Probe(cst.CSTVisitor):
+        METADATA_DEPENDENCIES = (fix_engine.PositionProvider,)
+
+        def visit_Name(self, node) -> None:  # noqa: N802 — libcst's visitor hook
+            line = fix_engine._as_range(self.get_metadata(fix_engine.PositionProvider, node)).start.line
+            seen[(node.value, line)] = fix_engine._name_ref_kind(wrapper, node)
+
+    wrapper.visit(Probe())
+    assert seen[("x", 1)] == "skip"  # an AnnAssign target binds
+    assert seen[("operating", 2)] == "skip"  # an ImportAlias binds
+    assert seen[("en", 3)] == "skip"  # a from-import alias binds
+    assert seen[("handle", 4)] == "skip"  # an `as` target binds
+    assert seen[("walrus", 6)] == "skip"  # a named expression target binds
+    assert seen[("g", 8)] == "skip"  # the function's own name binds
+    assert seen[("key", 8)] == "skip"  # a keyword argument's NAME is not a read
+    assert seen[("item", 9)] == "deferred"  # the element read runs inside the function
+    assert seen[("item", 10)] == "skip"  # the comprehension target binds
+    assert seen[("xs", 10)] == "deferred"
+    assert seen[("K", 11)] == "skip"  # the class's own name binds
+    assert seen[("attr", 12)] == "skip"  # an attribute's name is not a bare read
+
+
+CLUMP_SRC = (
+    "def area(width: int, height: int, scale: int) -> int:\n"
+    "    return width * height * scale\n"
+    "\n"
+    "def perimeter(width: int, height: int, scale: int) -> int:\n"
+    "    return 2 * (width + height) * scale\n"
+    "\n"
+    "def diagonal(width: int, height: int) -> float:\n"
+    "    return (width ** 2 + height ** 2) ** 0.5\n"
+)
+
+
+def test_data_clump_refuses_defaulted_pair_and_imported_callers(tmp_path):
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    target = repo / "houses" / "app.py"
+    defaulted = CLUMP_SRC.replace(
+        "def diagonal(width: int, height: int) -> float:",
+        "def diagonal(width: int, height: int = 1) -> float:",
+    )
+    target.write_text(defaulted)
+    req = _req("data-clump", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Rect"))
+    assert req.fix_finding() is None
+    assert req.decline is not None
+    assert "defaults" in req.decline
+    assert target.read_text() == defaulted
+
+    target.write_text(CLUMP_SRC)
+    (repo / "houses" / "user.py").write_text("from houses.app import area\n")
+    req = _req("data-clump", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Rect"))
+    assert req.fix_finding() is None
+    assert req.decline is not None
+    assert "imports a clump function" in req.decline
+    assert target.read_text() == CLUMP_SRC
+
+
+def test_data_clump_refuses_an_unusable_class_name(tmp_path):
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    target = repo / "houses" / "app.py"
+    target.write_text(CLUMP_SRC)
+    req = _req("data-clump", "houses/app.py", repo, 1, fix_engine.FixOptions(name="9bad"))
+    assert req.fix_finding() is None
+    assert req.decline is not None
+    assert "not a usable class name" in req.decline
+
+
+def test_partition_refuses_an_unusable_name_and_a_bound_name(tmp_path):
+    src = (
+        "class Report:\n"
+        "    def __init__(self):\n"
+        "        self.rows = []\n"
+        "        self.total = 0\n"
+        '        self.title = ""\n'
+        '        self.author = ""\n'
+        "\n"
+        "    def add_row(self) -> None:\n"
+        "        self.rows.append(1)\n"
+        "\n"
+        "    def row_count(self) -> int:\n"
+        "        return len(self.rows) + self.total\n"
+        "\n"
+        "    def clear_rows(self) -> None:\n"
+        "        self.rows = []\n"
+        "        self.total = 0\n"
+        "\n"
+        "    def set_title(self) -> None:\n"
+        '        self.title = "x"\n'
+        "\n"
+        "    def set_author(self) -> None:\n"
+        '        self.author = "y"\n'
+        "\n"
+        "    def describe(self) -> str:\n"
+        "        return self.title + self.author\n"
+    )
+    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    target = repo / "houses" / "app.py"
+    target.write_text(src)
+    req = _req("partition", "houses/app.py", repo, 1, fix_engine.FixOptions(name="9bad"))
+    assert req.fix_finding() is None
+    assert req.decline is not None
+    assert "not a usable class-name prefix" in req.decline
+
+    target.write_text(src + "\n\nclass ReportAuthor:\n    pass\n")
+    req = _req("partition", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Report"))
+    assert req.fix_finding() is None
+    assert req.decline is not None
+    assert "already bound" in req.decline
+
+
+def test_target_bound_names_reads_names_tuple_list_and_starred():
+    def names(text: str) -> set[str]:
+        return fix_engine._target_bound_names(cst.parse_expression(text))
+
+    assert names("x") == {"x"}
+    assert names("a, b") == {"a", "b"}
+    assert names("(a, *rest)") == {"a", "rest"}
+    assert names("[a, (b, c)]") == {"a", "b", "c"}
+    assert names("obj.attr") == set()  # an attribute store binds nothing
+    assert names("items[0]") == set()  # a subscript store binds nothing
