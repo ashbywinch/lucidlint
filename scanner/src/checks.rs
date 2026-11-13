@@ -347,29 +347,22 @@ fn is_type_alias_value(name: &str, value: &Expr) -> bool {
 /// global services containers and framework-required globals (`app =
 /// Flask(...)`, DI registries) — a CALL-valued assignment is a service
 /// registration, not a domain value.
-/// The action the reader can take depends on what the binding IS: a mutable
-/// container, a constant, or a re-binding of another module's value. The AST
-/// already knows that, so the message names the case instead of offering a
-/// conditional menu.
-fn global_state_message(name: &str, value: Option<&Expr>) -> String {
-    let (opening, middle, action) = match value {
+/// What the AST already says about a module-level binding. The message names
+/// the case so the reader does not have to classify it.
+#[derive(Clone, Copy)]
+enum GlobalValueKind {
+    MutableContainer,
+    Rebinding,
+    Constant,
+    Other,
+}
+
+fn global_value_kind(value: Option<&Expr>) -> GlobalValueKind {
+    match value {
         Some(
-            Expr::List(_)
-            | Expr::Dict(_)
-            | Expr::Set(_)
-            | Expr::ListComp(_)
-            | Expr::DictComp(_)
-            | Expr::SetComp(_),
-        ) => (
-            "is a mutable container bound at import time",
-            "Every reader shares the same object, and a caller cannot vary it without monkeypatching the module.",
-            "Make it an attribute of the class that owns the work.",
-        ),
-        Some(Expr::Name(_) | Expr::Attribute(_) | Expr::Subscript(_)) => (
-            "is bound to another value at import time",
-            "Every reader shares that binding, and a caller cannot vary it without monkeypatching the module.",
-            "Give that value one home and import it here; do not re-bind it.",
-        ),
+            Expr::List(_) | Expr::Dict(_) | Expr::Set(_) | Expr::ListComp(_) | Expr::DictComp(_) | Expr::SetComp(_),
+        ) => GlobalValueKind::MutableContainer,
+        Some(Expr::Name(_) | Expr::Attribute(_) | Expr::Subscript(_)) => GlobalValueKind::Rebinding,
         Some(
             Expr::StringLiteral(_)
             | Expr::BytesLiteral(_)
@@ -385,12 +378,29 @@ fn global_state_message(name: &str, value: Option<&Expr>) -> String {
             | Expr::If(_)
             | Expr::BoolOp(_)
             | Expr::Compare(_),
-        ) => (
+        ) => GlobalValueKind::Constant,
+        _ => GlobalValueKind::Other,
+    }
+}
+
+fn global_state_message(name: &str, value: Option<&Expr>) -> String {
+    let (opening, middle, action) = match global_value_kind(value) {
+        GlobalValueKind::MutableContainer => (
+            "is a mutable container bound at import time",
+            "Every reader shares the same object, and a caller cannot vary it without monkeypatching the module.",
+            "Make it an attribute of the class that owns the work.",
+        ),
+        GlobalValueKind::Rebinding => (
+            "is bound to another value at import time",
+            "Every reader shares that binding, and a caller cannot vary it without monkeypatching the module.",
+            "Give that value one home and import it here; do not re-bind it.",
+        ),
+        GlobalValueKind::Constant => (
             "is a constant bound at import time",
             "Every reader shares one value, and a caller cannot vary it without monkeypatching the module.",
             "Make it a parameter default of the function that reads it, or an attribute of the class that owns the work.",
         ),
-        _ => (
+        GlobalValueKind::Other => (
             "binds at import time",
             "Every reader shares one value, and a caller cannot vary it without monkeypatching the module.",
             "Make it an attribute of the class that owns the work.",

@@ -557,12 +557,10 @@ CATALOG = RuleCatalog([
          display_group="standard"),
     Rule("global-state", "fail", "style", "Both",
          "Any module-level variable assignment — mutable or constant, mutated "
-         "or not: values are a class's private internals. A mutable container "
-         "belongs as the owning class's attribute; a constant belongs as a "
-         "parameter default of the function that reads it or a class attribute; "
-         "a re-binding of another module's value keeps one home and imports it. "
-         "Exception: global services containers and framework-required globals "
-         "(`app = Flask(...)`, DI registries).",
+         "or not: values are a class's private internals. The finding names the "
+         "action for the value's kind — mutable container, constant, or "
+         "re-binding. Exception: global services containers and "
+         "framework-required globals (`app = Flask(...)`, DI registries).",
          display_group="standard"),
     Rule("unused", "warn", "style", "Python",
          "A function or class defined in production code that's never "
