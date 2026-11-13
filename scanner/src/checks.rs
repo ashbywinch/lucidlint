@@ -347,6 +347,58 @@ fn is_type_alias_value(name: &str, value: &Expr) -> bool {
 /// global services containers and framework-required globals (`app =
 /// Flask(...)`, DI registries) — a CALL-valued assignment is a service
 /// registration, not a domain value.
+/// The action the reader can take depends on what the binding IS: a mutable
+/// container, a constant, or a re-binding of another module's value. The AST
+/// already knows that, so the message names the case instead of offering a
+/// conditional menu.
+fn global_state_message(name: &str, value: Option<&Expr>) -> String {
+    let (opening, middle, action) = match value {
+        Some(
+            Expr::List(_)
+            | Expr::Dict(_)
+            | Expr::Set(_)
+            | Expr::ListComp(_)
+            | Expr::DictComp(_)
+            | Expr::SetComp(_),
+        ) => (
+            "is a mutable container bound at import time",
+            "Every reader shares the same object, and a caller cannot vary it without monkeypatching the module.",
+            "Make it an attribute of the class that owns the work.",
+        ),
+        Some(Expr::Name(_) | Expr::Attribute(_) | Expr::Subscript(_)) => (
+            "is bound to another value at import time",
+            "Every reader shares that binding, and a caller cannot vary it without monkeypatching the module.",
+            "Give that value one home and import it here; do not re-bind it.",
+        ),
+        Some(
+            Expr::StringLiteral(_)
+            | Expr::BytesLiteral(_)
+            | Expr::NumberLiteral(_)
+            | Expr::BooleanLiteral(_)
+            | Expr::NoneLiteral(_)
+            | Expr::EllipsisLiteral(_)
+            | Expr::FString(_)
+            | Expr::TString(_)
+            | Expr::Tuple(_)
+            | Expr::UnaryOp(_)
+            | Expr::BinOp(_)
+            | Expr::If(_)
+            | Expr::BoolOp(_)
+            | Expr::Compare(_),
+        ) => (
+            "is a constant bound at import time",
+            "Every reader shares one value, and a caller cannot vary it without monkeypatching the module.",
+            "Make it a parameter default of the function that reads it, or an attribute of the class that owns the work.",
+        ),
+        _ => (
+            "binds at import time",
+            "Every reader shares one value, and a caller cannot vary it without monkeypatching the module.",
+            "Make it an attribute of the class that owns the work.",
+        ),
+    };
+    format!("{name} {opening}. {middle} {action}")
+}
+
 pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: bool) {
     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
     if let Stmt::Global(g) = stmt {
@@ -372,7 +424,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
         let value: Option<&Expr> = match stmt {
             Stmt::Assign(a) => Some(a.value.as_ref()),
             Stmt::AnnAssign(a) => a.value.as_deref(),
-            Stmt::AugAssign(a) => Some(a.target.as_ref()),
+            Stmt::AugAssign(_) => None,
             _ => None,
         };
         let targets: Vec<&Expr> = match stmt {
@@ -395,16 +447,17 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
                 continue; // a name for a type, not a variable a caller varies
             }
             let line = stmt_line(state.source, stmt);
-            state.findings.push(Finding { logical_start: None, seam_members: Vec::new(),
-            col: 0,
-            file: state.file.to_string(),
-            line,
-            function: fn_name.clone(),
-            kind: "global-state".into(),
-            severity: "fail".into(),
-            message: format!(
-                "{name} binds at import time, so every reader shares one value and a caller cannot vary it without monkeypatching the module. If it is state a caller should vary, make it an attribute of the class that owns the work. If it is a constant the module's functions read, make it a parameter default of the function that reads it, or a class attribute. If another module spells the same value, the class that owns the work is its one home and the other module imports it."
-            ), });
+            state.findings.push(Finding {
+                logical_start: None,
+                seam_members: Vec::new(),
+                col: 0,
+                file: state.file.to_string(),
+                line,
+                function: fn_name.clone(),
+                kind: "global-state".into(),
+                severity: "fail".into(),
+                message: global_state_message(name, value),
+            });
         }
     }
 }
