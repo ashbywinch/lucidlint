@@ -5560,6 +5560,10 @@ mod tests {
             "{}",
             d[0].message
         );
+        assert!(d[0].message.contains("structural match"), "{}", d[0].message);
+        assert!(d[0].message.contains("generated from the other"), "{}", d[0].message);
+        assert!(d[0].message.contains("this is not a fork"), "{}", d[0].message);
+        assert!(!d[0].message.contains("— a fork:"), "{}", d[0].message);
     }
 
     #[test]
@@ -5639,7 +5643,7 @@ mod tests {
     #[test]
     fn duplicate_module_fires_without_constants_and_claims_none() {
         // Phase 6: the constants leave the gate — two near-identical modules
-        // with NO module-level constants are still a fork, and the message
+        // with NO module-level constants are still a structural match, and the message
         // makes no constants claim when there are none.
         let f = scan_corpus(&[
             (
@@ -5654,7 +5658,7 @@ mod tests {
         let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-module").collect();
         assert_eq!(d.len(), 1, "{f:?}");
         assert!(!d[0].message.contains("identical constants"), "{}", d[0].message);
-        assert!(d[0].message.contains("— a fork:"), "{}", d[0].message);
+        assert!(d[0].message.contains("structural match"), "{}", d[0].message);
     }
 
     #[test]
@@ -5697,7 +5701,7 @@ mod tests {
     #[test]
     fn duplicate_module_identical_records_in_two_modules_still_fire() {
         // the inverse: the same record written twice — same field, same
-        // shape — is still a copy, and its message still names it a fork
+        // shape — is still a structural match, and the message says so
         let f = scan_corpus(&[
             (
                 "dag/person.py",
@@ -5710,7 +5714,7 @@ mod tests {
         ]);
         let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-module").collect();
         assert_eq!(d.len(), 1, "{f:?}");
-        assert!(d[0].message.contains("a fork"), "{}", d[0].message);
+        assert!(d[0].message.contains("structural match"), "{}", d[0].message);
     }
 
     #[test]
