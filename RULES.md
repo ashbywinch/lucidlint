@@ -102,7 +102,7 @@ with a why).
 |---|---|---|---|
 | **complexity** | fail | Both | Cyclomatic complexity ≥ 15 (radon-equivalent rules: `if`/`elif` count, `match` arms minus wildcard, `&&`/`||`, ternary, loops, `assert!`, closures +0 walked) — Extract Function: `lucidlint fix --kind extract-method --file <F> --line <L>` previews the best self-contained seam (placeholder name — the extracted function is private by construction, so the fix underscores it); apply with `--name <N>` (the name IS the commitment — no `--confirm`). |
 | **long-param-list** | fail | Both | A function with > 5 parameters (receiver/`self` excluded) — introduce a parameter object. |
-| **large-function** | fail | Both | Function spans ≥ 120 lines — split it: one rule per function. |
+| **large-function** | fail | Both | Function spans ≥ 120 lines — the steps it performs are not named, so a reader cannot hold the whole job: extract each domain step into a named function. |
 | **closures → latent-class** | fail | Both | A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line span) — the nested structure is a class waiting to be extracted. |
 | **partition → latent-class** | fail | Python | The field-partition variant of latent-class: a class's methods partition its fields (each group touches a disjoint subset) — the class is really that many independent classes. |
 | **strewing → latent-class** | fail | Both | ≥3 free functions sharing the same leading parameter — they share data, they're a class. |
@@ -119,7 +119,7 @@ with a why).
 | **record-shape** | fail | Both | A signature or literal leaves a record unnamed: a bare dict/grab-bag, a dict of records, a fixed-size tuple (including a 2-tuple pair), or a list of records, plus a dict literal with constant keys. Type the shape as a class; a map whose values are the class that names them still asks for the collection class, except a parameter the function only reads: its content is already named, and no operation belongs to the collection. |
 | **detached-method** | **warn** | Both | A method that never touches its receiver — a classmethod should always use `cls`; a plain method should use `self` or move out — it doesn't use instance state; make it a `@staticmethod`/associated fn or move it out of the class. |
 | **duplicate** | **warn** | Both | Dice similarity ≥ 0.9 (structural skeleton bigrams) — copy-paste; extract the shared logic. |
-| **duplicate-module** | fail | Both | Two modules or classes with the same structural skeleton (>= 0.9 Dice) and identical constants — a fork: a fix lands in one copy while the other silently keeps the old behavior; reconcile the copies into one. |
+| **duplicate-module** | fail | Both | Two modules or classes with the same structural skeleton (>= 0.9 Dice) and the same declared fields — plus, for two classes, identical constants — a fork: a fix lands in one copy while the other silently keeps the old behavior; reconcile the copies into one. |
 | **static-husk** | **warn** | Python | A class with no state of its own (no `self.X =` anywhere, no dataclass fields, no properties) whose members are all staticmethods — a namespace wearing a domain noun: it presents an object's shape while owning nothing. |
 | **delegating-husk** | **warn** | Python | A class where every instance method's body is exactly `return F(<all params>)` with F a module-level function — an indirection layer with no behavior; callers could reach the functions directly (dissolve the husk — never inline). |
 | **process-class** | fail | Python | A top-level class whose name is a process noun (Builder, Validator, Importer, ...) — a verb wearing a noun: the work belongs on the domain objects it operates on; the four-part honesty test decides (fold, rename, or delete). |
@@ -188,15 +188,15 @@ with a why).
 | **loop-sequence → loop-pipeline** | **warn** | Both | A function with >=2 sequential (non-nested) loops — each is a pass that changes the function's state; combine the passes or extract each loop into a named step (a pipeline of comprehensions / combinators when the loops share or feed state). |
 | **loop-hoist → loop-pipeline** | **warn** | Both | A loop that mutates exactly one surviving name but whose body is > a couple of statements — the body computes more than it adds; hoist the per-item step into a named helper that returns the value, then combine or fold. |
 
-## Group 5: Hotspot & risk (graph-based)
+## Group 5: Hotspot & risk
 
-These rules require the optional `code-review-graph` tool (installed separately or via `pip install code-review-graph`). Without it they degrade silently.
+`hub-file`, `high-risk` and `over-abstraction` require the optional `code-review-graph` tool (installed separately or via `pip install code-review-graph`); `hotspot` uses git churn plus the scan's own CC, and `churn-untested` uses git churn plus the repo's coverage snapshot. Each rule degrades silently when its input is absent.
 | Rule | Severity | Language | What it checks |
 |---|---|---|---|
-| **hub-file** | fail | Graph | A file with ≥150 incoming or outgoing call/import edges — central module that may need splitting. |
+| **hub-file** | fail | Graph | A module that ≥15 other modules import or call into — the change blast radius. The count is distinct dependent files (tests excluded); a change here reaches every one of them, so narrow the interface it exposes to a domain noun, or split it by the dependent groups. |
 | **high-risk** | fail | Graph | A function with >10 callers, no test coverage, and/or a security-related name (`auth`, `login`, `token`, `sql`...). |
-| **hotspot** | fail | Graph | A file in the top N% by churn with a function at ≥15 CC — volatile code that needs refactoring. |
-| **churn-untested** | fail | Graph | A file in the top N% by churn with no test coverage — volatile and unverified. |
+| **hotspot** | fail | Both | A file in the top N% by churn with a function at ≥15 CC — volatile code that needs refactoring. |
+| **churn-untested** | fail | Both | A code file in the top N% by churn that the repo's coverage snapshot names with no covered line — volatile and unverified. A file the snapshot does not name is UNKNOWN, never flagged; a snapshot older than the repo's tests reports verify as a warning. |
 | **over-abstraction** | fail | Graph | An abstract base class (Python ABC) with exactly one concrete subclass — the abstraction doesn't earn its keep. |
 
 ## Group 6: Cross-cutting

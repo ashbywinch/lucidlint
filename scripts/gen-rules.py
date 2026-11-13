@@ -45,6 +45,10 @@ NON_LITERAL_KINDS = {
     "mutating-loop",
     "loop-sequence",
     "loop-hoist",
+    # churn-untested's severity is CONDITIONAL, not literal in the construction:
+    # fail when the repo's coverage snapshot is fresh, warn ("verify") when the
+    # snapshot predates the tests — R6 forbids a hard claim on stale data.
+    "churn-untested",
 }
 
 START = "<!-- RULES-GENERATED:START -->"

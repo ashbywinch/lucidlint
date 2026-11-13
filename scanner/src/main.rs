@@ -118,6 +118,10 @@ struct ScanState<'a> {
     parent_stack: Vec<ParentEntry<'a>>,
     /// Module-level function definitions (name, line) — non-test files.
     defs: Vec<(String, usize)>,
+    /// Every function/method span (name, first line, last line) — the
+    /// large-function rule's own evidence, computed from this file's AST so
+    /// the fact never depends on the optional graph contract.
+    fn_spans: Vec<(String, usize, usize)>,
     /// set_* methods and property setters (name, line) — repo-wide pass.
     setters: Vec<(String, usize)>,
     /// `self.<attr> = ...` sites in top-level classes — undeclared-
@@ -275,6 +279,11 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 let module_level = self.fn_stack.is_empty() && self.in_class == 0;
                 let was_fn = self.current_fn.take();
                 self.current_fn = Some((f.name.to_string(), line_of(self.source, f.range.start())));
+                self.fn_spans.push((
+                    f.name.to_string(),
+                    line_of(self.source, f.range.start()),
+                    line_of(self.source, f.range.end()),
+                ));
 
                 self.fn_stack.push(FnScope {
                     returned: returned_names(&f.body),
@@ -1319,6 +1328,29 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         fakefs_findings(&mut state, &body, source);
         no_assert_test_findings(&mut state, &body, source);
     }
+    // large-function: the span is a fact of THIS file's AST, computed here so
+    // the LSP and a graph-less CI run see it too (the graph contract only
+    // adds evidence about other files). Test files keep it out of the gate via
+    // the action layer's test-only filter, unless --include-tests is passed.
+    for (fn_name, start, end) in &state.fn_spans {
+        let span = end.saturating_sub(*start) + 1;
+        if span <= 120 {
+            continue;
+        }
+        state.findings.push(Finding {
+            logical_start: None,
+            seam_members: Vec::new(),
+            col: 0,
+            file: name.to_string(),
+            line: *start,
+            function: fn_name.clone(),
+            kind: "large-function".into(),
+            severity: "fail".into(),
+            message: format!(
+                "'{fn_name}' spans {span} lines (>= 120) — the steps it performs are not named, so a reader cannot hold the whole job: extract each domain step into a named function"
+            ),
+        });
+    }
     // duplicate candidates in ast.walk BFS order — module-level functions
     // (any depth) come before class methods regardless of source line;
     // skipped for a single buffer (repo-wide families need the whole repo)
@@ -2003,6 +2035,7 @@ fn main() {
     // flag parsing: --graph <json> --churn <json> --docs <root> --include-tests
     let mut graph_path: Option<String> = None;
     let mut churn_path: Option<String> = None;
+    let mut coverage_path: Option<String> = None;
     let mut docs_root: Option<String> = None;
     let mut gitignored_json: Option<String> = None;
     let mut root_override: Option<String> = None;
@@ -2018,6 +2051,10 @@ fn main() {
             "--churn" => {
                 i += 1;
                 churn_path = args.get(i).cloned();
+            }
+            "--coverage" => {
+                i += 1;
+                coverage_path = args.get(i).cloned();
             }
             "--docs" => {
                 i += 1;
@@ -2241,37 +2278,18 @@ fn main() {
     } else {
         None
     };
+    let rels: Vec<String> = paths.iter().map(|p| rel_of(p, &root)).collect();
     if let Some(c) = &contract {
         let repo_root = Path::new(&root);
-        let mut max_cc_by_file: std::collections::HashMap<String, (usize, usize, String)> =
-            std::collections::HashMap::new();
-        let mut cc_by_file: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        for e in &all_cc {
-            let rel = rel_of(&e.file, &root);
-            *cc_by_file.entry(rel.clone()).or_default() = (*cc_by_file.get(&rel).unwrap_or(&0)).max(e.cc);
-            let entry = max_cc_by_file
-                .entry(rel)
-                .or_insert((e.line, e.cc as usize, e.function.clone()));
-            if (e.cc as usize) > entry.1 {
-                *entry = (e.line, e.cc as usize, e.function.clone());
-            }
-        }
-        all_findings.extend(graph_families::large_function_findings(
-            repo_root,
-            c,
-            120,
-            include_tests,
-        ));
         all_findings.extend(graph_families::hub_file_findings(
             repo_root,
             c,
-            150,
+            &rels,
+            15,
             include_tests,
-            &max_cc_by_file,
         ));
         all_findings.extend(graph_families::high_risk_findings(repo_root, c, 0.8, include_tests));
         all_findings.extend(graph_families::cycle_findings(repo_root, c));
-        let rels: Vec<String> = paths.iter().map(|p| rel_of(p, &root)).collect();
         all_findings.extend(graph_families::layer_mix_findings(repo_root, c, &rels));
         all_findings.extend(graph_families::folder_mix_findings(repo_root, c));
         all_findings.extend(graph_families::module_cohesion_findings(repo_root, c, 150));
@@ -2302,16 +2320,15 @@ fn main() {
                     15,
                     &std::collections::HashMap::new(),
                 ));
-                // churn-untested: top-churn files with no coverage — needs the
-                // graph contract (TESTED_BY edges) alongside the churn map
-                if let Some(c) = &contract {
-                    all_findings.extend(graph_families::churn_untested_findings(
-                        Path::new(&root),
-                        &churn,
-                        c,
-                        0.1,
-                    ));
-                }
+                // churn-untested: the repo's OWN coverage snapshot decides
+                // (coverage.xml / .coverage, R6) — never the graph's TESTED_BY
+                // approximation, which misses body imports and cannot speak
+                // for Rust at all
+                let coverage = coverage_path
+                    .as_deref()
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .and_then(|s| serde_json::from_str::<graph_families::CoverageSnapshot>(&s).ok());
+                all_findings.extend(graph_families::churn_untested_findings(&churn, coverage.as_ref(), 0.1));
             }
         }
     }
@@ -5191,6 +5208,18 @@ mod tests {
     }
 
     #[test]
+    fn why_less_marker_does_not_exempt_the_finding() {
+        // R18: an exemption applies only with a why. A why-less marker is
+        // reported as its own finding and does NOT suppress the signal it
+        // names — the marker's message says exactly that, so honoring it
+        // silently would contradict the report.
+        let src = "def f():\n    try:\n        g()\n    except Exception:  # lucidlint: ignore swallow\n        pass\n";
+        let f = scan_src(src);
+        assert!(f.iter().any(|x| x.kind == "suppression"), "{f:?}");
+        assert!(f.iter().any(|x| x.kind == "swallow"), "{f:?}");
+    }
+
+    #[test]
     fn why_less_comma_suppression_reports_each_signal() {
         // `ignore sig1,sig2` without a why: BOTH signals need a reason
         let f = scan_src(include_str!(
@@ -5626,6 +5655,62 @@ mod tests {
         assert_eq!(d.len(), 1, "{f:?}");
         assert!(!d[0].message.contains("identical constants"), "{}", d[0].message);
         assert!(d[0].message.contains("— a fork:"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn duplicate_module_record_siblings_with_different_fields_stay_silent() {
+        // #73: two one-record modules are 100% similar by structure because a
+        // field NAME is an "N" token — the skeleton cannot tell `name: str`
+        // from `address: str`. A record's declared fields ARE its facts:
+        // different fields mean two different records, with no shared
+        // behaviour to fork.
+        let f = scan_corpus(&[
+            (
+                "houses/nodes/commute_card_person.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_record_siblings_differing_fields__01.py"),
+            ),
+            (
+                "houses/nodes/commute_card_destination.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_record_siblings_differing_fields__02.py"),
+            ),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "duplicate-module"), "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_module_record_siblings_with_different_init_fields_stay_silent() {
+        // the same rule for a record written as a plain class: the fields are
+        // its `self.<name> = ...` assignments, so they must be compared too
+        let f = scan_corpus(&[
+            (
+                "houses/nodes/center.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_record_siblings_differing_init_fields__01.py"),
+            ),
+            (
+                "houses/nodes/radius.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_record_siblings_differing_init_fields__02.py"),
+            ),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "duplicate-module"), "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_module_identical_records_in_two_modules_still_fire() {
+        // the inverse: the same record written twice — same field, same
+        // shape — is still a copy, and its message still names it a fork
+        let f = scan_corpus(&[
+            (
+                "dag/person.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_identical_records_fire__01.py"),
+            ),
+            (
+                "houses/person.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_identical_records_fire__02.py"),
+            ),
+        ]);
+        let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-module").collect();
+        assert_eq!(d.len(), 1, "{f:?}");
+        assert!(d[0].message.contains("a fork"), "{}", d[0].message);
     }
 
     #[test]
@@ -6633,6 +6718,32 @@ mod tests {
             "../../tests/fixtures/rust/special_case_repeated_none_checks__02.py"
         ));
         assert!(!ok.iter().any(|x| x.kind == "special-case"));
+    }
+
+    #[test]
+    fn special_case_nested_function_checks_are_not_added_to_the_parent() {
+        // the reviewer's question: a nested def INSIDE an if body — the outer
+        // counter walks if bodies but must stop at the def, and the scope walk
+        // counts the inner checks once. 2 + 2 is not "4 repeated checks".
+        let src = "def outer(x):\n    if x is None:\n        return 1\n    if x is None:\n        return 2\n    if x:\n        def inner(y):\n            if y is None:\n                return 3\n            if y is None:\n                return 4\n            return 5\n        return inner(x)\n    return 0\n";
+        let f = scan_src(src);
+        assert!(!f.iter().any(|x| x.kind == "special-case"), "{f:?}");
+    }
+
+    #[test]
+    fn special_case_counts_within_one_function_only() {
+        // the same local name in two functions is two unrelated values: two
+        // checks in each is not "3 repeated checks on one value" (a file-wide
+        // count fired on common names like `found` and `callee`)
+        let split = "def a(x):\n    if x is None:\n        return 1\n    if x is None:\n        return 2\n    return 3\n\ndef b(x):\n    if x is None:\n        return 1\n    if x is None:\n        return 2\n    return 3\n";
+        let f = scan_src(split);
+        assert!(!f.iter().any(|x| x.kind == "special-case"), "{f:?}");
+        // three checks on ONE value in one function still fires
+        let repeated = "def a(x):\n    if x is None:\n        return 1\n    if x is None:\n        return 2\n    if x is None:\n        return 3\n    return 4\n";
+        let hit = scan_src(repeated);
+        assert!(hit
+            .iter()
+            .any(|x| x.kind == "special-case" && x.message.contains("3 repeated")));
     }
 
     #[test]

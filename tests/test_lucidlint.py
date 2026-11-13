@@ -240,6 +240,91 @@ def test_coverage_context_staleness(tmp_path):
     assert "snapshot older" in cc.stale_note
 
 
+def test_coverage_context_compares_the_snapshot_the_loader_read(tmp_path):
+    """A repo gated on coverage.xml (CI) must get the staleness verdict from
+    coverage.xml — comparing `.coverage` either invents staleness or hides it."""
+    repo = make_repo(tmp_path)
+    (repo / "coverage.xml").write_text("<coverage/>")
+    now = 1_800_000_000.0
+    test = repo / "tests" / "unit" / "test_app.py"
+    os_utime = __import__("os").utime
+    os_utime(repo / "coverage.xml", (now, now))
+    os_utime(test, (now + 1000, now + 1000))
+    cc = ch._coverage_context(repo, {"houses/app.py": {1}}, "coverage.xml")
+    assert cc.graph_preferred is True
+
+
+def test_prepare_hands_the_repo_coverage_snapshot_to_the_core(tmp_path):
+    """R6: the core decides "unverified" from the repo's OWN snapshot — the
+    prepare step passes which files it names and which lines it saw executed."""
+    repo = make_repo(tmp_path)
+    snapshot = ch._CoverageInput(
+        ch.CoverageResult({"houses/app.py": {1, 3}, "scripts/oneoff.py": set()}, "coverage.xml"),
+        False,
+    )
+    ch.RUST_SCAN.prepare(repo, None, False, Counter(), snapshot)
+    path = ch.RUST_SCAN._pending_coverage
+    assert path is not None
+    assert json.loads(path.read_text()) == {
+        "source": "coverage.xml",
+        "stale": False,
+        "covered": {"houses/app.py": [1, 3], "scripts/oneoff.py": []},
+    }
+
+
+def test_prepare_without_a_snapshot_writes_no_coverage_input(tmp_path):
+    """No snapshot = no claim: the core gets no coverage file at all, never an
+    empty one it could read as "nothing is covered" (R6)."""
+    repo = make_repo(tmp_path)
+    ch.RUST_SCAN.prepare(repo, None, False, Counter(), ch._CoverageInput(ch.CoverageResult(None, ""), False))
+    assert ch.RUST_SCAN._pending_coverage is None
+
+
+def test_large_function_fires_without_the_graph(tmp_path, capsys):
+    """The span is a fact of the file's own AST — CI (no graph DB) and the
+    LSP's per-file mode must see a 130-line function, not only a machine with
+    code-review-graph installed."""
+    repo = make_repo(tmp_path, app_src="def big():\n" + "    x = 1\n" * 130 + "    return x\n")
+    rc = run_main(repo)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "large-function" in out
+    assert "'big' spans 132 lines (>= 120)" in out
+    # the per-file path (what the editor shows) sees it too
+    rc = run_main(repo, "--file", "houses/app.py")
+    assert "large-function" in capsys.readouterr().out
+
+
+def test_large_function_is_not_claimed_for_a_test_file_without_include_tests(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    (repo / "tests" / "unit" / "test_big.py").write_text(
+        "def test_big():\n" + "    x = 1\n" * 130 + "    assert x\n"
+    )
+    run_main(repo, "--file", "tests/unit/test_big.py")
+    assert "large-function" not in capsys.readouterr().out
+    run_main(repo, "--file", "tests/unit/test_big.py", "--include-tests")
+    assert "large-function" in capsys.readouterr().out
+
+
+def test_churn_untested_reads_the_snapshot_not_the_graph(tmp_path, capsys):
+    """End to end: a churny file the snapshot names with no covered line fails;
+    the same file once covered passes. The docs in the same repo never fire."""
+    repo = materialize_test_repo(tmp_path)
+    (repo / "coverage.xml").write_text(
+        '<coverage><class filename="houses/app.py"><line hits="0" number="1"/></class></coverage>'
+    )
+    run_main(repo)
+    out = capsys.readouterr().out
+    assert "churn-untested" in out
+    assert "houses/app.py" in out
+    assert "AGENTS.md" not in out and "README.md" not in out
+    (repo / "coverage.xml").write_text(
+        '<coverage><class filename="houses/app.py"><line hits="1" number="1"/></class></coverage>'
+    )
+    run_main(repo)
+    assert "churn-untested" not in capsys.readouterr().out
+
+
 # --------------------------------------------------------------------------- git gathering edges
 def test_file_history_parser_edges(tmp_path):
     # fixture: houses/app.py touched in c1+c2 (churn 2), Makefile never
@@ -500,7 +585,7 @@ def test_unmapped_finding_files_are_reported_not_swallowed(tmp_path, capsys):
     scan = ch._RustScan()
     scan._binary_cache[repo] = script
     files = [ch.SourceFile(py=repo / "pkg" / "a.py", rel="pkg/a.py")]
-    scan.load_with(repo, files, ch._ScanFlags(None, None, False, None, ()))
+    scan.load_with(repo, files, ch._ScanFlags(graph=None, churn_json=None, include_tests=False))
     err = capsys.readouterr().err
     assert "a.py" in err and "dropped" in err
 
@@ -637,6 +722,38 @@ def test_file_mode_single_file(tmp_path, capsys):
     assert "houses/app.py" in out  # the requested file renders with its finding
     assert "scripts/oneoff.py" not in out  # only the one file is scanned
     assert "GATE" in out
+
+
+def test_full_report_ends_with_the_feedback_request(tmp_path, capsys):
+    """The reader is the only source of a suggestion that would make code
+    worse: every full report closes by inviting an issue, and an agent files
+    it only with the user's permission."""
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "feedback:" in out
+    assert "github.com/ashbywinch/lucidlint/issues" in out
+    assert out.rstrip().endswith("agents: file that issue only with your user's permission")
+
+
+def test_clean_report_still_ends_with_the_feedback_request(tmp_path, capsys):
+    """The GATE: PASS early return is still a full run — the ask belongs on
+    it too (a clean repo is exactly where a bad suggestion goes unnoticed)."""
+    repo = make_repo(tmp_path, app_src="")
+    run_main(repo)
+    out = capsys.readouterr().out
+    assert "GATE: PASS — clean, no actions" in out
+    assert out.rstrip().endswith("agents: file that issue only with your user's permission")
+
+
+def test_per_file_and_json_runs_omit_the_feedback_request(tmp_path, capsys):
+    """Per-file runs are the LSP's on-type path (the ask would reprint on
+    every edit), and --json stdout is a machine document."""
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
+    run_main(repo, "--file", "houses/app.py")
+    assert "github.com/ashbywinch/lucidlint/issues" not in capsys.readouterr().out
+    run_main(repo, "--warn", "--json")
+    assert json.loads(capsys.readouterr().out)["actions"]  # stdout still parses
 
 
 def test_update_baseline_requires_path(tmp_path):

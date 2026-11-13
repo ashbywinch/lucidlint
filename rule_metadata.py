@@ -51,10 +51,12 @@ GROUP_INFO = {
         "to hand-apply.*",
     ),
     "graph": (
-        "Group 5: Hotspot & risk (graph-based)",
-        "These rules require the optional `code-review-graph` tool (installed "
-        "separately or via `pip install code-review-graph`). Without it they "
-        "degrade silently.",
+        "Group 5: Hotspot & risk",
+        "`hub-file`, `high-risk` and `over-abstraction` require the optional "
+        "`code-review-graph` tool (installed separately or via `pip install "
+        "code-review-graph`); `hotspot` uses git churn plus the scan's own CC, "
+        "and `churn-untested` uses git churn plus the repo's coverage snapshot. "
+        "Each rule degrades silently when its input is absent.",
     ),
     "cross-cutting": ("Group 6: Cross-cutting", None),
 }
@@ -354,7 +356,9 @@ CATALOG = RuleCatalog([
          "a parameter object.",
          fix="long-param-list"),
     Rule("large-function", "fail", "architecture", "Both",
-         "Function spans ≥ 120 lines — split it: one rule per function.",
+         "Function spans ≥ 120 lines — the steps it performs are not named, so "
+         "a reader cannot hold the whole job: extract each domain step into a "
+         "named function.",
          fix="extract-method"),
     Rule("closures", "fail", "architecture", "Both",
          "A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line "
@@ -454,9 +458,10 @@ CATALOG = RuleCatalog([
          display_group="standard"),
     Rule("duplicate-module", "fail", "architecture", "Both",
          "Two modules or classes with the same structural skeleton (>= 0.9 "
-         "Dice) and identical constants — a fork: a fix lands in one copy "
-         "while the other silently keeps the old behavior; reconcile the "
-         "copies into one."),
+         "Dice) and the same declared fields — plus, for two classes, "
+         "identical constants — a fork: a fix lands in one copy while the "
+         "other silently keeps the old behavior; reconcile the copies into "
+         "one."),
     Rule("static-husk", "warn", "architecture", "Python",
          "A class with no state of its own (no `self.X =` anywhere, no "
          "dataclass fields, no properties) whose members are all "
@@ -694,17 +699,22 @@ CATALOG = RuleCatalog([
          fix="loop-hoist"),
     # ---- graph-based (require code-review-graph)
     Rule("hub-file", "fail", "graph", "Graph",
-         "A file with ≥150 incoming or outgoing call/import edges — central "
-         "module that may need splitting."),
+         "A module that ≥15 other modules import or call into — the change "
+         "blast radius. The count is distinct dependent files (tests "
+         "excluded); a change here reaches every one of them, so narrow the "
+         "interface it exposes to a domain noun, or split it by the dependent "
+         "groups."),
     Rule("high-risk", "fail", "graph", "Graph",
          "A function with >10 callers, no test coverage, and/or a "
          "security-related name (`auth`, `login`, `token`, `sql`...)."),
-    Rule("hotspot", "fail", "graph", "Graph",
+    Rule("hotspot", "fail", "graph", "Both",
          "A file in the top N% by churn with a function at ≥15 CC — volatile "
          "code that needs refactoring."),
-    Rule("churn-untested", "fail", "graph", "Graph",
-         "A file in the top N% by churn with no test coverage — volatile and "
-         "unverified."),
+    Rule("churn-untested", "fail", "graph", "Both",
+         "A code file in the top N% by churn that the repo's coverage snapshot "
+         "names with no covered line — volatile and unverified. A file the "
+         "snapshot does not name is UNKNOWN, never flagged; a snapshot older "
+         "than the repo's tests reports verify as a warning."),
     Rule("over-abstraction", "fail", "graph", "Graph",
          "An abstract base class (Python ABC) with exactly one concrete "
          "subclass — the abstraction doesn't earn its keep.",
