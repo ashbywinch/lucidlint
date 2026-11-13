@@ -454,9 +454,10 @@ CATALOG = RuleCatalog([
          display_group="standard"),
     Rule("duplicate-module", "fail", "architecture", "Both",
          "Two modules or classes with the same structural skeleton (>= 0.9 "
-         "Dice) and identical constants — a fork: a fix lands in one copy "
-         "while the other silently keeps the old behavior; reconcile the "
-         "copies into one."),
+         "Dice) and the same declared fields — plus, for two classes, "
+         "identical constants — a fork: a fix lands in one copy while the "
+         "other silently keeps the old behavior; reconcile the copies into "
+         "one."),
     Rule("static-husk", "warn", "architecture", "Python",
          "A class with no state of its own (no `self.X =` anywhere, no "
          "dataclass fields, no properties) whose members are all "
