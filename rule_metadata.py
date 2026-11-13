@@ -459,9 +459,10 @@ CATALOG = RuleCatalog([
     Rule("duplicate-module", "fail", "architecture", "Both",
          "Two modules or classes with the same structural skeleton (>= 0.9 "
          "Dice) and the same declared fields — plus, for two classes, "
-         "identical constants — a fork: a fix lands in one copy while the "
-         "other silently keeps the old behavior; reconcile the copies into "
-         "one."),
+         "identical constants — a structural match: a fix can land in one "
+         "copy and miss the other; reconcile the copies into one. A copy "
+         "generated from the other and pinned by a check that fails when they "
+         "diverge is not a fork; the finding does not apply."),
     Rule("static-husk", "warn", "architecture", "Python",
          "A class with no state of its own (no `self.X =` anywhere, no "
          "dataclass fields, no properties) whose members are all "
@@ -562,10 +563,10 @@ CATALOG = RuleCatalog([
          display_group="standard"),
     Rule("global-state", "fail", "style", "Both",
          "Any module-level variable assignment — mutable or constant, mutated "
-         "or not: values are a class's private internals, the variable "
-         "belongs as that class's attribute/member. Exception: global "
-         "services containers and framework-required globals (`app = "
-         "Flask(...)`, DI registries).",
+         "or not: values are a class's private internals. The finding names the "
+         "action for the value's kind — mutable container, constant, or "
+         "re-binding. Exception: global services containers and "
+         "framework-required globals (`app = Flask(...)`, DI registries).",
          display_group="standard"),
     Rule("unused", "warn", "style", "Python",
          "A function or class defined in production code that's never "
