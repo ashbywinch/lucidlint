@@ -108,6 +108,9 @@ persistent_comment = true
 # table comment is never published (pr_code_suggestions.py:139 at the pinned
 # v0.48). Posting failures degrade to verified one-line comments, never a table.
 commitable_code_suggestions = true
+# No suggestions is not a comment: an empty "No code suggestions found" note
+# is pure noise beside the inline threads.
+publish_output_no_suggestions = false
 
 [github_action_config]
 handle_push_trigger = true
