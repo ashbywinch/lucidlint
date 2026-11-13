@@ -3055,21 +3055,34 @@ mod tests {
         ));
         let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
         assert_eq!(gs.len(), 2);
-        // the message names the mechanism (import-time binding) and gives the
-        // reader the decision: state -> the owning class, constant -> keep it
-        // here with its meaning, duplicated vocabulary -> one home
+        // The message names the mechanism (import-time binding, every reader
+        // shares one value) and gives an action for each case: state -> an
+        // attribute of the owning class, constant -> a parameter default of
+        // the function that reads it, duplicated vocabulary -> one home.
+        // #79: the old message said "keep it here" for a constant the
+        // module's own functions read — an exemption the rule does not have,
+        // so following it never cleared the finding and led to a suppression
+        // wall. The message must not offer a shape the rule still fails.
         for g in &gs {
             assert!(
-                g.message.contains("binds at import time and every reader shares it"),
+                g.message
+                    .contains("binds at import time, so every reader shares one value"),
                 "{}",
                 g.message
             );
             assert!(
-                g.message.contains("give it to the class that owns the work"),
+                g.message.contains("attribute of the class that owns the work"),
                 "{}",
                 g.message
             );
-            assert!(g.message.contains("give the value one home"), "{}", g.message);
+            assert!(
+                g.message.contains("parameter default of the function that reads it"),
+                "{}",
+                g.message
+            );
+            assert!(g.message.contains("one home"), "{}", g.message);
+            assert!(!g.message.contains("keep it here"), "{}", g.message);
+            assert!(!g.message.contains("say what it measures"), "{}", g.message);
         }
     }
 

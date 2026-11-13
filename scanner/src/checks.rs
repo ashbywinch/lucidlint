@@ -403,7 +403,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
             kind: "global-state".into(),
             severity: "fail".into(),
             message: format!(
-                "{name} binds at import time and every reader shares it. If it is state a caller should be able to vary, give it to the class that owns the work; if it is a constant the module's own functions read, keep it here and say what it measures — a class invented to hold one number is ceremony. If another module spells the same value, give the value one home and import it: two spellings drift."
+                "{name} binds at import time, so every reader shares one value and a caller cannot vary it without monkeypatching the module. If it is state a caller should vary, make it an attribute of the class that owns the work. If it is a constant the module's functions read, make it a parameter default of the function that reads it, or a class attribute. If another module spells the same value, the class that owns the work is its one home and the other module imports it."
             ), });
         }
     }

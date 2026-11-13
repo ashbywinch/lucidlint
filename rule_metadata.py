@@ -557,9 +557,10 @@ CATALOG = RuleCatalog([
          display_group="standard"),
     Rule("global-state", "fail", "style", "Both",
          "Any module-level variable assignment — mutable or constant, mutated "
-         "or not: values are a class's private internals, the variable "
-         "belongs as that class's attribute/member. Exception: global "
-         "services containers and framework-required globals (`app = "
+         "or not: values are a class's private internals, so the variable "
+         "belongs as that class's attribute/member, or as a parameter default "
+         "of the function that reads it when it is a constant. Exception: "
+         "global services containers and framework-required globals (`app = "
          "Flask(...)`, DI registries).",
          display_group="standard"),
     Rule("unused", "warn", "style", "Python",
