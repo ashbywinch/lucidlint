@@ -216,12 +216,14 @@ The body must state:
   it without the diff; define the rule's terms there, and give one concrete
   example of the behaviour. Keep it to three short paragraphs at most.
 - `Closes #N` only when the fix fully resolves it; `Refs #N` otherwise.
-- After the summary: the issue's claims with the `TRUE` / `FALSE` /
-  `UNVERIFIABLE` verdicts and citations.
-- What the reporter got right, and what the correct change is if it differs.
-- The measurement, or "message-only; no detector change".
-- The tests that pin the fix and the inverse case.
+- What changed, then the verification: the measurement, or "message-only; no
+  detector change"; the tests that pin the fix and the inverse case.
 - Residuals: what this does not fix and what it exposes next.
+
+Do not put the claim-by-claim `TRUE` / `FALSE` / `UNVERIFIABLE` verdicts, or a
+"what the reporter got wrong" section, in the PR. The PR is the customer's
+description of the change; the verification stays in the run output and the
+plan doc (when there is one).
 
 ### Wait for the PR to be green
 
@@ -243,10 +245,24 @@ finding. Do not leave the PR red or with unaddressed comments.
    change in one pass. Return to step 1.
 5. Stop when every check passes and the remaining comments are stylistic,
    pre-existing, or config self-reviews. Then add `nightly-triaged` and
-   `nightly-fix` to the issue and comment the verdict summary.
+   `nightly-fix` to the issue and post the customer-facing comment below.
 6. Never merge, approve, force-push, or resolve a thread. If a check fails for
    a reason you cannot attribute to the change, leave the PR open, comment the
    failure on the PR, and do not label the issue as fixed.
+
+### Comment on the issue
+
+After the PR is green, write one concise comment in the customer's language:
+
+- confirm the harm you reproduced;
+- if a diagnosis or claim was wrong, correct it politely and say what happens
+  instead, with the documented referent if there is one;
+- link the PR;
+- keep it short. Do not paste the claim verdicts, file/line tables, or "the
+  reporter was wrong" language.
+
+The claim-by-claim verification is for the run output and the plan doc; the
+issue comment is for the customer.
 
 Never close the issue; the merged PR does that.
 
