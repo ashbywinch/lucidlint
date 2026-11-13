@@ -23,6 +23,9 @@ pub struct GNode {
     pub qualified_name: String,
     pub file_path: String,
     pub line_start: Option<i64>,
+    /// The node's last line — part of the contract's wire shape; no family
+    /// reads it today (large-function moved to the per-file scan).
+    #[allow(dead_code)]
     pub line_end: Option<i64>,
     pub community_id: Option<i64>,
 }
@@ -43,165 +46,6 @@ pub struct GraphContract {
     #[serde(default)]
     pub communities: HashMap<String, String>,
 }
-
-pub const BUILTIN_NAMES: &[&str] = &[
-    "ArithmeticError",
-    "AssertionError",
-    "AttributeError",
-    "BaseException",
-    "BaseExceptionGroup",
-    "BlockingIOError",
-    "BrokenPipeError",
-    "BufferError",
-    "BytesWarning",
-    "ChildProcessError",
-    "ConnectionAbortedError",
-    "ConnectionError",
-    "ConnectionRefusedError",
-    "ConnectionResetError",
-    "DeprecationWarning",
-    "EOFError",
-    "Ellipsis",
-    "EncodingWarning",
-    "EnvironmentError",
-    "Exception",
-    "False",
-    "FileExistsError",
-    "FileNotFoundError",
-    "FloatingPointError",
-    "FutureWarning",
-    "GeneratorExit",
-    "IOError",
-    "ImportError",
-    "ImportWarning",
-    "IndentationError",
-    "IndexError",
-    "InterruptedError",
-    "IsADirectoryError",
-    "KeyError",
-    "KeyboardInterrupt",
-    "LookupError",
-    "MemoryError",
-    "ModuleNotFoundError",
-    "NameError",
-    "None",
-    "NotADirectoryError",
-    "NotImplemented",
-    "NotImplementedError",
-    "OSError",
-    "OverflowError",
-    "PendingDeprecationWarning",
-    "PermissionError",
-    "ProcessLookupError",
-    "RecursionError",
-    "ReferenceError",
-    "ResourceWarning",
-    "RuntimeError",
-    "RuntimeWarning",
-    "StopAsyncIteration",
-    "StopIteration",
-    "SyntaxError",
-    "SyntaxWarning",
-    "SystemError",
-    "SystemExit",
-    "TabError",
-    "TimeoutError",
-    "True",
-    "TypeError",
-    "UnboundLocalError",
-    "UnicodeDecodeError",
-    "UnicodeEncodeError",
-    "UnicodeError",
-    "UnicodeTranslateError",
-    "UnicodeWarning",
-    "UserWarning",
-    "ValueError",
-    "Warning",
-    "ZeroDivisionError",
-    "__build_class__",
-    "__debug__",
-    "__doc__",
-    "__import__",
-    "__loader__",
-    "__name__",
-    "__package__",
-    "__spec__",
-    "abs",
-    "aiter",
-    "all",
-    "anext",
-    "any",
-    "ascii",
-    "bin",
-    "bool",
-    "breakpoint",
-    "bytearray",
-    "bytes",
-    "callable",
-    "chr",
-    "classmethod",
-    "compile",
-    "complex",
-    "copyright",
-    "credits",
-    "delattr",
-    "dict",
-    "dir",
-    "divmod",
-    "enumerate",
-    "eval",
-    "exec",
-    "exit",
-    "filter",
-    "float",
-    "format",
-    "frozenset",
-    "getattr",
-    "globals",
-    "hasattr",
-    "hash",
-    "help",
-    "hex",
-    "id",
-    "input",
-    "int",
-    "isinstance",
-    "issubclass",
-    "iter",
-    "len",
-    "license",
-    "list",
-    "locals",
-    "map",
-    "max",
-    "memoryview",
-    "min",
-    "next",
-    "object",
-    "oct",
-    "open",
-    "ord",
-    "pow",
-    "print",
-    "property",
-    "quit",
-    "range",
-    "repr",
-    "reversed",
-    "round",
-    "set",
-    "setattr",
-    "slice",
-    "sorted",
-    "staticmethod",
-    "str",
-    "sum",
-    "super",
-    "tuple",
-    "type",
-    "vars",
-    "zip",
-];
 
 /// First two directory segments inside the repo root — `_module_key`.
 fn module_key(repo: &Path, file_path: &str) -> String {
@@ -381,117 +225,118 @@ fn repo_rel(repo: &Path, path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-/// Large functions: node span >= threshold — `_large_function_actions`.
-pub fn large_function_findings(
-    repo: &Path,
-    contract: &GraphContract,
-    max_lines: usize,
-    include_tests: bool,
-) -> Vec<Finding> {
-    let mut out = Vec::new();
-    for n in &contract.nodes {
-        if !matches!(n.kind.as_str(), "Function" | "Method") {
-            continue;
-        }
-        // The kind filter above excludes Test — the !include_tests Test gate
-        // was unreachable; removed.
-        if !n.file_path.ends_with(".py") {
-            continue;
-        }
-        let (Some(ls), Some(le)) = (n.line_start, n.line_end) else {
-            continue;
-        };
-        let span = le - ls + 1;
-        // span > max_lines fires (le-ls >= max_lines is the same boundary —
-        // the span variable keeps the message and the check on one number)
-        if span <= max_lines as i64 {
-            continue;
-        }
-        let rel = repo_rel(repo, &n.file_path);
-        if !include_tests && is_test_rel(&rel) {
-            continue;
-        }
-        out.push(Finding { logical_start: None, seam_members: Vec::new(), file: rel, line: ls as usize, col: 0, function: n.name.clone(), kind: "large-function".into(), severity: "fail".into(), message: format!("function spans {span} lines (>= {max_lines}) — Extract Function: split it into small named functions, one job each") });
-    }
-    out
-}
-
 fn is_test_rel(rel: &str) -> bool {
     rel.contains("/test") || rel.starts_with("test")
 }
 
-/// Per-file coupling edge counts — `_hub_edge_counts` (builtin CALLS
-/// skipped).
+/// Per-file dependent modules: the OTHER files that import this file or call
+/// into a symbol it declares. This is coupling (fan-in), not call-site volume
+/// — the harm a hub carries is that a change here reaches every dependent.
 impl GraphContract {
-    fn hub_edge_counts(&self) -> HashMap<String, usize> {
-        let mut counts: HashMap<String, usize> = HashMap::new();
+    fn dependent_modules(
+        &self,
+        repo: &Path,
+        rels: &HashSet<String>,
+        include_tests: bool,
+    ) -> HashMap<String, HashSet<String>> {
+        let node_file: HashMap<&str, String> = self
+            .nodes
+            .iter()
+            .map(|n| (n.qualified_name.as_str(), repo_rel(repo, &n.file_path)))
+            .collect();
+        let mut dependents: HashMap<String, HashSet<String>> = HashMap::new();
         for e in &self.edges {
             if !matches!(e.kind.as_str(), "CALLS" | "IMPORTS_FROM" | "INHERITS" | "REFERENCES") {
                 continue;
             }
-            if !e.file_path.ends_with(".py") {
+            let source = repo_rel(repo, &e.file_path);
+            if !rels.contains(&source) {
+                continue; // a vendored/ignored copy is not a dependent
+            }
+            let target = if e.kind == "IMPORTS_FROM" {
+                if let Some(t) = node_file.get(e.target.as_str()) {
+                    t.clone()
+                } else if Path::new(&e.target).starts_with(repo) {
+                    // a local module import names the file it imports
+                    repo_rel(repo, &e.target)
+                } else {
+                    continue; // an external package (libcst, pathlib) has no file here
+                }
+            } else {
+                match node_file.get(e.target.as_str()) {
+                    Some(t) => t.clone(),
+                    None => continue, // unresolved target (builtin or external)
+                }
+            };
+            if target == source || !rels.contains(&target) {
                 continue;
             }
-            if e.kind == "CALLS" && BUILTIN_NAMES.contains(&base_name(&e.target)) {
+            if target.ends_with("__init__.py") {
+                continue; // a package facade IS the interface, not a seam to split
+            }
+            if is_test_rel(&target) {
+                continue; // tests are not a production module others depend on
+            }
+            if !include_tests && is_test_rel(&source) {
                 continue;
             }
-            *counts.entry(e.file_path.clone()).or_default() += 1;
+            dependents.entry(target).or_default().insert(source);
         }
-        counts
+        dependents
     }
 }
 
-/// Hub files: heavy coupling — `_hub_file_actions`.
+/// Hub files: modules many other modules depend on — the change blast radius.
+/// The count is DISTINCT dependent files (imports + resolved calls), so a
+/// large cohesive leaf module nobody imports is not a hub, while a small
+/// module every module imports is. Tests and package facades are excluded.
 pub fn hub_file_findings(
     repo: &Path,
     contract: &GraphContract,
-    max_edges: usize,
+    rels: &[String],
+    min_dependents: usize,
     include_tests: bool,
-    max_cc_by_file: &HashMap<String, (usize, usize, String)>, // rel -> (line, cc, name) of the fattest
 ) -> Vec<Finding> {
-    let counts = contract.hub_edge_counts();
-    let mut out = Vec::new();
-    let mut entries: Vec<(&String, &usize)> = counts.iter().collect();
-    entries.sort_by_key(|(f, c)| (*c, (*f).clone()));
+    let rel_set: HashSet<String> = rels.iter().cloned().collect();
+    let dependents = contract.dependent_modules(repo, &rel_set, include_tests);
+    let mut entries: Vec<(&String, &HashSet<String>)> = dependents.iter().collect();
+    entries.sort_by_key(|(f, d)| (d.len(), (*f).clone()));
     entries.reverse();
-    for (file_path, edge_count) in entries {
-        if *edge_count < max_edges {
-            continue;
-        }
-        let rel = repo_rel(repo, file_path);
-        if !include_tests && is_test_rel(&rel) {
+    let mut out = Vec::new();
+    for (rel, modules) in entries {
+        if modules.len() < min_dependents {
             continue;
         }
         let first = contract
             .nodes
             .iter()
-            .filter(|n| n.file_path == *file_path && matches!(n.kind.as_str(), "Function" | "Method"))
+            .filter(|n| repo_rel(repo, &n.file_path) == *rel)
+            .filter(|n| matches!(n.kind.as_str(), "Function" | "Method"))
             .filter_map(|n| n.line_start)
             .min()
             .unwrap_or(1);
-        let (anchor, mut message) = match max_cc_by_file.get(&rel) {
-            Some((line, cc, name)) => (
-                *line,
-                format!("{edge_count} call/import edges (>= {max_edges}) fattest: {name}:{line} (CC {cc})"),
-            ),
-            None => (
-                first as usize,
-                format!("{edge_count} call/import edges (>= {max_edges})"),
-            ),
+        let mut names: Vec<&String> = modules.iter().collect();
+        names.sort();
+        let shown: Vec<&str> = names.iter().take(4).map(|s| s.as_str()).collect();
+        let more = if names.len() > shown.len() {
+            format!(", and {} more", names.len() - shown.len())
+        } else {
+            String::new()
         };
-        if message.is_empty() {
-            message = format!("{edge_count} call/import edges (>= {max_edges})");
-        }
         out.push(Finding {
             logical_start: None,
             seam_members: Vec::new(),
             col: 0,
-            file: rel,
-            line: anchor,
+            file: rel.clone(),
+            line: first as usize,
             function: String::new(),
             kind: "hub-file".into(),
             severity: "fail".into(),
-            message,
+            message: format!(
+                "'{rel}' is imported or called by {} other modules ({}{more}) — a change here reaches all of them: narrow the interface it exposes to a domain noun, or split it by the dependent groups",
+                modules.len(),
+                shown.join(", ")
+            ),
         });
     }
     out
@@ -879,42 +724,77 @@ pub fn hotspot_findings(
     out
 }
 
-/// Churn-untested: files in the top fraction by churn with no test coverage —
-/// volatile AND unverified. Coverage is the contract's TESTED_BY edges (the
-/// same source the high-risk family uses): a file is covered when one of its
-/// nodes is the tested side of such an edge.
+/// The repo's own coverage snapshot: the files the snapshot NAMES, with the
+/// lines it saw executed. A file the snapshot does not name is UNKNOWN, never
+/// uncovered (R6/D6) — absence is not evidence. `stale` marks a snapshot older
+/// than the repo's tests: the verdict flips to "verify", never a hard fail.
+#[derive(Deserialize, Default)]
+pub struct CoverageSnapshot {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub stale: bool,
+    #[serde(default)]
+    pub covered: HashMap<String, Vec<usize>>,
+}
+
+/// A file a test can exercise — the only population the churn-untested rule
+/// can make a coverage claim about. Docs, skills and config are churned but
+/// have no tests to lack, so they are never in the population.
+fn is_testable_code(rel: &str) -> bool {
+    rel.ends_with(".py") || rel.ends_with(".rs")
+}
+
+/// Churn-untested: the top fraction by churn, limited to testable code files,
+/// whose OWN coverage snapshot shows no covered line — volatile AND
+/// unverified. Test status comes from the repo's data (coverage.xml, else
+/// `.coverage`), never from the graph's TESTED_BY approximation: that edge
+/// misses tests that import a module in a body, and it has no opinion about
+/// Rust at all (R6). A stale snapshot reports "verify" as a warning.
 pub fn churn_untested_findings(
-    repo: &Path,
     churn: &HashMap<String, usize>,
-    contract: &GraphContract,
+    coverage: Option<&CoverageSnapshot>,
     top_frac: f64,
 ) -> Vec<Finding> {
-    let mut covered: HashSet<String> = HashSet::new();
-    for e in &contract.edges {
-        if e.kind != "TESTED_BY" {
-            continue;
-        }
-        if let Some(n) = contract
-            .nodes
-            .iter()
-            .find(|n| n.qualified_name == e.source || n.file_path == e.source)
-        {
-            covered.insert(repo_rel(repo, &n.file_path));
-        }
-    }
-
-    let cutoff = ((churn.len() as f64) * top_frac).max(1.0) as usize;
-    let mut entries: Vec<(&String, &usize)> = churn.iter().collect();
+    let Some(cov) = coverage else {
+        // no snapshot at all: every file's test status is UNKNOWN — the rule
+        // has nothing true to say (R6), so it says nothing
+        return Vec::new();
+    };
+    let mut entries: Vec<(&String, &usize)> = churn
+        .iter()
+        .filter(|(rel, _)| is_testable_code(rel) && !is_test_rel(rel))
+        .collect();
     entries.sort_by_key(|(f, c)| (*c, (*f).clone()));
     entries.reverse();
+    let cutoff = ((entries.len() as f64) * top_frac).max(1.0) as usize;
     let mut out = Vec::new();
     for (rel, count) in entries.into_iter().take(cutoff) {
         if *count < 2 {
             continue; // one change isn't volatile — same gate as hotspot
         }
-        if covered.contains(rel.as_str()) {
-            continue;
+        let Some(lines) = cov.covered.get(rel) else {
+            continue; // absent from the snapshot = UNKNOWN, never uncovered
+        };
+        if !lines.is_empty() {
+            continue; // a covered line is evidence the tests exercise the file
         }
+        let source = cov.source.split(' ').next().unwrap_or("the coverage snapshot");
+        let (severity, message) = if cov.stale {
+            (
+                "warn",
+                format!(
+                    "changed {count}x (top {cutoff} by churn) and {source} shows no covered line — the snapshot predates the repo's tests: re-run coverage, then verify a test exercises it"
+                ),
+            )
+        } else {
+            (
+                "fail",
+                format!(
+                    "changed {count}x (top {cutoff} by churn) and {source} shows no covered line — volatile and unverified: add a test that exercises it"
+                ),
+            )
+        };
         out.push(Finding {
             logical_start: None,
             seam_members: Vec::new(),
@@ -923,10 +803,8 @@ pub fn churn_untested_findings(
             col: 0,
             function: String::new(),
             kind: "churn-untested".into(),
-            severity: "fail".into(),
-            message: format!(
-                "changed {count}x (top {cutoff} by churn) but has no test coverage — volatile and unverified"
-            ),
+            severity: severity.into(),
+            message,
         });
     }
     out
@@ -967,54 +845,169 @@ mod tests {
         }
     }
 
-    #[test]
-    fn large_function_over_threshold_is_found() {
-        let c = contract(
-            vec![
-                node("Function", "big", "/repo/a.py::big", "/repo/a.py", 10, 200, None),
-                node("Function", "small", "/repo/a.py::small", "/repo/a.py", 1, 5, None),
-            ],
-            vec![],
-        );
-        let f = large_function_findings(Path::new("/repo"), &c, 120, false);
-        assert_eq!(f.len(), 1);
-        assert_eq!(f[0].function, "big");
-        assert_eq!(f[0].line, 10);
-        assert_eq!(f[0].kind, "large-function");
+    fn rels(files: &[&str]) -> Vec<String> {
+        files.iter().map(|f| (*f).to_string()).collect()
     }
 
     #[test]
-    fn large_function_skips_tests_without_flag() {
+    fn hub_file_counts_distinct_dependent_modules() {
+        // 15 different files call into a.py::f — a hub: a change reaches all
+        let mut edges = Vec::new();
+        let mut files = vec!["a.py".to_string()];
+        for i in 0..15 {
+            let caller = format!("caller{i}.py");
+            edges.push(edge(
+                "CALLS",
+                &format!("/repo/{caller}::g"),
+                "/repo/a.py::f",
+                &format!("/repo/{caller}"),
+            ));
+            files.push(caller);
+        }
+        let c = contract(
+            vec![node("Function", "f", "/repo/a.py::f", "/repo/a.py", 7, 9, None)],
+            edges,
+        );
+        let rel_names: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
+        let f = hub_file_findings(Path::new("/repo"), &c, &rels(&rel_names), 15, false);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].file, "a.py");
+        assert_eq!(f[0].line, 7); // anchor = the file's first function
+        assert_eq!(f[0].kind, "hub-file");
+        assert!(
+            f[0].message
+                .starts_with("'a.py' is imported or called by 15 other modules"),
+            "{}",
+            f[0].message
+        );
+        assert!(f[0].message.contains(", and 11 more"), "{}", f[0].message);
+    }
+
+    #[test]
+    fn hub_file_ignores_call_volume_from_one_dependent() {
+        // 300 call sites, ONE dependent module: not a hub. The old metric
+        // counted call sites, so a big cohesive file looked central.
+        let mut edges = Vec::new();
+        for i in 0..300 {
+            edges.push(edge(
+                "CALLS",
+                &format!("/repo/x.py::g{i}"),
+                "/repo/a.py::f",
+                "/repo/x.py",
+            ));
+        }
+        let c = contract(
+            vec![node("Function", "f", "/repo/a.py::f", "/repo/a.py", 1, 5, None)],
+            edges,
+        );
+        assert!(hub_file_findings(Path::new("/repo"), &c, &rels(&["a.py", "x.py"]), 15, false).is_empty());
+    }
+
+    #[test]
+    fn hub_file_counts_imports_and_calls_together() {
+        // the same module is imported and called — one dependent, not two
+        let mut edges = Vec::new();
+        for i in 0..8 {
+            edges.push(edge(
+                "IMPORTS_FROM",
+                &format!("/repo/i{i}.py"),
+                "/repo/a.py",
+                &format!("/repo/i{i}.py"),
+            ));
+            edges.push(edge(
+                "CALLS",
+                &format!("/repo/c{i}.py::g"),
+                "/repo/a.py::f",
+                &format!("/repo/c{i}.py"),
+            ));
+        }
+        let mut names = vec!["a.py".to_string()];
+        names.extend((0..8).flat_map(|i| [format!("i{i}.py"), format!("c{i}.py")]));
+        let rel_names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let c = contract(
+            vec![node("Function", "f", "/repo/a.py::f", "/repo/a.py", 1, 5, None)],
+            edges,
+        );
+        let f = hub_file_findings(Path::new("/repo"), &c, &rels(&rel_names), 16, false);
+        assert_eq!(f.len(), 1);
+    }
+
+    #[test]
+    fn hub_file_skips_a_package_facade() {
+        // pkg/__init__.py is the public interface, not a seam to split
+        let mut edges = Vec::new();
+        let mut names = Vec::new();
+        for i in 0..20 {
+            names.push(format!("user{i}.py"));
+            edges.push(edge(
+                "IMPORTS_FROM",
+                &format!("/repo/user{i}.py"),
+                "/repo/pkg/__init__.py",
+                &format!("/repo/user{i}.py"),
+            ));
+        }
+        names.push("pkg/__init__.py".to_string());
+        let rel_names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let c = contract(vec![], edges);
+        assert!(hub_file_findings(Path::new("/repo"), &c, &rels(&rel_names), 15, false).is_empty());
+    }
+
+    #[test]
+    fn hub_file_skips_test_dependents_without_the_flag() {
+        let mut edges = Vec::new();
+        let mut names = vec!["a.py".to_string()];
+        for i in 0..20 {
+            names.push(format!("tests/test_{i}.py"));
+            edges.push(edge(
+                "CALLS",
+                &format!("/repo/tests/test_{i}.py::t"),
+                "/repo/a.py::f",
+                &format!("/repo/tests/test_{i}.py"),
+            ));
+        }
+        let rel_names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let c = contract(
+            vec![node("Function", "f", "/repo/a.py::f", "/repo/a.py", 1, 5, None)],
+            edges,
+        );
+        assert!(hub_file_findings(Path::new("/repo"), &c, &rels(&rel_names), 15, false).is_empty());
+        assert_eq!(
+            hub_file_findings(Path::new("/repo"), &c, &rels(&rel_names), 15, true).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn hub_file_includes_rust_modules() {
+        // the rule is language-neutral: main.rs depended on by 15 modules
+        let mut edges = Vec::new();
+        let mut names = vec!["scanner/src/main.rs".to_string()];
+        for i in 0..15 {
+            names.push(format!("scanner/src/m{i}.rs"));
+            edges.push(edge(
+                "CALLS",
+                &format!("/repo/scanner/src/m{i}.rs::g"),
+                "/repo/scanner/src/main.rs::f",
+                &format!("/repo/scanner/src/m{i}.rs"),
+            ));
+        }
+        let rel_names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
         let c = contract(
             vec![node(
                 "Function",
-                "big",
-                "/repo/tests/t.py::big",
-                "/repo/tests/t.py",
-                10,
-                200,
+                "f",
+                "/repo/scanner/src/main.rs::f",
+                "/repo/scanner/src/main.rs",
+                1,
+                5,
                 None,
             )],
-            vec![],
+            edges,
         );
-        assert!(large_function_findings(Path::new("/repo"), &c, 120, false).is_empty());
-        assert_eq!(large_function_findings(Path::new("/repo"), &c, 120, true).len(), 1);
-    }
-
-    #[test]
-    fn hub_file_counts_edges_and_skips_builtins() {
-        let c = contract(
-            vec![node("Function", "f", "/repo/a.py::f", "/repo/a.py", 1, 5, None)],
-            vec![
-                edge("CALLS", "/repo/a.py::f", "len", "/repo/a.py"), // builtin — skipped
-                edge("CALLS", "/repo/a.py::f", "/repo/b.py::g", "/repo/a.py"),
-                edge("IMPORTS_FROM", "/repo/a.py", "/repo/b.py", "/repo/a.py"),
-                edge("REFERENCES", "/repo/a.py", "x", "/repo/a.py"),
-            ],
+        assert_eq!(
+            hub_file_findings(Path::new("/repo"), &c, &rels(&rel_names), 15, false).len(),
+            1
         );
-        let f = hub_file_findings(Path::new("/repo"), &c, 3, false, &HashMap::new());
-        assert_eq!(f.len(), 1);
-        assert!(f[0].message.starts_with("3 call/import edges"));
     }
 
     #[test]
@@ -1078,52 +1071,103 @@ mod tests {
         assert_eq!(f[0].file, "a.py");
     }
 
+    fn coverage(source: &str, stale: bool, files: &[(&str, &[usize])]) -> CoverageSnapshot {
+        CoverageSnapshot {
+            source: source.into(),
+            stale,
+            covered: files
+                .iter()
+                .map(|(rel, lines)| ((*rel).to_string(), lines.to_vec()))
+                .collect(),
+        }
+    }
+
     #[test]
-    fn churn_untested_high_churn_without_coverage_is_found() {
+    fn churn_untested_snapshot_without_a_covered_line_is_found() {
         let mut churn = HashMap::new();
         churn.insert("a.py".to_string(), 11usize); // top churn -> the candidate
         churn.insert("b.py".to_string(), 10usize);
-        // no TESTED_BY edge -> a.py has no test coverage
-        let c = contract(
-            vec![node("Function", "f", "/repo/a.py::f", "/repo/a.py", 1, 5, None)],
-            vec![],
-        );
-        let f = churn_untested_findings(Path::new("/repo"), &churn, &c, 0.5);
+        // a.py is NAMED by the snapshot with zero covered lines -> unverified
+        let cov = coverage("coverage.xml", false, &[("a.py", &[]), ("b.py", &[1, 2])]);
+        let f = churn_untested_findings(&churn, Some(&cov), 0.5);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].file, "a.py");
         assert_eq!(f[0].kind, "churn-untested");
         assert_eq!(f[0].severity, "fail");
         assert_eq!(
             f[0].message,
-            "changed 11x (top 1 by churn) but has no test coverage — volatile and unverified"
+            "changed 11x (top 1 by churn) and coverage.xml shows no covered line — volatile and unverified: add a test that exercises it"
         );
     }
 
     #[test]
-    fn churn_untested_high_churn_covered_passes() {
+    fn churn_untested_covered_file_passes() {
         let mut churn = HashMap::new();
-        churn.insert("a.py".to_string(), 11usize); // top churn -> the candidate
-        churn.insert("b.py".to_string(), 10usize);
-        // TESTED_BY source is the tested node (the code's TESTED_BY keying) -> a.py is covered
-        let c = contract(
-            vec![node("Function", "f", "/repo/a.py::f", "/repo/a.py", 1, 5, None)],
-            vec![edge(
-                "TESTED_BY",
-                "/repo/a.py::f",
-                "/repo/tests/test_a.py::test_f",
-                "/repo/tests/test_a.py",
-            )],
-        );
-        assert!(churn_untested_findings(Path::new("/repo"), &churn, &c, 0.5).is_empty());
+        churn.insert("a.py".to_string(), 11usize);
+        let cov = coverage("coverage.xml", false, &[("a.py", &[1, 2, 3])]);
+        assert!(churn_untested_findings(&churn, Some(&cov), 0.5).is_empty());
     }
 
     #[test]
-    fn churn_untested_low_churn_without_coverage_passes() {
-        // changed once: in the top cutoff but below the volatile gate — and no coverage
+    fn churn_untested_file_absent_from_the_snapshot_is_unknown() {
+        // R6: absence is not evidence — setup.py and .rs files are simply not
+        // in a Python coverage snapshot, and that is UNKNOWN, never uncovered
+        let mut churn = HashMap::new();
+        churn.insert("setup.py".to_string(), 11usize);
+        churn.insert("scanner/src/main.rs".to_string(), 10usize);
+        let cov = coverage("coverage.xml", false, &[("lucidlint.py", &[1])]);
+        assert!(churn_untested_findings(&churn, Some(&cov), 0.5).is_empty());
+    }
+
+    #[test]
+    fn churn_untested_no_snapshot_makes_no_claim() {
+        let mut churn = HashMap::new();
+        churn.insert("a.py".to_string(), 11usize);
+        assert!(churn_untested_findings(&churn, None, 0.5).is_empty());
+    }
+
+    #[test]
+    fn churn_untested_docs_and_tests_are_not_in_the_population() {
+        // docs cannot have tests and test files are the tests — neither takes
+        // a slot in the top-N, so a churny README never displaces a code file
+        let mut churn = HashMap::new();
+        churn.insert("AGENTS.md".to_string(), 40usize);
+        churn.insert("tests/test_a.py".to_string(), 30usize);
+        churn.insert("a.py".to_string(), 2usize);
+        let cov = coverage("coverage.xml", false, &[("a.py", &[])]);
+        let f = churn_untested_findings(&churn, Some(&cov), 0.5);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].file, "a.py");
+        assert_eq!(f[0].message, "changed 2x (top 1 by churn) and coverage.xml shows no covered line — volatile and unverified: add a test that exercises it");
+    }
+
+    #[test]
+    fn churn_untested_stale_snapshot_reports_verify_as_a_warning() {
+        let mut churn = HashMap::new();
+        churn.insert("a.py".to_string(), 11usize);
+        let cov = coverage("coverage.xml", true, &[("a.py", &[])]);
+        let f = churn_untested_findings(&churn, Some(&cov), 0.5);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, "warn");
+        assert!(
+            f[0].message.contains("re-run coverage, then verify"),
+            "{}",
+            f[0].message
+        );
+        assert!(
+            !f[0].message.contains("add a test"),
+            "stale data never demands a test: {}",
+            f[0].message
+        );
+    }
+
+    #[test]
+    fn churn_untested_low_churn_passes() {
+        // changed once: in the top cutoff but below the volatile gate
         let mut churn = HashMap::new();
         churn.insert("a.py".to_string(), 1usize);
-        let c = contract(vec![], vec![]);
-        assert!(churn_untested_findings(Path::new("/repo"), &churn, &c, 0.5).is_empty());
+        let cov = coverage("coverage.xml", false, &[("a.py", &[])]);
+        assert!(churn_untested_findings(&churn, Some(&cov), 0.5).is_empty());
     }
 
     #[test]
