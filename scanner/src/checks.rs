@@ -347,6 +347,82 @@ fn is_type_alias_value(name: &str, value: &Expr) -> bool {
 /// global services containers and framework-required globals (`app =
 /// Flask(...)`, DI registries) — a CALL-valued assignment is a service
 /// registration, not a domain value.
+/// What the AST already says about a module-level binding. The message names
+/// the case so the reader does not have to classify it.
+#[derive(Clone, Copy)]
+enum GlobalValueKind {
+    MutableContainer,
+    Rebinding,
+    Constant,
+    Other,
+}
+
+fn is_mutable_container(value: &Expr) -> bool {
+    matches!(
+        value,
+        Expr::List(_) | Expr::Dict(_) | Expr::Set(_) | Expr::ListComp(_) | Expr::DictComp(_) | Expr::SetComp(_)
+    )
+}
+
+fn is_rebinding(value: &Expr) -> bool {
+    matches!(value, Expr::Name(_) | Expr::Attribute(_) | Expr::Subscript(_))
+}
+
+fn is_constant_binding(value: &Expr) -> bool {
+    matches!(
+        value,
+        Expr::StringLiteral(_)
+            | Expr::BytesLiteral(_)
+            | Expr::NumberLiteral(_)
+            | Expr::BooleanLiteral(_)
+            | Expr::NoneLiteral(_)
+            | Expr::EllipsisLiteral(_)
+            | Expr::FString(_)
+            | Expr::TString(_)
+            | Expr::Tuple(_)
+            | Expr::UnaryOp(_)
+            | Expr::BinOp(_)
+            | Expr::If(_)
+            | Expr::BoolOp(_)
+            | Expr::Compare(_)
+    )
+}
+
+fn global_value_kind(value: Option<&Expr>) -> GlobalValueKind {
+    match value {
+        Some(value) if is_mutable_container(value) => GlobalValueKind::MutableContainer,
+        Some(value) if is_rebinding(value) => GlobalValueKind::Rebinding,
+        Some(value) if is_constant_binding(value) => GlobalValueKind::Constant,
+        _ => GlobalValueKind::Other,
+    }
+}
+
+fn global_state_message(name: &str, value: Option<&Expr>) -> String {
+    let (opening, middle, action) = match global_value_kind(value) {
+        GlobalValueKind::MutableContainer => (
+            "is a mutable container bound at import time",
+            "Every reader shares the same object, and a caller cannot vary it without monkeypatching the module.",
+            "Make it an attribute of the class that owns the work.",
+        ),
+        GlobalValueKind::Rebinding => (
+            "is bound to another value at import time",
+            "Every reader shares that binding, and a caller cannot vary it without monkeypatching the module.",
+            "Give that value one home and import it here; do not re-bind it.",
+        ),
+        GlobalValueKind::Constant => (
+            "is a constant bound at import time",
+            "Every reader shares one value, and a caller cannot vary it without monkeypatching the module.",
+            "Make it a parameter default of the function that reads it, or an attribute of the class that owns the work.",
+        ),
+        GlobalValueKind::Other => (
+            "binds at import time",
+            "Every reader shares one value, and a caller cannot vary it without monkeypatching the module.",
+            "Make it an attribute of the class that owns the work.",
+        ),
+    };
+    format!("{name} {opening}. {middle} {action}")
+}
+
 pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: bool) {
     let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
     if let Stmt::Global(g) = stmt {
@@ -372,7 +448,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
         let value: Option<&Expr> = match stmt {
             Stmt::Assign(a) => Some(a.value.as_ref()),
             Stmt::AnnAssign(a) => a.value.as_deref(),
-            Stmt::AugAssign(a) => Some(a.target.as_ref()),
+            Stmt::AugAssign(_) => None,
             _ => None,
         };
         let targets: Vec<&Expr> = match stmt {
@@ -385,7 +461,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
         for target in targets {
             let Expr::Name(n) = target else { continue };
             let name = n.id.as_str();
-            if name.starts_with("__") && name.ends_with("__") {
+            if is_dunder(name) {
                 continue; // module protocol metadata (__all__, __version__)
             }
             if call_valued {
@@ -395,16 +471,17 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
                 continue; // a name for a type, not a variable a caller varies
             }
             let line = stmt_line(state.source, stmt);
-            state.findings.push(Finding { logical_start: None, seam_members: Vec::new(),
-            col: 0,
-            file: state.file.to_string(),
-            line,
-            function: fn_name.clone(),
-            kind: "global-state".into(),
-            severity: "fail".into(),
-            message: format!(
-                "{name} binds at import time and every reader shares it. If it is state a caller should be able to vary, give it to the class that owns the work; if it is a constant the module's own functions read, keep it here and say what it measures — a class invented to hold one number is ceremony. If another module spells the same value, give the value one home and import it: two spellings drift."
-            ), });
+            state.findings.push(Finding {
+                logical_start: None,
+                seam_members: Vec::new(),
+                col: 0,
+                file: state.file.to_string(),
+                line,
+                function: fn_name.clone(),
+                kind: "global-state".into(),
+                severity: "fail".into(),
+                message: global_state_message(name, value),
+            });
         }
     }
 }

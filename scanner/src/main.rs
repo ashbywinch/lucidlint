@@ -3072,21 +3072,65 @@ mod tests {
         ));
         let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
         assert_eq!(gs.len(), 2);
-        // the message names the mechanism (import-time binding) and gives the
-        // reader the decision: state -> the owning class, constant -> keep it
-        // here with its meaning, duplicated vocabulary -> one home
+        // Both fixtures are mutable containers, so the AST already says which
+        // action applies: the owning class's attribute, never a parameter
+        // default (a mutable default argument is a bug of its own).
+        // #79: the old message said "keep it here" for a constant the
+        // module's own functions read — an exemption the rule does not have,
+        // so following it never cleared the finding and led to a suppression
+        // wall. The message must not offer a shape the rule still fails, and
+        // must not ask the reader to classify a value the AST already knows.
         for g in &gs {
+            assert!(g.message.contains("mutable container"), "{}", g.message);
             assert!(
-                g.message.contains("binds at import time and every reader shares it"),
+                g.message.contains("attribute of the class that owns the work"),
                 "{}",
                 g.message
             );
-            assert!(
-                g.message.contains("give it to the class that owns the work"),
-                "{}",
-                g.message
-            );
-            assert!(g.message.contains("give the value one home"), "{}", g.message);
+            assert!(!g.message.contains("parameter default"), "{}", g.message);
+            assert!(!g.message.contains("If it is"), "{}", g.message);
+            assert!(!g.message.contains("keep it here"), "{}", g.message);
+        }
+    }
+
+    #[test]
+    fn global_state_messages_name_the_value_kind() {
+        // The message branches on the value the rule already parsed: a
+        // mutable container gets the class-attribute action; a constant gets
+        // the parameter-default/class-attribute action; a re-binding gets the
+        // one-home/import action. No conditional menu.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/global_state_messages_name_the_value_kind__01.py"
+        ));
+        let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
+        assert_eq!(gs.len(), 5, "{f:?}");
+        let msg = |name: &str| {
+            gs.iter()
+                .find(|g| g.message.starts_with(name))
+                .map(|g| g.message.as_str())
+                .unwrap_or_else(|| panic!("no global-state message for {name}: {gs:?}"))
+        };
+
+        for name in ["STATE", "TABLE"] {
+            let m = msg(name);
+            assert!(m.contains("mutable container"), "{m}");
+            assert!(m.contains("attribute of the class"), "{m}");
+            assert!(!m.contains("parameter default"), "{m}");
+        }
+        for name in ["PAIR", "PROMPT"] {
+            let m = msg(name);
+            assert!(m.contains("constant"), "{m}");
+            assert!(m.contains("parameter default"), "{m}");
+            assert!(!m.contains("mutable container"), "{m}");
+        }
+        let alias = msg("ALIAS");
+        assert!(alias.contains("bound to another value"), "{alias}");
+        assert!(alias.contains("one home"), "{alias}");
+        assert!(!alias.contains("parameter default"), "{alias}");
+
+        for g in &gs {
+            assert!(g.message.contains("at import time"), "{}", g.message);
+            assert!(!g.message.contains("If it is"), "{}", g.message);
         }
     }
 
