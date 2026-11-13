@@ -264,15 +264,23 @@ impl GraphContract {
                 }
             } else {
                 match node_file.get(e.target.as_str()) {
+                    // an unresolved target contributes nothing: a builtin or
+                    // external symbol has no file here, and an incomplete graph
+                    // export only UNDERCOUNTS dependents — the safe direction
+                    // for a fail rule (it never invents a hub)
                     Some(t) => t.clone(),
-                    None => continue, // unresolved target (builtin or external)
+                    None => continue,
                 }
             };
             if target == source || !rels.contains(&target) {
                 continue;
             }
             if target.ends_with("__init__.py") {
-                continue; // a package facade IS the interface, not a seam to split
+                // a package facade IS the interface, not a seam to split — it
+                // is exempt as a TARGET only; a facade importing its own
+                // submodules still counts as a dependent (being depended on is
+                // the hub property; depending on others is real coupling)
+                continue;
             }
             if is_test_rel(&target) {
                 continue; // tests are not a production module others depend on
@@ -307,6 +315,9 @@ pub fn hub_file_findings(
         if modules.len() < min_dependents {
             continue;
         }
+        // a file-level finding: anchor at the file's first function (stable
+        // identity for the baseline, and a marker above that def binds); a
+        // data-only module with no function nodes anchors at line 1
         let first = contract
             .nodes
             .iter()

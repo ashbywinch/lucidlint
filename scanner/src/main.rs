@@ -5164,6 +5164,18 @@ mod tests {
     }
 
     #[test]
+    fn why_less_marker_does_not_exempt_the_finding() {
+        // R18: an exemption applies only with a why. A why-less marker is
+        // reported as its own finding and does NOT suppress the signal it
+        // names — the marker's message says exactly that, so honoring it
+        // silently would contradict the report.
+        let src = "def f():\n    try:\n        g()\n    except Exception:  # lucidlint: ignore swallow\n        pass\n";
+        let f = scan_src(src);
+        assert!(f.iter().any(|x| x.kind == "suppression"), "{f:?}");
+        assert!(f.iter().any(|x| x.kind == "swallow"), "{f:?}");
+    }
+
+    #[test]
     fn why_less_comma_suppression_reports_each_signal() {
         // `ignore sig1,sig2` without a why: BOTH signals need a reason
         let f = scan_src(include_str!(
@@ -6606,6 +6618,16 @@ mod tests {
             "../../tests/fixtures/rust/special_case_repeated_none_checks__02.py"
         ));
         assert!(!ok.iter().any(|x| x.kind == "special-case"));
+    }
+
+    #[test]
+    fn special_case_nested_function_checks_are_not_added_to_the_parent() {
+        // the reviewer's question: a nested def INSIDE an if body — the outer
+        // counter walks if bodies but must stop at the def, and the scope walk
+        // counts the inner checks once. 2 + 2 is not "4 repeated checks".
+        let src = "def outer(x):\n    if x is None:\n        return 1\n    if x is None:\n        return 2\n    if x:\n        def inner(y):\n            if y is None:\n                return 3\n            if y is None:\n                return 4\n            return 5\n        return inner(x)\n    return 0\n";
+        let f = scan_src(src);
+        assert!(!f.iter().any(|x| x.kind == "special-case"), "{f:?}");
     }
 
     #[test]
