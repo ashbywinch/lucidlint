@@ -100,7 +100,7 @@ def test_merge_skips_a_record_without_a_line_number(tmp_path):
     rust.write_text(
         '<?xml version="1.0"?><coverage version="t"><packages><package name="src">'
         '<classes><class name="a" filename="src/a.rs"><lines>'
-        '<line hits="1"/><line number="7" hits="1"/>'
+        '<line hits="1"/><line number="0" hits="1"/><line number="7" hits="1"/>'
         "</lines></class></classes></package></packages></coverage>"
     )
     merged = tmp_path / "coverage-all.xml"
