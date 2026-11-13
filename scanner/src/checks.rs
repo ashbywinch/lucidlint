@@ -7844,7 +7844,7 @@ pub fn duplicate_module_findings(entities: &[SkeletonModule]) -> Vec<Finding> {
                     String::new()
                 };
                 format!(
-                    "{what} '{}' ({}:{}) and '{}' ({}:{}) are {:.0}% similar{} — a fork: a fix lands in one copy while the other silently keeps the old behavior{}. Reconcile the copies into one.",
+                    "{what} '{}' ({}:{}) and '{}' ({}:{}) are {:.0}% similar{}{} — a structural match. A fix can land in one copy and silently miss the other. If they are copies, reconcile them into one. If one is generated from the other and a check that fails when they diverge pins them, this is not a fork and the finding does not apply.",
                     earlier.name,
                     earlier.rel,
                     earlier.line,
