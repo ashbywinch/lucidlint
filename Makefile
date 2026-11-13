@@ -139,10 +139,11 @@ bundle-check: scanner-check
 
 
 # Every SHIPPED subject is measured and gated: the Python modules, the scan
-# core crate, and the radon-parity crate. The merged Cobertura file is what
-# renders as the PR comment (one package per subject) — a subject missing from
-# it is a subject whose coverage nobody sees. Floors sit ~2 points under the
-# measured number; raise one when coverage lands (it is a promise, not a goal).
+# core crate, and the radon-parity crate. The merged Cobertura file feeds the
+# PR comment (one row per subject). Each subject carries two bars: the MINIMUM
+# (below it the subject is in trouble) and the TARGET (the high bar the suite
+# must hit — the gate fails below the target, so a small drop cannot land
+# quietly). Move a bar deliberately, with its new measurement.
 coverage: deps scanner-check
 	@$(UV) run coverage run -m pytest tests/ -q --tb=short
 	@$(UV) run coverage report -m
@@ -151,10 +152,9 @@ coverage: deps scanner-check
 	@cd scanner && cargo llvm-cov --cobertura --output-path ../coverage-rust.xml 2>&1 | tail -5
 	@cd scanner/radonc && cargo llvm-cov --cobertura --output-path ../../coverage-radonc.xml 2>&1 | tail -5
 	@$(PYTHON) scripts/merge-coverage.py --report python coverage.xml "" --report scanner coverage-rust.xml scanner/ --report radonc coverage-radonc.xml scanner/radonc/ -o coverage-all.xml
-	@$(PYTHON) scripts/coverage-gate.py coverage.xml 85 Python        # measured 86.8%
-	@$(PYTHON) scripts/coverage-gate.py coverage-rust.xml 82 scanner   # measured 84.6%
-	@$(PYTHON) scripts/coverage-gate.py coverage-radonc.xml 62 radonc  # measured 64.5%
-	@echo "${GREEN}Coverage gate: Python >= 85%, scanner >= 82%, radonc >= 62% — reports: htmlcov/index.html + coverage-all.xml${NC}"
+	@$(PYTHON) scripts/coverage-gate.py coverage-all.xml --subject python 85 90 --subject scanner 82 85 --subject radonc 62 70 -o coverage-summary.md
+	@cat coverage-summary.md
+	@echo "${GREEN}Coverage gate: each subject at its target (Python 90%, scanner 85%, radonc 70%) — reports: htmlcov/index.html + coverage-all.xml${NC}"
 
 lint: deps lint-check
 

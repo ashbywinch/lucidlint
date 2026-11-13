@@ -29,6 +29,7 @@ coverage.xml
 coverage-rust.xml
 coverage-radonc.xml
 coverage-all.xml
+coverage-summary.md
 lcov.info
 
 # build artifacts

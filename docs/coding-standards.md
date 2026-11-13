@@ -306,9 +306,10 @@ without a check is a wish:
   re-formatted.
 - Coverage: `make coverage` measures every shipped subject (the Python
   modules, the scan core, the radon-parity crate), merges them into one
-  Cobertura report for the PR comment, and gates each subject against a floor
-  (`scripts/coverage-gate.py`). A subject missing from the merged report is a
-  subject whose coverage nobody sees.
+  Cobertura report for the PR comment, and gates each subject against its
+  minimum and target (`scripts/coverage-gate.py`) — below target fails. A
+  subject missing from the merged report is a subject whose coverage nobody
+  sees.
 - Semantic types: newtype wrappers over primitives (units in the type
   name — `Meters`, never bare `f64`); conversions at the boundary.
 - Modules: the scan-core modules (`checks`, `graph_families`, `docs`,

@@ -33,24 +33,14 @@ jobs:
       - run: make test
       - run: make self-check
       - run: make coverage
-      # ONE summary: the merged report carries every shipped subject as its
-      # own package (Python modules, scan core, radon-parity crate). The gate
-      # is `make coverage` above — per-subject floors with their measured
-      # numbers in the Makefile — so this step only renders the comment.
-      - name: Coverage summary (all subjects)
-        uses: irongut/CodeCoverageSummary@v1.3.0
-        with:
-          filename: coverage-all.xml
-          badge: true
-          fail_below_min: false
-          format: markdown
-          output: both
+      # `make coverage` gated every subject and wrote the comment table
+      # (measured / minimum / target / status) — this step only posts it.
       - name: Post coverage comment
         uses: marocchino/sticky-pull-request-comment@v2
         if: github.event_name == 'pull_request'
         with:
           recreate: true
-          path: code-coverage-results.md
+          path: coverage-summary.md
 
   # The one distribution channel: the pip wheel (the Rust core is built INTO
   # it by setup.py). wheel-check installs the freshly built wheel into a
