@@ -5614,6 +5614,62 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_module_record_siblings_with_different_fields_stay_silent() {
+        // #73: two one-record modules are 100% similar by structure because a
+        // field NAME is an "N" token — the skeleton cannot tell `name: str`
+        // from `address: str`. A record's declared fields ARE its facts:
+        // different fields mean two different records, with no shared
+        // behaviour to fork.
+        let f = scan_corpus(&[
+            (
+                "houses/nodes/commute_card_person.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_record_siblings_differing_fields__01.py"),
+            ),
+            (
+                "houses/nodes/commute_card_destination.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_record_siblings_differing_fields__02.py"),
+            ),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "duplicate-module"), "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_module_record_siblings_with_different_init_fields_stay_silent() {
+        // the same rule for a record written as a plain class: the fields are
+        // its `self.<name> = ...` assignments, so they must be compared too
+        let f = scan_corpus(&[
+            (
+                "houses/nodes/center.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_record_siblings_differing_init_fields__01.py"),
+            ),
+            (
+                "houses/nodes/radius.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_record_siblings_differing_init_fields__02.py"),
+            ),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "duplicate-module"), "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_module_identical_records_in_two_modules_still_fire() {
+        // the inverse: the same record written twice — same field, same
+        // shape — is still a copy, and its message still names it a fork
+        let f = scan_corpus(&[
+            (
+                "dag/person.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_identical_records_fire__01.py"),
+            ),
+            (
+                "houses/person.py",
+                include_str!("../../tests/fixtures/rust/duplicate_module_identical_records_fire__02.py"),
+            ),
+        ]);
+        let d: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-module").collect();
+        assert_eq!(d.len(), 1, "{f:?}");
+        assert!(d[0].message.contains("a fork"), "{}", d[0].message);
+    }
+
+    #[test]
     fn duplicate_module_below_the_similarity_bar_stays_silent() {
         // Phase 6: Dice >= 0.9 alone decides — a pair of similar-length
         // classes with different structure stays silent.

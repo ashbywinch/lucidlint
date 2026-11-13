@@ -7458,6 +7458,32 @@ fn constant_tokens(body: &[Stmt]) -> Vec<String> {
     uniq
 }
 
+/// The fields a module's own classes declare: class-body annotations
+/// (`name: str`) plus the `self.<name> = ...` assignments in their methods —
+/// the field set the sibling pass compares. A record's fields ARE its facts,
+/// so two records whose fields differ are siblings by shape, not copies
+/// (#73: two one-field records were reported as a fork because a field NAME
+/// is an "N" token in the skeleton).
+fn declared_record_fields(classes: &[&StmtClassDef]) -> Vec<String> {
+    let mut fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for c in classes {
+        for m in &c.body {
+            if let Stmt::AnnAssign(a) = m {
+                if let Expr::Name(n) = a.target.as_ref() {
+                    fields.insert(n.id.to_string());
+                }
+            }
+            if let Stmt::FunctionDef(f) = m {
+                let mut assigned: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+                let mut types: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+                collect_field_assignments(&f.body, &std::collections::HashMap::new(), &mut assigned, &mut types);
+                fields.extend(assigned);
+            }
+        }
+    }
+    fields.into_iter().collect()
+}
+
 /// One statement's structural tokens, headed by a member-boundary sentinel
 /// so bigrams never cross statement boundaries.
 fn stmt_skeleton<'a>(stmt: &'a Stmt, sentinel: &str, toks: &mut Vec<String>, queue: &mut Vec<Q<'a>>) {
@@ -7576,6 +7602,7 @@ pub fn collect_skeleton_modules(state: &mut ScanState, body: &[Stmt], rel: &str)
             skeleton: module_skel.clone(),
             consts: module_consts.clone(),
             members: module_members.clone(),
+            fields: declared_record_fields(&classes),
             entity: "module",
             bases: Vec::new(),
         });
@@ -7597,6 +7624,7 @@ pub fn collect_skeleton_modules(state: &mut ScanState, body: &[Stmt], rel: &str)
             skeleton: skel.clone(),
             consts: consts.clone(),
             members: members.clone(),
+            fields: declared_record_fields(&[c]),
             entity: "class",
             bases: class_bases(c),
         });
@@ -7624,6 +7652,7 @@ pub fn collect_skeleton_modules(state: &mut ScanState, body: &[Stmt], rel: &str)
                 skeleton: combined,
                 consts: module_consts.clone(),
                 members: all,
+                fields: declared_record_fields(&[c]),
                 entity: "module-class",
                 bases: Vec::new(),
             });
@@ -7669,6 +7698,13 @@ pub fn duplicate_module_findings(entities: &[SkeletonModule]) -> Vec<Finding> {
                 for &j in &bucket[start..] {
                     let earlier = &entities[j];
                     if !compatible(e, earlier) {
+                        continue;
+                    }
+                    // #73: a record's declared fields are its facts. Two
+                    // records whose fields differ hold different data — there
+                    // is no shared behaviour for a fix to land in one copy and
+                    // miss in the other, so they are siblings, not a fork.
+                    if !e.fields.is_empty() && !earlier.fields.is_empty() && e.fields != earlier.fields {
                         continue;
                     }
                     // two classes pair on matching constants as well as on
