@@ -5226,22 +5226,113 @@ pub fn conditional_polymorphism_findings(state: &mut ScanState, body: &[Stmt], s
 /// Introduce Special Case: >= 3 None/empty checks on the same name — the
 /// repeated null-handling the special-case object replaces.
 pub fn special_case_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
-    let mut counts: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
-    scan_stmts(body, &mut counts, source);
+    let mut hits: Vec<(String, usize, usize)> = Vec::new();
+    special_case_scope(body, source, &mut hits);
+    hits.sort_by_key(|(_, _, line)| *line);
+    for (name, n, line) in hits {
+        state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
+                        file: state.file.to_string(),
+                        line,
+                        function: String::new(),
+                        kind: "special-case".into(),
+                        severity: "warn".into(),
+                        message: format!(
+                            "{n} repeated None/empty checks on '{name}' — Introduce Special Case: handle the missing or empty value once (a default or a stand-in object) instead of checking it at every use"
+                        ), });
+    }
+}
 
-    let mut v: Vec<(&String, &(usize, usize))> = counts.iter().collect();
-    v.sort_by_key(|(_, (_, l))| *l);
-    for (name, (n, line)) in v {
+/// One scope's repeated-check hits (name, count, first line). A function or
+/// class body is its OWN scope: the same local name in two functions is two
+/// unrelated values, so the counter must never add them together (a file-wide
+/// count fired on common names like `found` and `callee`).
+fn special_case_scope(stmts: &[Stmt], source: &str, out: &mut Vec<(String, usize, usize)>) {
+    let mut counts: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+    count_scope_checks(stmts, &mut counts, source);
+    for (name, (n, line)) in &counts {
         if *n >= 3 {
-            state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
-                            file: state.file.to_string(),
-                            line: *line,
-                            function: String::new(),
-                            kind: "special-case".into(),
-                            severity: "warn".into(),
-                            message: format!(
-                                "{n} repeated None/empty checks on '{name}' — Introduce Special Case: handle the missing or empty value once (a default or a stand-in object) instead of checking it at every use"
-                            ), });
+            out.push((name.clone(), *n, *line));
+        }
+    }
+    for_each_nested_scope(stmts, &mut |body| special_case_scope(body, source, out));
+}
+
+/// Count this scope's None/empty checks, walking control flow but stopping at
+/// a nested function/class body — those are scopes of their own.
+fn count_scope_checks(stmts: &[Stmt], counts: &mut std::collections::HashMap<String, (usize, usize)>, source: &str) {
+    for s in stmts {
+        if let Stmt::If(i) = s {
+            if let Expr::Compare(c) = i.test.as_ref() {
+                if let Expr::Name(n) = c.left.as_ref() {
+                    let none_check = c.ops.len() == 1
+                        && matches!(c.ops[0], ruff_python_ast::CmpOp::Is)
+                        && matches!(c.comparators[0], Expr::NoneLiteral(_));
+                    let empty_check = c.ops.len() == 1
+                        && matches!(c.ops[0], ruff_python_ast::CmpOp::Eq)
+                        && is_empty_literal(&c.comparators[0]);
+                    if none_check || empty_check {
+                        // a fail-fast GUARD (the guarded branch raises) is not
+                        // a special-case candidate: the absence IS an error, so
+                        // no object can replace the repeated handling — the
+                        // "give the absent object" refactoring would mask it
+                        if !branch_guards(&i.body) {
+                            let e = counts.entry(n.id.to_string()).or_insert((0, usize::MAX));
+                            e.0 += 1;
+                            e.1 = e.1.min(line_of(source, i.range().start()));
+                        }
+                    }
+                }
+            }
+            count_scope_checks(&i.body, counts, source);
+            for cl in &i.elif_else_clauses {
+                count_scope_checks(&cl.body, counts, source);
+            }
+        } else {
+            match s {
+                Stmt::For(f) => count_scope_checks(&f.body, counts, source),
+                Stmt::While(w) => count_scope_checks(&w.body, counts, source),
+                Stmt::Try(t) => {
+                    count_scope_checks(&t.body, counts, source);
+                    for h in &t.handlers {
+                        let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                        count_scope_checks(&eh.body, counts, source);
+                    }
+                    count_scope_checks(&t.orelse, counts, source);
+                    count_scope_checks(&t.finalbody, counts, source);
+                }
+                // a nested function/class body is its own scope
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Visit every nested function/class body inside `stmts`, through control flow
+/// — the scopes `special_case_scope` recurses into.
+fn for_each_nested_scope<'a>(stmts: &'a [Stmt], visit: &mut dyn FnMut(&'a [Stmt])) {
+    for s in stmts {
+        match s {
+            Stmt::FunctionDef(f) => visit(&f.body),
+            Stmt::ClassDef(c) => visit(&c.body),
+            Stmt::If(i) => {
+                for_each_nested_scope(&i.body, visit);
+                for cl in &i.elif_else_clauses {
+                    for_each_nested_scope(&cl.body, visit);
+                }
+            }
+            Stmt::For(f) => for_each_nested_scope(&f.body, visit),
+            Stmt::While(w) => for_each_nested_scope(&w.body, visit),
+            Stmt::With(w) => for_each_nested_scope(&w.body, visit),
+            Stmt::Try(t) => {
+                for_each_nested_scope(&t.body, visit);
+                for h in &t.handlers {
+                    let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                    for_each_nested_scope(&eh.body, visit);
+                }
+                for_each_nested_scope(&t.orelse, visit);
+                for_each_nested_scope(&t.finalbody, visit);
+            }
+            _ => {}
         }
     }
 }
@@ -6383,54 +6474,6 @@ fn is_empty_literal(e: &Expr) -> bool {
         || matches!(e, Expr::Dict(d) if d.items.is_empty())
         || matches!(e, Expr::Tuple(t) if t.elts.is_empty())
 }
-fn scan_stmts(stmts: &[Stmt], counts: &mut std::collections::HashMap<String, (usize, usize)>, source: &str) {
-    for s in stmts {
-        if let Stmt::If(i) = s {
-            if let Expr::Compare(c) = i.test.as_ref() {
-                if let Expr::Name(n) = c.left.as_ref() {
-                    let none_check = c.ops.len() == 1
-                        && matches!(c.ops[0], ruff_python_ast::CmpOp::Is)
-                        && matches!(c.comparators[0], Expr::NoneLiteral(_));
-                    let empty_check = c.ops.len() == 1
-                        && matches!(c.ops[0], ruff_python_ast::CmpOp::Eq)
-                        && is_empty_literal(&c.comparators[0]);
-                    if none_check || empty_check {
-                        // a fail-fast GUARD (the guarded branch raises) is not
-                        // a special-case candidate: the absence IS an error, so
-                        // no object can replace the repeated handling — the
-                        // "give the absent case an object" refactoring would
-                        // mask it (review log §2.6: person is None -> KeyError)
-                        if !branch_guards(&i.body) {
-                            let e = counts.entry(n.id.to_string()).or_insert((0, usize::MAX));
-                            e.0 += 1;
-                            e.1 = e.1.min(line_of(source, i.range().start()));
-                        }
-                    }
-                }
-            }
-            scan_stmts(&i.body, counts, source);
-            for cl in &i.elif_else_clauses {
-                scan_stmts(&cl.body, counts, source);
-            }
-        } else {
-            match s {
-                Stmt::FunctionDef(f) => scan_stmts(&f.body, counts, source),
-                Stmt::ClassDef(cd) => scan_stmts(&cd.body, counts, source),
-                Stmt::For(f) => scan_stmts(&f.body, counts, source),
-                Stmt::While(w) => scan_stmts(&w.body, counts, source),
-                Stmt::Try(t) => {
-                    scan_stmts(&t.body, counts, source);
-                    for h in &t.handlers {
-                        let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
-                        scan_stmts(&eh.body, counts, source);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
 /// Is the guarded branch of a None/empty check a FAIL-FAST GUARD — it raises
 /// or returns an error shape (an HTTPException, a *Response, a dict with an
 /// "error" key)? A guard is not a special-case candidate: the absence IS an

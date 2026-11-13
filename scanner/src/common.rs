@@ -492,7 +492,13 @@ fn marker_inventory(members: &[usize], findings: &[crate::Finding], supps: &Supp
     for ln in window {
         if let Some(entries) = supps.line.get(&ln) {
             for (sig, why) in entries {
-                if why.is_empty() || pairs.iter().any(|(pl, _)| *pl == ln) {
+                if why.is_empty() {
+                    continue;
+                }
+                // one marker LINE may name several signals
+                // (`ignore closures,long-param-list <why>`); each pair is its
+                // own candidate, so every named signal can bind its finding
+                if pairs.iter().any(|(pl, ps)| *pl == ln && ps == sig) {
                     continue;
                 }
                 if members.iter().any(|&i| signal_matches(sig, &findings[i].kind)) {
@@ -535,18 +541,32 @@ impl<'a> LineMarkerCtx<'a> {
             }
         }
         for (_col, js) in by_col {
-            let matches_any = |pi: usize| {
-                js.iter()
-                    .any(|&j| signal_matches(&pairs[pi].1, &findings[members[j]].kind))
-            };
-            if let Some(pi) = (0..pairs.len()).find(|&pi| !used.contains(&pi) && matches_any(pi)) {
-                used.insert(pi);
-                let cand = pairs[pi].clone();
-                self.taken.insert(cand.clone());
-                self.used_line.insert(cand.clone());
-                self.spent.insert(cand.clone());
+            let matches = |pi: usize, j: usize| signal_matches(&pairs[pi].1, &findings[members[j]].kind);
+            // the nearest unused marker whose signal names this site's members
+            if let Some(pi) = (0..pairs.len()).find(|&pi| !used.contains(&pi) && js.iter().any(|&j| matches(pi, j))) {
+                // G3: one marker SITE (one comment line) binds every member
+                // anchored at this col that the line's signals name. A
+                // comma-named line (`ignore closures,large-function`) covers
+                // both; a `closures` marker must not silence the large-function
+                // reported at the same anchor. Nested sites at distinct cols
+                // still peel innermost-first, one marker line per site.
+                let marker_line = pairs[pi].0;
+                let applied: Vec<usize> = (0..pairs.len())
+                    .filter(|&qi| {
+                        !used.contains(&qi) && pairs[qi].0 == marker_line && js.iter().any(|&j| matches(qi, j))
+                    })
+                    .collect();
+                for &qi in &applied {
+                    used.insert(qi);
+                    let cand = pairs[qi].clone();
+                    self.taken.insert(cand.clone());
+                    self.used_line.insert(cand.clone());
+                    self.spent.insert(cand);
+                }
                 for &j in &js {
-                    ok[j] = true;
+                    if applied.iter().any(|&qi| matches(qi, j)) {
+                        ok[j] = true;
+                    }
                 }
             }
         }
@@ -877,6 +897,53 @@ mod tests {
             severity: "fail".into(),
             message: "m".into(),
         }
+    }
+
+    #[test]
+    fn a_marker_names_only_its_own_signal_at_a_shared_anchor() {
+        // a `closures` marker above a def used to exempt EVERY finding at that
+        // col — including a large-function reported on the same anchor, so a
+        // 372-line function silently vanished from the gate. The marker binds
+        // the members its signal names and leaves the rest.
+        let comments = vec![(1, "// lucidlint: ignore closures the walker is one pass".to_string())];
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let fs = apply_suppressions_impl(
+            vec![finding("closures", 2), finding("large-function", 2)],
+            &comments,
+            "x.rs",
+            "//",
+            &mut books,
+            &[],
+        );
+        assert_eq!(fs.len(), 1);
+        assert_eq!(fs[0].kind, "large-function");
+    }
+
+    #[test]
+    fn a_comma_marker_covers_each_named_signal_at_one_anchor() {
+        // the sanctioned way to exempt two findings on one def: one marker
+        // naming both signals (`ignore closures,large-function <why>`) — the
+        // why sits in the ONE line that fits the window
+        let comments = vec![(
+            1,
+            "// lucidlint: ignore closures,large-function one site, both shapes".to_string(),
+        )];
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let fs = apply_suppressions_impl(
+            vec![finding("closures", 2), finding("large-function", 2)],
+            &comments,
+            "x.rs",
+            "//",
+            &mut books,
+            &[],
+        );
+        assert!(fs.is_empty(), "{:?}", fs.iter().map(|f| &f.kind).collect::<Vec<_>>());
     }
 
     #[test]

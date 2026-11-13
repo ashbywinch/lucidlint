@@ -134,6 +134,7 @@ class _ScanFlags:
 
     graph: Path | None = None
     churn_json: Path | None = None
+    coverage: Path | None = None
     include_tests: bool = False
     docs_root: str | None = None
     gitignored: tuple[str, ...] = ()
@@ -240,7 +241,7 @@ class _RenderCtx:
                         "thresholds": {
                             "max_complexity": 15,
                             "max_function_lines": 120,
-                            "max_file_edges": 150,
+                            "max_dependent_modules": 15,
                             "max_risk": 0.8,
                             "hotspot_top_frac": 0.1,
                             "hotspot_min_cc": 15.0,
@@ -401,6 +402,16 @@ class CoverageContext:
     label: str
     graph_preferred: bool
     stale_note: str
+
+
+@dataclass(frozen=True)
+class _CoverageInput:
+    """The repo's own snapshot plus its staleness verdict — the one coverage
+    input the scan core needs to decide whether it can claim a file is
+    unverified (R6): a stale snapshot downgrades the claim to verify."""
+
+    result: CoverageResult
+    stale: bool
 
 
 @dataclass
@@ -863,6 +874,7 @@ class _RustScan:
         self._pending_gitignored: tuple[str, ...] = ()
         self._pending_graph: Path | None = None
         self._pending_churn: Path | None = None
+        self._pending_coverage: Path | None = None
         self._pending_tests: bool = False
         self._pending_docs: str | None = None
 
@@ -925,6 +937,8 @@ class _RustScan:
                     cmd += ["--graph", str(flags.graph)]
                 if flags.churn_json is not None:
                     cmd += ["--churn", str(flags.churn_json)]
+                if flags.coverage is not None:
+                    cmd += ["--coverage", str(flags.coverage)]
                 if flags.include_tests:
                     cmd.append("--include-tests")
                 if flags.docs_root is not None:
@@ -985,13 +999,22 @@ class _RustScan:
         self._cache[key] = wrapped
         return wrapped
 
-    def prepare(self, repo: Path, only_rel: str | None, include_tests: bool, file_churn: Counter[str]) -> None:
-        """Graph contract + churn JSON + docs root for the next scan; repo-wide only.
-        Each run scans fresh — the per-run cache must not leak across main()
-        calls (the tests drive several runs in one process)."""
+    def prepare(
+        self,
+        repo: Path,
+        only_rel: str | None,
+        include_tests: bool,
+        file_churn: Counter[str],
+        coverage: _CoverageInput | None = None,
+    ) -> None:
+        """Graph contract + churn JSON + coverage snapshot + docs root for the
+        next scan; repo-wide only. Each run scans fresh — the per-run cache
+        must not leak across main() calls (the tests drive several runs in one
+        process)."""
         self._cache.clear()
         self._pending_graph = None
         self._pending_churn = None
+        self._pending_coverage = None
         self._pending_tests = include_tests
         self._pending_docs = None
         self._pending_gitignored = ()
@@ -1001,6 +1024,24 @@ class _RustScan:
                 tmp = Path(tempfile.mkstemp(prefix="lucidlint-churn-", suffix=".json")[1])
                 tmp.write_text(json.dumps(dict(file_churn)), encoding="utf-8")
                 self._pending_churn = tmp
+            if coverage is not None and coverage.result.lines is not None:
+                # the repo's OWN snapshot is the coverage truth (R6/D6): the
+                # core reads which files it names and which lines it saw
+                # executed. A file it does not name is UNKNOWN to the core.
+                tmp = Path(tempfile.mkstemp(prefix="lucidlint-coverage-", suffix=".json")[1])
+                tmp.write_text(
+                    json.dumps(
+                        {
+                            "source": coverage.result.source,
+                            "stale": coverage.stale,
+                            "covered": {
+                                rel: sorted(lines) for rel, lines in coverage.result.lines.items()
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                self._pending_coverage = tmp
             self._pending_docs = str(repo)
             self._pending_gitignored = _gitignored_docs(repo)
 
@@ -1008,6 +1049,7 @@ class _RustScan:
         return _ScanFlags(
             self._pending_graph,
             self._pending_churn,
+            self._pending_coverage,
             self._pending_tests,
             self._pending_docs,
             self._pending_gitignored,
@@ -1321,15 +1363,18 @@ def _position_key(a: Action) -> str:
 
 
 def _coverage_context(repo: Path, covered, coverage_source: str) -> CoverageContext:
-    """Coverage provenance label + staleness verdict."""
+    """Coverage provenance label + staleness verdict. The snapshot compared is
+    the one the loader actually read (coverage.xml, else `.coverage`) — using
+    the other file's mtime either hides a stale snapshot or invents one."""
+    snapshot = repo / "coverage.xml" if (repo / "coverage.xml").exists() else repo / ".coverage"
     if coverage_source == ".coverage" and (repo / ".coverage").exists():
         coverage_source += (
             " (mtime " + time.strftime("%Y-%m-%d %H:%M", time.localtime((repo / ".coverage").stat().st_mtime)) + ")"
         )
     graph_preferred = False
     stale_note = ""
-    if covered is not None and (repo / ".coverage").exists():
-        cov_mtime = (repo / ".coverage").stat().st_mtime
+    if covered is not None and snapshot.exists():
+        cov_mtime = snapshot.stat().st_mtime
         newest_test = max((p.stat().st_mtime for p in (repo / "tests").rglob("*.py")), default=0.0)
         if newest_test > cov_mtime:
             graph_preferred = True
@@ -1558,6 +1603,19 @@ _NAMING_NOTICE = (
 )
 
 
+# The report's closing ask (issue feedback): the gate checks this repo's
+# code, never the soundness of its own advice. A suggestion that would make
+# the reader's code worse, or a message the reader cannot act on, is a defect
+# only the reader can see — the rules and fixtures cannot supply a case the
+# rule does not yet exclude. Per-file runs stay silent (the LSP reprints the
+# report on the next edit) and --json stdout stays a machine document.
+_FEEDBACK_REQUEST = (
+    "feedback: if a lucidlint suggestion would make your code worse, or a message is confusing, open an\n"
+    "  issue at github.com/ashbywinch/lucidlint/issues with the finding's text and why it misleads\n"
+    "  agents: file that issue only with your user's permission"
+)
+
+
 # owns
 # hop for one consumer
 # lucidlint: ignore closures the nested visitors are one-purpose probe walks — hoisting names nothing the domain owns
@@ -1649,8 +1707,7 @@ def _kind_counts(actions: list[Action]) -> str:
     return ", ".join(f"{k}={v}" for k, v in counts.most_common())
 
 
-# lucidlint: ignore closures the render helpers are one-purpose local walks
-# lucidlint: ignore long-param-list the report pass context is a (repo, args, actions) trio
+# lucidlint: ignore closures,long-param-list the render helpers are one-purpose local walks; the pass context is a trio
 def _render_actions(
     repo: Path,
     args,
@@ -1793,7 +1850,17 @@ class _GateRunner:
         header and suppression census (the banner + footer ledger)."""
         fh = self.fh
         assert fh is not None, "gather() precedes collect"
-        rust = _scan_rust(self.repo, self.args, fh.churn, only_rel=self.args.file)
+        cc = self.cc
+        assert cc is not None, "gather() precedes collect"
+        cr = self.cr
+        assert cr is not None, "gather() precedes collect"
+        rust = _scan_rust(
+            self.repo,
+            self.args,
+            fh.churn,
+            only_rel=self.args.file,
+            coverage=_CoverageInput(cr, cc.graph_preferred),
+        )
         self.actions = _actions_from_rust(rust, self.args.include_tests, fh.churn, fh.last_modified)
         self.report_header = rust.header
         self.suppression_census = rust.suppressions or {}
@@ -2135,6 +2202,16 @@ class _GateRunner:
                     f"low-change file under scripts/tools."
                 ).strip()
 
+    def _render_feedback_request(self) -> None:
+        """Append the closing ask to a full text report. The reader is the
+        only source of a bad suggestion, so every full run ends by inviting
+        one; per-file runs stay silent (the LSP reprints the report on the
+        next edit)."""
+        if self.args.file:
+            return
+        print()
+        print(_FEEDBACK_REQUEST)
+
     def run(self) -> int:
         """The gate verdict for the repo."""
         self.gather()
@@ -2206,6 +2283,9 @@ class _GateRunner:
             self.rc.render_json(self.unique)
         else:
             self.rc.render_text(self.unique, fails, warns, acks)
+            # the tool's own advice is the one thing it cannot check — every
+            # full report closes by inviting a report of its defects
+            self._render_feedback_request()
 
         return _gate_exit(self.stale, fails, self.args)
 
@@ -2635,19 +2715,27 @@ def _actions_from_rust(
     return actions
 
 
-def _scan_rust(repo: Path, args, file_churn: Counter[str], only_rel: str | None = None) -> RustFindings:
+def _scan_rust(
+    repo: Path,
+    args,
+    file_churn: Counter[str],
+    only_rel: str | None = None,
+    coverage: _CoverageInput | None = None,
+) -> RustFindings:
     """Every finding family computes in the Rust core (per-file, partition,
     test rules, duplicate/unused, record-shape, complexity, the graph
     families, hotspot, abstraction, docs). The thresholds live in the binary
     (schema 4); the report header and suppression census ride on the result
-    for the banner + footer ledger."""
+    for the banner + footer ledger. `coverage` is the repo's own snapshot —
+    the core reads which files it names and which lines it saw executed, so a
+    file the snapshot omits stays UNKNOWN (R6)."""
     if not RUST_SCAN.active(repo):
         # no Python fallback — the binary is required; a silent empty scan
         # would report GATE: PASS without checking anything (fail-fast)
         raise RuntimeError(
             "the scan binary is required — build it with `make scanner-check` or install the lucidlint release bundle"
         )
-    RUST_SCAN.prepare(repo, only_rel, args.include_tests, file_churn)
+    RUST_SCAN.prepare(repo, only_rel, args.include_tests, file_churn, coverage)
     files = _py_files(repo, only_rel)
     rust = RUST_SCAN.load(repo, files)
     if rust is None:
