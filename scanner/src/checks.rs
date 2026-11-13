@@ -357,14 +357,21 @@ enum GlobalValueKind {
     Other,
 }
 
-fn global_value_kind(value: Option<&Expr>) -> GlobalValueKind {
-    match value {
-        Some(
-            Expr::List(_) | Expr::Dict(_) | Expr::Set(_) | Expr::ListComp(_) | Expr::DictComp(_) | Expr::SetComp(_),
-        ) => GlobalValueKind::MutableContainer,
-        Some(Expr::Name(_) | Expr::Attribute(_) | Expr::Subscript(_)) => GlobalValueKind::Rebinding,
-        Some(
-            Expr::StringLiteral(_)
+fn is_mutable_container(value: &Expr) -> bool {
+    matches!(
+        value,
+        Expr::List(_) | Expr::Dict(_) | Expr::Set(_) | Expr::ListComp(_) | Expr::DictComp(_) | Expr::SetComp(_)
+    )
+}
+
+fn is_rebinding(value: &Expr) -> bool {
+    matches!(value, Expr::Name(_) | Expr::Attribute(_) | Expr::Subscript(_))
+}
+
+fn is_constant_binding(value: &Expr) -> bool {
+    matches!(
+        value,
+        Expr::StringLiteral(_)
             | Expr::BytesLiteral(_)
             | Expr::NumberLiteral(_)
             | Expr::BooleanLiteral(_)
@@ -377,8 +384,15 @@ fn global_value_kind(value: Option<&Expr>) -> GlobalValueKind {
             | Expr::BinOp(_)
             | Expr::If(_)
             | Expr::BoolOp(_)
-            | Expr::Compare(_),
-        ) => GlobalValueKind::Constant,
+            | Expr::Compare(_)
+    )
+}
+
+fn global_value_kind(value: Option<&Expr>) -> GlobalValueKind {
+    match value {
+        Some(value) if is_mutable_container(value) => GlobalValueKind::MutableContainer,
+        Some(value) if is_rebinding(value) => GlobalValueKind::Rebinding,
+        Some(value) if is_constant_binding(value) => GlobalValueKind::Constant,
         _ => GlobalValueKind::Other,
     }
 }
@@ -447,7 +461,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
         for target in targets {
             let Expr::Name(n) = target else { continue };
             let name = n.id.as_str();
-            if name.starts_with("__") && name.ends_with("__") {
+            if is_dunder(name) {
                 continue; // module protocol metadata (__all__, __version__)
             }
             if call_valued {
