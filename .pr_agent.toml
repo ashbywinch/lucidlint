@@ -1,25 +1,17 @@
-# PR-Agent config — the house review contract.
+# PR-Agent — the house review contract. The workflow reads this file from the
+# pr-agent-config branch; a PR branch must never override it.
 #
-# CHANGE: repo_context_files tracks the repo's doc set.
+# CHANGE: repo_context_files tracks the repo's doc set; keep the budget above
+# the list's line count.
 #
 # DO NOT CHANGE:
-# - api_base points at the house provider. Never let a PR branch override
-#   it (the workflow has no checkout for exactly this reason).
-# - model stays "openai/dynamic/fallback2": the action's handler strips the
-#   openai/ (and azure/) prefix and sends the bare name to api_base — the
-#   Cloudflare AI Gateway resolves "dynamic/fallback2" via its dynamic
-#   fallback (OpenCode -> DeepSeek). Any OTHER prefix goes to the endpoint
-#   verbatim and 401s with "Model ... is not supported" — silently, every run.
-# - This file applies ONLY when the workflow pins PR_AGENT_CONFIG_BRANCH to
-#   a branch holding it: the action gates repo .pr_agent.toml keys by
-#   per-host allowed-keys, so without the pin the image defaults run
-#   (model gpt-5.6, api_base api.openai.com) and the key is rejected as
-#   "Incorrect API key provided: sk-...".
-# - repo_context_files lists ALL the standards + plan docs: the reviewer
-#   reads ONLY these files, so a rule that isn't listed here is invisible
-#   to review.
-# - extra_instructions demands a per-doc Compliance section — this is what
-#   makes the bot enforce the standards instead of rubber-stamping.
+# - api_base/model: the gateway resolves the bare "dynamic/fallback2" route;
+#   any other prefix 401s.
+# - The workflow's PR_AGENT_CONFIG_BRANCH pin: without it the image defaults
+#   run and the key is rejected.
+# - repo_context_files is the reviewer's whole world: an unlisted file is
+#   invisible to review.
+# - extra_instructions demands a per-doc Compliance section.
 
 [openai]
 custom_llm_provider = "openai"
@@ -29,10 +21,18 @@ api_base = "https://gateway.ai.cloudflare.com/v1/e21a5be58ac1e8f7d5619539feb2dc3
 model = "openai/dynamic/fallback2"
 custom_model_max_tokens = 128000
 max_model_tokens = 128000
-ai_timeout = 1800  # reviews on large diffs take minutes; the upstream default is too low
+ai_timeout = 1800  # large diffs take minutes; the upstream default is too low
 fallback_models = []
+# Turn thinking off for the gateway route (needs the v0.48+ action pin).
+reasoning_effort = "none"
+additional_reasoning_effort_models = ["dynamic/fallback2"]
+# Do not re-post identical inline comments across pushes.
+persistent_inline_comments = true
 
 repo_context_from_default_branch = false
+# The nine files are ~1750 lines; the 500-line default truncates and silently
+# drops every later file. Keep this above the list's total.
+repo_context_max_lines = 1900
 repo_context_files = [
     "docs/PRD.md",
     "docs/TECHSPEC.md",
@@ -46,45 +46,29 @@ repo_context_files = [
 ]
 
 [litellm]
-# Cloudflare AI Gateway request options — same transport as omp-config:
-# long timeout for large reviews, no gateway-side retries (a push re-runs
-# the review), exponential backoff, and per-request metadata for analytics.
+# Cloudflare AI Gateway transport: long timeout, no gateway retries (a push
+# re-runs the review), exponential backoff, request metadata for analytics.
 extra_headers = '{"cf-aig-request-timeout": "1800000", "cf-aig-max-attempts": "0", "cf-aig-backoff": "exponential", "cf-aig-metadata": "{\"source\":\"review\",\"repo\":\"lucidlint\"}"}'
 
 [pr_reviewer]
-# Incremental reviews must post FRESH comments: the commit range anchors on
-# the previous review comment's created_at (github_provider.get_commit_range),
-# which an in-place-updated persistent comment would break (2026-08-11).
+# Incremental reviews anchor on the previous review comment's time; keep this
+# false or every push re-reviews the whole PR.
 persistent_comment = false
 require_tests_review = true
 require_security_review = true
-num_max_findings = 50
+# Bound the review's output demand; a high cap returns empty content.
+num_max_findings = 10
+# Findings post as inline comments; unanchorable findings stay in the summary.
+inline_key_issues = true
 extra_instructions = "Check the PR against each file in repo_context_files. Add a 'Compliance' section per doc, listing any violations found or 'No violations'. Flag violations as findings, not just notes: requirement deviations from docs/PRD.md (a change that violates a stated requirement, constraint, persona, or JTBD is a finding), tech-spec deviations from docs/TECHSPEC.md (architecture, object model, decisions), and plan deviations from docs/PLAN.md (phases, quality gates). Structural findings the standards name are findings too: a missed class (bare dict/tuple/list in a record position), a name that violates the object model or domain-noun rules, and separation-of-concerns violations."
-
-[pr_code_suggestions]
-persistent_comment = true
 
 [github_action_config]
 handle_push_trigger = true
-# -i on /review is the ONLY incremental enabler in v0.41.1 (the
-# enable_incremental config key does not exist in this version) — without
-# it every push re-reviews the WHOLE PR diff (family-history-album 2026-08):
-# the incremental flag makes each push review only the commits since the
-# previous review, so a 12-push PR costs 12 small reviews, not 12 full ones.
-# /improve (code suggestions) is dropped: its runaway generations (285K
-# output tokens on a 9.3K prompt, 2026-10-04) come back empty at the token
-# ceiling, and the fail-loud wrapper fails the whole action on that recorded
-# tool error — the review itself had posted clean. The review is what the
-# gate exists for; the suggestions pass was never a requirement.
+# Code suggestions are off; the review is the gate.
+auto_improve = false
+# -i is the only incremental switch; without it every push reviews the whole diff.
 push_commands = ["/review -i"]
-# The omp harness pushes through its GitHub App token, so the synchronize
-# event's sender is a Bot — with the upstream default (ignore_bot_commits)
-# the review is skipped on every agent push and the fail-loud check-review
-# step fails the PR. The agent's commits ARE the developer's work here;
-# review them. (Dependabot PRs are already excluded at the job level.)
+# The harness pushes as a bot; review those pushes.
 push_trigger_ignore_bot_commits = false
-# A human posting "/skip" on the PR skips the AI review for that PR
-# (the check-review step passes on it). Deliberate opt-out only — the
-# default is that every PR gets reviewed. Do NOT use /skip on your own
-# initiative; only when the user explicitly asks.
+# Human opt-out only; never use it on your own initiative.
 skip_commands = ["/skip"]
