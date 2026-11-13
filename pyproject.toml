@@ -89,12 +89,11 @@ addopts = "--ignore=tests/fixtures/rust"
 # the fix-engine tests exec fixtures under synthetic filenames ("after.py",
 # "app.py"...) that coverage cannot measure at report time — scoping the
 # source set keeps them out entirely. The subject is the shipped PYTHON
-# logic (lucidlint.py + fix_engine.py). rule_metadata.py also ships in the
-# wheel but is exercised only via the RULES.md drift gate (a gen-rules
-# subprocess — invisible to in-process coverage), so it is excluded here
-# and guarded by its own `make rules --check` gate in CI; scripts/ is dev
-# tooling, not shipped.
-source = ["lucidlint", "fix_engine"]
+# logic: the orchestrator, the fix engine, and the rule catalog — all three
+# are py-modules in the wheel and the tests import them in-process. scripts/
+# is dev tooling, not shipped; the scan core and the radon-parity crate have
+# their own Rust coverage in `make coverage`.
+source = ["lucidlint", "fix_engine", "rule_metadata"]
 omit = ["*/__main__.py"]
 
 [tool.pyrefly]

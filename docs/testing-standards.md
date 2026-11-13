@@ -8,6 +8,19 @@ suite is organised.
 The language's type checker is configured (strict where the toolchain allows)
 and runs in the test gate — errors fail the build, never suppressed.
 
+## Coverage is a gate, and it covers every shipped subject
+
+`make coverage` measures all shipped code — the Python modules, the scan core
+crate, and the radon-parity crate — and fails when any subject drops below its
+**target**. Each subject carries two bars in the `Makefile`, beside the measured
+number they protect: a **minimum** (below it the subject is in trouble) and a
+**target** (the high bar the suite must hit). The gate fails below the target,
+so a small regression cannot land quietly just because it stayed above the
+minimum. A subject is never silently left out of the report: the merged Cobertura
+report (one package per subject) renders in the PR comment as measured /
+minimum / target / status. Moving a bar is a deliberate one-line change with its
+new measurement; lowering one is a review conversation, not a quiet edit.
+
 ## Write the test before the code
 
 Follow test-driven development: a failing test first, then the code that
