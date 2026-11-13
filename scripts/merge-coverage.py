@@ -66,9 +66,11 @@ def _line_hits(source: ET.Element) -> dict[int, int]:
     understates the rate."""
     hits: dict[int, int] = {}
     for line in source.findall("lines/line"):
-        number = int(line.get("number", "0") or 0)
+        number = line.get("number") or ""
+        if not number.isdigit():
+            continue  # line 0 is not a source line — a malformed record adds no data
         count = int(line.get("hits", "0") or 0)
-        hits[number] = max(hits.get(number, 0), count)
+        hits[int(number)] = max(hits.get(int(number), 0), count)
     return hits
 
 

@@ -21,24 +21,26 @@ def percent(fraction: float) -> float:
     return fraction * 100  # lucidlint: ignore magic-number 100 is the definition of percent
 
 
-def line_rate(report: Path) -> float:
+def line_rate(report: Path) -> float | None:
     """The report's line rate as a percentage, recomputed per CLASS and per
     line NUMBER: llvm-cov emits one record per instantiation of a line, and
     counting records inflates the total (a duplicated line is still one line).
-    A root attribute that disagrees with the lines cannot hide a drop, and a
-    report with no line records cannot pass by omission."""
+    A root attribute that disagrees with the lines cannot hide a drop. None
+    when the report measures NO line — that is a broken coverage run, not 0%."""
     root = ET.parse(report).getroot()
     valid = 0
     covered = 0
     for cls in root.iter("class"):
         hits: dict[str, int] = {}
         for line in cls.findall("lines/line"):
-            number = line.get("number", "")
+            number = line.get("number") or ""
+            if not number.isdigit():
+                continue  # line 0 is not a source line — a malformed record adds no data
             count = int(line.get("hits", "0") or 0)
             hits[number] = max(hits.get(number, 0), count)
         valid += len(hits)
         covered += sum(1 for count in hits.values() if count > 0)
-    return percent(covered / valid) if valid else 0.0
+    return percent(covered / valid) if valid else None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -58,6 +60,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     subject = f"{args.label}: " if args.label else ""
+    if measured is None:
+        print(
+            f"coverage-gate: {subject}{args.report} measures no line at all — "
+            "the coverage run produced nothing (a broken report, not 0%)",
+            file=sys.stderr,
+        )
+        return 2
     print(f"coverage-gate: {subject}{measured:.1f}% (floor {args.floor:.0f}%)")
     if round(measured, 1) < round(args.floor, 1):
         print(

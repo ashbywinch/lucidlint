@@ -93,6 +93,35 @@ def test_duplicate_line_records_collapse_to_one_line(tmp_path):
     assert run(GATE, str(rust), "100", "scanner").returncode == 0
 
 
+def test_merge_skips_a_record_without_a_line_number(tmp_path):
+    """Line 0 is not a source line: a malformed record is skipped, so it can
+    neither inflate the totals nor dilute the rate."""
+    rust = tmp_path / "rust.xml"
+    rust.write_text(
+        '<?xml version="1.0"?><coverage version="t"><packages><package name="src">'
+        '<classes><class name="a" filename="src/a.rs"><lines>'
+        '<line hits="1"/><line number="7" hits="1"/>'
+        "</lines></class></classes></package></packages></coverage>"
+    )
+    merged = tmp_path / "coverage-all.xml"
+    assert run(MERGE, "--report", "scanner", str(rust), "scanner/", "-o", str(merged)).returncode == 0
+    root = ET.parse(merged).getroot()
+    assert (root.get("lines-covered"), root.get("lines-valid")) == ("1", "1")
+
+
+def test_gate_treats_an_empty_report_as_broken_not_uncovered(tmp_path):
+    """A report with no measurable line is a broken coverage run, not 0% — the
+    gate names it instead of pretending the code is untested."""
+    empty = tmp_path / "coverage.xml"
+    empty.write_text(
+        '<?xml version="1.0"?><coverage version="t"><packages><package name="src">'
+        '</package></packages></coverage>'
+    )
+    result = run(GATE, str(empty), "80", "Python")
+    assert result.returncode == 2
+    assert "measures no line at all" in result.stderr
+
+
 def test_merge_names_a_missing_report(tmp_path):
     missing = tmp_path / "absent.xml"
     result = run(
