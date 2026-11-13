@@ -275,13 +275,6 @@ impl GraphContract {
             if target == source || !rels.contains(&target) {
                 continue;
             }
-            if target.ends_with("__init__.py") {
-                // a package facade IS the interface, not a seam to split — it
-                // is exempt as a TARGET only; a facade importing its own
-                // submodules still counts as a dependent (being depended on is
-                // the hub property; depending on others is real coupling)
-                continue;
-            }
             if is_test_rel(&target) {
                 continue; // tests are not a production module others depend on
             }
@@ -297,7 +290,8 @@ impl GraphContract {
 /// Hub files: modules many other modules depend on — the change blast radius.
 /// The count is DISTINCT dependent files (imports + resolved calls), so a
 /// large cohesive leaf module nobody imports is not a hub, while a small
-/// module every module imports is. Tests and package facades are excluded.
+/// module every module imports is. Tests are excluded; a package facade
+/// (`__init__.py`) is included — its re-export surface is the clearest hub.
 pub fn hub_file_findings(
     repo: &Path,
     contract: &GraphContract,
@@ -944,8 +938,9 @@ mod tests {
     }
 
     #[test]
-    fn hub_file_skips_a_package_facade() {
-        // pkg/__init__.py is the public interface, not a seam to split
+    fn hub_file_includes_a_package_facade() {
+        // a public API re-exported through __init__.py IS the clearest hub:
+        // every module depends on that surface, so widening it ripples
         let mut edges = Vec::new();
         let mut names = Vec::new();
         for i in 0..20 {
@@ -960,7 +955,9 @@ mod tests {
         names.push("pkg/__init__.py".to_string());
         let rel_names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
         let c = contract(vec![], edges);
-        assert!(hub_file_findings(Path::new("/repo"), &c, &rels(&rel_names), 15, false).is_empty());
+        let f = hub_file_findings(Path::new("/repo"), &c, &rels(&rel_names), 15, false);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].file, "pkg/__init__.py");
     }
 
     #[test]

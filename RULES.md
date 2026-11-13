@@ -193,7 +193,7 @@ with a why).
 `hub-file`, `high-risk` and `over-abstraction` require the optional `code-review-graph` tool (installed separately or via `pip install code-review-graph`); `hotspot` uses git churn plus the scan's own CC, and `churn-untested` uses git churn plus the repo's coverage snapshot. Each rule degrades silently when its input is absent.
 | Rule | Severity | Language | What it checks |
 |---|---|---|---|
-| **hub-file** | fail | Graph | A module that ≥15 other modules import or call into — the change blast radius. The count is distinct dependent files (tests and package facades excluded); a change here reaches every one of them, so narrow the interface it exposes to a domain noun, or split it by the dependent groups. |
+| **hub-file** | fail | Graph | A module that ≥15 other modules import or call into — the change blast radius. The count is distinct dependent files (tests excluded); a change here reaches every one of them, so narrow the interface it exposes to a domain noun, or split it by the dependent groups. |
 | **high-risk** | fail | Graph | A function with >10 callers, no test coverage, and/or a security-related name (`auth`, `login`, `token`, `sql`...). |
 | **hotspot** | fail | Both | A file in the top N% by churn with a function at ≥15 CC — volatile code that needs refactoring. |
 | **churn-untested** | fail | Both | A code file in the top N% by churn that the repo's coverage snapshot names with no covered line — volatile and unverified. A file the snapshot does not name is UNKNOWN, never flagged; a snapshot older than the repo's tests reports verify as a warning. |

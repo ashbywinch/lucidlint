@@ -699,10 +699,10 @@ CATALOG = RuleCatalog([
     # ---- graph-based (require code-review-graph)
     Rule("hub-file", "fail", "graph", "Graph",
          "A module that ≥15 other modules import or call into — the change "
-         "blast radius. The count is distinct dependent files (tests and "
-         "package facades excluded); a change here reaches every one of them, "
-         "so narrow the interface it exposes to a domain noun, or split it by "
-         "the dependent groups."),
+         "blast radius. The count is distinct dependent files (tests "
+         "excluded); a change here reaches every one of them, so narrow the "
+         "interface it exposes to a domain noun, or split it by the dependent "
+         "groups."),
     Rule("high-risk", "fail", "graph", "Graph",
          "A function with >10 callers, no test coverage, and/or a "
          "security-related name (`auth`, `login`, `token`, `sql`...)."),
