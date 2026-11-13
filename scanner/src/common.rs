@@ -86,6 +86,11 @@ pub struct SkeletonModule {
     pub consts: Vec<String>,
     /// Sorted member names — the issue's "matched members:" intersection.
     pub members: Vec<String>,
+    /// Sorted declared field names — class-body annotations plus the
+    /// `self.<name> = ...` assignments in methods. A record's fields are its
+    /// facts: two identities whose declared fields differ are siblings by
+    /// shape, not copies (#73).
+    pub fields: Vec<String>,
     /// "module" | "class" | "module-class" (a module whose non-import
     /// top-levels are exactly one class def — pairs as both).
     pub entity: &'static str,
