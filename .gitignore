@@ -27,6 +27,8 @@ __pycache__/
 htmlcov/
 coverage.xml
 coverage-rust.xml
+coverage-radonc.xml
+coverage-all.xml
 lcov.info
 
 # build artifacts

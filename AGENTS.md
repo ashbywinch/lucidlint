@@ -11,7 +11,8 @@ fetch a tool at run time, pinned to a tag — never `main`.
 - `make check` — lint + typecheck only (what the pre-push hook and CI run)
 - `make self-check` — the gate must pass on this repo itself (PR gate)
 - `make lucidlint REPO=<path>` — run the gate on a repo (default `..`)
-- `make coverage` — pytest with coverage report (XML for CI)
+- `make coverage` — the coverage gate: Python, scan core and radonc measured, merged
+  into one Cobertura for the PR comment, each subject held to its floor
 
 ## Before you edit code
 

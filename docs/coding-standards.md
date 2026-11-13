@@ -304,8 +304,11 @@ without a check is a wish:
 - Format: rustfmt, `max_width = 120` (matching `.editorconfig`); one
   formatter per artifact — generated code is owned by its generator, never
   re-formatted.
-- Coverage: `cargo llvm-cov --lcov` → `lcov.info` (gated in CI alongside
-  the Python coverage).
+- Coverage: `make coverage` measures every shipped subject (the Python
+  modules, the scan core, the radon-parity crate), merges them into one
+  Cobertura report for the PR comment, and gates each subject against a floor
+  (`scripts/coverage-gate.py`). A subject missing from the merged report is a
+  subject whose coverage nobody sees.
 - Semantic types: newtype wrappers over primitives (units in the type
   name — `Meters`, never bare `f64`); conversions at the boundary.
 - Modules: the scan-core modules (`checks`, `graph_families`, `docs`,
