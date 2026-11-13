@@ -487,10 +487,8 @@ class _FixRequest:
             self.extra_writes.append((rel, ns))
         return origin_new
 
-# lucidlint: ignore assembly-class the chain facts thread through module helpers — _FixRequest is the boundary
-# lucidlint: ignore closures the nested visitors are one-purpose probe walks — hoisting names nothing owned
+# lucidlint: ignore latent-class the chain facts thread through module helpers — _FixRequest is the boundary
     def fix_collapse_chain(self) -> str | None:
-        source, line = self._loaded_source(), self.line
         """Collapse a forwarding chain (#30): method M (class C) whose body is
         exactly `return F(<all params>)`, module fn F whose body is exactly
         `return N(<all F params>)`, N a method on ANOTHER class D (or a
@@ -501,101 +499,69 @@ class _FixRequest:
         has other callers, on *args/**kwargs passthrough, on a
         `from mod import F` re-export, or when N has other callers — never
         blind inlining."""
-        module = cst.parse_module(source)
-        wrapper = cst.MetadataWrapper(module)
+        module, wrapper = _wrapped_module(self._loaded_source())
+        head = _chain_head(wrapper, self.line)
+        if head is None:
+            return None  # stale, or the method is not a pure forwarder (R28)
+        mid = _chain_middle(self.repo, head)
+        if mid is None:
+            return None  # F is missing or does not forward its own params
+        refusal = self._chain_refusal(head, mid)
+        if refusal is not None:
+            self.decline = refusal
+            return None
+        if mid.callee.is_name:
+            return self._collapse_to_module_fn(module, head, mid)
+        return self._collapse_to_method(module, head, mid)
 
-        class _FindMethod(cst.CSTVisitor):
-            METADATA_DEPENDENCIES = (PositionProvider,)
-
-            def __init__(self, target_line):
-                self.target_line = target_line
-                self.owner: tuple[str, cst.ClassDef, cst.FunctionDef] | None = None
-
-            @override
-            def visit_ClassDef(self, node):
-                for stmt in node.body.body:
-                    if not isinstance(stmt, cst.FunctionDef):
-                        continue
-                    pos = _as_range(self.get_metadata(PositionProvider, stmt))
-                    if pos.start.line == self.target_line:
-                        self.owner = (node.name.value, node, stmt)
-                        return
-
-        probe = _FindMethod(line)
-        wrapper.visit(probe)
-        if probe.owner is None:
-            return None  # stale or not a method — R28 silence
-        c_name, cls_node, method = probe.owner
-        head_params = [p.name.value for p in method.params.params if p.name.value not in ("self", "cls")]
-        head_callee, head_args = _pure_forward_of(method)
-        if head_callee is None or head_args != head_params:
-            return None  # M is not a pure forwarder to a module fn
-        if not head_callee.is_name:
-            return None
-        # find F's definition repo-wide
-        f_name = head_callee.name
-        f_holder = _module_fn_definition(self.repo, f_name)
-        if f_holder is None:
-            return None
-        f_rel, f_module = f_holder
-        f_fn = _module_fn_node(f_module, f_name)
-        if f_fn is None:
-            return None
-        f_params = [p.name.value for p in f_fn.params.params]
-        target = _pure_forward_of(f_fn)
-        if target is None:
-            return None  # F does not forward — not a chain
-        mid_callee, mid_args = target
-        if not isinstance(mid_callee, _ForwardTarget):
-            return None
-        # a method callee absorbs the receiver param (`store.load(key)` passes
-        # only `key`); a module-fn callee takes all params
-        expected_args = (
-            [p for p in f_params if p != mid_callee.attr_method[0]]
-            if mid_callee.attr_method is not None
-            else f_params
-        )
-        if mid_args != expected_args:
-            return None
-        # +1 caller check for F: the ONLY call must be M's
+    def _chain_refusal(self, head: _ChainHead, mid: _ChainMiddle) -> str | None:
+        """The refusals every chain shape shares: F's only caller is the head,
+        no *args/**kwargs passthrough, and no `from mod import F` re-export to
+        retarget."""
+        f_name = head.callee.name
         if _call_sites(self.repo, f_name) != 1:
-            self.decline = f"'{f_name}' has more than one caller — collapse by hand"
-            return None
-        if any("*" in p for p in f_params) or any("*" in p for p in head_params):
-            self.decline = "the chain passes *args/**kwargs — collapse by hand"
-            return None
+            return f"'{f_name}' has more than one caller — collapse by hand"
+        if any("*" in p for p in head.params) or any("*" in p for p in mid.params):
+            return "the chain passes *args/**kwargs — collapse by hand"
         if _reexported(self.repo, f_name):
-            self.decline = f"'from ... import {f_name}' re-exports the forwarder — collapse by hand"
+            return f"'from ... import {f_name}' re-exports the forwarder — collapse by hand"
+        return None
+
+    def _collapse_to_module_fn(self, module: cst.Module, head: _ChainHead, mid: _ChainMiddle) -> str | None:
+        """M -> F -> G (a module function): M calls G with its own params and F
+        is deleted. None when the two modules are otherwise independent — the
+        chain is then the deliberate boundary between them."""
+        if not _depends_on(self.repo, self.rel, mid.rel):
+            self.decline = "the chain is the only coupling between the modules — a boundary; leave it"
             return None
-        if mid_callee.is_name:
-            # M -> F -> G at depth >= 2: G is a module fn terminal
-            if not _depends_on(self.repo, self.rel, f_rel):
-                self.decline = "the chain is the only coupling between the modules — a boundary; leave it"
-                return None
-            body = cst.SimpleStatementLine(
-                body=[
-                    cst.Return(
-                        cst.Call(
-                            func=cst.Name(mid_callee.name),
-                            args=[cst.Arg(cst.Name(p)) for p in head_params],
-                        )
+        body = cst.SimpleStatementLine(
+            body=[
+                cst.Return(
+                    cst.Call(
+                        func=cst.Name(mid.callee.name),
+                        args=[cst.Arg(cst.Name(p)) for p in head.params],
                     )
-                ]
-            )
-            origin_new = _replace_method_body(module, method, body).code
-            self.extra_writes.append((f_rel, _remove_fn(f_module, f_name)))
-            return origin_new
-        # N is a method on another class D — resolve uniquely
-        if mid_callee.attr_method is None:
+                )
+            ]
+        )
+        origin_new = _replace_method_body(module, head.method, body).code
+        self.extra_writes.append((mid.rel, _remove_fn(mid.module, head.callee.name)))
+        return origin_new
+
+    def _method_terminal(self, head: _ChainHead, mid: _ChainMiddle) -> _ChainTerminal | None:
+        """The unique D.N the chain reaches through F. None when the method is
+        not unique in the repo, or when the modules are independent."""
+        attr_method = mid.callee.attr_method
+        if attr_method is None:
             return None
-        recv, n_name = mid_callee.attr_method
-        arg_params = [p for p in f_params if p != recv]
-        candidates = _methods_named(self.repo, n_name)
+        recv, n_name = attr_method
+        arg_params = [p for p in mid.params if p != recv]
         matches = [
             (d_rel, d_cls, d_method)
-            for d_rel, d_cls, d_method in candidates
-            if d_cls != c_name
-            and [p.name.value for p in d_method.params.params if p.name.value not in ("self", "cls")] == arg_params
+            for d_rel, d_cls, d_method in _methods_named(self.repo, n_name)
+            if d_cls.name.value != head.class_name
+            and [p.name.value for p in d_method.params.params if p.name.value not in ("self", "cls")]
+            == arg_params
         ]
         if len(matches) != 1:
             return None  # ambiguous — no structural certainty
@@ -606,67 +572,91 @@ class _FixRequest:
         if _call_sites(self.repo, n_name) > 1:
             self.decline = f"'{n_name}' has other callers beyond the chain — collapse by hand"
             return None
-        d_has_state = _class_has_identity(d_cls)
-        if d_has_state:
-            # REWIRE: M reaches D.N directly; F deleted
-            body = cst.SimpleStatementLine(
-                body=[
-                    cst.Return(
-                        cst.Call(
-                            func=cst.Attribute(value=cst.Name(recv), attr=cst.Name(n_name)),
-                            args=[cst.Arg(cst.Name(p)) for p in head_params if p != recv],
-                        )
-                    )
-                ]
-            )
-            origin_new = _replace_method_body(module, method, body, line).code
-            if f_rel == self.rel:
-                origin_new = cst.parse_module(origin_new).visit(_RemoveFn(f_name)).code
-            else:
-                self.extra_writes.append((f_rel, _remove_fn(f_module, f_name)))
-            return origin_new
-        # PROMOTE: N becomes a sibling method of M on C; D dissolves
-        if not _zero_external_refs(self.repo, d_cls.name.value):
-            self.decline = f"'{d_cls.name.value}' still has external references — dissolve D by hand"
+        return _ChainTerminal(recv, n_name, d_rel, d_cls, d_method)
+
+    def _collapse_to_method(self, module: cst.Module, head: _ChainHead, mid: _ChainMiddle) -> str | None:
+        """M -> F -> D.N: rewire when D has identity, promote N onto C when D
+        dissolves. D's identity decides, not the caller's preference."""
+        terminal = self._method_terminal(head, mid)
+        if terminal is None:
             return None
-        if _method_uses_self(d_method):
-            self.decline = f"'{n_name}' touches its own instance state — promote by hand"
-            return None
-        promoted = d_method.with_changes(name=cst.Name(n_name))
-        new_class = cls_node.with_changes(
-            body=cls_node.body.with_changes(
-                body=[*cls_node.body.body, promoted]
-            )
-        )
-        origin_new = _replace_class_body(module, line, new_class).code
-        # M's body becomes `return self.N(<args minus the recv param>)`
-        m_body = cst.SimpleStatementLine(
+        if _class_has_identity(terminal.cls):
+            return self._rewire_method_terminal(module, head, mid, terminal)
+        return self._promote_method_terminal(module, head, mid, terminal)
+
+    def _rewire_method_terminal(
+        self, module: cst.Module, head: _ChainHead, mid: _ChainMiddle, terminal: _ChainTerminal
+    ) -> str:
+        """D keeps its identity: M reaches D.N directly and F is deleted."""
+        args = [p for p in head.params if p != terminal.recv]
+        body = cst.SimpleStatementLine(
             body=[
                 cst.Return(
                     cst.Call(
-                        func=cst.Attribute(value=cst.Name("self"), attr=cst.Name(n_name)),
-                        args=[cst.Arg(cst.Name(p)) for p in head_params if p != recv],
+                        func=cst.Attribute(
+                            value=cst.Name(terminal.recv), attr=cst.Name(terminal.name)
+                        ),
+                        args=[cst.Arg(cst.Name(p)) for p in args],
                     )
                 )
             ]
         )
-        origin_new = _replace_method_body(cst.parse_module(origin_new), method, m_body, line).code
-        if f_rel == self.rel:
-            origin_new = cst.parse_module(origin_new).visit(_RemoveFn(f_name)).code
-        else:
-            self.extra_writes.append((f_rel, _remove_fn(f_module, f_name)))
-        if d_rel != self.rel:
-            d_new = _remove_class(_module_of(self.repo, d_rel), d_cls.name.value)
+        origin_new = _replace_method_body(module, head.method, body, self.line).code
+        return self._drop_middle(origin_new, head, mid)
+
+    def _promote_method_terminal(
+        self, module: cst.Module, head: _ChainHead, mid: _ChainMiddle, terminal: _ChainTerminal
+    ) -> str | None:
+        """D has no identity: N becomes a sibling method of M on C, D dissolves."""
+        d_name = terminal.cls.name.value
+        if not _zero_external_refs(self.repo, d_name):
+            self.decline = f"'{d_name}' still has external references — dissolve D by hand"
+            return None
+        if _method_uses_self(terminal.method):
+            self.decline = f"'{terminal.name}' touches its own instance state — promote by hand"
+            return None
+        promoted = terminal.method.with_changes(name=cst.Name(terminal.name))
+        new_class = head.class_node.with_changes(
+            body=head.class_node.body.with_changes(
+                body=[*head.class_node.body.body, promoted]
+            )
+        )
+        origin_new = _replace_class_body(module, self.line, new_class).code
+        args = [p for p in head.params if p != terminal.recv]
+        m_body = cst.SimpleStatementLine(
+            body=[
+                cst.Return(
+                    cst.Call(
+                        func=cst.Attribute(value=cst.Name("self"), attr=cst.Name(terminal.name)),
+                        args=[cst.Arg(cst.Name(p)) for p in args],
+                    )
+                )
+            ]
+        )
+        origin_new = _replace_method_body(
+            cst.parse_module(origin_new), head.method, m_body, self.line
+        ).code
+        origin_new = self._drop_middle(origin_new, head, mid)
+        if terminal.rel != self.rel:
+            d_new = _remove_class(_module_of(self.repo, terminal.rel), d_name)
             if _module_empty(d_new):
-                self.deletes.append(d_rel)
+                self.deletes.append(terminal.rel)
             else:
-                self.extra_writes.append((d_rel, d_new))
+                self.extra_writes.append((terminal.rel, d_new))
         else:
             # D dissolves in the origin too (zero external refs by the gate)
-            origin_new = cst.parse_module(origin_new).visit(_RemoveClass(d_cls.name.value)).code
+            origin_new = cst.parse_module(origin_new).visit(_RemoveClass(d_name)).code
         return origin_new
 
-# lucidlint: ignore closures the nested visitors are one-purpose probe walks — hoisting names nothing the domain owns
+    def _drop_middle(self, origin_new: str, head: _ChainHead, mid: _ChainMiddle) -> str:
+        """Delete F once the head no longer calls it: in the origin when F
+        lives there, otherwise as a separate write."""
+        if mid.rel == self.rel:
+            return cst.parse_module(origin_new).visit(_RemoveFn(head.callee.name)).code
+        self.extra_writes.append((mid.rel, _remove_fn(mid.module, head.callee.name)))
+        return origin_new
+
+# lucidlint: ignore latent-class the nested visitors are one-purpose probe walks — hoisting names nothing owned
     def fix_split_module(self) -> str | None:
         """Split a multi-class module (#31): the misplaced public classes move
         to files named after them — flat siblings when independent, a package
@@ -679,366 +669,26 @@ class _FixRequest:
         cannot move into a class (the __init__ holds no constants, BQ6), and
         relative imports in the origin refuse the package layout and fall
         the split back to flat."""
-        rel = self.rel
-        if not rel.endswith(".py") or rel.endswith("__init__.py"):
+        if not self.rel.endswith(".py") or self.rel.endswith("__init__.py"):
             return None  # the scanner never flags __init__ — nothing to split
-        source = self._loaded_source()
-        module = cst.parse_module(source)
-        wrapper = cst.MetadataWrapper(module)
-        # MetadataWrapper deep-copies the tree — every node MUST come from the
-        # wrapper's copy or ParentNodeProvider lookups miss (the fixers hold
-        # nodes across transforms; identity must stay within one tree)
-        module = wrapper.module
-        top = module.body
-        origin_dir = rel.rsplit("/", 1)[0] if "/" in rel else ""
-        dirs = origin_dir.split("/") if origin_dir else []
-        in_package = bool(dirs)
-        stem = rel.rsplit("/", 1)[-1][:-3]
-        subjects = [
-            s
-            for s in top
-            if isinstance(s, cst.ClassDef)
-            and not s.name.value.startswith("_")
-            and not _class_matches_stem(s.name.value, stem)
-        ]
+        module, wrapper = _wrapped_module(self._loaded_source())
+        origin = _split_origin(self.rel)
+        subjects = _split_subjects(module.body, origin.stem)
         if not subjects:
             return None  # stale — no misplaced public class remains
-        subject_ids = {id(s) for s in subjects}
-        subject_names = {s.name.value for s in subjects}
-        origin_path = dirs + [stem]
-
-        # REFUSAL: module-level executable statements BETWEEN the first and
-        # last subject class would be reordered by the split (their original
-        # position sits relative to the classes) — decline, never reorder
-        bounds = [i for i, s in enumerate(top) if id(s) in subject_ids]
-        for stmt in top[bounds[0] : bounds[-1] + 1]:
-            if id(stmt) in subject_ids or isinstance(stmt, cst.EmptyLine):
-                continue
-            if isinstance(stmt, (cst.ClassDef, cst.FunctionDef)):
-                continue
-            if _stmt_is_plain_assign(stmt):
-                continue
-            self.decline = (
-                "module-level executable statements between classes would be "
-                "reordered by the split — split by hand"
-            )
+        refusal = _refuse_split_reordering(module.body, subjects)
+        if refusal is not None:
+            self.decline = refusal
             return None
-
-        # the constants the split can move: module-level assignments to plain
-        # names, and their readers (per subject class / per residual statement)
-        const_stmts = _module_constants(top)
-        const_def_ids = {id(s) for _n, s in const_stmts}
-        const_names = {n for n, _s in const_stmts}
-        class_refs: dict[int, set[str]] = {}
-        residual_refs: set[str] = set()
-        for stmt in top:
-            if id(stmt) in const_def_ids:
-                continue
-            names = _free_names_of(stmt) & const_names
-            if isinstance(stmt, cst.ClassDef) and id(stmt) in subject_ids:
-                class_refs[id(stmt)] = names
-            else:
-                residual_refs |= names
-        external_consts = {
-            k for k in const_names if _const_imported_elsewhere(self.repo, rel, module, k)
-        }
-        moved_consts: dict[int, set[str]] = {}
-        for c in subjects:
-            moved_consts[id(c)] = _consts_moving_into(
-                const_stmts, class_refs, residual_refs, external_consts, c
-            )
-        moved_all = set().union(*moved_consts.values()) if moved_consts else set()
-
-        # the residual: everything that stays behind, and the module-level
-        # names the moved classes may need to import from the origin
-        residual = [s for s in top if id(s) not in subject_ids and id(s) not in const_def_ids]
-        residual_def_names = {
-            s.name.value
-            for s in residual
-            if isinstance(s, (cst.FunctionDef, cst.ClassDef))
-        }
-        residual_def_names |= const_names - moved_all
-        residual_subject_refs: set[str] = set()
-        for s in residual:
-            if isinstance(s, cst.SimpleStatementLine) and any(
-                isinstance(i, (cst.Import, cst.ImportFrom)) for i in s.body
-            ):
-                continue  # imports bind their own names — not class references
-            residual_subject_refs |= _free_names_of(s) & subject_names
-
-        # cluster the subjects by cohesion edges: cross-class member
-        # references OR shared class-level attributes
-        free_of = {id(c): _class_free_names(c) for c in subjects}
-        attrs_of = {id(c): _class_attr_names(c) for c in subjects}
-        # a constant's VALUE may reference a moved class (`CACHE = {User: []}`)
-        # — the residual keeps the constant, so the origin also imports the class
-        for _n, stmt in const_stmts:
-            residual_subject_refs |= _expr_names(_const_value(stmt)) & subject_names
-        parent = {id(c): id(c) for c in subjects}
-
-        def find(x: int) -> int:
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        for i, a in enumerate(subjects):
-            for b in subjects[i + 1 :]:
-                if (
-                    b.name.value in free_of[id(a)]
-                    or a.name.value in free_of[id(b)]
-                    or attrs_of[id(a)] & attrs_of[id(b)]
-                ):
-                    parent[find(id(a))] = find(id(b))
-        class_index = {id(s): i for i, s in enumerate(top)}
-        comps: dict[int, list[cst.ClassDef]] = {}
-        for c in subjects:
-            comps.setdefault(find(id(c)), []).append(c)
-        components = sorted(
-            comps.values(), key=lambda cs: min(class_index[id(c)] for c in cs)
+        outcome = _ModuleSplit(self.repo, origin, module, subjects).execute(
+            wrapper, self.opts.name
         )
-        total = len(subjects)
-        layouts: list[tuple[list[cst.ClassDef], str | None]] = []
-        for comp in components:
-            if len(comp) == 1:
-                layouts.append((comp, None))
-            elif len(comp) == total:
-                layouts.append((comp, self.opts.name or stem))
-            else:
-                name = self.opts.name
-                if not name:
-                    self.decline = (
-                        "the cohesive sub-cluster needs a package name — name the "
-                        "package with a domain noun (--name)"
-                    )
-                    return None
-                layouts.append((comp, name))
-        any_pkg = any(name is not None for _comp, name in layouts)
-        # relative imports in the origin change their resolution when the
-        # module becomes a package (the path root moves) — refuse PACKAGE,
-        # split flat (the class files are siblings, the imports stay valid)
-        if any_pkg and _module_has_relative_imports(module):
-            layouts = [(comp, None) for comp, _name in layouts]
-            any_pkg = False
-        whole_pkg = (
-            len(layouts) == 1
-            and layouts[0][1] is not None
-            and len(layouts[0][0]) == total
-        )
-
-        # package layouts: no module-level constant may survive (BQ6) and no
-        # residual code may evaluate a moved class at import time (the __init__
-        # evaluates before its re-exports)
-        if any_pkg and (const_names - moved_all):
-            names = ", ".join(sorted(const_names - moved_all))
-            self.decline = (
-                f"the constant(s) {names} cannot move into a class; a package "
-                "__init__ may hold no constants — split by hand"
-            )
+        if outcome.decline is not None:
+            self.decline = outcome.decline
             return None
-        if whole_pkg:
-            for s in residual:
-                refs = _exec_time_names(wrapper, s) & subject_names
-                if refs:
-                    self.decline = (
-                        "module-level code evaluates " + ", ".join(sorted(refs))
-                        + " at import time — the package __init__ runs before the "
-                        "re-exports — split by hand"
-                    )
-                    return None
-
-        # the new modules: flat files are snake_cased siblings; package members
-        # live in `<pkg>/<Class>.py` and load via the package
-        snake = {c.name.value: _snake_name(c.name.value) for c in subjects}
-        targets: dict[str, list[str]] = {}
-        for comp, name in layouts:
-            for c in comp:
-                targets[c.name.value] = [name] if name is not None else [snake[c.name.value]]
-
-        # REFUSAL: target collisions (an existing sibling file, an existing
-        # package dir — the stem package needs --name when taken)
-        seen_files: set[str] = set()
-        for comp, name in layouts:
-            if name is None:
-                for c in comp:
-                    t = origin_dir + "/" + snake[c.name.value] + ".py" if origin_dir else snake[c.name.value] + ".py"
-                    if t in seen_files:
-                        self.decline = f"the split target '{t}' would collide — split by hand"
-                        return None
-                    seen_files.add(t)
-                    if (self.repo / t).exists():
-                        self.decline = f"'{t}' already exists — split by hand"
-                        return None
-            else:
-                pkg_dir = origin_dir + "/" + name if origin_dir else name
-                # the origin file itself is being replaced — only a DIFFERENT
-                # `name.py` or an existing `name/` directory blocks the package
-                if (self.repo / pkg_dir).exists() or (
-                    (self.repo / f"{pkg_dir}.py").exists() and f"{pkg_dir}.py" != rel
-                ):
-                    if name == stem and self.opts.name is None:
-                        self.decline = (
-                            f"a package named '{name}' already exists — pass --name <name>"
-                        )
-                    else:
-                        self.decline = (
-                            f"the package name '{name}' is taken — pick another --name"
-                        )
-                    return None
-
-        # REFUSAL: an import cycle in the produced layout — between the produced
-        # class files (the __init__ re-export edge is exempt by construction),
-        # or between a class file and the residual origin module (FLAT/sub)
-        if any_pkg:
-            for comp, name in layouts:
-                if name is None:
-                    continue
-                nodes = [c.name.value for c in comp]
-                edges = {n: set() for n in nodes}
-                for c in comp:
-                    for d in comp:
-                        if d is not c and d.name.value in free_of[id(c)]:
-                            edges[c.name.value].add(d.name.value)
-                cyc = _graph_cycle(nodes, edges)
-                if cyc:
-                    self.decline = (
-                        "the split would create an import cycle ("
-                        + " -> ".join(cyc)
-                        + ") — split by hand"
-                    )
-                    return None
-        if not whole_pkg:
-            bad = [
-                c.name.value
-                for c in subjects
-                if (free_of[id(c)] & residual_def_names)
-                and c.name.value in residual_subject_refs
-            ]
-            if bad:
-                self.decline = (
-                    "the split would create an import cycle between '"
-                    + bad[0]
-                    + "' and the origin module — split by hand"
-                )
-                return None
-            if _module_star_imported(self.repo, rel, module):
-                self.decline = (
-                    "a file does 'from ... import *' on the origin — the split "
-                    "cannot retarget it — split by hand"
-                )
-                return None
-
-        # ---- build the new sources (pure — fix_finding applies the writes) ----
-        extra_writes: list[tuple[str, str]] = []
-        for comp, name in layouts:
-            if name is None:
-                for c in comp:
-                    t = origin_dir + "/" + snake[c.name.value] + ".py" if origin_dir else snake[c.name.value] + ".py"
-                    extra_writes.append(
-                        (
-                            t,
-                            _split_class_source(
-                                module,
-                                wrapper,
-                                c,
-                                _SplitCtx(
-                                    stem=stem,
-
-                                    subjects=subject_names,
-                                    residual_def_names=residual_def_names,
-                                    moved=moved_consts.get(id(c), set()),
-                                    package=None,
-                                    origin_dots=1 if in_package else 0,
-                                    member_dots=0,
-                                ),
-                            ),
-                        )
-                    )
-            else:
-                pkg_dir = origin_dir + "/" + name if origin_dir else name
-                init_body = list(residual) + [
-                    cst.SimpleStatementLine(body=[_from_import_node([c.name.value], [c.name.value], 1)])
-                    for c in comp
-                ]
-                extra_writes.append((f"{pkg_dir}/__init__.py", cst.Module(body=init_body).code))
-                for c in comp:
-                    extra_writes.append(
-                        (
-                            f"{pkg_dir}/{c.name.value}.py",
-                            _split_class_source(
-                                module,
-                                wrapper,
-                                c,
-                                _SplitCtx(
-                                    stem=stem,
-
-                                    subjects=subject_names,
-                                    residual_def_names=residual_def_names,
-                                    moved=moved_consts.get(id(c), set()),
-                                    package=name,
-                                    origin_dots=2 if in_package else 0,
-                                    member_dots=1,
-                                ),
-                            ),
-                        )
-                    )
-
-        # the origin residual: the kept statements in their original order plus
-        # the from-imports the residual needs for the moved classes it uses
-        moved_def_ids = {
-            id(s) for n, s in const_stmts if n in moved_all
-        }
-        origin_kept = [s for s in top if id(s) not in subject_ids and id(s) not in moved_def_ids]
-        origin_additions = [
-            cst.SimpleStatementLine(body=[_from_import_node(targets[n], [n], 1 if in_package else 0)])
-            for n in sorted(residual_subject_refs)
-        ]
-        origin_source = cst.Module(body=_insert_header_imports(origin_kept, origin_additions)).code
-
-        # repo-wide rewrites for the layouts that move classes out of the
-        # reachable origin (FLAT + sub-package): from-imports and `old.Cls`
-        # attribute chains retarget to the class's new module
-        rewritten: dict[str, str] = {}
-        if not whole_pkg:
-            for path in _py_files(self.repo):
-                p_rel = path.relative_to(self.repo).as_posix()
-                text = origin_source if p_rel == rel else path.read_text(encoding="utf-8")
-                new = _split_rewrite_source(text, p_rel, origin_path, targets)
-                if new is not None:
-                    rewritten[p_rel] = new
-            if rel in rewritten:
-                origin_source = rewritten[rel]
-            for p_rel, new in rewritten.items():
-                if p_rel != rel:
-                    extra_writes.append((p_rel, new))
-
-        # safety: every produced file must parse, and every NEW target must not
-        # exist (a rewritten file exists by definition — it is being edited)
-        self.extra_writes = extra_writes
-        for t, src in [(rel, origin_source)] + extra_writes:
-            try:
-                cst.parse_module(src)
-            except Exception:
-                self.decline = f"the computed split for '{t}' does not parse — split by hand"
-                return None
-            if t != rel and t not in rewritten and (self.repo / t).exists():
-                self.decline = f"the split target '{t}' already exists — split by hand"
-                return None
-
-        # an origin that became empty is deleted only when no import names it
-        # anywhere in the produced repo (BQ6(f)); a whole-module package always
-        # replaces its origin file (the imports resolve through the package)
-        if whole_pkg:
-            self.deletes.append(rel)
-            return ""
-        final_sources = {p: s for p, s in rewritten.items()}
-        final_sources.update({t: s for t, s in extra_writes})
-        if _module_empty(origin_source) and not _origin_imported_anywhere(
-            self.repo, final_sources, rel, origin_path
-        ):
-            self.deletes.append(rel)
-            return ""
-        return origin_source
+        self.extra_writes = outcome.writes
+        self.deletes.extend(outcome.deletes)
+        return outcome.origin
 
     def _fn_seam_analysis(self):
         source, line = self._loaded_source(), self.line
@@ -4585,6 +4235,113 @@ class _ForwardTarget:
     attr_method: tuple[str, str] | None = None
 
 
+class _ChainHead(NamedTuple):
+    """A forwarding chain's head: the method, its class, the parameters it
+    passes through, and the call it forwards to."""
+
+    class_name: str
+    class_node: cst.ClassDef
+    method: cst.FunctionDef
+    params: list[str]
+    callee: _ForwardTarget
+
+
+class _ChainMiddle(NamedTuple):
+    """The module function the head forwards into: where it lives, the module
+    it belongs to, its parameters, and where that forwards."""
+
+    rel: str
+    module: cst.Module
+    params: list[str]
+    callee: _ForwardTarget
+
+
+class _ModuleFn(NamedTuple):
+    """One module-level function resolved repo-wide: the file it lives in, the
+    parsed module, and its node — the three facts a caller needs together."""
+
+    rel: str
+    module: cst.Module
+    node: cst.FunctionDef
+
+
+class _ChainTerminal(NamedTuple):
+    """The method the chain reaches through its middle: D.N, plus the
+    receiver parameter the head passes for it."""
+
+    recv: str
+    name: str
+    rel: str
+    cls: cst.ClassDef
+    method: cst.FunctionDef
+
+
+def _wrapped_module(source: str) -> tuple[cst.Module, cst.MetadataWrapper]:
+    """Parse into a metadata wrapper's copy — every node MUST come from the
+    wrapper's tree or ParentNodeProvider lookups miss (the fixers hold nodes
+    across transforms; identity must stay within one tree)."""
+    wrapper = cst.MetadataWrapper(cst.parse_module(source))
+    return wrapper.module, wrapper
+
+
+class _MethodAtLine(cst.CSTVisitor):
+    """The class + method whose def sits on one line — a chain's head probe."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, target_line: int) -> None:
+        self.target_line = target_line
+        self.owner: tuple[str, cst.ClassDef, cst.FunctionDef] | None = None
+
+    @override
+    def visit_ClassDef(self, node: cst.ClassDef) -> None:
+        for stmt in node.body.body:
+            if not isinstance(stmt, cst.FunctionDef):
+                continue
+            pos = _as_range(self.get_metadata(PositionProvider, stmt))
+            if pos.start.line == self.target_line:
+                self.owner = (node.name.value, node, stmt)
+                return
+
+
+def _chain_head(wrapper: cst.MetadataWrapper, line: int) -> _ChainHead | None:
+    """The forwarding chain's head at `line`: a method whose body is exactly
+    one call into a module function, passing its own parameters through. None
+    when the line is not that shape (stale, or not a forwarder)."""
+    probe = _MethodAtLine(line)
+    wrapper.visit(probe)
+    if probe.owner is None:
+        return None
+    class_name, class_node, method = probe.owner
+    params = [p.name.value for p in method.params.params if p.name.value not in ("self", "cls")]
+    callee, args = _pure_forward_of(method)
+    if callee is None or args != params or not callee.is_name:
+        return None
+    return _ChainHead(class_name, class_node, method, params, callee)
+
+
+def _chain_middle(repo: Path, head: _ChainHead) -> _ChainMiddle | None:
+    """The module function F the head calls, resolved repo-wide; None when F is
+    missing or does not forward its own parameters on."""
+    found = _find_module_fn(repo, head.callee.name)
+    if found is None:
+        return None
+    params = [p.name.value for p in found.node.params.params]
+    callee, args = _pure_forward_of(found.node)
+    if callee is None:
+        return None
+    # a method callee absorbs the receiver param (`store.load(key)` passes only
+    # `key`); a module-fn callee takes all params
+    expected = (
+        [p for p in params if p != callee.attr_method[0]]
+        if callee.attr_method is not None
+        else params
+    )
+    if args != expected:
+        return None
+    return _ChainMiddle(found.rel, found.module, params, callee)
+
+
 def _pure_forward_of(fn: cst.FunctionDef) -> tuple[_ForwardTarget | None, list[str]]:
     """The forwarder call + arg names when `fn`'s body is exactly
     `return <callee>(<arg names>)` — the #30 re-derivation of the pure
@@ -4619,11 +4376,14 @@ def _module_fn_node(module: cst.Module, name: str) -> cst.FunctionDef | None:
     return None
 
 
-def _module_fn_definition(repo: Path, name: str) -> tuple[str, cst.Module] | None:
+def _find_module_fn(repo: Path, name: str) -> _ModuleFn | None:
+    """One module-level function by name, resolved across the repo — the
+    lookup returns the file, the module, and the node together."""
     for path in _py_files(repo):
-        mod = cst.parse_module(path.read_text(encoding="utf-8"))
-        if _module_fn_node(mod, name) is not None:
-            return path.relative_to(repo).as_posix(), mod
+        module = cst.parse_module(path.read_text(encoding="utf-8"))
+        node = _module_fn_node(module, name)
+        if node is not None:
+            return _ModuleFn(path.relative_to(repo).as_posix(), module, node)
     return None
 
 
@@ -5146,6 +4906,502 @@ def _class_with_moved_consts(
     new_body = body[:insert] + attrs + body[insert:]
     cls2 = cls.with_changes(body=cls.body.with_changes(body=new_body))
     return cast(cst.ClassDef, cls2.visit(_RewriteMovedConstRefs(wrapper, moved, cls_name)))
+
+
+class _SplitOrigin(NamedTuple):
+    """Where the module being split lives: its repo-relative path, the
+    directory segments that decide flat-vs-package, its stem (the file name
+    without `.py`), and the dotted path the split's imports resolve through."""
+
+    rel: str
+    directory: str
+    segments: list[str]
+    stem: str
+
+    @property
+    def in_package(self) -> bool:
+        return bool(self.segments)
+
+    @property
+    def origin_path(self) -> list[str]:
+        return self.segments + [self.stem]
+
+
+class _SplitLayout(NamedTuple):
+    """The split's shape: one entry per produced module (its classes and the
+    package name, or None for a flat sibling file), the snake names the flat
+    targets use, and the decline when the shape cannot be named."""
+
+    members: list[tuple[list[cst.ClassDef], str | None]]
+    any_package: bool
+    snake: dict[str, str]
+    decline: str | None = None
+
+
+class _SplitOutcome(NamedTuple):
+    """What a split produced: the origin's new source ("" when the origin is
+    deleted), the other files to write, the files to delete, and the reason it
+    refused (None on success)."""
+
+    origin: str | None
+    writes: list[tuple[str, str]]
+    deletes: list[str]
+    decline: str | None = None
+
+
+def _split_origin(rel: str) -> _SplitOrigin:
+    """The module's location facts, derived once from its repo-relative path."""
+    directory = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    return _SplitOrigin(
+        rel=rel,
+        directory=directory,
+        segments=directory.split("/") if directory else [],
+        stem=rel.rsplit("/", 1)[-1].removesuffix(".py"),
+    )
+
+
+def _split_subjects(top: Sequence, stem: str) -> list[cst.ClassDef]:
+    """The misplaced public classes: not private, not the stem-matching class
+    (that one belongs to the module's own name)."""
+    return [
+        stmt
+        for stmt in top
+        if isinstance(stmt, cst.ClassDef)
+        and not stmt.name.value.startswith("_")
+        and not _class_matches_stem(stmt.name.value, stem)
+    ]
+
+
+def _refuse_split_reordering(top: Sequence, subjects: list[cst.ClassDef]) -> str | None:
+    """Module-level executable statements BETWEEN the first and last subject
+    class would be reordered by the split — decline, never reorder."""
+    subject_ids = {id(s) for s in subjects}
+    bounds = [i for i, stmt in enumerate(top) if id(stmt) in subject_ids]
+    for stmt in top[bounds[0] : bounds[-1] + 1]:
+        if id(stmt) in subject_ids or isinstance(stmt, cst.EmptyLine):
+            continue
+        if isinstance(stmt, (cst.ClassDef, cst.FunctionDef)):
+            continue
+        if _stmt_is_plain_assign(stmt):
+            continue
+        return (
+            "module-level executable statements between classes would be "
+            "reordered by the split — split by hand"
+        )
+    return None
+
+
+def _union_find(parent: dict[int, int], node: int) -> int:
+    """One union-find root lookup — the clustering's only shared state."""
+    while parent[node] != node:
+        parent[node] = parent[parent[node]]
+        node = parent[node]
+    return node
+
+
+class _ModuleSplit:
+    """One module split (#31), as the operation it is: the module's misplaced
+    classes, the constants that move with them, the residual that stays, and
+    the layout the split produces. Each step is named after what it decides —
+    plan the constant moves, cluster, name the layout, refuse the unsafe
+    shapes, build the sources — so the phases read in order."""
+
+    def __init__(self, repo: Path, origin: _SplitOrigin, module: cst.Module, subjects: list[cst.ClassDef]) -> None:
+        self.repo = repo
+        self.origin = origin
+        self.module = module
+        self.subjects = subjects
+        self.subject_names = {subject.name.value for subject in subjects}
+        self.const_stmts = _module_constants(module.body)
+        self.const_names = {name for name, _stmt in self.const_stmts}
+        self.moved_consts = self._moved_constants()
+        self.moved_all = set().union(*self.moved_consts.values()) if self.moved_consts else set()
+        self.residual = [
+            stmt
+            for stmt in module.body
+            if id(stmt) not in {id(s) for s in subjects}
+            and id(stmt) not in {id(s) for _name, s in self.const_stmts}
+        ]
+        self.residual_def_names = {
+            stmt.name.value
+            for stmt in self.residual
+            if isinstance(stmt, (cst.FunctionDef, cst.ClassDef))
+        }
+        self.residual_def_names |= self.const_names - self.moved_all
+        self.residual_subject_refs = self._residual_subject_refs()
+        self.free_of = {id(c): _class_free_names(c) for c in subjects}
+        self.attrs_of = {id(c): _class_attr_names(c) for c in subjects}
+
+    def _moved_constants(self) -> dict[int, set[str]]:
+        """Which module constants each subject class reads, and which of those
+        no residual statement and no other module needs — only those move."""
+        const_def_ids = {id(stmt) for _name, stmt in self.const_stmts}
+        subject_ids = {id(subject) for subject in self.subjects}
+        class_refs: dict[int, set[str]] = {}
+        residual_refs: set[str] = set()
+        for stmt in self.module.body:
+            if id(stmt) in const_def_ids:
+                continue
+            names = _free_names_of(stmt) & self.const_names
+            if isinstance(stmt, cst.ClassDef) and id(stmt) in subject_ids:
+                class_refs[id(stmt)] = names
+            else:
+                residual_refs |= names
+        external = {
+            name
+            for name in self.const_names
+            if _const_imported_elsewhere(self.repo, self.origin.rel, self.module, name)
+        }
+        return {
+            id(subject): _consts_moving_into(
+                self.const_stmts, class_refs, residual_refs, external, subject
+            )
+            for subject in self.subjects
+        }
+
+    def _residual_subject_refs(self) -> set[str]:
+        """The moved classes the residual statements need — the origin imports
+        them back. A constant's VALUE may reference one (`CACHE = {User: []}`):
+        the residual keeps the constant, so the origin imports the class too."""
+        refs: set[str] = set()
+        for stmt in self.residual:
+            if isinstance(stmt, cst.SimpleStatementLine) and any(
+                isinstance(item, (cst.Import, cst.ImportFrom)) for item in stmt.body
+            ):
+                continue  # imports bind their own names — not class references
+            refs |= _free_names_of(stmt) & self.subject_names
+        for _name, stmt in self.const_stmts:
+            refs |= _expr_names(_const_value(stmt)) & self.subject_names
+        return refs
+
+    def components(self) -> list[list[cst.ClassDef]]:
+        """The subjects clustered by cohesion edges: cross-class member
+        references OR shared class-level attributes. Components keep source
+        order."""
+        parent = {id(subject): id(subject) for subject in self.subjects}
+        for i, first in enumerate(self.subjects):
+            for second in self.subjects[i + 1 :]:
+                if (
+                    second.name.value in self.free_of[id(first)]
+                    or first.name.value in self.free_of[id(second)]
+                    or self.attrs_of[id(first)] & self.attrs_of[id(second)]
+                ):
+                    parent[_union_find(parent, id(first))] = _union_find(parent, id(second))
+        class_index = {id(stmt): i for i, stmt in enumerate(self.module.body)}
+        components: dict[int, list[cst.ClassDef]] = {}
+        for subject in self.subjects:
+            components.setdefault(_union_find(parent, id(subject)), []).append(subject)
+        return sorted(components.values(), key=lambda group: min(class_index[id(c)] for c in group))
+
+    def layout(self, package_name: str | None) -> _SplitLayout:
+        """Name each component's target: a lone class goes flat, a cohesive
+        whole takes the stem (or --name), a sub-cluster needs --name. Relative
+        imports in the origin refuse the package layout and fall back to flat."""
+        total = len(self.subjects)
+        members: list[tuple[list[cst.ClassDef], str | None]] = []
+        for component in self.components():
+            if len(component) == 1:
+                members.append((component, None))
+            elif len(component) == total:
+                members.append((component, package_name or self.origin.stem))
+            elif package_name:
+                members.append((component, package_name))
+            else:
+                return _SplitLayout(
+                    members=[],
+                    any_package=False,
+                    snake={},
+                    decline=(
+                        "the cohesive sub-cluster needs a package name — name the "
+                        "package with a domain noun (--name)"
+                    ),
+                )
+        any_package = any(name is not None for _component, name in members)
+        if any_package and _module_has_relative_imports(self.module):
+            members = [(component, None) for component, _name in members]
+            any_package = False
+        snake = {subject.name.value: _snake_name(subject.name.value) for subject in self.subjects}
+        return _SplitLayout(members=members, any_package=any_package, snake=snake)
+
+    def is_whole_package(self, layout: _SplitLayout) -> bool:
+        """One package holding every subject class — the origin is replaced."""
+        return (
+            len(layout.members) == 1
+            and layout.members[0][1] is not None
+            and len(layout.members[0][0]) == len(self.subjects)
+        )
+
+    def refuse_package(self, layout: _SplitLayout, wrapper: cst.MetadataWrapper, whole_pkg: bool) -> str | None:
+        """The package-layout refusals: no module-level constant may survive
+        (BQ6), and no residual code may evaluate a moved class at import time
+        (the __init__ evaluates before its re-exports)."""
+        if layout.any_package and (self.const_names - self.moved_all):
+            names = ", ".join(sorted(self.const_names - self.moved_all))
+            return (
+                f"the constant(s) {names} cannot move into a class; a package "
+                "__init__ may hold no constants — split by hand"
+            )
+        if whole_pkg:
+            for stmt in self.residual:
+                refs = _exec_time_names(wrapper, stmt) & self.subject_names
+                if refs:
+                    return (
+                        "module-level code evaluates " + ", ".join(sorted(refs))
+                        + " at import time — the package __init__ runs before the "
+                        "re-exports — split by hand"
+                    )
+        return None
+
+    def refuse_collisions(self, layout: _SplitLayout, package_name: str | None) -> str | None:
+        """The target-collision refusals: an existing sibling file or an
+        existing package dir blocks the split (the stem package needs --name
+        when taken)."""
+        directory = self.origin.directory
+        seen_files: set[str] = set()
+        for component, name in layout.members:
+            if name is None:
+                for subject in component:
+                    target = self._flat_target(layout, subject)
+                    if target in seen_files:
+                        return f"the split target '{target}' would collide — split by hand"
+                    seen_files.add(target)
+                    if (self.repo / target).exists():
+                        return f"'{target}' already exists — split by hand"
+            else:
+                package_dir = f"{directory}/{name}" if directory else name
+                # the origin file itself is being replaced — only a DIFFERENT
+                # `name.py` or an existing `name/` directory blocks the package
+                if (self.repo / package_dir).exists() or (
+                    (self.repo / f"{package_dir}.py").exists()
+                    and f"{package_dir}.py" != self.origin.rel
+                ):
+                    if name == self.origin.stem and package_name is None:
+                        return f"a package named '{name}' already exists — pass --name <name>"
+                    return f"the package name '{name}' is taken — pick another --name"
+        return None
+
+    def refuse_cycles(self, layout: _SplitLayout) -> str | None:
+        """Import cycles between the produced class files (the __init__
+        re-export edge is exempt by construction)."""
+        if not layout.any_package:
+            return None
+        for component, name in layout.members:
+            if name is None:
+                continue
+            nodes = [subject.name.value for subject in component]
+            edges = {node: set() for node in nodes}
+            for subject in component:
+                for other in component:
+                    if other is not subject and other.name.value in self.free_of[id(subject)]:
+                        edges[subject.name.value].add(other.name.value)
+            cycle = _graph_cycle(nodes, edges)
+            if cycle:
+                return (
+                    "the split would create an import cycle ("
+                    + " -> ".join(cycle)
+                    + ") — split by hand"
+                )
+        return None
+
+    def refuse_residual_cycles(self) -> str | None:
+        """Import cycles between a moved class file and the residual origin
+        module, and the `from ... import *` origin the split cannot retarget."""
+        bad = [
+            subject.name.value
+            for subject in self.subjects
+            if (self.free_of[id(subject)] & self.residual_def_names)
+            and subject.name.value in self.residual_subject_refs
+        ]
+        if bad:
+            return (
+                "the split would create an import cycle between '"
+                + bad[0]
+                + "' and the origin module — split by hand"
+            )
+        if _module_star_imported(self.repo, self.origin.rel, self.module):
+            return (
+                "a file does 'from ... import *' on the origin — the split "
+                "cannot retarget it — split by hand"
+            )
+        return None
+
+    @staticmethod
+    def targets(layout: _SplitLayout) -> dict[str, list[str]]:
+        """Each subject class's import path after the split: the package name,
+        or the snake-cased flat sibling."""
+        return {
+            subject.name.value: (
+                [name] if name is not None else [layout.snake[subject.name.value]]
+            )
+            for component, name in layout.members
+            for subject in component
+        }
+
+    def _flat_target(self, layout: _SplitLayout, subject: cst.ClassDef) -> str:
+        filename = f"{layout.snake[subject.name.value]}.py"
+        return f"{self.origin.directory}/{filename}" if self.origin.directory else filename
+
+    def member_sources(self, layout: _SplitLayout, wrapper: cst.MetadataWrapper) -> list[tuple[str, str]]:
+        """The produced files for the moved classes: flat siblings, or a
+        package's __init__ (residual + re-exports) and one file per class."""
+        writes: list[tuple[str, str]] = []
+        for component, name in layout.members:
+            if name is None:
+                for subject in component:
+                    writes.append(
+                        (
+                            self._flat_target(layout, subject),
+                            _split_class_source(
+                                self.module,
+                                wrapper,
+                                subject,
+                                self._split_ctx(subject, None),
+                            ),
+                        )
+                    )
+            else:
+                package_dir = f"{self.origin.directory}/{name}" if self.origin.directory else name
+                init_body = list(self.residual) + [
+                    cst.SimpleStatementLine(
+                        body=[_from_import_node([c.name.value], [c.name.value], 1)]
+                    )
+                    for c in component
+                ]
+                writes.append((f"{package_dir}/__init__.py", cst.Module(body=init_body).code))
+                for subject in component:
+                    writes.append(
+                        (
+                            f"{package_dir}/{subject.name.value}.py",
+                            _split_class_source(
+                                self.module,
+                                wrapper,
+                                subject,
+                                self._split_ctx(subject, name),
+                            ),
+                        )
+                    )
+        return writes
+
+    def _split_ctx(self, subject: cst.ClassDef, package: str | None) -> _SplitCtx:
+        """The per-class rewrite context: which names move with this class,
+        and the import depth its new file sees — a package member is one hop
+        deeper than the package's own __init__."""
+        in_package = self.origin.in_package
+        return _SplitCtx(
+            stem=self.origin.stem,
+            subjects=self.subject_names,
+            residual_def_names=self.residual_def_names,
+            moved=self.moved_consts.get(id(subject), set()),
+            package=package,
+            origin_dots=(2 if in_package else 0) if package is not None else (1 if in_package else 0),
+            member_dots=1 if package is not None else 0,
+        )
+
+    def origin_source(self, targets: dict[str, list[str]]) -> str:
+        """The origin residual: the kept statements in their original order
+        plus the from-imports the residual needs for the moved classes."""
+        subject_ids = {id(subject) for subject in self.subjects}
+        moved_def_ids = {
+            id(stmt) for name, stmt in self.const_stmts if name in self.moved_all
+        }
+        kept = [
+            stmt
+            for stmt in self.module.body
+            if id(stmt) not in subject_ids and id(stmt) not in moved_def_ids
+        ]
+        additions = [
+            cst.SimpleStatementLine(
+                body=[
+                    _from_import_node(
+                        targets[name], [name], 1 if self.origin.in_package else 0
+                    )
+                ]
+            )
+            for name in sorted(self.residual_subject_refs)
+        ]
+        return cst.Module(body=_insert_header_imports(kept, additions)).code
+
+    def retarget(
+        self, origin_source: str, targets: dict[str, list[str]], whole_pkg: bool
+    ) -> tuple[str, dict[str, str]]:
+        """Repo-wide rewrites for the layouts that move classes out of the
+        reachable origin (FLAT + sub-package): from-imports and `old.Cls`
+        attribute chains retarget to the class's new module."""
+        if whole_pkg:
+            return origin_source, {}
+        rewritten: dict[str, str] = {}
+        for path in _py_files(self.repo):
+            rel = path.relative_to(self.repo).as_posix()
+            text = origin_source if rel == self.origin.rel else path.read_text(encoding="utf-8")
+            new = _split_rewrite_source(text, rel, self.origin.origin_path, targets)
+            if new is not None:
+                rewritten[rel] = new
+        if self.origin.rel in rewritten:
+            origin_source = rewritten[self.origin.rel]
+        return origin_source, rewritten
+
+    def finalize(
+        self,
+        origin_source: str,
+        writes: list[tuple[str, str]],
+        rewritten: dict[str, str],
+        whole_pkg: bool,
+    ) -> _SplitOutcome:
+        """Verify the produced files parse and no new target collides, then
+        decide whether an empty origin is deleted (only when no import names
+        it anywhere in the produced repo, BQ6(f))."""
+        rel = self.origin.rel
+        for target, src in [(rel, origin_source)] + writes:
+            try:
+                cst.parse_module(src)
+            except Exception:  # lucidlint: ignore broad-except the split is cst output; a parse failure means refuse
+                return _SplitOutcome(
+                    None,
+                    [],
+                    [],
+                    f"the computed split for '{target}' does not parse — split by hand",
+                )
+            if target != rel and target not in rewritten and (self.repo / target).exists():
+                return _SplitOutcome(
+                    None,
+                    [],
+                    [],
+                    f"the split target '{target}' already exists — split by hand",
+                )
+        if whole_pkg:
+            return _SplitOutcome("", writes, [rel])
+        final_sources = {path: source for path, source in rewritten.items()}
+        final_sources.update({target: src for target, src in writes})
+        if _module_empty(origin_source) and not _origin_imported_anywhere(
+            self.repo, final_sources, rel, self.origin.origin_path
+        ):
+            return _SplitOutcome("", writes, [rel])
+        return _SplitOutcome(origin_source, writes, [])
+
+    def execute(self, wrapper: cst.MetadataWrapper, package_name: str | None) -> _SplitOutcome:
+        """Run the split: name the layout, refuse the unsafe shapes, build and
+        verify the sources. The refusals run in the order their reasons are
+        cheapest for the reader to check."""
+        layout = self.layout(package_name)
+        if layout.decline is not None:
+            return _SplitOutcome(None, [], [], layout.decline)
+        whole_pkg = self.is_whole_package(layout)
+        refusals = [
+            self.refuse_package(layout, wrapper, whole_pkg),
+            self.refuse_collisions(layout, package_name),
+            self.refuse_cycles(layout),
+        ]
+        if not whole_pkg:
+            refusals.append(self.refuse_residual_cycles())
+        for refusal in refusals:
+            if refusal is not None:
+                return _SplitOutcome(None, [], [], refusal)
+        targets = self.targets(layout)
+        writes = self.member_sources(layout, wrapper)
+        origin_source = self.origin_source(targets)
+        origin_source, rewritten = self.retarget(origin_source, targets, whole_pkg)
+        writes.extend((rel, src) for rel, src in rewritten.items() if rel != self.origin.rel)
+        return self.finalize(origin_source, writes, rewritten, whole_pkg)
 
 
 class _SplitCtx(NamedTuple):
