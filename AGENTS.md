@@ -45,6 +45,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | Docs walk: ask git for ignored docs, guard unreadable reads | `docs/plans/plan-docs-walk-git.md` |
 | Issue #44: middle-man exemptions (library targets, interface members, fixed defaults) | `docs/plans/plan-issue-44-middle-man-exemptions.md` |
 | Issue #57: data-clump parameter-type grouping + record-shape tuple wording | `docs/plans/plan-issue-57-param-type-clump.md` |
+| Issue #65: middle-man interface evidence (own module, or a named base) | `docs/plans/plan-issue-65-middle-man-interface-evidence.md` |
 | Duplicate near-rule and repeated-literal decisions (measurements) | `docs/plans/plan-duplicate-and-literal-decisions.md` |
 | Usefulness round 0.7.0 (houses + album: signals, fixes, deferred) | `docs/plans/plan-usefulness-round-0-7-0.md` |
 | Coding standards (canonical + language conventions) | `docs/coding-standards.md` |
@@ -53,6 +54,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | What good documentation is | `docs/writing-documentation.md` |
 | Writing finding messages (the message standard) | `docs/writing-messages.md` |
 | Run the two-repo usefulness evaluation (proposer + critic round) | `skills/lucidlint-usefulness-eval/SKILL.md` |
+| Nightly GitHub issue triage (the midnight schedule) | `skills/nightly-issue-triage/SKILL.md` |
 | Required doc set and folder structure | `docs/documentation-structure.md` |
 | What each tool does | `README.md` (below) |
 
@@ -70,6 +72,11 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 ## Rules
 
 - Never commit to main; branch + PR.
+- PRs call `.github/workflows/pr-automerge.yml`, the reusable workflow from
+  omp-config at `v0.2.7`; it mints a repo-scoped GitHub App token, arms
+  auto-merge, and refreshes approved or armed PRs behind `main` hourly. The
+  `protect-main` ruleset's one approving review and required checks are the
+  gate. Agents never arm, approve, or merge a PR.
 - Every behavior change ships with a test — fakes only, no monkeypatch.
 - The tool passes itself: `make self-check` is green before any PR.
 - The tool exists for code lucidity. Never design a rule, threshold, or

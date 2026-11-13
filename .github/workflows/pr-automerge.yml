@@ -1,0 +1,27 @@
+# The house PR auto-merge: the reusable omp-config workflow mints a
+# repo-scoped GitHub App token, arms auto-merge on PR events, refreshes a
+# branch behind main before arming, and checks approved or armed PRs hourly.
+# It never approves or merges directly; the `protect-main` ruleset's one
+# approving review and required checks are the gate.
+name: PR auto-merge
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  pull_request_review:
+    types: [submitted]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  automerge:
+    permissions:
+      contents: read
+    uses: ashbywinch/omp-config/.github/workflows/pr-automerge.yml@v0.2.7
+    with:
+      app_id: ${{ vars.OMP_APP_ID }}
+    secrets:
+      app_private_key: ${{ secrets.OMP_APP_PRIVATE_KEY }}

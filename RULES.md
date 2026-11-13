@@ -1,5 +1,17 @@
 # lucidlint rule reference
 
+Lucid means a reader who has never seen this code — a human or an agent — can
+understand it and change it safely without first reading the rest of the
+repository. Judge lucidity with common sense and the wider software
+community's established practice for clear design: separation of concerns,
+effective encapsulation, code that is obviously correct, and anti-fragility —
+every change leaves the code safer to change again, not merely passing today's
+tests. Name things with the domain's own nouns and verbs so the code connects
+to what the reader already knows. When a case is not covered by these rules,
+search for the current best practice and weigh it against them and the code in
+front of you; do not apply a practice the code does not support. Metrics are
+proxies for these qualities, never the goals themselves.
+
 Every rule below exists for one reason: code that is maintainable, lucid,
 and obviously correct. A finding is a pointer, not a verdict — its message
 and suggested fix state the reasoning and exist to make the reader reflect.
@@ -169,7 +181,7 @@ with a why).
 | **latent-visitor** | **warn** | Both | ≥2 operations dispatching over the same element family (`isinstance`/`type()` chains) — Replace Conditional with Visitor: elements accept a visitor with `visit_<Type>` methods. Chains this rule claims are exempt from conditional-polymorphism — one ruling per chain. |
 | **conditional-polymorphism** | **warn** | Python | An if/elif chain of ≥4 arms dispatching on the same value — Replace Conditional with Polymorphism. |
 | **special-case** | **warn** | Python | ≥3 repeated `None`/empty checks on one name — Introduce Special Case. |
-| **middle-man** | **warn** | Python | A method that only forwards (`return self.x.y(...)`) — Remove Middle Man. Exempt where the advice cannot be taken: the delegated member is not declared anywhere in the scanned codebase (a library's method — the wrapper is where that library meets our interface), the method is a member of an `ABC`/`Protocol` the codebase declares whose parameters it accepts (callers are typed against that interface), or the call fixes an argument the target defaults (`self.dump(by_alias=True)`) — the policy lives in the named method. |
+| **middle-man** | **warn** | Python | A method that only forwards (`return self.x.y(...)`) — Remove Middle Man. Exempt where the advice cannot be taken: the delegated member is not declared anywhere in the scanned codebase (a library's method — the wrapper is where that library meets our interface); the method is an operator the language invokes (`__add__`, `__len__`), so no call site exists to take the advice; the method is a member of an `ABC`/`Protocol` declared in the class's own module, or of one the class names as a base, whose parameters it accepts (the class's own contract — an interface in an unrelated module is not evidence about this class); or the call fixes an argument the target defaults (`self.dump(by_alias=True)`) — the policy lives in the named method. |
 | **unused-setter** | **warn** | Python | A `set_*` method or property setter never referenced — Remove Setting Method. |
 | **loop-pipeline** | **warn** | Both | A loop whose body is only a collection mutation (Python: append/add/update, `name += [..]`, or a subscript store; Rust: `acc.push(item)` or `acc[i] = v`, plain or behind one if-filter) — Replace Loop with Pipeline: a comprehension (Python) or a combinator (Rust: .map()/.filter() to build the value, .for_each() where pushing is the whole body). |
 | **mutating-loop → loop-pipeline** | **warn** | Both | A loop that mutates >=2 pieces of state that survive it (Python: accumulated collections, rebound names, object writes; Rust: rebinds/compound-assigns of fn-scope locals, mutating receiver calls) — the changes are invisible at the call site; Replace Loop with Pipeline: compute each output from the input instead. |
