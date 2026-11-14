@@ -397,8 +397,45 @@ fn global_value_kind(value: Option<&Expr>) -> GlobalValueKind {
     }
 }
 
-fn global_state_message(name: &str, value: Option<&Expr>) -> String {
-    let (opening, middle, action) = match global_value_kind(value) {
+/// A module-level binding the rule reports as a constant: a literal-ish
+/// value, not a dunder, not a type alias. Mirrors the finding loop's filters
+/// so the message's count matches the constant findings.
+fn is_reported_module_constant(name: &str, value: &Expr) -> bool {
+    !is_dunder(name) && is_constant_binding(value) && !is_type_alias_value(name, value)
+}
+
+/// The module-level constants the rule will report, in source order. Mirrors
+/// the finding loop's filters so the message's count matches the constant
+/// findings.
+pub fn module_constant_names(body: &[Stmt]) -> Vec<String> {
+    fn names_of<'a>(targets: impl Iterator<Item = &'a Expr>, value: &Expr) -> Vec<String> {
+        targets
+            .filter_map(|target| match target {
+                Expr::Name(n) => Some(n.id.as_str()),
+                _ => None,
+            })
+            .filter(|name| is_reported_module_constant(name, value))
+            .map(str::to_string)
+            .collect()
+    }
+    let mut names = Vec::new();
+    for stmt in body {
+        match stmt {
+            Stmt::Assign(a) => names.extend(names_of(a.targets.iter(), &a.value)),
+            Stmt::AnnAssign(a) => {
+                if let Some(value) = a.value.as_deref() {
+                    names.extend(names_of(std::iter::once(a.target.as_ref()), value));
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+fn global_state_message(name: &str, value: Option<&Expr>, module_constants: &[String]) -> String {
+    let kind = global_value_kind(value);
+    let (opening, middle, action) = match kind {
         GlobalValueKind::MutableContainer => (
             "is a mutable container bound at import time",
             "Every reader shares the same object, and a caller cannot vary it without monkeypatching the module.",
@@ -420,7 +457,18 @@ fn global_state_message(name: &str, value: Option<&Expr>) -> String {
             "Make it an attribute of the class that owns the work.",
         ),
     };
-    format!("{name} {opening}. {middle} {action}")
+    let message = format!("{name} {opening}. {middle} {action}");
+    // The set-level nudge is one observation about the module, so it rides
+    // the first constant only: a module with eight constants must not repeat
+    // the same sentence eight times (#80).
+    let is_first_constant = module_constants.first().is_some_and(|first| first == name);
+    if module_constants.len() >= 3 && is_first_constant && matches!(kind, GlobalValueKind::Constant) {
+        return format!(
+            "{message} If the module's {} constants are one concept, put them on one class — a new class, or the module's own class.",
+            module_constants.len()
+        );
+    }
+    message
 }
 
 pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: bool) {
@@ -471,6 +519,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
                 continue; // a name for a type, not a variable a caller varies
             }
             let line = stmt_line(state.source, stmt);
+            let message = global_state_message(name, value, &state.module_constants);
             state.findings.push(Finding {
                 logical_start: None,
                 seam_members: Vec::new(),
@@ -480,7 +529,7 @@ pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: b
                 function: fn_name.clone(),
                 kind: "global-state".into(),
                 severity: "fail".into(),
-                message: global_state_message(name, value),
+                message,
             });
         }
     }

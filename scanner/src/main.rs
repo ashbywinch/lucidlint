@@ -163,6 +163,10 @@ struct ScanState<'a> {
     logical_starts: Vec<usize>,
     /// File is under a test path — reference-scan split + skeleton skip.
     is_test: bool,
+    /// The module-level constants this file binds, in source order — the
+    /// `global-state` constant message offers one class for the set when
+    /// there are several.
+    module_constants: Vec<String>,
 }
 
 // The last line start per `line_of`/`col_of` source — a thread-local cache
@@ -1311,6 +1315,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         magic_len_guard_exempts: checks::magic_len_guard_offsets(&body),
         magic_unit_named_exempts: checks::magic_unit_named_offsets(&body),
         is_test: is_test_path(name),
+        module_constants: checks::module_constant_names(&body),
         ..Default::default()
     };
     for stmt in &body {
@@ -3138,6 +3143,69 @@ mod tests {
         for g in &gs {
             assert!(g.message.contains("at import time"), "{}", g.message);
             assert!(!g.message.contains("If it is"), "{}", g.message);
+        }
+    }
+
+    #[test]
+    fn several_module_constants_offer_one_class() {
+        // #80: the per-value action is not the only reading when the module
+        // holds a set of constants. The message names the set and offers the
+        // one-class decision; the reader judges whether the constants are one
+        // concept.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/several_module_constants_offer_one_class__01.py"
+        ));
+        let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
+        assert_eq!(gs.len(), 3, "{f:?}");
+        assert!(gs[0].message.starts_with("HOST"), "{}", gs[0].message);
+        assert!(gs[0].message.contains("the module's 3 constants"), "{}", gs[0].message);
+        assert!(gs[0].message.contains("the module's own class"), "{}", gs[0].message);
+        assert!(gs[0].message.contains("parameter default"), "{}", gs[0].message);
+        for g in &gs[1..] {
+            // one module-level observation, not one per constant
+            assert!(!g.message.contains("the module's"), "{}", g.message);
+        }
+    }
+
+    #[test]
+    fn two_module_constants_keep_the_single_value_action() {
+        // "Several" is three or more: a pair does not carry the class nudge.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/several_module_constants_offer_one_class__02.py"
+        ));
+        let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
+        assert_eq!(gs.len(), 2, "{f:?}");
+        for g in &gs {
+            assert!(!g.message.contains("the module's"), "{}", g.message);
+            assert!(!g.message.contains("the module's own class"), "{}", g.message);
+        }
+    }
+
+    #[test]
+    fn module_constant_count_ignores_other_module_bindings() {
+        // The count in the message is the number of constant findings, not
+        // every module-level binding: the mutable container, re-binding,
+        // call-valued service and dunder name do not belong to the set.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/several_module_constants_offer_one_class__03.py"
+        ));
+        let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
+        assert_eq!(gs.len(), 5, "{f:?}");
+        let constants: Vec<&Finding> = gs
+            .iter()
+            .filter(|g| g.message.contains("is a constant bound at import time"))
+            .copied()
+            .collect();
+        assert_eq!(constants.len(), 3, "{gs:?}");
+        let nudged: Vec<&Finding> = gs
+            .iter()
+            .filter(|g| g.message.contains("the module's 3 constants"))
+            .copied()
+            .collect();
+        assert_eq!(nudged.len(), 1, "{gs:?}");
+        assert!(nudged[0].message.starts_with("HOST"), "{}", nudged[0].message);
+        for g in gs.iter().filter(|g| !g.message.contains("is a constant")) {
+            assert!(!g.message.contains("the module's"), "{}", g.message);
         }
     }
 
