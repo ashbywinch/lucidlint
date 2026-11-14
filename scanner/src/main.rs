@@ -166,6 +166,10 @@ struct ScanState<'a> {
     logical_starts: Vec<usize>,
     /// File is under a test path — reference-scan split + skeleton skip.
     is_test: bool,
+    /// The module-level constants this file binds, in source order — the
+    /// `global-state` constant message offers one class for the set when
+    /// there are several.
+    module_constants: Vec<String>,
 }
 
 // The last line start per `line_of`/`col_of` source — a thread-local cache
@@ -732,10 +736,7 @@ fn empty_list_init(body: &[Stmt]) -> Option<(String, usize)> {
     for (i, stmt) in body.iter().enumerate() {
         match stmt {
             Stmt::Assign(a) => {
-                if matches!(a.value.as_ref(), Expr::List(l) if l.elts.is_empty())
-                    && a.targets.len() == 1
-                    && matches!(a.targets[0], Expr::Name(_))
-                {
+                if is_empty_list_assignment(a) {
                     let Expr::Name(n) = &a.targets[0] else { unreachable!() };
                     return Some((n.id.to_string(), i));
                 }
@@ -801,10 +802,7 @@ impl<'a> ScanState<'a> {
         let text = &self.source[n.range()];
         if text.len() >= 2 {
             let prefix = &text[..2];
-            if prefix.eq_ignore_ascii_case("0x")
-                || prefix.eq_ignore_ascii_case("0o")
-                || prefix.eq_ignore_ascii_case("0b")
-            {
+            if checks::is_radix_prefix(prefix) {
                 return;
             }
         }
@@ -1275,6 +1273,8 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     conditional_polymorphism_findings(state, body, source);
     special_case_findings(state, body, source);
     collect_scattered_instances(state, body);
+    unnamed_condition_findings(state, body, source);
+    unnamed_classification_findings(state, body, source);
     collect_middle_man(state, body, source, repo_wide);
     collect_setters(state, body);
     loop_pipeline_findings(state, body, source);
@@ -1320,6 +1320,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         magic_len_guard_exempts: checks::magic_len_guard_offsets(&body),
         magic_unit_named_exempts: checks::magic_unit_named_offsets(&body),
         is_test: is_test_path(name),
+        module_constants: checks::module_constant_names(&body),
         ..Default::default()
     };
     for stmt in &body {
@@ -1972,13 +1973,7 @@ fn main() {
                 let file = v.get("file").and_then(|k| k.as_str()).unwrap_or("");
                 let line = v.get("line").and_then(|k| k.as_u64()).unwrap_or(0) as usize;
                 let name = v.get("name").and_then(|k| k.as_str()).unwrap_or("");
-                if kind != "extract-method"
-                    && kind != "dispatch-registry"
-                    && kind != "rule-table"
-                    && kind != "loop-pipeline"
-                    && kind != "loop-sequence"
-                    && kind != "loop-hoist"
-                {
+                if !RUST_FIX_KINDS.contains(&kind) {
                     // the request names a kind with no engine — the honest
                     // refusal names the gap (every shipped family runs
                     // through this gate; an unlisted kind is a typo or a
@@ -1986,13 +1981,7 @@ fn main() {
                     println!("fix: {kind} has no Rust auto-fix - the Rust engine fixes extract-method, dispatch-registry, rule-table, loop-pipeline, loop-sequence, loop-hoist only; the report line for it says what to change");
                     std::process::exit(2);
                 }
-                if kind == "extract-method"
-                    || kind == "dispatch-registry"
-                    || kind == "rule-table"
-                    || kind == "loop-pipeline"
-                    || kind == "loop-sequence"
-                    || kind == "loop-hoist"
-                {
+                if RUST_FIX_KINDS.contains(&kind) {
                     let src = match std::fs::read_to_string(file) {
                         Ok(s) => s,
                         Err(e) => {
@@ -2216,7 +2205,7 @@ fn main() {
         let rel = rel_of(p, &root);
         // count what the scan browses: production code unless the caller asked
         // for tests, and never upstream's vendored tree
-        if (!include_tests && is_test_path(&rel)) || checks::is_vendored(&rel) {
+        if is_out_of_scan(include_tests, &rel) {
             continue;
         }
         if p.ends_with(".md") {
@@ -2463,6 +2452,29 @@ fn main() {
         "complexity": contract_complexity,
     });
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
+}
+
+/// The fix kinds the Rust engine implements.
+const RUST_FIX_KINDS: &[&str] = &[
+    "extract-method",
+    "dispatch-registry",
+    "rule-table",
+    "loop-pipeline",
+    "loop-sequence",
+    "loop-hoist",
+];
+
+/// `x = []` — an empty list bound to one name, the list-literal rewrite target.
+fn is_empty_list_assignment(assign: &ruff_python_ast::StmtAssign) -> bool {
+    matches!(assign.value.as_ref(), Expr::List(l) if l.elts.is_empty())
+        && assign.targets.len() == 1
+        && matches!(assign.targets[0], Expr::Name(_))
+}
+
+/// The path is outside this scan: test code (unless tests are included) or
+/// vendored.
+fn is_out_of_scan(include_tests: bool, rel: &str) -> bool {
+    (!include_tests && is_test_path(rel)) || checks::is_vendored(rel)
 }
 
 #[cfg(test)]
@@ -3166,6 +3178,69 @@ mod tests {
         for g in &gs {
             assert!(g.message.contains("at import time"), "{}", g.message);
             assert!(!g.message.contains("If it is"), "{}", g.message);
+        }
+    }
+
+    #[test]
+    fn several_module_constants_offer_one_class() {
+        // #80: the per-value action is not the only reading when the module
+        // holds a set of constants. The message names the set and offers the
+        // one-class decision; the reader judges whether the constants are one
+        // concept.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/several_module_constants_offer_one_class__01.py"
+        ));
+        let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
+        assert_eq!(gs.len(), 3, "{f:?}");
+        assert!(gs[0].message.starts_with("HOST"), "{}", gs[0].message);
+        assert!(gs[0].message.contains("the module's 3 constants"), "{}", gs[0].message);
+        assert!(gs[0].message.contains("the module's own class"), "{}", gs[0].message);
+        assert!(gs[0].message.contains("parameter default"), "{}", gs[0].message);
+        for g in &gs[1..] {
+            // one module-level observation, not one per constant
+            assert!(!g.message.contains("the module's"), "{}", g.message);
+        }
+    }
+
+    #[test]
+    fn two_module_constants_keep_the_single_value_action() {
+        // "Several" is three or more: a pair does not carry the class nudge.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/several_module_constants_offer_one_class__02.py"
+        ));
+        let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
+        assert_eq!(gs.len(), 2, "{f:?}");
+        for g in &gs {
+            assert!(!g.message.contains("the module's"), "{}", g.message);
+            assert!(!g.message.contains("the module's own class"), "{}", g.message);
+        }
+    }
+
+    #[test]
+    fn module_constant_count_ignores_other_module_bindings() {
+        // The count in the message is the number of constant findings, not
+        // every module-level binding: the mutable container, re-binding,
+        // call-valued service and dunder name do not belong to the set.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/several_module_constants_offer_one_class__03.py"
+        ));
+        let gs: Vec<&Finding> = f.iter().filter(|x| x.kind == "global-state").collect();
+        assert_eq!(gs.len(), 5, "{f:?}");
+        let constants: Vec<&Finding> = gs
+            .iter()
+            .filter(|g| g.message.contains("is a constant bound at import time"))
+            .copied()
+            .collect();
+        assert_eq!(constants.len(), 3, "{gs:?}");
+        let nudged: Vec<&Finding> = gs
+            .iter()
+            .filter(|g| g.message.contains("the module's 3 constants"))
+            .copied()
+            .collect();
+        assert_eq!(nudged.len(), 1, "{gs:?}");
+        assert!(nudged[0].message.starts_with("HOST"), "{}", nudged[0].message);
+        for g in gs.iter().filter(|g| !g.message.contains("is a constant")) {
+            assert!(!g.message.contains("the module's"), "{}", g.message);
         }
     }
 
@@ -6704,6 +6779,71 @@ mod tests {
             "../../tests/fixtures/rust/scattered_instance_objects_detected__03.py"
         ));
         assert!(two.iter().any(|x| x.kind == "scattered-instance"), "{two:?}");
+    }
+
+    #[test]
+    fn unnamed_condition_joins_facts_detected() {
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unnamed_condition_joins_facts_detected__01.py"
+        ));
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "unnamed-condition").collect();
+        assert_eq!(hits.len(), 2, "{f:?}"); // decide + shape
+        assert!(
+            hits.iter().any(|h| h.message.contains("about order and user")),
+            "{hits:?}"
+        );
+        assert!(hits.iter().any(|h| h.message.contains("about value")), "{hits:?}");
+        // two facts, a named predicate, and self-only state are all silent
+        let ok = scan_src(include_str!(
+            "../../tests/fixtures/rust/unnamed_condition_joins_facts_detected__02.py"
+        ));
+        assert!(!ok.iter().any(|x| x.kind == "unnamed-condition"), "{ok:?}");
+        // __eq__ IS the decision: the name exists
+        let eq = scan_src(include_str!(
+            "../../tests/fixtures/rust/unnamed_condition_joins_facts_detected__03.py"
+        ));
+        assert!(!eq.iter().any(|x| x.kind == "unnamed-condition"), "{eq:?}");
+    }
+
+    #[test]
+    fn unnamed_condition_sees_a_nested_bool_op_in_a_comparison() {
+        // `a > (b or c)` is ONE operand at the top level and three nouns
+        // inside it — the nested-BoolOp arm of operand_nouns is live
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unnamed_condition_joins_facts_detected__04.py"
+        ));
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "unnamed-condition").collect();
+        assert_eq!(hits.len(), 1, "{f:?}"); // the 3-operand nested one; 2 operands is silent
+        assert!(
+            hits[0].message.contains("about a, b, c, d, and e"),
+            "{}",
+            hits[0].message
+        );
+    }
+
+    #[test]
+    fn unnamed_condition_answer_shape_ignores_a_nested_defs_returns() {
+        // a nested def's `return 1` belongs to that def: if it counted, `outer`
+        // would look like it answers twice and its own returned condition would
+        // be reported
+        let ok = scan_src(include_str!(
+            "../../tests/fixtures/rust/unnamed_condition_joins_facts_detected__02.py"
+        ));
+        assert!(!ok.iter().any(|x| x.kind == "unnamed-condition"), "{ok:?}");
+    }
+
+    #[test]
+    fn unnamed_classification_cases_detected() {
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unnamed_classification_cases_detected__01.py"
+        ));
+        assert!(f.iter().any(|x| x.kind == "unnamed-classification"), "{f:?}");
+        // the match form, and a plain function is not a classification
+        let m = scan_src(include_str!(
+            "../../tests/fixtures/rust/unnamed_classification_cases_detected__02.py"
+        ));
+        let hits: Vec<&Finding> = m.iter().filter(|x| x.kind == "unnamed-classification").collect();
+        assert_eq!(hits.len(), 1, "{m:?}");
     }
 
     #[test]

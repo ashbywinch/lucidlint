@@ -184,7 +184,7 @@ fn match_class<'a>(t: &'a [char], p: &'a [char]) -> (bool, &'a [char], &'a [char
     }
     let mut any = false;
     while i < p.len() && p[i] != ']' {
-        if i + 2 < p.len() && p[i + 1] == '-' && p[i + 2] != ']' {
+        if is_char_range(p, i) {
             if let Some(c) = t.first() {
                 if *c >= p[i] && *c <= p[i + 2] {
                     any = true;
@@ -203,6 +203,12 @@ fn match_class<'a>(t: &'a [char], p: &'a [char]) -> (bool, &'a [char], &'a [char
         return (false, p, t);
     }
     (any != negate, rest_p, &t[1..])
+}
+
+/// A character range (`a-z`) starts at `i`: room for the dash and the end
+/// character, and the end is not the closing bracket.
+fn is_char_range(pattern: &[char], i: usize) -> bool {
+    i + 2 < pattern.len() && pattern[i + 1] == '-' && pattern[i + 2] != ']'
 }
 
 #[cfg(test)]

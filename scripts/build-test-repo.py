@@ -53,11 +53,15 @@ def build() -> None:
 
     repo = pygit2.init_repository(str(work))
     c1 = commit_all(repo, {"houses/app.py": "def alpha(a):\n    return a\n"}, "base: houses", [])
-    c2 = commit_all(repo, {"houses/app.py": "def alpha(a):\n    if a:\n        return 1\n    return 0\n"},
-    "modify: houses/app.py", [repo.head.target])
+    c2 = commit_all(
+        repo,
+        {"houses/app.py": "def alpha(a):\n    if a:\n        return 1\n    return 0\n"},
+        "modify: houses/app.py",
+        [repo.head.target],
+    )
     c3 = commit_all(repo, {"scripts/oneoff.py": "def main():\n    pass\n"}, "add: scripts", [repo.head.target])
     c4 = commit_all(repo, {"tests/unit/test_app.py": "def test_x():\n    pass\n"}, "add: tests", [repo.head.target])
-    assert c1 and c2 and c3 and c4
+    assert all((c1, c2, c3, c4))
 
     # tar the working tree + .git (not the parent dir)
     OUT.parent.mkdir(parents=True, exist_ok=True)
