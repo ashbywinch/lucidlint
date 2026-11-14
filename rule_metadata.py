@@ -122,14 +122,14 @@ class Fix:
     def name_required(self) -> bool:
         """Judge-true iff the KIND's registry entry declares "name" among
         its required agent inputs (the Fifth-pass judgement signal)."""
-        return FIX_REGISTRY.name_required(self.kind)
+        return CATALOG.fixes.name_required(self.kind)
 
     @property
     def judgement(self) -> bool:
         """H5: the stamp's judge signal — true when the fix needs a name OR
         its kind is judgement-marked (a decision, not a mechanical fact);
         the registry is the single source for both surfaces."""
-        return self.name_required or FIX_REGISTRY.judgement_marked(self.kind)
+        return self.name_required or CATALOG.fixes.judgement_marked(self.kind)
 
     def command(self) -> str:
         """The full runnable command — the R27 directive rewrite in ONE
@@ -220,9 +220,6 @@ class FixRegistry:
         return kind in JUDGEMENT_KINDS
 
 
-FIX_REGISTRY = FixRegistry()
-
-
 # The config group a rule belongs to (RULE_GROUPS / rule_groups — the
 # gate's and the LSP's `group:` suppression expansion). Derived from the
 # RULES.md section: sections are documentation, the four config
@@ -285,6 +282,9 @@ class RuleCatalog:
 
     def __init__(self, rules: list[Rule]) -> None:
         self.rules: list[Rule] = rules
+        # the fixes the rows advertise: one owner with the catalog, so a rule
+        # and the fix it names are read in one place
+        self.fixes: FixRegistry = FixRegistry()
 
     def kinds(self) -> list[str]:
         return [r.kind for r in self.rules]
@@ -651,6 +651,11 @@ CATALOG = RuleCatalog([
     Rule("conditional-polymorphism", "warn", "advice", "Python",
          "An if/elif chain of ≥4 arms dispatching on the same value — Replace "
          "Conditional with Polymorphism."),
+    Rule("scattered-instance", "warn", "architecture", "Python",
+         "≥2 module-level bindings that construct a class defined in this repo — "
+         "one object holds them, and the class that uses it owns it. A single "
+         "registry or container object is exempt.",
+         display_name="scattered-instance → latent-class", display_group="latent-class"),
     Rule("special-case", "warn", "advice", "Python",
          "≥3 repeated `None`/empty checks on one name — Introduce Special "
          "Case."),

@@ -262,8 +262,8 @@ def test_prepare_hands_the_repo_coverage_snapshot_to_the_core(tmp_path):
         ch.CoverageResult({"houses/app.py": {1, 3}, "scripts/oneoff.py": set()}, "coverage.xml"),
         False,
     )
-    ch.RUST_SCAN.prepare(repo, None, False, Counter(), snapshot)
-    path = ch.RUST_SCAN._pending_coverage
+    ch.SERVICES.rust_scan.prepare(repo, None, False, Counter(), snapshot)
+    path = ch.SERVICES.rust_scan._pending_coverage
     assert path is not None
     assert json.loads(path.read_text()) == {
         "source": "coverage.xml",
@@ -276,8 +276,8 @@ def test_prepare_without_a_snapshot_writes_no_coverage_input(tmp_path):
     """No snapshot = no claim: the core gets no coverage file at all, never an
     empty one it could read as "nothing is covered" (R6)."""
     repo = make_repo(tmp_path)
-    ch.RUST_SCAN.prepare(repo, None, False, Counter(), ch._CoverageInput(ch.CoverageResult(None, ""), False))
-    assert ch.RUST_SCAN._pending_coverage is None
+    ch.SERVICES.rust_scan.prepare(repo, None, False, Counter(), ch._CoverageInput(ch.CoverageResult(None, ""), False))
+    assert ch.SERVICES.rust_scan._pending_coverage is None
 
 
 def test_large_function_fires_without_the_graph(tmp_path, capsys):
@@ -1684,7 +1684,7 @@ def test_empty_repo_passes_clean(tmp_path, capsys):
 def test_missing_binary_fails_fast(tmp_path):
     repo = make_repo(tmp_path)
     # the binary cache says "not built" — the gate must raise, never pass un-scanned
-    ch.RUST_SCAN._binary_cache[repo] = None
+    ch.SERVICES.rust_scan._binary_cache[repo] = None
     try:
         run_main(repo)
         raise AssertionError("expected RuntimeError")
@@ -1953,7 +1953,7 @@ def test_graph_contract_corrupt_db_degrades(tmp_path):
     db_dir = tmp_path / ".code-review-graph"
     db_dir.mkdir()
     (db_dir / "graph.db").write_bytes(b"this is not a sqlite database at all")
-    contract = ch.GRAPH_CONTRACT
+    contract = ch.SERVICES.graph
     result = contract.contract(tmp_path)
     assert result is None  # either the extra is absent (early None) or the
     # corrupt db raised and was caught — never an exception
@@ -2537,18 +2537,18 @@ def test_graph_contract_exports_the_store_wire_shape(tmp_path):
     data_dir.mkdir()
     (data_dir / "graph.db").touch()
     saved_store, saved_registry = ch._GraphStore, ch._Registry
-    saved_cache = dict(ch.GRAPH_CONTRACT._cache)
+    saved_cache = dict(ch.SERVICES.graph._cache)
     ch._GraphStore = cast(Any, _FakeGraphStore)
     ch._Registry = cast(Any, lambda: _FakeRegistry(data_dir))  # the API is a zero-arg factory
     try:
-        ch.GRAPH_CONTRACT._cache.clear()
-        path = ch.GRAPH_CONTRACT.contract(repo)
+        ch.SERVICES.graph._cache.clear()
+        path = ch.SERVICES.graph.contract(repo)
         assert path is not None
         exported = json.loads(path.read_text())
     finally:
         ch._GraphStore, ch._Registry = saved_store, saved_registry
-        ch.GRAPH_CONTRACT._cache.clear()
-        ch.GRAPH_CONTRACT._cache.update(saved_cache)
+        ch.SERVICES.graph._cache.clear()
+        ch.SERVICES.graph._cache.update(saved_cache)
 
     assert exported["contract_version"] == ch.CONTRACT_VERSION
     assert exported["nodes"] == [
@@ -2572,15 +2572,15 @@ def test_graph_contract_exports_the_store_wire_shape(tmp_path):
 
 def test_graph_contract_degrades_without_a_store(tmp_path):
     repo = make_repo(tmp_path)
-    saved = (ch._GraphStore, ch._Registry, dict(ch.GRAPH_CONTRACT._cache))
+    saved = (ch._GraphStore, ch._Registry, dict(ch.SERVICES.graph._cache))
     ch._GraphStore = None
     try:
-        ch.GRAPH_CONTRACT._cache.clear()
-        assert ch.GRAPH_CONTRACT.contract(repo) is None
+        ch.SERVICES.graph._cache.clear()
+        assert ch.SERVICES.graph.contract(repo) is None
     finally:
         ch._GraphStore, ch._Registry = saved[0], saved[1]
-        ch.GRAPH_CONTRACT._cache.clear()
-        ch.GRAPH_CONTRACT._cache.update(saved[2])
+        ch.SERVICES.graph._cache.clear()
+        ch.SERVICES.graph._cache.update(saved[2])
 
 
 def test_graph_contract_degrades_when_the_db_or_store_is_broken(tmp_path):
@@ -2589,11 +2589,11 @@ def test_graph_contract_degrades_when_the_db_or_store_is_broken(tmp_path):
     repo = make_repo(tmp_path)
     data_dir = tmp_path / "graph"
     data_dir.mkdir()
-    saved = (ch._GraphStore, ch._Registry, dict(ch.GRAPH_CONTRACT._cache))
+    saved = (ch._GraphStore, ch._Registry, dict(ch.SERVICES.graph._cache))
     ch._Registry = cast(Any, lambda: _FakeRegistry(data_dir))
     try:
-        ch.GRAPH_CONTRACT._cache.clear()
-        assert ch.GRAPH_CONTRACT.contract(repo) is None  # no graph.db
+        ch.SERVICES.graph._cache.clear()
+        assert ch.SERVICES.graph.contract(repo) is None  # no graph.db
 
         (data_dir / "graph.db").touch()
 
@@ -2605,12 +2605,12 @@ def test_graph_contract_degrades_when_the_db_or_store_is_broken(tmp_path):
                 raise sqlite3.OperationalError("bad schema")
 
         ch._GraphStore = cast(Any, _BrokenStore)
-        ch.GRAPH_CONTRACT._cache.clear()
-        assert ch.GRAPH_CONTRACT.contract(repo) is None
+        ch.SERVICES.graph._cache.clear()
+        assert ch.SERVICES.graph.contract(repo) is None
     finally:
         ch._GraphStore, ch._Registry = saved[0], saved[1]
-        ch.GRAPH_CONTRACT._cache.clear()
-        ch.GRAPH_CONTRACT._cache.update(saved[2])
+        ch.SERVICES.graph._cache.clear()
+        ch.SERVICES.graph._cache.update(saved[2])
 
 
 def test_fix_directive_kind_reads_both_message_forms():
