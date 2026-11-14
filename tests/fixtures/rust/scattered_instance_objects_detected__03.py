@@ -6,6 +6,7 @@ class Gate:
     pass
 
 
-# two different singletons are each a container in its own right
+# two objects of different classes are still a scattering: nothing
+# says which one holds the other
 A = Client()
 G = Gate()
