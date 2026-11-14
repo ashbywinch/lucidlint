@@ -128,6 +128,7 @@ with a why).
 | **layer-mix** | fail | Graph | A file calls into multiple architectural layers (determined via the code-review-graph contract) — files belong in one layer. |
 | **folder-mix** | fail | Graph | Files in a directory are split across graph communities — they belong together. |
 | **flat-folder** | **warn** | Both | A directory holding 20+ browsable files (source modules and docs, combined) — a folder that large stops telling a reader which files belong together; split it into coherent domain subsets, one subfolder per thing its members are about, never by file kind, size or number. |
+| **scattered-instance → latent-class** | **warn** | Python | ≥2 module-level bindings that construct a class defined in this repo — one object holds them, and the class that uses it owns it. A single registry or container object is exempt. |
 
 ## Group 2: Style & correctness
 | Rule | Severity | Language | What it checks |
