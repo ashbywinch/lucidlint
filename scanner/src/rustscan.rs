@@ -1641,152 +1641,111 @@ fn ignored_test_findings(file: &File, file_name: &str) -> Vec<Finding> {
 
 // --------------------------------------------------------------------------- comment extraction
 
-/// `//` and `/* */` comments with their (1-based) line — string-aware so a
-/// `//` inside a string literal or a char is not a comment. Python's comments
-/// come from ruff tokens; Rust's from here; both feed `common`'s matching.
-// lucidlint: ignore large-function the string-aware comment scanner is one linear pass — splitting it scatters the byte-state
+/// `//` and `/* */` comments with their (1-based) line.
+///
+/// Python gets its comments from ruff's tokens; Rust needs its own scan. It is
+/// string-aware because `//` inside a literal is not a comment, and it counts
+/// lines because suppressions bind by line — a scanner that loses one newline
+/// silently moves every later suppression out of its window.
+///
+/// The rule that keeps that honest is one line long: **every advance goes
+/// through `skip_to`, and `skip_to` adds the newlines in the span it steps
+/// over**. No arm counts lines itself, so a new literal form cannot forget.
 pub fn rs_comment_lines(source: &str) -> Vec<(usize, String)> {
-    let mut out = Vec::new();
     let bytes = source.as_bytes();
-    let mut i = 0usize;
+    let mut out = Vec::new();
+    let mut at = 0usize;
     let mut line = 1usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match b {
-            b'\n' => {
-                line += 1;
-                i += 1;
+    while at < bytes.len() {
+        let end = match bytes[at] {
+            b'/' if bytes.get(at + 1) == Some(&b'/') => {
+                let end = line_comment_end(bytes, at);
+                out.push((line, source[at..end].to_string()));
+                end
             }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
-                let start = i;
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-                out.push((line, source[start..i].to_string()));
-                if i < bytes.len() {
-                    i += 1; // consume the newline — counted once, here
-                    line += 1;
-                }
-                continue;
+            b'/' if bytes.get(at + 1) == Some(&b'*') => {
+                let end = block_comment_end(bytes, at);
+                out.push((line, source[at..end].to_string()));
+                end
             }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
-                let start = i;
-                let start_line = line;
-                i += 2;
-                while !at_block_comment_end(bytes, i) {
-                    if bytes[i] == b'\n' {
-                        line += 1;
-                    }
-                    i += 1;
-                }
-                i = (i + 2).min(bytes.len());
-                out.push((start_line, source[start..i].to_string()));
-                continue;
-            }
-            b'"' => {
-                // skip a string literal (with escapes); raw strings r".." /
-                // r#".."# are handled by the 'r' arm below
-                let quote = bytes[i];
-                i += 1;
-                while i < bytes.len() {
-                    match bytes[i] {
-                        b'\\' => {
-                            // an escaped newline is a line continuation: it
-                            // still ends a source line
-                            if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                                line += 1;
-                            }
-                            i = (i + 2).min(bytes.len());
-                        }
-                        b'\n' => {
-                            line += 1;
-                            i += 1;
-                        }
-                        b if b == quote => {
-                            i += 1;
-                            break;
-                        }
-                        _ => i += 1,
-                    }
-                }
-                continue;
-            }
-            b'\'' => {
-                // a char literal is 'x' or an escape '\n' — a bare 'a is a
-                // LIFETIME ('a, 'static) and must NOT start a literal scan
-                // (it would swallow to the next apostrophe — losing every
-                // comment in between)
-                let is_char = (i + 2 < bytes.len() && bytes[i + 2] == b'\'')
-                    || (i + 3 < bytes.len() && bytes[i + 1] == b'\\' && bytes[i + 3] == b'\'');
-                if !is_char {
-                    i += 1;
-                    continue;
-                }
-                let quote = bytes[i];
-                i += 1;
-                while i < bytes.len() {
-                    match bytes[i] {
-                        b'\\' => {
-                            // an escaped newline is a line continuation: it
-                            // still ends a source line
-                            if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                                line += 1;
-                            }
-                            i = (i + 2).min(bytes.len());
-                        }
-                        b'\n' => {
-                            line += 1;
-                            i += 1;
-                        }
-                        b if b == quote => {
-                            i += 1;
-                            break;
-                        }
-                        _ => i += 1,
-                    }
-                }
-                continue;
-            }
-            b'r' if i + 2 < bytes.len() && bytes[i + 1] == b'"' => {
-                i += 2;
-                while i < bytes.len() && bytes[i] != b'"' {
-                    if bytes[i] == b'\n' {
-                        line += 1;
-                    }
-                    i += 1;
-                }
-                i += 1;
-                continue;
-            }
-            b'r' if i + 2 < bytes.len() && bytes[i + 1] == b'#' => {
-                // hashed raw strings: r#"..."#, r##"..."## — count the hashes
-                // and match the same count at the closing quote
-                let mut hashes = 1usize;
-                let mut j = i + 2;
-                while j < bytes.len() && bytes[j] == b'#' {
-                    hashes += 1;
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b'"' {
-                    j += 1;
-                    while j + hashes < bytes.len() {
-                        if bytes[j] == b'"' && bytes[j + 1..j + 1 + hashes].iter().all(|&b| b == b'#') {
-                            break;
-                        }
-                        if bytes[j] == b'\n' {
-                            line += 1;
-                        }
-                        j += 1;
-                    }
-                    i = (j + 1 + hashes).min(bytes.len());
-                    continue;
-                }
-                i += 1; // not a raw string after all — a plain r
-            }
-            _ => i += 1,
-        }
+            b'"' => literal_end(bytes, at),
+            b'\'' if is_char_literal(bytes, at) => literal_end(bytes, at),
+            b'r' => raw_string_end(bytes, at).unwrap_or(at + 1),
+            _ => at + 1,
+        };
+        line += bytes[at..end].iter().filter(|b| **b == b'\n').count();
+        at = end;
     }
     out
+}
+
+/// The index of the newline that ends the line comment starting at `at`, or the
+/// end of the source when it is the last line.
+fn line_comment_end(bytes: &[u8], at: usize) -> usize {
+    bytes[at..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .map_or(bytes.len(), |k| at + k)
+}
+
+/// The index just past the `*/` that closes the block comment starting at `at`.
+fn block_comment_end(bytes: &[u8], at: usize) -> usize {
+    let mut j = at + 2;
+    while j + 1 < bytes.len() {
+        if bytes[j] == b'*' && bytes[j + 1] == b'/' {
+            return j + 2;
+        }
+        j += 1;
+    }
+    bytes.len()
+}
+
+/// The index just past the quoted literal that starts at `at` (`"…"` or
+/// `'…'`), honouring backslash escapes. An unterminated literal runs to the end.
+fn literal_end(bytes: &[u8], at: usize) -> usize {
+    let quote = bytes[at];
+    let mut j = at + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\\' => j = (j + 2).min(bytes.len()),
+            b if b == quote => return j + 1,
+            _ => j += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// The index just past the raw string that starts at `at` (`r"…"`, `r#"…"#`),
+/// or None when those bytes are not a raw string (`r` used as a name).
+fn raw_string_end(bytes: &[u8], at: usize) -> Option<usize> {
+    let mut j = at + 1;
+    let mut hashes = 0usize;
+    while bytes.get(j) == Some(&b'#') {
+        hashes += 1;
+        j += 1;
+    }
+    if bytes.get(j) != Some(&b'"') {
+        return None;
+    }
+    j += 1;
+    while j < bytes.len() {
+        let closes = bytes[j] == b'"'
+            && bytes
+                .get(j + 1..j + 1 + hashes)
+                .is_some_and(|tail| tail.iter().all(|b| *b == b'#'));
+        if closes {
+            return Some(j + 1 + hashes);
+        }
+        j += 1;
+    }
+    Some(bytes.len())
+}
+
+/// A `'` that opens a char literal (`'x'`, `'\n'`). A bare `'a` is a lifetime:
+/// treating it as a literal would swallow to the next apostrophe and lose every
+/// comment in between.
+fn is_char_literal(bytes: &[u8], at: usize) -> bool {
+    bytes.get(at + 2) == Some(&b'\'') || (bytes.get(at + 1) == Some(&b'\\') && bytes.get(at + 3) == Some(&b'\''))
 }
 
 // --------------------------------------------------------------------------- duplicate skeletons
@@ -2528,11 +2487,6 @@ fn is_unasserted_test(f: &ItemFn) -> bool {
         && !has_attr(&f.attrs, "ignore")
         && !has_attr(&f.attrs, "should_panic")
         && !block_asserts(&f.block)
-}
-
-/// The scan position is at a block-comment terminator (`*/`).
-fn at_block_comment_end(bytes: &[u8], i: usize) -> bool {
-    i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/'
 }
 
 #[cfg(test)]
