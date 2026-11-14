@@ -72,8 +72,11 @@ jobs:
       # @latest does not resolve.
       # FORK: v0.41.1 + the malformed-prediction repair (the model's YAML is
       # re-serialized from the parser's own error instead of failing the run).
-      # Pinned to the commit, like a release tag — never a branch.
-      - uses: ashbywinch/pr-agent@dcc67d3a2d6dd4dae75105e510ead824be094cdd
+      # The image is built from the fork's patches by ashbywinch/pr-agent's
+      # `image` workflow and republished weekly; the tag moves with each
+      # successful build, so a broken patch cannot reach us — the build fails
+      # and the tag stays.
+      - uses: docker://ghcr.io/ashbywinch/pr-agent:github_action
         id: pr-agent
         env:
           # Cloudflare AI Gateway (OpenCode -> DeepSeek fallback) — same
