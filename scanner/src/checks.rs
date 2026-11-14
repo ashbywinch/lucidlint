@@ -5637,9 +5637,11 @@ fn is_only_return_of(body: &[Stmt], expr: &Expr) -> bool {
     collect_returns(body, &mut returns);
     let mut answer = false;
     for value in returns {
-        // the same source span, not the same address: the walk never clones,
-        // but a range states "this text is the answer" and survives a copy
-        if unwrap_not(value).range() == unwrap_not(expr).range() {
+        // identity, not a span: the walk borrows one AST and hands the same
+        // node to both sides, so "the return's value IS this expression" is
+        // the exact question. A span would be a proxy that assumes no two
+        // nodes share one.
+        if std::ptr::eq(unwrap_not(value), unwrap_not(expr)) {
             answer = true;
         } else if !is_literal(unwrap_not(value)) && !matches!(unwrap_not(value), Expr::NoneLiteral(_)) {
             return false;
