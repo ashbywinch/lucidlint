@@ -70,7 +70,10 @@ jobs:
       # config.reasoning_effort, which is how the review turns DeepSeek's thinking off
       # (see the [config] notes on the pr-agent-config branch). Pin a real release SHA;
       # @latest does not resolve.
-      - uses: the-pr-agent/pr-agent@981344be2755e303df501e18e3f60b848a188a80
+      # FORK: v0.41.1 + the malformed-prediction repair (the model's YAML is
+      # re-serialized from the parser's own error instead of failing the run).
+      # Pinned to the commit, like a release tag — never a branch.
+      - uses: ashbywinch/pr-agent@dcc67d3a2d6dd4dae75105e510ead824be094cdd
         id: pr-agent
         env:
           # Cloudflare AI Gateway (OpenCode -> DeepSeek fallback) — same
