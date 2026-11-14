@@ -5590,6 +5590,8 @@ fn operand_nouns(expr: &Expr) -> Vec<String> {
             out.extend(operand_nouns(&b.left));
             out.extend(operand_nouns(&b.right));
         }
+        // reachable through a comparison or arithmetic operand: `a > (b or c)`
+        // is one operand at the top level and three nouns inside it
         Expr::BoolOp(b) => {
             for v in &b.values {
                 out.extend(operand_nouns(v));
@@ -5635,7 +5637,9 @@ fn is_only_return_of(body: &[Stmt], expr: &Expr) -> bool {
     collect_returns(body, &mut returns);
     let mut answer = false;
     for value in returns {
-        if std::ptr::eq(unwrap_not(value), unwrap_not(expr)) {
+        // the same source span, not the same address: the walk never clones,
+        // but a range states "this text is the answer" and survives a copy
+        if unwrap_not(value).range() == unwrap_not(expr).range() {
             answer = true;
         } else if !is_literal(unwrap_not(value)) && !matches!(unwrap_not(value), Expr::NoneLiteral(_)) {
             return false;

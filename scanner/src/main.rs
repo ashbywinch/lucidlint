@@ -6668,6 +6668,22 @@ mod tests {
     }
 
     #[test]
+    fn unnamed_condition_sees_a_nested_bool_op_in_a_comparison() {
+        // `a > (b or c)` is ONE operand at the top level and three nouns
+        // inside it — the nested-BoolOp arm of operand_nouns is live
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unnamed_condition_joins_facts_detected__04.py"
+        ));
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "unnamed-condition").collect();
+        assert_eq!(hits.len(), 1, "{f:?}"); // the 3-operand nested one; 2 operands is silent
+        assert!(
+            hits[0].message.contains("about a, b, c, d, and e"),
+            "{}",
+            hits[0].message
+        );
+    }
+
+    #[test]
     fn unnamed_classification_cases_detected() {
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/unnamed_classification_cases_detected__01.py"

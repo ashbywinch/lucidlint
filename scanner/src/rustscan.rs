@@ -140,6 +140,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         current_impl: None,
         bare_body_start: None,
         tail_value_start: None,
+        only_return_value: None,
     };
     // the test-only rules run even inside #[cfg(test)] mods — a pre-pass over
     // the whole file, then the production walk skips test subtrees
@@ -241,6 +242,9 @@ pub(crate) struct RsState<'a> {
     /// Start of the expression a function returns (locals allowed) — a
     /// condition there is the function's own predicate.
     tail_value_start: Option<(usize, usize)>,
+    /// Start of the value of the function's only `return`, when it has exactly
+    /// one — `return match …` is the function's answer too.
+    only_return_value: Option<(usize, usize)>,
 }
 
 struct RsFnScope {
@@ -431,9 +435,10 @@ impl<'a> RsState<'a> {
     /// Record the expression a function returns (locals allowed) and the one
     /// that is its whole body — the unnamed-condition/classification arms read
     /// both. Returns the previous values for the caller to restore.
-    fn track_returned_value(&mut self, block: &'a Block) -> (SpanStart, SpanStart) {
+    fn track_returned_value(&mut self, block: &'a Block) -> (SpanStart, SpanStart, SpanStart) {
         let prev_bare = self.bare_body_start;
         let prev_tail = self.tail_value_start;
+        let prev_only_return = self.only_return_value;
         let span_of = |e: &Expr| Some((e.span().start().line, e.span().start().column));
         // the body is exactly one expression (a `use` line does not count):
         // the match IS the definition
@@ -462,7 +467,12 @@ impl<'a> RsState<'a> {
             }
             _ => None,
         };
-        (prev_bare, prev_tail)
+        let returns = return_values(block);
+        self.only_return_value = match returns.as_slice() {
+            [only] => span_of(only),
+            _ => None,
+        };
+        (prev_bare, prev_tail, prev_only_return)
     }
 
     /// The file is scanned repo-wide and is not test code — the skeleton
@@ -511,11 +521,15 @@ impl<'a> RsState<'a> {
     /// no name for the kinds.
     fn unnamed_classification(&mut self, expr: &'a Expr) {
         let Expr::Match(m) = expr else { return };
-        if self.bare_body_start == Some((expr.span().start().line, expr.span().start().column)) {
+        let here = (expr.span().start().line, expr.span().start().column);
+        // the function's answer — its whole body, or its only `return` — is
+        // already named by the function
+        if self.bare_body_start == Some(here) || self.only_return_value == Some(here) {
             return;
         }
-        // the classification must be the whole answer of its statement: a match
-        // used as one argument or operand is an expression, not a named kind
+        // otherwise the classification must be the whole answer of its
+        // statement: a match used as one argument or operand is an expression,
+        // not a named kind
         if matches!(self.expr_stack.last(), Some(parent) if !matches!(parent, Expr::Return(_))) {
             return;
         }
@@ -632,7 +646,7 @@ impl<'a> RsState<'a> {
         }
         let prev_fn = self.current_fn.take();
         self.current_fn = Some((sig.ident.to_string(), line));
-        let (prev_bare, prev_tail) = self.track_returned_value(block);
+        let (prev_bare, prev_tail, prev_only_return) = self.track_returned_value(block);
         self.fn_stack.push(RsFnScope { decisions: 0 });
         self.visit_block(block); // the override: unreachable check + nested walk
                                  // the push/pop invariant is per-function; a missing scope is a walker
@@ -640,6 +654,7 @@ impl<'a> RsState<'a> {
         let scope = self.fn_stack.pop().unwrap_or(RsFnScope { decisions: 0 });
         self.bare_body_start = prev_bare;
         self.tail_value_start = prev_tail;
+        self.only_return_value = prev_only_return;
         let cc = scope.decisions + 1;
         let span = span_lines(sig.span().start().line, block.span().end().line);
         if !self.in_test_code {
@@ -1262,6 +1277,24 @@ fn impl_self_name(i: &ItemImpl) -> Option<String> {
     } else {
         None
     }
+}
+
+/// The values of every `return` in the block (closures excluded).
+fn return_values(block: &Block) -> Vec<&Expr> {
+    struct Probe<'a> {
+        values: Vec<&'a Expr>,
+    }
+    impl<'ast> Visit<'ast> for Probe<'ast> {
+        fn visit_expr_return(&mut self, ret: &'ast syn::ExprReturn) {
+            if let Some(value) = &ret.expr {
+                self.values.push(value);
+            }
+        }
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+    }
+    let mut probe = Probe { values: Vec::new() };
+    probe.visit_block(block);
+    probe.values
 }
 
 /// Does the block contain a `return` expression anywhere (closures excluded)?
@@ -2554,11 +2587,24 @@ mod tests {
     }
 
     #[test]
+    fn comment_lines_survive_raw_and_continued_strings() {
+        // a `\`-continued line and a multi-line raw string each consume a
+        // source line; missing either drifts every later suppression window
+        let src = "fn f() {\n    let a = \"one \\\n two\";\n    let b = r#\"raw\nline\"#;\n}\n// tail comment\n";
+        let cs = rs_comment_lines(src);
+        let (line, text) = cs.last().expect("the tail comment");
+        assert_eq!(*line, 7, "comments: {cs:?}");
+        assert!(text.contains("tail comment"));
+    }
+
+    #[test]
     fn unnamed_classification_cases() {
         let fs = scan(&fixture("unnamed_classification_rs.rs"));
         let hits: Vec<&Finding> = fs.iter().filter(|f| f.kind == "unnamed-classification").collect();
-        assert_eq!(hits.len(), 1, "{fs:?}"); // `describe`; `token` is the whole fn
+        assert_eq!(hits.len(), 1, "{fs:?}"); // `describe` only
         assert!(hits[0].message.contains("3 cases of op"), "{}", hits[0].message);
+        // `token` (bare body), `token_with_use` (bare body after a `use`), and
+        // `explained` (the fn's only `return`) are all the function's answer
     }
 
     #[test]
