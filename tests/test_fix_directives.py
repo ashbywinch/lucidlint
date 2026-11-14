@@ -116,7 +116,7 @@ def test_fix_refuses_engine_less_kind_on_rust_file(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     target = repo / "houses" / "lib.rs"
     target.write_text("fn main() {}\n")
-    binary = ch.RUST_SCAN.binary(repo)
+    binary = ch.SERVICES.rust_scan.binary(repo)
     assert binary is not None
     spec = json.dumps({"kind": "boolean-arg", "file": str(target), "line": 1, "name": ""})
     proc = subprocess.run([str(binary), "--fix", spec], capture_output=True, text=True, cwd=str(repo))

@@ -130,6 +130,9 @@ struct ScanState<'a> {
     /// Module-level CLASS definitions (name, line) — the unused scan's
     /// dead-class arm (#28).
     class_defs: Vec<(String, usize)>,
+    /// Module-level `NAME = SomeClass(...)` bindings — the scattered-instance
+    /// pass's raw material, resolved against the repo's class names.
+    scattered: Vec<checks::ScatteredInstance>,
     /// Duplicate-module identities (#26) — modules + top-level classes with
     /// their structural skeletons and constant tokens.
     skeleton_modules: Vec<checks::SkeletonModule>,
@@ -1181,6 +1184,7 @@ pub struct FileScan {
     pub errors: usize,
     pub defs: Vec<(String, usize)>,
     pub class_defs: Vec<(String, usize)>,
+    pub scattered: Vec<checks::ScatteredInstance>,
     pub setters: Vec<(String, usize)>,
     pub refs: HashSet<String>,
     pub strings: Vec<String>,
@@ -1268,6 +1272,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     latent_visitor_findings(state, body, source); // claims chains first — polymorphism skips them
     conditional_polymorphism_findings(state, body, source);
     special_case_findings(state, body, source);
+    collect_scattered_instances(state, body);
     unnamed_condition_findings(state, body, source);
     unnamed_classification_findings(state, body, source);
     collect_middle_man(state, body, source, repo_wide);
@@ -1456,6 +1461,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         errors,
         defs: state.defs,
         class_defs: state.class_defs,
+        scattered: state.scattered,
         setters: state.setters,
         refs: state.refs,
         strings: state.strings,
@@ -1637,6 +1643,19 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
     let mut repo_wide_unused = checks::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
     repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
     reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
+    let class_names: HashSet<String> = definitions
+        .iter()
+        .filter(|(_, _, _, is_class)| *is_class)
+        .map(|(_, name, _, _)| name.clone())
+        .collect();
+    let scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> =
+        scans.iter().map(|s| (s.rel_of(root_s), s.scattered.clone())).collect();
+    reconcile_repo_wide(
+        &mut additions,
+        checks::scattered_instance_findings(&scattered_scans, &class_names),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
     let undecl_scans: Vec<UndeclScan> = scans
         .iter()
         .map(|s| UndeclScan {
@@ -1684,6 +1703,7 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         errors: rs.errors,
         defs: Vec::new(),
         class_defs: Vec::new(),
+        scattered: Vec::new(),
         setters: Vec::new(),
         refs: HashSet::new(),
         strings: Vec::new(),
@@ -2207,6 +2227,21 @@ fn main() {
     let mut repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
     repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
     reconcile_repo_wide(&mut all_findings, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
+    let class_names: HashSet<String> = definitions
+        .iter()
+        .filter(|(_, _, _, is_class)| *is_class)
+        .map(|(_, name, _, _)| name.clone())
+        .collect();
+    let scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> = scans
+        .iter()
+        .map(|s| (rel_of(&s.file_name, &root), s.scattered.clone()))
+        .collect();
+    reconcile_repo_wide(
+        &mut all_findings,
+        checks::scattered_instance_findings(&scattered_scans, &class_names),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
     reconcile_repo_wide(
         &mut all_findings,
         middle_man_repo_wide(&scans, &root),
@@ -5106,6 +5141,7 @@ mod tests {
         let mut heads = Vec::new();
         let mut fns = Vec::new();
         let mut repo_methods = Vec::new();
+        let mut scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> = Vec::new();
         let mut mm_classes: Vec<checks::MiddleManClass> = Vec::new();
         let mut mm_candidates: Vec<checks::MiddleManCandidate> = Vec::new();
         let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
@@ -5130,6 +5166,7 @@ mod tests {
             heads.extend(scan.forwarder_methods.iter().cloned());
             fns.extend(scan.forwarder_fns.iter().cloned());
             repo_methods.extend(scan.repo_methods.iter().cloned());
+            scattered_scans.push((rel.clone(), scan.scattered.clone()));
             mm_classes.extend(scan.middle_man_classes.iter().cloned());
             mm_candidates.extend(scan.middle_man_candidates.iter().cloned());
             imports_by_rel.insert(name.to_string(), scan.imports.clone());
@@ -5160,6 +5197,17 @@ mod tests {
         let mut repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
         repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
         reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel, &spent_by_rel);
+        let class_names: HashSet<String> = definitions
+            .iter()
+            .filter(|(_, _, _, is_class)| *is_class)
+            .map(|(_, name, _, _)| name.clone())
+            .collect();
+        reconcile_repo_wide(
+            &mut all,
+            checks::scattered_instance_findings(&scattered_scans, &class_names),
+            &supps_by_rel,
+            &spent_by_rel,
+        );
         let undeclared = undeclared_findings(&undecl_scans);
         reconcile_repo_wide(&mut all, undeclared, &supps_by_rel, &spent_by_rel);
         reconcile_repo_wide(
@@ -6709,6 +6757,28 @@ mod tests {
             "../../tests/fixtures/rust/guard_clauses_arrow_code_detected__02.py"
         ));
         assert!(!ok.iter().any(|x| x.kind == "guard-clauses")); // 2 levels is fine
+    }
+
+    #[test]
+    fn scattered_instance_objects_detected() {
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/scattered_instance_objects_detected__01.py"
+        ));
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "scattered-instance").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("A, B, and G"), "{}", hits[0].message);
+        // one object is the container itself; a stdlib constructor is not a
+        // repo class
+        let ok = scan_src(include_str!(
+            "../../tests/fixtures/rust/scattered_instance_objects_detected__02.py"
+        ));
+        assert!(!ok.iter().any(|x| x.kind == "scattered-instance"), "{ok:?}");
+        // two objects of DIFFERENT classes are still a scattering: nothing
+        // says which one holds the other
+        let two = scan_src(include_str!(
+            "../../tests/fixtures/rust/scattered_instance_objects_detected__03.py"
+        ));
+        assert!(two.iter().any(|x| x.kind == "scattered-instance"), "{two:?}");
     }
 
     #[test]
