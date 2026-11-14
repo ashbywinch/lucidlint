@@ -729,10 +729,7 @@ fn empty_list_init(body: &[Stmt]) -> Option<(String, usize)> {
     for (i, stmt) in body.iter().enumerate() {
         match stmt {
             Stmt::Assign(a) => {
-                if matches!(a.value.as_ref(), Expr::List(l) if l.elts.is_empty())
-                    && a.targets.len() == 1
-                    && matches!(a.targets[0], Expr::Name(_))
-                {
+                if is_empty_list_assignment(a) {
                     let Expr::Name(n) = &a.targets[0] else { unreachable!() };
                     return Some((n.id.to_string(), i));
                 }
@@ -798,10 +795,7 @@ impl<'a> ScanState<'a> {
         let text = &self.source[n.range()];
         if text.len() >= 2 {
             let prefix = &text[..2];
-            if prefix.eq_ignore_ascii_case("0x")
-                || prefix.eq_ignore_ascii_case("0o")
-                || prefix.eq_ignore_ascii_case("0b")
-            {
+            if checks::is_radix_prefix(prefix) {
                 return;
             }
         }
@@ -1270,6 +1264,8 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     latent_visitor_findings(state, body, source); // claims chains first — polymorphism skips them
     conditional_polymorphism_findings(state, body, source);
     special_case_findings(state, body, source);
+    unnamed_condition_findings(state, body, source);
+    unnamed_classification_findings(state, body, source);
     collect_middle_man(state, body, source, repo_wide);
     collect_setters(state, body);
     loop_pipeline_findings(state, body, source);
@@ -1952,13 +1948,7 @@ fn main() {
                 let file = v.get("file").and_then(|k| k.as_str()).unwrap_or("");
                 let line = v.get("line").and_then(|k| k.as_u64()).unwrap_or(0) as usize;
                 let name = v.get("name").and_then(|k| k.as_str()).unwrap_or("");
-                if kind != "extract-method"
-                    && kind != "dispatch-registry"
-                    && kind != "rule-table"
-                    && kind != "loop-pipeline"
-                    && kind != "loop-sequence"
-                    && kind != "loop-hoist"
-                {
+                if !RUST_FIX_KINDS.contains(&kind) {
                     // the request names a kind with no engine — the honest
                     // refusal names the gap (every shipped family runs
                     // through this gate; an unlisted kind is a typo or a
@@ -1966,13 +1956,7 @@ fn main() {
                     println!("fix: {kind} has no Rust auto-fix - the Rust engine fixes extract-method, dispatch-registry, rule-table, loop-pipeline, loop-sequence, loop-hoist only; the report line for it says what to change");
                     std::process::exit(2);
                 }
-                if kind == "extract-method"
-                    || kind == "dispatch-registry"
-                    || kind == "rule-table"
-                    || kind == "loop-pipeline"
-                    || kind == "loop-sequence"
-                    || kind == "loop-hoist"
-                {
+                if RUST_FIX_KINDS.contains(&kind) {
                     let src = match std::fs::read_to_string(file) {
                         Ok(s) => s,
                         Err(e) => {
@@ -2196,7 +2180,7 @@ fn main() {
         let rel = rel_of(p, &root);
         // count what the scan browses: production code unless the caller asked
         // for tests, and never upstream's vendored tree
-        if (!include_tests && is_test_path(&rel)) || checks::is_vendored(&rel) {
+        if is_out_of_scan(include_tests, &rel) {
             continue;
         }
         if p.ends_with(".md") {
@@ -2428,6 +2412,29 @@ fn main() {
         "complexity": contract_complexity,
     });
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
+}
+
+/// The fix kinds the Rust engine implements.
+const RUST_FIX_KINDS: &[&str] = &[
+    "extract-method",
+    "dispatch-registry",
+    "rule-table",
+    "loop-pipeline",
+    "loop-sequence",
+    "loop-hoist",
+];
+
+/// `x = []` — an empty list bound to one name, the list-literal rewrite target.
+fn is_empty_list_assignment(assign: &ruff_python_ast::StmtAssign) -> bool {
+    matches!(assign.value.as_ref(), Expr::List(l) if l.elts.is_empty())
+        && assign.targets.len() == 1
+        && matches!(assign.targets[0], Expr::Name(_))
+}
+
+/// The path is outside this scan: test code (unless tests are included) or
+/// vendored.
+fn is_out_of_scan(include_tests: bool, rel: &str) -> bool {
+    (!include_tests && is_test_path(rel)) || checks::is_vendored(rel)
 }
 
 #[cfg(test)]
@@ -6634,6 +6641,44 @@ mod tests {
             "../../tests/fixtures/rust/guard_clauses_arrow_code_detected__02.py"
         ));
         assert!(!ok.iter().any(|x| x.kind == "guard-clauses")); // 2 levels is fine
+    }
+
+    #[test]
+    fn unnamed_condition_joins_facts_detected() {
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unnamed_condition_joins_facts_detected__01.py"
+        ));
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "unnamed-condition").collect();
+        assert_eq!(hits.len(), 2, "{f:?}"); // decide + shape
+        assert!(
+            hits.iter().any(|h| h.message.contains("about order and user")),
+            "{hits:?}"
+        );
+        assert!(hits.iter().any(|h| h.message.contains("about value")), "{hits:?}");
+        // two facts, a named predicate, and self-only state are all silent
+        let ok = scan_src(include_str!(
+            "../../tests/fixtures/rust/unnamed_condition_joins_facts_detected__02.py"
+        ));
+        assert!(!ok.iter().any(|x| x.kind == "unnamed-condition"), "{ok:?}");
+        // __eq__ IS the decision: the name exists
+        let eq = scan_src(include_str!(
+            "../../tests/fixtures/rust/unnamed_condition_joins_facts_detected__03.py"
+        ));
+        assert!(!eq.iter().any(|x| x.kind == "unnamed-condition"), "{eq:?}");
+    }
+
+    #[test]
+    fn unnamed_classification_cases_detected() {
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/unnamed_classification_cases_detected__01.py"
+        ));
+        assert!(f.iter().any(|x| x.kind == "unnamed-classification"), "{f:?}");
+        // the match form, and a plain function is not a classification
+        let m = scan_src(include_str!(
+            "../../tests/fixtures/rust/unnamed_classification_cases_detected__02.py"
+        ));
+        let hits: Vec<&Finding> = m.iter().filter(|x| x.kind == "unnamed-classification").collect();
+        assert_eq!(hits.len(), 1, "{m:?}");
     }
 
     #[test]

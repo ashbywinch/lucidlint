@@ -174,11 +174,7 @@ pub fn docs_findings(repo: &Path, gitignored: &HashSet<String>) -> Vec<Finding> 
             // `standards/`-prefixed paths against the REPO root, a parent-
             // relative (`../`, `./`) path against the DOC'S OWN directory.
             // A bare name (coding-standards.md) is a reference, not a path.
-            if !path.starts_with("docs/")
-                && !path.starts_with("standards/")
-                && !path.starts_with("./")
-                && !path.starts_with("../")
-            {
+            if is_repo_relative_path(&path) {
                 continue;
             }
             check_target(
@@ -321,6 +317,12 @@ fn docs_reachability(repo: &Path, gitignored: &HashSet<String>) -> Vec<Finding> 
         message,
     });
     out
+}
+
+/// The path is written repo-relative: not under docs/ or standards/, and not
+/// relative to the current file. A bare name is a reference, not a path.
+fn is_repo_relative_path(path: &str) -> bool {
+    !path.starts_with("docs/") && !path.starts_with("standards/") && !path.starts_with("./") && !path.starts_with("../")
 }
 
 #[cfg(test)]

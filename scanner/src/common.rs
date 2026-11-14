@@ -694,7 +694,7 @@ fn suppress_track_file(
     // the file suppression may name a FAMILY (latent-class) — then it covers
     // the variant raw kinds (closures/partition), not just one exact kind
     for (sig, why) in &supps.file {
-        if sig != &f.kind && signal_matches(sig, &f.kind) && !why.is_empty() {
+        if matches_suppression(sig, f, why) {
             used_file.insert(sig.clone());
             return true;
         }
@@ -856,6 +856,11 @@ impl<'a> StaleCtx<'a> {
             None
         }
     }
+}
+
+/// The suppression entry names this finding's family, with a reason.
+fn matches_suppression(sig: &str, finding: &crate::Finding, why: &str) -> bool {
+    sig != finding.kind && signal_matches(sig, &finding.kind) && !why.is_empty()
 }
 
 #[cfg(test)]

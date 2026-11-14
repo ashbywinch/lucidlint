@@ -574,7 +574,7 @@ pub fn folder_mix_findings(repo: &Path, contract: &GraphContract) -> Vec<Finding
     let mut out = Vec::new();
     for (d, files) in dirs {
         let rel = repo_rel(repo, &d);
-        if files.len() < 5 || rel.starts_with("tests") || rel.is_empty() || rel == "." {
+        if !is_spread_target(&files, &rel) {
             continue;
         }
         let mut spread: BTreeMap<i64, Vec<String>> = BTreeMap::new();
@@ -813,6 +813,12 @@ pub fn churn_untested_findings(
         });
     }
     out
+}
+
+/// The file is a directory-level scan target with enough files to spread
+/// across folders.
+fn is_spread_target(files: &[(String, i64)], rel: &str) -> bool {
+    files.len() >= 5 && !rel.starts_with("tests") && !rel.is_empty() && rel != "."
 }
 
 #[cfg(test)]

@@ -1195,7 +1195,7 @@ pub fn closure_findings(state: &mut ScanState, stmt: &Stmt, cc: u32, span: u32) 
         return;
     }
     let mutated = closures_mutate_shared_state(f);
-    if cc < 15 && span < 60 && mutated.is_empty() {
+    if !is_closures_candidate(cc, span, &mutated) {
         return;
     }
     let line = stmt_line(state.source, stmt);
@@ -2492,13 +2492,7 @@ pub fn feature_envy_findings(state: &mut ScanState, body: &[Stmt]) {
                 // envy is reaching into a COLLABORATOR (a local aliased from
                 // self.<attr>) — not the method's inputs (params, loop
                 // targets) and not computed values (pos = self.get_metadata())
-                if receiver == "self"
-                    || params.contains(receiver)
-                    || loop_targets.contains(receiver)
-                    || !collaborators.contains(receiver)
-                    || *n < 4
-                    || *n < self_reads + 3
-                {
+                if !is_collaborator_envy(receiver, *n, &params, &loop_targets, &collaborators, self_reads) {
                     continue;
                 }
                 let line = line_of(state.source, f.name.range().start());
@@ -3311,7 +3305,7 @@ pub fn static_husk_findings(state: &mut ScanState, body: &[Stmt]) {
             });
         let writes_state = methods.iter().any(|m| body_writes_self_attr(&m.body));
         let all_static = methods.iter().all(|m| has_decorator(m, "staticmethod"));
-        if !all_static || has_property || has_dataclass_fields || writes_state {
+        if !is_static_husk(all_static, has_property, has_dataclass_fields, writes_state) {
             continue;
         }
         let line = stmt_line(state.source, s);
@@ -4878,10 +4872,7 @@ pub fn magic_number_candidates(body: &[Stmt], source: &str) -> HashSet<usize> {
                     let text = source[n.range()].to_string();
                     if text.len() >= 2 {
                         let prefix = &text[..2];
-                        if prefix.eq_ignore_ascii_case("0x")
-                            || prefix.eq_ignore_ascii_case("0o")
-                            || prefix.eq_ignore_ascii_case("0b")
-                        {
+                        if is_radix_prefix(prefix) {
                             return;
                         }
                     }
@@ -5021,9 +5012,7 @@ pub fn unit_tokens_of_name(name: &str) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
     for comp in name_components(name) {
         for tok in UNIT_TOKENS {
-            if (comp == *tok || (comp.len() == tok.len() + 1 && comp.starts_with(tok) && comp.ends_with('s')))
-                && !out.contains(tok)
-            {
+            if is_unit_token(comp.as_str(), tok) && !out.contains(tok) {
                 out.push(tok);
             }
         }
@@ -5158,7 +5147,7 @@ fn push_census_literal(
 pub fn guard_clause_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
     fn chain_len(s: &Stmt) -> usize {
         if let Stmt::If(i) = s {
-            if i.body.len() == 1 && i.elif_else_clauses.is_empty() && matches!(i.body[0], Stmt::If(_)) {
+            if is_nested_if_body(i) {
                 return 1 + chain_len(&i.body[0]);
             }
         }
@@ -5181,7 +5170,7 @@ pub fn guard_clause_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                                             ), });
                 }
                 // descend: nested ifs inside the body (not the chain itself)
-                if !(i.body.len() == 1 && matches!(i.body[0], Stmt::If(_)) && i.elif_else_clauses.is_empty()) {
+                if !is_nested_if_body(i) {
                     walk(state, &i.body, source);
                 }
                 for cl in &i.elif_else_clauses {
@@ -5298,6 +5287,622 @@ pub fn conditional_polymorphism_findings(state: &mut ScanState, body: &[Stmt], s
         }
     }
     walk(state, body, source);
+}
+
+// ------------------------------------------------------------ unnamed-condition
+
+/// Where a condition sits: the function that owns it (for the bare-return
+/// exemption) and the class that owns that function (so the action can name
+/// the object instead of asking the reader to find it).
+#[derive(Clone, Copy, Default)]
+struct ConditionScope<'a> {
+    fn_name: &'a str,
+    fn_body: Option<&'a [Stmt]>,
+    class: Option<&'a str>,
+}
+
+/// A condition is a decision the code makes. Written inline as three or more
+/// facts joined by `and`/`or`, the reader has to reconstruct what the
+/// combination means — the name is the fix, and the object the name belongs
+/// to is a fact the AST already holds.
+pub fn unnamed_condition_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    let imported: HashSet<String> = collect_imports(body, source).into_iter().map(|i| i.alias).collect();
+    walk_conditions(state, body, source, ConditionScope::default(), &imported);
+}
+
+fn walk_conditions(
+    state: &mut ScanState,
+    stmts: &[Stmt],
+    source: &str,
+    scope: ConditionScope<'_>,
+    imported: &HashSet<String>,
+) {
+    for s in stmts {
+        match s {
+            Stmt::If(i) => {
+                condition_finding(state, &i.test, source, scope, imported);
+                walk_conditions(state, &i.body, source, scope, imported);
+                for cl in &i.elif_else_clauses {
+                    walk_conditions(state, &cl.body, source, scope, imported);
+                }
+            }
+            Stmt::While(w) => {
+                condition_finding(state, &w.test, source, scope, imported);
+                walk_conditions(state, &w.body, source, scope, imported);
+                walk_conditions(state, &w.orelse, source, scope, imported);
+            }
+            Stmt::Return(r) => {
+                if let Some(v) = &r.value {
+                    condition_finding(state, v, source, scope, imported);
+                }
+            }
+            Stmt::Assert(a) => condition_finding(state, &a.test, source, scope, imported),
+            Stmt::Match(m) => {
+                for c in &m.cases {
+                    if let Some(g) = &c.guard {
+                        condition_finding(state, g, source, scope, imported);
+                    }
+                    walk_conditions(state, &c.body, source, scope, imported);
+                }
+            }
+            Stmt::FunctionDef(f) => {
+                let inner = ConditionScope {
+                    fn_name: f.name.as_str(),
+                    fn_body: Some(&f.body),
+                    class: scope.class,
+                };
+                walk_conditions(state, &f.body, source, inner, imported);
+            }
+            Stmt::ClassDef(c) => {
+                let inner = ConditionScope {
+                    fn_name: "",
+                    fn_body: None,
+                    class: Some(c.name.as_str()),
+                };
+                walk_conditions(state, &c.body, source, inner, imported);
+            }
+            Stmt::For(f) => {
+                walk_conditions(state, &f.body, source, scope, imported);
+                walk_conditions(state, &f.orelse, source, scope, imported);
+            }
+            Stmt::With(w) => walk_conditions(state, &w.body, source, scope, imported),
+            Stmt::Try(t) => {
+                walk_conditions(state, &t.body, source, scope, imported);
+                for h in &t.handlers {
+                    let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                    walk_conditions(state, &eh.body, source, scope, imported);
+                }
+                walk_conditions(state, &t.orelse, source, scope, imported);
+                walk_conditions(state, &t.finalbody, source, scope, imported);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn condition_finding(
+    state: &mut ScanState,
+    expr: &Expr,
+    source: &str,
+    scope: ConditionScope<'_>,
+    imported: &HashSet<String>,
+) {
+    let Some(operands) = bool_operands(expr) else { return };
+    if operands.len() < 3 {
+        return; // two facts joined is a condition, not an unnamed decision
+    }
+    if scope.fn_body.is_some_and(|body| is_only_return_of(body, expr)) {
+        return; // the name already exists: this function IS the predicate
+    }
+    if is_named_decision(scope.fn_name) {
+        return; // __eq__ and friends ARE the decision: the name exists
+    }
+    let (unit, nouns) = choose_condition_unit(expr);
+    let nouns: Vec<String> = nouns
+        .into_iter()
+        .filter(|n| !names_a_type_or_constant(state, n) && !imported.contains(n))
+        .collect();
+    if !names_a_decision(&nouns) {
+        return;
+    }
+    let facts = bool_operands(unit).map_or(operands.len(), |v| v.len());
+    let message = condition_message(facts, &nouns, scope.class);
+    state.findings.push(Finding {
+        logical_start: None,
+        seam_members: Vec::new(),
+        col: 0,
+        file: state.file.to_string(),
+        line: line_of(source, unit.range().start()),
+        function: scope.fn_name.to_string(),
+        kind: "unnamed-condition".into(),
+        severity: "warn".into(),
+        message,
+    });
+}
+
+/// The unit to name: a parenthesised group that is about one noun and about
+/// nothing the rest of the condition is about is the decision — the reader
+/// already drew that boundary. Otherwise the whole condition is.
+fn choose_condition_unit(expr: &Expr) -> (&Expr, Vec<String>) {
+    let top = unwrap_not(expr);
+    if let Expr::BoolOp(b) = top {
+        let mut groups = Vec::new();
+        for v in &b.values {
+            let child = unwrap_not(v);
+            if !matches!(child, Expr::BoolOp(_)) {
+                continue;
+            }
+            let inner = condition_nouns(child);
+            if inner.len() != 1 || bool_operands(child).is_none_or(|v| v.len() < 3) {
+                continue;
+            }
+            let outside: HashSet<String> = b
+                .values
+                .iter()
+                .filter(|other| !std::ptr::eq(*other, v))
+                .flat_map(condition_nouns)
+                .collect();
+            if !outside.contains(&inner[0]) {
+                groups.push((child, inner));
+            }
+        }
+        if let [group] = groups.as_slice() {
+            return (group.0, group.1.clone());
+        }
+    }
+    (top, condition_nouns(top))
+}
+
+/// The message names the object and the action; the signature is the
+/// extraction's business, so it is never prescribed.
+fn condition_message(facts: usize, nouns: &[String], class: Option<&str>) -> String {
+    let owner = class.unwrap_or("the class this code belongs to");
+    let display: Vec<String> = nouns
+        .iter()
+        .map(|n| {
+            if n == "self" {
+                format!("this {owner}")
+            } else {
+                n.clone()
+            }
+        })
+        .collect();
+    let named: Vec<&str> = display.iter().map(String::as_str).collect();
+    let subject = match named.as_slice() {
+        [only] => only.to_string(),
+        [a, b] => format!("{a} and {b}"),
+        _ => {
+            let Some((last, rest)) = named.split_last() else {
+                return String::new();
+            };
+            format!("{}, and {last}", rest.join(", "))
+        }
+    };
+    if nouns.len() == 1 {
+        format!(
+            "{facts} facts about {subject} are joined here, and nothing states what they mean together. \
+             Name the decision as a predicate over {subject}, and call it here."
+        )
+    } else if nouns.iter().any(|n| n == "self") {
+        format!(
+            "{facts} facts about {subject} are joined here, and nothing states what they mean together. \
+             Name the decision as a method on {owner}, and call it here."
+        )
+    } else {
+        format!(
+            "{facts} facts about {subject} are joined here, and nothing states what they mean together. \
+             Name the decision as a predicate, and call it here."
+        )
+    }
+}
+
+/// The method name already states the decision: a comparison or containment
+/// operator's body IS the definition, not an unnamed condition.
+fn is_named_decision(fn_name: &str) -> bool {
+    matches!(
+        fn_name,
+        "__eq__" | "__ne__" | "__lt__" | "__le__" | "__gt__" | "__ge__" | "__hash__" | "__contains__" | "__bool__"
+    )
+}
+
+/// The operands name something a decision can be about: at least one noun, and
+/// not `self` alone (internal state on an object that already has a name).
+fn names_a_decision(nouns: &[String]) -> bool {
+    !nouns.is_empty() && !(nouns.len() == 1 && nouns[0] == "self")
+}
+
+/// A noun that names a type or a constant (`Mark`, `PageKinds`, `_OUTCODE_RE`)
+/// is the vocabulary a condition is written in, not a thing it decides about —
+/// "facts about Mark" tells the reader nothing.
+fn names_a_type_or_constant(state: &ScanState, noun: &str) -> bool {
+    let bare = noun.trim_start_matches('_');
+    if bare.chars().next().is_some_and(|c| c.is_uppercase()) {
+        return true;
+    }
+    let all_caps = noun.chars().all(|c| c.is_uppercase() || c.is_ascii_digit() || c == '_')
+        && noun.chars().any(|c| c.is_uppercase());
+    all_caps || state.class_defs.iter().any(|(name, _)| name == noun)
+}
+
+fn unwrap_not(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::UnaryOp(u) if matches!(u.op, UnaryOp::Not) => unwrap_not(&u.operand),
+        _ => expr,
+    }
+}
+
+/// The operands of a boolean expression used as a condition, or None when the
+/// expression is not a boolean combination at all (a single test, a call, a
+/// name — already one fact).
+fn bool_operands(expr: &Expr) -> Option<Vec<&Expr>> {
+    let top = unwrap_not(expr);
+    if !matches!(top, Expr::BoolOp(_)) {
+        return None;
+    }
+    let mut out = Vec::new();
+    flatten_bool(top, &mut out);
+    Some(out)
+}
+
+fn flatten_bool<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match unwrap_not(expr) {
+        Expr::BoolOp(b) => {
+            for v in &b.values {
+                flatten_bool(v, out);
+            }
+        }
+        other => out.push(other),
+    }
+}
+
+/// The distinct nouns a boolean expression is about. A free call's noun is its
+/// first argument (`len(text)` is about `text`); a method call's is its
+/// receiver (`row.get(...)` is about `row`); a comparison's is its subject.
+fn condition_nouns(expr: &Expr) -> Vec<String> {
+    let Some(operands) = bool_operands(expr) else {
+        return operand_nouns(expr);
+    };
+    let mut nouns: Vec<String> = Vec::new();
+    for op in operands {
+        for n in operand_nouns(op) {
+            if !nouns.contains(&n) {
+                nouns.push(n);
+            }
+        }
+    }
+    nouns.sort();
+    nouns
+}
+
+/// Every noun one operand is about: a comparison is about both sides, an
+/// arithmetic operand about both of its terms (`self.low - tol` is about the
+/// line and the tolerance).
+fn operand_nouns(expr: &Expr) -> Vec<String> {
+    let mut out = Vec::new();
+    match unwrap_not(expr) {
+        Expr::Compare(c) => {
+            out.extend(operand_nouns(&c.left));
+            for comp in &c.comparators {
+                out.extend(operand_nouns(comp));
+            }
+        }
+        Expr::BinOp(b) => {
+            out.extend(operand_nouns(&b.left));
+            out.extend(operand_nouns(&b.right));
+        }
+        Expr::BoolOp(b) => {
+            for v in &b.values {
+                out.extend(operand_nouns(v));
+            }
+        }
+        other => out.extend(operand_noun(other)),
+    }
+    out
+}
+
+fn operand_noun(expr: &Expr) -> Option<String> {
+    match unwrap_not(expr) {
+        Expr::Name(n) => Some(n.id.to_string()),
+        Expr::Attribute(_) | Expr::Subscript(_) => chain_root(expr),
+        Expr::Call(c) => {
+            if matches!(c.func.as_ref(), Expr::Attribute(_)) {
+                operand_noun(&c.func)
+            } else {
+                c.arguments.args.first().and_then(operand_noun)
+            }
+        }
+        Expr::Compare(c) => operand_noun(&c.left),
+        Expr::UnaryOp(u) => operand_noun(&u.operand),
+        _ => None,
+    }
+}
+
+/// The root name of an attribute/subscript chain (`a.b[c].d` -> `a`).
+fn chain_root(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Name(n) => Some(n.id.to_string()),
+        Expr::Attribute(a) => chain_root(&a.value),
+        Expr::Subscript(s) => chain_root(&s.value),
+        _ => None,
+    }
+}
+
+/// The expression is the function's answer: it is returned, and every other
+/// return is a literal early exit. The function's name IS the decision, whatever
+/// locals it computes first. A condition used as a TEST is not its answer.
+fn is_only_return_of(body: &[Stmt], expr: &Expr) -> bool {
+    let mut returns: Vec<&Expr> = Vec::new();
+    collect_returns(body, &mut returns);
+    let mut answer = false;
+    for value in returns {
+        if std::ptr::eq(unwrap_not(value), unwrap_not(expr)) {
+            answer = true;
+        } else if !is_literal(unwrap_not(value)) && !matches!(unwrap_not(value), Expr::NoneLiteral(_)) {
+            return false;
+        }
+    }
+    answer
+}
+
+fn collect_returns<'a>(body: &'a [Stmt], out: &mut Vec<&'a Expr>) {
+    for s in body {
+        match s {
+            Stmt::Return(r) => {
+                if let Some(v) = &r.value {
+                    out.push(v);
+                }
+            }
+            Stmt::If(i) => {
+                collect_returns(&i.body, out);
+                for cl in &i.elif_else_clauses {
+                    collect_returns(&cl.body, out);
+                }
+            }
+            Stmt::For(f) => {
+                collect_returns(&f.body, out);
+                collect_returns(&f.orelse, out);
+            }
+            Stmt::While(w) => {
+                collect_returns(&w.body, out);
+                collect_returns(&w.orelse, out);
+            }
+            Stmt::With(w) => collect_returns(&w.body, out),
+            Stmt::Try(t) => {
+                collect_returns(&t.body, out);
+                for h in &t.handlers {
+                    let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                    collect_returns(&eh.body, out);
+                }
+                collect_returns(&t.orelse, out);
+                collect_returns(&t.finalbody, out);
+            }
+            Stmt::Match(m) => {
+                for c in &m.cases {
+                    collect_returns(&c.body, out);
+                }
+            }
+            // a nested def's returns belong to that def, not this one
+            Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
+            _ => {}
+        }
+    }
+}
+
+// ------------------------------------------------------- unnamed-classification
+
+/// A chain that sorts one value into cases IS the domain's classification.
+/// Inline, the cases have no name, so every reader reconstructs the kinds from
+/// the tests. The fix is the one #88 took: name the cases as one kind.
+pub fn unnamed_classification_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+    walk_classifications(state, body, source, ConditionScope::default());
+}
+
+fn walk_classifications(state: &mut ScanState, stmts: &[Stmt], source: &str, scope: ConditionScope<'_>) {
+    for s in stmts {
+        match s {
+            Stmt::If(i) => {
+                classification_chain(state, i, source, scope);
+                walk_classifications(state, &i.body, source, scope);
+                for cl in &i.elif_else_clauses {
+                    walk_classifications(state, &cl.body, source, scope);
+                }
+            }
+            Stmt::Match(m) => {
+                classification_match(state, m, source, scope);
+                for c in &m.cases {
+                    walk_classifications(state, &c.body, source, scope);
+                }
+            }
+            Stmt::FunctionDef(f) => {
+                let inner = ConditionScope {
+                    fn_name: f.name.as_str(),
+                    fn_body: Some(&f.body),
+                    class: scope.class,
+                };
+                walk_classifications(state, &f.body, source, inner);
+            }
+            Stmt::ClassDef(c) => {
+                let inner = ConditionScope {
+                    fn_name: "",
+                    fn_body: None,
+                    class: Some(c.name.as_str()),
+                };
+                walk_classifications(state, &c.body, source, inner);
+            }
+            Stmt::For(f) => {
+                walk_classifications(state, &f.body, source, scope);
+                walk_classifications(state, &f.orelse, source, scope);
+            }
+            Stmt::While(w) => {
+                walk_classifications(state, &w.body, source, scope);
+                walk_classifications(state, &w.orelse, source, scope);
+            }
+            Stmt::With(w) => walk_classifications(state, &w.body, source, scope),
+            Stmt::Try(t) => {
+                walk_classifications(state, &t.body, source, scope);
+                for h in &t.handlers {
+                    let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
+                    walk_classifications(state, &eh.body, source, scope);
+                }
+                walk_classifications(state, &t.orelse, source, scope);
+                walk_classifications(state, &t.finalbody, source, scope);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// An if/elif chain of >= 3 arms, every test `<subject> == <constant>`, every
+/// arm returning a constant/name/attribute: a classification with no name.
+fn classification_chain(
+    state: &mut ScanState,
+    head: &ruff_python_ast::StmtIf,
+    source: &str,
+    scope: ConditionScope<'_>,
+) {
+    if scope
+        .fn_body
+        .is_some_and(|body| body.len() == 1 && body[0].range() == head.range())
+    {
+        return; // the chain is the whole function: its name is the name
+    }
+    let mut tests: Vec<&Expr> = vec![&head.test];
+    let mut bodies: Vec<&[Stmt]> = vec![&head.body];
+    for cl in &head.elif_else_clauses {
+        if let Some(t) = &cl.test {
+            tests.push(t);
+            bodies.push(&cl.body);
+        }
+    }
+    if tests.len() < 3 {
+        return;
+    }
+    let mut subject = None;
+    for t in &tests {
+        let Expr::Compare(c) = unwrap_not(t) else { return };
+        if c.ops.len() != 1 || !matches!(c.ops[0], CmpOp::Eq) {
+            return;
+        }
+        if !c.comparators.first().is_some_and(is_literal) {
+            return;
+        }
+        let text = source_text(source, &c.left);
+        if subject.as_ref().is_some_and(|s| s != &text) {
+            return;
+        }
+        subject = Some(text);
+    }
+    if !bodies.iter().all(|b| returns_one_constant(b)) {
+        return;
+    }
+    // a >=4-arm chain on one value is conditional-polymorphism's ruling; one
+    // chain gets one verdict
+    if tests.len() >= 4 {
+        let keys: Vec<Option<String>> = tests.iter().map(|t| dispatch_key(t)).collect();
+        if keys.iter().all(|k| k.is_some()) && keys.windows(2).all(|w| w[0] == w[1]) {
+            return;
+        }
+    }
+    push_classification(
+        state,
+        source,
+        head.range().start().to_usize(),
+        tests.len(),
+        subject.unwrap_or_default(),
+        scope,
+    );
+}
+
+/// A match over one value whose cases each return a constant/name/attribute —
+/// the same classification, written with patterns.
+fn classification_match(
+    state: &mut ScanState,
+    m: &ruff_python_ast::StmtMatch,
+    source: &str,
+    scope: ConditionScope<'_>,
+) {
+    if scope
+        .fn_body
+        .is_some_and(|body| body.len() == 1 && body[0].range() == m.range())
+    {
+        return;
+    }
+    if m.cases.len() < 3 || !matches!(m.subject.as_ref(), Expr::Name(_) | Expr::Attribute(_)) {
+        return;
+    }
+    if m.cases
+        .iter()
+        .any(|c| c.guard.is_some() || !returns_one_constant(&c.body))
+    {
+        return;
+    }
+    let subject = source_text(source, &m.subject);
+    push_classification(
+        state,
+        source,
+        m.range().start().to_usize(),
+        m.cases.len(),
+        subject,
+        scope,
+    );
+}
+
+fn push_classification(
+    state: &mut ScanState,
+    source: &str,
+    start: usize,
+    cases: usize,
+    subject: String,
+    scope: ConditionScope<'_>,
+) {
+    state.findings.push(Finding {
+        logical_start: None,
+        seam_members: Vec::new(),
+        col: 0,
+        file: state.file.to_string(),
+        line: line_of(source, ruff_text_size::TextSize::new(start as u32)),
+        function: scope.fn_name.to_string(),
+        kind: "unnamed-classification".into(),
+        severity: "warn".into(),
+        message: format!(
+            "{cases} cases of {subject} are classified here, and the classification has no name. \
+             Name the cases as one kind, and return that kind."
+        ),
+    });
+}
+
+/// The block is exactly `return <constant|name|attribute>`.
+fn returns_one_constant(body: &[Stmt]) -> bool {
+    let real: Vec<&Stmt> = body
+        .iter()
+        .filter(|s| !matches!(s, Stmt::Expr(e) if matches!(e.value.as_ref(), Expr::StringLiteral(_) | Expr::EllipsisLiteral(_))))
+        .collect();
+    let [Stmt::Return(r)] = real.as_slice() else {
+        return false;
+    };
+    r.value
+        .as_deref()
+        .is_some_and(|v| matches!(unwrap_not(v), Expr::Name(_) | Expr::Attribute(_)) || is_literal(v))
+}
+
+/// A literal value: the arms of a classification yield these.
+fn is_literal(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::StringLiteral(_)
+            | Expr::BytesLiteral(_)
+            | Expr::NumberLiteral(_)
+            | Expr::BooleanLiteral(_)
+            | Expr::NoneLiteral(_)
+            | Expr::EllipsisLiteral(_)
+            | Expr::FString(_)
+    )
+}
+
+fn source_text(source: &str, expr: &Expr) -> String {
+    let range = expr.range();
+    let (start, end) = (range.start().to_usize(), range.end().to_usize());
+    source.get(start..end).unwrap_or_default().trim().to_string()
 }
 
 /// Introduce Special Case: >= 3 None/empty checks on the same name — the
@@ -7636,7 +8241,7 @@ fn class_bases(c: &StmtClassDef) -> Vec<String> {
 }
 
 pub fn collect_skeleton_modules(state: &mut ScanState, body: &[Stmt], rel: &str) {
-    if state.is_test || rel.ends_with("__init__.py") || is_vendored(rel) {
+    if is_skipped_module(state, rel) {
         return;
     }
     if body.len() < 3 {
@@ -7715,7 +8320,7 @@ pub fn collect_skeleton_modules(state: &mut ScanState, body: &[Stmt], rel: &str)
             })
             .count()
             == 0;
-        if classes.len() == 1 && other_statements && module_qualifies {
+        if is_module_class(classes.len(), other_statements, module_qualifies) {
             let mut combined = skel.clone();
             combined.extend(module_consts.iter().cloned());
             let mut all = module_members.clone();
@@ -7781,7 +8386,7 @@ pub fn duplicate_module_findings(entities: &[SkeletonModule]) -> Vec<Finding> {
                     // records whose fields differ hold different data — there
                     // is no shared behaviour for a fix to land in one copy and
                     // miss in the other, so they are siblings, not a fork.
-                    if !e.fields.is_empty() && !earlier.fields.is_empty() && e.fields != earlier.fields {
+                    if fields_differ(e, earlier) {
                         continue;
                     }
                     // two classes pair on matching constants as well as on
@@ -7789,9 +8394,7 @@ pub fn duplicate_module_findings(entities: &[SkeletonModule]) -> Vec<Finding> {
                     // evidence carries the fork claim there. Modules pair on
                     // the structural measure alone — a whole file's shape is
                     // evidence enough, and constant-free module forks exist.
-                    if e.entity == "class"
-                        && earlier.entity == "class"
-                        && (e.consts.is_empty() || e.consts != earlier.consts)
+                    if consts_differ(e, earlier)
                     {
                         continue;
                     }
@@ -8177,7 +8780,7 @@ pub fn unused_findings(
     let mut out = Vec::new();
     for (rel, name, line, is_class) in definitions {
         let what = if *is_class { "class" } else { "function" };
-        if name == "main" || prod_refs.contains(name) || strings.iter().any(|s| s.contains(name.as_str())) {
+        if is_live_name(name, prod_refs, strings) {
             continue;
         }
         let (message, kind) = if test_refs.contains(name) {
@@ -8720,7 +9323,7 @@ fn record_literal_scan(e: &Expr, source: &str, bindings: &TypeBindings, found: &
             // identity, not a record. A collection/call/name/attribute value
             // keeps the finding (the dict holds shape).
             let scalar_map = d.items.iter().all(|it| is_scalar_literal(&it.value));
-            if d.items.len() >= 2 && !keys.is_empty() && !scalar_map {
+            if is_literal_record(d, &keys, scalar_map) {
                 let record = literal_value_record(d.items.iter().map(|it| &it.value), bindings);
                 found.push(RecordHit {
                     line: line_of(source, d.range().start()),
@@ -9094,10 +9697,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                                 // which is what the rule exists to make explicit
                                 // (record_raw_dict_alias_does_not_exempt,
                                 // record_optional_named_type_map).
-                                if matches!(a, Expr::Subscript(_))
-                                    && module_classes.contains(record.as_str())
-                                    && !param_is_mutated(&f.body, arg)
-                                {
+                                if is_unspelled_record_map(a, f, record.as_str(), &module_classes, arg) {
                                     continue;
                                 }
                                 format!("{arg} is a map whose values are {record}. {COLLECTION_MESSAGE_TAIL}")
@@ -9600,12 +10200,7 @@ pub fn skipif_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                                                                         line_of(source, call.range().start())
                                                                     ), });
                             }
-                        } else if a.attr.as_str() == "skip"
-                            && is_pytest_mark_skip(a)
-                            && call.arguments.args.is_empty()
-                            && call.arguments.keywords.is_empty()
-                            && reported.insert(call.range().start().to_usize())
-                        {
+                        } else if is_skip_mark(a, call, &mut reported) {
                             parked_skip_finding(state, source, call.range().start());
                         }
                     }
@@ -9800,10 +10395,7 @@ fn has_assertion(body: &[Stmt]) -> bool {
                     Expr::Attribute(a) => {
                         // unittest: self.assertEqual/assertTrue/assertRaises/...
                         // and pytest: pytest.raises / self.fail
-                        if a.attr.as_str().starts_with("assert")
-                            || a.attr.as_str() == "raises"
-                            || a.attr.as_str() == "fail"
-                        {
+                        if is_assert_attr(a) {
                             return true;
                         }
                     }
@@ -10078,4 +10670,113 @@ pub fn abstraction_findings(scans: &[(String, Vec<crate::ClassInfo>, Vec<crate::
         }
     }
     out
+}
+
+// ------------------------------------------------- unnamed-condition: named decisions
+// Each names one decision the checks make inline, so the call site reads as the
+// question it asks rather than a list of operators.
+
+/// Big enough, or mutating shared state, to be a closures candidate.
+fn is_closures_candidate(cc: u32, span: u32, mutated: &[String]) -> bool {
+    cc >= 15 || span >= 60 || !mutated.is_empty()
+}
+
+/// The read reaches into a collaborator: not the receiver, not a parameter or
+/// loop target, and often enough to be a habit.
+fn is_collaborator_envy(
+    receiver: &str,
+    reads: usize,
+    params: &HashSet<String>,
+    loop_targets: &HashSet<String>,
+    collaborators: &HashSet<String>,
+    self_reads: usize,
+) -> bool {
+    receiver != "self"
+        && !params.contains(receiver)
+        && !loop_targets.contains(receiver)
+        && collaborators.contains(receiver)
+        && reads >= 4
+        && reads >= self_reads + 3
+}
+
+/// A static husk: every method static, nothing property-like, no dataclass
+/// fields, no state written.
+fn is_static_husk(all_static: bool, has_property: bool, has_dataclass_fields: bool, writes_state: bool) -> bool {
+    all_static && !has_property && !has_dataclass_fields && !writes_state
+}
+
+/// A radix prefix (`0x`, `0o`, `0b`) — a literal that states its base.
+pub fn is_radix_prefix(prefix: &str) -> bool {
+    prefix.eq_ignore_ascii_case("0x") || prefix.eq_ignore_ascii_case("0o") || prefix.eq_ignore_ascii_case("0b")
+}
+
+/// The name component is a unit token, or its plural.
+fn is_unit_token(component: &str, token: &str) -> bool {
+    component == token
+        || (component.len() == token.len() + 1 && component.starts_with(token) && component.ends_with('s'))
+}
+
+/// The if body is a single nested if — one link of a guard chain.
+fn is_nested_if_body(if_stmt: &ruff_python_ast::StmtIf) -> bool {
+    if_stmt.body.len() == 1 && if_stmt.elif_else_clauses.is_empty() && matches!(if_stmt.body[0], Stmt::If(_))
+}
+
+/// The module is outside the identity scan: test code, a package marker, or
+/// vendored.
+fn is_skipped_module(state: &ScanState, rel: &str) -> bool {
+    state.is_test || rel.ends_with("__init__.py") || is_vendored(rel)
+}
+
+/// Two class skeletons carry different field sets — siblings, not a fork.
+fn fields_differ(e: &crate::common::SkeletonModule, earlier: &crate::common::SkeletonModule) -> bool {
+    !e.fields.is_empty() && !earlier.fields.is_empty() && e.fields != earlier.fields
+}
+
+/// Two class skeletons pair on constants only when both carry them.
+fn consts_differ(e: &crate::common::SkeletonModule, earlier: &crate::common::SkeletonModule) -> bool {
+    e.entity == "class" && earlier.entity == "class" && (e.consts.is_empty() || e.consts != earlier.consts)
+}
+
+/// The file's shape is one class plus module-level imports and constants.
+fn is_module_class(classes: usize, other_statements: bool, module_qualifies: bool) -> bool {
+    classes == 1 && other_statements && module_qualifies
+}
+
+/// The name is still used: `main`, a production reference, or a string
+/// reference (a framework's dispatch by name).
+fn is_live_name(name: &str, prod_refs: &HashSet<String>, strings: &[String]) -> bool {
+    name == "main" || prod_refs.contains(name) || strings.iter().any(|s| s.contains(name))
+}
+
+/// The dict is a record literal: two or more items, with keys, not a scalar map.
+fn is_literal_record(d: &ruff_python_ast::ExprDict, keys: &[String], scalar_map: bool) -> bool {
+    d.items.len() >= 2 && !keys.is_empty() && !scalar_map
+}
+
+/// The argument is a map of a module class, passed by subscript and not
+/// mutated — the shape must be spelled out rather than aliased.
+fn is_unspelled_record_map(
+    annotation: &Expr,
+    function: &StmtFunctionDef,
+    record: &str,
+    module_classes: &HashSet<String>,
+    arg: &str,
+) -> bool {
+    matches!(annotation, Expr::Subscript(_))
+        && module_classes.contains(record)
+        && !param_is_mutated(&function.body, arg)
+}
+
+/// A bare `@pytest.mark.skip` with no reason — the skip hides the test.
+fn is_skip_mark(attr: &ExprAttribute, call: &ExprCall, reported: &mut HashSet<usize>) -> bool {
+    attr.attr.as_str() == "skip"
+        && is_pytest_mark_skip(attr)
+        && call.arguments.args.is_empty()
+        && call.arguments.keywords.is_empty()
+        && reported.insert(call.range().start().to_usize())
+}
+
+/// A pytest assertion attribute (`assert*`, `raises`, `fail`).
+fn is_assert_attr(attr: &ExprAttribute) -> bool {
+    attr.attr.as_str().starts_with("assert") || attr.attr.as_str() == "raises" || attr.attr.as_str() == "fail"
 }

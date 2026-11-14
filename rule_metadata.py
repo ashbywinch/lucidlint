@@ -654,6 +654,17 @@ CATALOG = RuleCatalog([
     Rule("special-case", "warn", "advice", "Python",
          "≥3 repeated `None`/empty checks on one name — Introduce Special "
          "Case."),
+    Rule("unnamed-condition", "warn", "advice", "Both",
+         "A condition joining ≥3 facts about one name, or about several, with "
+         "no name for the decision — name it as a predicate and call it. "
+         "Exempt: a function whose body is exactly `return <condition>` (the "
+         "name already exists), and a condition about `self` alone (internal "
+         "state on an object that already has a name)."),
+    Rule("unnamed-classification", "warn", "advice", "Both",
+         "A match or if/elif chain of ≥3 cases sorting one value into "
+         "constants, with no name for the classification — name the cases as "
+         "one kind and return it. Exempt: the chain is the function's whole "
+         "body (the function's name is the name)."),
     Rule("middle-man", "warn", "advice", "Python",
          "A method that only forwards (`return self.x.y(...)`) — Remove Middle "
          "Man. Exempt where the advice cannot be taken: the delegated member is "

@@ -29,9 +29,13 @@ use std::collections::HashMap;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, BinOp, Block, Expr, ExprCall, ExprLit, ExprMacro, File, FnArg, Ident, ImplItem, Item, ItemFn, ItemImpl,
-    ItemUse, Lit, Pat, Path, Signature, Stmt, Type, UseTree,
+    Arm, Attribute, BinOp, Block, Expr, ExprCall, ExprLit, ExprMacro, File, FnArg, Ident, ImplItem, Item, ItemFn,
+    ItemImpl, ItemUse, Lit, Member, Pat, Path, Signature, Stmt, Type, UseTree,
 };
+
+/// A source position (1-based line, 0-based column) — the start of the
+/// expression a function returns.
+type SpanStart = Option<(usize, usize)>;
 
 /// One struct: name, declaration line, named-field count, line span.
 #[derive(Clone)]
@@ -133,6 +137,9 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         in_test_code: false,
         is_test_file: crate::is_test_path(name),
         repo_wide,
+        current_impl: None,
+        bare_body_start: None,
+        tail_value_start: None,
     };
     // the test-only rules run even inside #[cfg(test)] mods — a pre-pass over
     // the whole file, then the production walk skips test subtrees
@@ -225,6 +232,15 @@ pub(crate) struct RsState<'a> {
     in_test_code: bool,
     is_test_file: bool,
     repo_wide: bool,
+    /// The `impl` type whose methods are being walked — the owner the
+    /// unnamed-condition message names.
+    current_impl: Option<String>,
+    /// Start of the expression that is a function's entire body — a match
+    /// there is the function's own definition.
+    bare_body_start: Option<(usize, usize)>,
+    /// Start of the expression a function returns (locals allowed) — a
+    /// condition there is the function's own predicate.
+    tail_value_start: Option<(usize, usize)>,
 }
 
 struct RsFnScope {
@@ -393,6 +409,140 @@ impl<'a> RsState<'a> {
         });
     }
 
+    /// A module-level free fn whose leading parameter's type it uses — the
+    /// strewing pass's candidate. The param must be USED: "they share data" —
+    /// a fn that never reads it would make the extracted class field-disjoint
+    /// (partition) and the fix would thrash.
+    fn collect_strew_candidate(&mut self, sig: &Signature, block: &'a Block, line: usize) {
+        let Some(FnArg::Typed(pt)) = sig.inputs.first() else {
+            return;
+        };
+        let Pat::Ident(pi) = pt.pat.as_ref() else { return };
+        if !tokens_contain_ident(quote::ToTokens::to_token_stream(block), &pi.ident.to_string()) {
+            return;
+        }
+        let mut types = Vec::new();
+        collect_type_idents(&pt.ty, &mut types);
+        if let Some(t) = types.first() {
+            self.strew_candidates.push((sig.ident.to_string(), line, t.clone()));
+        }
+    }
+
+    /// Record the expression a function returns (locals allowed) and the one
+    /// that is its whole body — the unnamed-condition/classification arms read
+    /// both. Returns the previous values for the caller to restore.
+    fn track_returned_value(&mut self, block: &'a Block) -> (SpanStart, SpanStart) {
+        let prev_bare = self.bare_body_start;
+        let prev_tail = self.tail_value_start;
+        let span_of = |e: &Expr| Some((e.span().start().line, e.span().start().column));
+        // the body is exactly one expression (a `use` line does not count):
+        // the match IS the definition
+        let body: Vec<&Stmt> = block
+            .stmts
+            .iter()
+            .filter(|s| !matches!(s, Stmt::Item(Item::Use(_))))
+            .collect();
+        self.bare_body_start = match body.as_slice() {
+            [Stmt::Expr(e, None)] => span_of(e),
+            _ => None,
+        };
+        // the fn's only returned value: a tail expression with no `return`
+        // anywhere else — the function IS the predicate
+        self.tail_value_start = match (block.stmts.last(), has_return_expr(block)) {
+            // a control-flow tail (`if c { .. } else { .. }`) is not the value:
+            // the function returns a choice, and the condition inside it is
+            // still unnamed
+            (Some(Stmt::Expr(e, None)), false)
+                if !matches!(
+                    e,
+                    Expr::If(_) | Expr::While(_) | Expr::ForLoop(_) | Expr::Loop(_) | Expr::Block(_)
+                ) =>
+            {
+                span_of(e)
+            }
+            _ => None,
+        };
+        (prev_bare, prev_tail)
+    }
+
+    /// The file is scanned repo-wide and is not test code — the skeleton
+    /// identity's scope.
+    fn is_repo_wide_module(&self, module_level: bool) -> bool {
+        module_level && self.repo_wide && !self.is_test_file
+    }
+
+    /// The method never uses its receiver and is not a test — it does not
+    /// belong in the impl.
+    fn is_detached_method(&self, f: &syn::ImplItemFn) -> bool {
+        f.sig.receiver().is_some() && !has_attr(&f.attrs, "test") && !self.in_test_code && !block_refs_self(&f.block)
+    }
+
+    /// `unnamed-condition`: three or more facts joined inline as a condition,
+    /// about one or more nouns, with no name for the decision.
+    fn unnamed_condition(&mut self, expr: &'a Expr) {
+        let cond = match expr {
+            Expr::If(i) => &i.cond,
+            Expr::While(w) => &w.cond,
+            _ => return,
+        };
+        if self.tail_value_start == Some((expr.span().start().line, expr.span().start().column)) {
+            return; // the function is the predicate: its name is the name
+        }
+        let operands = rs_bool_operands(cond);
+        if operands.len() < 3 {
+            return;
+        }
+        let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
+        if matches!(fn_name.as_str(), "eq" | "ne" | "cmp" | "partial_cmp" | "hash") {
+            return; // the operator IS the decision: the name exists
+        }
+        let nouns: Vec<String> = rs_condition_nouns(cond)
+            .into_iter()
+            .filter(|n| !rs_names_a_type_or_constant(self, n))
+            .collect();
+        if !names_a_decision(&nouns) {
+            return;
+        }
+        let message = rs_condition_message(operands.len(), &nouns, self.current_impl.as_deref());
+        self.finding("unnamed-condition", "warn", cond.span().start().line, &fn_name, message);
+    }
+
+    /// `unnamed-classification`: a match sorting one value into constants, with
+    /// no name for the kinds.
+    fn unnamed_classification(&mut self, expr: &'a Expr) {
+        let Expr::Match(m) = expr else { return };
+        if self.bare_body_start == Some((expr.span().start().line, expr.span().start().column)) {
+            return;
+        }
+        // the classification must be the whole answer of its statement: a match
+        // used as one argument or operand is an expression, not a named kind
+        if matches!(self.expr_stack.last(), Some(parent) if !matches!(parent, Expr::Return(_))) {
+            return;
+        }
+        let cases: Vec<&Arm> = m.arms.iter().filter(|a| !matches!(a.pat, Pat::Wild(_))).collect();
+        if cases.len() < 3 {
+            return;
+        }
+        let classifies = cases
+            .iter()
+            .all(|a| matches!(a.body.as_ref(), Expr::Lit(_) | Expr::Path(_)));
+        if !classifies {
+            return;
+        }
+        let subject = rs_expr_text(&m.expr);
+        let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
+        self.finding(
+            "unnamed-classification",
+            "warn",
+            expr.span().start().line,
+            &fn_name,
+            format!(
+                "{} cases of {subject} are classified here, and the classification has no name. Name the cases as one kind, and return that kind.",
+                cases.len()
+            ),
+        );
+    }
+
     /// Magic numbers: int/float literals outside (0, 1, 2) whose parent is an
     /// operation — the same position rule as the Python layer. Rust const
     /// definitions (const/static items, enum discriminants) are naturally
@@ -456,7 +606,7 @@ impl<'a> RsState<'a> {
         let compound_assign = matches!(e, Expr::Binary(b) if is_compound_op(&b.op));
         // return/break/continue are control flow, not discarded values
         let control = matches!(e, Expr::Return(_) | Expr::Break(_) | Expr::Continue(_));
-        if !compound_assign && !control && !harmless {
+        if is_discarded_expression(compound_assign, control, harmless) {
             let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
             let line = e.span().start().line;
             self.finding(
@@ -482,17 +632,20 @@ impl<'a> RsState<'a> {
         }
         let prev_fn = self.current_fn.take();
         self.current_fn = Some((sig.ident.to_string(), line));
+        let (prev_bare, prev_tail) = self.track_returned_value(block);
         self.fn_stack.push(RsFnScope { decisions: 0 });
         self.visit_block(block); // the override: unreachable check + nested walk
                                  // the push/pop invariant is per-function; a missing scope is a walker
                                  // bug, not a crash — default to no decisions
         let scope = self.fn_stack.pop().unwrap_or(RsFnScope { decisions: 0 });
+        self.bare_body_start = prev_bare;
+        self.tail_value_start = prev_tail;
         let cc = scope.decisions + 1;
         let span = span_lines(sig.span().start().line, block.span().end().line);
         if !self.in_test_code {
             // closures->latent-class: >= 2 inner fns/closures on a big fn
             let inner = inner_count(block);
-            if inner >= 2 && (cc >= 15 || span >= 60) {
+            if is_closures_shape(inner, cc, span) {
                 self.finding(
                     "closures",
                     "fail",
@@ -532,7 +685,7 @@ impl<'a> RsState<'a> {
                     ),
                 );
             }
-            if module_level && self.repo_wide && !self.is_test_file {
+            if self.is_repo_wide_module(module_level) {
                 let skel = rs_skeleton(sig, block);
                 if common::is_duplicate_size(skel.len(), block.stmts.len()) {
                     self.skeletons.push(common::SkeletonFn {
@@ -568,24 +721,8 @@ impl<'a> RsState<'a> {
             types.sort();
             types.dedup();
             self.fn_params.push((sig.ident.to_string(), line, types));
-            // strewing: module-level free fns (methods have a non-empty
-            // fn_stack; test fns already set in_test_code) — the leading
-            // param's bare type name, filtered against file-local structs
-            // in finish(). The param must be USED: "they share data" — a fn
-            // that never reads it would make the extracted class
-            // field-disjoint (partition) and the fix would thrash.
             if module_level {
-                if let Some(FnArg::Typed(pt)) = sig.inputs.first() {
-                    if let Pat::Ident(pi) = pt.pat.as_ref() {
-                        if tokens_contain_ident(quote::ToTokens::to_token_stream(block), &pi.ident.to_string()) {
-                            let mut tids = Vec::new();
-                            collect_type_idents(&pt.ty, &mut tids);
-                            if let Some(t) = tids.first() {
-                                self.strew_candidates.push((sig.ident.to_string(), line, t.clone()));
-                            }
-                        }
-                    }
-                }
+                self.collect_strew_candidate(sig, block, line);
             }
         }
         self.current_fn = prev_fn;
@@ -660,9 +797,11 @@ impl<'a> Visit<'a> for RsState<'a> {
             Item::Impl(i) => {
                 let self_name = impl_self_name(i);
                 let methods = i.items.iter().filter(|it| matches!(it, ImplItem::Fn(_))).count();
-                if let Some(n) = self_name {
-                    self.impls.push((n, methods));
+                if let Some(n) = &self_name {
+                    self.impls.push((n.clone(), methods));
                 }
+                let prev_impl = self.current_impl.take();
+                self.current_impl = self_name;
                 for it in &i.items {
                     let iattrs: &[Attribute] = match it {
                         ImplItem::Fn(f) => f.attrs.as_slice(),
@@ -686,11 +825,7 @@ impl<'a> Visit<'a> for RsState<'a> {
                         // — the method does not touch instance state, so it
                         // does not belong in the impl (the Python rule's
                         // inverse direction, Rust-flavored)
-                        if f.sig.receiver().is_some()
-                            && !has_attr(&f.attrs, "test")
-                            && !self.in_test_code
-                            && !block_refs_self(&f.block)
-                        {
+                        if self.is_detached_method(f) {
                             let line = f.sig.span().start().line;
                             self.finding(
                                 "detached-method",
@@ -705,6 +840,7 @@ impl<'a> Visit<'a> for RsState<'a> {
                         }
                     }
                 }
+                self.current_impl = prev_impl;
             }
             _ => visit::visit_item(self, item), // enums, traits, consts, statics, types
         }
@@ -767,17 +903,25 @@ impl<'a> Visit<'a> for RsState<'a> {
         if !self.in_test_code {
             match expr {
                 Expr::Lit(l) => self.magic_check(l),
-                Expr::If(_) => self.decide(1),
+                Expr::If(_) => {
+                    self.decide(1);
+                    self.unnamed_condition(expr);
+                }
                 Expr::Match(m) => {
                     let arms = m.arms.iter().filter(|a| !matches!(a.pat, Pat::Wild(_))).count() as u32;
                     self.decide(arms);
+                    self.unnamed_classification(expr);
                 }
                 Expr::Binary(b) => {
                     if matches!(b.op, BinOp::And(_) | BinOp::Or(_)) {
                         self.decide(1);
                     }
                 }
-                Expr::ForLoop(_) | Expr::While(_) | Expr::Loop(_) => self.decide(1),
+                Expr::While(_) => {
+                    self.decide(1);
+                    self.unnamed_condition(expr);
+                }
+                Expr::ForLoop(_) | Expr::Loop(_) => self.decide(1),
                 Expr::Macro(m) if is_assert_macro(&m.mac.path) => {
                     self.decide(1); // assert!: +1, subtree not counted (visit_Assert)
                 }
@@ -1120,6 +1264,180 @@ fn impl_self_name(i: &ItemImpl) -> Option<String> {
     }
 }
 
+/// Does the block contain a `return` expression anywhere (closures excluded)?
+fn has_return_expr(block: &Block) -> bool {
+    struct Probe {
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for Probe {
+        fn visit_expr_return(&mut self, _: &'ast syn::ExprReturn) {
+            self.found = true;
+        }
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+    }
+    let mut probe = Probe { found: false };
+    probe.visit_block(block);
+    probe.found
+}
+
+/// The operands of a boolean condition, flattening nested `&&`/`||` through
+/// `not`, parentheses and references — the same operand set the Python arm
+/// sees.
+fn rs_bool_operands(expr: &Expr) -> Vec<&Expr> {
+    fn flatten<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match unwrap_rs(e) {
+            Expr::Binary(b) if matches!(b.op, BinOp::And(_) | BinOp::Or(_)) => {
+                flatten(&b.left, out);
+                flatten(&b.right, out);
+            }
+            other => out.push(other),
+        }
+    }
+    let mut out = Vec::new();
+    if !matches!(unwrap_rs(expr), Expr::Binary(b) if matches!(b.op, BinOp::And(_) | BinOp::Or(_))) {
+        return out;
+    }
+    flatten(expr, &mut out);
+    out
+}
+
+fn unwrap_rs(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Paren(p) => unwrap_rs(&p.expr),
+        Expr::Group(g) => unwrap_rs(&g.expr),
+        Expr::Reference(r) => unwrap_rs(&r.expr),
+        Expr::Unary(u) if matches!(u.op, syn::UnOp::Not(_)) => unwrap_rs(&u.expr),
+        _ => expr,
+    }
+}
+
+/// The distinct nouns a condition is about — a field/method receiver, a
+/// one-segment path, a free call's first argument.
+fn rs_condition_nouns(expr: &Expr) -> Vec<String> {
+    let mut nouns: Vec<String> = Vec::new();
+    for op in rs_bool_operands(expr) {
+        for n in rs_operand_nouns(op) {
+            if !nouns.contains(&n) {
+                nouns.push(n);
+            }
+        }
+    }
+    nouns.sort();
+    nouns
+}
+
+/// Every noun one operand is about: a comparison about both sides, arithmetic
+/// about both terms (`self.low - tol` is about the line and the tolerance).
+fn rs_operand_nouns(expr: &Expr) -> Vec<String> {
+    let mut out = Vec::new();
+    match unwrap_rs(expr) {
+        Expr::Binary(b) => {
+            out.extend(rs_operand_nouns(&b.left));
+            out.extend(rs_operand_nouns(&b.right));
+        }
+        other => out.extend(rs_operand_noun(other)),
+    }
+    out
+}
+
+fn rs_operand_noun(expr: &Expr) -> Option<String> {
+    match unwrap_rs(expr) {
+        Expr::Path(p) => match (p.path.segments.len(), p.path.segments.first()) {
+            (1, Some(seg)) => Some(seg.ident.to_string()),
+            _ => None, // Foo::BAR is a constant, not a noun
+        },
+        Expr::Field(f) => rs_operand_noun(&f.base),
+        Expr::MethodCall(m) => rs_operand_noun(&m.receiver),
+        Expr::Call(c) => match c.func.as_ref() {
+            Expr::Path(p) if p.path.segments.len() == 1 => c.args.first().and_then(rs_operand_noun),
+            other => rs_operand_noun(other),
+        },
+        Expr::Index(i) => rs_operand_noun(&i.expr),
+        Expr::Binary(b) => rs_operand_noun(&b.left),
+        Expr::Unary(u) => rs_operand_noun(&u.expr),
+        _ => None,
+    }
+}
+
+/// The operands name something a decision can be about: at least one noun, and
+/// not `self` alone.
+fn names_a_decision(nouns: &[String]) -> bool {
+    !nouns.is_empty() && !(nouns.len() == 1 && nouns[0] == "self")
+}
+
+/// A noun naming a type or a constant is the vocabulary the condition is
+/// written in, not a thing it decides about.
+fn rs_names_a_type_or_constant(state: &RsState<'_>, noun: &str) -> bool {
+    noun.chars().next().is_some_and(|c| c.is_uppercase()) || state.structs.iter().any(|s| s.name == noun)
+}
+
+/// The message names the object and the action; the signature is the
+/// extraction's business, so it is never prescribed.
+fn rs_condition_message(facts: usize, nouns: &[String], owner: Option<&str>) -> String {
+    let owner = owner.unwrap_or("the type this code belongs to");
+    let display: Vec<String> = nouns
+        .iter()
+        .map(|n| {
+            if n == "self" {
+                format!("this {owner}")
+            } else {
+                n.clone()
+            }
+        })
+        .collect();
+    let named: Vec<&str> = display.iter().map(String::as_str).collect();
+    let subject = match named.as_slice() {
+        [only] => only.to_string(),
+        [a, b] => format!("{a} and {b}"),
+        _ => {
+            let Some((last, rest)) = named.split_last() else {
+                return String::new();
+            };
+            format!("{}, and {last}", rest.join(", "))
+        }
+    };
+    if nouns.len() == 1 {
+        format!(
+            "{facts} facts about {subject} are joined here, and nothing states what they mean together. \
+             Name the decision as a predicate over {subject}, and call it here."
+        )
+    } else if nouns.iter().any(|n| n == "self") {
+        format!(
+            "{facts} facts about {subject} are joined here, and nothing states what they mean together. \
+             Name the decision as a method on {owner}, and call it here."
+        )
+    } else {
+        format!(
+            "{facts} facts about {subject} are joined here, and nothing states what they mean together. \
+             Name the decision as a predicate, and call it here."
+        )
+    }
+}
+
+/// A short source-free description of an expression, for the classification
+/// message's subject.
+fn rs_expr_text(expr: &Expr) -> String {
+    match unwrap_rs(expr) {
+        Expr::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_else(|| "the value".into()),
+        Expr::Field(f) => {
+            let member = match &f.member {
+                Member::Named(id) => id.to_string(),
+                Member::Unnamed(i) => i.index.to_string(),
+            };
+            format!("{}.{member}", rs_expr_text(&f.base))
+        }
+        Expr::MethodCall(m) => format!("{}.{}()", rs_expr_text(&m.receiver), m.method),
+        Expr::Call(c) => format!("{}()", rs_expr_text(&c.func)),
+        Expr::Index(i) => format!("{}[...]", rs_expr_text(&i.expr)),
+        _ => "the value".into(),
+    }
+}
+
 fn span_lines(start: usize, end: usize) -> usize {
     end.saturating_sub(start)
 }
@@ -1183,11 +1501,7 @@ fn no_assert_test_findings(file: &File, file_name: &str) -> Vec<Finding> {
 fn walk_test_fns(item: &Item, out: &mut Vec<Finding>, file_name: &str) {
     match item {
         Item::Fn(f) => {
-            if has_attr(&f.attrs, "test")
-                && !has_attr(&f.attrs, "ignore")
-                && !has_attr(&f.attrs, "should_panic")
-                && !block_asserts(&f.block)
-            {
+            if is_unasserted_test(f) {
                 out.push(Finding {
                     logical_start: None,
                     seam_members: Vec::new(),
@@ -1343,7 +1657,7 @@ pub fn rs_comment_lines(source: &str) -> Vec<(usize, String)> {
                 let start = i;
                 let start_line = line;
                 i += 2;
-                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                while !at_block_comment_end(bytes, i) {
                     if bytes[i] == b'\n' {
                         line += 1;
                     }
@@ -1360,7 +1674,14 @@ pub fn rs_comment_lines(source: &str) -> Vec<(usize, String)> {
                 i += 1;
                 while i < bytes.len() {
                     match bytes[i] {
-                        b'\\' => i = (i + 2).min(bytes.len()),
+                        b'\\' => {
+                            // an escaped newline is a line continuation: it
+                            // still ends a source line
+                            if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                                line += 1;
+                            }
+                            i = (i + 2).min(bytes.len());
+                        }
                         b'\n' => {
                             line += 1;
                             i += 1;
@@ -1389,7 +1710,14 @@ pub fn rs_comment_lines(source: &str) -> Vec<(usize, String)> {
                 i += 1;
                 while i < bytes.len() {
                     match bytes[i] {
-                        b'\\' => i = (i + 2).min(bytes.len()),
+                        b'\\' => {
+                            // an escaped newline is a line continuation: it
+                            // still ends a source line
+                            if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                                line += 1;
+                            }
+                            i = (i + 2).min(bytes.len());
+                        }
                         b'\n' => {
                             line += 1;
                             i += 1;
@@ -2166,6 +2494,31 @@ fn rust_rule_battery_shape(body: &[syn::Stmt], params: &std::collections::HashSe
     Some(acc)
 }
 
+/// The expression discards its value: not a compound assignment, not control
+/// flow, and not one of the harmless statement forms.
+fn is_discarded_expression(compound_assign: bool, control: bool, harmless: bool) -> bool {
+    !compound_assign && !control && !harmless
+}
+
+/// The function is a closures candidate: nested definitions plus size.
+fn is_closures_shape(inner: u32, cc: u32, span: usize) -> bool {
+    inner >= 2 && (cc >= 15 || span >= 60)
+}
+
+/// The test carries no assertion: `#[test]` without `#[ignore]`,
+/// `#[should_panic]`, or an assert in the body.
+fn is_unasserted_test(f: &ItemFn) -> bool {
+    has_attr(&f.attrs, "test")
+        && !has_attr(&f.attrs, "ignore")
+        && !has_attr(&f.attrs, "should_panic")
+        && !block_asserts(&f.block)
+}
+
+/// The scan position is at a block-comment terminator (`*/`).
+fn at_block_comment_end(bytes: &[u8], i: usize) -> bool {
+    i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2187,6 +2540,25 @@ mod tests {
 
     fn has_kind(fs: &[Finding], k: &str) -> bool {
         fs.iter().any(|f| f.kind == k)
+    }
+
+    #[test]
+    fn unnamed_condition_joins_facts() {
+        let fs = scan(&fixture("unnamed_condition_rs.rs"));
+        let hits: Vec<&Finding> = fs.iter().filter(|f| f.kind == "unnamed-condition").collect();
+        assert_eq!(hits.len(), 1, "{fs:?}"); // `decide`; `joins` is the whole fn
+        assert!(hits[0].message.contains("about a, b, and ready"), "{}", hits[0].message);
+        // a named predicate (bare body) and a self-only condition are silent
+        let ok = scan(&fixture("unnamed_condition_rs_ok.rs"));
+        assert!(!has_kind(&ok, "unnamed-condition"), "{ok:?}");
+    }
+
+    #[test]
+    fn unnamed_classification_cases() {
+        let fs = scan(&fixture("unnamed_classification_rs.rs"));
+        let hits: Vec<&Finding> = fs.iter().filter(|f| f.kind == "unnamed-classification").collect();
+        assert_eq!(hits.len(), 1, "{fs:?}"); // `describe`; `token` is the whole fn
+        assert!(hits[0].message.contains("3 cases of op"), "{}", hits[0].message);
     }
 
     #[test]
