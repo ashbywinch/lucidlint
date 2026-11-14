@@ -6684,6 +6684,17 @@ mod tests {
     }
 
     #[test]
+    fn unnamed_condition_answer_shape_ignores_a_nested_defs_returns() {
+        // a nested def's `return 1` belongs to that def: if it counted, `outer`
+        // would look like it answers twice and its own returned condition would
+        // be reported
+        let ok = scan_src(include_str!(
+            "../../tests/fixtures/rust/unnamed_condition_joins_facts_detected__02.py"
+        ));
+        assert!(!ok.iter().any(|x| x.kind == "unnamed-condition"), "{ok:?}");
+    }
+
+    #[test]
     fn unnamed_classification_cases_detected() {
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/unnamed_classification_cases_detected__01.py"
