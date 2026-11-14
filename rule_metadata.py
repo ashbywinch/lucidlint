@@ -651,6 +651,11 @@ CATALOG = RuleCatalog([
     Rule("conditional-polymorphism", "warn", "advice", "Python",
          "An if/elif chain of ≥4 arms dispatching on the same value — Replace "
          "Conditional with Polymorphism."),
+    Rule("scattered-instance", "warn", "architecture", "Python",
+         "≥2 module-level bindings that construct a class defined in this repo — "
+         "one object holds them, and the class that uses it owns it. A single "
+         "registry or container object is exempt.",
+         display_name="scattered-instance → latent-class", display_group="latent-class"),
     Rule("special-case", "warn", "advice", "Python",
          "≥3 repeated `None`/empty checks on one name — Introduce Special "
          "Case."),
