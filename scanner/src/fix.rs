@@ -952,7 +952,7 @@ fn pipeline_no_mid_read(stmts: &[Stmt], init_idx: usize, loop_idx: usize, acc: &
         }
     }
     for (i, s) in stmts.iter().enumerate() {
-        if i == init_idx || i == loop_idx || i == stmts.len() - 1 {
+        if is_loop_edge(i, init_idx, loop_idx, stmts.len()) {
             continue;
         }
         if matches!(s, Stmt::Expr(Expr::ForLoop(_), _)) {
@@ -1253,12 +1253,17 @@ fn hoist_no_mid_read(body: &[Stmt], acc: &str, receivers: &[*const syn::ExprPath
         receivers: &'x [*const syn::ExprPath],
         found: bool,
     }
-    impl syn::visit::Visit<'_> for AccRead<'_> {
-        fn visit_expr_path(&mut self, node: &syn::ExprPath) {
-            if node.path.segments.len() == 1
+    impl AccRead<'_> {
+        fn is_accumulator_read(&self, node: &syn::ExprPath) -> bool {
+            node.path.segments.len() == 1
                 && node.path.segments[0].ident == self.acc
                 && !self.receivers.contains(&(node as *const syn::ExprPath))
-            {
+        }
+    }
+
+    impl syn::visit::Visit<'_> for AccRead<'_> {
+        fn visit_expr_path(&mut self, node: &syn::ExprPath) {
+            if self.is_accumulator_read(node) {
                 self.found = true;
             }
         }
@@ -1685,6 +1690,78 @@ pub fn fix_loop_hoist(source: &str, line: usize, name: &str) -> Result<String, S
 }
 
 #[cfg(test)]
+mod loop_tests {
+    use super::*;
+
+    fn fixture(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures")
+            .join(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing fixture {name}"))
+    }
+
+    #[test]
+    fn pipeline_plain_push_becomes_map_collect() {
+        let src = fixture("loop_pipeline_rs.rs");
+        let out = fix_loop_pipeline(&src, 3).expect("fix applies");
+        assert!(
+            out.contains("let out: Vec<_> = xs.iter().map(|x| *x).collect();"),
+            "{out}"
+        );
+        assert!(!out.contains("for x in xs"), "{out}");
+        let file: syn::File = syn::parse_str(&out).expect("fixed source parses");
+        assert_eq!(file.items.len(), 1);
+    }
+
+    #[test]
+    fn pipeline_if_filter_becomes_filter_map() {
+        let src = fixture("loop_pipeline_rs_filtered.rs");
+        let out = fix_loop_pipeline(&src, 3).expect("fix applies");
+        assert!(
+            out.contains("let out: Vec<_> = xs.iter().filter(|x| *x > 0).map(|x| *x).collect();"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn sequence_shared_accumulator_becomes_concatenation() {
+        let src = fixture("loop_sequence_rs_fix.rs");
+        let out = fix_loop_sequence(&src, 1).expect("fix applies");
+        assert!(out.contains("let out: Vec<_> = xs.iter().map(|x| *x).collect::<Vec<_>>() + xs.iter().map(|y| *y + 1).collect::<Vec<_>>();"), "{out}");
+        assert!(!out.contains("for x in xs"), "{out}");
+        let file: syn::File = syn::parse_str(&out).expect("fixed source parses");
+        assert_eq!(file.items.len(), 1);
+    }
+
+    #[test]
+    fn sequence_refuses_interleaved_statements() {
+        let src = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    let n = out.len();\n    for y in xs {\n        out.push(*y);\n    }\n    out\n}\n";
+        assert!(fix_loop_sequence(src, 1).is_err());
+    }
+
+    #[test]
+    fn pipeline_fixes_a_loop_in_a_later_function() {
+        // the review finding: the fixer resolved the FIRST fn, so a loop
+        // in a later fn rewrote through the wrong accumulator (or refused
+        // with "no for-loop at line N"). The finding line selects the
+        // enclosing fn.
+        let src = "fn first() -> u32 {\n    1\n}\n\nfn collect(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
+        let out = fix_loop_pipeline(src, 7).expect("fix applies in the later fn");
+        assert!(
+            out.contains("let out: Vec<_> = xs.iter().map(|x| *x).collect();"),
+            "{out}"
+        );
+        assert!(out.contains("fn first() -> u32"), "{out}");
+    }
+}
+
+/// The statement is one of the loop's edges: the initialiser, the loop header,
+/// or the trailing return — none of them moves into the helper.
+fn is_loop_edge(index: usize, init_idx: usize, loop_idx: usize, len: usize) -> bool {
+    index == init_idx || index == loop_idx || index + 1 == len
+}
+
+#[cfg(test)]
 mod hoist_tests {
     use super::*;
 
@@ -1753,71 +1830,5 @@ mod hoist_tests {
             "{out}"
         );
         syn::parse_str::<syn::File>(&out).expect("fixed source parses");
-    }
-}
-
-#[cfg(test)]
-mod loop_tests {
-    use super::*;
-
-    fn fixture(name: &str) -> String {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../tests/fixtures")
-            .join(name);
-        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing fixture {name}"))
-    }
-
-    #[test]
-    fn pipeline_plain_push_becomes_map_collect() {
-        let src = fixture("loop_pipeline_rs.rs");
-        let out = fix_loop_pipeline(&src, 3).expect("fix applies");
-        assert!(
-            out.contains("let out: Vec<_> = xs.iter().map(|x| *x).collect();"),
-            "{out}"
-        );
-        assert!(!out.contains("for x in xs"), "{out}");
-        let file: syn::File = syn::parse_str(&out).expect("fixed source parses");
-        assert_eq!(file.items.len(), 1);
-    }
-
-    #[test]
-    fn pipeline_if_filter_becomes_filter_map() {
-        let src = fixture("loop_pipeline_rs_filtered.rs");
-        let out = fix_loop_pipeline(&src, 3).expect("fix applies");
-        assert!(
-            out.contains("let out: Vec<_> = xs.iter().filter(|x| *x > 0).map(|x| *x).collect();"),
-            "{out}"
-        );
-    }
-
-    #[test]
-    fn sequence_shared_accumulator_becomes_concatenation() {
-        let src = fixture("loop_sequence_rs_fix.rs");
-        let out = fix_loop_sequence(&src, 1).expect("fix applies");
-        assert!(out.contains("let out: Vec<_> = xs.iter().map(|x| *x).collect::<Vec<_>>() + xs.iter().map(|y| *y + 1).collect::<Vec<_>>();"), "{out}");
-        assert!(!out.contains("for x in xs"), "{out}");
-        let file: syn::File = syn::parse_str(&out).expect("fixed source parses");
-        assert_eq!(file.items.len(), 1);
-    }
-
-    #[test]
-    fn sequence_refuses_interleaved_statements() {
-        let src = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    let n = out.len();\n    for y in xs {\n        out.push(*y);\n    }\n    out\n}\n";
-        assert!(fix_loop_sequence(src, 1).is_err());
-    }
-
-    #[test]
-    fn pipeline_fixes_a_loop_in_a_later_function() {
-        // the review finding: the fixer resolved the FIRST fn, so a loop
-        // in a later fn rewrote through the wrong accumulator (or refused
-        // with "no for-loop at line N"). The finding line selects the
-        // enclosing fn.
-        let src = "fn first() -> u32 {\n    1\n}\n\nfn collect(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
-        let out = fix_loop_pipeline(src, 7).expect("fix applies in the later fn");
-        assert!(
-            out.contains("let out: Vec<_> = xs.iter().map(|x| *x).collect();"),
-            "{out}"
-        );
-        assert!(out.contains("fn first() -> u32"), "{out}");
     }
 }

@@ -45,6 +45,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | Message precision round 2 (section I residuals) | `docs/plans/plan-message-precision-round-2.md` |
 | Message precision round 3 (section J residuals) | `docs/plans/plan-message-precision-round-3.md` |
 | Issue #42: record-shape export exemption for to_dict/to_json | `docs/plans/plan-issue-42-export-exemption.md` |
+| Issue #93: `unnamed-condition` + `unnamed-classification` (criterion, message, measurement) | `docs/plans/plan-issue-93-unnamed-condition.md` |
 | Docs walk: ask git for ignored docs, guard unreadable reads | `docs/plans/plan-docs-walk-git.md` |
 | Issue #44: middle-man exemptions (library targets, interface members, fixed defaults) | `docs/plans/plan-issue-44-middle-man-exemptions.md` |
 | Issue #57: data-clump parameter-type grouping + record-shape tuple wording | `docs/plans/plan-issue-57-param-type-clump.md` |

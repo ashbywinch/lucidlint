@@ -44,6 +44,7 @@ from dataclasses import asdict, dataclass, field
 from importlib import metadata
 from pathlib import Path
 from subprocess import SubprocessError
+from types import ModuleType
 from typing import Any, NamedTuple
 
 import rule_metadata
@@ -107,9 +108,8 @@ def _excluded_part(part: str) -> bool:
     """An env/tool directory hides vendored code — .venv-htr, .conda-tools,
     node_modules, .mypy_cache, etc. Exact names in EXCLUDED_DIRS plus the
     .venv* / venv* env-dir families (a repo's real modules never live there)."""
-    if part in EXCLUDED_DIRS:
-        return True
-    return part.startswith(".venv") or part.startswith("venv") or part.startswith(".conda")
+    env_prefixes = (".venv", "venv", ".conda")
+    return part in EXCLUDED_DIRS or part.startswith(env_prefixes)
 
 
 ACTION_KINDS = (
@@ -187,10 +187,7 @@ class _RenderCtx:
         current, _ = _baseline_file_state(self.repo / "lucidlint.json")
         if not current:
             return ""
-        return (
-            f" — {current} acknowledged in lucidlint.json — "
-            "pass --baseline lucidlint.json to activate"
-        )
+        return f" — {current} acknowledged in lucidlint.json — pass --baseline lucidlint.json to activate"
 
     def _suppression_ledger(self, fails: list[Action], warns: list[Action], acks: list[Action]) -> str | None:
         """H7: ONE additive line — the single home of the report's numbers:
@@ -212,7 +209,8 @@ class _RenderCtx:
                 f"match{'es' if n == 1 else ''} no current finding — "
                 "re-acknowledge with --update-baseline"
             )
-        if not reported and not acks and not ignored and not census and not acknote and not self.stale_count:
+        terms = (reported, acks, ignored, census, acknote, self.stale_count)
+        if not any(terms):
             return None
         total = reported + len(acks) + ignored + census
         return (
@@ -252,9 +250,7 @@ class _RenderCtx:
                     "header": self.report_header,
                     "suppressions": dict(self.suppression_census or {}),
                     "actions": [asdict(a) for a in unique],
-                    "naming_notice": _NAMING_NOTICE
-                    if any(_stamp_of(a) == "JUDGEMENT" for a in unique)
-                    else None,
+                    "naming_notice": _NAMING_NOTICE if any(_stamp_of(a) == "JUDGEMENT" for a in unique) else None,
                     "groups": _seam_groups(unique),
                 },
                 indent=2,
@@ -349,6 +345,8 @@ class _RenderCtx:
             print(f"\nwarnings (reported, never fail) — {len(warns)}:")
             # the census was printed with the fails group — once per report
             _render_actions(repo, args, warns, [], None, self.config_ignore_keys)
+
+
 @dataclass
 class Action:
     """One finding. Kind families: complexity/large-function merge per target;
@@ -376,7 +374,6 @@ class Action:
     fix_kind: str = ""  # the structured fix kind (schema 4) — the directive's
     # kind when present, else the rule's default link (Rule.fix); empty =
     # fix-less finding, never constructed into a Fix
-
 
 
 @dataclass
@@ -693,6 +690,7 @@ class RustFinding(NamedTuple):
     fix_kind: str = ""  # the structured fix kind (schema 4) — the
     # directive's kind when present, else the rule's default link
 
+
 @dataclass(frozen=True)
 class RustFixRequest:
     """The --fix payload for the Rust scan core. A record with a to_json() —
@@ -834,6 +832,7 @@ def _scanner_candidates(repo: Path, exe: str) -> list[Path]:
     # self-contained pip channel, sibling of the module like the bundle bin
     candidates.append(Path(__file__).resolve().parent / "lucidlint_bin" / "bin" / f"lucidlint{exe}")
     return candidates
+
 
 def _scanner_build_is_stale(binary: Path) -> bool:
     """True when the binary is a LOCAL cargo build (.../scanner/target/
@@ -1034,9 +1033,7 @@ class _RustScan:
                         {
                             "source": coverage.result.source,
                             "stale": coverage.stale,
-                            "covered": {
-                                rel: sorted(lines) for rel, lines in coverage.result.lines.items()
-                            },
+                            "covered": {rel: sorted(lines) for rel, lines in coverage.result.lines.items()},
                         }
                     ),
                     encoding="utf-8",
@@ -1082,9 +1079,15 @@ def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
         # is for a file outside this scan set — drop it, not a failure to surface
     except (ValueError, OSError):  # lucidlint: ignore swallow an unmappable path means the finding
         rel = ""
-    if rel and rel not in rels and (repo / rel).is_dir():
+    if _is_directory_finding(repo, rel, rels):
         return rel  # a directory-level finding (flat-folder, folder-mix)
     return rel if rel in rels else None
+
+
+def _is_directory_finding(repo: Path, rel: str, rels: set[str]) -> bool:
+    """The finding names a directory rather than a scanned file — flat-folder
+    and folder-mix report at folder level."""
+    return bool(rel) and rel not in rels and (repo / rel).is_dir()
 
 
 def _unmapped_note(values: set[str]) -> str:
@@ -1118,9 +1121,7 @@ _ALL_RULE_KINDS = frozenset(rule_metadata.CATALOG.kinds())
 # invites hiding the defect (issue #21). The `standard` catch-all is NOT a
 # suppression identity, so its findings keep the raw-signal note.
 _FAMILY_OF_VARIANT = {
-    variant: family
-    for family, variants in rule_metadata.CATALOG.families().items()
-    for variant in variants
+    variant: family for family, variants in rule_metadata.CATALOG.families().items() for variant in variants
 }
 
 # Cache for config loading
@@ -1347,6 +1348,7 @@ def _version() -> str:
         except Exception:
             return "0.0.0.dev"
 
+
 _VERSION = _version()
 
 
@@ -1493,9 +1495,7 @@ def _facts_line(a: Action) -> str | None:
     return sentence[0].upper() + sentence[1:] + "."
 
 
-def _render_file_group(
-    file: str, items: list[Action], ignore_keys: dict[str, str] | None = None
-) -> None:
+def _render_file_group(file: str, items: list[Action], ignore_keys: dict[str, str] | None = None) -> None:
     """One file's actions, priority-ordered, with notes."""
     print(f"\n{file}")
     for a in items:
@@ -1515,12 +1515,7 @@ def _render_file_group(
         # beside "create the class" invites hiding the defect. Only a
         # display identity that cannot be suppressed (standard) names the
         # raw signal.
-        marker = (
-            a.signal
-            and a.signal != a.kind
-            and a.signal not in a.kinds
-            and a.signal not in _FAMILY_OF_VARIANT
-        )
+        marker = a.signal and a.signal != a.kind and a.signal not in a.kinds and a.signal not in _FAMILY_OF_VARIANT
         # Phase 4: when a family's suppression identity and its fix are two
         # words (class-module -> split-module), the line links them — the
         # reader saw "suppress with: class-module" beside "fix: --kind
@@ -1567,6 +1562,7 @@ def _render_file_group(
             print(f"      -> {facts}")
         if a.note:
             print(f"      -> {a.note}")
+
 
 # --------------------------------------------------------------------------- #33/#34 render aids
 
@@ -1636,7 +1632,6 @@ def _seam_groups(actions: list[Action]) -> list[dict[str, Any]]:
 
     seams = [seam_of(a) for a in actions]
     parent = list(range(len(actions)))
-
 
     def find(i: int) -> int:
         while parent[i] != i:
@@ -2196,7 +2191,8 @@ class _GateRunner:
     def _lifecycle_notes(self, unique: list[Action]) -> None:
         """Facts only — low-churn scripts/tools. Delete-vs-refactor is the agent's call."""
         for a in unique:
-            if a.file.startswith(("scripts/", "tools/")) and a.churn <= 2 and a.last_modified:
+            low_churn_script = a.file.startswith(("scripts/", "tools/")) and a.churn <= 2 and bool(a.last_modified)
+            if low_churn_script:
                 a.note = (
                     a.note + f" Lifecycle: {a.churn}x churn, last touched {_iso_day(a.last_modified)} — "
                     f"low-change file under scripts/tools."
@@ -2341,12 +2337,18 @@ def _name_required_kinds() -> set[str]:
     return set(fix_engine._NAME_REQUIRED_KINDS) if fix_engine else set()
 
 
+def _name_is_invalid(name: str | None) -> bool:
+    """A --name that is not a Python identifier cannot be built into a fixer's
+    node; a missing name is fine (previews run nameless)."""
+    return name is not None and not name.isidentifier()
+
+
 def _fix_identifier_problem(kind: str, name: str | None, params: list[str] | None, where: str) -> str | None:
     """The invalid-argument guard: a non-identifier --name or --params entry
     would construct an invalid libcst node inside a fixer. Refused before
     dispatch with a message; a MISSING name is NOT refused here — previews
     run nameless by contract."""
-    if kind in _name_required_kinds() and name is not None and not name.isidentifier():
+    if kind in _name_required_kinds() and _name_is_invalid(name):
         return (
             f"fix: --name must be a valid Python identifier, got '{name}' "
             f"at {where} - replace the message's <placeholder> with the real name"
@@ -2475,9 +2477,14 @@ class _FixCommand:
             opts=fe.FixOptions(params=self._params(), name=self.args.name, callee=self.args.callee),
             col=col,
         )
-        if self.fix_kind in fe.PREVIEW_KINDS and not self.args.name and not self.args.confirm:
+        if self._previews_only(fe):
             return self._preview(req)
         return self._apply(req)
+
+    def _previews_only(self, engine: ModuleType) -> bool:
+        """A fix kind that only previews, with no name or --confirm, stops at
+        the preview — the caller never meant to write."""
+        return self.fix_kind in engine.PREVIEW_KINDS and not self.args.name and not self.args.confirm
 
     def _resolve_line(self) -> int | None:
         """R27: agents never compute line numbers — the tool owns its own
@@ -2559,8 +2566,10 @@ class _FixCommand:
                 print(f"fix: {self.fix_kind} at {self.args.file}:{req.line} needs input — {req.decline}")
                 return 0
             if self.fix_kind in _name_required_kinds() and self.args.name is None:
-                print(f"fix: {self.fix_kind} at {self.args.file}:{req.line} needs a semantic name "
-                      f"the tool cannot invent — pass --name <Name> (name it with a domain noun)")
+                print(
+                    f"fix: {self.fix_kind} at {self.args.file}:{req.line} needs a semantic name "
+                    f"the tool cannot invent — pass --name <Name> (name it with a domain noun)"
+                )
                 return 0
             return self._reattach_or_silence(req, moved)
         print(f"fix: applied {self.fix_kind} at {self.args.file}:{req.line} — {description}")
@@ -2580,8 +2589,7 @@ class _FixCommand:
         silent when nothing of this kind remains."""
         if moved:
             return 0  # already re-attached once and it still will not write
-        lines = [ln for ln in _File(self.repo, self.args.file).finding_lines(self.fix_kind)
-                 if ln != self.args.line]
+        lines = [ln for ln in _File(self.repo, self.args.file).finding_lines(self.fix_kind) if ln != self.args.line]
         if len(lines) == 1:
             print(f"fix: anchor moved — {self.fix_kind} now at {self.args.file}:{lines[0]}")
             req.line = lines[0]
@@ -2599,8 +2607,10 @@ class _FixCommand:
             req.col = max(anchors) if anchors else 0
             return self._apply(req, moved=True)
         if len(lines) > 1:
-            print(f"fix: {self.fix_kind} anchor moved — live findings at "
-                  f"{', '.join(map(str, lines))} — pass --line to pick one")
+            print(
+                f"fix: {self.fix_kind} anchor moved — live findings at "
+                f"{', '.join(map(str, lines))} — pass --line to pick one"
+            )
         return 0  # nothing of this kind remains — R28 silence
 
     def _verify_multi_file(self, req) -> None:
@@ -2625,6 +2635,7 @@ class _FixCommand:
                 f"{len(remaining)} related finding(s) in {', '.join(rels)}{'…' if len(rels) > 3 else ''}: "
                 "iterate the fix"
             )
+
 
 def main() -> int:
     args = parse_args()

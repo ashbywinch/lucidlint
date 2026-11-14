@@ -462,13 +462,27 @@ impl GraphContract {
         if let Some(n) = node_by_qn.get(target) {
             return Some(module_key(repo, &n.file_path));
         }
-        if target.contains("::") {
-            let name = base_name(target);
-            if let Some(n) = self.nodes.iter().find(|n| n.name == name) {
-                return Some(module_key(repo, &n.file_path));
-            }
+        let Some((prefix, _)) = target.split_once("::") else {
+            return None; // a bare method name places no call
+        };
+        // The exporter prefixes an unresolved target with the file it was seen
+        // in (`<file>::new`, `<file>::to_string`). A stdlib call is not a layer
+        // boundary: it resolves to its own file, which the caller's module
+        // check then ignores.
+        if Path::new(prefix).is_absolute() {
+            return Some(module_key(repo, prefix));
         }
-        None
+        // A bare name is evidence only when it names ONE node. `new` and
+        // `visit_expr` collide across the tree; picking the first match
+        // invents a layer the file does not have (every `Vec::new()` was
+        // attributed to whichever file declared a `new` first).
+        let name = base_name(target);
+        let mut found = self.nodes.iter().filter(|n| n.name == name);
+        let first = found.next()?;
+        if found.next().is_some() {
+            return None;
+        }
+        Some(module_key(repo, &first.file_path))
     }
 }
 
@@ -574,7 +588,7 @@ pub fn folder_mix_findings(repo: &Path, contract: &GraphContract) -> Vec<Finding
     let mut out = Vec::new();
     for (d, files) in dirs {
         let rel = repo_rel(repo, &d);
-        if files.len() < 5 || rel.starts_with("tests") || rel.is_empty() || rel == "." {
+        if !is_spread_target(&files, &rel) {
             continue;
         }
         let mut spread: BTreeMap<i64, Vec<String>> = BTreeMap::new();
@@ -813,6 +827,12 @@ pub fn churn_untested_findings(
         });
     }
     out
+}
+
+/// The file is a directory-level scan target with enough files to spread
+/// across folders.
+fn is_spread_target(files: &[(String, i64)], rel: &str) -> bool {
+    files.len() >= 5 && !rel.starts_with("tests") && !rel.is_empty() && rel != "."
 }
 
 #[cfg(test)]
@@ -1408,6 +1428,90 @@ mod tests {
         }
         let c = contract(nodes, vec![]);
         assert!(module_cohesion_findings(Path::new("/repo"), &c, 8).is_empty());
+    }
+
+    #[test]
+    fn layer_mix_ignores_path_prefixed_stdlib_calls() {
+        // `Vec::new()` is recorded as `<caller-file>::new`; the resolver used
+        // to take the first node named `new` — a test file — and invent a
+        // second layer for every function that allocated a collection.
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        for i in 0..4 {
+            let qn = format!("/repo/houses/mix.py::f{i}");
+            nodes.push(node(
+                "Function",
+                &format!("f{i}"),
+                &qn,
+                "/repo/houses/mix.py",
+                1,
+                5,
+                None,
+            ));
+            edges.push(edge("CALLS", &qn, "/repo/houses/mix.py::new", "/repo/houses/mix.py"));
+        }
+        for i in 0..2 {
+            let qn = format!("/repo/houses/mix.py::g{i}");
+            nodes.push(node(
+                "Function",
+                &format!("g{i}"),
+                &qn,
+                "/repo/houses/mix.py",
+                6,
+                9,
+                None,
+            ));
+            edges.push(edge(
+                "CALLS",
+                &qn,
+                &format!("/repo/houses/nodes/t{i}.py::t{i}"),
+                "/repo/houses/mix.py",
+            ));
+        }
+        // the only node named `new` lives in a test file — the trap
+        nodes.push(node(
+            "Function",
+            "new",
+            "/repo/scanner/tests/cli.rs::new",
+            "/repo/scanner/tests/cli.rs",
+            1,
+            2,
+            None,
+        ));
+        let c = contract(nodes, edges);
+        assert!(layer_mix_findings(Path::new("/repo"), &c, &rels(&["houses/mix.py"])).is_empty());
+    }
+
+    #[test]
+    fn layer_mix_ignores_ambiguous_bare_names() {
+        // `visit::visit_expr` matches a node in two subsystems — an ambiguous
+        // name says nothing about which layer the caller belongs to.
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        for i in 0..4 {
+            let qn = format!("/repo/houses/mix.py::f{i}");
+            nodes.push(node(
+                "Function",
+                &format!("f{i}"),
+                &qn,
+                "/repo/houses/mix.py",
+                1,
+                5,
+                None,
+            ));
+            edges.push(edge("CALLS", &qn, "visit::visit_expr", "/repo/houses/mix.py"));
+        }
+        for (file, qn) in [
+            (
+                "/repo/scanner/radonc/src/visitors.rs",
+                "/repo/scanner/radonc/src/visitors.rs::visit_expr",
+            ),
+            ("/repo/scanner/src/main.rs", "/repo/scanner/src/main.rs::visit_expr"),
+        ] {
+            nodes.push(node("Function", "visit_expr", qn, file, 1, 2, None));
+        }
+        let c = contract(nodes, edges);
+        assert!(layer_mix_findings(Path::new("/repo"), &c, &rels(&["houses/mix.py"])).is_empty());
     }
 
     #[test]
