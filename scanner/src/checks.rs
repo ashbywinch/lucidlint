@@ -5297,8 +5297,43 @@ pub fn conditional_polymorphism_findings(state: &mut ScanState, body: &[Stmt], s
 #[derive(Clone, Copy, Default)]
 struct ConditionScope<'a> {
     fn_name: &'a str,
-    fn_body: Option<&'a [Stmt]>,
     class: Option<&'a str>,
+    /// The enclosing function's answer shape, computed once from its body —
+    /// the walk never compares the condition against the returns to find out
+    /// whether it is one of them.
+    answer: AnswerShape,
+    /// The function's body is exactly one if/elif chain or match: that chain
+    /// is the function, so the function's name names the classification.
+    single_chain: bool,
+}
+
+/// What a function's `return` statements say about its answer.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum AnswerShape {
+    /// No returns, or every return is a literal: the function decides nothing.
+    #[default]
+    NoAnswer,
+    /// Exactly one return carries a non-literal value — that return IS the
+    /// function's answer, and the function's name names it.
+    SingleAnswer,
+}
+
+fn body_is_one_chain(body: &[Stmt]) -> bool {
+    matches!(body, [Stmt::If(_) | Stmt::Match(_)])
+}
+
+fn answer_shape(body: &[Stmt]) -> AnswerShape {
+    let mut returns: Vec<&Expr> = Vec::new();
+    collect_returns(body, &mut returns);
+    let valued = returns
+        .into_iter()
+        .filter(|v| !is_literal(unwrap_not(v)) && !matches!(unwrap_not(v), Expr::NoneLiteral(_)))
+        .count();
+    if valued == 1 {
+        AnswerShape::SingleAnswer
+    } else {
+        AnswerShape::NoAnswer
+    }
 }
 
 /// A condition is a decision the code makes. Written inline as three or more
@@ -5320,27 +5355,27 @@ fn walk_conditions(
     for s in stmts {
         match s {
             Stmt::If(i) => {
-                condition_finding(state, &i.test, source, scope, imported);
+                condition_finding(state, &i.test, source, scope, imported, Returned::Test);
                 walk_conditions(state, &i.body, source, scope, imported);
                 for cl in &i.elif_else_clauses {
                     walk_conditions(state, &cl.body, source, scope, imported);
                 }
             }
             Stmt::While(w) => {
-                condition_finding(state, &w.test, source, scope, imported);
+                condition_finding(state, &w.test, source, scope, imported, Returned::Test);
                 walk_conditions(state, &w.body, source, scope, imported);
                 walk_conditions(state, &w.orelse, source, scope, imported);
             }
             Stmt::Return(r) => {
                 if let Some(v) = &r.value {
-                    condition_finding(state, v, source, scope, imported);
+                    condition_finding(state, v, source, scope, imported, Returned::Value);
                 }
             }
-            Stmt::Assert(a) => condition_finding(state, &a.test, source, scope, imported),
+            Stmt::Assert(a) => condition_finding(state, &a.test, source, scope, imported, Returned::Test),
             Stmt::Match(m) => {
                 for c in &m.cases {
                     if let Some(g) = &c.guard {
-                        condition_finding(state, g, source, scope, imported);
+                        condition_finding(state, g, source, scope, imported, Returned::Test);
                     }
                     walk_conditions(state, &c.body, source, scope, imported);
                 }
@@ -5348,16 +5383,18 @@ fn walk_conditions(
             Stmt::FunctionDef(f) => {
                 let inner = ConditionScope {
                     fn_name: f.name.as_str(),
-                    fn_body: Some(&f.body),
                     class: scope.class,
+                    answer: answer_shape(&f.body),
+                    single_chain: body_is_one_chain(&f.body),
                 };
                 walk_conditions(state, &f.body, source, inner, imported);
             }
             Stmt::ClassDef(c) => {
                 let inner = ConditionScope {
                     fn_name: "",
-                    fn_body: None,
                     class: Some(c.name.as_str()),
+                    answer: AnswerShape::NoAnswer,
+                    single_chain: false,
                 };
                 walk_conditions(state, &c.body, source, inner, imported);
             }
@@ -5380,18 +5417,27 @@ fn walk_conditions(
     }
 }
 
+/// Where the expression sits: the value of a `return`, or a test the code
+/// branches on. The walk knows this; it never has to search the body.
+#[derive(Clone, Copy, PartialEq)]
+enum Returned {
+    Value,
+    Test,
+}
+
 fn condition_finding(
     state: &mut ScanState,
     expr: &Expr,
     source: &str,
     scope: ConditionScope<'_>,
     imported: &HashSet<String>,
+    placement: Returned,
 ) {
     let Some(operands) = bool_operands(expr) else { return };
     if operands.len() < 3 {
         return; // two facts joined is a condition, not an unnamed decision
     }
-    if scope.fn_body.is_some_and(|body| is_only_return_of(body, expr)) {
+    if placement == Returned::Value && scope.answer == AnswerShape::SingleAnswer {
         return; // the name already exists: this function IS the predicate
     }
     if is_named_decision(scope.fn_name) {
@@ -5629,27 +5675,6 @@ fn chain_root(expr: &Expr) -> Option<String> {
     }
 }
 
-/// The expression is the function's answer: it is returned, and every other
-/// return is a literal early exit. The function's name IS the decision, whatever
-/// locals it computes first. A condition used as a TEST is not its answer.
-fn is_only_return_of(body: &[Stmt], expr: &Expr) -> bool {
-    let mut returns: Vec<&Expr> = Vec::new();
-    collect_returns(body, &mut returns);
-    let mut answer = false;
-    for value in returns {
-        // identity, not a span: the walk borrows one AST and hands the same
-        // node to both sides, so "the return's value IS this expression" is
-        // the exact question. A span would be a proxy that assumes no two
-        // nodes share one.
-        if std::ptr::eq(unwrap_not(value), unwrap_not(expr)) {
-            answer = true;
-        } else if !is_literal(unwrap_not(value)) && !matches!(unwrap_not(value), Expr::NoneLiteral(_)) {
-            return false;
-        }
-    }
-    answer
-}
-
 fn collect_returns<'a>(body: &'a [Stmt], out: &mut Vec<&'a Expr>) {
     for s in body {
         match s {
@@ -5700,58 +5725,60 @@ fn collect_returns<'a>(body: &'a [Stmt], out: &mut Vec<&'a Expr>) {
 /// Inline, the cases have no name, so every reader reconstructs the kinds from
 /// the tests. The fix is the one #88 took: name the cases as one kind.
 pub fn unnamed_classification_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
-    walk_classifications(state, body, source, ConditionScope::default());
+    walk_classifications(state, body, source, ConditionScope::default(), true);
 }
 
-fn walk_classifications(state: &mut ScanState, stmts: &[Stmt], source: &str, scope: ConditionScope<'_>) {
+fn walk_classifications(state: &mut ScanState, stmts: &[Stmt], source: &str, scope: ConditionScope<'_>, top: bool) {
     for s in stmts {
         match s {
             Stmt::If(i) => {
-                classification_chain(state, i, source, scope);
-                walk_classifications(state, &i.body, source, scope);
+                classification_chain(state, i, source, scope, top);
+                walk_classifications(state, &i.body, source, scope, false);
                 for cl in &i.elif_else_clauses {
-                    walk_classifications(state, &cl.body, source, scope);
+                    walk_classifications(state, &cl.body, source, scope, false);
                 }
             }
             Stmt::Match(m) => {
-                classification_match(state, m, source, scope);
+                classification_match(state, m, source, scope, top);
                 for c in &m.cases {
-                    walk_classifications(state, &c.body, source, scope);
+                    walk_classifications(state, &c.body, source, scope, false);
                 }
             }
             Stmt::FunctionDef(f) => {
                 let inner = ConditionScope {
                     fn_name: f.name.as_str(),
-                    fn_body: Some(&f.body),
                     class: scope.class,
+                    answer: answer_shape(&f.body),
+                    single_chain: body_is_one_chain(&f.body),
                 };
-                walk_classifications(state, &f.body, source, inner);
+                walk_classifications(state, &f.body, source, inner, true);
             }
             Stmt::ClassDef(c) => {
                 let inner = ConditionScope {
                     fn_name: "",
-                    fn_body: None,
                     class: Some(c.name.as_str()),
+                    answer: AnswerShape::NoAnswer,
+                    single_chain: false,
                 };
-                walk_classifications(state, &c.body, source, inner);
+                walk_classifications(state, &c.body, source, inner, true);
             }
             Stmt::For(f) => {
-                walk_classifications(state, &f.body, source, scope);
-                walk_classifications(state, &f.orelse, source, scope);
+                walk_classifications(state, &f.body, source, scope, false);
+                walk_classifications(state, &f.orelse, source, scope, false);
             }
             Stmt::While(w) => {
-                walk_classifications(state, &w.body, source, scope);
-                walk_classifications(state, &w.orelse, source, scope);
+                walk_classifications(state, &w.body, source, scope, false);
+                walk_classifications(state, &w.orelse, source, scope, false);
             }
-            Stmt::With(w) => walk_classifications(state, &w.body, source, scope),
+            Stmt::With(w) => walk_classifications(state, &w.body, source, scope, false),
             Stmt::Try(t) => {
-                walk_classifications(state, &t.body, source, scope);
+                walk_classifications(state, &t.body, source, scope, false);
                 for h in &t.handlers {
                     let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
-                    walk_classifications(state, &eh.body, source, scope);
+                    walk_classifications(state, &eh.body, source, scope, false);
                 }
-                walk_classifications(state, &t.orelse, source, scope);
-                walk_classifications(state, &t.finalbody, source, scope);
+                walk_classifications(state, &t.orelse, source, scope, false);
+                walk_classifications(state, &t.finalbody, source, scope, false);
             }
             _ => {}
         }
@@ -5765,11 +5792,9 @@ fn classification_chain(
     head: &ruff_python_ast::StmtIf,
     source: &str,
     scope: ConditionScope<'_>,
+    top: bool,
 ) {
-    if scope
-        .fn_body
-        .is_some_and(|body| body.len() == 1 && body[0].range() == head.range())
-    {
+    if top && scope.single_chain {
         return; // the chain is the whole function: its name is the name
     }
     let mut tests: Vec<&Expr> = vec![&head.test];
@@ -5826,11 +5851,9 @@ fn classification_match(
     m: &ruff_python_ast::StmtMatch,
     source: &str,
     scope: ConditionScope<'_>,
+    top: bool,
 ) {
-    if scope
-        .fn_body
-        .is_some_and(|body| body.len() == 1 && body[0].range() == m.range())
-    {
+    if top && scope.single_chain {
         return;
     }
     if m.cases.len() < 3 || !matches!(m.subject.as_ref(), Expr::Name(_) | Expr::Attribute(_)) {

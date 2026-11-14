@@ -33,10 +33,6 @@ use syn::{
     ItemImpl, ItemUse, Lit, Member, Pat, Path, Signature, Stmt, Type, UseTree,
 };
 
-/// A source position (1-based line, 0-based column) — the start of the
-/// expression a function returns.
-type SpanStart = Option<(usize, usize)>;
-
 /// One struct: name, declaration line, named-field count, line span.
 #[derive(Clone)]
 pub struct RsStruct {
@@ -138,9 +134,10 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         is_test_file: crate::is_test_path(name),
         repo_wide,
         current_impl: None,
-        bare_body_start: None,
-        tail_value_start: None,
-        only_return_value: None,
+        bare_body: false,
+        valued_returns: 0,
+        at_tail: false,
+        body_block: false,
     };
     // the test-only rules run even inside #[cfg(test)] mods — a pre-pass over
     // the whole file, then the production walk skips test subtrees
@@ -236,15 +233,19 @@ pub(crate) struct RsState<'a> {
     /// The `impl` type whose methods are being walked — the owner the
     /// unnamed-condition message names.
     current_impl: Option<String>,
-    /// Start of the expression that is a function's entire body — a match
-    /// there is the function's own definition.
-    bare_body_start: Option<(usize, usize)>,
-    /// Start of the expression a function returns (locals allowed) — a
-    /// condition there is the function's own predicate.
-    tail_value_start: Option<(usize, usize)>,
-    /// Start of the value of the function's only `return`, when it has exactly
-    /// one — `return match …` is the function's answer too.
-    only_return_value: Option<(usize, usize)>,
+    /// The function body is exactly one expression (a `use` line does not
+    /// count): a match there is the function's own definition.
+    bare_body: bool,
+    /// How many of the function's `return` statements carry a non-literal
+    /// value — exactly one means that return is the function's answer.
+    valued_returns: usize,
+    /// The statement about to be visited is its block's tail expression. The
+    /// walk sets this, so no check has to compare spans to find out where it
+    /// is.
+    at_tail: bool,
+    /// The block about to be visited is the current function's body (not a
+    /// nested block) — where `at_tail` means something.
+    body_block: bool,
 }
 
 struct RsFnScope {
@@ -432,47 +433,24 @@ impl<'a> RsState<'a> {
         }
     }
 
-    /// Record the expression a function returns (locals allowed) and the one
-    /// that is its whole body — the unnamed-condition/classification arms read
-    /// both. Returns the previous values for the caller to restore.
-    fn track_returned_value(&mut self, block: &'a Block) -> (SpanStart, SpanStart, SpanStart) {
-        let prev_bare = self.bare_body_start;
-        let prev_tail = self.tail_value_start;
-        let prev_only_return = self.only_return_value;
-        let span_of = |e: &Expr| Some((e.span().start().line, e.span().start().column));
-        // the body is exactly one expression (a `use` line does not count):
-        // the match IS the definition
+    /// Record the function's shape — its body as one expression, and how many
+    /// returns carry a value. The checks read these facts; none of them
+    /// compares a node against a recorded span to work out where it is.
+    fn track_returned_value(&mut self, block: &'a Block) -> (bool, usize) {
+        let prev_bare = self.bare_body;
+        let prev_returns = self.valued_returns;
+        // the body is exactly one expression (a `use` line does not count)
         let body: Vec<&Stmt> = block
             .stmts
             .iter()
             .filter(|s| !matches!(s, Stmt::Item(Item::Use(_))))
             .collect();
-        self.bare_body_start = match body.as_slice() {
-            [Stmt::Expr(e, None)] => span_of(e),
-            _ => None,
-        };
-        // the fn's only returned value: a tail expression with no `return`
-        // anywhere else — the function IS the predicate
-        self.tail_value_start = match (block.stmts.last(), has_return_expr(block)) {
-            // a control-flow tail (`if c { .. } else { .. }`) is not the value:
-            // the function returns a choice, and the condition inside it is
-            // still unnamed
-            (Some(Stmt::Expr(e, None)), false)
-                if !matches!(
-                    e,
-                    Expr::If(_) | Expr::While(_) | Expr::ForLoop(_) | Expr::Loop(_) | Expr::Block(_)
-                ) =>
-            {
-                span_of(e)
-            }
-            _ => None,
-        };
-        let returns = return_values(block);
-        self.only_return_value = match returns.as_slice() {
-            [only] => span_of(only),
-            _ => None,
-        };
-        (prev_bare, prev_tail, prev_only_return)
+        self.bare_body = matches!(body.as_slice(), [Stmt::Expr(_, None)]);
+        self.valued_returns = return_values(block)
+            .into_iter()
+            .filter(|v| !matches!(v, Expr::Lit(_) | Expr::Path(_)))
+            .count();
+        (prev_bare, prev_returns)
     }
 
     /// The file is scanned repo-wide and is not test code — the skeleton
@@ -489,14 +467,16 @@ impl<'a> RsState<'a> {
 
     /// `unnamed-condition`: three or more facts joined inline as a condition,
     /// about one or more nouns, with no name for the decision.
-    fn unnamed_condition(&mut self, expr: &'a Expr) {
+    fn unnamed_condition(&mut self, expr: &'a Expr, is_tail: bool) {
         let cond = match expr {
             Expr::If(i) => &i.cond,
             Expr::While(w) => &w.cond,
             _ => return,
         };
-        if self.tail_value_start == Some((expr.span().start().line, expr.span().start().column)) {
-            return; // the function is the predicate: its name is the name
+        // a tail condition is the function's answer — except a control-flow
+        // tail, which returns a choice and leaves the condition inside unnamed
+        if is_tail {
+            return;
         }
         let operands = rs_bool_operands(cond);
         if operands.len() < 3 {
@@ -517,14 +497,18 @@ impl<'a> RsState<'a> {
         self.finding("unnamed-condition", "warn", cond.span().start().line, &fn_name, message);
     }
 
+    /// The match is the function's answer — its whole body, or its only valued
+    /// return — so the function's name already names the classification.
+    fn is_function_answer(&self, is_tail: bool, returned: bool) -> bool {
+        (is_tail && self.bare_body) || (returned && self.valued_returns == 1)
+    }
+
     /// `unnamed-classification`: a match sorting one value into constants, with
     /// no name for the kinds.
-    fn unnamed_classification(&mut self, expr: &'a Expr) {
+    fn unnamed_classification(&mut self, expr: &'a Expr, is_tail: bool) {
         let Expr::Match(m) = expr else { return };
-        let here = (expr.span().start().line, expr.span().start().column);
-        // the function's answer — its whole body, or its only `return` — is
-        // already named by the function
-        if self.bare_body_start == Some(here) || self.only_return_value == Some(here) {
+        let returned = matches!(self.expr_stack.last(), Some(Expr::Return(_)));
+        if self.is_function_answer(is_tail, returned) {
             return;
         }
         // otherwise the classification must be the whole answer of its
@@ -646,15 +630,15 @@ impl<'a> RsState<'a> {
         }
         let prev_fn = self.current_fn.take();
         self.current_fn = Some((sig.ident.to_string(), line));
-        let (prev_bare, prev_tail, prev_only_return) = self.track_returned_value(block);
+        let (prev_bare, prev_returns) = self.track_returned_value(block);
         self.fn_stack.push(RsFnScope { decisions: 0 });
+        self.body_block = true; // this block's tail is the function's answer
         self.visit_block(block); // the override: unreachable check + nested walk
                                  // the push/pop invariant is per-function; a missing scope is a walker
                                  // bug, not a crash — default to no decisions
         let scope = self.fn_stack.pop().unwrap_or(RsFnScope { decisions: 0 });
-        self.bare_body_start = prev_bare;
-        self.tail_value_start = prev_tail;
-        self.only_return_value = prev_only_return;
+        self.bare_body = prev_bare;
+        self.valued_returns = prev_returns;
         let cc = scope.decisions + 1;
         let span = span_lines(sig.span().start().line, block.span().end().line);
         if !self.in_test_code {
@@ -915,17 +899,22 @@ impl<'a> Visit<'a> for RsState<'a> {
     }
 
     fn visit_expr(&mut self, expr: &'a Expr) {
+        // the tail flag belongs to the statement, not to expressions inside it
+        let is_tail = self.at_tail && self.expr_stack.is_empty();
+        if is_tail {
+            self.at_tail = false;
+        }
         if !self.in_test_code {
             match expr {
                 Expr::Lit(l) => self.magic_check(l),
                 Expr::If(_) => {
                     self.decide(1);
-                    self.unnamed_condition(expr);
+                    self.unnamed_condition(expr, is_tail);
                 }
                 Expr::Match(m) => {
                     let arms = m.arms.iter().filter(|a| !matches!(a.pat, Pat::Wild(_))).count() as u32;
                     self.decide(arms);
-                    self.unnamed_classification(expr);
+                    self.unnamed_classification(expr, is_tail);
                 }
                 Expr::Binary(b) => {
                     if matches!(b.op, BinOp::And(_) | BinOp::Or(_)) {
@@ -934,7 +923,7 @@ impl<'a> Visit<'a> for RsState<'a> {
                 }
                 Expr::While(_) => {
                     self.decide(1);
-                    self.unnamed_condition(expr);
+                    self.unnamed_condition(expr, is_tail);
                 }
                 Expr::ForLoop(_) | Expr::Loop(_) => self.decide(1),
                 Expr::Macro(m) if is_assert_macro(&m.mac.path) => {
@@ -1025,7 +1014,17 @@ impl<'a> Visit<'a> for RsState<'a> {
                 }
             }
         }
-        visit::visit_block(self, block);
+        let is_body = self.body_block;
+        self.body_block = false;
+        let last = block.stmts.len().saturating_sub(1);
+        for (index, stmt) in block.stmts.iter().enumerate() {
+            let prev = self.at_tail;
+            // only the FUNCTION body's last expression is its answer: a nested
+            // block's tail is just where that block ends
+            self.at_tail = is_body && index == last && matches!(stmt, Stmt::Expr(_, None));
+            self.visit_stmt(stmt);
+            self.at_tail = prev;
+        }
     }
 }
 
@@ -1295,22 +1294,6 @@ fn return_values(block: &Block) -> Vec<&Expr> {
     let mut probe = Probe { values: Vec::new() };
     probe.visit_block(block);
     probe.values
-}
-
-/// Does the block contain a `return` expression anywhere (closures excluded)?
-fn has_return_expr(block: &Block) -> bool {
-    struct Probe {
-        found: bool,
-    }
-    impl<'ast> Visit<'ast> for Probe {
-        fn visit_expr_return(&mut self, _: &'ast syn::ExprReturn) {
-            self.found = true;
-        }
-        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
-    }
-    let mut probe = Probe { found: false };
-    probe.visit_block(block);
-    probe.found
 }
 
 /// The operands of a boolean condition, flattening nested `&&`/`||` through
