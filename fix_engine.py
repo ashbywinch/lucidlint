@@ -258,7 +258,7 @@ class _FixRequest:
             *target.params.kwonly_params,
         ]
         total = len(all_params)
-        if total and all_params[0].name is not None and all_params[0].name.value in ("self", "cls"):
+        if _is_receiver_param(all_params):
             total -= 1
         if total <= 5:
             return None  # not the long-param-list shape (threshold is > 5)
@@ -984,7 +984,7 @@ class _FixRequest:
         for i, stmt in enumerate(stmts):
             reads, bound, has_self = _stmt_analysis(stmt)
             external = reads - derived
-            if not has_self and not external and bound:
+            if _derives_its_own_names(bound, external, has_self):
                 derived |= bound
                 for n in bound:
                     if n not in derived_order:
@@ -1097,7 +1097,7 @@ class _FixRequest:
         seen: set[str] = set()
         for i, el in enumerate(elements):
             base = _tuple_element_name(el)
-            if base in seen or base == "value" and any(e != el for e in elements):
+            if _field_name_taken(base, seen, elements, el):
                 base = f"field_{i}"
             seen.add(base)
             field_names.append(base)
@@ -1525,8 +1525,9 @@ class _RecordToClass(cst.CSTTransformer):
         if not self._is_record_base(updated_node.iter.func.value):
             return updated_node
         t = updated_node.target
-        if not isinstance(t, cst.Tuple) or len(t.elements) != 2 or not isinstance(t.elements[1].value, cst.Tuple):
+        if not _is_field_pair_target(t):
             return updated_node
+        assert isinstance(t, cst.Tuple) and isinstance(t.elements[1].value, cst.Tuple)
         outer = t.elements[0].value
         inner = t.elements[1].value
         if len(inner.elements) != len(self.field_names):
@@ -1706,12 +1707,22 @@ class _DictToClass(cst.CSTTransformer):
         self.key_map: dict[str, str] = key_map
         self.bind_names: frozenset[str] = bind_names
 
+    def _at_finding_position(self, pos) -> bool:
+        """The node is the literal the finding cites. col==0 keeps the legacy
+        line-only contract; a transported col pins the exact literal among
+        same-line twins."""
+        if pos.start.line != self.line:
+            return False
+        return self.col == 0 or pos.start.column + 1 == self.col
+
+    def _reads_one_bound_name(self, value: cst.BaseExpression, slices) -> bool:
+        """The subscript indexes one name bound by the loop target."""
+        return isinstance(value, cst.Name) and value.value in self.bind_names and len(slices) == 1
+
     @override
     def leave_Dict(self, original_node, updated_node):
         pos = _as_range(self.get_metadata(PositionProvider, original_node))
-        if pos.start.line != self.line or (self.col > 0 and pos.start.column + 1 != self.col):
-            # col==0 keeps the legacy line-only contract; a transported col
-            # pins the exact literal among same-line twins
+        if not self._at_finding_position(pos):
             return updated_node
         keywords = []
         for el in updated_node.elements:
@@ -1735,11 +1746,7 @@ class _DictToClass(cst.CSTTransformer):
     @override
     def leave_Subscript(self, original_node, updated_node):
         slices = updated_node.slice
-        if (
-            isinstance(updated_node.value, cst.Name)
-            and updated_node.value.value in self.bind_names
-            and len(slices) == 1
-        ):
+        if self._reads_one_bound_name(updated_node.value, slices):
             idx = slices[0].slice
             if not isinstance(idx, cst.Index) or not isinstance(idx.value, cst.SimpleString):
                 return updated_node
@@ -1798,7 +1805,8 @@ def _collaborator_aliases(method: cst.FunctionDef) -> list[_Collaborator]:
         if not isinstance(target, cst.Name):
             continue
         value = assign.value
-        if isinstance(value, cst.Attribute) and isinstance(value.value, cst.Name) and value.value.value == "self":
+        if _is_self_attribute(value):
+            assert isinstance(value, cst.Attribute)
             out.append(_Collaborator(target.value, value.attr.value))
     return out
 
@@ -1816,6 +1824,126 @@ def _alias_field_reads(method: cst.FunctionDef, alias: str) -> int:
 
     method.visit(_V())
     return count
+
+
+def _is_self_attribute(value: cst.BaseExpression) -> bool:
+    """`self.<attr>` — an attribute read on the receiver."""
+    return isinstance(value, cst.Attribute) and isinstance(value.value, cst.Name) and value.value.value == "self"
+
+
+def _annotates_self_attr(assign: cst.AnnAssign, target: cst.BaseExpression, attr: str) -> bool:
+    """The annotated assignment is `self.<attr>: SomeType = ...`."""
+    return (
+        isinstance(target, cst.Attribute)
+        and isinstance(target.value, cst.Name)
+        and target.value.value == "self"
+        and target.attr.value == attr
+        and isinstance(assign.annotation.annotation, cst.Name)
+    )
+
+
+def _arg_stays_positional(arg: cst.Arg, index: int, positional: list[int], first_kw: int) -> bool:
+    """The argument is not one of the trailing positional targets the rewrite
+    moves: a keyword, outside the target set, or before the first keyword."""
+    return arg.keyword is not None or index not in positional or index < first_kw
+
+
+def _is_list_extend(aug: cst.AugAssign) -> bool:
+    """The `acc += [x]` shape: a name extended by a list or tuple literal."""
+    return (
+        isinstance(aug.target, cst.Name)
+        and isinstance(aug.operator, cst.AddAssign)
+        and isinstance(aug.value, (cst.List, cst.Tuple))
+    )
+
+
+def _is_empty_set_call(value: cst.BaseExpression) -> bool:
+    """`set()` with no arguments — the empty-set literal's fix target."""
+    return (
+        isinstance(value, cst.Call)
+        and isinstance(value.func, cst.Name)
+        and value.func.value == "set"
+        and not value.args
+    )
+
+
+def _reads_accumulator_mid_build(node: cst.BaseExpression, acc: str, receivers: set[int]) -> bool:
+    """The body reads the accumulator while still building it — a comprehension
+    has no partial state to read."""
+    return isinstance(node, cst.Name) and node.value == acc and id(node) not in receivers
+
+
+def _writes_other_name(node: cst.BaseExpression, bound: set[str], acc: str) -> bool:
+    """The body writes a name other than the accumulator — the hoist rewrite
+    moves a single-accumulator loop only."""
+    return isinstance(node, cst.Name) and node.value not in bound and node.value != acc
+
+
+def _is_rebound_read(ctx: str, same_container: bool, name: str, re_bound: set[str]) -> bool:
+    """A read of a name the loop re-binds each pass — not a dependency on the
+    code after the loop."""
+    return ctx == "read" and same_container and name in re_bound
+
+
+def _is_docstring_only_body(class_body: list) -> bool:
+    """The class body is a single docstring — no members to carry a record."""
+    return (
+        bool(class_body)
+        and isinstance(class_body[0], cst.SimpleStatementLine)
+        and len(class_body[0].body) == 1
+        and isinstance(class_body[0].body[0], cst.Expr)
+        and isinstance(class_body[0].body[0].value, cst.SimpleString)
+    )
+
+
+def _is_husk_instantiation(stmt: cst.BaseSmallStatement, husk: str) -> bool:
+    """`x = Husk()` with no arguments — one instance the static-husk rewrite
+    carries onto its members."""
+    return (
+        isinstance(stmt, cst.Assign)
+        and len(stmt.targets) == 1
+        and isinstance(stmt.targets[0].target, cst.Name)
+        and isinstance(stmt.value, cst.Call)
+        and isinstance(stmt.value.func, cst.Name)
+        and stmt.value.func.value == husk
+        and not stmt.value.args
+    )
+
+
+def _is_receiver_param(params: list[cst.Param]) -> bool:
+    """The first parameter is the receiver (`self`/`cls`) — it is not part of
+    the list a parameter record bundles."""
+    first = params[0].name if params else None
+    return first is not None and first.value in ("self", "cls")
+
+
+def _derives_its_own_names(bound: set[str], external: set[str], has_self: bool) -> bool:
+    """The statement binds names it derives itself: it reads nothing from the
+    enclosing scope and does not touch the receiver, so it can move whole."""
+    return bool(bound) and not has_self and not external
+
+
+def _field_name_taken(
+    base: str,
+    seen: set[str],
+    elements: list[cst.BaseExpression],
+    element: cst.BaseExpression,
+) -> bool:
+    """The field name is already used, or it is the wrapper's own `value` while
+    the tuple elements differ from each other (one field cannot hold them)."""
+    if base in seen:
+        return True
+    return base == "value" and any(other != element for other in elements)
+
+
+def _is_field_pair_target(target: cst.BaseExpression) -> bool:
+    """The loop target destructures a key and a tuple of fields:
+    `for k, (a, b) in ...`."""
+    return (
+        isinstance(target, cst.Tuple)
+        and len(target.elements) == 2
+        and isinstance(target.elements[1].value, cst.Tuple)
+    )
 
 
 def _stmt_analysis(stmt: cst.BaseStatement | cst.BaseSmallStatement) -> _StmtReads:
@@ -1876,13 +2004,8 @@ def _find_envied_class(owner: cst.ClassDef, attr: str) -> str | None:
             if not isinstance(assign, cst.AnnAssign) or assign.target is None:
                 continue
             target = assign.target
-            if (
-                isinstance(target, cst.Attribute)
-                and isinstance(target.value, cst.Name)
-                and target.value.value == "self"
-                and target.attr.value == attr
-                and isinstance(assign.annotation.annotation, cst.Name)
-            ):
+            if _annotates_self_attr(assign, target, attr):
+                assert isinstance(assign.annotation.annotation, cst.Name)
                 return assign.annotation.annotation.value
     return None
 
@@ -2026,7 +2149,7 @@ class _KeywordArgs(cst.CSTTransformer):
             return updated_node  # out of params past the first keyword
         new_args = []
         for i, arg in enumerate(updated_node.args):
-            if arg.keyword is not None or i not in positional or i < first_kw:
+            if _arg_stays_positional(arg, i, positional, first_kw):
                 new_args.append(arg)
                 continue
             self.applied = True
@@ -2082,12 +2205,9 @@ def _augassign_mutation_plan(node: cst.AugAssign) -> _LoopPipelinePlan | None:
     """`name += [a, b]` (list/tuple literal concatenation): one element is
     a direct element, several flatten through the literal."""
     aug = node
-    if (
-        not isinstance(aug.target, cst.Name)
-        or not isinstance(aug.operator, cst.AddAssign)
-        or not isinstance(aug.value, (cst.List, cst.Tuple))
-    ):
+    if not _is_list_extend(aug):
         return None
+    assert isinstance(aug.target, cst.Name) and isinstance(aug.value, (cst.List, cst.Tuple))
     elts = aug.value.elements
     if len(elts) == 1:
         return _LoopPipelinePlan(
@@ -2346,10 +2466,7 @@ class _LoopsIntoComprehensions(cst.CSTTransformer):
         if collection == "dict":
             return isinstance(value, cst.Dict) and not value.elements
         return (
-            isinstance(value, cst.Call)
-            and isinstance(value.func, cst.Name)
-            and value.func.value == "set"
-            and not value.args
+            _is_empty_set_call(value)
         )
 
 
@@ -2640,7 +2757,7 @@ class _LoopHoistExtractor(cst.CSTTransformer):
             self.decline = "no outer collection mutation found in the loop body"
             return None
         for n in nodes:
-            if isinstance(n, cst.Name) and n.value == acc and id(n) not in receivers:
+            if _reads_accumulator_mid_build(n, acc, receivers):
                 self.decline = (
                     f"the body READS `{acc}` mid-build — a comprehension has no partial "
                     "state to read; refactor by hand"
@@ -2658,7 +2775,7 @@ class _LoopHoistExtractor(cst.CSTTransformer):
                     continue
                 for t in target_list:
                     for sub in _iter_nodes(t):
-                        if isinstance(sub, cst.Name) and sub.value not in bound and sub.value != acc:
+                        if _writes_other_name(sub, bound, acc):
                             self.decline = (
                                 f"the body also writes `{sub.value}` — the hoist rewrite "
                                 "only moves a single-accumulator loop"
@@ -2873,13 +2990,17 @@ class _InsertExtractedFn(cst.CSTTransformer):
         self.new_def: cst.FunctionDef = new_def
         self.done: bool = False
 
+    def _is_target_fn(self, stmt: cst.BaseStatement) -> bool:
+        """The source function the extracted def is inserted after."""
+        return isinstance(stmt, cst.FunctionDef) and stmt.name.value == self.fn_name
+
     def _maybe_insert(self, body: list, blank_lines: int) -> list:
         if self.done:
             return body
         out = []
         for stmt in body:
             out.append(stmt)
-            if not self.done and isinstance(stmt, cst.FunctionDef) and stmt.name.value == self.fn_name:
+            if self._is_target_fn(stmt):
                 out.append(self.new_def.with_changes(leading_lines=[cst.EmptyLine()] * blank_lines))
                 self.done = True
         return out
@@ -3024,7 +3145,7 @@ class _FnBodyState:
             same_container = self.flat[k][1] == container
             for dsid in self._subtree_sids(sid):
                 for name, ctx in self.first_use[dsid].items():
-                    if ctx == "read" and same_container and name in re_bound:
+                    if _is_rebound_read(ctx, same_container, name, re_bound):
                         continue  # the loop re-binds it each pass — no dependency
                     after.add(name)
         return bool(writes_all & after)
@@ -3321,13 +3442,19 @@ class _CollectStores(cst.CSTVisitor):
     def leave_Param(self, original_node) -> None:
         self._in_param = False
 
+    def _is_body_store(self, ctx) -> bool:
+        """A name stored by the function body — not a parameter (the signature)
+        and not outside any function."""
+        return ctx == cst.metadata.ExpressionContext.STORE and self._current is not None and not self._in_param
+
     @override
     def visit_Name(self, node) -> None:
         try:
             ctx = self.get_metadata(ExpressionContextProvider, node)
         except KeyError:
             return  # attribute names (obj.state) are not refs
-        if ctx == cst.metadata.ExpressionContext.STORE and self._current is not None and not self._in_param:
+        if self._is_body_store(ctx):
+            assert self._current is not None
             self.per_fn[self._current].add(node.value)
 
 
@@ -3541,14 +3668,18 @@ def _find_fn_at(wrapper, line: int, name: str | None = None) -> cst.FunctionDef 
     class _Find(cst.CSTVisitor):
         METADATA_DEPENDENCIES = (PositionProvider,)
 
+        def _is_target(self, node, found, line: int, name: str | None) -> bool:
+            """The first def at the finding's line (optionally by name)."""
+            if found is not None:
+                return False
+            if _as_range(self.get_metadata(PositionProvider, node)).start.line != line:
+                return False
+            return name is None or node.name.value == name
+
         @override
         def visit_FunctionDef(self, node) -> None:
             nonlocal found
-            if (
-                found is None
-                and _as_range(self.get_metadata(PositionProvider, node)).start.line == line
-                and (name is None or node.name.value == name)
-            ):
+            if self._is_target(node, found, line, name):
                 found = node
 
     wrapper.visit(_Find())
@@ -3666,13 +3797,7 @@ class _InsertClassConstant(cst.CSTTransformer):
         self.done = True
         class_body = list(updated_node.body.body)
         insert_at = 0
-        if (
-            class_body
-            and isinstance(class_body[0], cst.SimpleStatementLine)
-            and len(class_body[0].body) == 1
-            and isinstance(class_body[0].body[0], cst.Expr)
-            and isinstance(class_body[0].body[0].value, cst.SimpleString)
-        ):
+        if _is_docstring_only_body(class_body):
             insert_at = 1
         class_body.insert(insert_at, self.assignment)
         return updated_node.with_changes(body=updated_node.body.with_changes(body=class_body))
@@ -3913,7 +4038,7 @@ class _FindModuleDef(cst.CSTVisitor):
     @override
     def visit_FunctionDef(self, node) -> None:
         pos = _as_range(self.get_metadata(PositionProvider, node))
-        if self.depth == 0 and self.found is None and pos.start.line == self.line:
+        if self._is_target_at_top(pos):
             self.found, self.name = node, node.name.value
         self.depth += 1
 
@@ -3921,10 +4046,14 @@ class _FindModuleDef(cst.CSTVisitor):
     def leave_FunctionDef(self, original_node) -> None:
         self.depth -= 1
 
+    def _is_target_at_top(self, pos) -> bool:
+        """The first top-level definition at the finding's line."""
+        return self.depth == 0 and self.found is None and pos.start.line == self.line
+
     @override
     def visit_ClassDef(self, node) -> None:
         pos = _as_range(self.get_metadata(PositionProvider, node))
-        if self.depth == 0 and self.found is None and pos.start.line == self.line:
+        if self._is_target_at_top(pos):
             self.found, self.name = node, node.name.value
         self.depth += 1
 
@@ -4059,15 +4188,8 @@ def _rewire_husk_sites(module: cst.Module, husk: str, method_fns: dict[str, str]
         @override
         def visit_SimpleStatementLine(self, node):
             for stmt in node.body:
-                if (
-                    isinstance(stmt, cst.Assign)
-                    and len(stmt.targets) == 1
-                    and isinstance(stmt.targets[0].target, cst.Name)
-                    and isinstance(stmt.value, cst.Call)
-                    and isinstance(stmt.value.func, cst.Name)
-                    and stmt.value.func.value == husk
-                    and not stmt.value.args
-                ):
+                if _is_husk_instantiation(stmt, husk):
+                    assert isinstance(stmt, cst.Assign) and isinstance(stmt.targets[0].target, cst.Name)
                     self.instances.add(stmt.targets[0].target.value)
                     self.statements.append(node)
             return True
@@ -4087,19 +4209,12 @@ def _rewire_husk_sites(module: cst.Module, husk: str, method_fns: dict[str, str]
                 # Husk().m(<args>) -> Fm(<args>)
                 inner = func.value
                 if (
-                    isinstance(inner.func, cst.Name)
-                    and inner.func.value == husk
-                    and not inner.args
-                    and func.attr.value in method_fns
+                    _is_husk_method_call(inner, func, husk, method_fns)
                 ):
                     return updated_node.with_changes(func=cst.Name(method_fns[func.attr.value]))
             # h.m(<args>) -> Fm(<args>) for a proven instance variable
-            if (
-                isinstance(func, cst.Attribute)
-                and isinstance(func.value, cst.Name)
-                and func.value.value in instances
-                and func.attr.value in method_fns
-            ):
+            if _is_husk_attr_call(func, instances, method_fns):
+                assert isinstance(func, cst.Attribute)
                 return updated_node.with_changes(func=cst.Name(method_fns[func.attr.value]))
             return updated_node
 
@@ -4113,6 +4228,11 @@ def _rewire_husk_sites(module: cst.Module, husk: str, method_fns: dict[str, str]
             self.names: list[str] = []
             self.in_husk: int = 0
 
+        def _is_husk_name(self, node) -> bool:
+            """A reference to the husk class or one of its instances, outside
+            the husk's own subtree."""
+            return self.in_husk == 0 and (node.value == husk or node.value in instances)
+
         @override
         def visit_ClassDef(self, node):
             if node.name.value == husk:
@@ -4125,7 +4245,7 @@ def _rewire_husk_sites(module: cst.Module, husk: str, method_fns: dict[str, str]
 
         @override
         def visit_Name(self, node):
-            if self.in_husk == 0 and (node.value == husk or node.value in instances):
+            if self._is_husk_name(node):
                 self.names.append(node.value)
 
     # drop the `h = Husk()` assignments: identity removal needs nodes OF the
@@ -4221,9 +4341,7 @@ def _origin_after_move(module: cst.Module, move: set[str], opts, rel: str) -> li
     insert_at = 0
     for i, s in enumerate(remaining):
         if (
-            isinstance(s, cst.SimpleStatementLine)
-            and len(s.body) == 1
-            and isinstance(s.body[0], (cst.Import, cst.ImportFrom))
+            _is_import_line(s)
         ):
             insert_at = i + 1
     remaining.insert(insert_at, reexport)
@@ -4320,8 +4438,9 @@ def _chain_head(wrapper: cst.MetadataWrapper, line: int) -> _ChainHead | None:
     class_name, class_node, method = probe.owner
     params = [p.name.value for p in method.params.params if p.name.value not in ("self", "cls")]
     callee, args = _pure_forward_of(method)
-    if callee is None or args != params or not callee.is_name:
+    if _breaks_forwarding_chain(callee, args, params):
         return None
+    assert callee is not None
     return _ChainHead(class_name, class_node, method, params, callee)
 
 
@@ -4468,9 +4587,7 @@ def _class_has_identity(cls: cst.ClassDef) -> bool:
             nonlocal writes_self
             for t in node.targets:
                 if (
-                    isinstance(t.target, cst.Attribute)
-                    and isinstance(t.target.value, cst.Name)
-                    and t.target.value.value == "self"
+                    _is_self_attribute(t.target)
                 ):
                     writes_self = True
 
@@ -4478,9 +4595,7 @@ def _class_has_identity(cls: cst.ClassDef) -> bool:
         def visit_AnnAssign(self, node):
             nonlocal writes_self
             if (
-                isinstance(node.target, cst.Attribute)
-                and isinstance(node.target.value, cst.Name)
-                and node.target.value.value == "self"
+                _is_self_attribute(node.target)
             ):
                 writes_self = True
 
@@ -4691,9 +4806,8 @@ def _module_constants(top: Sequence) -> list[tuple[str, cst.SimpleStatementLine]
         if not isinstance(stmt, cst.SimpleStatementLine) or len(stmt.body) != 1:
             continue
         inner = stmt.body[0]
-        if isinstance(inner, cst.Assign) and len(inner.targets) == 1 and isinstance(
-            inner.targets[0].target, cst.Name
-        ):
+        if _is_single_name_assign(inner):
+            assert isinstance(inner, cst.Assign) and isinstance(inner.targets[0].target, cst.Name)
             out.append((inner.targets[0].target.value, stmt))
         elif isinstance(inner, cst.AnnAssign) and inner.value is not None and isinstance(
             inner.target, cst.Name
@@ -4732,9 +4846,7 @@ def _class_body_binds(cls: cst.ClassDef, name: str) -> bool:
                     name in _hoist_target_names(t.target) for t in inner.targets
                 ):
                     return True
-                if isinstance(inner, cst.AnnAssign) and inner.target and name in _hoist_target_names(
-                    inner.target
-                ):
+                if _binds_hoisted_name(inner, name):
                     return True
                 if isinstance(inner, (cst.Import, cst.ImportFrom)):
                     bound: set[str] = set()
@@ -5011,6 +5123,7 @@ class _ModuleSplit:
     plan the constant moves, cluster, name the layout, refuse the unsafe
     shapes, build the sources — so the phases read in order."""
 
+
     def __init__(self, repo: Path, origin: _SplitOrigin, module: cst.Module, subjects: list[cst.ClassDef]) -> None:
         self.repo = repo
         self.origin = origin
@@ -5087,9 +5200,7 @@ class _ModuleSplit:
         for i, first in enumerate(self.subjects):
             for second in self.subjects[i + 1 :]:
                 if (
-                    second.name.value in self.free_of[id(first)]
-                    or first.name.value in self.free_of[id(second)]
-                    or self.attrs_of[id(first)] & self.attrs_of[id(second)]
+                    _functions_collide(first, second, self.free_of, self.attrs_of)
                 ):
                     parent[_union_find(parent, id(first))] = _union_find(parent, id(second))
         class_index = {id(stmt): i for i, stmt in enumerate(self.module.body)}
@@ -5366,7 +5477,7 @@ class _ModuleSplit:
                     [],
                     f"the computed split for '{target}' does not parse — split by hand",
                 )
-            if target != rel and target not in rewritten and (self.repo / target).exists():
+            if _split_target_exists(self.repo, target, rel, rewritten):
                 return _SplitOutcome(
                     None,
                     [],
@@ -5726,6 +5837,12 @@ class _ConstImportScan(cst.CSTVisitor):
         self.name = name
         self.hit = False
 
+    def _refers_to_origin(self, parts: list[str]) -> bool:
+        """The import path is the origin module itself, or an alias of it."""
+        if parts == self.origin_path:
+            return True
+        return len(parts) == 1 and parts[0] in self.alias_map and self.alias_map[parts[0]] == self.origin_path
+
     @override
     def visit_ImportFrom(self, node) -> None:
         if not _import_refers_to_origin(node, self.importer_dir, self.origin_path):
@@ -5743,11 +5860,7 @@ class _ConstImportScan(cst.CSTVisitor):
         parts = _resolve_dotted(node.value)
         if parts is None:
             return
-        if parts == self.origin_path or (
-            len(parts) == 1
-            and parts[0] in self.alias_map
-            and self.alias_map[parts[0]] == self.origin_path
-        ):
+        if self._refers_to_origin(parts):
             self.hit = True
 
 
@@ -5768,9 +5881,7 @@ def _module_star_imported(repo: Path, rel: str, module: cst.Module) -> bool:
                 continue
             for inner in stmt.body:
                 if (
-                    isinstance(inner, cst.ImportFrom)
-                    and isinstance(inner.names, cst.ImportStar)
-                    and _import_refers_to_origin(inner, importer_dir, origin_path)
+                    _is_star_import_from_origin(inner, importer_dir, origin_path)
                 ):
                     return True
     return False
@@ -6140,9 +6251,7 @@ def _dispatch_chain_shape(fn: cst.FunctionDef, body: list) -> _DispatchShape | N
         return None  # >= 3 arms make a registry worth it
     tail = body[first_if + len(chain) :]
     if (
-        len(tail) != 1
-        or not isinstance(tail[0], cst.SimpleStatementLine)
-        or not isinstance(tail[0].body[0], cst.Return)
+        not _is_single_return_tail(tail)
     ):
         return None  # v1: a single trailing `return <default>` is the no-match path
     return preamble, chain, selector or "", tail[0].body[0]
@@ -6408,19 +6517,11 @@ def _acc_init(body: list) -> _AccInit | None:
         if not isinstance(stmt, cst.SimpleStatementLine) or len(stmt.body) != 1:
             continue
         a = stmt.body[0]
-        if (
-            isinstance(a, cst.Assign)
-            and isinstance(a.value, cst.List)
-            and len(a.value.elements) == 0
-            and isinstance(a.targets[0].target, cst.Name)
-        ):
+        if _is_empty_list_assign(a):
+            assert isinstance(a, cst.Assign) and isinstance(a.targets[0].target, cst.Name)
             return a.targets[0].target.value, i
-        if (
-            isinstance(a, cst.AnnAssign)
-            and isinstance(a.value, cst.List)
-            and len(a.value.elements) == 0
-            and isinstance(a.target, cst.Name)
-        ):
+        if _is_empty_list_annassign(a):
+            assert isinstance(a, cst.AnnAssign) and isinstance(a.target, cst.Name)
             return a.target.value, i
     return None
 
@@ -6438,10 +6539,7 @@ def _append_value(branch, acc: str):
         return None
     call = app_stmt.value
     if (
-        not isinstance(call.func, cst.Attribute)
-        or call.func.attr.value != "append"
-        or not isinstance(call.func.value, cst.Name)
-        or call.func.value.value != acc
+        not _is_accumulator_append(call, acc)
         or len(call.args) != 1
     ):
         return None
@@ -6580,9 +6678,8 @@ class _FindWideTuples(cst.CSTVisitor):
         if arity is None or arity < 3:
             return
         elements = None
-        if isinstance(node.value, cst.Tuple) and len(node.value.elements) == arity and all(
-            isinstance(element, cst.Element) for element in node.value.elements
-        ):
+        if _is_arity_tuple(node.value, arity):
+            assert isinstance(node.value, cst.Tuple)
             elements = tuple(element.value for element in node.value.elements)
         self.sites.append(
             _WideTupleSite("assign", node.target.value, arity, node.annotation.annotation, elements)
@@ -6611,10 +6708,9 @@ class _FindWideTuples(cst.CSTVisitor):
 def _fixed_tuple_arity(node: cst.BaseExpression | None) -> int | None:
     """The arity of a fixed-arity `tuple[...]`/`Tuple[...]` annotation; None
     for anything else (including the variadic `tuple[int, ...]`)."""
-    if not isinstance(node, cst.Subscript) or not (
-        isinstance(node.value, cst.Name) and node.value.value in ("tuple", "Tuple")
-    ):
+    if not _is_tuple_subscript(node):
         return None
+    assert isinstance(node, cst.Subscript)
     elements = node.slice if isinstance(node.slice, tuple) else (node.slice,)
     for element in elements:
         if not isinstance(element, cst.SubscriptElement):
@@ -6638,7 +6734,7 @@ def _record_field_names(elements: tuple[cst.BaseExpression, ...] | None, arity: 
             name = element.value
         elif isinstance(element, cst.Attribute):
             name = element.attr.value
-        if not name.isidentifier() or keyword.iskeyword(name) or name in names:
+        if _field_name_taken_by_python(name, names):
             name = f"f{i}"
         names.append(name)
     return names
@@ -6844,7 +6940,8 @@ def _annotation_key(
     whitespace, resolved through module aliases. `""` is unannotated."""
     node = annotation
     seen: set[str] = set()
-    while isinstance(node, cst.Name) and node.value in aliases and node.value not in seen:
+    while _is_unresolved_alias(node, aliases, seen):
+        assert isinstance(node, cst.Name)
         seen.add(node.value)
         node = aliases[node.value]
     if node is None:
@@ -6926,6 +7023,19 @@ class _DataClumpToRecord(cst.CSTTransformer):
         self._fn_stack: list[str | None] = []
         self._shadow_stack: list[set[str]] = []
 
+    def _is_forwarded_pair(self, a_val, b_val) -> bool:
+        """Both arguments are the clump's two fields, read from the parameter
+        the caller already holds — the pair is forwarded, not rebuilt."""
+        return (
+            isinstance(a_val, cst.Attribute)
+            and isinstance(b_val, cst.Attribute)
+            and isinstance(a_val.value, cst.Name)
+            and isinstance(b_val.value, cst.Name)
+            and a_val.value.value == self.param_name
+            and b_val.value.value == self.param_name
+            and (a_val.attr.value, b_val.attr.value) == self.pair
+        )
+
     def _own_params(self, node: cst.FunctionDef) -> set[str]:
         return {
             p.name.value
@@ -7002,15 +7112,7 @@ class _DataClumpToRecord(cst.CSTTransformer):
             )
             return updated_node
         a_val, b_val = a_arg.value, b_arg.value
-        if (
-            isinstance(a_val, cst.Attribute)
-            and isinstance(b_val, cst.Attribute)
-            and isinstance(a_val.value, cst.Name)
-            and isinstance(b_val.value, cst.Name)
-            and a_val.value.value == self.param_name
-            and b_val.value.value == self.param_name
-            and (a_val.attr.value, b_val.attr.value) == self.pair
-        ):
+        if self._is_forwarded_pair(a_val, b_val):
             # the caller already holds the instance (a forwarded pair) — pass
             # it on instead of rebuilding it from its own fields
             replacement: cst.BaseExpression = cst.Name(self.param_name)
@@ -7053,7 +7155,7 @@ def _data_clump_fix(req: _FixRequest) -> str | None:
     pair_a, pair_b = clump.pair
     index: dict[str, tuple[int, int]] = {}
     for fn in clump.fns:
-        if fn.params.posonly_params or isinstance(fn.params.star_arg, cst.Param) or fn.params.star_kwarg:
+        if _has_positional_only_or_variadic(fn.params):
             req.decline = (
                 f"'{fn.name.value}' has positional-only or variadic parameters — the pair "
                 "cannot be threaded mechanically; do it by hand"
@@ -7169,7 +7271,7 @@ def _init_plan(init: cst.FunctionDef | None) -> _InitPlan | None:
     if init is None:
         return [], None, []
     params = init.params
-    if params.posonly_params or params.kwonly_params or isinstance(params.star_arg, cst.Param) or params.star_kwarg:
+    if _has_irregular_params(params):
         return None
     init_params = [
         (param.name.value, param.annotation, param.default) for param in params.params[1:]
@@ -7185,14 +7287,9 @@ def _init_plan(init: cst.FunctionDef | None) -> _InitPlan | None:
             docstring = stmt
             continue
         target = small.targets[0].target if isinstance(small, cst.Assign) and len(small.targets) == 1 else None
-        if (
-            not isinstance(target, cst.Attribute)
-            or not isinstance(target.value, cst.Name)
-            or target.value.value != "self"
-            or not isinstance(small, cst.Assign)
-            or _reads_self(small.value)
-        ):
+        if not _is_plain_self_assign(target, small):
             return None
+        assert isinstance(small, cst.Assign) and isinstance(target, cst.Attribute)
         assigns.append((target.attr.value, small.value))
     return assigns, docstring, init_params
 
@@ -7398,3 +7495,174 @@ def _partition_fix(req: _FixRequest) -> str | None:
     index = next(i for i, stmt in enumerate(body) if stmt is cls)
     body[index : index + 1] = replacements
     return module.with_changes(body=body).code
+
+# ------------------------------------------------- unnamed-condition: named decisions
+# Each names one decision a fixer makes inline, so the guard reads as the
+# question it asks rather than a list of operators.
+
+
+def _is_husk_method_call(
+    inner: cst.BaseExpression, func: cst.BaseExpression, husk: str, method_fns: dict[str, str]
+) -> bool:
+    """`h.m(...)` on the husk instance, where `m` is one of its methods."""
+    return (
+        isinstance(inner, cst.Call)
+        and isinstance(inner.func, cst.Name)
+        and inner.func.value == husk
+        and not inner.args
+        and isinstance(func, cst.Attribute)
+        and func.attr.value in method_fns
+    )
+
+
+def _is_husk_attr_call(func: cst.BaseExpression, instances: set[str], method_fns: dict[str, str]) -> bool:
+    """`<instance>.m(...)` where the instance is a dissolved husk."""
+    return (
+        isinstance(func, cst.Attribute)
+        and isinstance(func.value, cst.Name)
+        and func.value.value in instances
+        and func.attr.value in method_fns
+    )
+
+
+def _is_import_line(stmt: cst.BaseStatement) -> bool:
+    """A line holding exactly one import."""
+    return (
+        isinstance(stmt, cst.SimpleStatementLine)
+        and len(stmt.body) == 1
+        and isinstance(stmt.body[0], (cst.Import, cst.ImportFrom))
+    )
+
+
+def _breaks_forwarding_chain(callee, args: list, params: list) -> bool:
+    """The call does not forward every parameter to a plain name — the chain's
+    middle edge is broken."""
+    return callee is None or args != params or not callee.is_name
+
+
+def _is_single_name_assign(stmt: cst.BaseSmallStatement) -> bool:
+    """`name = value` with exactly one plain-name target."""
+    return isinstance(stmt, cst.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0].target, cst.Name)
+
+
+def _binds_hoisted_name(stmt: cst.BaseSmallStatement, name: str) -> bool:
+    """The annotated assignment binds `name` (directly or through a target
+    tuple)."""
+    return isinstance(stmt, cst.AnnAssign) and stmt.target is not None and name in _hoist_target_names(stmt.target)
+
+
+def _split_target_exists(repo: Path, target: str, rel: str, rewritten) -> bool:
+    """The split's target path already exists on disk and is not the origin or
+    a file this fix already rewrote."""
+    return target != rel and target not in rewritten and (repo / target).exists()
+
+
+def _is_star_import_from_origin(imp: cst.BaseSmallStatement, importer_dir: list[str], origin_path: list[str]) -> bool:
+    """A `from ... import *` that pulls in the module being split."""
+    return (
+        isinstance(imp, cst.ImportFrom)
+        and isinstance(imp.names, cst.ImportStar)
+        and _import_refers_to_origin(imp, importer_dir, origin_path)
+    )
+
+
+def _is_single_return_tail(tail: list) -> bool:
+    """The function ends with exactly one `return <value>` statement."""
+    return (
+        len(tail) == 1
+        and isinstance(tail[0], cst.SimpleStatementLine)
+        and len(tail[0].body) == 1
+        and isinstance(tail[0].body[0], cst.Return)
+    )
+
+
+def _is_empty_list_assign(stmt: cst.BaseSmallStatement) -> bool:
+    """`name = []` — the empty-list accumulator's declaration."""
+    return (
+        isinstance(stmt, cst.Assign)
+        and isinstance(stmt.value, cst.List)
+        and len(stmt.value.elements) == 0
+        and isinstance(stmt.targets[0].target, cst.Name)
+    )
+
+
+def _is_empty_list_annassign(stmt: cst.BaseSmallStatement) -> bool:
+    """`name: list = []` — the annotated form of the accumulator."""
+    return (
+        isinstance(stmt, cst.AnnAssign)
+        and isinstance(stmt.value, cst.List)
+        and len(stmt.value.elements) == 0
+        and isinstance(stmt.target, cst.Name)
+    )
+
+
+def _is_accumulator_append(call: cst.Call, acc: str) -> bool:
+    """`<acc>.append(...)` — the loop's per-item write."""
+    return (
+        isinstance(call.func, cst.Attribute)
+        and call.func.attr.value == "append"
+        and isinstance(call.func.value, cst.Name)
+        and call.func.value.value == acc
+    )
+
+
+def _is_arity_tuple(value: cst.BaseExpression | None, arity: int) -> bool:
+    """A tuple literal with exactly `arity` plain elements."""
+    return (
+        isinstance(value, cst.Tuple)
+        and len(value.elements) == arity
+        and all(isinstance(element, cst.Element) for element in value.elements)
+    )
+
+
+def _is_tuple_subscript(node: cst.BaseExpression | None) -> bool:
+    """`tuple[...]` / `Tuple[...]` — the annotation that hides a record."""
+    return (
+        isinstance(node, cst.Subscript)
+        and isinstance(node.value, cst.Name)
+        and node.value.value in ("tuple", "Tuple")
+    )
+
+
+def _field_name_taken_by_python(name: str, names: list[str]) -> bool:
+    """The field name is not a usable Python identifier, or is already used."""
+    return not name.isidentifier() or keyword.iskeyword(name) or name in names
+
+
+def _is_unresolved_alias(node: cst.BaseExpression | None, aliases: dict, seen: set[str]) -> bool:
+    """The name is an import alias that has not been walked yet."""
+    return isinstance(node, cst.Name) and node.value in aliases and node.value not in seen
+
+
+def _has_positional_only_or_variadic(params: cst.Parameters) -> bool:
+    """The signature has positional-only or variadic parameters — the fix
+    cannot rewrite it faithfully."""
+    return bool(params.posonly_params) or isinstance(params.star_arg, cst.Param) or params.star_kwarg is not None
+
+
+def _has_irregular_params(params: cst.Parameters) -> bool:
+    """The signature has positional-only, keyword-only, or variadic
+    parameters."""
+    return (
+        bool(params.posonly_params)
+        or bool(params.kwonly_params)
+        or isinstance(params.star_arg, cst.Param)
+        or params.star_kwarg is not None
+    )
+
+def _is_plain_self_assign(target, stmt) -> bool:
+    """The statement is `self.<attr> = <value not read from self>` — one field
+    initialised from outside."""
+    if target is None or not _is_self_attribute(target):
+        return False
+    return isinstance(stmt, cst.Assign) and not _reads_self(stmt.value)
+
+
+def _functions_collide(first, second, free_of: dict, attrs_of: dict) -> bool:
+    """Two functions cannot share one moved cluster: one calls the other, or
+    both touch the same state."""
+    return (
+        second.name.value in free_of[id(first)]
+        or first.name.value in free_of[id(second)]
+        or bool(attrs_of[id(first)] & attrs_of[id(second)])
+    )
