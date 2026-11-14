@@ -6698,11 +6698,12 @@ mod tests {
             "../../tests/fixtures/rust/scattered_instance_objects_detected__02.py"
         ));
         assert!(!ok.iter().any(|x| x.kind == "scattered-instance"), "{ok:?}");
-        // two DIFFERENT singletons: each is a container, not a scatter
+        // two objects of DIFFERENT classes are still a scattering: nothing
+        // says which one holds the other
         let two = scan_src(include_str!(
             "../../tests/fixtures/rust/scattered_instance_objects_detected__03.py"
         ));
-        assert!(!two.iter().any(|x| x.kind == "scattered-instance"), "{two:?}");
+        assert!(two.iter().any(|x| x.kind == "scattered-instance"), "{two:?}");
     }
 
     #[test]

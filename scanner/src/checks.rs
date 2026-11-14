@@ -5332,7 +5332,15 @@ pub fn collect_scattered_instances(state: &mut ScanState, body: &[Stmt]) {
         let Expr::Name(callee) = call.func.as_ref() else {
             continue;
         };
-        if !callee.id.as_str().chars().next().is_some_and(|c| c.is_uppercase()) {
+        // a private class is still a class: `_RustScan()` counts
+        if !callee
+            .id
+            .as_str()
+            .trim_start_matches('_')
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_uppercase())
+        {
             continue;
         }
         state.scattered.push(ScatteredInstance {
@@ -5382,15 +5390,11 @@ fn scattered_finding(rel: &str, instances: &[ScatteredInstance], classes: &HashS
     })
 }
 
-/// A scatter is one concept spread across objects: two or more of the same
-/// class, or three or more in total. Two DIFFERENT singletons are each a
-/// container in its own right — the exemption is per object.
+/// A scatter is one concept spread across objects. ONE module-level object is
+/// the container itself and is exempt; two is already a scattering, whatever
+/// their classes — nothing says which object holds them.
 fn is_scatter(owned: &[&ScatteredInstance]) -> bool {
-    let mut per_class: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for instance in owned {
-        *per_class.entry(instance.callee.as_str()).or_default() += 1;
-    }
-    per_class.values().any(|n| *n >= 2) || owned.len() >= 3
+    owned.len() >= 2
 }
 
 fn join_names(names: &[&str]) -> String {

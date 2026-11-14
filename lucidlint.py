@@ -739,7 +739,7 @@ class _File(NamedTuple):
         """A Rust fix runs in the scan core (syn), not the Python/libcst
         engine: invoke the binary's --fix mode, which edits in place."""
         repo, rel = self.repo, self.rel
-        binary = RUST_SCAN.binary(repo)
+        binary = SERVICES.rust_scan.binary(repo)
         if binary is None:
             print("fix: the Rust scan core is required — build it with `make scanner-check`")
             return 1
@@ -795,9 +795,9 @@ class _File(NamedTuple):
         """Scan this file, yielding its findings."""
         repo, rel = self.repo, self.rel
         let_include_tests = False  # the fix resolves one file's findings
-        RUST_SCAN.prepare(repo, rel, let_include_tests, Counter())
+        SERVICES.rust_scan.prepare(repo, rel, let_include_tests, Counter())
         files = _py_files(repo, rel)
-        rust = RUST_SCAN.load(repo, files)
+        rust = SERVICES.rust_scan.load(repo, files)
         if rust is None:
             return
         yield from rust.by_rel.get(rel, [])
@@ -1019,7 +1019,7 @@ class _RustScan:
         self._pending_docs = None
         self._pending_gitignored = ()
         if only_rel is None:
-            self._pending_graph = GRAPH_CONTRACT.contract(repo)
+            self._pending_graph = SERVICES.graph.contract(repo)
             if file_churn:
                 tmp = Path(tempfile.mkstemp(prefix="lucidlint-churn-", suffix=".json")[1])
                 tmp.write_text(json.dumps(dict(file_churn)), encoding="utf-8")
@@ -1127,7 +1127,15 @@ _FAMILY_OF_VARIANT = {
 _CONFIG_CACHE: dict[Path, _LucidlintConfig] = {}
 
 
-RUST_SCAN = _RustScan()
+class _Services:
+    """The gate's two external services in one object: the Rust scan core and
+    the graph contract exporter. Both cache per repo, so the gate holds one of
+    each for the whole run."""
+
+    def __init__(self) -> None:
+        self.rust_scan = _RustScan()
+        self.graph = _GraphContract()
+
 
 # the failure modes of a scanner invocation — a subprocess that dies, times
 _SCANNER_FAILURES = (OSError, SubprocessError, json.JSONDecodeError, ValueError)
@@ -1226,7 +1234,8 @@ class _GraphContract:
         return result
 
 
-GRAPH_CONTRACT = _GraphContract()
+SERVICES = _Services()
+
 
 
 def parse_args() -> argparse.Namespace:
@@ -2729,15 +2738,15 @@ def _scan_rust(
     for the banner + footer ledger. `coverage` is the repo's own snapshot —
     the core reads which files it names and which lines it saw executed, so a
     file the snapshot omits stays UNKNOWN (R6)."""
-    if not RUST_SCAN.active(repo):
+    if not SERVICES.rust_scan.active(repo):
         # no Python fallback — the binary is required; a silent empty scan
         # would report GATE: PASS without checking anything (fail-fast)
         raise RuntimeError(
             "the scan binary is required — build it with `make scanner-check` or install the lucidlint release bundle"
         )
-    RUST_SCAN.prepare(repo, only_rel, args.include_tests, file_churn, coverage)
+    SERVICES.rust_scan.prepare(repo, only_rel, args.include_tests, file_churn, coverage)
     files = _py_files(repo, only_rel)
-    rust = RUST_SCAN.load(repo, files)
+    rust = SERVICES.rust_scan.load(repo, files)
     if rust is None:
         raise RuntimeError("the Rust scan core failed — rebuild with `make scanner-check`")
     return rust

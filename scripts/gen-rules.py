@@ -138,7 +138,7 @@ def validate() -> list[str]:
     for src in scanner_sources():
         for m in re.finditer(r"— fix: (?!lucidlint )([a-z-]+)", _prod_text(src)):
             directive_kinds.add(m.group(1))
-    for kind in sorted(directive_kinds - set(rule_metadata.FIX_REGISTRY.kinds())):
+    for kind in sorted(directive_kinds - set(rule_metadata.CATALOG.fixes.kinds())):
         problems.append(
             f"fix kind '{kind}' is advertised in a scanner message but not registered in FIX_REQUIRED_INPUTS"
         )
