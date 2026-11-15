@@ -360,12 +360,17 @@ CATALOG = RuleCatalog([
          "a reader cannot hold the whole job: extract each domain step into a "
          "named function.",
          fix="extract-method"),
-    Rule("large-module", "warn", "architecture", "Both",
-         "Source module holding ≥ 25 top-level functions and classes whose names "
-         "form ≥ 3 groups — titled sections, or words shared by ≥ 3 names — "
-         "several concepts in one module: split it by concept, one module per "
-         "group. Lines are not the measure; a generated module, and a definition "
-         "set that forms one group, is one concept and is exempt."),
+    Rule("several-classes", "warn", "architecture", "Python",
+         "A module holding > 2 top-level classes (and more than one of them "
+         "defining a method) — each class belongs in a file named after it, so "
+         "the import path states which class lives where. A class with no "
+         "methods is a value record and may stay beside the one class that uses "
+         "it."),
+    Rule("many-functions", "warn", "architecture", "Python",
+         "A module holding > 10 top-level functions — the functions pass the "
+         "same data between their parameters and no object owns it, so every "
+         "call site re-states the shape. Name the domain concepts they operate "
+         "on and make each one a class whose methods they become."),
     Rule("closures", "fail", "architecture", "Both",
          "A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line "
          "span) — the nested structure is a class waiting to be extracted.",

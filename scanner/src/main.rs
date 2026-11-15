@@ -1478,7 +1478,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         scattered: state.scattered,
         duplicate_expressions: state.duplicate_expressions,
         path_expressions: state.path_expressions,
-        module_shape: checks::module_shape(name, source, &checks::python_definition_names(&body)),
+        module_shape: checks::python_module_shape(source, &body),
         setters: state.setters,
         refs: state.refs,
         strings: state.strings,
@@ -1699,7 +1699,7 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         .collect();
     reconcile_repo_wide(
         &mut additions,
-        checks::large_module_findings(&module_shapes),
+        checks::module_findings(&module_shapes),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -2319,7 +2319,7 @@ fn main() {
         .collect();
     reconcile_repo_wide(
         &mut all_findings,
-        checks::large_module_findings(&module_shapes),
+        checks::module_findings(&module_shapes),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -5309,7 +5309,7 @@ mod tests {
         );
         reconcile_repo_wide(
             &mut all,
-            checks::large_module_findings(&module_shapes),
+            checks::module_findings(&module_shapes),
             &supps_by_rel,
             &spent_by_rel,
         );
@@ -7160,23 +7160,39 @@ def two(work, batch):
         assert!(hits[0].message.contains("one"), "{}", hits[0].message);
     }
 
-    /// A synthetic module: `per` top-level functions per family — one family
-    /// is one concept, three families are several.
-    fn large_module_source(families: &[&str], per: usize) -> String {
+    /// A synthetic module with `n` classes; `with_methods` of them carry a
+    /// method, the rest are records.
+    fn several_classes_source(n: usize, with_methods: usize) -> String {
         let mut src = String::new();
-        for family in families {
-            for i in 0..per {
-                src.push_str(&format!("def {family}_{i}(value):\n    return value + {i}\n\n"));
+        for i in 0..n {
+            src.push_str(&format!("class Widget{i}:\n"));
+            if i < with_methods {
+                src.push_str(&format!("    def run_{i}(self, value):\n        return value + {i}\n"));
+            } else {
+                src.push_str(&format!("    size: int = {i}\n"));
             }
+            src.push('\n');
+        }
+        src
+    }
+
+    /// A synthetic module with `n` top-level functions and `classes` classes.
+    fn many_functions_source(n: usize, classes: usize) -> String {
+        let mut src = String::new();
+        for i in 0..classes {
+            src.push_str(&format!("class Holder{i}:\n    pass\n\n"));
+        }
+        for i in 0..n {
+            src.push_str(&format!("def step_{i}(value):\n    return value + {i}\n\n"));
         }
         src
     }
 
     #[test]
-    fn large_module_names_the_families_and_the_split() {
-        let src = large_module_source(&["payload", "matrix", "grid"], 9);
-        let f = scan_corpus(&[("pkg/big.py", &src)]);
-        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "large-module").collect();
+    fn several_classes_fires_and_names_the_classes() {
+        let src = several_classes_source(3, 3);
+        let f = scan_corpus(&[("pkg/widgets.py", &src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-classes").collect();
         assert_eq!(
             hits.len(),
             1,
@@ -7184,192 +7200,121 @@ def two(work, batch):
             hits.iter().map(|h| &h.message).collect::<Vec<_>>()
         );
         let msg = &hits[0].message;
-        assert!(msg.contains("27 top-level definitions"), "{msg}");
-        assert!(msg.contains("several concepts"), "{msg}");
-        assert!(msg.contains("payload"), "{msg}");
-        assert!(msg.contains("matrix"), "{msg}");
-        assert!(msg.contains("grid"), "{msg}");
-        assert!(msg.contains("module beside this file"), "{msg}");
-        assert_eq!(hits[0].file, "pkg/big.py");
+        assert!(msg.contains("holds 3 top-level classes"), "{msg}");
+        assert!(msg.contains("Widget0") && msg.contains("Widget1"), "{msg}");
+        assert!(msg.contains("file named after it"), "{msg}");
+        assert!(msg.contains("no methods may stay"), "{msg}");
+        assert_eq!(hits[0].file, "pkg/widgets.py");
+        assert_eq!(hits[0].line, 0);
     }
 
     #[test]
-    fn large_module_passes_a_one_family_module() {
-        // 200 definitions that share one word are one concept: the count is
-        // wide, the names are not several.
-        let src = large_module_source(&["rate"], 200);
-        let f = scan_corpus(&[("pkg/rates.py", &src)]);
-        assert!(!f.iter().any(|x| x.kind == "large-module"), "{f:?}");
+    fn several_classes_passes_two_classes() {
+        // a class and the record it returns is a pair, not a module
+        let src = several_classes_source(2, 2);
+        let f = scan_corpus(&[("pkg/widget.py", &src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-classes"), "{f:?}");
     }
 
     #[test]
-    fn large_module_passes_a_generated_module() {
-        // several families, but a generated file is one concept by construction
-        let body = large_module_source(&["payload", "matrix", "grid"], 9);
-        let src = format!("# generated by tools/gen_tables.py — do not edit\n{body}");
-        let f = scan_corpus(&[("pkg/tables.py", &src)]);
-        assert!(!f.iter().any(|x| x.kind == "large-module"), "{f:?}");
+    fn several_classes_passes_a_class_and_its_records() {
+        // three classes where all but one are records (no methods)
+        let src = several_classes_source(3, 1);
+        let f = scan_corpus(&[("pkg/widget.py", &src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-classes"), "{f:?}");
+        // all records is not this finding either
+        let records = several_classes_source(4, 0);
+        let f = scan_corpus(&[("pkg/records.py", &records)]);
+        assert!(!f.iter().any(|x| x.kind == "several-classes"), "{f:?}");
     }
 
     #[test]
-    fn large_module_names_the_titled_sections() {
-        let mut src = String::new();
-        // one name family, four titled sections: the sections are the concepts
-        for (i, title) in ["rates", "taxes", "totals", "bands"].iter().enumerate() {
-            src.push_str(&format!("# ---------------- {title}\n"));
-            for j in 0..7 {
-                src.push_str(&format!("def rate_{i}_{j}(value):\n    return value + {j}\n\n"));
-            }
-        }
-        let f = scan_corpus(&[("pkg/fares.py", &src)]);
-        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "large-module").collect();
-        assert_eq!(hits.len(), 1, "{f:?}");
-        let msg = &hits[0].message;
-        assert!(msg.contains("28 top-level definitions"), "{msg}");
-        assert!(msg.contains("titled sections"), "{msg}");
-        assert!(msg.contains("rates") && msg.contains("taxes"), "{msg}");
+    fn several_classes_ignores_nested_classes_and_methods() {
+        // one top-level class holding nested ones: the nested classes belong
+        // to it, and its methods are the class's, not module definitions
+        let src = "class Outer:\n    class Inner:\n        pass\n\n    class Deeper:\n        pass\n\n    def a(self):\n        pass\n";
+        let f = scan_corpus(&[("pkg/outer.py", src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-classes"), "{f:?}");
     }
 
     #[test]
-    fn large_module_stays_silent_below_the_definition_floor() {
-        // 24 definitions: one short of the floor, however many lines they span
-        let src = large_module_source(&["payload", "matrix", "grid"], 8);
-        let f = scan_corpus(&[("pkg/small.py", &src)]);
-        assert!(!f.iter().any(|x| x.kind == "large-module"), "{f:?}");
-    }
-
-    #[test]
-    fn large_module_passes_a_long_module_with_few_definitions() {
-        // 900 lines of table with one binding: a data module is one concept
-        let mut data = String::from("ROW_LABELS = {\n");
-        for i in 0..300 {
-            data.push_str(&format!("    \"row_{i}\": \"label {i}\",\n"));
-        }
-        data.push_str("}\n");
-        assert!(data.lines().count() >= 300);
-        let f = scan_corpus(&[("pkg/labels.py", &data)]);
-        assert!(!f.iter().any(|x| x.kind == "large-module"), "{f:?}");
-
-        // and a long class: one definition, many methods — one concept
-        let mut cls = String::from("class Report:\n");
-        for i in 0..20 {
-            cls.push_str(&format!(
-                "    def row_{i}(self, value):\n        \"\"\"Return row {i} with the value the caller passed.\"\"\"\n        first = value + {i}\n        second = first * 2\n        return second\n\n"
-            ));
-        }
-        let f = scan_corpus(&[("pkg/report.py", &cls)]);
-        assert!(!f.iter().any(|x| x.kind == "large-module"), "{f:?}");
-    }
-
-    #[test]
-    fn large_module_counts_definitions_not_constants() {
-        // a table of constants is data the module holds, not names it groups
-        let src = "class PayloadRow:\n    pass\n\nPAYLOAD_ROWS = 3\n\nPAYLOAD_LIMIT: int = 4\n";
-        let parsed = parse_module(src).unwrap();
-        let names = checks::python_definition_names(&parsed.syntax().body);
-        assert_eq!(names, ["PayloadRow"]);
-        let shape = checks::module_shape("pkg/x.py", src, &names);
-        assert_eq!(shape.definitions, 1);
-        assert!(shape.families.is_empty(), "{:?}", shape.families);
-        assert!(!shape.generated);
-    }
-
-    #[test]
-    fn large_module_reads_only_titled_sections() {
-        let src = "# ----------\n// TODO: tidy\n# --- x\n// ==== real title ====\ndef only_one():\n    pass\n";
-        let shape = checks::module_shape("pkg/x.py", src, &["only_one".to_string()]);
-        assert_eq!(shape.sections, ["real title"]);
-        assert!(shape.large_module_finding("pkg/x.py").is_none());
-    }
-
-    #[test]
-    fn large_module_lists_the_groups_and_counts_the_rest() {
-        let shape_with = |sections: &[&str], families: &[(&str, usize)]| checks::ModuleShape {
-            definitions: 30,
-            sections: sections.iter().map(|s| (*s).to_string()).collect(),
-            families: families.iter().map(|(w, c)| ((*w).to_string(), *c)).collect(),
-            generated: false,
-        };
-        let three = shape_with(&["rates", "taxes", "totals"], &[]);
-        assert!(three
-            .large_module_finding("x.py")
-            .unwrap()
-            .message
-            .contains("rates, taxes, totals."));
-        let four = shape_with(&["rates", "taxes", "totals", "bands"], &[]);
-        assert!(four
-            .large_module_finding("x.py")
-            .unwrap()
-            .message
-            .contains("totals and one more"));
-        let six = shape_with(&["rates", "taxes", "totals", "bands", "zones", "fares"], &[]);
-        assert!(six
-            .large_module_finding("x.py")
-            .unwrap()
-            .message
-            .contains("totals and 3 more"));
-        let families = shape_with(&[], &[("payload", 9), ("matrix", 6), ("grid", 4)]);
-        assert!(families
-            .large_module_finding("x.py")
-            .unwrap()
-            .message
-            .contains("payload (9 names), matrix (6 names), grid (4 names)."));
-        let more = shape_with(&[], &[("payload", 9), ("matrix", 6), ("grid", 4), ("fare", 3)]);
-        assert!(more
-            .large_module_finding("x.py")
-            .unwrap()
-            .message
-            .contains("grid (4 names) and one more"));
-        let many = shape_with(
-            &[],
-            &[
-                ("payload", 9),
-                ("matrix", 6),
-                ("grid", 4),
-                ("fare", 3),
-                ("zone", 3),
-                ("band", 3),
-            ],
+    fn several_classes_passes_a_generated_module() {
+        let src = format!(
+            "# generated by tools/gen_models.py — do not edit\n{}",
+            several_classes_source(6, 6)
         );
-        assert!(many
-            .large_module_finding("x.py")
-            .unwrap()
-            .message
-            .contains("grid (4 names) and 3 more"));
-        // 24 definitions is under the floor even with the groups present
-        let short = checks::ModuleShape {
-            definitions: 24,
-            ..shape_with(&["rates", "taxes", "totals"], &[])
-        };
-        assert!(short.large_module_finding("x.py").is_none());
+        let f = scan_corpus(&[("pkg/models.py", &src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-classes"), "{f:?}");
     }
 
     #[test]
-    fn large_module_reads_a_rust_module() {
+    fn many_functions_asks_for_the_domain_concepts() {
+        let src = many_functions_source(11, 0);
+        let f = scan_corpus(&[("pkg/steps.py", &src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-functions").collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "{:?}",
+            hits.iter().map(|h| &h.message).collect::<Vec<_>>()
+        );
+        let msg = &hits[0].message;
+        assert!(msg.contains("holds 11 top-level functions"), "{msg}");
+        assert!(msg.contains("domain concepts"), "{msg}");
+        assert!(msg.contains("become its methods"), "{msg}");
+    }
+
+    #[test]
+    fn many_functions_passes_ten() {
+        let src = many_functions_source(10, 0);
+        let f = scan_corpus(&[("pkg/steps.py", &src)]);
+        assert!(!f.iter().any(|x| x.kind == "many-functions"), "{f:?}");
+    }
+
+    #[test]
+    fn many_functions_defers_to_several_classes() {
+        // the class rule answers first: a module with several classes needs a
+        // file per class before its free functions need a home
+        let mut src = several_classes_source(3, 3);
+        src.push_str(&many_functions_source(12, 0));
+        let f = scan_corpus(&[("pkg/mixed.py", &src)]);
+        assert!(f.iter().any(|x| x.kind == "several-classes"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "many-functions"), "{f:?}");
+        // and with only records for classes, the functions rule applies
+        let mut records = several_classes_source(3, 0);
+        records.push_str(&many_functions_source(12, 0));
+        let f = scan_corpus(&[("pkg/records.py", &records)]);
+        assert!(f.iter().any(|x| x.kind == "many-functions"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "several-classes"), "{f:?}");
+    }
+
+    #[test]
+    fn module_shape_rules_do_not_run_on_rust() {
+        // the two rules are Python-shaped advice (a file per class, classes
+        // for free functions) — a Rust module keeps its own families
         let mut src = String::new();
-        for family in ["payload", "matrix", "grid"] {
-            for i in 0..9 {
-                src.push_str(&format!(
-                    "pub fn {family}_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
-                ));
-            }
-        }
-        let rs = rustscan::scan_source(&src, "crate/src/big.rs", true);
-        let scan = rustscan_to_filescan_ref(&rs, "crate/src/big.rs");
-        let f = checks::large_module_findings(&[("crate/src/big.rs".to_string(), scan.module_shape.clone())]);
-        assert_eq!(f.len(), 1, "{f:?}");
-        assert!(f[0].message.contains("payload"), "{}", f[0].message);
-        // and a 200-definition Rust module with one family passes
-        let mut one = String::new();
-        for i in 0..200 {
-            one.push_str(&format!(
-                "pub fn rate_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
+        for i in 0..20 {
+            src.push_str(&format!(
+                "pub struct Widget{i};\n\npub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
             ));
         }
-        let rs = rustscan::scan_source(&one, "crate/src/rates.rs", true);
-        let scan = rustscan_to_filescan_ref(&rs, "crate/src/rates.rs");
-        let quiet = checks::large_module_findings(&[("crate/src/rates.rs".to_string(), scan.module_shape.clone())]);
-        assert!(quiet.is_empty(), "{quiet:?}");
+        let rs = rustscan::scan_source(&src, "crate/src/widgets.rs", true);
+        let scan = rustscan_to_filescan_ref(&rs, "crate/src/widgets.rs");
+        let f = checks::module_findings(&[("crate/src/widgets.rs".to_string(), scan.module_shape.clone())]);
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn module_shape_reads_only_the_module_body() {
+        let src =
+            "class Widget:\n    def run(self):\n        pass\n\ndef step(value):\n    return value\n\nCONSTANT = 3\n";
+        let parsed = parse_module(src).unwrap();
+        let shape = checks::python_module_shape(src, &parsed.syntax().body);
+        assert_eq!(shape.classes.len(), 1);
+        assert_eq!(shape.classes[0].name, "Widget");
+        assert_eq!(shape.classes[0].methods, 1);
+        assert_eq!(shape.functions, 1); // the class's method and the constant are not module functions
+        assert!(!shape.generated);
     }
 
     #[test]

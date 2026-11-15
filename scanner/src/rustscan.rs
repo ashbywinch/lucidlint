@@ -54,7 +54,8 @@ pub struct RustScan {
     pub mod_decls: Vec<(String, bool)>,
     /// Raw `use` paths ("crate::a::b", "super::x", "serde::Deserialize", ...).
     pub uses: Vec<String>,
-    /// The file's size and concept groups (#107 large-module).
+    /// The file's shape for the module-shape rules (#107). The class and
+    /// free-function rules are Python-only, so a Rust scan carries none.
     pub module_shape: crate::checks::ModuleShape,
     /// The file's parsed `lucidlint: ignore` suppressions — the orchestrator
     /// needs them to suppress the repo-wide families (duplicate/unused).
@@ -148,7 +149,6 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     state.findings.extend(no_assert_test_findings(&file, name));
     state.walk_file(&file);
     let mut scan = state.finish();
-    scan.module_shape = crate::checks::module_shape(name, source, &definition_names(&file));
     // G4: does the file hold magic-CANDIDATE literals anywhere — the fact
     // the stale magic-number message cites when the family fires nowhere.
     // Rust's only exemptions are the position rule, so the label set is
@@ -1128,30 +1128,6 @@ fn is_dbg_macro(path: &Path) -> bool {
 
 fn is_unwrap_expect(method: &Ident) -> bool {
     method == "unwrap" || method == "expect"
-}
-
-/// The module's top-level definition names — the vocabulary `large-module`
-/// (#107) reads. An `impl` block is named by the type it implements, because
-/// that is the concept it belongs to; a `const`/`static` is data the module
-/// holds, not a name that groups with others.
-fn definition_names(file: &File) -> Vec<String> {
-    let mut names = Vec::new();
-    for item in &file.items {
-        match item {
-            Item::Fn(i) => names.push(i.sig.ident.to_string()),
-            Item::Struct(i) => names.push(i.ident.to_string()),
-            Item::Enum(i) => names.push(i.ident.to_string()),
-            Item::Trait(i) => names.push(i.ident.to_string()),
-            Item::TraitAlias(i) => names.push(i.ident.to_string()),
-            Item::Type(i) => names.push(i.ident.to_string()),
-            Item::Union(i) => names.push(i.ident.to_string()),
-            Item::Mod(i) => names.push(i.ident.to_string()),
-            Item::Impl(i) => names.push(static_type_ident(&i.self_ty)),
-            _ => {}
-        }
-    }
-    names.retain(|name| !name.is_empty());
-    names
 }
 
 /// The bare type ident of a static's type (peels reference/paren wrappers).

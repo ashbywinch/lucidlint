@@ -1,43 +1,30 @@
-//! `large-module` (#107): a source module that holds several concepts.
+//! `several-classes` and `many-functions` (#107): a module holding more
+//! definitions than it should.
 //!
-//! The entry signal is the number of top-level definitions — the names a
-//! reader has to hold — not the line count. Lines measure typing, not
-//! concepts: a generated table and a 1,300-line class are one concept each,
-//! and splitting them makes the code worse.
+//! Two rules, decided by what the definitions are:
 //!
-//! A module fires when it holds [`LARGE_MODULE_DEFINITIONS`] top-level
-//! definitions AND [`LARGE_MODULE_GROUPS`] named groups, where a group is
-//! either a titled section (a comment that draws a separator and names what
-//! follows) or a name family (a word shared by the names of at least
-//! [`NAME_FAMILY_MEMBERS`] definitions). Definitions that form one family are
-//! one concept whatever their count.
+//! - **classes**: more than [`SEVERAL_CLASSES`] top-level classes means each
+//!   class belongs in a file named after it. A class with no methods is a
+//!   value record, and records may stay beside the one class that uses them.
+//! - **functions**: more than [`MANY_FUNCTIONS`] top-level functions means
+//!   the module has no object to own the data the functions pass around; the
+//!   reader names the domain concepts and makes them classes.
 //!
-//! The measurement that set the floors is in
-//! `docs/plans/plan-issue-107-large-module.md`.
-
-use std::collections::HashMap;
+//! The class rule wins when a module holds classes: which file a class lives
+//! in is the first question, and the free functions are answered by that
+//! split. The measurement is in `docs/plans/plan-issue-107-large-module.md`.
 
 use ruff_python_ast::Stmt;
 
 use crate::Finding;
 
-use super::name_tokens;
+/// A module holding more classes than this has stopped saying where each one
+/// lives. Two is a pair (a class and the record it returns); three is a file.
+pub const SEVERAL_CLASSES: usize = 2;
 
-/// The definition floor: 25. Measured on this repo, houses and
-/// family-history-album. At 20 the count starts flagging one-family modules —
-/// album's `tools/cli.py` (24 commands, one family), houses'
-/// `tools/deploy/run_migrations.py` (21 steps, no family). At 25 every module
-/// the count flags also holds three or more named groups.
-pub const LARGE_MODULE_DEFINITIONS: usize = 25;
-
-/// A word shared by at least this many definition names is a family. Two
-/// names that happen to share a word are a pair, not how the file is
-/// organised.
-pub const NAME_FAMILY_MEMBERS: usize = 3;
-
-/// How many named groups make "several concepts": one group is a concept, two
-/// is a concept and its other half, three is a file a reader cannot hold.
-pub const LARGE_MODULE_GROUPS: usize = 3;
+/// A module holding more free functions than this has a missing class: the
+/// data the functions pass around has no owner.
+pub const MANY_FUNCTIONS: usize = 10;
 
 /// How many opening lines may carry a generator marker. Generators stamp the
 /// top of the file; a marker further down is prose about something else.
@@ -53,54 +40,52 @@ const GENERATED_MARKERS: &[&str] = &[
     "code generated",
 ];
 
-/// Words that state a naming convention or a generic role rather than a
-/// concept. `global_state_findings` and `noqa_findings` share `findings`
-/// (a convention) and not a subject, so the word names no family. A word is
-/// only removed from family names — it still counts as a definition name.
-pub const NAMING_WORDS: &[&str] = &[
-    "all", "and", "apply", "build", "check", "collect", "count", "data", "default", "defs", "emit", "findings", "for",
-    "from", "get", "has", "impl", "into", "item", "items", "load", "make", "message", "messages", "name", "names",
-    "new", "parse", "push", "read", "save", "self", "set", "test", "tests", "the", "this", "type", "types", "value",
-    "values", "walk", "with", "write",
-];
+/// One top-level class: its name and how many methods its own body defines.
+/// A class with no methods is a record — a value with a name, not a concept
+/// that owns behaviour.
+#[derive(Clone, Debug)]
+pub struct ClassShape {
+    pub name: String,
+    pub methods: usize,
+}
 
-/// The shape of one source module — what the repo-wide `large-module` pass
-/// needs, collected where the parser already holds the file. `definitions`
-/// counts the module's top-level functions and types (constants are data, not
-/// names a reader holds); `sections` are the titles its comments draw,
-/// deduplicated in source order (a title repeated three times is one
-/// concept); `families` are the words its definition names share, largest
-/// first.
+impl ClassShape {
+    fn is_record(&self) -> bool {
+        self.methods == 0
+    }
+}
+
+/// The shape of one module: its top-level classes and its free functions.
+/// Only the module body is read — a class's methods are that class's, and a
+/// nested class belongs to the class that holds it.
 #[derive(Clone, Debug, Default)]
 pub struct ModuleShape {
-    pub definitions: usize,
-    pub sections: Vec<String>,
-    pub families: Vec<(String, usize)>,
+    pub classes: Vec<ClassShape>,
+    pub functions: usize,
     pub generated: bool,
 }
 
-/// The module's top-level definitions: functions and classes. A constant is
-/// a value the module holds, not a name that groups with others.
-pub fn python_definition_names(body: &[Stmt]) -> Vec<String> {
-    let mut names = Vec::new();
+/// Measure one module from its parsed body and source text.
+pub fn python_module_shape(source: &str, body: &[Stmt]) -> ModuleShape {
+    let mut classes = Vec::new();
+    let mut functions = 0;
     for stmt in body {
         match stmt {
-            Stmt::FunctionDef(f) => names.push(f.name.to_string()),
-            Stmt::ClassDef(c) => names.push(c.name.to_string()),
+            Stmt::ClassDef(class) => classes.push(ClassShape {
+                name: class.name.to_string(),
+                methods: class
+                    .body
+                    .iter()
+                    .filter(|member| matches!(member, Stmt::FunctionDef(_)))
+                    .count(),
+            }),
+            Stmt::FunctionDef(_) => functions += 1,
             _ => {}
         }
     }
-    names
-}
-
-/// Measure one module: the definitions it holds, the concepts they group
-/// into, and whether a generator wrote it. `rel` is the repo-relative path —
-/// its stem names the module's own concept and is never counted as a family.
-pub fn module_shape(rel: &str, source: &str, names: &[String]) -> ModuleShape {
     ModuleShape {
-        definitions: names.len(),
-        sections: section_titles(source),
-        families: name_families(rel, names),
+        classes,
+        functions,
         generated: is_generated(source),
     }
 }
@@ -112,82 +97,37 @@ fn is_generated(source: &str) -> bool {
     })
 }
 
-/// The titles a file's own comments give its groups: a comment line that
-/// draws a separator run (`# ----`, `// ====`) and then names what follows.
-/// A bare separator, a TODO and a license header name nothing.
-fn section_titles(source: &str) -> Vec<String> {
-    let mut titles: Vec<String> = Vec::new();
-    for line in source.lines() {
-        let Some(title) = section_title(line) else {
-            continue;
-        };
-        if !titles.contains(&title) {
-            titles.push(title);
-        }
-    }
-    titles
-}
-
-fn section_title(line: &str) -> Option<String> {
-    let trimmed = line.trim_start();
-    let body = trimmed.strip_prefix("//").or_else(|| trimmed.strip_prefix('#'))?.trim();
-    let run = body.chars().take_while(|c| "-=*#_".contains(*c)).count();
-    if run < 3 {
-        return None;
-    }
-    let title = body[run..]
-        .trim()
-        .trim_end_matches(['-', '=', '*', '#', '_', ' '])
-        .trim();
-    if title.len() < 3 || !title.chars().any(|c| c.is_alphanumeric()) {
-        return None;
-    }
-    Some(title.to_string())
-}
-
-/// The words the definition names share. A word appears once per name (`sets`
-/// of tokens, never a count of occurrences), so a name that says `row` twice
-/// is still one member of the `row` family.
-fn name_families(rel: &str, names: &[String]) -> Vec<(String, usize)> {
-    let own: Vec<String> = name_tokens(&file_stem(rel));
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for name in names {
-        for token in name_tokens(name) {
-            if own.contains(&token) || NAMING_WORDS.contains(&token.as_str()) {
-                continue;
-            }
-            *counts.entry(token).or_default() += 1;
-        }
-    }
-    let mut families: Vec<(String, usize)> = counts
-        .into_iter()
-        .filter(|(_, count)| *count >= NAME_FAMILY_MEMBERS)
-        .collect();
-    // deterministic: the largest family first, then the alphabet
-    families.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    families
-}
-
-fn file_stem(rel: &str) -> String {
-    let file = rel.rsplit('/').next().unwrap_or(rel);
-    file.split_once('.')
-        .map_or_else(|| file.to_string(), |(stem, _)| stem.to_string())
-}
-
 impl ModuleShape {
-    /// The finding for one module, when it holds several concepts. A
-    /// generated module and a one-group module are one concept.
-    pub fn large_module_finding(&self, rel: &str) -> Option<Finding> {
-        if self.generated || self.definitions < LARGE_MODULE_DEFINITIONS {
+    /// The finding for one module, when it holds more than it should. The
+    /// class rule answers first: a module with several classes needs a file
+    /// per class before its free functions need a home.
+    pub fn module_finding(&self, rel: &str) -> Option<Finding> {
+        if self.generated {
             return None;
         }
-        let message = if self.sections.len() >= LARGE_MODULE_GROUPS {
-            self.sections_message(rel)
-        } else if self.families.len() >= LARGE_MODULE_GROUPS {
-            self.families_message(rel)
-        } else {
-            return None;
-        };
+        if self.several_classes() {
+            return self.classes_finding(rel);
+        }
+        if self.functions > MANY_FUNCTIONS {
+            return self.functions_finding(rel);
+        }
+        None
+    }
+
+    /// More than two classes, and more than one of them carries behaviour —
+    /// "all but one are records" is a class and its value types, which is one
+    /// concept in one file.
+    fn several_classes(&self) -> bool {
+        self.classes.len() > SEVERAL_CLASSES && self.classes.iter().filter(|c| !c.is_record()).count() > 1
+    }
+
+    fn classes_finding(&self, rel: &str) -> Option<Finding> {
+        let names: Vec<&str> = self.classes.iter().map(|c| c.name.as_str()).collect();
+        let message = format!(
+            "'{rel}' holds {count} top-level classes ({list}). A reader looking for one of them reads past the others, and the import path never states which class lives where. Move each class into a file named after it, so the import path states the class. A class with no methods may stay beside the class that uses it.",
+            count = names.len(),
+            list = name_list(&names),
+        );
         Some(Finding {
             logical_start: None,
             seam_members: Vec::new(),
@@ -195,57 +135,43 @@ impl ModuleShape {
             file: rel.to_string(),
             line: 0,
             function: String::new(),
-            kind: "large-module".into(),
+            kind: "several-classes".into(),
             severity: "warn".into(),
             message,
         })
     }
 
-    fn sections_message(&self, rel: &str) -> String {
-        format!(
-            "'{rel}' holds {definitions} top-level definitions in {count} titled sections — several concepts in one module. A change to one section sits among the others, and nothing in the file marks where it ends. The sections are {list}. Move each section into its own module beside this file, so each module's name states its concept.",
-            definitions = self.definitions,
-            count = self.sections.len(),
-            list = section_list(&self.sections),
-        )
-    }
-
-    fn families_message(&self, rel: &str) -> String {
-        format!(
-            "'{rel}' holds {definitions} top-level definitions whose names form {count} families — several concepts in one module. A change to one family's names sits among the others, and nothing in the file marks where it ends. The families are {list}. Move each family into its own module beside this file, so each module's name states its concept.",
-            definitions = self.definitions,
-            count = self.families.len(),
-            list = family_list(&self.families),
-        )
+    fn functions_finding(&self, rel: &str) -> Option<Finding> {
+        let message = format!(
+            "'{rel}' holds {count} top-level functions — more than {MANY_FUNCTIONS}, and each one carries the shared data in its parameters. A reader cannot see which functions touch the same data, so every call site re-states it. Find the domain concepts these functions operate on, and give each one a class: the functions become its methods.",
+            count = self.functions,
+        );
+        Some(Finding {
+            logical_start: None,
+            seam_members: Vec::new(),
+            col: 0,
+            file: rel.to_string(),
+            line: 0,
+            function: String::new(),
+            kind: "many-functions".into(),
+            severity: "warn".into(),
+            message,
+        })
     }
 }
 
-/// One finding per module that holds several concepts.
-pub fn large_module_findings(scans: &[(String, ModuleShape)]) -> Vec<Finding> {
+/// One finding per module that holds more definitions than its rules allow.
+pub fn module_findings(scans: &[(String, ModuleShape)]) -> Vec<Finding> {
     scans
         .iter()
-        .filter_map(|(rel, shape)| shape.large_module_finding(rel))
+        .filter_map(|(rel, shape)| shape.module_finding(rel))
         .collect()
 }
 
-fn section_list(sections: &[String]) -> String {
-    let shown: Vec<&str> = sections.iter().take(3).map(String::as_str).collect();
+fn name_list(names: &[&str]) -> String {
+    let shown: Vec<&str> = names.iter().take(3).copied().collect();
     let list = shown.join(", ");
-    match sections.len().saturating_sub(shown.len()) {
-        0 => list,
-        1 => format!("{list} and one more"),
-        more => format!("{list} and {more} more"),
-    }
-}
-
-fn family_list(families: &[(String, usize)]) -> String {
-    let shown: Vec<String> = families
-        .iter()
-        .take(3)
-        .map(|(word, count)| format!("{word} ({count} names)"))
-        .collect();
-    let list = shown.join(", ");
-    match families.len().saturating_sub(shown.len()) {
+    match names.len().saturating_sub(shown.len()) {
         0 => list,
         1 => format!("{list} and one more"),
         more => format!("{list} and {more} more"),
