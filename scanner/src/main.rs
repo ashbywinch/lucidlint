@@ -7360,18 +7360,56 @@ def two(work, batch):
     }
 
     #[test]
-    fn module_shape_rules_do_not_run_on_rust() {
-        // the messages are Python-shaped advice (a file per class, classes for
-        // free functions) — a Rust module keeps its own families
+    fn rust_types_arm_asks_for_a_directory_of_modules() {
+        // 12 structs, no fns: the types arm, and the action is a module split
         let mut src = String::new();
-        for i in 0..20 {
-            src.push_str(&format!(
-                "pub struct Widget{i};\n\npub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
-            ));
+        for i in 0..12 {
+            src.push_str(&format!("pub struct Widget{i} {{ size: u32 }}\n\nimpl Widget{i} {{\n    pub fn run(&self) -> u32 {{\n        self.size\n    }}\n}}\n\n"));
         }
         let rs = rustscan::scan_source(&src, "crate/src/widgets.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/widgets.rs");
         let f = checks::module_findings(&[("crate/src/widgets.rs".to_string(), scan.module_shape.clone())]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        let msg = &hits[0].message;
+        assert!(msg.contains("12 of them types"), "{msg}");
+        assert!(msg.contains("directory of modules"), "{msg}");
+        assert!(msg.contains("one file per type"), "{msg}");
+        assert!(!msg.contains("__init__.py"), "{msg}");
+    }
+
+    #[test]
+    fn rust_functions_arm_asks_for_an_impl() {
+        let mut src = String::new();
+        for i in 0..12 {
+            src.push_str(&format!(
+                "pub fn step_{i}(state: &mut State) -> u32 {{\n    state.count + {i}\n}}\n\n"
+            ));
+        }
+        src.push_str("pub struct State {\n    pub count: u32,\n}\n");
+        let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
+        let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
+        let f = checks::module_findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        let msg = &hits[0].message;
+        assert!(msg.contains("12 of them functions"), "{msg}");
+        assert!(msg.contains("give it an impl"), "{msg}");
+        assert!(!msg.contains("A script is not different"), "{msg}");
+        assert!(!msg.contains("directory of modules"), "{msg}");
+    }
+
+    #[test]
+    fn rust_record_exception_spares_a_type_and_its_records() {
+        // one type with an impl plus two plain records: one concept, no finding
+        let mut src = String::new();
+        for i in 0..2 {
+            src.push_str(&format!("pub struct Row{i} {{ pub size: u32 }}\n\n"));
+        }
+        src.push_str("pub struct Table {\n    pub rows: u32,\n}\n\nimpl Table {\n    pub fn rows(&self) -> u32 {\n        self.rows\n    }\n}\n");
+        let rs = rustscan::scan_source(&src, "crate/src/table.rs", true);
+        let scan = rustscan_to_filescan_ref(&rs, "crate/src/table.rs");
+        let f = checks::module_findings(&[("crate/src/table.rs".to_string(), scan.module_shape.clone())]);
         assert!(f.is_empty(), "{f:?}");
     }
 

@@ -149,16 +149,45 @@ binaries reports identical findings on houses and family-history-album (0 added,
 0 removed, before counting the new rules), and only line-number shifts plus the
 one fixed `complexity` finding differ on this repo.
 
+## Rust
+
+Rust counts the same definitions: top-level `fn`s are functions; `struct`,
+`enum`, `trait`, `trait alias`, `type` and `union` are the types; an `impl`
+block is not a definition — its methods are the type's, exactly as a class's
+methods are the class's; `const`/`static` are data and an inline `mod` is a
+container. The record exception reads the same way: a type with no `impl` is a
+record.
+
+With no decorator idiom for framework registration, the framework exemption is
+Python-only (`#[allow]`/`#[derive]` are on most Rust items, so attributes cannot
+mark an entry point).
+
+This repo carries 33 Rust modules; houses and album carry none, so the Rust arm
+is measured on one repo only:
+
+| file | definitions | arm | advice |
+|---|---|---|---|
+| `scanner/src/checks.rs` | 294 (272 functions) | functions | give the shared state an impl |
+| `scanner/src/rustscan.rs` | 70 (65 functions) | functions | same |
+| `scanner/src/fix.rs` | 51 (40 functions) | functions | same |
+| `scanner/src/main.rs` | 48 (36 functions) | functions | same |
+| `scanner/radonc/src/visitors.rs` | 9 (5 types) | types | a directory of modules |
+
+16 of the 33 Rust modules fire — including the four files this PR's split just
+created (`checks/shared_path.rs` 17, `checks/duplicate_expression.rs` 18,
+`checks/review_log.rs` 11, `checks/module_size.rs` 9). That is the strict rung
+meeting an architecture of free functions over `&mut ScanState`: the functions
+do share a state object, but Rust's borrow rules make methods on it harder than
+free functions, which is why the scan is written that way. **This is the one
+place the Rust advice needs a ruling**: exempt a Rust module whose functions
+already take a shared `&mut` receiver (the state has an owner, just not a
+`self`), or keep the finding and take the markers.
+
 ## Out of scope, deliberately
 
-- **Rust.** Both messages are Python-shaped advice ("a file per class", "make
-  the functions methods"), and Rust has no classes. `scanner/src/checks.rs` —
-  the file the issue started from — therefore does not fire these rules. A Rust
-  arm needs its own messages (a module per type? free functions into impls?)
-  and its own measurement; it is the obvious next round.
-- **A shared-base exemption**, which would spare the AST families and the
-  protocol registries above. It is a real rule ("classes over one base are one
-  family") but it is not this ruling.
+- **A shared-base exemption** for Python type families — it would spare the AST
+  families and protocol registries above. It is a real rule ("classes over one
+  base are one family") but it is not this ruling.
 - **The split of `checks.rs` itself**: the remaining eleven sections are rounds
   of their own.
 

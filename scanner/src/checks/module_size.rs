@@ -55,16 +55,27 @@ const GENERATED_MARKERS: &[&str] = &[
 /// where the objection comes from.
 const SCRIPT_DIRS: &[&str] = &["scripts", "tools", "bin"];
 
-/// One top-level class: its name and how many methods its own body defines.
-/// A class with no methods is a record — a value with a name, not a concept
-/// that owns behaviour.
+/// The language the module is written in — the advice differs (a Python class
+/// lives in a file, a Rust type in a module; a package has `__init__.py`, a
+/// directory module does not).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Language {
+    #[default]
+    Python,
+    Rust,
+}
+
+/// One top-level type: a class, or a Rust struct/enum/trait/union. `methods`
+/// counts the methods its own body (or its `impl` blocks) define. A type with
+/// no methods is a record — a value with a name, not a concept that owns
+/// behaviour.
 #[derive(Clone, Debug)]
-pub struct ClassShape {
+pub struct TypeShape {
     pub name: String,
     pub methods: usize,
 }
 
-impl ClassShape {
+impl TypeShape {
     fn is_record(&self) -> bool {
         self.methods == 0
     }
@@ -76,7 +87,8 @@ impl ClassShape {
 /// that holds it.
 #[derive(Clone, Debug, Default)]
 pub struct ModuleShape {
-    pub classes: Vec<ClassShape>,
+    pub language: Language,
+    pub classes: Vec<TypeShape>,
     /// Free functions the module owns: undecorated.
     pub functions: usize,
     /// Decorated functions: registered with a caller outside the module.
@@ -91,7 +103,7 @@ pub fn python_module_shape(source: &str, body: &[Stmt]) -> ModuleShape {
     let mut framework_functions = 0;
     for stmt in body {
         match stmt {
-            Stmt::ClassDef(class) => classes.push(ClassShape {
+            Stmt::ClassDef(class) => classes.push(TypeShape {
                 name: class.name.to_string(),
                 methods: class
                     .body
@@ -110,9 +122,24 @@ pub fn python_module_shape(source: &str, body: &[Stmt]) -> ModuleShape {
         }
     }
     ModuleShape {
+        language: Language::Python,
         classes,
         functions,
         framework_functions,
+        generated: is_generated(source),
+    }
+}
+
+/// Measure a Rust module from the counts its scan collected: the free `fn`s
+/// and the top-level types with the methods their `impl` blocks define. An
+/// `impl` block is not a definition of its own — its methods are the type's,
+/// exactly as a class's methods are the class's.
+pub fn rust_module_shape(source: &str, functions: usize, classes: Vec<TypeShape>) -> ModuleShape {
+    ModuleShape {
+        language: Language::Rust,
+        classes,
+        functions,
+        framework_functions: 0,
         generated: is_generated(source),
     }
 }
@@ -191,27 +218,79 @@ impl ModuleShape {
     fn classes_message(&self, rel: &str) -> String {
         let names: Vec<&str> = self.classes.iter().map(|c| c.name.as_str()).collect();
         format!(
-            "'{rel}' holds {count} top-level definitions, {classes} of them classes ({list}){framework}. A reader looking for one class reads past the rest, and the import path never states which class lives where. Turn the module into a package — one file per class inside it, each named after its class and re-exported from __init__.py — so the family keeps its name. A class with no methods may stay beside the class that uses it.",
+            "'{rel}' holds {count} top-level definitions, {types} of them {noun} ({list}){framework}. {reader}. {package} {record}",
             count = self.definitions(),
-            classes = names.len(),
+            types = names.len(),
+            noun = self.type_noun(),
             list = name_list(&names),
             framework = self.framework_clause(),
+            reader = self.reader_harm(),
+            package = self.package_action(),
+            record = self.record_exclusion(),
         )
     }
 
     fn functions_message(&self, rel: &str) -> String {
-        let script = if is_script(rel) {
+        let script = if self.language == Language::Python && is_script(rel) {
             " A script is not different: the steps it runs build one program state, and no name owns it."
         } else {
             ""
         };
         format!(
-            "'{rel}' holds {count} top-level definitions, {functions} of them functions{framework}. A free function owns no state, so the data the others share arrives as parameters and every call site re-states it.{script} Name the concept that data belongs to and make it a class: the data becomes its fields, and the functions become its methods.",
+            "'{rel}' holds {count} top-level definitions, {functions} of them functions{framework}. A free function owns no state, so the data the others share arrives as parameters and every call site re-states it.{script} {action}",
             count = self.definitions(),
             functions = self.functions,
             framework = self.framework_clause(),
             script = script,
+            action = self.functions_action(),
         )
+    }
+
+    fn type_noun(&self) -> &'static str {
+        match self.language {
+            Language::Python => "classes",
+            Language::Rust => "types",
+        }
+    }
+
+    fn reader_harm(&self) -> &'static str {
+        match self.language {
+            Language::Python => {
+                "A reader looking for one class reads past the rest, and the import path never states which class lives where."
+            }
+            Language::Rust => {
+                "A reader looking for one type reads past the rest, and the module path never states which type lives where."
+            }
+        }
+    }
+
+    fn package_action(&self) -> &'static str {
+        match self.language {
+            Language::Python => {
+                "Turn the module into a package — one file per class inside it, each named after its class and re-exported from __init__.py — so the family keeps its name."
+            }
+            Language::Rust => {
+                "Turn the module into a directory of modules — one file per type inside it, re-exported from the module root — so the family keeps its name."
+            }
+        }
+    }
+
+    fn functions_action(&self) -> &'static str {
+        match self.language {
+            Language::Python => {
+                "Name the concept that data belongs to and make it a class: the data becomes its fields, and the functions become its methods."
+            }
+            Language::Rust => {
+                "Name the type those functions operate on and give it an impl: the data becomes its fields, and the functions become its methods."
+            }
+        }
+    }
+
+    fn record_exclusion(&self) -> &'static str {
+        match self.language {
+            Language::Python => "A class with no methods may stay beside the class that uses it.",
+            Language::Rust => "A type with no impl may stay beside the type that uses it.",
+        }
     }
 
     /// The framework entry points, named as the rule's own exclusion rather

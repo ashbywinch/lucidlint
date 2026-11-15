@@ -30,7 +30,7 @@ mod review_log;
 mod shared_path;
 
 pub use duplicate_expression::{collect_duplicate_expressions, duplicate_expression_findings, ExpressionOccurrence};
-pub use module_size::{module_findings, python_module_shape, ModuleShape};
+pub use module_size::{module_findings, python_module_shape, rust_module_shape, ModuleShape, TypeShape};
 pub use review_log::{duplicate_block_findings, duplicate_def_findings, restating_docstring_findings};
 pub use shared_path::{collect_path_expressions, shared_path_findings, PathExpression};
 

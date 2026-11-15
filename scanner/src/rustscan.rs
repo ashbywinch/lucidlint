@@ -54,8 +54,7 @@ pub struct RustScan {
     pub mod_decls: Vec<(String, bool)>,
     /// Raw `use` paths ("crate::a::b", "super::x", "serde::Deserialize", ...).
     pub uses: Vec<String>,
-    /// The file's shape for the module-shape rules (#107). The class and
-    /// free-function rules are Python-only, so a Rust scan carries none.
+    /// The file's shape for the module-shape rules (#107).
     pub module_shape: crate::checks::ModuleShape,
     /// The file's parsed `lucidlint: ignore` suppressions — the orchestrator
     /// needs them to suppress the repo-wide families (duplicate/unused).
@@ -149,6 +148,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     state.findings.extend(no_assert_test_findings(&file, name));
     state.walk_file(&file);
     let mut scan = state.finish();
+    scan.module_shape = module_shape(&file, source);
     // G4: does the file hold magic-CANDIDATE literals anywhere — the fact
     // the stale magic-number message cites when the family fires nowhere.
     // Rust's only exemptions are the position rule, so the label set is
@@ -1128,6 +1128,52 @@ fn is_dbg_macro(path: &Path) -> bool {
 
 fn is_unwrap_expect(method: &Ident) -> bool {
     method == "unwrap" || method == "expect"
+}
+
+/// The file's shape for the module-shape rules (#107): the free `fn`s and the
+/// top-level types, each with the methods its `impl` blocks define. An `impl`
+/// block is not a definition of its own — its methods are the type's, exactly
+/// as a class's methods are the class's. `const`/`static` are data, and an
+/// inline `mod` is a container, so neither counts.
+fn module_shape(file: &File, source: &str) -> crate::checks::ModuleShape {
+    use crate::checks::TypeShape;
+    let mut functions = 0usize;
+    let mut types: Vec<TypeShape> = Vec::new();
+    for item in &file.items {
+        match item {
+            Item::Fn(_) => functions += 1,
+            Item::Struct(i) => types.push(TypeShape {
+                name: i.ident.to_string(),
+                methods: 0,
+            }),
+            Item::Enum(i) => types.push(TypeShape {
+                name: i.ident.to_string(),
+                methods: 0,
+            }),
+            Item::Union(i) => types.push(TypeShape {
+                name: i.ident.to_string(),
+                methods: 0,
+            }),
+            Item::Type(i) => types.push(TypeShape {
+                name: i.ident.to_string(),
+                methods: 0,
+            }),
+            Item::Trait(i) => types.push(TypeShape {
+                name: i.ident.to_string(),
+                methods: i.items.iter().filter(|t| matches!(t, syn::TraitItem::Fn(_))).count(),
+            }),
+            _ => {}
+        }
+    }
+    for item in &file.items {
+        let Item::Impl(block) = item else { continue };
+        let name = static_type_ident(&block.self_ty);
+        let methods = block.items.iter().filter(|i| matches!(i, ImplItem::Fn(_))).count();
+        if let Some(shape) = types.iter_mut().find(|t| t.name == name) {
+            shape.methods += methods;
+        }
+    }
+    crate::checks::rust_module_shape(source, functions, types)
 }
 
 /// The bare type ident of a static's type (peels reference/paren wrappers).

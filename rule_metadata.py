@@ -360,22 +360,25 @@ CATALOG = RuleCatalog([
          "a reader cannot hold the whole job: extract each domain step into a "
          "named function.",
          fix="extract-method"),
-    Rule("several-definitions", "warn", "architecture", "Python",
-         "A module holding 3–10 top-level definitions (functions and classes; "
-         "constants are data) — more than one concept's worth. The advice "
-         "follows what the definitions are: mostly classes → each class belongs "
-         "in a file named after it; mostly functions → the functions pass data "
-         "no object owns, so name the domain concepts and make them classes. "
-         "All but one class being a method-less value record is one concept "
-         "plus its records, and is exempt. The upper rung is "
-         "`many-definitions`, so a repo can disable this row and keep the 11+ "
-         "rule."),
-    Rule("many-definitions", "warn", "architecture", "Python",
+    Rule("several-definitions", "warn", "architecture", "Both",
+         "A module holding 3–10 top-level definitions (functions and classes or "
+         "Rust types; constants are data) — more than one concept's worth. The "
+         "advice follows what the definitions are: mostly classes/types → turn "
+         "the module into a package (Python) or a directory of modules (Rust), "
+         "one file each; mostly functions → the functions pass data no object "
+         "owns, so name the domain concepts and make them a class (Python) or a "
+         "type with an impl (Rust). All but one class/type being a method-less "
+         "value record is one concept plus its records, and is exempt; a "
+         "decorated Python function is a framework entry point, not a definition "
+         "the module owns. The upper rung is `many-definitions`, so a repo can "
+         "disable this row and keep the 11+ rule."),
+    Rule("many-definitions", "warn", "architecture", "Both",
          "A module holding more than 10 top-level definitions (functions and "
-         "classes) — the second rung of the `several-definitions` ladder, so a "
-         "repo that tolerates 3–10 definitions still holds a module to 11. "
-         "Same advice: mostly classes → a file per class; mostly functions → "
-         "name the domain concepts and make them classes."),
+         "classes or Rust types) — the second rung of the `several-definitions` "
+         "ladder, so a repo that tolerates 3–10 definitions still holds a module "
+         "to 11. Same advice: mostly classes/types → a package or directory of "
+         "modules; mostly functions → name the domain concepts and make them a "
+         "class (Python) or a type with an impl (Rust)."),
     Rule("closures", "fail", "architecture", "Both",
          "A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line "
          "span) — the nested structure is a class waiting to be extracted.",
