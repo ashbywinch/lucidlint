@@ -313,10 +313,7 @@ fn expression_key(expr: &Expr, source: &str, callee: bool, key: bool) -> String 
             all.extend(kwargs);
             format!("{func}({})", all.join(", "))
         }
-        Expr::StringLiteral(s) if key => {
-            let _ = s;
-            "<key>".to_string()
-        }
+        Expr::StringLiteral(_) if key => "<key>".to_string(),
         Expr::FString(f) => fstring_shape(f),
         Expr::StringLiteral(_)
         | Expr::BytesLiteral(_)
