@@ -72,8 +72,9 @@ _FINDING_PATTERNS: tuple = (
 
 def scanner_sources() -> list[Path]:
     """The scanner's own source — rules_gen.rs is generated FROM the
-    catalog, so scanning it for kinds would be circular."""
-    return sorted(p for p in (ROOT / "scanner" / "src").glob("*.rs") if p.name != "rules_gen.rs")
+    catalog, so scanning it for kinds would be circular. Recursive: the
+    families live in `src/` and in its concept submodules (`src/checks/`)."""
+    return sorted(p for p in (ROOT / "scanner" / "src").rglob("*.rs") if p.name != "rules_gen.rs")
 def _prod_text(src: Path) -> str:
     """The file's production code: everything before the first `#[cfg(test)]`
     module. Test fixtures construct Findings with stand-in kinds (the LSP

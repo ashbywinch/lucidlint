@@ -2019,7 +2019,7 @@ def test_every_emitted_kind_is_registered():
     arm silently failed to land)."""
     src_dir = Path(__file__).resolve().parent.parent / "scanner" / "src"
     emitted = set()
-    for f in sorted(src_dir.glob("*.rs")):
+    for f in sorted(src_dir.rglob("*.rs")):
         text = f.read_text()
         # test-fixture Finding structs live in #[cfg(test)] mods — their kind
         # strings are data, not emissions

@@ -40,7 +40,7 @@ def tails_of(src: str) -> list[str]:
 
 def test_python_finding_tails_name_python_fixable_kinds():
     offenders = []
-    for rs in sorted(SCANNER_SRC.glob("*.rs")):
+    for rs in sorted(SCANNER_SRC.rglob("*.rs")):
         if rs.name == "rustscan.rs":  # findings about .rs files: guarded below
             continue
         for kind in tails_of(rs.read_text()):
