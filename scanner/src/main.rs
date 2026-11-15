@@ -7119,10 +7119,12 @@ def two(work, batch):
     fn duplicate_expression_abstracts_the_key_a_helper_would_take() {
         let a = "import json\n\ndef a(store):\n    return json.dumps([json.loads(store.get(\"one\").read_text(encoding=\"utf-8\"))], indent=1, ensure_ascii=False) if store and store.exists() else {}\n";
         let b = "import json\n\ndef b(store):\n    return json.dumps([json.loads(store.get(\"two\").read_text(encoding=\"utf-8\"))], indent=1, ensure_ascii=False) if store and store.exists() else {}\n";
-        let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
+        let c = "import json\n\ndef c(store):\n    return json.dumps([json.loads(store.get(\"three\").read_text(encoding=\"utf-8\"))], indent=1, ensure_ascii=False) if store and store.exists() else {}\n";
+        let f = scan_corpus(&[("a.py", a), ("b.py", b), ("c.py", c)]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         assert!(hits[0].message.contains("read_text"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("one"), "{}", hits[0].message);
     }
 
     #[test]
