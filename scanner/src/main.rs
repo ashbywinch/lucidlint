@@ -135,6 +135,8 @@ struct ScanState<'a> {
     scattered: Vec<checks::ScatteredInstance>,
     /// Module-level path expressions — the shared-path family's raw material.
     path_expressions: Vec<checks::PathExpression>,
+    /// Substantive expressions — the duplicate-expression family's raw material.
+    duplicate_expressions: Vec<checks::ExpressionOccurrence>,
     /// Duplicate-module identities (#26) — modules + top-level classes with
     /// their structural skeletons and constant tokens.
     skeleton_modules: Vec<checks::SkeletonModule>,
@@ -286,6 +288,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
         match stmt {
             Stmt::FunctionDef(f) => {
                 let module_level = self.fn_stack.is_empty() && self.in_class == 0;
+                checks::collect_duplicate_expressions(self, f);
                 if module_level {
                     checks::collect_path_expressions(self, f);
                 }
@@ -1190,6 +1193,8 @@ pub struct FileScan {
     pub defs: Vec<(String, usize)>,
     pub class_defs: Vec<(String, usize)>,
     pub scattered: Vec<checks::ScatteredInstance>,
+    /// The file's substantive expressions (#104 duplicate-expression).
+    pub duplicate_expressions: Vec<checks::ExpressionOccurrence>,
     /// The file's module-level path expressions (#60 shared-path).
     pub path_expressions: Vec<checks::PathExpression>,
     pub setters: Vec<(String, usize)>,
@@ -1469,6 +1474,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         defs: state.defs,
         class_defs: state.class_defs,
         scattered: state.scattered,
+        duplicate_expressions: state.duplicate_expressions,
         path_expressions: state.path_expressions,
         setters: state.setters,
         refs: state.refs,
@@ -1674,6 +1680,16 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         &supps_by_rel,
         &supps_spent_by_rel,
     );
+    let duplicate_expr_scans: Vec<(String, Vec<checks::ExpressionOccurrence>)> = scans
+        .iter()
+        .map(|s| (s.rel_of(root_s), s.duplicate_expressions.clone()))
+        .collect();
+    reconcile_repo_wide(
+        &mut additions,
+        checks::duplicate_expression_findings(&duplicate_expr_scans),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
     let undecl_scans: Vec<UndeclScan> = scans
         .iter()
         .map(|s| UndeclScan {
@@ -1722,6 +1738,7 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         defs: Vec::new(),
         class_defs: Vec::new(),
         scattered: Vec::new(),
+        duplicate_expressions: Vec::new(),
         path_expressions: Vec::new(),
         setters: Vec::new(),
         refs: HashSet::new(),
@@ -2268,6 +2285,16 @@ fn main() {
     reconcile_repo_wide(
         &mut all_findings,
         checks::shared_path_findings(&path_scans),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
+    let duplicate_expr_scans: Vec<(String, Vec<checks::ExpressionOccurrence>)> = scans
+        .iter()
+        .map(|s| (rel_of(&s.file_name, &root), s.duplicate_expressions.clone()))
+        .collect();
+    reconcile_repo_wide(
+        &mut all_findings,
+        checks::duplicate_expression_findings(&duplicate_expr_scans),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -5172,6 +5199,7 @@ mod tests {
         let mut repo_methods = Vec::new();
         let mut scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> = Vec::new();
         let mut path_scans: Vec<(String, Vec<checks::PathExpression>)> = Vec::new();
+        let mut duplicate_expr_scans: Vec<(String, Vec<checks::ExpressionOccurrence>)> = Vec::new();
         let mut mm_classes: Vec<checks::MiddleManClass> = Vec::new();
         let mut mm_candidates: Vec<checks::MiddleManCandidate> = Vec::new();
         let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
@@ -5198,6 +5226,7 @@ mod tests {
             repo_methods.extend(scan.repo_methods.iter().cloned());
             scattered_scans.push((rel.clone(), scan.scattered.clone()));
             path_scans.push((rel.clone(), scan.path_expressions.clone()));
+            duplicate_expr_scans.push((rel.clone(), scan.duplicate_expressions.clone()));
             mm_classes.extend(scan.middle_man_classes.iter().cloned());
             mm_candidates.extend(scan.middle_man_candidates.iter().cloned());
             imports_by_rel.insert(name.to_string(), scan.imports.clone());
@@ -5242,6 +5271,12 @@ mod tests {
         reconcile_repo_wide(
             &mut all,
             checks::shared_path_findings(&path_scans),
+            &supps_by_rel,
+            &spent_by_rel,
+        );
+        reconcile_repo_wide(
+            &mut all,
+            checks::duplicate_expression_findings(&duplicate_expr_scans),
             &supps_by_rel,
             &spent_by_rel,
         );
@@ -6992,6 +7027,104 @@ def two(work, batch):
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "shared-path").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         assert!(!hits[0].message.contains("(work, batch)"), "{}", hits[0].message);
+    }
+
+    #[test]
+    fn duplicate_expression_names_a_helper() {
+        let a =
+            "SCALE = 2\n\ndef a(p):\n    return Rectangle(p.x0 * SCALE, p.y0 * SCALE, p.x1 * SCALE, p.y1 * SCALE)\n";
+        let b =
+            "SCALE = 2\n\ndef b(p):\n    return Rectangle(p.x0 * SCALE, p.y0 * SCALE, p.x1 * SCALE, p.y1 * SCALE)\n";
+        let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(
+            hits[0].message.contains("Rectangle(p.x0 * SCALE"),
+            "{}",
+            hits[0].message
+        );
+        assert!(hits[0].message.contains("helper"), "{}", hits[0].message);
+    }
+
+    #[test]
+    fn duplicate_expression_counts_two_occurrences_in_one_module() {
+        let src = "SCALE = 2\n\ndef a(one, two):\n    first = Rectangle(one.x0 * SCALE, one.y0 * SCALE, one.x1 * SCALE, one.y1 * SCALE)\n    second = Rectangle(two.x0 * SCALE, two.y0 * SCALE, two.x1 * SCALE, two.y1 * SCALE)\n    return first, second\n";
+        let f = scan_corpus(&[("a.py", src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_expression_ignores_one_step_reads_and_defaults() {
+        let a = "def a(row):\n    return row.get(\"value\") or \"\"\n";
+        let b = "def b(row):\n    return str(row.get(\"value\", \"\"))\n";
+        let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
+        assert!(!f.iter().any(|x| x.kind == "duplicate-expression"), "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_expression_reports_the_bound_expression_not_the_name() {
+        let a = "def a(x, y, z, w, v):\n    ok = x > 0 and y > 0 and z != \"\" and w < 10 and v is not None\n    return ok\n";
+        let b = "def b(x, y, z, w, v):\n    ok = x > 0 and y > 0 and z != \"\" and w < 10 and v is not None\n    return ok\n";
+        let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("x > 0 and y > 0"), "{}", hits[0].message);
+    }
+
+    #[test]
+    fn duplicate_expression_counts_a_multi_fact_condition() {
+        let a = "def a(order, user):\n    return order is not None and order.total > 0 and order.kind != \"draft\" and not user.locked\n";
+        let b = "def b(order, user):\n    return order is not None and order.total > 0 and order.kind != \"draft\" and not user.locked\n";
+        let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_expression_counts_a_filtered_comprehension() {
+        let a = "def a(items):\n    return [item for item in items if item.total > 0 and item.kind != \"draft\" and item.date is not None]\n";
+        let b = "def b(items):\n    return [item for item in items if item.total > 0 and item.kind != \"draft\" and item.date is not None]\n";
+        let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_expression_leaves_paths_to_shared_path() {
+        let a = "def a(work, batch):\n    return work / batch / \"ocr-guess\"\n";
+        let b = "def b(work, batch):\n    return work / batch / \"ocr-guess\"\n";
+        let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
+        assert!(!f.iter().any(|x| x.kind == "duplicate-expression"), "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_expression_ignores_bare_statement_calls() {
+        let a = "import logging\n\nlogger = logging.getLogger(__name__)\n\ndef a():\n    logger.info(\"one\")\n    logger.info(\"two\")\n";
+        let f = scan_corpus(&[("a.py", a)]);
+        assert!(!f.iter().any(|x| x.kind == "duplicate-expression"), "{f:?}");
+    }
+
+    #[test]
+    fn duplicate_expression_folds_a_subexpression_into_its_parent() {
+        let a = "SCALE = 2\n\ndef a(items):\n    return tuple([Rectangle(item.x0 * SCALE, item.y0 * SCALE, item.x1 * SCALE, item.y1 * SCALE) for item in items if item.visible])\n";
+        let b = "SCALE = 2\n\ndef b(items):\n    return tuple([Rectangle(item.x0 * SCALE, item.y0 * SCALE, item.x1 * SCALE, item.y1 * SCALE) for item in items if item.visible])\n";
+        let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("Rectangle"), "{}", hits[0].message);
+    }
+
+    #[test]
+    fn duplicate_expression_abstracts_the_key_a_helper_would_take() {
+        let a = "import json\n\ndef a(store):\n    return json.dumps([json.loads(store.get(\"one\").read_text(encoding=\"utf-8\"))], indent=1, ensure_ascii=False) if store and store.exists() else {}\n";
+        let b = "import json\n\ndef b(store):\n    return json.dumps([json.loads(store.get(\"two\").read_text(encoding=\"utf-8\"))], indent=1, ensure_ascii=False) if store and store.exists() else {}\n";
+        let c = "import json\n\ndef c(store):\n    return json.dumps([json.loads(store.get(\"three\").read_text(encoding=\"utf-8\"))], indent=1, ensure_ascii=False) if store and store.exists() else {}\n";
+        let f = scan_corpus(&[("a.py", a), ("b.py", b), ("c.py", c)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("read_text"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("one"), "{}", hits[0].message);
     }
 
     #[test]

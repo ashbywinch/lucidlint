@@ -492,6 +492,11 @@ class SourceFile:
     rel: str
 
 
+def _md_rels(stdout: str) -> tuple[str, ...]:
+    """The markdown paths in a NUL-separated git path list."""
+    return tuple(sorted(p for p in stdout.split("\0") if p.endswith(".md")))
+
+
 def _git_ignored_md(repo: Path) -> tuple[str, ...]:
     """The .md paths git itself reports as ignored — one `git ls-files` call,
     no filesystem walk. `--exclude-standard` honours .gitignore,
@@ -513,7 +518,7 @@ def _git_ignored_md(repo: Path) -> tuple[str, ...]:
         return ()
     if proc.returncode != 0:
         return ()
-    return tuple(sorted(p for p in proc.stdout.split("\0") if p.endswith(".md")))
+    return _md_rels(proc.stdout)
 
 
 def _repo_md_paths(repo: Path) -> tuple[str, ...]:
@@ -536,7 +541,7 @@ def _repo_md_paths(repo: Path) -> tuple[str, ...]:
         return ()
     if proc.returncode != 0:
         return ()
-    return tuple(sorted(p for p in proc.stdout.split("\0") if p.endswith(".md")))
+    return _md_rels(proc.stdout)
 
 
 def _gitignored_docs(repo: Path) -> tuple[str, ...]:
@@ -594,6 +599,15 @@ def _gitignored_docs(repo: Path) -> tuple[str, ...]:
     return tuple(sorted(ignored))
 
 
+def _rglob_sources(repo: Path) -> list[SourceFile]:
+    """The fallback source list when git is unavailable."""
+    return [
+        SourceFile(py, py.relative_to(repo).as_posix())
+        for py in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.rs")) + sorted(repo.rglob("*.md"))
+        if not any(_excluded_part(part) for part in py.parts)
+    ]
+
+
 def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
     """The repo's own .py and .rs files — git's answer, not an invented list.
 
@@ -629,11 +643,7 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
             # lucidlint: ignore swallow git missing or unrunnable — degrade to the rglob walk rather than crash
             except Exception as e:
                 log(f"git ls-files: {e}")
-        return [
-            SourceFile(py, py.relative_to(repo).as_posix())
-            for py in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.rs")) + sorted(repo.rglob("*.md"))
-            if not any(_excluded_part(part) for part in py.parts)
-        ]  # no git — certain: silent fallback
+        return _rglob_sources(repo)  # no git — certain: silent fallback
     try:
         r = _pygit2.Repository(str(repo))
         tracked = {e.path for e in r.index if e.path.endswith((".py", ".rs", ".md"))}
@@ -656,18 +666,10 @@ def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
         rels = sorted(r for r in (tracked | untracked) if not r.startswith("tests/fixtures/"))
         return [SourceFile(repo / rel, rel) for rel in rels]
     except KeyError:
-        return [
-            SourceFile(py, py.relative_to(repo).as_posix())
-            for py in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.rs")) + sorted(repo.rglob("*.md"))
-            if not any(_excluded_part(part) for part in py.parts)
-        ]  # not a git repo — certain: silent fallback
+        return _rglob_sources(repo)  # not a git repo — certain: silent fallback
     except Exception as e:
         log(f"file list: {e}")  # unexpected — show the actual error
-        return [
-            SourceFile(py, py.relative_to(repo).as_posix())
-            for py in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.rs")) + sorted(repo.rglob("*.md"))
-            if not any(_excluded_part(part) for part in py.parts)
-        ]
+        return _rglob_sources(repo)
 
 
 class RustFinding(NamedTuple):
@@ -1803,6 +1805,11 @@ class _LucidlintConfig:
     guidance: dict[str, str] = field(default_factory=dict)
 
 
+def _tracked_churn_path(path: str) -> bool:
+    """A source/doc path the churn scan counts."""
+    return path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/"))
+
+
 # lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
 # lucidlint: ignore-file record-shape a class per helper hop is ceremony
 # the domain's
@@ -1956,14 +1963,14 @@ class _GateRunner:
                     for patch in diff:
                         delta = patch.delta if patch is not None else None
                         path = delta.new_file.path if delta is not None else ""
-                        if path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/")):
+                        if _tracked_churn_path(path):
                             changed.add(path)
                 else:
                     # initial commit — diff against the empty tree gives every file
                     for patch in commit.tree.diff_to_tree():
                         delta = patch.delta if patch is not None else None
                         path = delta.new_file.path if delta is not None else ""
-                        if path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/")):
+                        if _tracked_churn_path(path):
                             changed.add(path)
                 for path in changed:
                     churn[path] += 1
