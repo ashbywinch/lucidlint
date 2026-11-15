@@ -1,30 +1,36 @@
-//! `several-classes` and `many-functions` (#107): a module holding more
-//! definitions than it should.
+//! `several-definitions` and `many-definitions` (#107): a module holding more
+//! top-level definitions than it should.
 //!
-//! Two rules, decided by what the definitions are:
+//! ONE ladder, two rules, disjoint ranges — exactly one fires:
 //!
-//! - **classes**: more than [`SEVERAL_CLASSES`] top-level classes means each
-//!   class belongs in a file named after it. A class with no methods is a
-//!   value record, and records may stay beside the one class that uses them.
-//! - **functions**: more than [`MANY_FUNCTIONS`] top-level functions means
-//!   the module has no object to own the data the functions pass around; the
-//!   reader names the domain concepts and makes them classes.
+//! - [`SEVERAL_DEFINITIONS`] < count <= [`MANY_DEFINITIONS`] fires
+//!   `several-definitions` (3–10 definitions).
+//! - count > [`MANY_DEFINITIONS`] fires `many-definitions` (11+).
 //!
-//! The class rule wins when a module holds classes: which file a class lives
-//! in is the first question, and the free functions are answered by that
-//! split. The measurement is in `docs/plans/plan-issue-107-large-module.md`.
+//! The split exists so a repo can set its policy: disable
+//! `several-definitions` and the module is judged only at 11+, or keep both
+//! and hold every module to three.
+//!
+//! The message branches on what the definitions ARE. A module whose
+//! definitions are mostly classes puts each class in a file named after it; a
+//! module whose definitions are mostly functions has no object to own the data
+//! they pass around, so the reader names the domain concepts and makes them
+//! classes. "All but one class are value records" is one concept plus its
+//! records, and is exempt.
+//!
+//! The measurement is in `docs/plans/plan-issue-107-module-shape.md`.
 
 use ruff_python_ast::Stmt;
 
 use crate::Finding;
 
-/// A module holding more classes than this has stopped saying where each one
-/// lives. Two is a pair (a class and the record it returns); three is a file.
-pub const SEVERAL_CLASSES: usize = 2;
+/// A module holding more top-level definitions than this has stopped being
+/// one concept: a class, a data table or a record may hold two, never three.
+pub const SEVERAL_DEFINITIONS: usize = 2;
 
-/// A module holding more free functions than this has a missing class: the
-/// data the functions pass around has no owner.
-pub const MANY_FUNCTIONS: usize = 10;
+/// Above this count the module is judged by the second rung of the ladder, so
+/// a repo can disable `several-definitions` and still hold files to 11.
+pub const MANY_DEFINITIONS: usize = 10;
 
 /// How many opening lines may carry a generator marker. Generators stamp the
 /// top of the file; a marker further down is prose about something else.
@@ -98,69 +104,90 @@ fn is_generated(source: &str) -> bool {
 }
 
 impl ModuleShape {
-    /// The finding for one module, when it holds more than it should. The
-    /// class rule answers first: a module with several classes needs a file
-    /// per class before its free functions need a home.
+    /// The module's top-level definitions: functions and classes. A constant
+    /// is a value the module holds, not a name that groups with others.
+    pub fn definitions(&self) -> usize {
+        self.classes.len() + self.functions
+    }
+
+    /// The finding for one module, when it holds more than its rung allows.
+    /// The rungs are disjoint: 3–10 is `several-definitions`, 11+ is
+    /// `many-definitions`, so one module never reports both.
     pub fn module_finding(&self, rel: &str) -> Option<Finding> {
-        if self.generated {
+        let count = self.definitions();
+        if self.generated || count <= SEVERAL_DEFINITIONS {
             return None;
         }
-        if self.several_classes() {
-            return self.classes_finding(rel);
+        if count > MANY_DEFINITIONS {
+            self.many_finding(rel)
+        } else {
+            self.several_finding(rel)
         }
-        if self.functions > MANY_FUNCTIONS {
-            return self.functions_finding(rel);
-        }
-        None
     }
 
-    /// More than two classes, and more than one of them carries behaviour —
-    /// "all but one are records" is a class and its value types, which is one
-    /// concept in one file.
-    fn several_classes(&self) -> bool {
-        self.classes.len() > SEVERAL_CLASSES && self.classes.iter().filter(|c| !c.is_record()).count() > 1
+    /// What the definitions ARE decides the message: classes get a file each,
+    /// free functions get the class they are missing.
+    fn many_finding(&self, rel: &str) -> Option<Finding> {
+        if self.classes_dominate() {
+            Some(self.finding("many-definitions", "warn", rel, self.classes_message(rel)))
+        } else if self.functions > 0 {
+            Some(self.finding("many-definitions", "warn", rel, self.functions_message(rel)))
+        } else {
+            None
+        }
     }
 
-    fn classes_finding(&self, rel: &str) -> Option<Finding> {
+    fn several_finding(&self, rel: &str) -> Option<Finding> {
+        if self.classes_dominate() {
+            Some(self.finding("several-definitions", "warn", rel, self.classes_message(rel)))
+        } else if self.functions > 0 {
+            Some(self.finding("several-definitions", "warn", rel, self.functions_message(rel)))
+        } else {
+            None
+        }
+    }
+
+    /// The classes arm applies when classes are the bulk of the definitions
+    /// AND more than one of them carries behaviour. "All but one are records"
+    /// is one class plus its value types: one concept, no finding.
+    fn classes_dominate(&self) -> bool {
+        self.classes.len() > self.functions && self.classes.iter().filter(|c| !c.is_record()).count() > 1
+    }
+
+    fn classes_message(&self, rel: &str) -> String {
         let names: Vec<&str> = self.classes.iter().map(|c| c.name.as_str()).collect();
-        let message = format!(
-            "'{rel}' holds {count} top-level classes ({list}). A reader looking for one of them reads past the others, and the import path never states which class lives where. Move each class into a file named after it, so the import path states the class. A class with no methods may stay beside the class that uses it.",
-            count = names.len(),
+        format!(
+            "'{rel}' holds {count} top-level definitions, {classes} of them classes ({list}). A reader looking for one class reads past the others, and the import path never states which class lives where. Move each class into a file named after it, so the import path states the class. A class with no methods may stay beside the class that uses it.",
+            count = self.definitions(),
+            classes = names.len(),
             list = name_list(&names),
-        );
-        Some(Finding {
-            logical_start: None,
-            seam_members: Vec::new(),
-            col: 0,
-            file: rel.to_string(),
-            line: 0,
-            function: String::new(),
-            kind: "several-classes".into(),
-            severity: "warn".into(),
-            message,
-        })
+        )
     }
 
-    fn functions_finding(&self, rel: &str) -> Option<Finding> {
-        let message = format!(
-            "'{rel}' holds {count} top-level functions — more than {MANY_FUNCTIONS}, and each one carries the shared data in its parameters. A reader cannot see which functions touch the same data, so every call site re-states it. Find the domain concepts these functions operate on, and give each one a class: the functions become its methods.",
-            count = self.functions,
-        );
-        Some(Finding {
+    fn functions_message(&self, rel: &str) -> String {
+        format!(
+            "'{rel}' holds {count} top-level definitions, {functions} of them functions. The functions pass the same data between their parameters, and no object owns it, so every call site re-states the shape. Find the domain concepts these functions operate on, and give each one a class: the functions become its methods.",
+            count = self.definitions(),
+            functions = self.functions,
+        )
+    }
+
+    fn finding(&self, kind: &str, severity: &str, rel: &str, message: String) -> Finding {
+        Finding {
             logical_start: None,
             seam_members: Vec::new(),
             col: 0,
             file: rel.to_string(),
             line: 0,
             function: String::new(),
-            kind: "many-functions".into(),
-            severity: "warn".into(),
+            kind: kind.to_string(),
+            severity: severity.to_string(),
             message,
-        })
+        }
     }
 }
 
-/// One finding per module that holds more definitions than its rules allow.
+/// One finding per module that holds more definitions than its rung allows.
 pub fn module_findings(scans: &[(String, ModuleShape)]) -> Vec<Finding> {
     scans
         .iter()

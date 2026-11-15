@@ -360,17 +360,22 @@ CATALOG = RuleCatalog([
          "a reader cannot hold the whole job: extract each domain step into a "
          "named function.",
          fix="extract-method"),
-    Rule("several-classes", "warn", "architecture", "Python",
-         "A module holding > 2 top-level classes (and more than one of them "
-         "defining a method) — each class belongs in a file named after it, so "
-         "the import path states which class lives where. A class with no "
-         "methods is a value record and may stay beside the one class that uses "
-         "it."),
-    Rule("many-functions", "warn", "architecture", "Python",
-         "A module holding > 10 top-level functions — the functions pass the "
-         "same data between their parameters and no object owns it, so every "
-         "call site re-states the shape. Name the domain concepts they operate "
-         "on and make each one a class whose methods they become."),
+    Rule("several-definitions", "warn", "architecture", "Python",
+         "A module holding 3–10 top-level definitions (functions and classes; "
+         "constants are data) — more than one concept's worth. The advice "
+         "follows what the definitions are: mostly classes → each class belongs "
+         "in a file named after it; mostly functions → the functions pass data "
+         "no object owns, so name the domain concepts and make them classes. "
+         "All but one class being a method-less value record is one concept "
+         "plus its records, and is exempt. The upper rung is "
+         "`many-definitions`, so a repo can disable this row and keep the 11+ "
+         "rule."),
+    Rule("many-definitions", "warn", "architecture", "Python",
+         "A module holding more than 10 top-level definitions (functions and "
+         "classes) — the second rung of the `several-definitions` ladder, so a "
+         "repo that tolerates 3–10 definitions still holds a module to 11. "
+         "Same advice: mostly classes → a file per class; mostly functions → "
+         "name the domain concepts and make them classes."),
     Rule("closures", "fail", "architecture", "Both",
          "A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line "
          "span) — the nested structure is a class waiting to be extracted.",
