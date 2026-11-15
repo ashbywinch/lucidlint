@@ -1197,6 +1197,8 @@ pub struct FileScan {
     pub duplicate_expressions: Vec<checks::ExpressionOccurrence>,
     /// The file's module-level path expressions (#60 shared-path).
     pub path_expressions: Vec<checks::PathExpression>,
+    /// The file's size and concept groups (#107 large-module).
+    pub module_shape: checks::ModuleShape,
     pub setters: Vec<(String, usize)>,
     pub refs: HashSet<String>,
     pub strings: Vec<String>,
@@ -1476,6 +1478,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         scattered: state.scattered,
         duplicate_expressions: state.duplicate_expressions,
         path_expressions: state.path_expressions,
+        module_shape: checks::module_shape(name, source, &checks::python_item_names(&body)),
         setters: state.setters,
         refs: state.refs,
         strings: state.strings,
@@ -1690,6 +1693,16 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         &supps_by_rel,
         &supps_spent_by_rel,
     );
+    let module_shapes: Vec<(String, checks::ModuleShape)> = scans
+        .iter()
+        .map(|s| (s.rel_of(root_s), s.module_shape.clone()))
+        .collect();
+    reconcile_repo_wide(
+        &mut additions,
+        checks::large_module_findings(&module_shapes),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
     let undecl_scans: Vec<UndeclScan> = scans
         .iter()
         .map(|s| UndeclScan {
@@ -1740,6 +1753,7 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         scattered: Vec::new(),
         duplicate_expressions: Vec::new(),
         path_expressions: Vec::new(),
+        module_shape: rs.module_shape.clone(),
         setters: Vec::new(),
         refs: HashSet::new(),
         strings: Vec::new(),
@@ -2295,6 +2309,17 @@ fn main() {
     reconcile_repo_wide(
         &mut all_findings,
         checks::duplicate_expression_findings(&duplicate_expr_scans),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
+    // large-module: the file's own shape, measured where the parser held it
+    let module_shapes: Vec<(String, checks::ModuleShape)> = scans
+        .iter()
+        .map(|s| (rel_of(&s.file_name, &root), s.module_shape.clone()))
+        .collect();
+    reconcile_repo_wide(
+        &mut all_findings,
+        checks::large_module_findings(&module_shapes),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -5200,6 +5225,7 @@ mod tests {
         let mut scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> = Vec::new();
         let mut path_scans: Vec<(String, Vec<checks::PathExpression>)> = Vec::new();
         let mut duplicate_expr_scans: Vec<(String, Vec<checks::ExpressionOccurrence>)> = Vec::new();
+        let mut module_shapes: Vec<(String, checks::ModuleShape)> = Vec::new();
         let mut mm_classes: Vec<checks::MiddleManClass> = Vec::new();
         let mut mm_candidates: Vec<checks::MiddleManCandidate> = Vec::new();
         let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
@@ -5227,6 +5253,7 @@ mod tests {
             scattered_scans.push((rel.clone(), scan.scattered.clone()));
             path_scans.push((rel.clone(), scan.path_expressions.clone()));
             duplicate_expr_scans.push((rel.clone(), scan.duplicate_expressions.clone()));
+            module_shapes.push((rel.clone(), scan.module_shape.clone()));
             mm_classes.extend(scan.middle_man_classes.iter().cloned());
             mm_candidates.extend(scan.middle_man_candidates.iter().cloned());
             imports_by_rel.insert(name.to_string(), scan.imports.clone());
@@ -5277,6 +5304,12 @@ mod tests {
         reconcile_repo_wide(
             &mut all,
             checks::duplicate_expression_findings(&duplicate_expr_scans),
+            &supps_by_rel,
+            &spent_by_rel,
+        );
+        reconcile_repo_wide(
+            &mut all,
+            checks::large_module_findings(&module_shapes),
             &supps_by_rel,
             &spent_by_rel,
         );
@@ -7125,6 +7158,190 @@ def two(work, batch):
         assert_eq!(hits.len(), 1, "{f:?}");
         assert!(hits[0].message.contains("read_text"), "{}", hits[0].message);
         assert!(hits[0].message.contains("one"), "{}", hits[0].message);
+    }
+
+    /// A synthetic module: `per` top-level functions per family, each with a
+    /// body long enough to clear the module floor at three families.
+    fn large_module_source(families: &[&str], per: usize) -> String {
+        let mut src = String::new();
+        for family in families {
+            for i in 0..per {
+                src.push_str(&format!(
+                    "def {family}_{i}(value):\n    first = value + {i}\n    second = first * 2\n    return second\n\n"
+                ));
+            }
+        }
+        src
+    }
+
+    #[test]
+    fn large_module_names_the_families_and_the_split() {
+        let src = large_module_source(&["payload", "matrix", "grid"], 60);
+        let f = scan_corpus(&[("pkg/big.py", &src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "large-module").collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "{:?}",
+            hits.iter().map(|h| &h.message).collect::<Vec<_>>()
+        );
+        let msg = &hits[0].message;
+        assert!(msg.contains("several concepts"), "{msg}");
+        assert!(msg.contains("payload"), "{msg}");
+        assert!(msg.contains("matrix"), "{msg}");
+        assert!(msg.contains("grid"), "{msg}");
+        assert!(msg.contains("module beside this file"), "{msg}");
+        assert_eq!(hits[0].file, "pkg/big.py");
+    }
+
+    #[test]
+    fn large_module_passes_a_long_single_concept_module() {
+        // one family, however long: a data module or a table is one concept
+        let src = large_module_source(&["rate"], 200);
+        let f = scan_corpus(&[("pkg/rates.py", &src)]);
+        assert!(!f.iter().any(|x| x.kind == "large-module"), "{f:?}");
+    }
+
+    #[test]
+    fn large_module_passes_a_generated_module() {
+        // several families, but a generated file is one concept by construction
+        let body = large_module_source(&["payload", "matrix", "grid"], 60);
+        let src = format!("# generated by tools/gen_tables.py — do not edit\n{body}");
+        let f = scan_corpus(&[("pkg/tables.py", &src)]);
+        assert!(!f.iter().any(|x| x.kind == "large-module"), "{f:?}");
+    }
+
+    #[test]
+    fn large_module_names_the_titled_sections() {
+        let mut src = String::new();
+        // one name family, four titled sections: the sections are the concepts
+        for (i, title) in ["rates", "taxes", "totals", "bands"].iter().enumerate() {
+            src.push_str(&format!("# ---------------- {title}\n"));
+            for j in 0..60 {
+                src.push_str(&format!(
+                    "def rate_{i}_{j}(value):\n    first = value + {j}\n    second = first * 2\n    return second\n\n"
+                ));
+            }
+        }
+        let f = scan_corpus(&[("pkg/fares.py", &src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "large-module").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        let msg = &hits[0].message;
+        assert!(msg.contains("titled sections"), "{msg}");
+        assert!(msg.contains("rates") && msg.contains("taxes"), "{msg}");
+    }
+
+    #[test]
+    fn large_module_stays_silent_below_the_floor() {
+        // several families, only ~180 lines: a short file is not this finding
+        let src = large_module_source(&["payload", "matrix", "grid"], 12);
+        let f = scan_corpus(&[("pkg/small.py", &src)]);
+        assert!(!f.iter().any(|x| x.kind == "large-module"), "{f:?}");
+    }
+
+    #[test]
+    fn large_module_reads_a_rust_module() {
+        let mut src = String::new();
+        for family in ["payload", "matrix", "grid"] {
+            for i in 0..60 {
+                src.push_str(&format!(
+                    "pub fn {family}_{i}(value: u32) -> u32 {{\n    let first = value + {i};\n    let second = first * 2;\n    second\n}}\n\n"
+                ));
+            }
+        }
+        let rs = rustscan::scan_source(&src, "crate/src/big.rs", true);
+        let scan = rustscan_to_filescan_ref(&rs, "crate/src/big.rs");
+        let f = checks::large_module_findings(&[("crate/src/big.rs".to_string(), scan.module_shape.clone())]);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].message.contains("payload"), "{}", f[0].message);
+        // and the one-family Rust module passes
+        let mut one = String::new();
+        for i in 0..200 {
+            one.push_str(&format!(
+                "pub fn rate_{i}(value: u32) -> u32 {{\n    let first = value + {i};\n    let second = first * 2;\n    second\n}}\n\n"
+            ));
+        }
+        let rs = rustscan::scan_source(&one, "crate/src/rates.rs", true);
+        let scan = rustscan_to_filescan_ref(&rs, "crate/src/rates.rs");
+        let quiet = checks::large_module_findings(&[("crate/src/rates.rs".to_string(), scan.module_shape.clone())]);
+        assert!(quiet.is_empty(), "{quiet:?}");
+    }
+
+    #[test]
+    fn large_module_counts_classes_and_constants_as_top_level_names() {
+        let src = "class PayloadRow:\n    pass\n\nPAYLOAD_ROWS = 3\n\nPAYLOAD_LIMIT: int = 4\n";
+        let parsed = parse_module(src).unwrap();
+        let names = checks::python_item_names(&parsed.syntax().body);
+        assert_eq!(names, ["PayloadRow", "PAYLOAD_ROWS", "PAYLOAD_LIMIT"]);
+        let shape = checks::module_shape("pkg/x.py", src, &names);
+        assert_eq!(shape.items, 3);
+        assert_eq!(shape.families, [("payload".to_string(), 3)]);
+        assert!(!shape.generated);
+    }
+
+    #[test]
+    fn large_module_reads_only_titled_sections() {
+        let src = "# ----------\n// TODO: tidy\n# --- x\n// ==== real title ====\ndef only_one():\n    pass\n";
+        let shape = checks::module_shape("pkg/x.py", src, &["only_one".to_string()]);
+        assert_eq!(shape.sections, ["real title"]);
+        assert!(shape.large_module_finding("pkg/x.py").is_none());
+    }
+
+    #[test]
+    fn large_module_lists_the_groups_and_counts_the_rest() {
+        let shape_with = |sections: &[&str], families: &[(&str, usize)]| checks::ModuleShape {
+            lines: 900,
+            items: 20,
+            sections: sections.iter().map(|s| (*s).to_string()).collect(),
+            families: families.iter().map(|(w, c)| ((*w).to_string(), *c)).collect(),
+            generated: false,
+        };
+        let three = shape_with(&["rates", "taxes", "totals"], &[]);
+        assert!(three
+            .large_module_finding("x.py")
+            .unwrap()
+            .message
+            .contains("rates, taxes, totals."));
+        let four = shape_with(&["rates", "taxes", "totals", "bands"], &[]);
+        assert!(four
+            .large_module_finding("x.py")
+            .unwrap()
+            .message
+            .contains("totals and one more"));
+        let six = shape_with(&["rates", "taxes", "totals", "bands", "zones", "fares"], &[]);
+        assert!(six
+            .large_module_finding("x.py")
+            .unwrap()
+            .message
+            .contains("totals and 3 more"));
+        let families = shape_with(&[], &[("payload", 9), ("matrix", 6), ("grid", 4)]);
+        assert!(families
+            .large_module_finding("x.py")
+            .unwrap()
+            .message
+            .contains("payload (9 names), matrix (6 names), grid (4 names)."));
+        let more = shape_with(&[], &[("payload", 9), ("matrix", 6), ("grid", 4), ("fare", 3)]);
+        assert!(more
+            .large_module_finding("x.py")
+            .unwrap()
+            .message
+            .contains("grid (4 names) and one more"));
+        let many = shape_with(
+            &[],
+            &[
+                ("payload", 9),
+                ("matrix", 6),
+                ("grid", 4),
+                ("fare", 3),
+                ("zone", 3),
+                ("band", 3),
+            ],
+        );
+        assert!(many
+            .large_module_finding("x.py")
+            .unwrap()
+            .message
+            .contains("grid (4 names) and 3 more"));
     }
 
     #[test]

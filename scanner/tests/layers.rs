@@ -21,6 +21,10 @@ fn scan_core_modules_do_not_depend_on_each_other() {
             "checks/duplicate_expression.rs",
             &["crate::graph_families", "crate::docs", "crate::lsp"],
         ),
+        (
+            "checks/module_size.rs",
+            &["crate::graph_families", "crate::docs", "crate::lsp"],
+        ),
         ("graph_families.rs", &["crate::checks", "crate::docs", "crate::lsp"]),
         ("docs.rs", &["crate::checks", "crate::graph_families", "crate::lsp"]),
         ("lsp.rs", &["crate::checks", "crate::graph_families", "crate::docs"]),
