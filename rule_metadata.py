@@ -417,6 +417,12 @@ CATALOG = RuleCatalog([
          "parameter pair, or give it one constant/module home when they do "
          "not.",
          display_name="shared-path → latent-class", display_group="latent-class"),
+    Rule("duplicate-expression", "warn", "architecture", "Python",
+         "The same expression — two or more meaningful steps, with key "
+         "literals abstracted — occurs more than once in production Python "
+         "(any files, any functions). It is one idea with no name: make one "
+         "helper, predicate, or type alias.",
+         display_name="duplicate-expression"),
     Rule("feature-envy", "fail", "architecture", "Python",
          "A method reads another object's fields more than its own state — "
          "the logic belongs on that object (feature envy); move the "
