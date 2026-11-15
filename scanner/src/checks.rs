@@ -4768,6 +4768,8 @@ fn call_name(call: &ExprCall) -> &str {
 /// call chain, >=2 modules, >=3 uses) kept one-step reads and missed the
 /// complex duplicates that live in two modules. Substance is the floor;
 /// frequency is not a gate: any two occurrences, in any files or functions.
+/// The node floor keeps a one-liner (`json.loads(path.read_text())`) out;
+/// the target is the expression complex enough that a name states something.
 fn expression_is_substantive(expr: &Expr) -> bool {
     use ruff_python_ast::visitor::source_order::{walk_expr, SourceOrderVisitor};
     struct Steps {
@@ -4818,9 +4820,10 @@ fn expression_is_substantive(expr: &Expr) -> bool {
     }
     let mut steps = Steps { calls: 0, logic: 0 };
     steps.visit_expr(expr);
-    steps.calls >= 2
+    let substantive = steps.calls >= 2
         || steps.logic >= 2
-        || (steps.calls >= 1 && steps.logic >= 1 && !matches!(expr, Expr::BoolOp(_) | Expr::If(_)))
+        || (steps.calls >= 1 && steps.logic >= 1 && !matches!(expr, Expr::BoolOp(_) | Expr::If(_)));
+    substantive && expr_node_count(expr) >= 15
 }
 
 fn expr_node_count(expr: &Expr) -> usize {

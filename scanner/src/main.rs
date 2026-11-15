@@ -7031,13 +7031,15 @@ def two(work, batch):
 
     #[test]
     fn duplicate_expression_names_a_helper() {
-        let a = "import json\n\ndef a(path):\n    return json.loads(path.read_text())\n";
-        let b = "import json\n\ndef b(path):\n    return json.loads(path.read_text())\n";
+        let a =
+            "SCALE = 2\n\ndef a(p):\n    return Rectangle(p.x0 * SCALE, p.y0 * SCALE, p.x1 * SCALE, p.y1 * SCALE)\n";
+        let b =
+            "SCALE = 2\n\ndef b(p):\n    return Rectangle(p.x0 * SCALE, p.y0 * SCALE, p.x1 * SCALE, p.y1 * SCALE)\n";
         let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         assert!(
-            hits[0].message.contains("json.loads(path.read_text())"),
+            hits[0].message.contains("Rectangle(p.x0 * SCALE"),
             "{}",
             hits[0].message
         );
@@ -7046,7 +7048,7 @@ def two(work, batch):
 
     #[test]
     fn duplicate_expression_counts_two_occurrences_in_one_module() {
-        let src = "import json\n\ndef a(one, two):\n    first = json.loads(one.read_text())\n    second = json.loads(two.read_text())\n    return first, second\n";
+        let src = "SCALE = 2\n\ndef a(one, two):\n    first = Rectangle(one.x0 * SCALE, one.y0 * SCALE, one.x1 * SCALE, one.y1 * SCALE)\n    second = Rectangle(two.x0 * SCALE, two.y0 * SCALE, two.x1 * SCALE, two.y1 * SCALE)\n    return first, second\n";
         let f = scan_corpus(&[("a.py", src)]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
@@ -7062,8 +7064,8 @@ def two(work, batch):
 
     #[test]
     fn duplicate_expression_reports_the_bound_expression_not_the_name() {
-        let a = "def a(x, y):\n    ok = x > 0 and y > 0\n    return ok\n";
-        let b = "def b(x, y):\n    ok = x > 0 and y > 0\n    return ok\n";
+        let a = "def a(x, y, z, w, v):\n    ok = x > 0 and y > 0 and z != \"\" and w < 10 and v is not None\n    return ok\n";
+        let b = "def b(x, y, z, w, v):\n    ok = x > 0 and y > 0 and z != \"\" and w < 10 and v is not None\n    return ok\n";
         let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
@@ -7072,8 +7074,8 @@ def two(work, batch):
 
     #[test]
     fn duplicate_expression_counts_a_multi_fact_condition() {
-        let a = "def a(order, user):\n    return order is not None and order.total > 0 and not user.locked\n";
-        let b = "def b(order, user):\n    return order is not None and order.total > 0 and not user.locked\n";
+        let a = "def a(order, user):\n    return order is not None and order.total > 0 and order.kind != \"draft\" and not user.locked\n";
+        let b = "def b(order, user):\n    return order is not None and order.total > 0 and order.kind != \"draft\" and not user.locked\n";
         let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
@@ -7081,8 +7083,8 @@ def two(work, batch):
 
     #[test]
     fn duplicate_expression_counts_a_filtered_comprehension() {
-        let a = "def a(items):\n    return [item for item in items if item.total > 0]\n";
-        let b = "def b(items):\n    return [item for item in items if item.total > 0]\n";
+        let a = "def a(items):\n    return [item for item in items if item.total > 0 and item.kind != \"draft\" and item.date is not None]\n";
+        let b = "def b(items):\n    return [item for item in items if item.total > 0 and item.kind != \"draft\" and item.date is not None]\n";
         let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
@@ -7105,22 +7107,22 @@ def two(work, batch):
 
     #[test]
     fn duplicate_expression_folds_a_subexpression_into_its_parent() {
-        let a = "import hashlib\n\ndef a(path):\n    return hashlib.sha256(path.read_bytes()).hexdigest()\n";
-        let b = "import hashlib\n\ndef b(path):\n    return hashlib.sha256(path.read_bytes()).hexdigest()\n";
+        let a = "SCALE = 2\n\ndef a(items):\n    return tuple([Rectangle(item.x0 * SCALE, item.y0 * SCALE, item.x1 * SCALE, item.y1 * SCALE) for item in items if item.visible])\n";
+        let b = "SCALE = 2\n\ndef b(items):\n    return tuple([Rectangle(item.x0 * SCALE, item.y0 * SCALE, item.x1 * SCALE, item.y1 * SCALE) for item in items if item.visible])\n";
         let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
-        assert!(hits[0].message.contains("hexdigest()"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("Rectangle"), "{}", hits[0].message);
     }
 
     #[test]
     fn duplicate_expression_abstracts_the_key_a_helper_would_take() {
-        let a = "def a(store):\n    return store.get(\"one\").read_text()\n";
-        let b = "def b(store):\n    return store.get(\"two\").read_text()\n";
+        let a = "import json\n\ndef a(store):\n    return json.dumps([json.loads(store.get(\"one\").read_text(encoding=\"utf-8\"))], indent=1, ensure_ascii=False) if store and store.exists() else {}\n";
+        let b = "import json\n\ndef b(store):\n    return json.dumps([json.loads(store.get(\"two\").read_text(encoding=\"utf-8\"))], indent=1, ensure_ascii=False) if store and store.exists() else {}\n";
         let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
-        assert!(hits[0].message.contains("read_text()"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("read_text"), "{}", hits[0].message);
     }
 
     #[test]

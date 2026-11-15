@@ -44,6 +44,39 @@ def _as_node(node: object) -> cst.CSTNode:
     return node
 
 
+def _non_receiver_param_names(params: Sequence[cst.Param]) -> list[str]:
+    """The parameter names a moved method carries, without `self`/`cls`."""
+    return [p.name.value for p in params if p.name.value not in ("self", "cls")]
+
+
+def _module_contains(module: cst.Module, fn: cst.FunctionDef | None) -> bool:
+    """Is the function still a direct child of the module?"""
+    return fn is not None and any(s is fn for s in module.body)
+
+
+def _self_attr_target(name: str) -> list[cst.AssignTarget]:
+    """The `self.<name>` assignment target a record constructor stores."""
+    return [cst.AssignTarget(cst.Attribute(cst.Name("self"), cst.Name(name)))]
+
+
+def _for_index_at_line(metadata: cst.CSTTransformer, stmts: list[cst.BaseStatement], line: int) -> int | None:
+    """The index of the `for` statement at the given source line."""
+    return next(
+        (
+            i
+            for i, s in enumerate(stmts)
+            if isinstance(s, cst.For)
+            and _as_range(metadata.get_metadata(PositionProvider, s)).start.line == line
+        ),
+        None,
+    )
+
+
+def _module_parts(rel: str) -> list[str]:
+    """A module's import path: its directory parts plus the stem."""
+    return rel.split("/")[:-1] + [rel.rsplit("/", 1)[-1][:-3]]
+
+
 MECHANICAL_KINDS = {
     "stale-suppression": "delete the stale lucidlint: ignore comment",
     "noop-statement": "delete the dead statement",
@@ -561,7 +594,7 @@ class _FixRequest:
             (d_rel, d_cls, d_method)
             for d_rel, d_cls, d_method in _methods_named(self.repo, n_name)
             if d_cls.name.value != head.class_name
-            and [p.name.value for p in d_method.params.params if p.name.value not in ("self", "cls")]
+            and _non_receiver_param_names(d_method.params.params)
             == arg_params
         ]
         if len(matches) != 1:
@@ -843,7 +876,7 @@ class _FixRequest:
         finder = _FindFnLine(line)
         wrapper.visit(finder)
         fn = finder.found
-        if fn is None or not any(s is fn for s in wrapper.module.body):
+        if fn is None or not _module_contains(wrapper.module, fn):
             return None
         body = list(fn.body.body)
         shaped = _dispatch_chain_shape(fn, body)
@@ -874,7 +907,7 @@ class _FixRequest:
         finder = _FindFnLine(line)
         wrapper.visit(finder)
         fn = finder.found
-        if fn is None or not any(s is fn for s in wrapper.module.body):
+        if fn is None or not _module_contains(wrapper.module, fn):
             return None
         body = list(fn.body.body)
         shaped = _rule_battery_shape(fn, body)
@@ -1593,7 +1626,7 @@ def _record_class_def(class_name: str, field_names: list[str]) -> cst.ClassDef:
         cst.SimpleStatementLine(
             body=[
                 cst.Assign(
-                    targets=[cst.AssignTarget(cst.Attribute(cst.Name("self"), cst.Name(f)))],
+                    targets=_self_attr_target(f),
                     value=cst.Name(f),
                 )
             ]
@@ -2321,15 +2354,7 @@ class _LoopsIntoComprehensions(cst.CSTTransformer):
                 return None
             return self._rewrite_plan(stmts, first_loop, loop_count)
         else:
-            first_idx = next(
-                (
-                    i
-                    for i, s in enumerate(stmts)
-                    if isinstance(s, cst.For)
-                    and _as_range(self.get_metadata(PositionProvider, s)).start.line == self.line
-                ),
-                None,
-            )
+            first_idx = _for_index_at_line(self, stmts, self.line)
             if first_idx is None:
                 return None
             loop_count = 1
@@ -2641,15 +2666,7 @@ class _LoopHoistExtractor(cst.CSTTransformer):
 
     def _block_plan(self, block):
         stmts = list(block.body)
-        loop_idx = next(
-            (
-                i
-                for i, s in enumerate(stmts)
-                if isinstance(s, cst.For)
-                and _as_range(self.get_metadata(PositionProvider, s)).start.line == self.line
-            ),
-            None,
-        )
+        loop_idx = _for_index_at_line(self, stmts, self.line)
         if loop_idx is None:
             return None
         loop = stmts[loop_idx]
@@ -4436,7 +4453,7 @@ def _chain_head(wrapper: cst.MetadataWrapper, line: int) -> _ChainHead | None:
     if probe.owner is None:
         return None
     class_name, class_node, method = probe.owner
-    params = [p.name.value for p in method.params.params if p.name.value not in ("self", "cls")]
+    params = _non_receiver_param_names(method.params.params)
     callee, args = _pure_forward_of(method)
     if _breaks_forwarding_chain(callee, args, params):
         return None
@@ -5640,6 +5657,11 @@ def _module_alias_map(module: cst.Module, origin_path: list[str]) -> dict[str, l
     return out
 
 
+def _alias_points_to_origin(parts: list[str], origin_path: list[str], alias_map: dict[str, list[str]]) -> bool:
+    """A one-component import path that names the origin through an alias."""
+    return len(parts) == 1 and parts[0] in alias_map and alias_map[parts[0]] == origin_path
+
+
 def _import_refers_to_origin(
     ifrom: cst.ImportFrom, importer_dir: list[str], origin_path: list[str]
 ) -> bool:
@@ -5679,11 +5701,7 @@ class _SplitImportRewrite(cst.CSTTransformer):
     def _base_is_origin(self, parts: list[str]) -> bool:
         if parts == self.origin_path:
             return True
-        return (
-            len(parts) == 1
-            and parts[0] in self.alias_map
-            and self.alias_map[parts[0]] == self.origin_path
-        )
+        return _alias_points_to_origin(parts, self.origin_path, self.alias_map)
 
     @override
     def leave_SimpleStatementLine(self, original_node, updated_node):
@@ -5802,7 +5820,7 @@ def _const_imported_elsewhere(
     """Is the constant imported or attribute-read from another file? A moved
     constant must be sole-owned by its class (BQ6) — an external reader would
     break."""
-    origin_path = rel.split("/")[:-1] + [rel.rsplit("/", 1)[-1][:-3]]
+    origin_path = _module_parts(rel)
     for path in _py_files(repo):
         if path.relative_to(repo).as_posix() == rel:
             continue
@@ -5841,7 +5859,7 @@ class _ConstImportScan(cst.CSTVisitor):
         """The import path is the origin module itself, or an alias of it."""
         if parts == self.origin_path:
             return True
-        return len(parts) == 1 and parts[0] in self.alias_map and self.alias_map[parts[0]] == self.origin_path
+        return _alias_points_to_origin(parts, self.origin_path, self.alias_map)
 
     @override
     def visit_ImportFrom(self, node) -> None:
@@ -5867,7 +5885,7 @@ class _ConstImportScan(cst.CSTVisitor):
 def _module_star_imported(repo: Path, rel: str, module: cst.Module) -> bool:
     """Does any other file `from <origin> import *`? The flat rewrite cannot
     retarget a star import — the moved classes would silently vanish from it."""
-    origin_path = rel.split("/")[:-1] + [rel.rsplit("/", 1)[-1][:-3]]
+    origin_path = _module_parts(rel)
     for path in _py_files(repo):
         if path.relative_to(repo).as_posix() == rel:
             continue
@@ -7390,7 +7408,7 @@ def _init_stmt(field: str, value: cst.BaseExpression) -> cst.BaseStatement:
     return cst.SimpleStatementLine(
         body=[
             cst.Assign(
-                targets=[cst.AssignTarget(cst.Attribute(cst.Name("self"), cst.Name(field)))],
+                targets=_self_attr_target(field),
                 value=value,
             )
         ]
