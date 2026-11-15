@@ -185,7 +185,7 @@ impl ModuleShape {
         if self.classes_dominate() {
             Some(self.finding("many-definitions", "warn", rel, self.classes_message(rel)))
         } else if self.functions_are_a_group() {
-            Some(self.finding("many-definitions", "warn", rel, self.functions_message(rel)))
+            Some(self.finding("many-definitions", "warn", rel, self.functions_message(rel, true)))
         } else {
             None
         }
@@ -195,7 +195,7 @@ impl ModuleShape {
         if self.classes_dominate() {
             Some(self.finding("several-definitions", "warn", rel, self.classes_message(rel)))
         } else if self.functions_are_a_group() {
-            Some(self.finding("several-definitions", "warn", rel, self.functions_message(rel)))
+            Some(self.finding("several-definitions", "warn", rel, self.functions_message(rel, false)))
         } else {
             None
         }
@@ -230,7 +230,10 @@ impl ModuleShape {
         )
     }
 
-    fn functions_message(&self, rel: &str) -> String {
+    /// `many` selects the rung: the loose rung's module is a grab-bag, so its
+    /// action is the module split; the strict rung's module is one concept with
+    /// a missing owner, so its action is local to the module.
+    fn functions_message(&self, rel: &str, many: bool) -> String {
         let script = if self.language == Language::Python && is_script(rel) {
             " A script is not different: the steps it runs build one program state, and no name owns it."
         } else {
@@ -242,7 +245,7 @@ impl ModuleShape {
             functions = self.functions,
             framework = self.framework_clause(),
             script = script,
-            action = self.functions_action(),
+            action = self.functions_action(many),
         )
     }
 
@@ -275,13 +278,16 @@ impl ModuleShape {
         }
     }
 
-    fn functions_action(&self) -> &'static str {
-        match self.language {
-            Language::Python => {
+    fn functions_action(&self, many: bool) -> &'static str {
+        match (self.language, many) {
+            (Language::Python, _) => {
                 "Name the concept that data belongs to and make it a class: the data becomes its fields, and the functions become its methods."
             }
-            Language::Rust => {
-                "Name the type those functions operate on and give it an impl: the data becomes its fields, and the functions become its methods."
+            (Language::Rust, false) => {
+                "Name the type those functions operate on and give it an impl — an impl block may live in this module. If that type belongs to another crate, put the functions behind one trait instead: a foreign type cannot take an inherent impl."
+            }
+            (Language::Rust, true) => {
+                "Split the module by concept: one module per family, each owning the types it introduces. Give a family an impl when it has a local type, and keep the free function where a `&mut` borrow would conflict."
             }
         }
     }

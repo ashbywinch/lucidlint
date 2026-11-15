@@ -7379,7 +7379,8 @@ def two(work, batch):
     }
 
     #[test]
-    fn rust_functions_arm_asks_for_an_impl() {
+    fn rust_functions_arm_splits_the_module_at_the_loose_rung() {
+        // 11+ functions: the module is a grab-bag, so the action is the split
         let mut src = String::new();
         for i in 0..12 {
             src.push_str(&format!(
@@ -7394,9 +7395,35 @@ def two(work, batch):
         assert_eq!(hits.len(), 1, "{f:?}");
         let msg = &hits[0].message;
         assert!(msg.contains("12 of them functions"), "{msg}");
-        assert!(msg.contains("give it an impl"), "{msg}");
-        assert!(!msg.contains("A script is not different"), "{msg}");
+        assert!(msg.contains("Split the module by concept"), "{msg}");
+        assert!(msg.contains("one module per family"), "{msg}");
+        assert!(msg.contains("`&mut` borrow would conflict"), "{msg}");
         assert!(!msg.contains("directory of modules"), "{msg}");
+        assert!(!msg.contains("A script is not different"), "{msg}");
+    }
+
+    #[test]
+    fn rust_functions_arm_asks_for_an_impl_at_the_strict_rung() {
+        // 3-10 functions: one concept with a missing owner, so the fix is local
+        let mut src = String::new();
+        for i in 0..4 {
+            src.push_str(&format!(
+                "pub fn step_{i}(state: &mut State) -> u32 {{\n    state.count + {i}\n}}\n\n"
+            ));
+        }
+        src.push_str("pub struct State {\n    pub count: u32,\n}\n");
+        let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
+        let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
+        let f = checks::module_findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        let msg = &hits[0].message;
+        assert!(msg.contains("5 top-level definitions, 4 of them functions"), "{msg}");
+        assert!(msg.contains("give it an impl"), "{msg}");
+        assert!(msg.contains("an impl block may live in this module"), "{msg}");
+        assert!(msg.contains("put the functions behind one trait"), "{msg}");
+        assert!(msg.contains("a foreign type cannot take an inherent impl"), "{msg}");
+        assert!(!msg.contains("Split the module by concept"), "{msg}");
     }
 
     #[test]

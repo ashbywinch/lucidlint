@@ -175,13 +175,38 @@ is measured on one repo only:
 
 16 of the 33 Rust modules fire — including the four files this PR's split just
 created (`checks/shared_path.rs` 17, `checks/duplicate_expression.rs` 18,
-`checks/review_log.rs` 11, `checks/module_size.rs` 9). That is the strict rung
-meeting an architecture of free functions over `&mut ScanState`: the functions
-do share a state object, but Rust's borrow rules make methods on it harder than
-free functions, which is why the scan is written that way. **This is the one
-place the Rust advice needs a ruling**: exempt a Rust module whose functions
-already take a shared `&mut` receiver (the state has an owner, just not a
-`self`), or keep the finding and take the markers.
+`checks/review_log.rs` 11, `checks/module_size.rs` 9).
+
+**The advice branches on the rung**, because the two rungs are two different
+problems:
+
+- 3–10 functions (`several-definitions`) — one concept with a missing owner:
+  *"Name the type those functions operate on and give it an impl — an impl block
+  may live in this module. If that type belongs to another crate, put the
+  functions behind one trait instead: a foreign type cannot take an inherent
+  impl."*
+- 11+ functions (`many-definitions`) — a grab-bag: *"Split the module by
+  concept: one module per family, each owning the types it introduces. Give a
+  family an impl when it has a local type, and keep the free function where a
+  `&mut` borrow would conflict."*
+
+Why the loose rung does not say "give it an impl", with the sources:
+
+| source | what it establishes |
+|---|---|
+| Rust API Guidelines **C-METHOD** | functions with a clear receiver should be methods — true where the receiver is local and unambiguous |
+| **The Reference**, implementations | "An implementing type must be defined within the same crate as the original type definition" — a foreign type (`ruff_python_ast::Expr`, `syn::Expr`, `Path`) cannot take an inherent impl, so many of these helpers cannot become methods at all |
+| same page | a type may have multiple inherent impls, in any module of the crate — so "an impl" never means one 10k-line impl block |
+| **Niko Matsakis, "After NLL: Interprocedural conflicts"** | a `&mut self` method cannot be called while another borrow of `self` is live; the documented workarounds are factoring a sub-struct, free functions over the fields, or view structs |
+| **clippy** `too_many_arguments` (7) | group parameters into a new type — the strict rung's advice |
+| **clippy** (all 842 lints) | no module- or file-size lint: only `too_many_lines` (100, pedantic, function-level). Rust tooling has no opinion on a 10k-line module, so the judgment is this rule's own |
+| **rust-analyzer architecture** | a large Rust codebase deliberately passes an explicit `db` argument to every call rather than threading `self`: free functions over a context are an architecture, not a smell |
+
+Measured receivers explain why the loose rung exists: across the 16 firing Rust
+modules no single receiver dominates (`checks.rs`: 272 functions, `&Expr` 60 and
+`&ScanState` 50 — 22%). The data is spread across AST types from other crates
+and the scan state, so "no object owns it" is true of the module's *concept*,
+not of a missing struct.
 
 ## Out of scope, deliberately
 
