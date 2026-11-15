@@ -4764,6 +4764,10 @@ fn call_name(call: &ExprCall) -> &str {
     }
 }
 
+/// The agreed gate for #104. The ticket's original filter (a literal or a
+/// call chain, >=2 modules, >=3 uses) kept one-step reads and missed the
+/// complex duplicates that live in two modules. Substance is the floor;
+/// frequency is not a gate: any two occurrences, in any files or functions.
 fn expression_is_substantive(expr: &Expr) -> bool {
     use ruff_python_ast::visitor::source_order::{walk_expr, SourceOrderVisitor};
     struct Steps {
@@ -5127,6 +5131,15 @@ fn duplicate_expression_finding(occs: &[ExprOccurrenceRef]) -> Finding {
     let first = &occs[0];
     let count = occs.len();
     let text = truncate_text(&first.occ.text, 120);
+    let mut files: Vec<&str> = occs.iter().map(|o| o.rel).collect();
+    files.sort_unstable();
+    files.dedup();
+    let file_word = if files.len() == 1 { "file" } else { "files" };
+    let where_text = if files.len() <= 3 {
+        files.join(", ")
+    } else {
+        format!("{}, {}, and {} more", files[0], files[1], files.len() - 2)
+    };
     Finding {
         logical_start: None,
         seam_members: Vec::new(),
@@ -5137,7 +5150,8 @@ fn duplicate_expression_finding(occs: &[ExprOccurrenceRef]) -> Finding {
         kind: "duplicate-expression".into(),
         severity: "warn".into(),
         message: format!(
-            "The same expression appears {count} times: `{text}`. One copy can drift from the others; make one helper, predicate, or type alias."
+            "The same expression appears {count} times across {} {file_word} ({where_text}): `{text}`. One copy can drift from the others; make one helper, predicate, or type alias.",
+            files.len()
         ),
     }
 }

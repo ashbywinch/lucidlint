@@ -417,6 +417,8 @@ CATALOG = RuleCatalog([
          "parameter pair, or give it one constant/module home when they do "
          "not.",
          display_name="shared-path → latent-class", display_group="latent-class"),
+    # #104: the tool's own Python reports 112 duplicate-expression warnings;
+    # they stay warnings (the gate is PASS) for a separate sweep.
     Rule("duplicate-expression", "warn", "architecture", "Python",
          "The same expression — two or more meaningful steps, with key "
          "literals abstracted — occurs more than once in production Python "

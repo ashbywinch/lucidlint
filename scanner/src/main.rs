@@ -7061,6 +7061,16 @@ def two(work, batch):
     }
 
     #[test]
+    fn duplicate_expression_reports_the_bound_expression_not_the_name() {
+        let a = "def a(x, y):\n    ok = x > 0 and y > 0\n    return ok\n";
+        let b = "def b(x, y):\n    ok = x > 0 and y > 0\n    return ok\n";
+        let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "duplicate-expression").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("x > 0 and y > 0"), "{}", hits[0].message);
+    }
+
+    #[test]
     fn duplicate_expression_counts_a_multi_fact_condition() {
         let a = "def a(order, user):\n    return order is not None and order.total > 0 and not user.locked\n";
         let b = "def b(order, user):\n    return order is not None and order.total > 0 and not user.locked\n";
