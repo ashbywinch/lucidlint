@@ -361,12 +361,11 @@ CATALOG = RuleCatalog([
          "named function.",
          fix="extract-method"),
     Rule("large-module", "warn", "architecture", "Both",
-         "Source module spanning ≥ 800 lines whose contents hold ≥ 3 named "
-         "groups — titled sections, or words shared by ≥ 3 top-level names — "
-         "several concepts in one module, so a reader cannot tell where one "
-         "ends: split it by concept, one module per group. A generated module, "
-         "and a module whose names form one group, is one concept however long "
-         "and is exempt."),
+         "Source module holding ≥ 25 top-level functions and classes whose names "
+         "form ≥ 3 groups — titled sections, or words shared by ≥ 3 names — "
+         "several concepts in one module: split it by concept, one module per "
+         "group. Lines are not the measure; a generated module, and a definition "
+         "set that forms one group, is one concept and is exempt."),
     Rule("closures", "fail", "architecture", "Both",
          "A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line "
          "span) — the nested structure is a class waiting to be extracted.",

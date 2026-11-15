@@ -1,33 +1,38 @@
 //! `large-module` (#107): a source module that holds several concepts.
 //!
-//! The line count is only the ENTRY signal. The finding is about how many
-//! named groups the file holds, because a long file that is one concept — a
-//! generated table, a data module, one class and its helpers — needs no split
-//! and a line cap would send a reader to make its code worse.
+//! The entry signal is the number of top-level definitions — the names a
+//! reader has to hold — not the line count. Lines measure typing, not
+//! concepts: a generated table and a 1,300-line class are one concept each,
+//! and splitting them makes the code worse.
 //!
-//! A group is either a titled section (a comment that draws a separator and
-//! names what follows) or a name family (a word shared by the names of at
-//! least [`NAME_FAMILY_MEMBERS`] top-level definitions).
+//! A module fires when it holds [`LARGE_MODULE_DEFINITIONS`] top-level
+//! definitions AND [`LARGE_MODULE_GROUPS`] named groups, where a group is
+//! either a titled section (a comment that draws a separator and names what
+//! follows) or a name family (a word shared by the names of at least
+//! [`NAME_FAMILY_MEMBERS`] definitions). Definitions that form one family are
+//! one concept whatever their count.
 //!
 //! The measurement that set the floors is in
 //! `docs/plans/plan-issue-107-large-module.md`.
 
 use std::collections::HashMap;
 
-use ruff_python_ast::{Expr, Stmt};
+use ruff_python_ast::Stmt;
 
 use crate::Finding;
 
 use super::name_tokens;
 
-/// The line floor: 800. Measured on this repo, houses and
-/// family-history-album. Multi-concept files exist below it, but flagging
-/// them triples the warning list without naming anything new; 800 is where
-/// length and group count agree on a file a reader cannot hold.
-pub const LARGE_MODULE_FLOOR: usize = 800;
+/// The definition floor: 25. Measured on this repo, houses and
+/// family-history-album. At 20 the count starts flagging one-family modules —
+/// album's `tools/cli.py` (24 commands, one family), houses'
+/// `tools/deploy/run_migrations.py` (21 steps, no family). At 25 every module
+/// the count flags also holds three or more named groups.
+pub const LARGE_MODULE_DEFINITIONS: usize = 25;
 
-/// A word shared by at least this many top-level names is a family. Two names
-/// that happen to share a word are a pair, not how the file is organised.
+/// A word shared by at least this many definition names is a family. Two
+/// names that happen to share a word are a pair, not how the file is
+/// organised.
 pub const NAME_FAMILY_MEMBERS: usize = 3;
 
 /// How many named groups make "several concepts": one group is a concept, two
@@ -51,7 +56,7 @@ const GENERATED_MARKERS: &[&str] = &[
 /// Words that state a naming convention or a generic role rather than a
 /// concept. `global_state_findings` and `noqa_findings` share `findings`
 /// (a convention) and not a subject, so the word names no family. A word is
-/// only removed from family names — it still counts as a top-level name.
+/// only removed from family names — it still counts as a definition name.
 pub const NAMING_WORDS: &[&str] = &[
     "all", "and", "apply", "build", "check", "collect", "count", "data", "default", "defs", "emit", "findings", "for",
     "from", "get", "has", "impl", "into", "item", "items", "load", "make", "message", "messages", "name", "names",
@@ -60,52 +65,40 @@ pub const NAMING_WORDS: &[&str] = &[
 ];
 
 /// The shape of one source module — what the repo-wide `large-module` pass
-/// needs, collected where the parser already holds the file. `items` counts
-/// the module's top-level definitions; `sections` are the titles its comments
-/// draw, deduplicated in source order (a title repeated three times is one
-/// concept); `families` are the words its names share, largest first.
+/// needs, collected where the parser already holds the file. `definitions`
+/// counts the module's top-level functions and types (constants are data, not
+/// names a reader holds); `sections` are the titles its comments draw,
+/// deduplicated in source order (a title repeated three times is one
+/// concept); `families` are the words its definition names share, largest
+/// first.
 #[derive(Clone, Debug, Default)]
 pub struct ModuleShape {
-    pub lines: usize,
-    pub items: usize,
+    pub definitions: usize,
     pub sections: Vec<String>,
     pub families: Vec<(String, usize)>,
     pub generated: bool,
 }
 
-/// The module's top-level names: definitions, classes and bound constants.
-pub fn python_item_names(body: &[Stmt]) -> Vec<String> {
+/// The module's top-level definitions: functions and classes. A constant is
+/// a value the module holds, not a name that groups with others.
+pub fn python_definition_names(body: &[Stmt]) -> Vec<String> {
     let mut names = Vec::new();
     for stmt in body {
         match stmt {
             Stmt::FunctionDef(f) => names.push(f.name.to_string()),
             Stmt::ClassDef(c) => names.push(c.name.to_string()),
-            Stmt::Assign(a) => {
-                for target in &a.targets {
-                    if let Expr::Name(n) = target {
-                        names.push(n.id.to_string());
-                    }
-                }
-            }
-            Stmt::AnnAssign(a) => {
-                if let Expr::Name(n) = a.target.as_ref() {
-                    names.push(n.id.to_string());
-                }
-            }
             _ => {}
         }
     }
     names
 }
 
-/// Measure one module: the entry signal (lines), the concepts it holds
-/// (titled sections, name families) and whether a generator wrote it.
-/// `rel` is the repo-relative path — its stem names the module's own concept
-/// and is never counted as a family.
+/// Measure one module: the definitions it holds, the concepts they group
+/// into, and whether a generator wrote it. `rel` is the repo-relative path —
+/// its stem names the module's own concept and is never counted as a family.
 pub fn module_shape(rel: &str, source: &str, names: &[String]) -> ModuleShape {
     ModuleShape {
-        lines: source.lines().count(),
-        items: names.len(),
+        definitions: names.len(),
         sections: section_titles(source),
         families: name_families(rel, names),
         generated: is_generated(source),
@@ -152,7 +145,7 @@ fn section_title(line: &str) -> Option<String> {
     Some(title.to_string())
 }
 
-/// The words the top-level names share. A word appears once per name (`sets`
+/// The words the definition names share. A word appears once per name (`sets`
 /// of tokens, never a count of occurrences), so a name that says `row` twice
 /// is still one member of the `row` family.
 fn name_families(rel: &str, names: &[String]) -> Vec<(String, usize)> {
@@ -183,9 +176,9 @@ fn file_stem(rel: &str) -> String {
 
 impl ModuleShape {
     /// The finding for one module, when it holds several concepts. A
-    /// generated file and a one-group file are one concept, however long.
+    /// generated module and a one-group module are one concept.
     pub fn large_module_finding(&self, rel: &str) -> Option<Finding> {
-        if self.generated || self.lines < LARGE_MODULE_FLOOR {
+        if self.generated || self.definitions < LARGE_MODULE_DEFINITIONS {
             return None;
         }
         let message = if self.sections.len() >= LARGE_MODULE_GROUPS {
@@ -210,8 +203,8 @@ impl ModuleShape {
 
     fn sections_message(&self, rel: &str) -> String {
         format!(
-            "'{rel}' spans {lines} lines and holds {count} titled sections — several concepts, not one long one. A change to one section sits among the others, and nothing in the file marks where it ends. The sections are {list}. Move each section into its own module beside this file, so each module's name states its concept.",
-            lines = self.lines,
+            "'{rel}' holds {definitions} top-level definitions in {count} titled sections — several concepts in one module. A change to one section sits among the others, and nothing in the file marks where it ends. The sections are {list}. Move each section into its own module beside this file, so each module's name states its concept.",
+            definitions = self.definitions,
             count = self.sections.len(),
             list = section_list(&self.sections),
         )
@@ -219,10 +212,9 @@ impl ModuleShape {
 
     fn families_message(&self, rel: &str) -> String {
         format!(
-            "'{rel}' spans {lines} lines and holds {count} name families among {items} top-level names — several concepts, not one long one. A change to one family's names sits among the others, and nothing in the file marks where it ends. The families are {list}. Move each family into its own module beside this file, so each module's name states its concept.",
-            lines = self.lines,
+            "'{rel}' holds {definitions} top-level definitions whose names form {count} families — several concepts in one module. A change to one family's names sits among the others, and nothing in the file marks where it ends. The families are {list}. Move each family into its own module beside this file, so each module's name states its concept.",
+            definitions = self.definitions,
             count = self.families.len(),
-            items = self.items,
             list = family_list(&self.families),
         )
     }

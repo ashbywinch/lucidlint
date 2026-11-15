@@ -2,95 +2,124 @@
 
 Fixes github.com/ashbywinch/lucidlint issue #107. A new warn rule
 (`large-module`) plus a behaviour-preserving refactor: `scanner/src/checks.rs`
-moves its duplicate-expression and shared-path sections into submodules. Every
-change ships with Rust unit tests; the two-repo run (houses, family-history-album)
-is the acceptance instrument.
+moves three of its rule families into submodules. Every change ships with Rust
+unit tests; the three-repo run (this repo, houses, family-history-album) is the
+acceptance instrument.
 
 ## The gap
 
 `large-function` and `complexity` are function-level. `flat-folder` is
 directories. A single file can hold ten rule families — ten concepts — and no
-rule says so. The tool passed its own gate while `scanner/src/checks.rs` held
-11,824 lines, so a reader had no finding pointing at the split.
+rule said so. The tool passed its own gate while:
 
-A line cap is the wrong rule: a generated table and a 2,000-line data module
-are one concept, and splitting them makes the code worse. The rule is about
-**concepts**, and the line count is only the entry signal that makes the
-concept question worth asking.
+| file | lines | top-level definitions |
+|---|---|---|
+| `scanner/src/checks.rs` | 11,824 | 297 |
+| `fix_engine.py` | 7,686 | 264 |
+| `scanner/src/main.rs` | 7,723 | 50 |
+
+A reader cannot hold 297 names. The finding needed to say that, and to point at
+the split.
 
 ## What the measurement changed about the rule
 
-Candidates were measured on the three repos that matter: this repo, houses and
-family-history-album, over every tracked module the scanner browses (no test
-paths, no vendored trees): 440 / 231 / 321 modules.
+Two rounds of measurement, on every module the tool browses (tracked and
+untracked-but-not-ignored files, no test paths, no vendored trees): 444 here,
+237 in houses, 323 in album.
+
+**Round one — a line floor.** The rule shipped as `≥ 800 lines AND ≥ 3 named
+groups`, and the group condition was doing all the work: a pure line floor
+flagged every long file, including the ones that are one concept.
 
 | criterion | build-tools | houses | album |
 |---|---|---|---|
 | ≥ 600 lines | 11 | 15 | 14 |
 | ≥ 800 lines | 9 | 4 | 9 |
-| ≥ 1000 lines | 8 | 4 | 7 |
-| **shipped: ≥ 800 lines AND ≥ 3 named groups** | **8** | **3** | **4** |
+| ≥ 800 lines AND ≥ 3 named groups | 8 | 3 | 4 |
 
-A pure line floor fires on every long file, including the ones that are one
-concept: album's `tools/archive.py` (1,318 lines, one `Archive` class),
-`pipeline/api/server.py` (1,310, one API app), `loft/live/memory.py` (1,153,
-one `Memory` class), and houses' `dag/derived_node.py` (1,088, one node type).
-Those five are exactly the files a line cap would send a reader to split for
-no reason. The concept floor is what separates them:
+**Round two — the count of definitions.** Lines measure typing, not concepts,
+and a reader holds names, not rows. Counting the module's top-level functions
+and classes (not constants — a settings or data module is one concept) separates
+the same files without a length threshold at all, and it spares the long
+one-concept modules by a wide margin:
 
-| module | lines | top-level names | named groups | verdict |
-|---|---|---|---|---|
-| album `tools/archive.py` | 1,318 | 11 | 0 | passes — one concept |
-| album `pipeline/api/server.py` | 1,310 | 7 | 0 | passes — one concept |
-| houses `dag/derived_node.py` | 1,088 | 13 | 2 | passes — one concept |
-| album `pipeline/layout.py` | 1,318 | 37 | 4 | fires — assembly, anchoring, orientation |
-| houses `tools/commute/drive_isochrone.py` | 1,489 | 72 | 12 | fires — config, matrix, grid, payload, … |
-| this repo `scanner/src/checks.rs` | 11,831 | 365 | 16 sections (before the split) | fires — the rule families |
+| module | lines | definitions | verdict |
+|---|---|---|---|
+| album `tools/archive.py` | 1,301 | 9 | one `Archive` class — passes |
+| album `pipeline/api/server.py` | 1,332 | 7 | one API app — passes |
+| album `loft/live/memory.py` | 1,153 | 10 | one `Memory` class — passes |
+| houses `dag/derived_node.py` | 1,088 | 11 | one node type — passes |
+| this repo `scanner/src/lsp.rs` | 957 | 22 | one LSP server — passes |
 
-Rejected: a 600-line floor — it adds eight house modules, and half of them
-(`dag/persistence.py`, `houses/floorplan/read.py`, `houses/web/auth.py`) are
-one concept with several steps, so the rule would flag files its own exemption
-protects. A 1,000-line floor separates no better: the same 8 / 3 / 4 modules
-fire, so the 200 lines buy nothing. Every finding the 800-line floor produced
-survives a reader's judgment — config/matrix/grid in `drive_isochrone`, the
-fare/journey/disambiguation models in `tfl_client`, the resource families in
-`api_router`, the assembly/anchoring/orientation passes in `layout`, and this
-repo's own modules. Any criterion built from call counts or deduplication is
-rejected on principle: those are mechanics, not what a reader holds.
+Definition counts per repo, with the group condition applied:
+
+| criterion | build-tools | houses | album |
+|---|---|---|---|
+| ≥ 15 definitions AND ≥ 3 groups | 10 | 20 | 10 |
+| ≥ 20 definitions AND ≥ 3 groups | 8 | 16 | 10 |
+| **shipped: ≥ 25 definitions AND ≥ 3 groups** | **8** | **14** | **5** |
+| ≥ 30 definitions AND ≥ 3 groups | 7 | 12 | 3 |
+
+25 is the knee. Below it the count starts flagging cohering modules — houses'
+`houses/model/domain.py` (20 definitions, one domain model), `tools/commute/searches.py`
+(20, one search model), album's eval scripts (`eval_geometry.py` 22,
+`eval_review.py` 24, `eval_memory.py` 23) — each a single topic that happens to
+have several nouns. Above it, the flag drops modules that are just as wide:
+album `tools/memory.py` (25), houses `google_routes_client.py` (25),
+`tools/commute/intersection.py` (27), album `pipeline/api/auth.py` (26).
+
+The group condition stays for the case the count cannot see: 200 definitions
+that all share one word (`get_*` accessors) are one family, and the finding must
+not claim "several concepts" there. It costs nothing on the measured set — at 25
+every flagged module also holds ≥ 3 groups — but it is the clause that keeps the
+sentence true.
+
+Rejected: the line floor (round one — it answers a different question, and the
+one-concept long files above show why); a definition floor at 20 (the cohering
+modules listed above); at 30 (drops modules just as wide); and any criterion
+built from call counts, deduplication or public surface. Public surface is the
+clearest rejection: `fix_engine.py` has 264 definitions and 3 public names, so a
+public-API control cannot see the second-largest offender in the tool.
 
 ## The shape
 
-- Scope: source modules the scan already browses (Python and Rust). Test paths,
+- Scope: modules the scan already browses (Python and Rust). Test paths,
   vendored trees and fixture files are out of scope by the existing filters.
-- Generated files are exempt: a file whose opening lines carry a generator
+- A **definition** is a top-level function or class (Python) / function, struct,
+  enum, trait, trait alias, type, union, module or impl block (Rust). An
+  `impl` block is named by the type it implements. Constants, statics and
+  module-level assignments are data, not names the reader holds, and do not
+  count.
+- Generated modules are exempt: a file whose opening lines carry a generator
   marker (`do not edit`, `generated by`, `auto-generated`, `@generated`,
   `code generated`) is one concept by construction.
 - A **named group** is either a titled section — a comment line that draws a
   separator and names what follows (`# ------- shared-path`) — or a **name
-  family**: a word shared by the names of ≥ 3 top-level definitions. A word
-  the module's own stem carries names the module, not a group, and the words
-  that state a naming convention or a generic role (`findings`, `message`,
-  `get`, `set`, `load`, `name`, `value`, `type`, …) are dropped.
-- Fires when the file spans ≥ 800 lines **and** holds ≥ 3 titled sections or
-  ≥ 3 name families. One family, however long, is one concept: no finding.
+  family**: a word shared by the names of ≥ 3 definitions. A word the module's
+  own stem carries names the module, not a group, and the words that state a
+  naming convention or a generic role (`findings`, `message`, `get`, `load`,
+  `name`, `value`, `type`, …) are dropped.
+- Fires when the module holds ≥ 25 definitions **and** ≥ 3 named groups. A
+  single group, however many definitions it holds, is one concept: no finding.
 
 ## The message
 
 Fact, mechanism, evidence, action — the evidence names the groups so a reader
 can check them:
 
-- `'scanner/src/checks.rs' spans 11831 lines and holds 16 titled sections —
-  several concepts, not one long one. A change to one of them sits among the
-  others, and nothing in the file marks where it ends. The sections are
-  latent-class, sibling value classes, #27 husks, and 13 more. Move each
-  section into its own module beside this file, so each module's name states
-  its concept.`
+- `'scanner/src/checks.rs' holds 304 top-level definitions in 12 titled
+  sections — several concepts in one module. A change to one section sits among
+  the others, and nothing in the file marks where it ends. The sections are
+  latent-class, sibling value classes (#61), #27 husks and 9 more. Move each
+  section into its own module beside this file, so each module's name states its
+  concept.`
 - the family variant names `raw (12 names), config (9), destination (6)` and
   prescribes the same split.
 
-The finding is fix-less on purpose: which families belong together is the
+The finding is fix-less on purpose: which groups belong together is the
 judgement, and the registered `split-module` fixer splits multi-class modules,
-not concept axes.
+not concept axes. A module that is one concept with several families takes a
+suppression with its why — that is the exemption path, not a config ignore.
 
 ## The split
 
@@ -102,8 +131,8 @@ not concept axes.
   `collect_duplicate_expressions`, `duplicate_expression_findings`, the
   expression-key walker and the node floor;
 - `scanner/src/checks/review_log.rs` — the §10/§11 families: `duplicate-def`,
-  `restating-docstring`, `duplicate-block`, and their statement walkers (a
-  third section that was cleanly bounded, so it moved in the same pass);
+  `restating-docstring`, `duplicate-block`, and their statement walkers (a third
+  section that was cleanly bounded, so it moved in the same pass);
 - `scanner/src/checks/module_size.rs` — the new rule's shape and merge.
 
 The parent re-exports each public item, so `main.rs` call sites keep reading
@@ -120,14 +149,14 @@ that why no longer applies, so it was fixed instead — binding collection becam
 Behaviour is unchanged: the same scan run with the pre-split and post-split
 binaries reports identical findings on houses and family-history-album (0 added,
 0 removed, before counting `large-module`), and only line-number shifts plus the
-one fixed `complexity` finding differ on this repo. `checks.rs` is 10,564 lines
-after the pass and still fires — the remaining eleven sections are the next
-rounds, deliberately out of this one.
+one fixed `complexity` finding differ on this repo. `checks.rs` is 304
+definitions after the pass and still fires — the remaining eleven sections are
+the next rounds, deliberately out of this one.
 
 ## Acceptance mapping
 
 - rule registered in `rule_metadata.py`; `make rules` regenerates RULES.md and
-  `rules_gen.rs`; Rust tests cover fire / one-concept / generated / section /
-  below-floor;
+  `rules_gen.rs`; Rust tests cover fire / one-family / generated / section /
+  below-floor / definitions-not-constants / long-and-few-definitions;
 - the split keeps `make check`, `make test` and `make self-check` green;
 - the measurement above is the two-repo record; the PR carries it.

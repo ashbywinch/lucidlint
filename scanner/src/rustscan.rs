@@ -148,7 +148,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     state.findings.extend(no_assert_test_findings(&file, name));
     state.walk_file(&file);
     let mut scan = state.finish();
-    scan.module_shape = crate::checks::module_shape(name, source, &top_level_names(&file));
+    scan.module_shape = crate::checks::module_shape(name, source, &definition_names(&file));
     // G4: does the file hold magic-CANDIDATE literals anywhere — the fact
     // the stale magic-number message cites when the family fires nowhere.
     // Rust's only exemptions are the position rule, so the label set is
@@ -1130,10 +1130,11 @@ fn is_unwrap_expect(method: &Ident) -> bool {
     method == "unwrap" || method == "expect"
 }
 
-/// The module's top-level item names — the vocabulary `large-module` (#107)
-/// reads. An `impl` block is named by the type it implements, because that is
-/// the concept it belongs to.
-fn top_level_names(file: &File) -> Vec<String> {
+/// The module's top-level definition names — the vocabulary `large-module`
+/// (#107) reads. An `impl` block is named by the type it implements, because
+/// that is the concept it belongs to; a `const`/`static` is data the module
+/// holds, not a name that groups with others.
+fn definition_names(file: &File) -> Vec<String> {
     let mut names = Vec::new();
     for item in &file.items {
         match item {
@@ -1145,8 +1146,6 @@ fn top_level_names(file: &File) -> Vec<String> {
             Item::Type(i) => names.push(i.ident.to_string()),
             Item::Union(i) => names.push(i.ident.to_string()),
             Item::Mod(i) => names.push(i.ident.to_string()),
-            Item::Const(i) => names.push(i.ident.to_string()),
-            Item::Static(i) => names.push(i.ident.to_string()),
             Item::Impl(i) => names.push(static_type_ident(&i.self_ty)),
             _ => {}
         }
