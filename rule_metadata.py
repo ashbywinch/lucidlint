@@ -410,6 +410,13 @@ CATALOG = RuleCatalog([
          "functions methods of that class.",
          display_name="data-clump → latent-class", display_group="latent-class",
          fix="extract-class"),
+    Rule("shared-path", "warn", "architecture", "Python",
+         "The same path expression — a shared run of names and path-shaped "
+         "literals — built in >=2 production modules. The run is one value "
+         "with no home: name the class when the functions share a leading "
+         "parameter pair, or give it one constant/module home when they do "
+         "not.",
+         display_name="shared-path → latent-class", display_group="latent-class"),
     Rule("feature-envy", "fail", "architecture", "Python",
          "A method reads another object's fields more than its own state — "
          "the logic belongs on that object (feature envy); move the "

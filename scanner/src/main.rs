@@ -133,6 +133,8 @@ struct ScanState<'a> {
     /// Module-level `NAME = SomeClass(...)` bindings — the scattered-instance
     /// pass's raw material, resolved against the repo's class names.
     scattered: Vec<checks::ScatteredInstance>,
+    /// Module-level path expressions — the shared-path family's raw material.
+    path_expressions: Vec<checks::PathExpression>,
     /// Duplicate-module identities (#26) — modules + top-level classes with
     /// their structural skeletons and constant tokens.
     skeleton_modules: Vec<checks::SkeletonModule>,
@@ -284,6 +286,9 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
         match stmt {
             Stmt::FunctionDef(f) => {
                 let module_level = self.fn_stack.is_empty() && self.in_class == 0;
+                if module_level {
+                    checks::collect_path_expressions(self, f);
+                }
                 let was_fn = self.current_fn.take();
                 self.current_fn = Some((f.name.to_string(), line_of(self.source, f.range.start())));
                 self.fn_spans.push((
@@ -1185,6 +1190,8 @@ pub struct FileScan {
     pub defs: Vec<(String, usize)>,
     pub class_defs: Vec<(String, usize)>,
     pub scattered: Vec<checks::ScatteredInstance>,
+    /// The file's module-level path expressions (#60 shared-path).
+    pub path_expressions: Vec<checks::PathExpression>,
     pub setters: Vec<(String, usize)>,
     pub refs: HashSet<String>,
     pub strings: Vec<String>,
@@ -1462,6 +1469,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         defs: state.defs,
         class_defs: state.class_defs,
         scattered: state.scattered,
+        path_expressions: state.path_expressions,
         setters: state.setters,
         refs: state.refs,
         strings: state.strings,
@@ -1656,6 +1664,16 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         &supps_by_rel,
         &supps_spent_by_rel,
     );
+    let path_scans: Vec<(String, Vec<checks::PathExpression>)> = scans
+        .iter()
+        .map(|s| (s.rel_of(root_s), s.path_expressions.clone()))
+        .collect();
+    reconcile_repo_wide(
+        &mut additions,
+        checks::shared_path_findings(&path_scans),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
     let undecl_scans: Vec<UndeclScan> = scans
         .iter()
         .map(|s| UndeclScan {
@@ -1704,6 +1722,7 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
         defs: Vec::new(),
         class_defs: Vec::new(),
         scattered: Vec::new(),
+        path_expressions: Vec::new(),
         setters: Vec::new(),
         refs: HashSet::new(),
         strings: Vec::new(),
@@ -2239,6 +2258,16 @@ fn main() {
     reconcile_repo_wide(
         &mut all_findings,
         checks::scattered_instance_findings(&scattered_scans, &class_names),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
+    let path_scans: Vec<(String, Vec<checks::PathExpression>)> = scans
+        .iter()
+        .map(|s| (rel_of(&s.file_name, &root), s.path_expressions.clone()))
+        .collect();
+    reconcile_repo_wide(
+        &mut all_findings,
+        checks::shared_path_findings(&path_scans),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -5142,6 +5171,7 @@ mod tests {
         let mut fns = Vec::new();
         let mut repo_methods = Vec::new();
         let mut scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> = Vec::new();
+        let mut path_scans: Vec<(String, Vec<checks::PathExpression>)> = Vec::new();
         let mut mm_classes: Vec<checks::MiddleManClass> = Vec::new();
         let mut mm_candidates: Vec<checks::MiddleManCandidate> = Vec::new();
         let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
@@ -5167,6 +5197,7 @@ mod tests {
             fns.extend(scan.forwarder_fns.iter().cloned());
             repo_methods.extend(scan.repo_methods.iter().cloned());
             scattered_scans.push((rel.clone(), scan.scattered.clone()));
+            path_scans.push((rel.clone(), scan.path_expressions.clone()));
             mm_classes.extend(scan.middle_man_classes.iter().cloned());
             mm_candidates.extend(scan.middle_man_candidates.iter().cloned());
             imports_by_rel.insert(name.to_string(), scan.imports.clone());
@@ -5205,6 +5236,12 @@ mod tests {
         reconcile_repo_wide(
             &mut all,
             checks::scattered_instance_findings(&scattered_scans, &class_names),
+            &supps_by_rel,
+            &spent_by_rel,
+        );
+        reconcile_repo_wide(
+            &mut all,
+            checks::shared_path_findings(&path_scans),
             &supps_by_rel,
             &spent_by_rel,
         );
@@ -6844,6 +6881,117 @@ mod tests {
         ));
         let hits: Vec<&Finding> = m.iter().filter(|x| x.kind == "unnamed-classification").collect();
         assert_eq!(hits.len(), 1, "{m:?}");
+    }
+
+    #[test]
+    fn shared_path_names_the_pair_class() {
+        let a = r#"
+from pathlib import Path
+
+
+def guess_dir(work: Path, batch: str) -> Path:
+    return work / batch / "ocr-guess"
+
+
+def oriented_dir(work: Path, batch: str) -> Path:
+    return work / batch / "oriented"
+"#;
+        let b = r#"
+from pathlib import Path
+
+
+def text_path(work: Path, batch: str, page: str) -> Path:
+    return work / batch / "ocr-guess" / f"{page}.txt"
+
+
+def marker_path(work: Path, batch: str, page: str) -> Path:
+    return work / batch / "ocr-guess" / f"{page}.rows.json"
+"#;
+        let f = scan_corpus(&[("pkg/paths.py", a), ("pkg/other.py", b)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "shared-path").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("(work, batch)"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("\"ocr-guess\""), "{}", hits[0].message);
+    }
+
+    #[test]
+    fn shared_path_without_a_pair_names_one_home() {
+        let a = r#"
+def read(fixture):
+    return fixture / "words.json"
+
+
+def read_more(fixture):
+    return fixture / "words.json"
+"#;
+        let b = r#"
+def load(data):
+    return data / "words.json"
+"#;
+        let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "shared-path").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("\"words.json\""), "{}", hits[0].message);
+        assert!(hits[0].message.contains("no home"), "{}", hits[0].message);
+    }
+
+    #[test]
+    fn shared_path_ignores_bare_extensions_and_test_files() {
+        let a = "def a(root):\n    return root / \".json\"\n";
+        let b = "def b(root):\n    return root / \".json\"\n";
+        let prod = scan_corpus(&[("a.py", a), ("b.py", b)]);
+        assert!(!prod.iter().any(|x| x.kind == "shared-path"), "{prod:?}");
+        let tests = scan_corpus(&[("tests/a.py", a), ("tests/b.py", b)]);
+        assert!(!tests.iter().any(|x| x.kind == "shared-path"), "{tests:?}");
+    }
+
+    #[test]
+    fn shared_path_needs_two_modules() {
+        let a = r#"
+def one(work, batch):
+    return work / batch / "ocr-guess"
+
+
+def two(work, batch):
+    return work / batch / "ocr-guess"
+"#;
+        let f = scan_corpus(&[("a.py", a)]);
+        assert!(!f.iter().any(|x| x.kind == "shared-path"), "{f:?}");
+    }
+
+    #[test]
+    fn shared_path_reads_a_path_constructor() {
+        let a = "from pathlib import Path\n\ndef a():\n    return Path(\"data\") / \"commute\"\n";
+        let b = "from pathlib import Path\n\ndef b():\n    return Path(\"data\") / \"commute\"\n";
+        let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "shared-path").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(
+            hits[0].message.contains("Path() / \"data\" / \"commute\""),
+            "{}",
+            hits[0].message
+        );
+    }
+
+    #[test]
+    fn shared_path_normalises_a_suffix_literal_and_an_fstring() {
+        let a = "from pathlib import Path\n\ndef a(root):\n    return root / Path(\"page\").with_suffix(\".layout.json\")\n";
+        let b = "def b(report, page):\n    return report.parent / f\"{page}.layout.json\"\n";
+        let c = "def c(base, page):\n    return base / f\"{page}.layout.json\"\n";
+        let f = scan_corpus(&[("a.py", a), ("b.py", b), ("c.py", c)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "shared-path").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("\".layout.json\""), "{}", hits[0].message);
+    }
+
+    #[test]
+    fn shared_path_does_not_claim_a_pair_one_use_lacks() {
+        let a = "def f(work, batch):\n    return work / batch / \"ocr-guess\"\n";
+        let b = "def g():\n    return work / batch / \"ocr-guess\"\n";
+        let f = scan_corpus(&[("a.py", a), ("b.py", b)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "shared-path").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(!hits[0].message.contains("(work, batch)"), "{}", hits[0].message);
     }
 
     #[test]
