@@ -4602,7 +4602,7 @@ fn shared_path_finding(run: Vec<String>, group: RunGroup) -> Option<Finding> {
     let path = path.join(" / ");
     let message = match group.pair_for(&run) {
         Some((a, b)) => format!(
-            "{} functions in {} modules build `{path}`; they all take `({a}, {b})`, so the pair and this path are one class. Make it, and the path components become its constants.",
+            "{} functions in {} modules build `{path}`; they all take `({a}, {b})`. If the pair and this path are one concept, make them one class, and the path components become its constants.",
             group.functions.len(),
             group.modules.len()
         ),

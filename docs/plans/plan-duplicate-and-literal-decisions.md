@@ -62,8 +62,8 @@ shape — and reports one finding per run.
   in >= 2 production modules; a single literal needs >= 3 uses.
 - A suffix written as a literal (`.layout.json`) and as an f-string tail
   (`f"{page}.layout.json"`) normalise to the same run.
-- The message names the class when the run starts with a shared leading
-  parameter pair; otherwise it says the path or name needs one home.
+- The message names the pair and asks whether it and the run are one
+  concept; otherwise it says the path or name needs one home.
 - Test files, nested functions, bare extensions (`.txt`) and format
   punctuation do not count.
 
