@@ -35,12 +35,12 @@ change does not touch.
 No `duplicate-near`, no threshold change. #62 closes as fixed by the root
 fix; the near-duplicate idea needs a corpus that shows a gap first.
 
-## Repeated literal (#60) — deferred
+## Repeated literal (#60) — shipped as `shared-path` (warn)
 
-### Measurement
+### The measurement that rejected the literal-only filter
 
 The proposal's own filter (string constants in path/format construction,
->= 3 uses across >= 2 modules) on the same two repos:
+>= 3 uses across >= 2 modules) on the two repos:
 
 | repo | literal groups that would fire |
 |---|---|
@@ -51,13 +51,37 @@ The output is dominated by formatting punctuation — `", "` (78 uses),
 `": "` (66), `",.2f"` (66), `" ("` (40), `"  "` (27). The ticket's own
 signal (`"ocr-guess"`: 22 uses across 11 modules) is real but buried.
 
+### What shipped
+
+`shared-path` (warn, Python) is a repo-wide pass over the outermost path
+expressions of module-level functions. It groups them by *shared runs* of
+segments — a name, a quoted literal, a `Path()` constructor, an f-string
+shape — and reports one finding per run.
+
+- A run qualifies when it contains a path-shaped domain literal and appears
+  in >= 2 production modules; a single literal needs >= 3 uses.
+- A suffix written as a literal (`.layout.json`) and as an f-string tail
+  (`f"{page}.layout.json"`) normalise to the same run.
+- The message names the pair and asks whether it and the run are one
+  concept; otherwise it says the path or name needs one home.
+- Test files, nested functions, bare extensions (`.txt`) and format
+  punctuation do not count.
+
+### Two-repo measurement
+
+| repo | findings |
+|---|---|
+| houses | 3 |
+| family-history-album | 5 |
+
+Examples: `Path() / "data"` (8 modules), `"words.json"` (7),
+`"strokes.json"` (4), `".layout.json"` (2), `"index.html"` (3),
+`out / "report.md"` (2).
+
 ### Decision
 
-Not shipped. The ticket's distinction — vocabulary *derived from the same
-data*, not merely repeated — needs the receiver's shape in the key
-(same leading receiver or pair), which is a different rule from the one
-proposed. The issue stays open with the measurement as the starting
-constraint; a rule that fires 160 times per repo is a noise generator.
+The literal-only filter was noise; the run plus path-shape gate is the
+shipped signal. The general duplicate-expression case is #104.
 
 ## Recorded with the same round
 
