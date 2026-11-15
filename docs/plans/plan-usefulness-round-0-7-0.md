@@ -78,16 +78,24 @@ changed to prescribe the subdivision, so that re-run is no longer the
 acceptance for this family. Album: 478 → 460 (18 type aliases exempted),
 with the census and lifecycle defects fixed.
 
+## Resolved after the round
+
+- **`global-state` on constants stays a fail (#74).** The ruling is "values
+  are a class's private internals". The round's 339-site wall was real, and
+  the answer was the change it asked for: album moved the 348 constants onto
+  the classes that own the work (`PageKinds`), reports 0 `global-state`
+  findings, and keeps the rule armed deliberately (`.lucidlint.toml:17`). A
+  `warn` for immutable constants would make that outcome optional; an
+  own-module exemption would silence exactly the constants the sweep moved.
+  The message now names the owner (#79), so the finding and the verdict
+  agree.
+- **`duplicate-module` reported structural identity as a fork (#73).**
+  Fixed in [#89](https://github.com/ashbywinch/lucidlint/pull/89): a record
+  module's declared field names are part of its identity, so two one-record
+  modules with different fields are siblings, not copies.
+
 ## Deferred, with the evidence
 
-- **`global-state` on constants stays a fail (339 sites on album).** The
-  rule's recorded ruling is "values are a class's private internals"; the
-  round shows the ruling is expensive on a measurement-heavy codebase. That
-  is a design decision for the rule's owner, not a message fix — the
-  evidence is the 339-site wall and the proposer's keep list.
-- **`duplicate-module` reports structural identity as a fork.** Two
-  one-field DTO modules with different fields report 100% similar and "a
-  fix lands in one copy"; there is no behaviour to fork. Filed as an issue.
 - **`[JUDGEMENT]` next to a runnable fix command.** The bracket says judge
   it; the line prints an executable command. Worth deciding whether a
   JUDGEMENT finding should carry a directive at all.
