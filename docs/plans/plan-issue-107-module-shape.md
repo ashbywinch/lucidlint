@@ -56,6 +56,43 @@ classes and a class's own methods are not module definitions. Generated modules
 | ≥ 25 definitions AND ≥ 3 groups | the count was right; the group condition was the same red herring |
 | > 2 classes (class count only) | changed the signal mid-rule: the count of definitions is the ladder, and the class-vs-function distinction belongs in the message |
 
+## The message
+
+Two arms, and each answers the objection it draws:
+
+- **mostly classes** — `'dag/delta_vs_home_node.py' holds 6 top-level
+  definitions, 4 of them classes (DeltaVsHome, DeltaVsHomeProvenanceValue,
+  DeltaVsHomeValue and one more). A reader looking for one class reads past the
+  rest, and the import path never states which class lives where. Turn the
+  module into a package — one file per class inside it, each named after its
+  class and re-exported from `__init__.py` — so the family keeps its name. A
+  class with no methods may stay beside the class that uses it.`
+
+  A family of classes does not scatter across the codebase: it becomes a
+  package, which keeps the family's name and gives every class its file. This is
+  the answer to `dag/expression.py`'s 12 AST nodes and `loft/live/protocols.py`'s
+  protocol registry as much as to a grab-bag.
+
+- **mostly functions** — `'scripts/gen-rules.py' holds 9 top-level
+  definitions, 9 of them functions. A free function owns no state, so the data
+  the others share arrives as parameters and every call site re-states it. A
+  script is not different: the steps it runs build one program state, and no
+  name owns it. Name the concept that data belongs to and make it a class: the
+  data becomes its fields, and the functions become its methods.`
+
+  The script sentence appears for `scripts/`, `tools/` and `bin/` paths, where
+  the objection ("it is a script, functions are fine") actually comes from. The
+  arm needs at least three functions to make its claim: "the data the others
+  share" is false of one helper, and a class plus two helpers is one concept.
+
+**Framework contracts are an exemption, not a marker.** A decorated top-level
+function is registered with a caller outside the module — a router, a CLI, a
+test fixture — so it is not a definition the module owns. A module made only of
+framework entry points (and records) holds no definitions to name, and is
+silent; a module that adds owned functions to its routes reports those and says
+`…, and 6 more functions registered with a framework` rather than hiding them
+from the count.
+
 ## What the ladder reports
 
 With the tool, on each repo's own tree:
@@ -63,30 +100,25 @@ With the tool, on each repo's own tree:
 | repo | in-scope modules | `several-definitions` | `many-definitions` |
 |---|---|---|---|
 | build-tools | 444 | 5 | 2 |
-| houses | 237 | 54 | 57 |
-| family-history-album | 323 | 71 | 26 |
+| houses | 237 | 49 | 57 |
+| family-history-album | 323 | 67 | 26 |
 
-The message arm split: functions 7 / 0 / 0 here, 89 / 22 in houses, 81 / 16 in
-album (functions / classes).
+Message arm (functions / classes): 7 / 0 here, 84 / 22 in houses, 77 / 16 in
+album.
 
-**Where the ladder is wrong, with the files.** These are the shapes that take
-`# lucidlint: ignore-file <kind> <why>` — verified to suppress and not read as
-stale on a scratch repo — and they are the input for the next round:
+**Where the ladder still asks for a judgement**, named with the files — these
+take `# lucidlint: ignore-file <kind> <why>`, verified to suppress and not read
+as stale on a scratch repo:
 
 - *the strict rung on small cohesive scripts*: this repo's `scripts/*.py`
   (`gen-rules.py` 9 definitions, `merge-coverage.py` 8, `coverage-gate.py` 7),
-  houses `dag/processor.py` (3 definitions), `dag/guard.py` (4). A 3-function
-  module is one concept by any reader's account; the strict rung is for repos
-  that want that standard, and the loose rung is the answer for the rest.
-- *a type family over one base* (classes arm): houses `dag/expression.py` (12
-  AST node classes), `floorplan/record.py` (15 record types), album
-  `loft/live/protocols.py`. Splitting an AST or a protocol registry one file per
-  class is worse than keeping it whole.
-- *a framework contract* (functions arm): album `tools/cli.py` (24 CLI
-  commands), houses `web/auth.py` (24 route handlers) — the framework calls
-  functions, so the class the message asks for is the framework's job.
-
-Every one of these is a judgement the reader makes; the rules are pointers.
+  houses `dag/processor.py` (3), `dag/guard.py` (4). The message argues the
+  class case for a script, but a three-step script is one program that may not
+  need a class; the loose rung is the policy answer.
+- *a type family over one base*: houses `dag/expression.py` (12 AST nodes),
+  `floorplan/record.py` (15 record types), album `loft/live/protocols.py`. The
+  package action fits these; whether the package is worth the move is the
+  reader's call.
 
 ## The split
 

@@ -7205,7 +7205,9 @@ def two(work, batch):
             "{msg}"
         );
         assert!(msg.contains("Widget0") && msg.contains("Widget1"), "{msg}");
-        assert!(msg.contains("file named after it"), "{msg}");
+        assert!(msg.contains("package"), "{msg}");
+        assert!(msg.contains("one file per class"), "{msg}");
+        assert!(msg.contains("re-exported from __init__.py"), "{msg}");
         assert!(msg.contains("no methods may stay"), "{msg}");
         assert_eq!(hits[0].file, "pkg/widgets.py");
         assert_eq!(hits[0].line, 0);
@@ -7234,9 +7236,11 @@ def two(work, batch):
             msg.contains("holds 5 top-level definitions, 4 of them functions"),
             "{msg}"
         );
-        assert!(msg.contains("domain concepts"), "{msg}");
+        assert!(msg.contains("owns no state"), "{msg}");
+        assert!(msg.contains("becomes its fields"), "{msg}");
         assert!(msg.contains("become its methods"), "{msg}");
-        assert!(!msg.contains("file named after it"), "{msg}");
+        assert!(!msg.contains("package"), "{msg}");
+        assert!(!msg.contains("A script is not different"), "{msg}");
     }
 
     #[test]
@@ -7296,7 +7300,63 @@ def two(work, batch):
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         assert!(hits[0].message.contains("12 of them classes"), "{}", hits[0].message);
-        assert!(hits[0].message.contains("file named after it"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("package"), "{}", hits[0].message);
+    }
+
+    #[test]
+    fn functions_arm_answers_the_script_objection() {
+        // a script's functions build one program state: the message says so
+        let src = definitions_source(4, 0);
+        let f = scan_corpus(&[("scripts/gen.py", &src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(
+            hits[0].message.contains("A script is not different"),
+            "{}",
+            hits[0].message
+        );
+        // the same module outside scripts/tools/bin does not get the clause
+        let f = scan_corpus(&[("pkg/gen.py", &src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(
+            !hits[0].message.contains("A script is not different"),
+            "{}",
+            hits[0].message
+        );
+    }
+
+    #[test]
+    fn a_framework_contract_module_is_exempt() {
+        // every function carries a registration decorator: the framework is
+        // the caller, so the module holds no definitions the reader must name
+        let mut src = String::new();
+        for i in 0..14 {
+            src.push_str(&format!(
+                "@router.get(\"/v1/thing/{i}\")\nasync def get_thing_{i}(request):\n    return request + {i}\n\n"
+            ));
+        }
+        let f = scan_corpus(&[("pkg/routes.py", &src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
+        // a module that adds owned functions to its routes still reports them,
+        // and the message names the framework entry points it is not counting
+        src.push_str(&definitions_source(12, 0));
+        let f = scan_corpus(&[("pkg/routes.py", &src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(
+            hits[0].message.contains("12 top-level definitions"),
+            "{}",
+            hits[0].message
+        );
+        assert!(
+            hits[0]
+                .message
+                .contains("14 more functions registered with a framework"),
+            "{}",
+            hits[0].message
+        );
     }
 
     #[test]

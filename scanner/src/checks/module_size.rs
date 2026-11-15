@@ -12,11 +12,15 @@
 //! and hold every module to three.
 //!
 //! The message branches on what the definitions ARE. A module whose
-//! definitions are mostly classes puts each class in a file named after it; a
-//! module whose definitions are mostly functions has no object to own the data
-//! they pass around, so the reader names the domain concepts and makes them
-//! classes. "All but one class are value records" is one concept plus its
-//! records, and is exempt.
+//! definitions are mostly classes becomes a PACKAGE — one file per class
+//! inside it, so the family keeps its name. A module whose definitions are
+//! mostly free functions has no object to own the data they pass around, so
+//! the reader names the domain concepts and makes them classes.
+//!
+//! Two exclusions: "all but one class are value records" is one class plus
+//! its records, and a decorated function is registered with a caller outside
+//! the module (a framework route, a CLI command) — a module made only of
+//! those is a framework contract, not a module full of concepts.
 //!
 //! The measurement is in `docs/plans/plan-issue-107-module-shape.md`.
 
@@ -46,6 +50,11 @@ const GENERATED_MARKERS: &[&str] = &[
     "code generated",
 ];
 
+/// The top-level directories whose modules run as programs: the reader of a
+/// script is owed the "a script is not different" argument, because that is
+/// where the objection comes from.
+const SCRIPT_DIRS: &[&str] = &["scripts", "tools", "bin"];
+
 /// One top-level class: its name and how many methods its own body defines.
 /// A class with no methods is a record — a value with a name, not a concept
 /// that owns behaviour.
@@ -61,13 +70,17 @@ impl ClassShape {
     }
 }
 
-/// The shape of one module: its top-level classes and its free functions.
-/// Only the module body is read — a class's methods are that class's, and a
-/// nested class belongs to the class that holds it.
+/// The shape of one module: its top-level classes, the functions it owns, and
+/// the functions a framework registered. Only the module body is read — a
+/// class's methods are that class's, and a nested class belongs to the class
+/// that holds it.
 #[derive(Clone, Debug, Default)]
 pub struct ModuleShape {
     pub classes: Vec<ClassShape>,
+    /// Free functions the module owns: undecorated.
     pub functions: usize,
+    /// Decorated functions: registered with a caller outside the module.
+    pub framework_functions: usize,
     pub generated: bool,
 }
 
@@ -75,6 +88,7 @@ pub struct ModuleShape {
 pub fn python_module_shape(source: &str, body: &[Stmt]) -> ModuleShape {
     let mut classes = Vec::new();
     let mut functions = 0;
+    let mut framework_functions = 0;
     for stmt in body {
         match stmt {
             Stmt::ClassDef(class) => classes.push(ClassShape {
@@ -85,13 +99,20 @@ pub fn python_module_shape(source: &str, body: &[Stmt]) -> ModuleShape {
                     .filter(|member| matches!(member, Stmt::FunctionDef(_)))
                     .count(),
             }),
-            Stmt::FunctionDef(_) => functions += 1,
+            Stmt::FunctionDef(function) => {
+                if function.decorator_list.is_empty() {
+                    functions += 1;
+                } else {
+                    framework_functions += 1;
+                }
+            }
             _ => {}
         }
     }
     ModuleShape {
         classes,
         functions,
+        framework_functions,
         generated: is_generated(source),
     }
 }
@@ -103,9 +124,14 @@ fn is_generated(source: &str) -> bool {
     })
 }
 
+fn is_script(rel: &str) -> bool {
+    rel.split('/').next().is_some_and(|dir| SCRIPT_DIRS.contains(&dir))
+}
+
 impl ModuleShape {
-    /// The module's top-level definitions: functions and classes. A constant
-    /// is a value the module holds, not a name that groups with others.
+    /// The definitions the module owns: classes and undecorated functions. A
+    /// constant is a value the module holds, not a name that groups with
+    /// others; a decorated function is the framework's entry point.
     pub fn definitions(&self) -> usize {
         self.classes.len() + self.functions
     }
@@ -125,12 +151,13 @@ impl ModuleShape {
         }
     }
 
-    /// What the definitions ARE decides the message: classes get a file each,
-    /// free functions get the class they are missing.
+    /// What the definitions ARE decides the message: classes become a package,
+    /// free functions get the class they are missing. A module of classes and
+    /// framework entry points only is a framework contract, not a finding.
     fn many_finding(&self, rel: &str) -> Option<Finding> {
         if self.classes_dominate() {
             Some(self.finding("many-definitions", "warn", rel, self.classes_message(rel)))
-        } else if self.functions > 0 {
+        } else if self.functions_are_a_group() {
             Some(self.finding("many-definitions", "warn", rel, self.functions_message(rel)))
         } else {
             None
@@ -140,11 +167,18 @@ impl ModuleShape {
     fn several_finding(&self, rel: &str) -> Option<Finding> {
         if self.classes_dominate() {
             Some(self.finding("several-definitions", "warn", rel, self.classes_message(rel)))
-        } else if self.functions > 0 {
+        } else if self.functions_are_a_group() {
             Some(self.finding("several-definitions", "warn", rel, self.functions_message(rel)))
         } else {
             None
         }
+    }
+
+    /// The functions arm needs a group to make its claim: "the data the
+    /// others share" is false of a single helper, and a module of one class
+    /// and two helpers is one concept, not several.
+    fn functions_are_a_group(&self) -> bool {
+        self.functions >= SEVERAL_DEFINITIONS
     }
 
     /// The classes arm applies when classes are the bulk of the definitions
@@ -157,19 +191,40 @@ impl ModuleShape {
     fn classes_message(&self, rel: &str) -> String {
         let names: Vec<&str> = self.classes.iter().map(|c| c.name.as_str()).collect();
         format!(
-            "'{rel}' holds {count} top-level definitions, {classes} of them classes ({list}). A reader looking for one class reads past the others, and the import path never states which class lives where. Move each class into a file named after it, so the import path states the class. A class with no methods may stay beside the class that uses it.",
+            "'{rel}' holds {count} top-level definitions, {classes} of them classes ({list}){framework}. A reader looking for one class reads past the rest, and the import path never states which class lives where. Turn the module into a package — one file per class inside it, each named after its class and re-exported from __init__.py — so the family keeps its name. A class with no methods may stay beside the class that uses it.",
             count = self.definitions(),
             classes = names.len(),
             list = name_list(&names),
+            framework = self.framework_clause(),
         )
     }
 
     fn functions_message(&self, rel: &str) -> String {
+        let script = if is_script(rel) {
+            " A script is not different: the steps it runs build one program state, and no name owns it."
+        } else {
+            ""
+        };
         format!(
-            "'{rel}' holds {count} top-level definitions, {functions} of them functions. The functions pass the same data between their parameters, and no object owns it, so every call site re-states the shape. Find the domain concepts these functions operate on, and give each one a class: the functions become its methods.",
+            "'{rel}' holds {count} top-level definitions, {functions} of them functions{framework}. A free function owns no state, so the data the others share arrives as parameters and every call site re-states it.{script} Name the concept that data belongs to and make it a class: the data becomes its fields, and the functions become its methods.",
             count = self.definitions(),
             functions = self.functions,
+            framework = self.framework_clause(),
+            script = script,
         )
+    }
+
+    /// The framework entry points, named as the rule's own exclusion rather
+    /// than silently dropped from the count.
+    fn framework_clause(&self) -> String {
+        if self.framework_functions == 0 {
+            String::new()
+        } else {
+            format!(
+                ", and {} more functions registered with a framework",
+                self.framework_functions
+            )
+        }
     }
 
     fn finding(&self, kind: &str, severity: &str, rel: &str, message: String) -> Finding {
