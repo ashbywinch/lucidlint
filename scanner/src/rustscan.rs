@@ -149,6 +149,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     state.walk_file(&file);
     let mut scan = state.finish();
     scan.module_shape = module_shape(&file, source);
+    mixed_module_into(&mut scan, &file, name);
     // G4: does the file hold magic-CANDIDATE literals anywhere — the fact
     // the stale magic-number message cites when the family fires nowhere.
     // Rust's only exemptions are the position rule, so the label set is
@@ -1205,6 +1206,223 @@ fn module_shape(file: &File, source: &str) -> crate::checks::ModuleShape {
     let mut grouped: Vec<(String, usize)> = groups.into_iter().collect();
     grouped.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     crate::checks::rust_module_shape(source, free, types, grouped)
+}
+
+/// `mixed-module` (#107): how many groups a module's top-level definitions fall
+/// into when grouped by what they reference. A group is a connected component
+/// of the item graph — the items in it reference each other (directly or
+/// through a chain), and the groups never reference each other. One group is
+/// one concept, however many items it holds; several groups that never meet is
+/// several modules wearing one filename.
+///
+/// Impl blocks belong to their type (their references are the type's), `use`
+/// and `mod` are boundaries rather than items, and `#[cfg(test)]` items are
+/// skipped: a test module references everything, so it would glue the groups.
+pub const MIXED_MODULE_ITEMS: usize = 20;
+pub const MIXED_MODULE_GROUPS: usize = 3;
+pub const MIXED_MODULE_PARTS: usize = 6;
+
+struct Cohesion {
+    items: usize,
+    /// Connected components with >= 2 members, largest first.
+    groups: Vec<Vec<String>>,
+    /// Items in no group: they reference no other item and nothing references them.
+    stand_alone: usize,
+}
+
+fn cohesion(file: &File) -> Cohesion {
+    // 1. the module's definitions: functions, types, constants; an impl block's
+    //    references belong to the type it implements
+    let mut names: Vec<String> = Vec::new();
+    for item in &file.items {
+        if has_cfg_test(item_attrs(item)) {
+            continue;
+        }
+        let name = match item {
+            Item::Fn(i) => Some(i.sig.ident.to_string()),
+            Item::Struct(i) => Some(i.ident.to_string()),
+            Item::Enum(i) => Some(i.ident.to_string()),
+            Item::Union(i) => Some(i.ident.to_string()),
+            Item::Type(i) => Some(i.ident.to_string()),
+            Item::Trait(i) => Some(i.ident.to_string()),
+            Item::Const(i) => Some(i.ident.to_string()),
+            Item::Static(i) => Some(i.ident.to_string()),
+            Item::Impl(i) => Some(static_type_ident(&i.self_ty)),
+            _ => None,
+        };
+        if let Some(name) = name.filter(|n| !n.is_empty()) {
+            names.push(name);
+        }
+    }
+    names.sort();
+    names.dedup();
+    let known: std::collections::HashSet<String> = names.iter().cloned().collect();
+    let index: std::collections::HashMap<&str, usize> =
+        names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+
+    // 2. edges: the item's own paths that name another item in this module
+    let mut parent: Vec<usize> = (0..names.len()).collect();
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    for item in &file.items {
+        if has_cfg_test(item_attrs(item)) {
+            continue;
+        }
+        let owner = match item {
+            Item::Impl(i) => static_type_ident(&i.self_ty),
+            _ => item_name(item).unwrap_or_default(),
+        };
+        if owner.is_empty() {
+            continue;
+        }
+        let mut probe = RefProbe {
+            known: &known,
+            found: std::collections::HashSet::new(),
+        };
+        probe.visit_item(item);
+        let Some(&owner_idx) = index.get(owner.as_str()) else {
+            continue;
+        };
+        for referenced in &probe.found {
+            if *referenced == owner {
+                continue;
+            }
+            if let Some(&other) = index.get(referenced.as_str()) {
+                let (a, b) = (find(&mut parent, owner_idx), find(&mut parent, other));
+                if a != b {
+                    parent[b] = a;
+                }
+            }
+        }
+    }
+
+    // 3. components
+    let mut by_root: std::collections::HashMap<usize, Vec<String>> = std::collections::HashMap::new();
+    for (i, name) in names.iter().enumerate() {
+        let root = find(&mut parent, i);
+        by_root.entry(root).or_default().push(name.clone());
+    }
+    let mut groups: Vec<Vec<String>> = by_root.into_values().filter(|g| g.len() >= 2).collect();
+    let stand_alone = names.len() - groups.iter().map(Vec::len).sum::<usize>();
+    for group in &mut groups {
+        group.sort();
+    }
+    groups.sort_by(|a, b| b.len().cmp(&a.len()).then(a[0].cmp(&b[0])));
+    Cohesion {
+        items: names.len(),
+        groups,
+        stand_alone,
+    }
+}
+
+fn item_attrs(item: &Item) -> &[Attribute] {
+    match item {
+        Item::Fn(i) => &i.attrs,
+        Item::Struct(i) => &i.attrs,
+        Item::Enum(i) => &i.attrs,
+        Item::Union(i) => &i.attrs,
+        Item::Type(i) => &i.attrs,
+        Item::Trait(i) => &i.attrs,
+        Item::Const(i) => &i.attrs,
+        Item::Static(i) => &i.attrs,
+        Item::Impl(i) => &i.attrs,
+        Item::Mod(i) => &i.attrs,
+        Item::Use(i) => &i.attrs,
+        _ => &[],
+    }
+}
+
+fn item_name(item: &Item) -> Option<String> {
+    match item {
+        Item::Fn(i) => Some(i.sig.ident.to_string()),
+        Item::Struct(i) => Some(i.ident.to_string()),
+        Item::Enum(i) => Some(i.ident.to_string()),
+        Item::Union(i) => Some(i.ident.to_string()),
+        Item::Type(i) => Some(i.ident.to_string()),
+        Item::Trait(i) => Some(i.ident.to_string()),
+        Item::Const(i) => Some(i.ident.to_string()),
+        Item::Static(i) => Some(i.ident.to_string()),
+        Item::Impl(i) => Some(static_type_ident(&i.self_ty)),
+        _ => None,
+    }
+}
+
+/// The paths an item uses, restricted to the module's own definition names.
+struct RefProbe<'a> {
+    known: &'a std::collections::HashSet<String>,
+    found: std::collections::HashSet<String>,
+}
+
+impl<'ast> Visit<'ast> for RefProbe<'_> {
+    fn visit_path(&mut self, path: &'ast Path) {
+        if let Some(first) = path.segments.first() {
+            let ident = first.ident.to_string();
+            if self.known.contains(&ident) {
+                self.found.insert(ident);
+            }
+        }
+        visit::visit_path(self, path);
+    }
+}
+
+/// Emit the `mixed-module` finding into a scan: skipped for generated files and
+/// test paths (a generated module has no reader to organise for, and a test
+/// module is not the module's design).
+fn mixed_module_into(scan: &mut RustScan, file: &File, name: &str) {
+    if scan.module_shape.generated || crate::is_test_path(name) {
+        return;
+    }
+    if let Some(finding) = mixed_module_finding(file, name) {
+        scan.findings.push(finding);
+    }
+}
+
+/// One finding when the module's definitions fall into groups that never
+/// reference each other.
+fn mixed_module_finding(file: &File, name: &str) -> Option<Finding> {
+    let shape = cohesion(file);
+    // Two arms: three families that never meet, or a big module whose items
+    // fall into many disconnected parts (the grab bag — several small groups
+    // and a pile of stand-alone items, which no single family size reveals).
+    let parts = shape.groups.len() + shape.stand_alone;
+    let several_families = shape.groups.len() >= MIXED_MODULE_GROUPS;
+    let fragmented = shape.items >= MIXED_MODULE_ITEMS && parts >= MIXED_MODULE_PARTS;
+    if !several_families && !fragmented {
+        return None;
+    }
+    let list = shape
+        .groups
+        .iter()
+        .take(3)
+        .map(|g| match g.len() {
+            1 => g[0].clone(),
+            2 => format!("{} and {}", g[0], g[1]),
+            n => format!("{} and {} others", g[0], n - 1),
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(Finding {
+        logical_start: None,
+        seam_members: Vec::new(),
+        col: 0,
+        file: name.to_string(),
+        line: 0,
+        function: String::new(),
+        kind: "mixed-module".into(),
+        severity: "warn".into(),
+        message: format!(
+            "'{name}' holds {} top-level definitions in {parts} parts that never reference each other — {} groups and {alone} items standing alone. A reader cannot tell which items belong together, because nothing in the file joins one part to the next. The groups are {list}. Move each group into its own module, named after what its members are about.",
+            shape.items,
+            shape.groups.len(),
+            alone = shape.stand_alone,
+            parts = parts,
+        ),
+    })
 }
 
 /// The type a function's first parameter names, when that type is a concept:
@@ -3054,6 +3272,112 @@ mod tests {
         assert!(!has_kind(&panic, "no-assert-test"));
         let ignored = scan("#[test]\n#[ignore]\nfn t() {}\n");
         assert!(!has_kind(&ignored, "no-assert-test"));
+    }
+
+    #[test]
+    fn mixed_module_fires_when_groups_do_not_meet() {
+        // three pairs that reference each other and nothing else, plus four
+        // stand-alone fns: 10 definitions, 3 groups -> several modules
+        let src = "\
+struct A;
+impl A { fn a(&self) { let _ = B; } }
+struct B;
+impl B { fn b(&self) { let _ = A; } }
+struct C;
+impl C { fn c(&self) { let _ = D; } }
+struct D;
+impl D { fn d(&self) { let _ = C; } }
+struct E;
+impl E { fn e(&self) { let _ = F; } }
+struct F;
+impl F { fn f(&self) { let _ = E; } }
+fn g() {}
+fn h() {}
+fn i() {}
+fn j() {}
+";
+        let fs = scan(src);
+        let hit = fs.iter().find(|f| f.kind == "mixed-module").expect("mixed-module");
+        assert!(hit.message.contains("3 groups"), "{}", hit.message);
+        assert!(hit.message.contains("4 items standing alone"), "{}", hit.message);
+        assert!(hit.message.contains("A and B"), "{}", hit.message);
+    }
+
+    #[test]
+    fn mixed_module_passes_one_connected_module() {
+        // a chain references through every item: one group, however many items
+        let src = "\
+struct A;
+impl A { fn a(&self) { let _ = B; } }
+struct B;
+impl B { fn b(&self) { let _ = C; } }
+struct C;
+impl C { fn c(&self) { let _ = D; } }
+struct D;
+impl D { fn d(&self) { let _ = E; } }
+struct E;
+impl E { fn e(&self) { let _ = F; } }
+struct F;
+impl F { fn f(&self) { let _ = A; } }
+fn g() {}
+fn h() {}
+fn i() {}
+fn j() {}
+";
+        assert!(!has_kind(&scan(src), "mixed-module"));
+    }
+
+    #[test]
+    fn mixed_module_passes_independent_helpers() {
+        // a module of stand-alone items is one concept whose items happen not
+        // to call each other: no groups, no finding
+        let mut src = String::new();
+        for i in 0..12 {
+            src.push_str(&format!("fn helper_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"));
+        }
+        assert!(!has_kind(&scan(&src), "mixed-module"));
+    }
+
+    #[test]
+    fn mixed_module_needs_three_groups() {
+        // two groups is a pair of concepts, under the bar
+        let src = "\
+struct A;
+impl A { fn a(&self) { let _ = B; } }
+struct B;
+impl B { fn b(&self) { let _ = A; } }
+struct C;
+impl C { fn c(&self) { let _ = D; } }
+struct D;
+impl D { fn d(&self) { let _ = C; } }
+fn g() {}
+fn h() {}
+fn i() {}
+fn j() {}
+";
+        assert!(!has_kind(&scan(src), "mixed-module"));
+    }
+
+    #[test]
+    fn mixed_module_ignores_test_items() {
+        // a test module references everything; the rule reads production items
+        let src = "\
+struct A;
+struct B;
+struct C;
+struct D;
+fn g() {}
+fn h() {}
+fn i() {}
+fn j() {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a() { let _ = A; let _ = B; let _ = C; let _ = D; let _ = g(); let _ = h(); let _ = i(); let _ = j(); }
+}
+";
+        assert!(!has_kind(&scan(src), "mixed-module"));
     }
 
     #[test]

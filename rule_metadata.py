@@ -493,6 +493,17 @@ CATALOG = RuleCatalog([
          "Dice similarity ≥ 0.9 (structural skeleton bigrams) — copy-paste; "
          "extract the shared logic.",
          display_group="standard"),
+    Rule("mixed-module", "warn", "architecture", "Rust",
+         "A Rust module whose top-level definitions fall into parts that never "
+         "reference each other, by one of two arms: ≥ 3 groups of items that "
+         "reference each other (each group is a connected component of the item "
+         "graph, so one group is one concept however many items it holds), or a "
+         "module of ≥ 20 definitions whose items fall into ≥ 6 disconnected "
+         "parts (several small groups plus stand-alone items — the grab bag no "
+         "single family size reveals). Impl blocks belong to their type, "
+         "`use`/`mod` are boundaries rather than items, and test items are "
+         "skipped. Move each group into its own module, named after what its "
+         "members are about."),
     Rule("duplicate-module", "fail", "architecture", "Both",
          "Two modules or classes with the same structural skeleton (>= 0.9 "
          "Dice) and the same declared fields — plus, for two classes, "

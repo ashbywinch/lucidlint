@@ -410,6 +410,27 @@ class-equivalent counting: Python's unit is the class, Rust's is the type plus
 its impl/functions, and forcing either into the other's shape is what the
 `several-classes` round already proved wrong.
 
+### `mixed-module` — shipped
+
+The rule is in (`rustscan.rs`, `MIXED_MODULE_*`): syn-based, per file, exactly
+the local evidence described above. Two arms, both measured on the three repos:
+
+- **three families** — ≥ 3 connected components of ≥ 2 items: `checks.rs` (16
+  groups), `checks/review_log.rs` (3 groups — the review-log families that
+  share a file by provenance, not by concept);
+- **the fragmented big module** — ≥ 20 definitions in ≥ 6 disconnected parts
+  (groups plus stand-alone items): the arm that catches the grab bag, and the
+  one that would have flagged `common.rs` before this round dissolved it
+  (“33 top-level definitions in 13 parts — 2 groups and 11 items standing
+  alone”).
+
+A module of stand-alone helpers is **not** a finding: `radonc/src/complexity.rs`
+(10 helpers, no groups) and `checks/module_size.rs` (one family + two helpers)
+stay silent, which is the false positive the first cut produced and the reason
+the count needs the second arm. Impl blocks fold into their type, `use`/`mod`
+are boundaries, `#[cfg(test)]` items are skipped (a test module references
+everything and would glue the parts).
+
 ### Does Rust need a graph tool for this?
 
 Prototyped before answering: a text-level item→reference graph over the old
