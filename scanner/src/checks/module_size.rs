@@ -3,13 +3,16 @@
 //!
 //! ONE ladder, two rules, disjoint ranges — exactly one fires:
 //!
-//! - [`SEVERAL_DEFINITIONS`] < count <= [`MANY_DEFINITIONS`] fires
-//!   `several-definitions` (3–10 definitions).
-//! - count > [`MANY_DEFINITIONS`] fires `many-definitions` (11+).
+//! - Python only, [`SEVERAL_DEFINITIONS`] < count <= [`MANY_DEFINITIONS`]
+//!   fires `several-definitions` (3–30 definitions);
+//! - count > [`MANY_DEFINITIONS`] fires `many-definitions` (31+), both
+//!   languages.
 //!
 //! The split exists so a repo can set its policy: disable
-//! `several-definitions` and the module is judged only at 11+, or keep both
-//! and hold every module to three.
+//! `several-definitions` and a Python module is judged only at 31+, or keep it
+//! and hold Python modules to three. Rust is judged at the loose rung only —
+//! a class equivalent there is a type plus the functions that take it, and a
+//! module of three is the normal unit.
 //!
 //! The message branches on what the definitions ARE. A module whose
 //! definitions are mostly classes becomes a PACKAGE — one file per class
@@ -28,13 +31,16 @@ use ruff_python_ast::Stmt;
 
 use crate::Finding;
 
-/// A module holding more top-level definitions than this has stopped being
-/// one concept: a class, a data table or a record may hold two, never three.
+/// The strict rung's floor: a Python module holding more definitions than this
+/// has stopped being one concept — a class, a data table or a record may hold
+/// two, never three. The rung is Python-only: in Rust a class equivalent is a
+/// type plus the functions that take it, and three of those is a normal module.
 pub const SEVERAL_DEFINITIONS: usize = 2;
 
-/// Above this count the module is judged by the second rung of the ladder, so
-/// a repo can disable `several-definitions` and still hold files to 11.
-pub const MANY_DEFINITIONS: usize = 10;
+/// The loose rung: more class equivalents than this is a grab-bag by any
+/// reading. Rust's module is judged only here, so a repo that disables the
+/// strict rung still holds Rust modules to thirty.
+pub const MANY_DEFINITIONS: usize = 30;
 
 /// How many opening lines may carry a generator marker. Generators stamp the
 /// top of the file; a marker further down is prose about something else.
@@ -181,15 +187,20 @@ impl ModuleShape {
     /// The rungs are disjoint: 3–10 is `several-definitions`, 11+ is
     /// `many-definitions`, so one module never reports both.
     pub fn module_finding(&self, rel: &str) -> Option<Finding> {
-        let count = self.definitions();
-        if self.generated || count <= SEVERAL_DEFINITIONS {
+        if self.generated {
             return None;
         }
+        let count = self.definitions();
         if count > MANY_DEFINITIONS {
-            self.many_finding(rel)
-        } else {
-            self.several_finding(rel)
+            return self.many_finding(rel);
         }
+        // The strict rung is a Python design directive ("these functions
+        // should be methods"); a Rust module of three class equivalents is the
+        // normal unit, so Rust is judged only at the loose rung.
+        if self.language == Language::Python && count > SEVERAL_DEFINITIONS {
+            return self.several_finding(rel);
+        }
+        None
     }
 
     /// What the definitions ARE decides the message: classes become a package,

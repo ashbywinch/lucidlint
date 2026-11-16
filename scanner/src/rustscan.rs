@@ -338,17 +338,20 @@ impl<'a> RsState<'a> {
             .filter(|(_, g)| g.len() >= 3)
             .map(|(param, g)| {
                 let fns = g.iter().map(|c| c.0.as_str()).collect::<Vec<_>>().join("', '");
-                (g[0].1, g.len(), format!("'{}' shared by {fns}", param))
+                (g[0].1, g.len(), format!("{param}|{fns}"))
             })
             .collect();
         strew_groups.sort();
         for (line, count, detail) in strew_groups {
+            let (param, fns) = detail.split_once('|').unwrap_or((detail.as_str(), ""));
             self.finding(
                 "strewing",
                 "fail",
                 line,
                 "",
-                format!("{count} free functions take the same leading parameter ({detail}) — they share data, extract a class"),
+                format!(
+                    "{count} free functions take '{param}' as their first parameter ('{fns}'). The struct names the data, but no method owns it. Give '{param}' an impl and move these functions onto it."
+                ),
             );
         }
         RustScan {
@@ -3048,6 +3051,10 @@ mod tests {
     fn strewing_free_fns_sharing_struct_param() {
         let fs = scan("struct S { x: i32 }\nfn a(s: S) { let _ = s.x; }\nfn b(s: S) { let _ = s.x; }\nfn c(s: S) { let _ = s.x; }\n");
         assert!(has_kind(&fs, "strewing"));
+        // the struct already names the data: the action is an impl, not a new class
+        let msg = fs.iter().find(|f| f.kind == "strewing").unwrap().message.clone();
+        assert!(msg.contains("Give 'S' an impl"), "{msg}");
+        assert!(!msg.contains("extract a class"), "{msg}");
         let fs2 = scan("struct S {}\nfn a(s: S) {}\nfn b(s: S) {}\n");
         assert!(!has_kind(&fs2, "strewing"));
     }

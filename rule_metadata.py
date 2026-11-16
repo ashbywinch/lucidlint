@@ -360,27 +360,26 @@ CATALOG = RuleCatalog([
          "a reader cannot hold the whole job: extract each domain step into a "
          "named function.",
          fix="extract-method"),
-    Rule("several-definitions", "warn", "architecture", "Both",
-         "A module holding 3–10 top-level definitions — Python functions and "
-         "classes; Rust types, groups of functions that take one type (a class "
-         "equivalent), and functions left with no receiver; constants are data. "
-         "More than one concept's worth. The "
-         "advice follows what the definitions are: mostly classes/types → turn "
-         "the module into a package (Python) or a directory of modules (Rust), "
-         "one file each; mostly functions → the functions pass data no object "
-         "owns, so name the domain concepts and make them a class (Python) or a "
-         "type with an impl (Rust). All but one class/type being a method-less "
-         "value record is one concept plus its records, and is exempt; a "
-         "decorated Python function is a framework entry point, not a definition "
-         "the module owns. The upper rung is `many-definitions`, so a repo can "
-         "disable this row and keep the 11+ rule."),
+    Rule("several-definitions", "warn", "architecture", "Python",
+         "A Python module holding 3–30 top-level definitions (functions and "
+         "classes; constants are data) — more than one concept's worth. The "
+         "advice follows what the definitions are: mostly classes → turn the "
+         "module into a package, one file per class; mostly functions → the "
+         "functions pass data no object owns, so name the domain concepts and "
+         "make them classes. All but one class being a method-less value record "
+         "is one concept plus its records, and is exempt; a decorated function "
+         "is a framework entry point, not a definition the module owns. Python "
+         "only: in Rust the class equivalent is a type plus the functions that "
+         "take it, so three of those is the normal module. The upper rung is "
+         "`many-definitions`, so a repo can disable this row and hold Python "
+         "modules only to 31."),
     Rule("many-definitions", "warn", "architecture", "Both",
-         "A module holding more than 10 top-level definitions (functions and "
-         "classes or Rust types) — the second rung of the `several-definitions` "
-         "ladder, so a repo that tolerates 3–10 definitions still holds a module "
-         "to 11. Same advice: mostly classes/types → a package or directory of "
-         "modules; mostly functions → name the domain concepts and make them a "
-         "class (Python) or a type with an impl (Rust)."),
+         "A module holding more than 30 top-level definitions — Python "
+         "functions and classes; Rust types, groups of functions that take one "
+         "type (a class equivalent), and functions left with no receiver. More "
+         "than thirty class equivalents is a grab-bag by any reading: split it "
+         "by concept, one module per family. The second rung of the "
+         "`several-definitions` ladder, and the only rung Rust is judged at."),
     Rule("closures", "fail", "architecture", "Both",
          "A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line "
          "span) — the nested structure is a class waiting to be extracted.",
@@ -393,7 +392,9 @@ CATALOG = RuleCatalog([
          fix="extract-class"),
     Rule("strewing", "fail", "architecture", "Both",
          "≥3 free functions sharing the same leading parameter — they share "
-         "data, they're a class.",
+         "data, so the class exists without its methods: in Python, extract the "
+         "class (or the struct that already names it); in Rust, give the "
+         "struct an impl and move the functions onto it.",
          display_name="strewing → latent-class", display_group="latent-class",
          fix="extract-class"),
     Rule("misplaced-method", "fail", "architecture", "Python",

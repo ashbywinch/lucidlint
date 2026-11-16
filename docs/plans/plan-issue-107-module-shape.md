@@ -268,15 +268,19 @@ class equivalents and the ladder flags 3–10 (`several`) and 11+ (`many`). Clea
 under the current rungs means every module holds at most **two** definitions,
 which no module with three concepts can satisfy.
 
-**Proposed adaptation, for the ruling:**
+**Shipped adaptation (ruled 2026-11-16):**
 
-1. `several-definitions` (3–10) is **Python-only**. Its message is a design
+1. `several-definitions` (3–30) is **Python-only**. Its message is a design
    directive — free functions should become methods — and in Rust the target it
    names (a class) does not exist; three class equivalents in a module is the
    normal unit.
-2. `many-definitions` moves to **31+** for both languages. A module holding more
+2. `many-definitions` fires at **31+** for both languages. A module holding more
    than thirty class equivalents is a grab-bag by any reading, and the target is
    then reachable: split by concept until each module is ≤ 30.
+
+Result on this repo: 26 ladder findings -> **11** — six `many` (the four huge
+Rust modules and the two Python ones) and five `several` (the `scripts/*.py`
+CLIs, which are Python's to fix).
 
 With class-equivalent counting the remaining Rust findings would be exactly
 four — `checks.rs` 135, `rustscan.rs` 49, `fix.rs` 50, `main.rs` 45 — and
@@ -296,3 +300,29 @@ the Python strict rung keeps its "make these methods" directive.
   and the shape reader;
 - the split keeps `make check`, `make test` and `make self-check` green;
 - the measurement and the known-wrong shapes above ship in the PR.
+## Rust class-related rules, audited against the class-equivalent definition
+
+Each rule whose Rust path uses the notion "class": does its implementation and
+message match "a class equivalent is a type plus the functions that take it"?
+
+| rule | Rust implementation | verdict |
+|---|---|---|
+| `record-shape` | a struct with fields and **no methods** is a record; a function taking it gets "its rules belong as methods on the struct" | **aligned** — the same `methods == 0` test, and the action is methods on the type |
+| `strewing` | 3+ free `fn`s whose first parameter is a struct defined in this file → fail | **message was wrong** — "extract a class" when the struct already names it; now "give '{S}' an impl and move these functions onto it" |
+| `detached-method` | an `impl` method that never touches `self` → "make it a static method or move it out" | **aligned** — the inverse direction, and it uses the type/method vocabulary |
+| `vague-name` | a struct named Manager/Handler/… with methods or ≥120-line span | **aligned** — names the type, not a class |
+| `long-param-list` | > 5 parameters → parameter object | **aligned** — a type is the object |
+| `duplicate-module` | Python-only in practice: Rust scans carry no `skeleton_modules` | nothing to align |
+| `class-module`, `partition`, `middle-man`, `sibling-value-class`, `static-husk`, `delegating-husk`, `process-class`, `closure-cluster`, `closures`, `data-clump`, `feature-envy`, `misplaced-method`, `assembly-class`, `tuple-record`, `wide-tuple`, `scattered-instance` | Python-only (registered or implemented) | nothing to align |
+
+**The one contradiction the audit found** is `strewing`: its Rust arm fired
+`fail` on exactly the shape the counting rule now calls *one* class equivalent
+(a struct plus the functions that take it), and its message asked for a class
+that already existed. The counting rule and `strewing` are otherwise orthogonal
+— one asks "how many concepts?", the other "is the concept cohesive?" — so the
+fix is the message, not the verdict.
+
+**Nothing else changes.** `record-shape` already uses the same record test
+(`methods == 0`), `detached-method` and `vague-name` already speak in
+type/method terms, and every other class-shaped rule is Python-only because
+Rust has no classes.

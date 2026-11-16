@@ -7276,30 +7276,30 @@ def two(work, batch):
 
     #[test]
     fn the_two_rungs_never_fire_together() {
-        // 10 definitions is the top of the first rung
-        let ten = definitions_source(10, 0);
-        let f = scan_corpus(&[("pkg/ten.py", &ten)]);
+        // 30 definitions is the top of the Python strict rung
+        let thirty = definitions_source(30, 0);
+        let f = scan_corpus(&[("pkg/thirty.py", &thirty)]);
         assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
         assert!(!f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
-        // 11 is the bottom of the second
-        let eleven = definitions_source(11, 0);
-        let f = scan_corpus(&[("pkg/eleven.py", &eleven)]);
+        // 31 is the bottom of the loose rung
+        let thirty_one = definitions_source(31, 0);
+        let f = scan_corpus(&[("pkg/thirty_one.py", &thirty_one)]);
         assert!(f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
         assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
         let msg = &f.iter().find(|x| x.kind == "many-definitions").unwrap().message;
         assert!(
-            msg.contains("holds 11 top-level definitions, 11 of them functions"),
+            msg.contains("holds 31 top-level definitions, 31 of them functions"),
             "{msg}"
         );
     }
 
     #[test]
     fn many_definitions_keeps_the_class_advice_for_classes() {
-        let src = several_classes_source(12, 12);
+        let src = several_classes_source(31, 31);
         let f = scan_corpus(&[("pkg/widgets.py", &src)]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
-        assert!(hits[0].message.contains("12 of them classes"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("31 of them classes"), "{}", hits[0].message);
         assert!(hits[0].message.contains("package"), "{}", hits[0].message);
     }
 
@@ -7331,7 +7331,7 @@ def two(work, batch):
         // every function carries a registration decorator: the framework is
         // the caller, so the module holds no definitions the reader must name
         let mut src = String::new();
-        for i in 0..14 {
+        for i in 0..31 {
             src.push_str(&format!(
                 "@router.get(\"/v1/thing/{i}\")\nasync def get_thing_{i}(request):\n    return request + {i}\n\n"
             ));
@@ -7341,19 +7341,19 @@ def two(work, batch):
         assert!(!f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
         // a module that adds owned functions to its routes still reports them,
         // and the message names the framework entry points it is not counting
-        src.push_str(&definitions_source(12, 0));
+        src.push_str(&definitions_source(31, 0));
         let f = scan_corpus(&[("pkg/routes.py", &src)]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         assert!(
-            hits[0].message.contains("12 top-level definitions"),
+            hits[0].message.contains("31 top-level definitions"),
             "{}",
             hits[0].message
         );
         assert!(
             hits[0]
                 .message
-                .contains("14 more functions registered with a framework"),
+                .contains("31 more functions registered with a framework"),
             "{}",
             hits[0].message
         );
@@ -7361,9 +7361,9 @@ def two(work, batch):
 
     #[test]
     fn rust_types_arm_asks_for_a_directory_of_modules() {
-        // 12 structs, no fns: the types arm, and the action is a module split
+        // 31 structs, no fns: the types arm, and the action is a module split
         let mut src = String::new();
-        for i in 0..12 {
+        for i in 0..31 {
             src.push_str(&format!("pub struct Widget{i} {{ size: u32 }}\n\nimpl Widget{i} {{\n    pub fn run(&self) -> u32 {{\n        self.size\n    }}\n}}\n\n"));
         }
         let rs = rustscan::scan_source(&src, "crate/src/widgets.rs", true);
@@ -7372,7 +7372,7 @@ def two(work, batch):
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         let msg = &hits[0].message;
-        assert!(msg.contains("12 of them types"), "{msg}");
+        assert!(msg.contains("31 of them types"), "{msg}");
         assert!(msg.contains("directory of modules"), "{msg}");
         assert!(msg.contains("one file per type"), "{msg}");
         assert!(!msg.contains("__init__.py"), "{msg}");
@@ -7380,9 +7380,9 @@ def two(work, batch):
 
     #[test]
     fn rust_functions_arm_splits_the_module_at_the_loose_rung() {
-        // 11+ functions: the module is a grab-bag, so the action is the split
+        // 31+ free functions: the module is a grab-bag, so the action is the split
         let mut src = String::new();
-        for i in 0..12 {
+        for i in 0..31 {
             src.push_str(&format!(
                 "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
             ));
@@ -7394,7 +7394,7 @@ def two(work, batch):
         assert_eq!(hits.len(), 1, "{f:?}");
         let msg = &hits[0].message;
         assert!(
-            msg.contains("holds 12 top-level definitions (12 free functions)"),
+            msg.contains("holds 31 top-level definitions (31 free functions)"),
             "{msg}"
         );
         assert!(msg.contains("Split the module by concept"), "{msg}");
@@ -7405,8 +7405,9 @@ def two(work, batch):
     }
 
     #[test]
-    fn rust_functions_arm_asks_for_an_impl_at_the_strict_rung() {
-        // 3-10 functions: one concept with a missing owner, so the fix is local
+    fn rust_is_judged_only_at_the_loose_rung() {
+        // 4 free functions with no receiver: Rust's strict rung does not apply,
+        // because three class equivalents in a module is the normal unit
         let mut src = String::new();
         for i in 0..4 {
             src.push_str(&format!(
@@ -7416,18 +7417,24 @@ def two(work, batch):
         let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
         let f = checks::module_findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
-        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert!(f.is_empty(), "{f:?}");
+        // and 31 free functions do fire, with the split advice
+        let mut wide = String::new();
+        for i in 0..31 {
+            wide.push_str(&format!(
+                "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
+            ));
+        }
+        let rs = rustscan::scan_source(&wide, "crate/src/wide.rs", true);
+        let scan = rustscan_to_filescan_ref(&rs, "crate/src/wide.rs");
+        let f = checks::module_findings(&[("crate/src/wide.rs".to_string(), scan.module_shape.clone())]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
-        let msg = &hits[0].message;
         assert!(
-            msg.contains("holds 4 top-level definitions (4 free functions)"),
-            "{msg}"
+            hits[0].message.contains("Split the module by concept"),
+            "{}",
+            hits[0].message
         );
-        assert!(msg.contains("give it an impl"), "{msg}");
-        assert!(msg.contains("an impl block may live in this module"), "{msg}");
-        assert!(msg.contains("put the functions behind one trait"), "{msg}");
-        assert!(msg.contains("a foreign type cannot take an inherent impl"), "{msg}");
-        assert!(!msg.contains("Split the module by concept"), "{msg}");
     }
 
     #[test]
@@ -7446,16 +7453,16 @@ def two(work, batch):
         assert_eq!(scan.module_shape.definitions(), 1, "{:?}", scan.module_shape);
         let f = checks::module_findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         assert!(f.is_empty(), "{f:?}");
-        // the same functions with no receiver are 12 definitions, and report
+        // the same functions with no receiver are 31 definitions, and report
         let mut loose = String::new();
-        for i in 0..12 {
+        for i in 0..31 {
             loose.push_str(&format!(
                 "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
             ));
         }
         let rs = rustscan::scan_source(&loose, "crate/src/loose.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/loose.rs");
-        assert_eq!(scan.module_shape.definitions(), 12);
+        assert_eq!(scan.module_shape.definitions(), 31);
         let f = checks::module_findings(&[("crate/src/loose.rs".to_string(), scan.module_shape.clone())]);
         assert!(f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
     }
