@@ -18,7 +18,7 @@
 // helpers would thread six collections through a parameter object for no reader gain
 use rayon::prelude::*;
 use ruff_python_ast::visitor::source_order::{walk_expr, walk_stmt, SourceOrderVisitor};
-use ruff_python_ast::{AnyNodeRef, Expr, ModModule, Stmt, StmtIf};
+use ruff_python_ast::{AnyNodeRef, Expr, ModModule, Stmt};
 use ruff_python_parser::{parse_module, Parsed};
 use ruff_text_size::Ranged;
 use serde::Serialize;
@@ -35,6 +35,8 @@ mod graph_families;
 mod lsp;
 mod magic;
 mod naming;
+mod paths;
+mod python_shape;
 mod report;
 mod rules_gen;
 mod rustloops;
@@ -44,6 +46,8 @@ mod source;
 mod suppressions;
 use checks::Q;
 use checks::*;
+use paths::{is_out_of_scan, is_test_path, rel_of, scan_root, SCAN_SKIP_DIRS};
+use python_shape::{collect_stmt_lists, python_fn_shape};
 use source::{col_of, line_of, reset_line_starts, stmt_line};
 
 /// One open function scope: its decision count and the names it returns
@@ -456,298 +460,6 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
     }
 }
 
-/// Classify a Python function body's shape for the complexity message: a
-/// dispatch chain (>= 3 top-level ifs comparing the SAME selector to string
-/// literals) or a rule battery (>= 3 top-level ifs appending to the SAME
-/// list) get shape-specific lucid guidance; anything else is "plain". The
-/// scan sees the body once — the message must not re-parse (review: run_tool
-/// is a dispatch chain, _deterministic_violations a rule battery).
-fn python_fn_shape(body: &[Stmt]) -> (&'static str, String) {
-    // the OFFER must equal the FIX: a shape is only "dispatch"/"rules" when
-    // the fix's own shape checks pass — otherwise the directive would offer
-    // something that refuses (the fix-engine v1 boundaries are strict)
-    if let Some(sel) = dispatch_chain_shape(body) {
-        return ("dispatch", sel);
-    }
-    if let Some(acc) = rule_battery_shape(body) {
-        return ("rules", acc);
-    }
-    ("plain", String::new())
-}
-
-/// One dispatch arm's selector when the test is `sel == "lit"`.
-fn dispatch_arm_selector(i: &StmtIf) -> Option<(&str, &str)> {
-    let Expr::Compare(c) = i.test.as_ref() else { return None };
-    if c.ops.len() != 1 || !matches!(c.ops[0], ruff_python_ast::CmpOp::Eq) {
-        return None;
-    }
-    let Expr::Name(n) = c.left.as_ref() else { return None };
-    let Expr::StringLiteral(_) = &c.comparators[0] else {
-        return None;
-    };
-    Some((n.id.as_str(), "lit"))
-}
-
-/// The names BOUND (assigned) in a statement run — arm-local bindings.
-/// Mirrors fix_engine's _BoundNames (Assign/AnnAssign/For/With targets and
-/// walrus/import bindings): a name bound in one dispatch arm and READ in a
-/// sibling cannot be a uniform handler parameter.
-struct DispatchArmNames<'a> {
-    bound: HashSet<&'a str>,
-    read: HashSet<&'a str>,
-}
-
-fn collect_dispatch_arm_names(body: &[Stmt]) -> DispatchArmNames<'_> {
-    use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
-    struct Collect<'a> {
-        bound: HashSet<&'a str>,
-        read: HashSet<&'a str>,
-    }
-    impl<'a> SourceOrderVisitor<'a> for Collect<'a> {
-        fn visit_expr(&mut self, e: &'a Expr) {
-            match e {
-                Expr::Name(n) => {
-                    self.read.insert(n.id.as_str());
-                }
-                Expr::Named(n) => {
-                    if let Expr::Name(t) = n.target.as_ref() {
-                        self.bound.insert(t.id.as_str());
-                    }
-                }
-                _ => {}
-            }
-            ruff_python_ast::visitor::source_order::walk_expr(self, e);
-        }
-        fn visit_stmt(&mut self, s: &'a Stmt) {
-            match s {
-                Stmt::Assign(a) => {
-                    for t in &a.targets {
-                        if let Expr::Name(t) = t {
-                            self.bound.insert(t.id.as_str());
-                        }
-                    }
-                }
-                Stmt::AnnAssign(a) => {
-                    if let Expr::Name(n) = a.target.as_ref() {
-                        self.bound.insert(n.id.as_str());
-                    }
-                }
-                Stmt::AugAssign(a) => {
-                    if let Expr::Name(n) = a.target.as_ref() {
-                        self.bound.insert(n.id.as_str());
-                    }
-                }
-                Stmt::For(f) => {
-                    if let Expr::Name(n) = f.target.as_ref() {
-                        self.bound.insert(n.id.as_str());
-                    }
-                }
-                Stmt::With(w) => {
-                    for item in &w.items {
-                        if let Some(v) = &item.optional_vars {
-                            if let Expr::Name(n) = v.as_ref() {
-                                self.bound.insert(n.id.as_str());
-                            }
-                        }
-                    }
-                }
-                Stmt::Import(imp) => {
-                    for a in &imp.names {
-                        self.bound.insert(a.name.as_str());
-                    }
-                }
-                Stmt::ImportFrom(imp) => {
-                    for a in &imp.names {
-                        self.bound.insert(a.name.as_str());
-                    }
-                }
-                _ => {}
-            }
-            // comprehension targets bind arm-locally (mirrors fix_engine's
-            // visit_CompFor)
-            for gen in stmt_comprehension_generators(s) {
-                if let Expr::Name(n) = &gen.target {
-                    self.bound.insert(n.id.as_str());
-                }
-            }
-            walk_stmt(self, s);
-        }
-    }
-    let mut c = Collect {
-        bound: HashSet::new(),
-        read: HashSet::new(),
-    };
-    for s in body {
-        walk_stmt(&mut c, s);
-    }
-    DispatchArmNames {
-        bound: c.bound,
-        read: c.read,
-    }
-}
-
-/// The comprehension generators of a statement's expressions — their targets
-/// bind arm-locally (mirrors fix_engine's visit_CompFor).
-fn stmt_comprehension_generators(s: &Stmt) -> Vec<&ruff_python_ast::Comprehension> {
-    fn collect_expr<'a>(e: &'a Expr, out: &mut Vec<&'a ruff_python_ast::Comprehension>) {
-        match e {
-            Expr::ListComp(c) => {
-                out.extend(c.generators.iter());
-                collect_expr(&c.elt, out);
-            }
-            Expr::SetComp(c) => {
-                out.extend(c.generators.iter());
-                collect_expr(&c.elt, out);
-            }
-            Expr::DictComp(c) => {
-                out.extend(c.generators.iter());
-                if let Some(k) = &c.key {
-                    collect_expr(k, out);
-                }
-                collect_expr(&c.value, out);
-            }
-            Expr::Generator(g) => {
-                out.extend(g.generators.iter());
-                collect_expr(&g.elt, out);
-            }
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    match s {
-        Stmt::Assign(a) => collect_expr(a.value.as_ref(), &mut out),
-        Stmt::AnnAssign(a) => {
-            if let Some(v) = &a.value {
-                collect_expr(v.as_ref(), &mut out);
-            }
-        }
-        Stmt::Expr(e) => collect_expr(e.value.as_ref(), &mut out),
-        Stmt::Return(r) => {
-            if let Some(v) = &r.value {
-                collect_expr(v.as_ref(), &mut out);
-            }
-        }
-        Stmt::If(i) => {
-            for b in &i.body {
-                out.extend(stmt_comprehension_generators(b));
-            }
-        }
-        _ => {}
-    }
-    out
-}
-
-/// The FIXABLE dispatch shape: a preamble, >= 3 contiguous `if <sel> ==
-/// "lit": <body>` arms over ONE selector, then exactly one trailing
-/// `return <default>`. This mirrors fix_engine's _dispatch_chain_shape — the
-/// offer is only made when the fix applies. Arms whose body reads a name
-/// BOUND IN A SIBLING ARM are refused (the named-handler rewrite cannot
-/// preserve them — see _dispatch_named_mode).
-fn dispatch_chain_shape(body: &[Stmt]) -> Option<String> {
-    let first_if = body.iter().position(|s| matches!(s, Stmt::If(_)))?;
-    let mut selector: Option<&str> = None;
-    let mut n = 0usize;
-    for stmt in &body[first_if..] {
-        let Stmt::If(i) = stmt else { break };
-        let (sel, _lit) = dispatch_arm_selector(i)?;
-        if !i.elif_else_clauses.is_empty() {
-            return None; // an arm with elif/else is not the fixable shape
-        }
-        match selector {
-            None => selector = Some(sel),
-            Some(s) if s == sel => {}
-            _ => return None,
-        }
-        n += 1;
-    }
-    if n < 3 {
-        return None;
-    }
-    // the no-match path: a single trailing `return <default>`
-    let tail = &body[first_if + n..];
-    if tail.len() != 1 || !matches!(tail[0], Stmt::Return(_)) {
-        return None;
-    }
-    // sibling-bound reads: an arm reading a name another arm binds cannot be
-    // rewritten to uniform module-level handlers (the value does not exist
-    // at the call site) — parity with the fix's refusal
-    let arms: Vec<&[Stmt]> = body[first_if..first_if + n]
-        .iter()
-        .filter_map(|s| match s {
-            Stmt::If(i) => Some(i.body.as_slice()),
-            _ => None,
-        })
-        .collect();
-    let names: Vec<DispatchArmNames> = arms.iter().map(|b| collect_dispatch_arm_names(b)).collect();
-    for (i, arm) in names.iter().enumerate() {
-        for (j, other) in names.iter().enumerate() {
-            if i != j && arm.read.intersection(&other.bound).next().is_some() {
-                return None;
-            }
-        }
-    }
-    selector.map(str::to_string)
-}
-
-/// The `acc = []` opener (plain or annotated) — (acc name, index).
-fn empty_list_init(body: &[Stmt]) -> Option<(String, usize)> {
-    for (i, stmt) in body.iter().enumerate() {
-        match stmt {
-            Stmt::Assign(a) => {
-                if is_empty_list_assignment(a) {
-                    let Expr::Name(n) = &a.targets[0] else { unreachable!() };
-                    return Some((n.id.to_string(), i));
-                }
-            }
-            Stmt::AnnAssign(a) => match (a.value.as_deref(), a.target.as_ref()) {
-                (Some(Expr::List(l)), Expr::Name(n)) if l.elts.is_empty() => {
-                    return Some((n.id.to_string(), i));
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Is the statement exactly one `acc.append(<value>)` call?
-fn is_single_append(stmts: &[Stmt], acc: &str) -> bool {
-    if stmts.len() != 1 {
-        return false;
-    }
-    let Stmt::Expr(e) = &stmts[0] else { return false };
-    let Expr::Call(call) = e.value.as_ref() else {
-        return false;
-    };
-    let Expr::Attribute(a) = call.func.as_ref() else {
-        return false;
-    };
-    a.attr.as_str() == "append"
-        && matches!(a.value.as_ref(), Expr::Name(n) if n.id.as_str() == acc)
-        && call.arguments.args.len() == 1
-}
-
-/// The FIXABLE rule-battery shape: an `acc = []` opener, then >= 3
-/// CONTIGUOUS `if <cond>: acc.append(<v>)` checks (no else, one append
-/// each). Mirrors fix_engine's _rule_battery_shape — the offer equals the
-/// fix.
-fn rule_battery_shape(body: &[Stmt]) -> Option<String> {
-    let (acc, init_idx) = empty_list_init(body)?;
-    let mut n = 0usize;
-    for stmt in &body[init_idx + 1..] {
-        let Stmt::If(i) = stmt else { break };
-        if !i.elif_else_clauses.is_empty() || !is_single_append(&i.body, &acc) {
-            return None;
-        }
-        n += 1;
-    }
-    if n < 3 {
-        return None;
-    }
-    Some(acc)
-}
-
 impl<'a> ScanState<'a> {
     /// Magic numbers: int/float literals outside (0, 1, 2) whose parent is an
     /// operation — mirrors the Python implementation's position rule.
@@ -976,88 +688,6 @@ impl<'a> ScanState<'a> {
     }
 }
 
-/// All statement lists inside a function, excluding nested function bodies —
-/// the Python `_statement_lists` equivalent.
-fn collect_stmt_lists<'a>(stmt: &'a Stmt, out: &mut Vec<&'a [Stmt]>) {
-    match stmt {
-        Stmt::FunctionDef(_) => {}
-        Stmt::ClassDef(c) => {
-            out.push(&c.body);
-            for s in &c.body {
-                collect_stmt_lists(s, out);
-            }
-        }
-        Stmt::If(i) => {
-            out.push(&i.body);
-            for s in &i.body {
-                collect_stmt_lists(s, out);
-            }
-            for cl in &i.elif_else_clauses {
-                out.push(&cl.body);
-                for s in &cl.body {
-                    collect_stmt_lists(s, out);
-                }
-            }
-        }
-        Stmt::For(f) => {
-            out.push(&f.body);
-            for s in &f.body {
-                collect_stmt_lists(s, out);
-            }
-            out.push(&f.orelse);
-            for s in &f.orelse {
-                collect_stmt_lists(s, out);
-            }
-        }
-        Stmt::While(w) => {
-            out.push(&w.body);
-            for s in &w.body {
-                collect_stmt_lists(s, out);
-            }
-            out.push(&w.orelse);
-            for s in &w.orelse {
-                collect_stmt_lists(s, out);
-            }
-        }
-        Stmt::With(w) => {
-            out.push(&w.body);
-            for s in &w.body {
-                collect_stmt_lists(s, out);
-            }
-        }
-        Stmt::Try(t) => {
-            out.push(&t.body);
-            for s in &t.body {
-                collect_stmt_lists(s, out);
-            }
-            for h in &t.handlers {
-                let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
-                out.push(&eh.body);
-                for s in &eh.body {
-                    collect_stmt_lists(s, out);
-                }
-            }
-            out.push(&t.orelse);
-            for s in &t.orelse {
-                collect_stmt_lists(s, out);
-            }
-            out.push(&t.finalbody);
-            for s in &t.finalbody {
-                collect_stmt_lists(s, out);
-            }
-        }
-        Stmt::Match(m) => {
-            for case in &m.cases {
-                out.push(&case.body);
-                for s in &case.body {
-                    collect_stmt_lists(s, out);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
 #[derive(Clone)]
 pub struct ClassInfo {
     pub name: String,
@@ -1146,10 +776,6 @@ impl FileScan {
     pub fn rel_of(&self, root_s: &str) -> String {
         rel_of(&self.file_name, root_s)
     }
-}
-
-pub(crate) fn is_test_path(name: &str) -> bool {
-    name.contains("/test") || name.starts_with("test")
 }
 
 /// The full scan (CLI): per-file families + repo-wide collections.
@@ -1428,35 +1054,6 @@ pub(crate) fn scan_file(path: &Path) -> FileScan {
     scan
 }
 
-/// Directories a repo-wide scan never enters (venvs, caches, build output —
-/// the orchestrator's git-ls-files equivalent without git).
-/// The repo-wide merge for the LSP's save path: every Python file under
-/// `root` scanned with the repo-wide flag, then the families that need the
-/// whole repo (duplicate, unused — reconciled through each file's
-/// suppressions, review-log B3). Returns the ADDITIONS per repo-relative
-/// file; the per-file findings travel via the buffer scan so nothing is
-/// double-reported. Lives here (the composition root) so lsp stays a
-/// standalone scan-core module (layers test).
-const SCAN_SKIP_DIRS: &[&str] = &[
-    ".git",
-    ".venv",
-    "venv",
-    "node_modules",
-    "__pycache__",
-    ".lucidlint-cache",
-    ".ruff_cache",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".pyrefly-cache",
-    "htmlcov",
-    "dist",
-    "build",
-    "target",
-    ".code-review-graph",
-    ".tox",
-    ".eggs",
-];
-
 /// Every Python file under `root` (the scan walk; `SCAN_SKIP_DIRS` prunes
 /// venvs/caches/build output). Shared by the full gate scan and the LSP's
 /// incremental save path — the LSP stats these paths instead of re-scanning.
@@ -1707,76 +1304,6 @@ fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
 /// here follows from it and the drift gate pins the generated file.
 pub use rules_gen::{final_kind, FAMILY_KINDS, STANDARD_KINDS};
 
-/// Longest common prefix of the passed paths — the repo root for a
-/// full-repo run; the file itself in per-file mode.
-///
-/// The char-level prefix can stop mid-component (tests/ vs tools/ share a
-/// trailing 't'), so it backs off to the last path separator — rels are
-/// always clean directory boundaries.
-fn repo_root(paths: &[String]) -> String {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    repo_root_impl(paths, &cwd)
-}
-
-/// The scan root: the explicit `--root` the orchestrator passes, else the
-/// inferred one. Explicit wins so the caller's contract does not depend on
-/// the file layout it happens to pass.
-fn scan_root(paths: &[String], root_override: Option<&str>) -> String {
-    match root_override {
-        Some(r) => r.to_string(),
-        None => repo_root(paths),
-    }
-}
-
-/// The longest common prefix of the passed paths, backed off to the last
-/// path separator. Paths are resolved against `cwd` FIRST: the orchestrator
-/// passes REPO-RELATIVE paths (the binary runs with the repo as its cwd),
-/// and the raw common prefix of `tests/a.py` + `tools/b.py` is `"t"` — which
-/// backed off to `""` and silently broke every graph-family rel resolution
-/// (repo_rel on the graph's ABSOLUTE node paths stripped nothing), so
-/// large-function/hub-file/high-risk/layer-mix/folder-mix never fired
-/// through the orchestrator. Joining the cwd makes the root the absolute
-/// repo path for relative inputs and leaves absolute inputs unchanged.
-fn repo_root_impl(paths: &[String], cwd: &Path) -> String {
-    if paths.is_empty() {
-        return String::new();
-    }
-    // A relative input is defined relative to the cwd, and the orchestrator
-    // passes REPO-RELATIVE paths with its cwd AT the repo root — so the cwd IS
-    // the scan root whenever ANY input is relative. The common prefix cannot
-    // know that: it loses a package segment shared by every file (pkg/a.py +
-    // pkg/b.py -> .../pkg), which silently breaks every repo-wide rel mapping
-    // — duplicate, unused, duplicate-module, forwarding-chain and the graph
-    // families all vanished for the common src/ or lib/ layout. Pure absolute
-    // input (an external caller, the LSP) keeps the prefix logic; a mixed
-    // caller is anchored at the cwd because that is what its relative half
-    // means.
-    if paths.iter().any(|p| !Path::new(p).is_absolute()) {
-        return cwd.to_string_lossy().to_string();
-    }
-    let abs: Vec<String> = paths
-        .iter()
-        .map(|p| {
-            let pb = Path::new(p);
-            if pb.is_absolute() {
-                p.clone()
-            } else {
-                cwd.join(pb).to_string_lossy().to_string()
-            }
-        })
-        .collect();
-    let mut prefix = abs[0].clone();
-    for p in &abs[1..] {
-        while !p.starts_with(&prefix) {
-            prefix.truncate(prefix.len().saturating_sub(1));
-        }
-    }
-    match prefix.rfind('/') {
-        Some(idx) => prefix.truncate(idx),
-        None => prefix.clear(),
-    }
-    prefix
-}
 fn sig_of_stale(msg: &str) -> String {
     // line form: "suppression '// lucidlint: ignore <sig>' at line N no longer fires"
     if let Some(i) = msg.find("ignore ") {
@@ -1839,29 +1366,6 @@ pub(crate) fn reconcile_repo_wide(
         let sig = sig_of_stale(&g.message);
         !used_file.contains(&sig) && !used_line.contains(&(g.line, sig))
     });
-}
-
-pub(crate) fn rel_of(path: &str, root: &str) -> String {
-    // a relative path is resolved against the cwd (the binary runs with the
-    // repo as its cwd) — stripping the root then yields the true rel instead
-    // of falling back to the bare file name (which left per-file rels to be
-    // re-resolved by the orchestrator's cwd-dependent guess)
-    let abs = if Path::new(path).is_absolute() {
-        path.to_string()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_default()
-            .join(path)
-            .to_string_lossy()
-            .to_string()
-    };
-    if let Some(rel) = abs.strip_prefix(root).and_then(|r| r.strip_prefix('/')) {
-        return rel.to_string();
-    }
-    std::path::Path::new(path)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string())
 }
 
 /// Suppression census: how many `lucidlint: ignore` sites each signal has
@@ -2468,22 +1972,11 @@ const RUST_FIX_KINDS: &[&str] = &[
     "loop-hoist",
 ];
 
-/// `x = []` — an empty list bound to one name, the list-literal rewrite target.
-fn is_empty_list_assignment(assign: &ruff_python_ast::StmtAssign) -> bool {
-    matches!(assign.value.as_ref(), Expr::List(l) if l.elts.is_empty())
-        && assign.targets.len() == 1
-        && matches!(assign.targets[0], Expr::Name(_))
-}
-
-/// The path is outside this scan: test code (unless tests are included) or
-/// vendored.
-fn is_out_of_scan(include_tests: bool, rel: &str) -> bool {
-    (!include_tests && is_test_path(rel)) || checks::is_vendored(rel)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::paths::{repo_root, repo_root_impl};
 
     #[test]
     fn full_fix_command_never_fabricates_name_from_prose() {

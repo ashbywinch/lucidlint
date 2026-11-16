@@ -7107,11 +7107,7 @@ pub fn is_duplicate_candidate(f: &StmtFunctionDef, skeleton_len: usize) -> bool 
 /// Vendored path components — never scanned for module forks (a fork inside
 /// vendored code is upstream's problem). Independent of SCAN_SKIP_DIRS,
 /// which has no vendor entries.
-pub const VENDOR_DIRS: &[&str] = &["vendor", "third_party", "thirdparty", "node_modules", "site-packages"];
-
-pub fn is_vendored(rel: &str) -> bool {
-    rel.split('/').any(|part| VENDOR_DIRS.contains(&part))
-}
+pub use crate::paths::is_vendored;
 
 /// The normalized constant token: `NAME:norm(type)` — numeric literals
 /// normalised, strings stripped, bools canonical (R4). None for non-literal
