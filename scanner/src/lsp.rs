@@ -57,7 +57,7 @@ fn finding_diag(f: &Finding, source: &str) -> serde_json::Value {
         },
         "severity": severity_of(f),
         "source": "lucidlint",
-        "message": crate::common::full_fix_command(&f.file, f.line, &f.message),
+        "message": crate::fix_render::full_fix_command(&f.file, f.line, &f.message),
     })
 }
 
@@ -119,10 +119,10 @@ pub fn diagnostics_for(scan: &FileScan, source: &str, filter: Option<(&LucidConf
                 },
                 "severity": 1,
                 "source": "lucidlint",
-                "message": crate::common::full_fix_command(
+                "message": crate::fix_render::full_fix_command(
                     &e.file,
                     e.line,
-                    &crate::common::complexity_message(e.cc, e.shape, &e.shape_detail),
+                    &crate::fix_render::complexity_message(e.cc, e.shape, &e.shape_detail),
                 ),
             }));
         }
@@ -193,7 +193,7 @@ fn repo_wide_diag(f: &Finding, rel: &str, cfg: &LucidConfig) -> Option<serde_jso
         },
         "severity": severity_of(f),
         "source": "lucidlint",
-        "message": crate::common::full_fix_command(&f.file, f.line, &f.message),
+        "message": crate::fix_render::full_fix_command(&f.file, f.line, &f.message),
     }))
 }
 

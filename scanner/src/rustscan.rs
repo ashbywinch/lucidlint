@@ -4,7 +4,7 @@
 //! The Rust language layer — syn-based per-file scan.
 //!
 //! Seam: the same `Finding`/`FnCc` model as the Python layer, the same shared
-//! logic from `common` (duplicate similarity, suppression matching, the CC
+//! logic from the shared modules (duplicate similarity, suppression matching, the CC
 //! rule table, vague-role names) — but the AST walk is genuinely Rust-shaped
 //! (`syn`), and the families whose Rust analog is weak or compiler-owned
 //! (monkeypatch fixtures — Rust injects via traits; class-module naming —
@@ -24,7 +24,7 @@
 //! LIVE in tests: an `#[ignore]`d test is a skipif finding, and suppressions
 //! still parse from the whole file.
 
-use crate::{common, Finding, FnCc};
+use crate::{Finding, FnCc};
 use std::collections::HashMap;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -49,7 +49,7 @@ pub struct RustScan {
     pub findings: Vec<Finding>,
     pub cc: Vec<FnCc>,
     pub errors: usize,
-    pub skeletons: Vec<common::SkeletonFn>,
+    pub skeletons: Vec<crate::skeleton::SkeletonFn>,
     /// (module name, inline?) — top-level `mod` declarations.
     pub mod_decls: Vec<(String, bool)>,
     /// Raw `use` paths ("crate::a::b", "super::x", "serde::Deserialize", ...).
@@ -58,7 +58,7 @@ pub struct RustScan {
     pub module_shape: crate::checks::ModuleShape,
     /// The file's parsed `lucidlint: ignore` suppressions — the orchestrator
     /// needs them to suppress the repo-wide families (duplicate/unused).
-    pub supps: common::Suppressions,
+    pub supps: crate::suppressions::Suppressions,
     pub supps_spent: std::collections::HashSet<(usize, String)>,
 }
 
@@ -79,11 +79,11 @@ struct NumericLiteralProbe {
 impl<'ast> syn::visit::Visit<'ast> for NumericLiteralProbe {
     fn visit_expr_lit(&mut self, el: &'ast syn::ExprLit) {
         if let syn::Lit::Int(i) = &el.lit {
-            if common::is_magic_value(i.base10_digits()) {
+            if crate::magic::is_magic_value(i.base10_digits()) {
                 self.found = true;
             }
         } else if let syn::Lit::Float(f) = &el.lit {
-            if common::is_magic_value(f.base10_digits()) {
+            if crate::magic::is_magic_value(f.base10_digits()) {
                 self.found = true;
             }
         }
@@ -95,7 +95,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         Ok(f) => f,
         Err(_) => {
             return RustScan {
-                supps: common::Suppressions::default(),
+                supps: crate::suppressions::Suppressions::default(),
                 supps_spent: Default::default(),
                 file_name: name.to_string(),
                 findings: Vec::new(),
@@ -115,7 +115,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         .collect();
 
     let mut state = RsState {
-        supps: common::Suppressions::default(),
+        supps: crate::suppressions::Suppressions::default(),
         supps_spent: Default::default(),
         file: name,
         source,
@@ -163,28 +163,28 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     // suppressions parse from the whole file, filtering every family — the
     // shared why-less rule applies (`// lucidlint: ignore` needs a why)
     let comments = rs_comment_lines(source);
-    let supps = common::suppressions_from_comments(&comments);
+    let supps = crate::suppressions::suppressions_from_comments(&comments);
     // complexity findings are generated from the cc array AFTER the per-file
     // pass — honor complexity suppressions here so both paths agree, and
     // record which suppressions this retain honored so the stale check does
     // not re-flag them
-    let mut pre_used = common::PreUsedSuppressions::default();
+    let mut pre_used = crate::suppressions::PreUsedSuppressions::default();
     if !scan.cc.is_empty() {
         scan.cc.retain(|e| {
             // record what the retention's own decision honors — the SAME
             // widened window and family-aware matching that suppressed()
             // uses (a suppression used by the cc path must not be re-flagged
             // stale by apply_suppressions_impl)
-            for ln in common::window_lines(e.line) {
+            for ln in crate::suppressions::window_lines(e.line) {
                 if let Some(entries) = supps.line.get(&ln) {
                     for (sig, why) in entries {
-                        if common::signal_matches(sig, "complexity") && !why.is_empty() {
+                        if crate::suppressions::signal_matches(sig, "complexity") && !why.is_empty() {
                             pre_used.lines.insert((ln, sig.clone()));
                         }
                     }
                 }
             }
-            let line_suppressed = common::suppressed("complexity", e.line, &supps);
+            let line_suppressed = crate::suppressions::suppressed("complexity", e.line, &supps);
             let file_suppressed = supps.file.get("complexity").is_some_and(|w| !w.is_empty());
             if file_suppressed {
                 pre_used.files.insert("complexity".into());
@@ -193,13 +193,19 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
         });
     }
     let mut supps_spent = std::collections::HashSet::new();
-    let mut books = common::SuppressionBooks {
+    let mut books = crate::suppressions::SuppressionBooks {
         pre_used: &pre_used,
         spent: &mut supps_spent,
     };
 
-    scan.findings =
-        common::apply_suppressions_impl(scan.findings, &comments, name, "//", &mut books, &magic_exempt_labels);
+    scan.findings = crate::suppressions::apply_suppressions_impl(
+        scan.findings,
+        &comments,
+        name,
+        "//",
+        &mut books,
+        &magic_exempt_labels,
+    );
     scan
 }
 
@@ -214,11 +220,11 @@ pub(crate) struct RsState<'a> {
     reason_lines: std::collections::HashSet<usize>,
     findings: Vec<Finding>,
     cc: Vec<FnCc>,
-    skeletons: Vec<common::SkeletonFn>,
+    skeletons: Vec<crate::skeleton::SkeletonFn>,
     mod_decls: Vec<(String, bool)>,
     uses: Vec<String>,
     structs: Vec<RsStruct>,
-    supps: common::Suppressions,
+    supps: crate::suppressions::Suppressions,
     supps_spent: std::collections::HashSet<(usize, String)>,
     /// (self type name, method count) — record-shape post-pass.
     impls: Vec<(String, usize)>,
@@ -292,7 +298,7 @@ impl<'a> RsState<'a> {
         // span or several methods) — the domain noun should take the name
         for s in &structs {
             let methods = methods_by.get(&s.name).copied().unwrap_or(0);
-            if common::vague_role_is_loaded(&s.name, s.span, methods) {
+            if crate::naming::vague_role_is_loaded(&s.name, s.span, methods) {
                 self.finding(
                     "vague-name",
                     "fail",
@@ -559,7 +565,7 @@ impl<'a> RsState<'a> {
             Lit::Float(f) => f.base10_digits().to_string(),
             _ => return,
         };
-        if !common::is_magic_value(&text) {
+        if !crate::magic::is_magic_value(&text) {
             return;
         }
         let parent_is_op = matches!(
@@ -694,8 +700,8 @@ impl<'a> RsState<'a> {
             }
             if self.is_repo_wide_module(module_level) {
                 let skel = rs_skeleton(sig, block);
-                if common::is_duplicate_size(skel.len(), block.stmts.len()) {
-                    self.skeletons.push(common::SkeletonFn {
+                if crate::skeleton::is_duplicate_size(skel.len(), block.stmts.len()) {
+                    self.skeletons.push(crate::skeleton::SkeletonFn {
                         rel: self.file.to_string(),
                         name: sig.ident.to_string(),
                         line,
@@ -1105,7 +1111,10 @@ fn is_diverging_macro(path: &Path) -> bool {
 
 /// The matching vague role suffix of a name (for the finding message).
 fn suffix_of(name: &str) -> Option<&'static str> {
-    common::VAGUE_SUFFIXES.iter().find(|s| name.ends_with(**s)).copied()
+    crate::naming::VAGUE_SUFFIXES
+        .iter()
+        .find(|s| name.ends_with(**s))
+        .copied()
 }
 
 pub(crate) fn is_compound_op(op: &BinOp) -> bool {
@@ -2882,15 +2891,15 @@ mod tests {
             "fn beta(y: u32) -> u32 {\n    let mut m = y;\n    for j in 0..10 {\n        m += j;\n    }\n    m\n}\n";
         let sa = scan_source(a, "a.rs", true);
         let sb = scan_source(b, "b.rs", true);
-        let mut pool: Vec<common::SkeletonFn> = Vec::new();
-        pool.extend(sa.skeletons.iter().map(|s| common::SkeletonFn {
+        let mut pool: Vec<crate::skeleton::SkeletonFn> = Vec::new();
+        pool.extend(sa.skeletons.iter().map(|s| crate::skeleton::SkeletonFn {
             rel: "a.rs".into(),
             name: s.name.clone(),
             line: s.line,
             end_line: s.end_line,
             skeleton: s.skeleton.clone(),
         }));
-        pool.extend(sb.skeletons.iter().map(|s| common::SkeletonFn {
+        pool.extend(sb.skeletons.iter().map(|s| crate::skeleton::SkeletonFn {
             rel: "b.rs".into(),
             name: s.name.clone(),
             line: s.line,

@@ -1,249 +1,11 @@
-// evidence flags (findings, comments, file, marker, books, numeric-literal probe) —
-// lucidlint: ignore-file long-param-list the suppression pass threads the scan shapes and the
-// an options struct would add a hop for the two callers
-//! The language-neutral core of the scan: logic that is IDENTICAL for every
-//! language layer, parameterized only by what the language layers extract.
-//!
-//! The seam: a language layer (Python = `checks.rs` + the visitor in `main.rs`,
-//! Rust = `rustscan.rs`) turns its own AST into the small plain shapes here
-//! (comment lines, skeletons, numeric literal texts), and THIS module does the
-//! reasoning — similarity, dedupe bucketing, suppression matching, the shared
-//! rule tables. A check that works in both languages lives here as a pure
-//! function over one of those shapes; a check that is genuinely language-
-//! specific lives in the language layer and is never forced through a shared
-//! abstraction (the except/broad-except family has no Rust analog, `static`
-//! globals no Python analog — those stay apart by design).
-//!
-//! Cyclomatic-complexity rule table (radon-equivalent; authoritative here,
-//! both visitors follow it):
-//!   if (+1 per elif/else-if; trailing else does NOT count)  for/while/loop +1
-//!   try: handlers +1 each, else +1 (Python only — Rust has no try/else)
-//!   assert/assert!/debug_assert! +1, subtree NOT counted (visit_Assert)
-//!   match/case: each arm minus the `_` wildcard +1
-//!   bool op (and/or, &&/||): operands-1           ternary/if-expr +1
-//!   comprehension generators + ifs (Python)       closures/lambdas +0, body walked
-//!   nested functions: not counted in the outer function (decisions tracked per fn)
-//!   base +1 for the function itself.
+//! The suppression engine: `lucidlint: ignore` comments and config ignores —
+//! parsing, family matching, the window a marker binds over, and the stale
+//! bookkeeping that keeps a spent why from being re-flagged.
+// lucidlint: ignore-file long-param-list the pass threads the scan shapes (findings,
+// comments, file, marker, books) that the marker idiom reads together — grouping them
+// adds a hop for the two callers
 
 use std::collections::HashMap;
-
-/// The vague role-suffix names hiding load-bearing code — one table for both
-/// languages; the case differs (Python `Manager`, Rust `Manager` — same
-/// UpperCamel role nouns appear in both).
-pub const VAGUE_SUFFIXES: [&str; 8] = [
-    "Manager",
-    "Orchestrator",
-    "Handler",
-    "Store",
-    "Repository",
-    "Controller",
-    "Utils",
-    "Info",
-];
-
-/// A role-suffixed name is a vague-name finding only when it carries real
-/// weight (large span or several methods); a thin class is the name itself
-/// communicating. Pure — each language layer feeds its own (span, methods).
-pub fn vague_role_is_loaded(name: &str, span_lines: usize, methods: usize) -> bool {
-    VAGUE_SUFFIXES.iter().any(|s| name.ends_with(s)) && (span_lines >= 120 || methods >= 6)
-}
-
-/// Magic numbers: a numeric literal is magic when its text is outside the
-/// (0, 1, 2) trivial set. The position rule (operand of an operation, not a
-/// keyword value / definition site) is language-layer logic.
-pub fn is_magic_value(text: &str) -> bool {
-    !matches!(text, "0" | "1" | "2")
-}
-
-// --------------------------------------------------------------------------- duplicates
-
-/// One duplicate candidate: the file/name/line plus its structural skeleton.
-/// The skeleton is a language-layer product (ruff op tokens for Python, syn
-/// tokens for Rust); the similarity machinery below is language-neutral.
-#[derive(Clone)]
-pub struct SkeletonFn {
-    pub rel: String,
-    pub name: String,
-    pub line: usize,
-    /// last line of the definition — a function nested in another always sits
-    /// inside its parent's span, which is containment, not copy-paste
-    pub end_line: usize,
-    pub skeleton: Vec<String>,
-}
-
-/// One duplicate-module candidate (#26): a module or top-level class
-/// identity with its structural skeleton, constant tokens, and member-name
-/// set. Built per file in the Python layer; the repo-wide pass pairs
-/// identities with >= 0.9 Dice AND identical constant sets.
-#[derive(Clone)]
-pub struct SkeletonModule {
-    pub rel: String,
-    pub name: String,
-    pub line: usize,
-    pub skeleton: Vec<String>,
-    /// `NAME:norm(type)` tokens for the identity's `NAME = literal` constants
-    /// (numeric literals normalised, strings stripped, bools canonical).
-    pub consts: Vec<String>,
-    /// Sorted member names — the issue's "matched members:" intersection.
-    pub members: Vec<String>,
-    /// Sorted declared field names — class-body annotations plus the
-    /// `self.<name> = ...` assignments in methods. A record's fields are its
-    /// facts: two identities whose declared fields differ are siblings by
-    /// shape, not copies (#73).
-    pub fields: Vec<String>,
-    /// "module" | "class" | "module-class" (a module whose non-import
-    /// top-levels are exactly one class def — pairs as both).
-    pub entity: &'static str,
-    /// The class identity's direct base names ("Name:Base" / "Attr:mod:Base")
-    /// — empty for module/module-class identities. C2: two classes sharing
-    /// one base get the subclass message, not the fork prose.
-    pub bases: Vec<String>,
-}
-
-/// A module-level function whose body is exactly `return <callee>(<all
-/// params>)` — the middle edge of a forwarding chain (#30).
-#[derive(Clone)]
-pub struct ForwarderFn {
-    pub rel: String,
-    pub name: String,
-    pub line: usize,
-    pub params: Vec<String>,
-    /// "Fn:<name>" for a module-fn callee, "Method:<recv-param>:<method>" for
-    /// a method callee on another class.
-    pub callee: String,
-}
-
-/// A class method whose body is exactly `return F(<all params>)` with F a
-/// module-level function — the head of a forwarding chain (#30).
-#[derive(Clone)]
-pub struct ForwarderMethod {
-    pub rel: String,
-    pub class: String,
-    pub name: String,
-    pub line: usize,
-    pub params: Vec<String>, // minus self/cls
-    pub fn_callee: String,
-}
-
-/// Every method of every top-level class (params minus receiver) — the
-/// terminal pool the forwarding-chain detector resolves `recv.method(...)`
-/// callees against (#30, R9).
-#[derive(Clone)]
-pub struct RepoMethod {
-    pub rel: String,
-    pub class: String,
-    pub name: String,
-    pub line: usize,
-    pub params: Vec<String>,
-}
-
-/// Rewrite a finding message's `fix:` directive into the FULL runnable
-/// command. The scanner messages say `— fix: <kind> [--fix-name <N>]`; that
-/// reads as if a command named `<kind>` existed. The real surface is the
-/// `fix` subcommand: `lucidlint fix --kind <kind> --file <file> --line
-/// <line>` (the R27 contract: the tool owns its coordinates, so the
-/// directive is self-contained and the caller never types a `.py` or a
-/// `fix-` prefix). The preview-only families carry no --name — running the
-/// bare command previews; adding the name applies.
-pub fn full_fix_command(file: &str, line: usize, message: &str) -> String {
-    let Some(pos) = message.rfind("— fix: ") else {
-        return message.to_string();
-    };
-    let (head, tail) = message.split_at(pos);
-    let dir = tail.trim_start_matches("— fix: ");
-    let mut parts = dir.split_whitespace();
-    let Some(fix_kind) = parts.next() else {
-        return message.to_string();
-    };
-    let rest: Vec<&str> = parts.collect();
-    let mut name_slot = String::new();
-    // an EXACT --fix-name token — a prose token that merely STARTS with
-    // "--fix-name" (a parenthetical like "--fix-name;") would otherwise be
-    // mistaken for the machine slot and fabricate "--name <prose>" (R28:
-    // the directive must be the exact command)
-    if let Some(i) = rest.iter().position(|p| *p == "--fix-name") {
-        if let Some(slot) = rest.get(i + 1) {
-            name_slot = format!(" --name {slot}");
-        }
-    }
-    // extract-module's member list travels as --params (the seam: which
-    // module-scope defs move) — the rewrite must carry it or the agent gets
-    // a command the fix cannot act on
-    let mut params_slot = String::new();
-    if let Some(i) = rest.iter().position(|p| *p == "--params") {
-        if let Some(slot) = rest.get(i + 1) {
-            params_slot = format!(" --params {slot}");
-        }
-    }
-    format!("{head}— fix: lucidlint fix --kind {fix_kind} --file {file} --line {line}{name_slot}{params_slot}")
-}
-
-/// The complexity finding message, routed by the function's SHAPE: a
-/// dispatch chain or rule battery gets the lucid refactoring for ITS shape
-/// (a handler registry / named checkers), anything else gets extract-method.
-/// The `fix:` directive stays extract-method — it is the real auto-fix that
-/// splits the CC — while the prose names the more lucid shape (review-log
-/// R1: "is extract-method the most lucid refactoring?").
-pub fn complexity_message(cc: u32, shape: &str, detail: &str) -> String {
-    // each shape carries ITS OWN fix directive — the shared extract-method
-    // tail would append a second, wrong directive to the shape-routed ones
-    match shape {
-        "dispatch" => format!(
-            "cyclomatic complexity {cc} (>= 15) — the function is a dispatch chain over '{detail}': every arm is a named handler — HOIST THE HIDDEN DATA STRUCTURE: the chain IS a (selector → action) table — collapse it into a dict of {detail} → lambda closures in Python (a match in Rust), and dispatch by lookup — fix: dispatch-registry (previews the table; apply with --confirm)"
-        ),
-        "rules" => format!(
-            "cyclomatic complexity {cc} (>= 15) — the function is a battery of independent checks each appending to '{detail}' — HOIST THE HIDDEN DATA STRUCTURE: the if/append chain IS a (condition, violation) table — collapse it into a list of such pairs whose conditions are lambdas (Python) or fn pointers (Rust), and collect the violations whose condition holds — fix: rule-table (previews the table; apply with --confirm)"
-        ),
-        _ => format!(
-            "cyclomatic complexity {cc} (>= 15) — extract part of this function into a named method (the preview shows the block) — fix: extract-method"
-        ),
-    }
-}
-
-/// A function is a duplicate candidate when it has real body substance:
-/// at least 2 non-doc statements and a skeleton of at least 12 tokens.
-/// Pure; each layer supplies its own statement count (docstring filtering
-/// is Python-shaped).
-pub fn is_duplicate_size(skeleton_len: usize, non_doc_stmts: usize) -> bool {
-    non_doc_stmts >= 2 && skeleton_len >= 12
-}
-
-/// Dice coefficient over bigram sets — the language-neutral similarity.
-/// MULTISET semantics (pinned by `duplicate_dice_contract_no_set_hash_shortcut`):
-/// repeated bigrams count. Computed via count maps instead of the old
-/// repo cost 69ms of the LSP's save-time merge; this is O(len(a) + len(b)).
-/// Reference implementation only now — production scores via the sorted-
-/// bigram fast path in `duplicate_findings`; the parity tests pin them equal.
-/// NOT `#[cfg(test)]`-gated: gen-rules.py treats the first cfg(test) as the
-/// test-module boundary and would miss the emissions later in this file.
-#[allow(dead_code)]
-pub fn dice_similarity(a: &[String], b: &[String]) -> f64 {
-    let bigram_counts = |t: &[String]| -> std::collections::HashMap<(String, String), usize> {
-        let mut m = std::collections::HashMap::new();
-        for w in t.windows(2) {
-            *m.entry((w[0].clone(), w[1].clone())).or_insert(0) += 1;
-        }
-        m
-    };
-    let (ab, bb) = (bigram_counts(a), bigram_counts(b));
-    if ab.is_empty() && bb.is_empty() {
-        return 0.0; // matches the Python reference: no shared bigrams, never a duplicate
-    }
-    if ab.is_empty() || bb.is_empty() {
-        return 0.0;
-    }
-    let mut common = 0usize;
-    for (k, ca) in &ab {
-        if let Some(cb) = bb.get(k) {
-            common += ca.min(cb);
-        }
-    }
-    let total_a: usize = ab.values().sum();
-    let total_b: usize = bb.values().sum();
-    (2.0 * common as f64) / (total_a + total_b) as f64
-}
-
-// --------------------------------------------------------------------------- suppressions
 
 /// One line-level suppression and the (signal, why) parsed from it.
 /// Line suppressions exempt a finding on that line or the line before;
@@ -583,6 +345,7 @@ fn signal_line_index(findings: &[crate::Finding]) -> std::collections::HashMap<S
     }
     by_signal
 }
+
 /// Filter findings through the suppressions + emit the why-less suppression
 /// findings — the shared post-filter (Python `_scan_file`'s). `marker` is the
 /// comment token ('#' or "//") used in the why-less messages. `pre_used`
@@ -866,6 +629,8 @@ fn matches_suppression(sig: &str, finding: &crate::Finding, why: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::fix_render::complexity_message;
 
     #[test]
     fn complexity_message_routes_by_shape() {
@@ -1367,24 +1132,5 @@ mod tests {
         );
         assert!(left.iter().any(|f| f.kind == "record-shape"), "{left:?}");
         assert!(!left.iter().any(|f| f.kind == "stale-suppression"), "{left:?}");
-    }
-}
-
-/// The report header — printed on every CLI run (text banner AND a `header`
-/// field in --json; never under the LSP). It states the AIM so agents read
-/// the intent before the findings: findings are pointers, fix rather than
-/// suppress, and make every suppression reviewer-checkable (Fourth-pass).
-pub const REPORT_HEADER: &str = "lucidlint — the aim is code that is maintainable, lucid, and obviously correct. Findings and suggested fixes are pointers, not orders: for each, judge the best way to make this code more maintainable, lucid, and obviously correct. Fix findings instead of suppressing them; give every suppression a why a reviewer can check";
-
-#[cfg(test)]
-mod header_tests {
-    use super::REPORT_HEADER;
-
-    #[test]
-    fn report_header_names_the_three_aims() {
-        assert!(REPORT_HEADER.contains("lucid"));
-        assert!(REPORT_HEADER.contains("obviously correct"));
-        assert!(REPORT_HEADER.contains("why a reviewer can check"));
-        assert!(REPORT_HEADER.contains("pointers, not orders"));
     }
 }

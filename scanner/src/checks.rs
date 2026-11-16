@@ -22,7 +22,7 @@ use std::collections::HashSet;
 
 use crate::{line_of, stmt_line, Finding, ScanState};
 
-pub use crate::common::VAGUE_SUFFIXES;
+pub use crate::naming::VAGUE_SUFFIXES;
 
 mod duplicate_expression;
 mod latent_visitor;
@@ -131,8 +131,8 @@ pub fn comment_lines(source: &str, tokens: &Tokens) -> Vec<(usize, String)> {
 }
 
 /// Python comment tokens -> the shared suppression map (`#` comments).
-pub fn parse_suppressions(source: &str, tokens: &Tokens) -> crate::common::Suppressions {
-    crate::common::suppressions_from_comments(&comment_lines(source, tokens))
+pub fn parse_suppressions(source: &str, tokens: &Tokens) -> crate::suppressions::Suppressions {
+    crate::suppressions::suppressions_from_comments(&comment_lines(source, tokens))
 }
 
 /// Map every 1-based source line to the first line of its LOGICAL line.
@@ -196,7 +196,7 @@ pub fn logical_line_starts(source: &str, tokens: &Tokens) -> Vec<usize> {
 
 /// Filter findings through the suppressions + emit the why-less suppression
 /// findings — shared logic over this language's comment lines (the parse
-/// itself lives in `common::suppressions_from_comments`). `pre_used` carries
+/// itself lives in `crate::suppressions::suppressions_from_comments`). `pre_used` carries
 /// the suppressions the cc-retain already honored (complexity suppressions
 /// are applied before the findings filter; stale detection must not re-flag
 /// them). `magic_exempt_labels` names the exemption kinds among the file's
@@ -207,10 +207,10 @@ pub fn apply_suppressions_impl(
     source: &str,
     file: &str,
     tokens: &Tokens,
-    books: &mut crate::common::SuppressionBooks,
+    books: &mut crate::suppressions::SuppressionBooks,
     magic_exempt_labels: &[&'static str],
 ) -> Vec<Finding> {
-    crate::common::apply_suppressions_impl(
+    crate::suppressions::apply_suppressions_impl(
         findings,
         &comment_lines(source, tokens),
         file,
@@ -3211,7 +3211,7 @@ impl SiblingClass {
                     .methods
                     .iter()
                     .filter(reads_only_shared)
-                    .any(|n| crate::common::dice_similarity(&m.skeleton, &n.skeleton) >= 0.9)
+                    .any(|n| crate::skeleton::dice_similarity(&m.skeleton, &n.skeleton) >= 0.9)
             })
             .map(|m| m.name.as_str())
             .collect()
@@ -6415,11 +6415,11 @@ pub fn unused_setter_findings(
 // _unused_actions in lucidlint.py.
 // =====================================================================
 
-pub use crate::common::ForwarderFn;
-pub use crate::common::ForwarderMethod;
-pub use crate::common::RepoMethod;
-pub use crate::common::SkeletonFn;
-pub use crate::common::SkeletonModule;
+pub use crate::forwarding::ForwarderFn;
+pub use crate::forwarding::ForwarderMethod;
+pub use crate::forwarding::RepoMethod;
+pub use crate::skeleton::SkeletonFn;
+pub use crate::skeleton::SkeletonModule;
 
 /// enumeration replicates `ast.iter_child_nodes` field order — the
 /// Parameters node emits its defaults hoisted (kw_defaults then defaults),
@@ -8764,12 +8764,12 @@ fn is_skipped_module(state: &ScanState, rel: &str) -> bool {
 }
 
 /// Two class skeletons carry different field sets — siblings, not a fork.
-fn fields_differ(e: &crate::common::SkeletonModule, earlier: &crate::common::SkeletonModule) -> bool {
+fn fields_differ(e: &crate::skeleton::SkeletonModule, earlier: &crate::skeleton::SkeletonModule) -> bool {
     !e.fields.is_empty() && !earlier.fields.is_empty() && e.fields != earlier.fields
 }
 
 /// Two class skeletons pair on constants only when both carry them.
-fn consts_differ(e: &crate::common::SkeletonModule, earlier: &crate::common::SkeletonModule) -> bool {
+fn consts_differ(e: &crate::skeleton::SkeletonModule, earlier: &crate::skeleton::SkeletonModule) -> bool {
     e.entity == "class" && earlier.entity == "class" && (e.consts.is_empty() || e.consts != earlier.consts)
 }
 

@@ -26,15 +26,21 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 mod checks;
-mod common;
 mod config;
 mod docs;
 mod fix;
+mod fix_render;
+mod forwarding;
 mod graph_families;
 mod lsp;
+mod magic;
+mod naming;
+mod report;
 mod rules_gen;
 mod rustloops;
 mod rustscan;
+mod skeleton;
+mod suppressions;
 use checks::Q;
 use checks::*;
 
@@ -1211,7 +1217,7 @@ pub struct FileScan {
     /// The file's parsed `lucidlint: ignore` suppressions — the repo-wide
     /// families (duplicate/unused/docs/graph) are filtered through them at
     /// the end of the scan (per-file families apply theirs during the scan).
-    pub supps: common::Suppressions,
+    pub supps: crate::suppressions::Suppressions,
     /// (line, signal) pairs the per-file pass consumed — stage-2 repo-wide
     /// re-honoring must not spend them again (innermost-peel capacity).
     pub supps_spent: HashSet<(usize, String)>,
@@ -1416,23 +1422,23 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     // complexity findings are generated from the cc array after this pass —
     // honor complexity suppressions here so both paths agree (radon parity:
     // a fn whose complexity is suppressed must not resurface via cc)
-    let mut pre_used = common::PreUsedSuppressions::default();
+    let mut pre_used = crate::suppressions::PreUsedSuppressions::default();
     if !state.cc.is_empty() {
         state.cc.retain(|e| {
             // record what the retention's own decision honors — the SAME
             // widened window and family-aware matching that suppressed()
             // uses (a suppression used by the cc path must not be re-flagged
             // stale by apply_suppressions_impl)
-            for ln in common::window_lines(e.line) {
+            for ln in crate::suppressions::window_lines(e.line) {
                 if let Some(entries) = supps.line.get(&ln) {
                     for (sig, why) in entries {
-                        if common::signal_matches(sig, "complexity") && !why.is_empty() {
+                        if crate::suppressions::signal_matches(sig, "complexity") && !why.is_empty() {
                             pre_used.lines.insert((ln, sig.clone()));
                         }
                     }
                 }
             }
-            let line_suppressed = common::suppressed("complexity", e.line, &supps);
+            let line_suppressed = crate::suppressions::suppressed("complexity", e.line, &supps);
             let file_suppressed = supps.file.get("complexity").is_some_and(|w| !w.is_empty());
             if file_suppressed {
                 pre_used.files.insert("complexity".into());
@@ -1453,7 +1459,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         &state.magic_len_guard_exempts,
         &state.magic_unit_named_exempts,
     );
-    let mut books = crate::common::SuppressionBooks {
+    let mut books = crate::suppressions::SuppressionBooks {
         pre_used: &pre_used,
         spent: &mut supps_spent,
     };
@@ -1602,7 +1608,8 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
     let mut prod_refs = HashSet::new();
     let mut test_refs = HashSet::new();
     let mut strings = Vec::new();
-    let mut supps_by_rel: std::collections::HashMap<String, common::Suppressions> = std::collections::HashMap::new();
+    let mut supps_by_rel: std::collections::HashMap<String, crate::suppressions::Suppressions> =
+        std::collections::HashMap::new();
     let mut supps_spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
         std::collections::HashMap::new();
     for scan in scans {
@@ -1889,7 +1896,7 @@ fn sig_of_stale(msg: &str) -> String {
 pub(crate) fn reconcile_repo_wide(
     all: &mut Vec<Finding>,
     repo_wide: Vec<Finding>,
-    supps_by_rel: &std::collections::HashMap<String, common::Suppressions>,
+    supps_by_rel: &std::collections::HashMap<String, crate::suppressions::Suppressions>,
     supps_spent_by_rel: &std::collections::HashMap<String, std::collections::HashSet<(usize, String)>>,
 ) {
     let mut used_line: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
@@ -1906,7 +1913,7 @@ pub(crate) fn reconcile_repo_wide(
             Some(supps) => {
                 let empty = std::collections::HashSet::new();
                 let spent = supps_spent_by_rel.get(&file).unwrap_or(&empty);
-                let kept = common::filter_repo_wide(fs, supps, &mut used_line, &mut used_file, spent);
+                let kept = crate::suppressions::filter_repo_wide(fs, supps, &mut used_line, &mut used_file, spent);
                 all.extend(kept);
             }
             None => all.extend(fs),
@@ -1952,7 +1959,7 @@ pub(crate) fn rel_of(path: &str, root: &str) -> String {
 /// report's `suppressions` field and the bulk-suppression warning - repeated
 /// identical whys are a policy decision, not per-site judgment.
 fn suppression_counts<'a>(
-    supps_list: impl IntoIterator<Item = &'a common::Suppressions>,
+    supps_list: impl IntoIterator<Item = &'a crate::suppressions::Suppressions>,
 ) -> std::collections::HashMap<String, usize> {
     let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for supps in supps_list {
@@ -1973,7 +1980,7 @@ fn suppression_counts<'a>(
 /// pattern itself (mass per-site suppression) is what a reviewer must see.
 fn bulk_suppression_findings(
     counts: &std::collections::HashMap<String, usize>,
-    supps_by_rel: &std::collections::HashMap<String, common::Suppressions>,
+    supps_by_rel: &std::collections::HashMap<String, crate::suppressions::Suppressions>,
     threshold: usize,
 ) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -2207,7 +2214,7 @@ fn main() {
         .iter()
         .map(|s| (rel_of(&s.file_name, &root), s.classes.clone(), s.imports.clone()))
         .collect();
-    let supps_by_rel: std::collections::HashMap<String, common::Suppressions> = scans
+    let supps_by_rel: std::collections::HashMap<String, crate::suppressions::Suppressions> = scans
         .iter()
         .map(|s| (rel_of(&s.file_name, &root), s.supps.clone()))
         .collect();
@@ -2447,12 +2454,12 @@ fn main() {
                 "function": e.function,
                 "kind": "complexity",
                 "severity": "fail",
-                "message": common::full_fix_command(
+                "message": crate::fix_render::full_fix_command(
                     &e.file,
                     e.line,
-                    &common::complexity_message(e.cc, e.shape, &e.shape_detail),
+                    &crate::fix_render::complexity_message(e.cc, e.shape, &e.shape_detail),
                 ),
-                "fix_kind": checks::fix_kind_of_message(&common::complexity_message(e.cc, e.shape, &e.shape_detail))
+                "fix_kind": checks::fix_kind_of_message(&crate::fix_render::complexity_message(e.cc, e.shape, &e.shape_detail))
                     .unwrap_or("extract-method"),
             }));
         }
@@ -2483,7 +2490,13 @@ fn main() {
             Some(supps) => {
                 let empty = std::collections::HashSet::new();
                 let spent = supps_spent_by_rel.get(&file).unwrap_or(&empty);
-                retained.extend(common::filter_repo_wide(fs, supps, &mut used_ln, &mut used_fl, spent));
+                retained.extend(crate::suppressions::filter_repo_wide(
+                    fs,
+                    supps,
+                    &mut used_ln,
+                    &mut used_fl,
+                    spent,
+                ));
             }
             None => {
                 let mut fs = fs;
@@ -2516,7 +2529,7 @@ fn main() {
                 "kind": final_kind(&f.kind),
                 "signal": f.kind,
                 "severity": f.severity,
-                "message": common::full_fix_command(&f.file, f.line, &f.message),
+                "message": crate::fix_render::full_fix_command(&f.file, f.line, &f.message),
                 "seam_members": f.seam_members,
                 "fix_kind": fix_kind_of_message(&f.message).unwrap_or_else(|| kind_fix_default(&f.kind)),
             })
@@ -2524,7 +2537,7 @@ fn main() {
         .collect();
     let out = serde_json::json!({
         "schema_version": 4,
-        "header": common::REPORT_HEADER,
+        "header": crate::report::REPORT_HEADER,
         "suppressions": suppression_census,
         "files": paths.len(),
         "parse_errors": total_errors,
@@ -2569,20 +2582,20 @@ mod tests {
         // the prose "--fix-name <name>" slot started a token with a
         // semicolon and produced "--name apply" for every plain-shape
         // complexity finding)
-        let msg = common::complexity_message(16, "plain", "x");
-        let cmd = common::full_fix_command("src/a.py", 5, &msg);
+        let msg = crate::fix_render::complexity_message(16, "plain", "x");
+        let cmd = crate::fix_render::full_fix_command("src/a.py", 5, &msg);
         assert!(cmd.contains("--kind extract-method"), "{cmd}");
         assert!(!cmd.contains("--name"), "{cmd}");
         assert!(!cmd.contains("apply"), "{cmd}");
         // name-bearing directives keep their exact placeholder slot
-        let m2 = common::full_fix_command(
+        let m2 = crate::fix_render::full_fix_command(
             "src/a.py",
             5,
             "magic number 3 \u{2014} name it as a constant \u{2014} fix: magic-number --fix-name <CONST>",
         );
         assert!(m2.contains("--name <CONST>"), "{m2}");
         // a prose token merely STARTING with --fix-name is ignored (exact match)
-        let m3 = common::full_fix_command(
+        let m3 = crate::fix_render::full_fix_command(
             "src/a.py",
             5,
             "x \u{2014} fix: extract-method (preview; --fix-name; prose)",
@@ -2661,7 +2674,7 @@ mod tests {
         // the rewrite must carry them or the agent gets a command the fix
         let msg = "module x holds 2 domains — fix: extract-module --fix-name text --params tokenize,words";
 
-        let cmd = common::full_fix_command("tools/layout.py", 0, msg);
+        let cmd = crate::fix_render::full_fix_command("tools/layout.py", 0, msg);
         assert!(cmd.contains("--kind extract-module"), "{cmd}");
         assert!(cmd.contains("--name text"), "{cmd}");
         assert!(cmd.contains("--params tokenize,words"), "{cmd}");
@@ -2905,7 +2918,7 @@ mod tests {
     fn duplicate_fast_path_matches_reference_dice() {
         // the sorted-index-bigram fast path must agree with the reference
         // multiset dice on the pinned repetition cases (2026-08-17 review-log)
-        use common::dice_similarity;
+        use crate::skeleton::dice_similarity;
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let rep = s(&["a", "b", "a", "b"]);
         let uniq = s(&["a", "b", "a"]);
@@ -5213,7 +5226,7 @@ mod tests {
         let mut strings = Vec::new();
         let mut all = Vec::new();
         let mut undecl_scans: Vec<UndeclScan> = Vec::new();
-        let mut supps_by_rel: std::collections::HashMap<String, common::Suppressions> =
+        let mut supps_by_rel: std::collections::HashMap<String, crate::suppressions::Suppressions> =
             std::collections::HashMap::new();
         let mut spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
             std::collections::HashMap::new();
@@ -5336,7 +5349,7 @@ mod tests {
             .into_iter()
             .filter(|f| match supps_by_rel.get(&f.file) {
                 Some(supps) => {
-                    let kept = common::filter_repo_wide(
+                    let kept = crate::suppressions::filter_repo_wide(
                         vec![f.clone()],
                         supps,
                         &mut used_ln,
@@ -5464,7 +5477,7 @@ mod tests {
         // score Dice < 0.9 — the set-hash shortcut reported these as 100%
         // similar (2026-08-17 review-log). There is no hash shortcut; the
         // pair must NOT be flagged.
-        use common::dice_similarity;
+        use crate::skeleton::dice_similarity;
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         // [a,b,a,b] has multiset bigrams (a,b),(b,a),(a,b) — the (a,b) repeats
         let rep = s(&["a", "b", "a", "b"]);
@@ -5534,9 +5547,9 @@ mod tests {
     fn dice_partial_similarity_below_threshold() {
         let a: Vec<String> = "A B C D E".split(' ').map(str::to_string).collect();
         let b: Vec<String> = "A B X Y Z".split(' ').map(str::to_string).collect();
-        assert!(common::dice_similarity(&a, &b) < 0.9);
+        assert!(crate::skeleton::dice_similarity(&a, &b) < 0.9);
         let same: Vec<String> = "A B C D E".split(' ').map(str::to_string).collect();
-        assert_eq!(common::dice_similarity(&a, &same), 1.0);
+        assert_eq!(crate::skeleton::dice_similarity(&a, &same), 1.0);
     }
 
     #[test]
