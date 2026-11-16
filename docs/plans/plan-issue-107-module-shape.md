@@ -359,3 +359,53 @@ That is a dedicated round: it touches the shared vocabulary of the whole crate,
 so it wants its own behaviour proof (the scan comparison) rather than riding on
 a family extraction. The split resumes after it — the five extractions above are
 ready to re-apply.
+
+## Why the tool did not name these grab bags itself
+
+The refactor that this round is doing — dissolve `common`, split `main`, pull
+`ScanState` apart by family — was not suggested by any finding. Asking why is
+worth more than the refactor.
+
+**What the tool had to say.** `checks.rs` fired (`several-definitions`), and so
+did `main.rs` (`many-definitions`, 45). `common.rs` did **not** fire: it holds
+exactly 30 definitions, one under the 31 threshold — a threshold artefact, not a
+judgement. And the findings that did fire said *how many* definitions a module
+holds, never *which* concepts it mixes.
+
+**Why that is the whole gap.** "This module is five concepts wearing one
+filename" is a **cohesion** claim, and the tool's Rust vocabulary has no
+cohesion rule:
+
+| rule family | what it measures | why it cannot name a grab bag |
+|---|---|---|
+| `several-definitions` / `many-definitions` | count of definitions | counts size; `common`'s 30 mixed items and a 30-item family look identical |
+| `hub-file` | how many modules import a file | measures fan-in, not mixedness — and it only fired *after* the split pushed the root past 15 dependents |
+| `module-cohesion` (Python) | a file whose graph nodes split across communities | the right rule — and it is graph-contract, Python-only |
+| `duplicate-module`, `middle-man`, `partition`, `class-module` | structural/name shapes | Python-only, and about a type's identity, not a module's mixedness |
+
+So the one rule that names sub-domains (`module-cohesion`) never ran, because
+Rust has no graph contract and the scanner never emitted a local cohesion signal
+for it. The size ladder was the only Rust voice, and size is the weakest proxy
+for a grab bag: `common` at 30 was silent while holding six unrelated things;
+`checks.rs` at 135 was noisy while holding one thing (rule families) twelve
+times.
+
+**What would have named it.** The clusters are readable from what each item
+*touches*: the suppression engine reaches `HashMap` and `Finding`, the
+skeletons reach nothing, the renderer reaches strings, the sentence machinery
+reaches the AST. That is a **use-cluster** count, not a word count — the same
+evidence `module-cohesion` gets from the graph contract, available locally in
+Rust from the `mod`/`use`/`impl` graph that `rustscan` already collects. The
+carry-over lesson from the earlier rounds: name groups from **structure**, never
+from name-word frequency (the red-herring family heuristic).
+
+**Proposal, and how it stays language-honest.** Give Rust the cohesion rule it
+lacks — `mixed-module` (or a Rust arm of `module-cohesion`): a module whose
+top-level items fall into ≥3 use-clusters that do not reference each other, with
+a measured threshold, naming the clusters. Keep the *concept* identical to the
+Python rule and let the implementation differ (local mod/use graph vs the
+external contract) — the same way several-definitions kept the concept and let
+the **count** differ per language. And do not let the Python side inherit Rust's
+class-equivalent counting: Python's unit is the class, Rust's is the type plus
+its impl/functions, and forcing either into the other's shape is what the
+`several-classes` round already proved wrong.
