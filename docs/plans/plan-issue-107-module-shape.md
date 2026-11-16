@@ -409,3 +409,29 @@ the **count** differ per language. And do not let the Python side inherit Rust's
 class-equivalent counting: Python's unit is the class, Rust's is the type plus
 its impl/functions, and forcing either into the other's shape is what the
 `several-classes` round already proved wrong.
+
+### Does Rust need a graph tool for this?
+
+Prototyped before answering: a text-level item→reference graph over the old
+`common.rs`, `suppressions.rs`, `skeleton.rs`, `checks/shared_path.rs`,
+`checks/record_shape.rs` and `main.rs`. It does **not** work as a text hack, and
+the failures are the point:
+
+- the inline `#[cfg(test)] mod tests` references everything, so it glues every
+  cluster into one;
+- a `mod`/`use` line makes a name appear in every item's text, so module
+  declarations become false hubs (`main.rs` collapsed to a 67-item component);
+- a coherent module of unconnected helpers looks like N singletons
+  (`skeleton.rs`: 3 items, 0 references) — the rule must not count singletons,
+  or it fires on concepts that are fine.
+
+So the signal is real but must be **AST-based**: for each top-level item, the
+identifiers it *uses* (expression and type paths), intersected with the module's
+own top-level names, with `use`/`mod` excluded and test modules skipped. The
+scanner already parses every file with `syn`, so that is a small addition to
+`rustscan` — no external tool, no new dependency, fully deterministic.
+
+An external Rust graph tool (rust-analyzer/SCIP-class, with cross-file
+resolution) is only needed for the *repo-wide* rules — layer-mix, folder-mix,
+risk, hub — which are a separate decision. The module-cohesion signal is local
+by nature: a module's items and what they reference.
