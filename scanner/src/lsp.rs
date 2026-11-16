@@ -11,7 +11,7 @@
 //! Editors point at: `lucidlint --lsp`
 
 use crate::config::{load_lucidlint_config, LucidConfig};
-use crate::{scan_source_lsp, FileScan, Finding};
+use crate::{finding::Finding, scan_source_lsp, FileScan};
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};

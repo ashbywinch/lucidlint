@@ -24,7 +24,7 @@
 //! LIVE in tests: an `#[ignore]`d test is a skipif finding, and suppressions
 //! still parse from the whole file.
 
-use crate::{Finding, FnCc};
+use crate::{finding::Finding, FnCc};
 use std::collections::HashMap;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};

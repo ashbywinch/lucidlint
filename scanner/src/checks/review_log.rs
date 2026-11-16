@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use ruff_python_ast::{AnyNodeRef, Expr, Stmt};
 
-use crate::{source::stmt_line, Finding, ScanState};
+use crate::{finding::Finding, source::stmt_line, ScanState};
 
 use super::{skel_children, Q};
 

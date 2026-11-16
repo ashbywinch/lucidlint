@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use ruff_python_ast::{AnyNodeRef, Expr, Operator, Stmt, StmtFunctionDef, UnaryOp};
 use ruff_text_size::Ranged;
 
-use crate::{source::col_of, source::line_of, Finding, ScanState};
+use crate::{finding::Finding, source::col_of, source::line_of, ScanState};
 
 use super::{class_attr_names, class_field_names, param_is_mutated, push_stmt_children, skel_children, stmt_exprs, Q};
 

@@ -29,7 +29,7 @@
 
 use ruff_python_ast::Stmt;
 
-use crate::Finding;
+use crate::finding::Finding;
 
 /// The strict rung's floor: a Python module holding more definitions than this
 /// has stopped being one concept — a class, a data table or a record may hold

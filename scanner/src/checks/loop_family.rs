@@ -9,7 +9,7 @@
 use ruff_python_ast::{Expr, Operator, Stmt, StmtFunctionDef};
 use ruff_text_size::Ranged;
 
-use crate::{source::line_of, Finding, ScanState};
+use crate::{finding::Finding, source::line_of, ScanState};
 
 // =====================================================================
 // the loop family (Replace Loop with Pipeline) — Python

@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::Finding;
+use crate::finding::Finding;
 
 const SKIP_PREFIXES: [&str; 10] = [
     "http://",

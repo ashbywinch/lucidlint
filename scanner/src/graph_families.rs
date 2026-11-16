@@ -14,7 +14,7 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-use crate::Finding;
+use crate::finding::Finding;
 
 #[derive(Deserialize)]
 pub struct GNode {

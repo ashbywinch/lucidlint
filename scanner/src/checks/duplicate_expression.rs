@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use ruff_python_ast::{Expr, ExprCall, Operator, Stmt, StmtFunctionDef};
 use ruff_text_size::Ranged;
 
-use crate::{source::col_of, source::line_of, Finding, ScanState};
+use crate::{finding::Finding, source::col_of, source::line_of, ScanState};
 
 use super::shared_path::{fstring_shape, path_call, source_text_of};
 

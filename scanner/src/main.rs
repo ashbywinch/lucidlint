@@ -21,13 +21,14 @@ use ruff_python_ast::visitor::source_order::{walk_expr, walk_stmt, SourceOrderVi
 use ruff_python_ast::{AnyNodeRef, Expr, ModModule, Stmt};
 use ruff_python_parser::{parse_module, Parsed};
 use ruff_text_size::Ranged;
-use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 mod checks;
 mod config;
 mod docs;
+mod file_scan;
+mod finding;
 mod fix;
 mod fix_render;
 mod forwarding;
@@ -46,45 +47,11 @@ mod source;
 mod suppressions;
 use checks::Q;
 use checks::*;
+use file_scan::{ClassInfo, FileScan, ImportInfo, SelfAssign, UndeclScan};
+use finding::{Finding, FnCc, FnScope};
 use paths::{is_out_of_scan, is_test_path, rel_of, scan_root, SCAN_SKIP_DIRS};
 use python_shape::{collect_stmt_lists, python_fn_shape};
 use source::{col_of, line_of, reset_line_starts, stmt_line};
-
-/// One open function scope: its decision count and the names it returns
-/// (for the swallow analysis).
-pub struct FnScope {
-    /// Names this function returns (for the swallow analysis).
-    pub returned: HashSet<String>,
-}
-
-#[derive(Serialize, Clone, Debug)]
-pub struct Finding {
-    file: String,
-    line: usize,
-    /// 1-based column of the finding's anchor node; 0 = line-level (schema 3).
-    /// Populated only where disambiguation needs it (magic-number,
-    /// positional-literals, record-shape literals).
-    #[serde(default)]
-    col: usize,
-    function: String,
-    kind: String,
-    severity: String,
-    message: String,
-    /// The clump identity for seam grouping (#34): the shared parameter-pair
-    /// names (data-clump), the disjoint method-group members (partition),
-    /// the functions sharing a leading parameter (strewing). Always emitted
-    /// (empty on non-carriers — BQ4); never scraped from message prose.
-    pub seam_members: Vec<String>,
-
-    /// The first source line of the LOGICAL line holding this finding — the
-    /// `def`/`async def` line for a signature finding, the enclosing
-    /// statement's first source line for a wrapped call or split literal.
-    /// One line of code can span several source lines, and a marker binds on
-    /// the logical line too (Phase 4a). `None` = the finding's own line, the
-    /// usual case; internal only (never serialized — the JSON stays schema 4).
-    #[serde(skip)]
-    logical_start: Option<usize>,
-}
 
 impl Finding {
     /// The finding's logical line: its own line when no construct spans
@@ -92,20 +59,6 @@ impl Finding {
     pub(crate) fn logical_line(&self) -> usize {
         self.logical_start.unwrap_or(self.line)
     }
-}
-
-/// One function's cyclomatic complexity — radon-equivalent counting.
-#[derive(Serialize, Clone)]
-pub struct FnCc {
-    file: String,
-    function: String,
-    line: usize,
-    cc: u32,
-    /// The body's SHAPE for the complexity message routing: "dispatch",
-    /// "rules", or "plain" (see python_fn_shape / rust_fn_shape).
-    pub shape: &'static str,
-    /// The dispatch selector or rule-battery accumulator name.
-    pub shape_detail: String,
 }
 
 #[derive(Default)]
@@ -686,88 +639,6 @@ impl<'a> ScanState<'a> {
             }
         }
     }
-}
-
-#[derive(Clone)]
-pub struct ClassInfo {
-    pub name: String,
-    pub line: usize,
-    pub abstract_: bool,
-    pub bases: Vec<String>,
-    /// Declared members (class-body annotations, __slots__, annotated
-    /// __init__ self-assigns) — undeclared-attribute's declaration table.
-    pub declared: Vec<String>,
-}
-
-/// One import alias: local name -> (module, imported name).
-#[derive(Clone)]
-pub struct ImportInfo {
-    pub alias: String,
-    pub module: String,
-    pub imported: String,
-}
-
-/// One `self.<attr> = ...` site inside a top-level class — undeclared-
-/// attribute's raw material: the repo-wide merge decides which are quiet
-/// assignments (per-file scans cannot resolve base classes).
-#[derive(Clone)]
-pub struct SelfAssign {
-    pub class: String,
-    pub attr: String,
-    pub line: usize,
-    pub function: String,
-    pub is_init: bool,
-}
-
-/// One file's undeclared-attribute inputs: its rel, classes (declared
-/// members + bases), imports, and self-assignment sites — the per-scan
-/// slice the repo-wide pass resolves.
-#[derive(Clone, Default)]
-pub struct UndeclScan {
-    pub rel: String,
-    pub classes: Vec<ClassInfo>,
-    pub imports: Vec<ImportInfo>,
-    pub self_assigns: Vec<SelfAssign>,
-}
-
-#[derive(Clone, Default)]
-pub struct FileScan {
-    pub file_name: String,
-    pub findings: Vec<Finding>,
-    pub cc: Vec<FnCc>,
-    pub errors: usize,
-    pub defs: Vec<(String, usize)>,
-    pub class_defs: Vec<(String, usize)>,
-    pub scattered: Vec<checks::ScatteredInstance>,
-    /// The file's substantive expressions (#104 duplicate-expression).
-    pub duplicate_expressions: Vec<checks::ExpressionOccurrence>,
-    /// The file's module-level path expressions (#60 shared-path).
-    pub path_expressions: Vec<checks::PathExpression>,
-    /// The file's size and concept groups (#107 large-module).
-    pub module_shape: checks::ModuleShape,
-    pub setters: Vec<(String, usize)>,
-    pub refs: HashSet<String>,
-    pub strings: Vec<String>,
-    pub skeletons: Vec<SkeletonFn>,
-    pub skeleton_modules: Vec<SkeletonModule>,
-    pub decorated: HashSet<String>,
-    pub classes: Vec<ClassInfo>,
-    pub imports: Vec<ImportInfo>,
-    pub self_assigns: Vec<SelfAssign>,
-    /// The file's parsed `lucidlint: ignore` suppressions — the repo-wide
-    /// families (duplicate/unused/docs/graph) are filtered through them at
-    /// the end of the scan (per-file families apply theirs during the scan).
-    pub supps: crate::suppressions::Suppressions,
-    /// (line, signal) pairs the per-file pass consumed — stage-2 repo-wide
-    /// re-honoring must not spend them again (innermost-peel capacity).
-    pub supps_spent: HashSet<(usize, String)>,
-    pub forwarder_fns: Vec<checks::ForwarderFn>,
-    pub forwarder_methods: Vec<checks::ForwarderMethod>,
-    pub repo_methods: Vec<checks::RepoMethod>,
-    pub middle_man_classes: Vec<checks::MiddleManClass>,
-    pub middle_man_candidates: Vec<checks::MiddleManCandidate>,
-    /// The file's class shapes for the repo-wide sibling pass (#61).
-    pub sibling_classes: Vec<checks::SiblingClass>,
 }
 
 impl FileScan {
