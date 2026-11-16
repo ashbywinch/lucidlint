@@ -456,3 +456,28 @@ An external Rust graph tool (rust-analyzer/SCIP-class, with cross-file
 resolution) is only needed for the *repo-wide* rules — layer-mix, folder-mix,
 risk, hub — which are a separate decision. The module-cohesion signal is local
 by nature: a module's items and what they reference.
+
+## The model extraction, done (2026-11-16)
+
+`main.rs` no longer carries the shared vocabulary. Five modules left it, each a
+leaf (nothing in them imports the root, so its fan-in only falls):
+
+| module | owns |
+|---|---|
+| `source.rs` (98) | the line index — offsets to line/column, `stmt_line`, one cache |
+| `paths.rs` (143) | repo root, repo-relative names, test/vendored/skip vocabulary (`VENDOR_DIRS` + `is_vendored` came with it, out of `checks`) |
+| `python_shape.rs` (389) | what kind of body a function has, for the complexity message |
+| `finding.rs` (56) | `Finding`, `FnCc`, `FnScope` — the record and the complexity fact |
+| `file_scan.rs` (91) | one file's scanned facts and the class/import/self-assign shapes |
+
+What this bought: `main.rs`'s production definitions dropped below the ladder's
+threshold (the `many-definitions` finding is gone), and the **`hub-file`
+finding disappeared** — the rule modules now import the model from these
+modules instead of the crate root. The gate is green with no suppression.
+
+`main.rs` is still 7,378 lines, but ~5,500 of them are `#[cfg(test)] mod tests`;
+the production half is the pipeline (`scan_source_impl`, the repo-wide merges),
+the AST walker (`impl ScanState`), the CLI and the fix dispatcher. Those are
+the next split: `pipeline.rs` and `cli.rs`, with `ScanState` already a candidate
+for its core/family-outcome split (its fields still hold nine per-family `Vec`s,
+which is why the rule modules pass `&mut ScanState` today).
