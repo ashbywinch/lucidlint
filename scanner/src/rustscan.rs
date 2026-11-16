@@ -1130,18 +1130,16 @@ fn is_unwrap_expect(method: &Ident) -> bool {
     method == "unwrap" || method == "expect"
 }
 
-/// The file's shape for the module-shape rules (#107): the free `fn`s and the
-/// top-level types, each with the methods its `impl` blocks define. An `impl`
-/// block is not a definition of its own — its methods are the type's, exactly
-/// as a class's methods are the class's. `const`/`static` are data, and an
-/// inline `mod` is a container, so neither counts.
+/// The file's shape for the module-shape rules (#107): the types, the free
+/// `fn`s that take one of them (a group is a class equivalent), and the free
+/// functions left with no receiver. An `impl` block is not a definition of its
+/// own — its methods are the type's; `const`/`static` are data, and an inline
+/// `mod` is a container.
 fn module_shape(file: &File, source: &str) -> crate::checks::ModuleShape {
     use crate::checks::TypeShape;
-    let mut functions = 0usize;
     let mut types: Vec<TypeShape> = Vec::new();
     for item in &file.items {
         match item {
-            Item::Fn(_) => functions += 1,
             Item::Struct(i) => types.push(TypeShape {
                 name: i.ident.to_string(),
                 methods: 0,
@@ -1173,7 +1171,54 @@ fn module_shape(file: &File, source: &str) -> crate::checks::ModuleShape {
             shape.methods += methods;
         }
     }
-    crate::checks::rust_module_shape(source, functions, types)
+    // free functions: the first parameter's type is the receiver. A function
+    // that takes one of the module's own types is that type's; one that takes
+    // a foreign type (`&Expr`, `&Path`) joins that type's group; a function
+    // with no named receiver is a free function.
+    let local: std::collections::HashSet<&str> = types.iter().map(|t| t.name.as_str()).collect();
+    let mut groups: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut free = 0usize;
+    for item in &file.items {
+        let Item::Fn(function) = item else { continue };
+        let receiver = function.sig.inputs.first().and_then(|arg| match arg {
+            FnArg::Receiver(_) => None,
+            FnArg::Typed(typed) => receiver_name(&typed.ty),
+        });
+        match receiver {
+            Some(name) if local.contains(name.as_str()) => {}
+            Some(name) => *groups.entry(name).or_default() += 1,
+            None => free += 1,
+        }
+    }
+    let mut grouped: Vec<(String, usize)> = groups.into_iter().collect();
+    grouped.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    crate::checks::rust_module_shape(source, free, types, grouped)
+}
+
+/// The type a function's first parameter names, when that type is a concept:
+/// `&ScanState` → `ScanState`, `&Expr` → `Expr`. Primitives, strings and
+/// containers are plumbing, not a receiver, so they return `None`.
+fn receiver_name(ty: &Type) -> Option<String> {
+    fn peel(ty: &Type) -> Option<&Type> {
+        match ty {
+            Type::Reference(r) => peel(&r.elem),
+            Type::Paren(p) => peel(&p.elem),
+            Type::Path(_) => Some(ty),
+            _ => None,
+        }
+    }
+    let Type::Path(path) = peel(ty)? else { return None };
+    let segment = path.path.segments.last()?;
+    let name = segment.ident.to_string();
+    const PLUMBING: &[&str] = &[
+        "str", "String", "usize", "isize", "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128", "f32",
+        "f64", "bool", "char", "Vec", "HashMap", "HashSet", "BTreeMap", "BTreeSet", "Option", "Box", "Rc", "Arc",
+        "Cow",
+    ];
+    if PLUMBING.contains(&name.as_str()) {
+        return None;
+    }
+    Some(name)
 }
 
 /// The bare type ident of a static's type (peels reference/paren wrappers).

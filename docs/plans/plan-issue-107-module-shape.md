@@ -216,33 +216,71 @@ not of a missing struct.
 - **The split of `checks.rs` itself**: the remaining eleven sections are rounds
   of their own.
 
+## Counting a Rust class equivalent as one definition
+
+Rust has no classes, so counting every free function separately penalised the
+language's normal unit: a type plus the functions that operate on it. The Rust
+count now groups a module's top-level `fn`s by the type their **first
+parameter** takes:
+
+- a function taking one of the module's own types belongs to that type (it is a
+  method in exile) — the type and its functions are **one definition**;
+- a function taking a foreign type (`&Expr`, `&Path`, `&File`) joins that type's
+  group — the helpers around `Expr` are **one definition**;
+- a function with no named receiver (`&str`, `&[Stmt]`, `Vec<…>`, or none) is a
+  free definition, and is the one the "give it a type" advice is aimed at.
+
+Measured on this repo, the count drops where the class equivalent is real:
+
+| module | before (raw) | after (class equivalent) |
+|---|---|---|
+| `scanner/src/checks.rs` | 245 | **135** |
+| `scanner/src/rustscan.rs` | 70 | **49** |
+| `scanner/src/fix.rs` | 51 | **50** |
+| `scanner/src/main.rs` | 48 | **45** |
+| `scanner/src/checks/record_shape.rs` | 29 | **14** |
+| `scanner/src/checks/shared_path.rs` | 17 | **15** |
+| `scanner/src/checks/loop_family.rs` | 16 | **8** |
+| `scanner/src/checks/duplicate_expression.rs` | 18 | **11** |
+| `scanner/src/checks/review_log.rs` | 11 | **7** |
+
+The counting change is right on its own — a type and the functions that take it
+are one thing a reader holds — but it does not by itself make the report clean:
+the rungs are 3–10 and 11+, so every family module (3–15 concepts) still fires.
+The threshold decision is the remaining one, and the numbers for it are below.
+
 ## Cleanliness arithmetic (measured 2026-11-16)
 
 Splitting by concept does not converge under the current rungs, and the numbers
 say so:
 
-| step | `checks.rs` defs | ladder findings in this repo |
+| step | `checks.rs` concepts | ladder findings in this repo |
 |---|---|---|
 | after the first split (3 sections) | 294 | 23 |
 | after `record_shape` (1,002 lines) | 269 | 24 |
 | after `loop_family` + `latent_visitor` | 245 | 26 |
+| after class-equivalent counting | 135 | 26 |
 
-Every extracted module is still a finding: `record_shape` 29, `duplicate_expression`
-18, `shared_path` 17, `loop_family` 16, `review_log` 11, `module_size` 9,
-`latent_visitor` 4. That is **the natural size of a concept family** — and the
-ladder flags 3–10 (`several`) and 11+ (`many`), so no family module can pass.
-Clean under the current rungs means every module holds at most **two**
-definitions, which no module with three functions can satisfy.
+Every extracted module is still a finding — `record_shape` 14,
+`duplicate_expression` 11, `shared_path` 15, `loop_family` 8, `review_log` 7,
+`module_size` 10, `latent_visitor` 3 — because a concept family holds 3–15
+class equivalents and the ladder flags 3–10 (`several`) and 11+ (`many`). Clean
+under the current rungs means every module holds at most **two** definitions,
+which no module with three concepts can satisfy.
 
 **Proposed adaptation, for the ruling:**
 
 1. `several-definitions` (3–10) is **Python-only**. Its message is a design
    directive — free functions should become methods — and in Rust the target it
-   names (a class) does not exist; three free functions in a module is the
+   names (a class) does not exist; three class equivalents in a module is the
    normal unit.
 2. `many-definitions` moves to **31+** for both languages. A module holding more
-   than thirty definitions is a grab-bag by any reading, and the target is then
-   reachable: split by family until each module is ≤ 30.
+   than thirty class equivalents is a grab-bag by any reading, and the target is
+   then reachable: split by concept until each module is ≤ 30.
+
+With class-equivalent counting the remaining Rust findings would be exactly
+four — `checks.rs` 135, `rustscan.rs` 49, `fix.rs` 50, `main.rs` 45 — and
+`common.rs` (30) is just inside the bar.
 
 With those two changes this repo's ladder findings become six: Rust `checks.rs`
 245, `rustscan.rs` 70, `fix.rs` 51, `main.rs` 48; Python `fix_engine.py` 264,

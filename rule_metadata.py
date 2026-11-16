@@ -361,8 +361,10 @@ CATALOG = RuleCatalog([
          "named function.",
          fix="extract-method"),
     Rule("several-definitions", "warn", "architecture", "Both",
-         "A module holding 3–10 top-level definitions (functions and classes or "
-         "Rust types; constants are data) — more than one concept's worth. The "
+         "A module holding 3–10 top-level definitions — Python functions and "
+         "classes; Rust types, groups of functions that take one type (a class "
+         "equivalent), and functions left with no receiver; constants are data. "
+         "More than one concept's worth. The "
          "advice follows what the definitions are: mostly classes/types → turn "
          "the module into a package (Python) or a directory of modules (Rust), "
          "one file each; mostly functions → the functions pass data no object "

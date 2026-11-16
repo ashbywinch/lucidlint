@@ -89,7 +89,12 @@ impl TypeShape {
 pub struct ModuleShape {
     pub language: Language,
     pub classes: Vec<TypeShape>,
-    /// Free functions the module owns: undecorated.
+    /// Rust only: free functions grouped by the type their first parameter
+    /// takes — a type and the functions that operate on it are one class
+    /// equivalent, so the group counts as one definition. A group over a
+    /// foreign type (`&Expr`) is one concept too: the helpers around `Expr`.
+    pub receiver_groups: Vec<(String, usize)>,
+    /// Functions with no receiver type: undecorated (Python) and ungrouped.
     pub functions: usize,
     /// Decorated functions: registered with a caller outside the module.
     pub framework_functions: usize,
@@ -124,6 +129,7 @@ pub fn python_module_shape(source: &str, body: &[Stmt]) -> ModuleShape {
     ModuleShape {
         language: Language::Python,
         classes,
+        receiver_groups: Vec::new(),
         functions,
         framework_functions,
         generated: is_generated(source),
@@ -134,10 +140,16 @@ pub fn python_module_shape(source: &str, body: &[Stmt]) -> ModuleShape {
 /// and the top-level types with the methods their `impl` blocks define. An
 /// `impl` block is not a definition of its own — its methods are the type's,
 /// exactly as a class's methods are the class's.
-pub fn rust_module_shape(source: &str, functions: usize, classes: Vec<TypeShape>) -> ModuleShape {
+pub fn rust_module_shape(
+    source: &str,
+    functions: usize,
+    classes: Vec<TypeShape>,
+    receiver_groups: Vec<(String, usize)>,
+) -> ModuleShape {
     ModuleShape {
         language: Language::Rust,
         classes,
+        receiver_groups,
         functions,
         framework_functions: 0,
         generated: is_generated(source),
@@ -156,11 +168,13 @@ fn is_script(rel: &str) -> bool {
 }
 
 impl ModuleShape {
-    /// The definitions the module owns: classes and undecorated functions. A
-    /// constant is a value the module holds, not a name that groups with
-    /// others; a decorated function is the framework's entry point.
+    /// The definitions the module holds. Python: classes and undecorated
+    /// functions (a constant is a value, not a name; a decorated function is
+    /// the framework's entry point). Rust: types, the groups of functions that
+    /// take one type (a class equivalent — the type plus its methods in
+    /// exile), and the functions left with no receiver.
     pub fn definitions(&self) -> usize {
-        self.classes.len() + self.functions
+        self.classes.len() + self.receiver_groups.len() + self.functions
     }
 
     /// The finding for one module, when it holds more than its rung allows.
@@ -208,11 +222,15 @@ impl ModuleShape {
         self.functions >= SEVERAL_DEFINITIONS
     }
 
-    /// The classes arm applies when classes are the bulk of the definitions
-    /// AND more than one of them carries behaviour. "All but one are records"
-    /// is one class plus its value types: one concept, no finding.
+    /// The types arm applies when the owned concepts (types and the function
+    /// groups that take one) are the bulk of the definitions AND more than one
+    /// of the types carries behaviour. "All but one are records", with no
+    /// function groups, is one class plus its value types: one concept, no
+    /// finding.
     fn classes_dominate(&self) -> bool {
-        self.classes.len() > self.functions && self.classes.iter().filter(|c| !c.is_record()).count() > 1
+        let owned = self.classes.len() + self.receiver_groups.len();
+        owned > self.functions
+            && (self.classes.iter().filter(|c| !c.is_record()).count() > 1 || !self.receiver_groups.is_empty())
     }
 
     fn classes_message(&self, rel: &str) -> String {
@@ -230,6 +248,18 @@ impl ModuleShape {
         )
     }
 
+    /// The groups, named: a class equivalent is the type plus the functions
+    /// that take it, so the groups are what the reader actually holds.
+    fn groups_clause(&self) -> String {
+        if self.receiver_groups.is_empty() {
+            return String::new();
+        }
+        format!(
+            " The functions group by the type they take: {}.",
+            group_list(&self.receiver_groups)
+        )
+    }
+
     /// `many` selects the rung: the loose rung's module is a grab-bag, so its
     /// action is the module split; the strict rung's module is one concept with
     /// a missing owner, so its action is local to the module.
@@ -240,13 +270,38 @@ impl ModuleShape {
             ""
         };
         format!(
-            "'{rel}' holds {count} top-level definitions, {functions} of them functions{framework}. A free function owns no state, so the data the others share arrives as parameters and every call site re-states it.{script} {action}",
+            "'{rel}' holds {count} top-level definitions{breakdown}{framework}. A free function owns no state, so the data the others share arrives as parameters and every call site re-states it.{groups}{script} {action}",
             count = self.definitions(),
-            functions = self.functions,
+            breakdown = self.functions_breakdown(),
             framework = self.framework_clause(),
+            groups = self.groups_clause(),
             script = script,
             action = self.functions_action(many),
         )
+    }
+
+    /// Python: "23 of them functions". Rust: "(17 types, 16 function groups,
+    /// 65 free functions)" — the class equivalents, so the count is checkable.
+    fn functions_breakdown(&self) -> String {
+        match self.language {
+            Language::Python => format!(", {} of them functions", self.functions),
+            Language::Rust => {
+                let mut parts = Vec::new();
+                if !self.classes.is_empty() {
+                    parts.push(format!("{} types", self.classes.len()));
+                }
+                if !self.receiver_groups.is_empty() {
+                    parts.push(format!("{} function groups", self.receiver_groups.len()));
+                }
+                if self.functions > 0 {
+                    parts.push(format!("{} free functions", self.functions));
+                }
+                if parts.is_empty() {
+                    return String::new();
+                }
+                format!(" ({})", parts.join(", "))
+            }
+        }
     }
 
     fn type_noun(&self) -> &'static str {
@@ -333,6 +388,20 @@ pub fn module_findings(scans: &[(String, ModuleShape)]) -> Vec<Finding> {
         .iter()
         .filter_map(|(rel, shape)| shape.module_finding(rel))
         .collect()
+}
+
+fn group_list(groups: &[(String, usize)]) -> String {
+    let shown: Vec<String> = groups
+        .iter()
+        .take(3)
+        .map(|(name, count)| format!("{name} ({count})"))
+        .collect();
+    let list = shown.join(", ");
+    match groups.len().saturating_sub(shown.len()) {
+        0 => list,
+        1 => format!("{list} and one more"),
+        more => format!("{list} and {more} more"),
+    }
 }
 
 fn name_list(names: &[&str]) -> String {

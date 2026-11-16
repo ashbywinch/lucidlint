@@ -7384,17 +7384,19 @@ def two(work, batch):
         let mut src = String::new();
         for i in 0..12 {
             src.push_str(&format!(
-                "pub fn step_{i}(state: &mut State) -> u32 {{\n    state.count + {i}\n}}\n\n"
+                "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
             ));
         }
-        src.push_str("pub struct State {\n    pub count: u32,\n}\n");
         let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
         let f = checks::module_findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         let msg = &hits[0].message;
-        assert!(msg.contains("12 of them functions"), "{msg}");
+        assert!(
+            msg.contains("holds 12 top-level definitions (12 free functions)"),
+            "{msg}"
+        );
         assert!(msg.contains("Split the module by concept"), "{msg}");
         assert!(msg.contains("one module per family"), "{msg}");
         assert!(msg.contains("`&mut` borrow would conflict"), "{msg}");
@@ -7408,22 +7410,54 @@ def two(work, batch):
         let mut src = String::new();
         for i in 0..4 {
             src.push_str(&format!(
-                "pub fn step_{i}(state: &mut State) -> u32 {{\n    state.count + {i}\n}}\n\n"
+                "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
             ));
         }
-        src.push_str("pub struct State {\n    pub count: u32,\n}\n");
         let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
         let f = checks::module_findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         let msg = &hits[0].message;
-        assert!(msg.contains("5 top-level definitions, 4 of them functions"), "{msg}");
+        assert!(
+            msg.contains("holds 4 top-level definitions (4 free functions)"),
+            "{msg}"
+        );
         assert!(msg.contains("give it an impl"), "{msg}");
         assert!(msg.contains("an impl block may live in this module"), "{msg}");
         assert!(msg.contains("put the functions behind one trait"), "{msg}");
         assert!(msg.contains("a foreign type cannot take an inherent impl"), "{msg}");
         assert!(!msg.contains("Split the module by concept"), "{msg}");
+    }
+
+    #[test]
+    fn rust_type_and_its_functions_count_as_one_definition() {
+        // a struct and 12 functions taking it: one class equivalent, so the
+        // module holds one definition — not thirteen
+        let mut src = String::new();
+        for i in 0..12 {
+            src.push_str(&format!(
+                "pub fn step_{i}(state: &mut State) -> u32 {{\n    state.count + {i}\n}}\n\n"
+            ));
+        }
+        src.push_str("pub struct State {\n    pub count: u32,\n}\n");
+        let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
+        let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
+        assert_eq!(scan.module_shape.definitions(), 1, "{:?}", scan.module_shape);
+        let f = checks::module_findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
+        assert!(f.is_empty(), "{f:?}");
+        // the same functions with no receiver are 12 definitions, and report
+        let mut loose = String::new();
+        for i in 0..12 {
+            loose.push_str(&format!(
+                "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
+            ));
+        }
+        let rs = rustscan::scan_source(&loose, "crate/src/loose.rs", true);
+        let scan = rustscan_to_filescan_ref(&rs, "crate/src/loose.rs");
+        assert_eq!(scan.module_shape.definitions(), 12);
+        let f = checks::module_findings(&[("crate/src/loose.rs".to_string(), scan.module_shape.clone())]);
+        assert!(f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
     }
 
     #[test]
