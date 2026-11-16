@@ -216,6 +216,39 @@ not of a missing struct.
 - **The split of `checks.rs` itself**: the remaining eleven sections are rounds
   of their own.
 
+## Cleanliness arithmetic (measured 2026-11-16)
+
+Splitting by concept does not converge under the current rungs, and the numbers
+say so:
+
+| step | `checks.rs` defs | ladder findings in this repo |
+|---|---|---|
+| after the first split (3 sections) | 294 | 23 |
+| after `record_shape` (1,002 lines) | 269 | 24 |
+| after `loop_family` + `latent_visitor` | 245 | 26 |
+
+Every extracted module is still a finding: `record_shape` 29, `duplicate_expression`
+18, `shared_path` 17, `loop_family` 16, `review_log` 11, `module_size` 9,
+`latent_visitor` 4. That is **the natural size of a concept family** — and the
+ladder flags 3–10 (`several`) and 11+ (`many`), so no family module can pass.
+Clean under the current rungs means every module holds at most **two**
+definitions, which no module with three functions can satisfy.
+
+**Proposed adaptation, for the ruling:**
+
+1. `several-definitions` (3–10) is **Python-only**. Its message is a design
+   directive — free functions should become methods — and in Rust the target it
+   names (a class) does not exist; three free functions in a module is the
+   normal unit.
+2. `many-definitions` moves to **31+** for both languages. A module holding more
+   than thirty definitions is a grab-bag by any reading, and the target is then
+   reachable: split by family until each module is ≤ 30.
+
+With those two changes this repo's ladder findings become six: Rust `checks.rs`
+245, `rustscan.rs` 70, `fix.rs` 51, `main.rs` 48; Python `fix_engine.py` 264,
+`lucidlint.py` 68. Every other Rust module (≤ 30 after the split) is clean, and
+the Python strict rung keeps its "make these methods" directive.
+
 ## Acceptance mapping
 
 - both rungs registered in `rule_metadata.py`; `make rules` regenerates
