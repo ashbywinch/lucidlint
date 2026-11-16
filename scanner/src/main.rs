@@ -40,9 +40,11 @@ mod rules_gen;
 mod rustloops;
 mod rustscan;
 mod skeleton;
+mod source;
 mod suppressions;
 use checks::Q;
 use checks::*;
+use source::{col_of, line_of, reset_line_starts, stmt_line};
 
 /// One open function scope: its decision count and the names it returns
 /// (for the swallow analysis).
@@ -185,64 +187,6 @@ struct ScanState<'a> {
 // The last line start per `line_of`/`col_of` source — a thread-local cache
 // keyed by (ptr, len): `line_of` used to scan from offset 0 for every call,
 // so a scan with F findings and C comments cost O((F+C) * file_len) — a
-// 2000-line file of function defs paid ~10ms of line scans per 1000 defs.
-// The index is rebuilt once per distinct source (O(n)), then binary search.
-thread_local! {
-    static LINE_STARTS: std::cell::RefCell<(usize, usize, Vec<usize>)> =
-        const { std::cell::RefCell::new((0, 0, Vec::new())) };
-}
-
-/// 1-based line of an offset.
-/// The LINE_STARTS cache is keyed by (ptr, len) — a fresh String can reuse
-/// the previous file's buffer address at the same length, so the key alone
-/// is unsafe; force a rebuild for every scan (review bot).
-fn reset_line_starts() {
-    LINE_STARTS.with(|c| {
-        let mut c = c.borrow_mut();
-        c.0 = 0;
-        c.1 = 0;
-        c.2.clear();
-    });
-}
-
-fn line_of(source: &str, offset: ruff_text_size::TextSize) -> usize {
-    LINE_STARTS.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.0 != source.as_ptr() as usize || c.1 != source.len() {
-            c.0 = source.as_ptr() as usize;
-            c.1 = source.len();
-            c.2.clear();
-            c.2.push(0);
-            for (i, b) in source.bytes().enumerate() {
-                if b == b'\n' {
-                    c.2.push(i + 1);
-                }
-            }
-        }
-        c.2.partition_point(|&s| s <= offset.to_usize())
-    })
-}
-
-/// 1-based column of an offset — the schema-3 disambiguation coordinate.
-fn col_of(source: &str, offset: ruff_text_size::TextSize) -> usize {
-    LINE_STARTS.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.0 != source.as_ptr() as usize || c.1 != source.len() {
-            c.0 = source.as_ptr() as usize;
-            c.1 = source.len();
-            c.2.clear();
-            c.2.push(0);
-            for (i, b) in source.bytes().enumerate() {
-                if b == b'\n' {
-                    c.2.push(i + 1);
-                }
-            }
-        }
-        let off = offset.to_usize();
-        off - c.2[c.2.partition_point(|&s| s <= off) - 1] + 1
-    })
-}
-
 /// The parent expr's KIND for the magic-number position rule — the variant
 /// discriminant, never the node: holding a cloned `Expr` per visited node
 /// deep-cloned every subtree (the scan's biggest allocation; a keystroke on
@@ -1114,40 +1058,6 @@ fn collect_stmt_lists<'a>(stmt: &'a Stmt, out: &mut Vec<&'a [Stmt]>) {
     }
 }
 
-fn stmt_line(source: &str, stmt: &Stmt) -> usize {
-    let off = match stmt {
-        Stmt::FunctionDef(f) => f.range.start(),
-        Stmt::ClassDef(c) => c.range.start(),
-        Stmt::Return(r) => r.range.start(),
-        Stmt::Delete(d) => d.range.start(),
-        Stmt::TypeAlias(t) => t.range.start(),
-        Stmt::Assign(a) => a.range.start(),
-        Stmt::AugAssign(a) => a.range.start(),
-        Stmt::AnnAssign(a) => a.range.start(),
-        Stmt::For(f) => f.range.start(),
-        Stmt::While(w) => w.range.start(),
-        Stmt::If(i) => i.range.start(),
-        Stmt::With(w) => w.range.start(),
-        Stmt::Match(m) => m.range.start(),
-        Stmt::Raise(r) => r.range.start(),
-        Stmt::Try(t) => t.range.start(),
-        Stmt::Assert(a) => a.range.start(),
-        Stmt::Import(i) => i.range.start(),
-        Stmt::ImportFrom(i) => i.range.start(),
-        Stmt::Global(g) => g.range.start(),
-        Stmt::Nonlocal(n) => n.range.start(),
-        Stmt::Expr(e) => e.range.start(),
-        Stmt::Pass(p) => p.range.start(),
-        Stmt::Break(b) => b.range.start(),
-        Stmt::Continue(c) => c.range.start(),
-        Stmt::IpyEscapeCommand(s) => s.range.start(),
-    };
-    line_of(source, off)
-}
-
-/// One file's scan output, including the repo-wide collections.
-/// One top-level class: name, def line, abstract flag, and base references
-/// ("Name:Id" for a plain base, "Attr:Alias:attr" for alias.attr).
 #[derive(Clone)]
 pub struct ClassInfo {
     pub name: String,

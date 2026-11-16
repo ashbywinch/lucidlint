@@ -20,7 +20,10 @@ use ruff_python_ast::{
 use ruff_text_size::Ranged;
 use std::collections::HashSet;
 
-use crate::{line_of, stmt_line, Finding, ScanState};
+use crate::{
+    source::{line_of, stmt_line},
+    Finding, ScanState,
+};
 
 pub use crate::naming::VAGUE_SUFFIXES;
 

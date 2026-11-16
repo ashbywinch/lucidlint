@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use ruff_python_ast::{Expr, ExprCall, Operator, Stmt, StmtFunctionDef};
 use ruff_text_size::Ranged;
 
-use crate::{line_of, Finding, ScanState};
+use crate::{source::line_of, Finding, ScanState};
 
 /// One module-level path expression: the raw material for the shared-path
 /// family. `segments` is the path's shape — names, quoted literals, `<Path>`

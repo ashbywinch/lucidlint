@@ -7,7 +7,7 @@
 use ruff_python_ast::{Expr, Stmt};
 use ruff_text_size::Ranged;
 
-use crate::{line_of, Finding, ScanState};
+use crate::{source::line_of, Finding, ScanState};
 
 /// Is the guarded branch of a None/empty check a FAIL-FAST GUARD — it raises
 /// or returns an error shape (an HTTPException, a *Response, a dict with an
