@@ -326,3 +326,36 @@ fix is the message, not the verdict.
 (`methods == 0`), `detached-method` and `vague-name` already speak in
 type/method terms, and every other class-shaped rule is Python-only because
 Rust has no classes.
+
+## The blocker that stops the split (found 2026-11-16)
+
+Attempting the next five extractions (`advisory`, `decisions`, `scattered`,
+`middle_man`, and `unnamed`+`classification`) worked mechanically — behaviour
+stayed identical — but the gate went red, and the cause is architectural, not
+mechanical:
+
+`hub-file` — `'scanner/src/main.rs' is imported or called by 17 other modules` —
+the split crossed the 15-dependent threshold. Every rules module needs
+`Finding`, `ScanState`, `line_of`, `col_of` and `stmt_line`, and those live in
+the crate root (`main.rs`), so each new submodule adds one dependent to the root.
+
+The root cause is Rust's privacy rule: `ScanState`'s fields are private and the
+rules reach them **because `checks` is a descendant of the crate root**. Move
+the type to `common` and the fields stop being visible; a child module of
+`common` cannot see them. So the extraction is:
+
+1. move `Finding`, `FnScope`, `FnCc`, `ScanState`, `SelfAssign`, `ParentEntry`
+   and the line helpers (`LINE_STARTS`, `line_of`, `col_of`, `stmt_line`) from
+   `main.rs` into `common.rs`, marking the cross-module fields `pub(crate)` (the
+   single `ScanState { … }` construction site stays in `main`);
+2. move the scan-data structs `ScanState` references — `ScatteredInstance`,
+   `PathExpression`, `ExpressionOccurrence`, `MiddleManClass`,
+   `MiddleManCandidate` — into `common.rs` too, or `common` would depend on
+   `checks` and close a cycle;
+3. point the ~33 `use crate::{…}` lines in `checks`, `docs`, `lsp`,
+   `graph_families` and `rustscan` at `crate::common`.
+
+That is a dedicated round: it touches the shared vocabulary of the whole crate,
+so it wants its own behaviour proof (the scan comparison) rather than riding on
+a family extraction. The split resumes after it — the five extractions above are
+ready to re-apply.
