@@ -41,7 +41,7 @@ def tails_of(src: str) -> list[str]:
 def test_python_finding_tails_name_python_fixable_kinds():
     offenders = []
     for rs in sorted(SCANNER_SRC.rglob("*.rs")):
-        if rs.name == "rustscan.rs":  # findings about .rs files: guarded below
+        if "rustscan" in rs.parts:  # findings about .rs files: guarded below
             continue
         for kind in tails_of(rs.read_text()):
             if kind not in fix_engine.FIXABLE_KINDS:
@@ -50,7 +50,8 @@ def test_python_finding_tails_name_python_fixable_kinds():
 
 
 def test_rust_finding_tails_name_rust_fixable_kinds():
-    src = (SCANNER_SRC / "rustscan.rs").read_text() + (SCANNER_SRC / "rustloops.rs").read_text()
+    rustscan = sorted((SCANNER_SRC / "rustscan").rglob("*.rs"))
+    src = "".join(p.read_text() for p in rustscan) + (SCANNER_SRC / "rustloops.rs").read_text()
     fixable = rust_fixable_from_dispatch()
     offenders = [k for k in tails_of(src) if k not in fixable]
     assert offenders == [], f"fix directives with no Rust fixer: {offenders}"

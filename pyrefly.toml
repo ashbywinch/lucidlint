@@ -4,8 +4,10 @@
 preset = "default"
 
 # tests import each other by bare module name at runtime (the sys.path.insert
-# hack in test_fix_engine.py) — give the checker the same import root
-search-path = ["tests"]
+# hack in test_fix_engine.py) — give the checker the same import root.
+# scripts/ is its own import root too: a script imports its siblings by bare
+# name when run (`python scripts/gen-rules.py`), so rule_inventory resolves.
+search-path = ["tests", "scripts"]
 
 # No file-exclude key exists in pyrefly's config schema — the
 # tests/fixtures/ exclusion lives in scripts/pyrefly-lock.py (the gate we

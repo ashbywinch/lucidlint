@@ -11,322 +11,232 @@ Writes two files (the `make rules` step):
   the family/variant map drifted because it was a second registration
   point).
 
-It validates as it goes:
-
-- every kind the scanner can emit (the `kind: "k".into()` literals across
-  the scanner source, plus the cc-path complexity emitter) has a catalog
-  entry — a new family without one fails the generation;
-- every catalog entry is an emitted kind — a dead row is removed;
-- each entry's severity matches the scanner's emission where that is
-  parseable.
+It validates as it goes (RuleInventory): every kind the scanner can emit has a
+catalog entry, every catalog entry is an emitted kind, each entry's severity
+matches the scanner's emission where that is parseable, and every fix directive
+a message advertises is a registered fix.
 
 Usage: `make rules` (writes both files) or `scripts/gen-rules.py --check`
 (fails when either is stale — the gate runs this).
 """
-# lucidlint: ignore-file global-state generator constants (markers, non-literal kinds) are the generator's configuration
+# lucidlint: ignore-file global-state the generator's markers and paths are its
+# configuration — read once at import, never rebound
 
-import re
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import rule_metadata  # noqa: E402  # the sys.path bootstrap above precedes the import — inherent to the pattern
+from rule_inventory import RuleInventory  # noqa: E402  # the sys.path bootstrap above precedes the import
 
-NON_LITERAL_KINDS = {
-    # the scanner never emits these as a literal kind/severity pair: the
-    # loop family's mutating/sequence variants all flow through
-    # LoopFunctionCtx.push_finding (kind is a parameter, severities warn).
-    # The severity string IS literal in the construction, but the regex
-    # needs the pair in one match — metadata is trusted for these.
-    "complexity",
-    "mutating-loop",
-    "loop-sequence",
-    "loop-hoist",
-    # churn-untested's severity is CONDITIONAL, not literal in the construction:
-    # fail when the repo's coverage snapshot is fresh, warn ("verify") when the
-    # snapshot predates the tests — R6 forbids a hard claim on stale data.
-    "churn-untested",
-}
+import rule_metadata  # noqa: E402  # same bootstrap, same reason
 
 START = "<!-- RULES-GENERATED:START -->"
 END = "<!-- RULES-GENERATED:END -->"
 RULES_RS = ROOT / "scanner" / "src" / "rules_gen.rs"
 
-# The three Finding-construction shapes the scanner uses — each captures
-# the kind and its severity in one match:
-_FINDING_PATTERNS: tuple = (
-    # Finding struct: kind: "k".into(), ... severity: "s"
-    re.compile(r'kind: "([a-z-]+)"\.into\(\),\s*severity: "(fail|warn)"'),
-    # helper call: self.finding("k", "s", ...) / finding("k", "s", ...)
-    re.compile(r'finding\(\s*"([a-z-]+)",\s*"(fail|warn)"'),
-    # (message, "k") tuple handed to out.push(Finding { ... severity: "s" }
-    # (the unused family's message variants share one construction; the
-    # kind is a tuple element, the severity lives in the Finding — one
-    # regex spans both, which is how the unused fail/warn drift surfaced)
-    re.compile(r'"([a-z-]+)",\s*\)\s*\}\s*;\s*\n\s*out\.push\(Finding\s*\{[^}]*?severity: "(fail|warn)"'),
-)
 
+class RuleGenerator:
+    """The generator run: the catalog (the one registration point) and the two
+    artifacts it renders from it."""
 
-def scanner_sources() -> list[Path]:
-    """The scanner's own source — rules_gen.rs is generated FROM the
-    catalog, so scanning it for kinds would be circular. Recursive: the
-    families live in `src/` and in its concept submodules (`src/checks/`)."""
-    return sorted(p for p in (ROOT / "scanner" / "src").rglob("*.rs") if p.name != "rules_gen.rs")
-def _prod_text(src: Path) -> str:
-    """The file's production code: everything before the first `#[cfg(test)]`
-    module. Test fixtures construct Findings with stand-in kinds (the LSP
-    severity test uses \"except\") that are not real emissions. The split is
-    anchored at line start — a doc-comment mention of the attribute is not a
-    module boundary."""
-    return re.split(r"(?m)^#\[cfg\(test\)\]", src.read_text(), maxsplit=1)[0]
+    def __init__(self, catalog: "rule_metadata.RuleCatalog"):
+        self.catalog = catalog
 
-
-def emitted_kinds() -> set[str]:
-    """Every kind the scanner can emit: the kind/severity literals in its
-    own source (any of the three construction shapes) plus the known
-    non-literal emitters."""
-    kinds = set(NON_LITERAL_KINDS)
-    for src in scanner_sources():
-        text = _prod_text(src)
-        for pattern in _FINDING_PATTERNS:
-            kinds.update(m.group(1) for m in pattern.finditer(text))
-    return kinds
-
-
-def emitted_severity(kind: str) -> str | None:
-    """The scanner's severity for `kind`, from the kind/severity literal
-    pairs. None when the kind emits through an indirect helper (unparseable
-    — metadata is trusted)."""
-    for src in scanner_sources():
-        text = _prod_text(src)
-        for pattern in _FINDING_PATTERNS:
-            for m in pattern.finditer(text):
-                if m.group(1) == kind:
-                    return m.group(2)
-    return None
-
-
-
-
-
-
-
-def validate() -> list[str]:
-    """Completeness + severity drift checks. Returns a list of problems."""
-    problems: list[str] = []
-    emitted = emitted_kinds()
-    registered = set(rule_metadata.CATALOG.kinds())
-    for kind in sorted(emitted - registered):
-        problems.append(f"kind '{kind}' is emitted by the scanner but has no rule_metadata entry")
-    for kind in sorted(registered - emitted):
-        problems.append(f"kind '{kind}' has a rule_metadata entry but the scanner never emits it")
-    for rule in rule_metadata.CATALOG.rules:
-        emitted_sev = emitted_severity(rule.kind)
-        if emitted_sev is not None and emitted_sev != rule.severity:
-            problems.append(
-                f"kind '{rule.kind}': metadata says {rule.severity}, scanner emits {emitted_sev}"
-            )
-        if rule.section not in rule_metadata.GROUP_INFO:
-            problems.append(f"kind '{rule.kind}': unknown section '{rule.section}'")
-    # Sixth-pass BQ1 drift gate: a finding message advertises its fix as
-    # `— fix: <kind>`; that kind MUST be a registered fix (FIX_REGISTRY) or
-    # the stamp/notice/judgement machinery cannot classify it. Shape-routed
-    # kinds (dispatch-registry, rule-table) are registered like any other.
-    directive_kinds: set[str] = set()
-    for src in scanner_sources():
-        for m in re.finditer(r"— fix: (?!lucidlint )([a-z-]+)", _prod_text(src)):
-            directive_kinds.add(m.group(1))
-    for kind in sorted(directive_kinds - set(rule_metadata.CATALOG.fixes.kinds())):
-        problems.append(
-            f"fix kind '{kind}' is advertised in a scanner message but not registered in FIX_REQUIRED_INPUTS"
-        )
-
-    return problems
-
-
-def render_rules_md() -> str:
-    """The marked region: every display group's section + table."""
-    problems = validate()
-    if problems:
-        raise SystemExit("rule_metadata drift:\n  " + "\n  ".join(problems))
-    out = [START]
-    for group, (header, intro) in rule_metadata.GROUP_INFO.items():
-        rows = [r for r in rule_metadata.CATALOG.rules if r.section == group]
-        out.append("")
-        out.append(f"## {header}")
-        if intro:
+    def rules_md(self) -> str:
+        """The marked region: every display group's section + table."""
+        problems = RuleInventory(self.catalog).validate()
+        if problems:
+            raise SystemExit("rule_metadata drift:\n  " + "\n  ".join(problems))
+        out = [START]
+        for group, (header, intro) in rule_metadata.GROUP_INFO.items():
+            rows = [r for r in self.catalog.rules if r.section == group]
             out.append("")
-            out.append(intro)
-        out.append("| Rule | Severity | Language | What it checks |")
-        out.append("|---|---|---|---|")
-        for rule in rows:
-            display = rule.display_name or rule.kind
-            sev = f"**{rule.severity}**" if rule.severity == "warn" else rule.severity
-            out.append(f"| **{display}** | {sev} | {rule.languages} | {rule.description} |")
-        if group == "cross-cutting":
-            out.append(
-                "| **standard** | — | — | Catch-all for findings that don't "
-                "fit the named families above. The finding's message "
-                "explains what's wrong. |"
-            )
-    out.append("")
-    out.append(END)
-    return "\n".join(out)
+            out.append(f"## {header}")
+            if intro:
+                out.append("")
+                out.append(intro)
+            out.append("| Rule | Severity | Language | What it checks |")
+            out.append("|---|---|---|---|")
+            for rule in rows:
+                display = rule.display_name or rule.kind
+                sev = f"**{rule.severity}**" if rule.severity == "warn" else rule.severity
+                out.append(f"| **{display}** | {sev} | {rule.languages} | {rule.description} |")
+            if group == "cross-cutting":
+                out.append(
+                    "| **standard** | — | — | Catch-all for findings that don't "
+                    "fit the named families above. The finding's message "
+                    "explains what's wrong. |"
+                )
+        out.append("")
+        out.append(END)
+        return "\n".join(out)
 
-
-def render_rules_rs() -> str:
-    """The generated Rust metadata module — everything derived from the
-    catalog; hand-editing it is a stale-file drift the gate catches."""
-    rules = rule_metadata.CATALOG.rules
-    kinds = ", ".join(f'"{r.kind}"' for r in rules)
-    standard = ", ".join(f'"{k}"' for k in rule_metadata.CATALOG.standard_kinds())
-    families = rule_metadata.CATALOG.families()
-    groups = rule_metadata.CATALOG.groups()
-    group_order = ["architecture", "style", "test-discipline", "suppression"]
-    out = [
-        "// GENERATED by scripts/gen-rules.py (`make rules`) — DO NOT EDIT.",
-        "//",
-        "// The single source of truth is rule_metadata.py's RuleCatalog:",
-        "// adding a rule there and running `make rules` regenerates this",
-        "// module, RULES.md, and the Python RULE_GROUPS map. The drift gate",
-        "// (`make rules --check` / test_rules_md_is_generated) fails when",
-        "// this file is stale — hand-editing it is a second registration",
-        "// point and the one thing this module exists to forbid.",
-        "",
-        "/// Every kind the catalog registers — the scanner's contract.",
-        f"pub const FAMILY_KINDS: &[&str] = &[{kinds}];",
-        "",
-        "/// Kinds that deliberately collapse to the \"standard\" display",
-        "/// bucket — their messages carry the rule; a named `final_kind`",
-        "/// bucket is optional for them.",
-        f"pub const STANDARD_KINDS: &[&str] = &[{standard}];",
-        "",
-        "/// Family -> variant kinds, for family suppressions (`ignore",
-        "/// latent-class <why>` covers every variant). Derived from the",
-        "/// catalog's `display` buckets — a variant missing here is a",
-        "/// registration drift, not a judgment call (review-log B6).",
-        "pub const FAMILY_VARIANTS: &[(&str, &[&str])] = &[",
-    ]
-    for fam, members in families.items():
-        out.append(f'    ("{fam}", &[{", ".join(f'"{m}"' for m in members)}]),')
-    out.append("];")
-    out.append("")
-    # The judgement signal is a property of the linked fix's REGISTRY inputs
-    # (Fifth-pass): "requires a name" is derived from FIX_REQUIRED_INPUTS,
-    # never a per-rule boolean. The table carries the FIX kinds (the LSP
-    # reads the DIRECTIVE's kind — extract-record-class for a record-shape
-    # finding), so the registry is the one source for both surfaces.
-    name_required = sorted(
-        k for k, inputs in rule_metadata.FIX_REQUIRED_INPUTS.items() if "name" in inputs
-    )
-    out.append("")
-    out.append("/// Fix kinds whose inputs declare a required `name` — the")
-    out.append("/// judge-true set (Fifth-pass): the LSP marks its code")
-    out.append("/// action `needsName` from this table; the CLI refuses a")
-    out.append("/// missing or invalid name with an explicit message.")
-    out.append(f"pub const NAME_REQUIRED_KINDS: &[&str] = &[{', '.join(f'"{k}"' for k in name_required)}];")
-    out.append("")
-    out.append("/// kind -> the rule's default fix kind (Rule.fix) — the")
-    out.append("/// scanner's structured `fix_kind` for findings whose message")
-    out.append("/// carries no shape-routed directive (Sixth-pass BQ1: the")
-    out.append("/// directive is the rendering of this value, no")
-    out.append("/// linked-vs-offered divergence).")
-    out.append("pub const KIND_FIX: &[(&str, &str)] = &[")
-    for r in rules:
-        if r.fix:
-            out.append(f'    ("{r.kind}", "{r.fix}"),')
-    out.append("];")
-    out.append("")
-    out.append("")
-    out.append("/// kind -> display bucket — the lookup table final_kind scans.")
-    out.append("/// A match of 50+ arms would be a complexity finding; data")
-    out.append("/// stays flat (a linear scan over the entries is nothing).")
-    out.append("pub const DISPLAY_BUCKETS: &[(&str, &str)] = &[")
-    for r in rules:
-        bucket = r.display_group or r.kind
-        out.append(f'    ("{r.kind}", "{bucket}"),')
-    out.append("];")
-    out.append("/// The display bucket for a finding kind — `final_kind` output.")
-    out.append("pub fn final_kind(kind: &str) -> &'static str {")
-    out.append("    for (k, bucket) in DISPLAY_BUCKETS {")
-    out.append("        if *k == kind {")
-    out.append("            return bucket;")
-    out.append("        }")
-    out.append("    }")
-    out.append('    "standard"')
-    out.append("}")
-    out.append("")
-    out.append("/// The config `group:` expansion — the LSP's mirror of the")
-    out.append("/// gate's RULE_GROUPS (both derived from the same catalog).")
-    out.append("pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {")
-    out.append("    &[")
-    for group in group_order:
-        members = sorted(groups.kinds_in(group))
-        out.append(f'        ("{group}", &[{", ".join(f'"{m}"' for m in members)}]),')
-    out.append("    ]")
-    out.append("}")
-    out.append("")
-    return "\n".join(out)
-
-
-def _fmt_rust(code: str) -> str:
-    """Run the generated Rust through rustfmt FROM scanner/ so it picks up
-    scanner/rustfmt.toml (max_width 120 — the house .editorconfig) — the
-    same config `cargo fmt` uses, which is the lint gate's formatter. A
-    generator formatting with the default config (run from the repo root)
-    disagreed with cargo fmt on tuple/array layout and made make-rules
-    output fail `cargo fmt --check` (the loop-pipeline family entry).
-    rustfmt is a required tool (the lint gate runs cargo fmt) — a missing
-    binary is a broken environment, and a raw fallback would make --check
-    report a freshly generated file as stale (review finding)."""
-    try:
-        proc = subprocess.run(
-            ["rustfmt", "--emit", "stdout"],
-            input=code,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=str(ROOT / "scanner"),
+    def rules_rs(self) -> str:
+        """The generated Rust metadata module — everything derived from the
+        catalog; hand-editing it is a stale-file drift the gate catches."""
+        rules = self.catalog.rules
+        kinds = ", ".join(f'"{r.kind}"' for r in rules)
+        standard = ", ".join(f'"{k}"' for k in self.catalog.standard_kinds())
+        families = self.catalog.families()
+        groups = self.catalog.groups()
+        group_order = ["architecture", "style", "test-discipline", "suppression"]
+        out = [
+            "// GENERATED by scripts/gen-rules.py (`make rules`) — DO NOT EDIT.",
+            "//",
+            "// The single source of truth is rule_metadata.py's RuleCatalog:",
+            "// adding a rule there and running `make rules` regenerates this",
+            "// module, RULES.md, and the Python RULE_GROUPS map. The drift gate",
+            "// (`make rules --check` / test_rules_md_is_generated) fails when",
+            "// this file is stale — hand-editing it is a second registration",
+            "// point and the one thing this module exists to forbid.",
+            "",
+            "/// Every kind the catalog registers — the scanner's contract.",
+            f"pub const FAMILY_KINDS: &[&str] = &[{kinds}];",
+            "",
+            "/// Kinds that deliberately collapse to the \"standard\" display",
+            "/// bucket — their messages carry the rule; a named `final_kind`",
+            "/// bucket is optional for them.",
+            f"pub const STANDARD_KINDS: &[&str] = &[{standard}];",
+            "",
+            "/// Family -> variant kinds, for family suppressions (`ignore",
+            "/// latent-class <why>` covers every variant). Derived from the",
+            "/// catalog's `display` buckets — a variant missing here is a",
+            "/// registration drift, not a judgment call (review-log B6).",
+            "pub const FAMILY_VARIANTS: &[(&str, &[&str])] = &[",
+        ]
+        for fam, members in families.items():
+            out.append(f'    ("{fam}", &[{", ".join(f'"{m}"' for m in members)}]),')
+        out.append("];")
+        out.append("")
+        # The judgement signal is a property of the linked fix's REGISTRY inputs
+        # (Fifth-pass): "requires a name" is derived from FIX_REQUIRED_INPUTS,
+        # never a per-rule boolean. The table carries the FIX kinds (the LSP
+        # reads the DIRECTIVE's kind — extract-record-class for a record-shape
+        # finding), so the registry is the one source for both surfaces.
+        name_required = sorted(
+            k for k, inputs in rule_metadata.FIX_REQUIRED_INPUTS.items() if "name" in inputs
         )
-    except OSError as e:
-        raise SystemExit(
-            f"rustfmt is required to generate rules_gen.rs — install it (rustup component add rustfmt): {e}"
-        ) from e
-    if proc.returncode != 0 or not proc.stdout:
-        raise SystemExit(f"rustfmt failed on the generated rules_gen.rs:\n{proc.stderr}")
-    return proc.stdout
+        out.append("")
+        out.append("/// Fix kinds whose inputs declare a required `name` — the")
+        out.append("/// judge-true set (Fifth-pass): the LSP marks its code")
+        out.append("/// action `needsName` from this table; the CLI refuses a")
+        out.append("/// missing or invalid name with an explicit message.")
+        out.append(f"pub const NAME_REQUIRED_KINDS: &[&str] = &[{', '.join(f'\"{k}\"' for k in name_required)}];")
+        out.append("")
+        out.append("/// kind -> the rule's default fix kind (Rule.fix) — the")
+        out.append("/// scanner's structured `fix_kind` for findings whose message")
+        out.append("/// carries no shape-routed directive (Sixth-pass BQ1: the")
+        out.append("/// directive is the rendering of this value, no")
+        out.append("/// linked-vs-offered divergence).")
+        out.append("pub const KIND_FIX: &[(&str, &str)] = &[")
+        for r in rules:
+            if r.fix:
+                out.append(f'    ("{r.kind}", "{r.fix}"),')
+        out.append("];")
+        out.append("")
+        out.append("")
+        out.append("/// kind -> display bucket — the lookup table final_kind scans.")
+        out.append("/// A match of 50+ arms would be a complexity finding; data")
+        out.append("/// stays flat (a linear scan over the entries is nothing).")
+        out.append("pub const DISPLAY_BUCKETS: &[(&str, &str)] = &[")
+        for r in rules:
+            bucket = r.display_group or r.kind
+            out.append(f'    ("{r.kind}", "{bucket}"),')
+        out.append("];")
+        out.append("/// The display bucket for a finding kind — `final_kind` output.")
+        out.append("pub fn final_kind(kind: &str) -> &'static str {")
+        out.append("    for (k, bucket) in DISPLAY_BUCKETS {")
+        out.append("        if *k == kind {")
+        out.append("            return bucket;")
+        out.append("        }")
+        out.append("    }")
+        out.append('    "standard"')
+        out.append("}")
+        out.append("")
+        out.append("/// The config `group:` expansion — the LSP's mirror of the")
+        out.append("/// gate's RULE_GROUPS (both derived from the same catalog).")
+        out.append("pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {")
+        out.append("    &[")
+        for group in group_order:
+            members = sorted(groups.kinds_in(group))
+            out.append(f'        ("{group}", &[{", ".join(f'"{m}"' for m in members)}]),')
+        out.append("    ]")
+        out.append("}")
+        out.append("")
+        return "\n".join(out)
 
+    @staticmethod
+    def rustfmt(code: str) -> str:
+        """Run the generated Rust through rustfmt FROM scanner/ so it picks up
+        scanner/rustfmt.toml (max_width 120 — the house .editorconfig) — the
+        same config `cargo fmt` uses, which is the lint gate's formatter. A
+        generator formatting with the default config (run from the repo root)
+        disagreed with cargo fmt on tuple/array layout and made make-rules
+        output fail `cargo fmt --check` (the loop-pipeline family entry).
+        rustfmt is a required tool (the lint gate runs cargo fmt) — a missing
+        binary is a broken environment, and a raw fallback would make --check
+        report a freshly generated file as stale (review finding)."""
+        try:
+            proc = subprocess.run(
+                ["rustfmt", "--emit", "stdout"],
+                input=code,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=str(ROOT / "scanner"),
+            )
+        except OSError as e:
+            raise SystemExit(
+                f"rustfmt is required to generate rules_gen.rs — install it (rustup component add rustfmt): {e}"
+            ) from e
+        if proc.returncode != 0 or not proc.stdout:
+            raise SystemExit(f"rustfmt failed on the generated rules_gen.rs:\n{proc.stderr}")
+        return proc.stdout
+
+    @staticmethod
+    def stale_note(current: str, written: str, what: str) -> str | None:
+        """The stale-artifact note, or None when the file on disk is current."""
+        if current == written:
+            return None
+        return f"{what} is stale — run `make rules` to regenerate"
+
+    def run(self, check: bool = False) -> int:
+        """Write both artifacts, or (check) fail when either is stale."""
+        md_path = ROOT / "RULES.md"
+        md_text = md_path.read_text()
+        if START not in md_text or END not in md_text:
+            print(f"error: {md_path} is missing the {START}/{END} markers")
+            return 1
+        md_region = self.rules_md()
+        head, _mid, tail = md_text.partition(START)
+        _mid, _marker, tail = tail.partition(END)
+        new_md = head + md_region + tail
+        new_rs = self.rustfmt(self.rules_rs() + "\n")
+        if check:
+            problems = [
+                note
+                for note in (
+                    self.stale_note(md_text, new_md, "RULES.md"),
+                    self.stale_note(RULES_RS.read_text(), new_rs, str(RULES_RS)),
+                )
+                if note
+            ]
+            if problems:
+                print("\n".join(problems))
+                return 1
+            print("RULES.md tables and rules_gen.rs are current")
+            return 0
+        md_path.write_text(new_md)
+        RULES_RS.write_text(new_rs)
+        print(f"regenerated {md_path} rule tables + {RULES_RS}")
+        return 0
 
 def main() -> int:
-    md_path = ROOT / "RULES.md"
-    md_text = md_path.read_text()
-    if START not in md_text or END not in md_text:
-        print(f"error: {md_path} is missing the {START}/{END} markers")
-        return 1
-    md_region = render_rules_md()
-    head, _mid, tail = md_text.partition(START)
-    _mid, _marker, tail = tail.partition(END)
-    new_md = head + md_region + tail
-    new_rs = _fmt_rust(render_rules_rs() + "\n")
-    if "--check" in sys.argv:
-        problems = []
-        if new_md != md_text:
-            problems.append("RULES.md is stale — run `make rules` to regenerate")
-        if new_rs != RULES_RS.read_text():
-            problems.append(f"{RULES_RS} is stale — run `make rules` to regenerate")
-        if problems:
-            print("\n".join(problems))
-            return 1
-        print("RULES.md tables and rules_gen.rs are current")
-        return 0
-    md_path.write_text(new_md)
-    RULES_RS.write_text(new_rs)
-    print(f"regenerated {md_path} rule tables + {RULES_RS}")
-    return 0
-
+    return RuleGenerator(rule_metadata.CATALOG).run(check="--check" in sys.argv)
 
 
 if __name__ == "__main__":
