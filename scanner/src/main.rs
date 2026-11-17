@@ -2189,16 +2189,16 @@ mod tests {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let rep = s(&["a", "b", "a", "b"]);
         let uniq = s(&["a", "b", "a"]);
-        let interner = checks::BigramInterner::new(&[&rep, &uniq]);
+        let interner = crate::skeleton::BigramInterner::new(&[&rep, &uniq]);
         let fa = interner.bigrams_of(0);
         let fb = interner.bigrams_of(1);
-        assert_eq!(checks::dice_from_bigrams(fa, fb), dice_similarity(&rep, &uniq));
-        assert_eq!(checks::dice_from_bigrams(fa, fa), 1.0);
+        assert_eq!(crate::skeleton::dice_from_bigrams(fa, fb), dice_similarity(&rep, &uniq));
+        assert_eq!(crate::skeleton::dice_from_bigrams(fa, fa), 1.0);
         // empty skeletons: never a duplicate, matches the reference
         let e = Vec::<String>::new();
-        let interner2 = checks::BigramInterner::new(&[&e, &rep]);
+        let interner2 = crate::skeleton::BigramInterner::new(&[&e, &rep]);
         assert_eq!(
-            checks::dice_from_bigrams(interner2.bigrams_of(0), interner2.bigrams_of(1)),
+            crate::skeleton::dice_from_bigrams(interner2.bigrams_of(0), interner2.bigrams_of(1)),
             dice_similarity(&e, &rep)
         );
     }
