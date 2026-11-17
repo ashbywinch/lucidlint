@@ -52,7 +52,7 @@ GROUP_INFO = {
     ),
     "graph": (
         "Group 5: Hotspot & risk",
-        "`hub-file`, `high-risk` and `over-abstraction` require the optional "
+        "`high-risk` and `over-abstraction` require the optional "
         "`code-review-graph` tool (installed separately or via `pip install "
         "code-review-graph`); `hotspot` uses git churn plus the scan's own CC, "
         "and `churn-untested` uses git churn plus the repo's coverage snapshot. "
@@ -763,12 +763,6 @@ CATALOG = RuleCatalog([
          display_name="loop-hoist → loop-pipeline", display_group="loop-pipeline",
          fix="loop-hoist"),
     # ---- graph-based (require code-review-graph)
-    Rule("hub-file", "fail", "graph", "Graph",
-         "A module that ≥15 other modules import or call into — the change "
-         "blast radius. The count is distinct dependent files (tests "
-         "excluded); a change here reaches every one of them, so narrow the "
-         "interface it exposes to a domain noun, or split it by the dependent "
-         "groups."),
     Rule("high-risk", "fail", "graph", "Graph",
          "A function with >10 callers, no test coverage, and/or a "
          "security-related name (`auth`, `login`, `token`, `sql`...)."),

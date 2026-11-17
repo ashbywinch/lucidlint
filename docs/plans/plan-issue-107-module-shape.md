@@ -507,12 +507,13 @@ definition of a rule set. `hub-file`'s advice — "narrow the interface it expos
 or split it by the dependent groups" — is right for a *behavioural* hub (a util
 everyone calls, a god object) and wrong for a *data* hub (the record, the state).
 
-**Proposal for the ruling**: count `hub-file` fan-in over behavioural edges
-(a call, an impl, a trait bound) and not over type-only imports, or exempt a
-module whose public surface is data. Measured next round: if the rule is
-narrowed that way, this batch lands unchanged and the remaining families can
-become modules; if not, the rule modules must be capped at ~14 dependents,
-which caps the split at its current shape.
+**Ruled 2026-11-17: the rule is deleted.** `hub-file` is removed from the
+catalog, the scanner, its tests, RULES.md and the graph-family note: fan-in over
+imports says nothing is wrong, and everything about a hub that matters is
+already covered by the complexity and size rules (a module everyone calls and
+that is big or complex is `several-definitions`/`many-definitions` and
+`complexity`'s business; a stable vocabulary is not a defect). The split resumed
+on the next commit.
 
 Reverted the batch to keep the gate green; the five extractions are ready to
 re-apply the moment the rule is settled.

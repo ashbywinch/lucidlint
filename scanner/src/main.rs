@@ -1678,13 +1678,6 @@ fn main() {
     let rels: Vec<String> = paths.iter().map(|p| rel_of(p, &root)).collect();
     if let Some(c) = &contract {
         let repo_root = Path::new(&root);
-        all_findings.extend(graph_families::hub_file_findings(
-            repo_root,
-            c,
-            &rels,
-            15,
-            include_tests,
-        ));
         all_findings.extend(graph_families::high_risk_findings(repo_root, c, 0.8, include_tests));
         all_findings.extend(graph_families::cycle_findings(repo_root, c));
         all_findings.extend(graph_families::layer_mix_findings(repo_root, c, &rels));

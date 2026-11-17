@@ -194,7 +194,7 @@ Read `docs/coding-standards.md` and `docs/testing-standards.md` first. Then:
    fails for a reason you cannot attribute to your change, stop: do not push,
    and name the command and failure in the run output.
 
-   A new graph-family finding (`churn-untested`, `hub-file`, `layer-mix`,
+   A new graph-family finding (`churn-untested`, `layer-mix`,
    `hotspot`) on a file that `git diff --name-only origin/main` does not name is
    contract drift: the refreshed graph changed the top-churn set, not your code.
    Record it in the PR body, refresh the baseline, and continue. A new finding
