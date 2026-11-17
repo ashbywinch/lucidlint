@@ -1874,7 +1874,7 @@ mod tests {
         // the orchestrator passes REPO-RELATIVE paths with the binary's cwd
         // at the repo root: the raw common prefix of tests/a.py + tools/b.py
         // is "t" — which used to back off to "" and silently broke every
-        // graph-family rel resolution (large-function/hub-file/high-risk/
+        // graph-family rel resolution (large-function/high-risk/
         // layer-mix/folder-mix never fired through the orchestrator)
         let cwd = Path::new("/work/repo");
         let root = repo_root_impl(

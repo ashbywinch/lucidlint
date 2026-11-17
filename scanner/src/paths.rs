@@ -61,7 +61,7 @@ pub(crate) fn repo_root(paths: &[String]) -> String {
 /// and the raw common prefix of `tests/a.py` + `tools/b.py` is `"t"` — which
 /// backed off to `""` and silently broke every graph-family rel resolution
 /// (repo_rel on the graph's ABSOLUTE node paths stripped nothing), so
-/// large-function/hub-file/high-risk/layer-mix/folder-mix never fired
+/// large-function/high-risk/layer-mix/folder-mix never fired
 /// through the orchestrator. Joining the cwd makes the root the absolute
 /// repo path for relative inputs and leaves absolute inputs unchanged.
 pub(crate) fn repo_root_impl(paths: &[String], cwd: &Path) -> String {

@@ -14,7 +14,7 @@
 //! the catch-that-vanishes analog; `strewing` is free fns sharing a leading
 //! struct param. `use`/`mod`
 //! collection feeds the cross-file import-cycle family; the code-review-graph
-//! families (hub-file, high-risk, layer-mix, hotspot) degrade for Rust repos
+//! families (high-risk, layer-mix, hotspot) degrade for Rust repos
 //! until the exporter speaks Rust, and `unused` is deliberately NOT re-
 //! implemented — rustc's dead_code owns that with better precision.
 //!
