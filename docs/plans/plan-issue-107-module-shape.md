@@ -481,3 +481,38 @@ the AST walker (`impl ScanState`), the CLI and the fix dispatcher. Those are
 the next split: `pipeline.rs` and `cli.rs`, with `ScanState` already a candidate
 for its core/family-outcome split (its fields still hold nine per-family `Vec`s,
 which is why the rule modules pass `&mut ScanState` today).
+
+## The second wall: the shared model is a "hub" (2026-11-17)
+
+Re-applied the five family extractions (`advisory`, `decisions`, `scattered`,
+`middle_man` — behaving identically, houses 360 / album 439 unchanged) and the
+gate went red on one rule, twice:
+
+```
+[hub-file] scanner/src/main.rs   — imported or called by 15 other modules
+[hub-file] scanner/src/finding.rs — imported or called by 17 other modules
+```
+
+Both are the *shared model*, and both counts are exactly what the architecture
+predicts: every rule module takes `&mut ScanState` (main) and constructs a
+`Finding` (finding.rs). As the rule families become modules, the model's fan-in
+grows one per module. No arrangement removes this: move the state to its own
+module and *that* module becomes the 15-dependent hub instead.
+
+That is a rule/architecture conflict, not a defect — and it is the same class of
+mistake as the earlier rounds: a measurement that reads mechanics (how many
+modules import a file) applied to a shape where the mechanics are the design. A
+linter is many independent rules over one record and one state; that is the
+definition of a rule set. `hub-file`'s advice — "narrow the interface it exposes,
+or split it by the dependent groups" — is right for a *behavioural* hub (a util
+everyone calls, a god object) and wrong for a *data* hub (the record, the state).
+
+**Proposal for the ruling**: count `hub-file` fan-in over behavioural edges
+(a call, an impl, a trait bound) and not over type-only imports, or exempt a
+module whose public surface is data. Measured next round: if the rule is
+narrowed that way, this batch lands unchanged and the remaining families can
+become modules; if not, the rule modules must be capped at ~14 dependents,
+which caps the split at its current shape.
+
+Reverted the batch to keep the gate green; the five extractions are ready to
+re-apply the moment the rule is settled.
