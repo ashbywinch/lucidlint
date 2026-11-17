@@ -871,7 +871,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         spent: &mut supps_spent,
     };
     let findings =
-        checks::apply_suppressions_impl(state.findings, source, name, tokens, &mut books, &magic_exempt_labels);
+        checks::apply_source_suppressions(state.findings, source, name, tokens, &mut books, &magic_exempt_labels);
     let mut all = type_ignore_findings(source, name, tokens);
     all.extend(noqa_findings(source, name, tokens));
     all.extend(findings);
@@ -2218,7 +2218,7 @@ mod tests {
         // starts; a multi-line string between comments must not lose count
         let src = "# one\nx = (\n    1 +\n    \"\"\"\nmulti\nline\n\"\"\"\n)\n# two\ny = 2  # three\n";
         let parsed = parse_module(src).unwrap();
-        let lines = checks::comment_lines(src, parsed.tokens());
+        let lines = crate::suppressions::comment_lines(src, parsed.tokens());
         let got: Vec<(usize, &str)> = lines.iter().map(|(l, t)| (*l, t.as_str())).collect();
         assert_eq!(got, vec![(1, "# one"), (9, "# two"), (10, "# three")], "{got:?}");
     }

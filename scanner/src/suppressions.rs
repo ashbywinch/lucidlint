@@ -7,6 +7,12 @@
 
 use std::collections::HashMap;
 
+use ruff_python_ast::token::{TokenKind, Tokens};
+use ruff_text_size::Ranged;
+
+use crate::finding::Finding;
+use crate::source::line_of;
+
 /// One line-level suppression and the (signal, why) parsed from it.
 /// Line suppressions exempt a finding on that line or the line before;
 /// file suppressions exempt the signal anywhere in the file (with a why).
@@ -624,6 +630,119 @@ impl<'a> StaleCtx<'a> {
 /// The suppression entry names this finding's family, with a reason.
 fn matches_suppression(sig: &str, finding: &crate::Finding, why: &str) -> bool {
     sig != finding.kind && signal_matches(sig, &finding.kind) && !why.is_empty()
+}
+
+/// Comment tokens -> (line, comment text incl. '#') — from the parsed
+/// token stream (0.0.9's lexer exposes no public range accessor).
+pub fn comment_lines(source: &str, tokens: &Tokens) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    // tokens are in source order — count newlines between comment starts
+    // instead of re-scanning from offset 0 per comment (`line_of` is O(n);
+    // N comments used to cost O(N^2) — a comment-heavy file scanned 4x per
+    // run and went quadratic)
+    let mut line = 1usize;
+    let mut prev = 0usize;
+    for tok in tokens.iter() {
+        if tok.kind() == TokenKind::Comment {
+            let range = tok.range();
+            let start = range.start().to_usize();
+            line += source[prev..start].bytes().filter(|&b| b == b'\n').count();
+            prev = start;
+            let text = &source[range];
+            out.push((line, text.to_string()));
+        }
+    }
+    out
+}
+
+/// Python comment tokens -> the shared suppression map (`#` comments).
+pub fn parse_suppressions(source: &str, tokens: &Tokens) -> crate::suppressions::Suppressions {
+    crate::suppressions::suppressions_from_comments(&comment_lines(source, tokens))
+}
+
+/// Map every 1-based source line to the first line of its LOGICAL line.
+///
+/// One line of code can span several source lines — a multi-line `def`, a
+/// wrapped call, a split literal. Python joins those physical lines into one
+/// logical line (implicit joining inside brackets, explicit `\` joining); the
+/// token stream marks the logical breaks with `Newline` and the joins with
+/// `NonLogicalNewline`, so the first significant token after each logical
+/// break is the logical line's first source line. Comments and blank lines
+/// are not part of any logical line: they map to themselves, and a finding
+/// never anchors on them.
+pub fn logical_line_starts(source: &str, tokens: &Tokens) -> Vec<usize> {
+    let nlines = source.lines().count();
+    // identity by default: a line is its own logical start
+    let mut starts: Vec<usize> = (0..=nlines).collect();
+    let mut cur: Option<usize> = None;
+    let mut filled = 0usize;
+    for tok in tokens.iter() {
+        let line = line_of(source, tok.range().start()).min(nlines);
+        if line > filled {
+            match tok.kind() {
+                TokenKind::Newline => {
+                    // the logical line ends here — every line from the last
+                    // break to this one belongs to `cur`
+                    let val = cur.take();
+                    for slot in starts.iter_mut().take(line + 1).skip(filled + 1) {
+                        let l = filled + 1;
+                        *slot = match val {
+                            Some(v) if v <= l => v,
+                            _ => l,
+                        };
+                        filled = l;
+                    }
+                    filled = line;
+                }
+                // markers, joins, block structure: any of these can be the
+                // only token on its line without starting a logical line
+                TokenKind::Comment
+                | TokenKind::NonLogicalNewline
+                | TokenKind::Indent
+                | TokenKind::Dedent
+                | TokenKind::EndOfFile => {}
+                _ => {
+                    if cur.is_none() {
+                        cur = Some(line);
+                    }
+                }
+            }
+        }
+    }
+    let val = cur;
+    for (offset, slot) in starts.iter_mut().enumerate().take(nlines + 1).skip(filled + 1) {
+        *slot = match val {
+            Some(v) if v <= offset => v,
+            _ => offset,
+        };
+    }
+    starts
+}
+
+/// Filter findings through the suppressions + emit the why-less suppression
+/// findings — shared logic over this language's comment lines (the parse
+/// itself lives in `crate::suppressions::suppressions_from_comments`). `pre_used` carries
+/// the suppressions the cc-retain already honored (complexity suppressions
+/// are applied before the findings filter; stale detection must not re-flag
+/// them). `magic_exempt_labels` names the exemption kinds among the file's
+/// still-present magic-number candidates — the stale message cites exactly
+/// those (G4), never a blanket unit/constant/table claim.
+pub fn apply_source_suppressions(
+    findings: Vec<Finding>,
+    source: &str,
+    file: &str,
+    tokens: &Tokens,
+    books: &mut crate::suppressions::SuppressionBooks,
+    magic_exempt_labels: &[&'static str],
+) -> Vec<Finding> {
+    crate::suppressions::apply_suppressions_impl(
+        findings,
+        &comment_lines(source, tokens),
+        file,
+        "#",
+        books,
+        magic_exempt_labels,
+    )
 }
 
 #[cfg(test)]
