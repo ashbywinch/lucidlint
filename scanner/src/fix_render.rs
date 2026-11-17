@@ -63,3 +63,28 @@ pub fn complexity_message(cc: u32, shape: &str, detail: &str) -> String {
         ),
     }
 }
+
+/// The structured fix kind of a RAW finding message: the first token after
+/// the `— fix: ` directive tail. None when the message carries no directive
+/// (fix-less findings never construct a Fix — Sixth-pass BQ1).
+pub fn fix_kind_of_message(message: &str) -> Option<&str> {
+    let pos = message.rfind("— fix: ")?;
+    let tail = &message[pos + "— fix: ".len()..];
+    let kind = tail.split_whitespace().next()?;
+    if kind == "lucidlint" {
+        return None; // the rendered full-command template — not a directive
+    }
+    Some(kind)
+}
+
+/// The rule's default fix kind (the catalog's Rule.fix via KIND_FIX) — the
+/// structured fix_kind for findings whose message carries no shape-routed
+/// directive (large-function -> extract-method, partition etc.).
+pub fn kind_fix_default(kind: &str) -> &'static str {
+    for (k, fix) in crate::rules_gen::KIND_FIX {
+        if *k == kind {
+            return fix;
+        }
+    }
+    ""
+}
