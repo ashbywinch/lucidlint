@@ -11,7 +11,8 @@ use ruff_text_size::Ranged;
 
 use std::collections::HashSet;
 
-use super::ast::{function_param_names, stmt_exprs, walk_expr_deep};
+use super::expr_walk::{stmt_exprs, walk_expr_deep};
+use super::function_facts::function_param_names;
 
 pub(crate) fn sub_name(s: &ruff_python_ast::ExprSubscript) -> String {
     match s.value.as_ref() {

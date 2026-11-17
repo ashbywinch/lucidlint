@@ -21,3 +21,11 @@ pub const VAGUE_SUFFIXES: [&str; 8] = [
 pub fn vague_role_is_loaded(name: &str, span_lines: usize, methods: usize) -> bool {
     VAGUE_SUFFIXES.iter().any(|s| name.ends_with(s)) && (span_lines >= 120 || methods >= 6)
 }
+
+/// The matching vague role suffix of a name (for the finding message).
+pub(crate) fn suffix_of(name: &str) -> Option<&'static str> {
+    crate::naming::VAGUE_SUFFIXES
+        .iter()
+        .find(|s| name.ends_with(**s))
+        .copied()
+}

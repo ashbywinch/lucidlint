@@ -10,7 +10,9 @@ use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
 
-use super::ast::{class_field_names, function_param_names, push_stmt_children, stmt_exprs, walk_expr_deep};
+use super::class_facts::class_field_names;
+use super::expr_walk::{push_stmt_children, stmt_exprs, walk_expr_deep};
+use super::function_facts::function_param_names;
 use super::record_shape::{class_key, module_type_bindings, resolve_alias, TypeBindings};
 use crate::{line_of, ScanState};
 

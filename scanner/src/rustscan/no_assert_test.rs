@@ -6,7 +6,7 @@ use syn::{Block, ExprMacro, File, Item, ItemFn, Path};
 
 use crate::finding::Finding;
 
-use super::ast::has_attr;
+use super::attrs::has_attr;
 
 /// `#[test]` + `#[ignore]` — a skipped test rots, the skipif analog. Runs as a
 /// pre-pass so cfg(test) containment can't hide it.

@@ -11,7 +11,8 @@ use ruff_python_ast::{Expr, Stmt, StmtFunctionDef};
 
 use crate::finding::Finding;
 
-use super::ast::{function_param_names, inner_function_count, push_stmt_children, walk_expr_deep};
+use super::expr_walk::{push_stmt_children, walk_expr_deep};
+use super::function_facts::{function_param_names, inner_function_count};
 use crate::{stmt_line, ScanState};
 
 /// Closures: >= 2 inner functions/lambdas with cc >= 15, span >= 60, OR

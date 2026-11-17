@@ -7,7 +7,7 @@ use ruff_text_size::Ranged;
 use crate::finding::Finding;
 use crate::{line_of, ScanState};
 
-use super::ast::base_name_of;
+use super::expr_walk::base_name_of;
 
 /// The dispatch-key (left side) of a chain-arm test — the value all arms
 /// compare. None when the test is not a simple comparison on one value.

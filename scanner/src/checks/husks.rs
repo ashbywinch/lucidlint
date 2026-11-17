@@ -7,7 +7,8 @@ use ruff_python_ast::{Expr, Stmt, StmtClassDef, StmtFunctionDef};
 
 use crate::finding::Finding;
 
-use super::ast::{annotation_base_name, push_stmt_children};
+use super::class_facts::annotation_base_name;
+use super::expr_walk::push_stmt_children;
 use crate::{stmt_line, ScanState};
 
 fn is_self_attr_expr(e: &Expr) -> bool {

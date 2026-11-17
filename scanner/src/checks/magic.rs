@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use ruff_python_ast::{Expr, Stmt};
 use ruff_text_size::Ranged;
 
-use super::ast::{push_stmt_children, stmt_exprs, walk_expr_deep};
+use super::expr_walk::{push_stmt_children, stmt_exprs, walk_expr_deep};
 
 /// Offsets of numeric literals that are data-table entries, exempt from
 /// magic-number: inside a single collection literal (dict/list/set/tuple,

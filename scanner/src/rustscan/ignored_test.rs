@@ -7,7 +7,7 @@ use syn::{File, ItemFn};
 
 use crate::finding::Finding;
 
-use super::ast::has_attr;
+use super::attrs::has_attr;
 
 pub(crate) fn ignored_test_findings(file: &File, file_name: &str) -> Vec<Finding> {
     struct Collector {

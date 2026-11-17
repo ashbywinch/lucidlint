@@ -19,7 +19,8 @@ use ruff_text_size::Ranged;
 
 use crate::{finding::Finding, source::col_of, source::line_of, ScanState};
 
-use super::ast::{class_attr_names, class_field_names, push_stmt_children, stmt_exprs};
+use super::class_facts::{class_attr_names, class_field_names};
+use super::expr_walk::{push_stmt_children, stmt_exprs};
 use super::skel_children;
 use super::Q;
 

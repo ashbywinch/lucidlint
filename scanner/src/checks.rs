@@ -2,7 +2,7 @@
 //! and the message the reader acts on; this root only declares them and re-exports
 //! the vocabulary the rest of the crate calls.
 
-mod ast;
+mod class_facts;
 mod closure_cluster;
 mod closures;
 mod conditional_polymorphism;
@@ -13,9 +13,11 @@ mod duplicate_def;
 mod duplicate_expression;
 mod duplicate_function;
 mod duplicate_module;
+mod expr_walk;
 mod fakefs;
 mod flat_folder;
 mod forwarding;
+mod function_facts;
 mod global_state;
 mod guard_clause;
 mod husks;
@@ -49,12 +51,8 @@ pub use crate::forwarding::ForwarderMethod;
 pub use crate::forwarding::RepoMethod;
 pub use crate::skeleton::{fn_skeleton, is_duplicate_candidate, skel_children, SkeletonFn, SkeletonModule, Q};
 pub use crate::suppressions::{apply_source_suppressions, logical_line_starts, parse_suppressions};
-#[cfg(test)]
-pub(crate) use ast::inner_function_count;
-pub(crate) use ast::{
-    all_exprs, annotation_base_name, body_refs_name, class_attr_names, push_stmt_children, returned_names, stmt_exprs,
-    walk_expr_deep,
-};
+pub use class_facts::annotation_base_name;
+pub(crate) use class_facts::class_attr_names;
 pub use closure_cluster::closure_cluster_findings;
 pub use closures::closure_findings;
 pub use conditional_polymorphism::conditional_polymorphism_findings;
@@ -65,9 +63,13 @@ pub use duplicate_def::duplicate_def_findings;
 pub use duplicate_expression::{collect_duplicate_expressions, duplicate_expression_findings, ExpressionOccurrence};
 pub use duplicate_function::duplicate_findings;
 pub use duplicate_module::{collect_skeleton_modules, duplicate_module_findings};
+pub(crate) use expr_walk::{all_exprs, push_stmt_children, stmt_exprs, walk_expr_deep};
 pub use fakefs::fakefs_findings;
 pub use flat_folder::flat_folder_findings;
 pub use forwarding::{collect_forwarders, forwarding_chain_findings};
+#[cfg(test)]
+pub(crate) use function_facts::inner_function_count;
+pub(crate) use function_facts::{body_refs_name, returned_names};
 pub use global_state::{global_state_findings, module_constant_names, shadow_findings};
 pub use guard_clause::guard_clause_findings;
 pub use husks::{delegating_husk_findings, static_husk_findings};

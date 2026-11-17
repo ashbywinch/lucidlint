@@ -6,7 +6,8 @@ use syn::{Attribute, File, FnArg, ImplItem, Item, Path};
 
 use crate::finding::Finding;
 
-use super::ast::{has_cfg_test, receiver_name, static_type_ident};
+use super::attrs::has_cfg_test;
+use super::types::{receiver_name, static_type_ident};
 use super::RustScan;
 
 /// `mixed-module` (#107): how many groups a module's top-level definitions fall

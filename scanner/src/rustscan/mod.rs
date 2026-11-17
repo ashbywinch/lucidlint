@@ -26,9 +26,10 @@
 
 use crate::{finding::Finding, FnCc};
 
-mod ast;
+mod attrs;
 mod comments;
 mod decisions;
+mod exprs;
 mod fakefs;
 mod graph;
 mod ignored_test;
@@ -37,9 +38,11 @@ mod no_assert_test;
 mod shape;
 mod skeleton;
 mod state;
+mod stmts;
+mod types;
 
-pub(crate) use ast::is_compound_op;
 pub(crate) use comments::rs_comment_lines;
+pub(crate) use exprs::is_compound_op;
 pub(crate) use graph::module_graph;
 pub(crate) use ignored_test::ignored_test_findings;
 pub(crate) use modshape::{mixed_module_into, module_shape};

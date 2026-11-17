@@ -6,19 +6,22 @@ use std::collections::HashMap;
 use crate::finding::Finding;
 use crate::FnCc;
 
-use super::ast::{
-    attrs_of, block_refs_self, collect_type_idents, has_attr, has_cfg_test, impl_self_name, inner_count,
-    is_assert_macro, is_compound_op, is_dbg_macro, is_diverge_stmt, is_unwrap_expect, return_values, span_lines,
-    static_type_ident, suffix_of, tokens_contain_ident, use_paths,
-};
+use super::attrs::{attrs_of, has_attr, has_cfg_test};
 use super::decisions::{
     names_a_decision, rs_bool_operands, rs_condition_message, rs_condition_nouns, rs_expr_text,
     rs_names_a_type_or_constant,
 };
+use super::exprs::{
+    block_refs_self, is_assert_macro, is_compound_op, is_dbg_macro, is_unwrap_expect, tokens_contain_ident,
+};
 use super::fakefs::fakefs_hit;
+use super::graph::use_paths;
 use super::shape::{is_closures_shape, is_discarded_expression, is_trivial_rust_stub, rust_fn_shape};
 use super::skeleton::rs_skeleton;
+use super::stmts::{inner_count, is_diverge_stmt, return_values, span_lines};
+use super::types::{collect_type_idents, impl_self_name, static_type_ident};
 use super::{RsStruct, RustScan};
+use crate::naming::suffix_of;
 
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};

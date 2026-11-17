@@ -3,6 +3,8 @@
 
 use std::collections::HashMap;
 
+use syn::{ItemUse, UseTree};
+
 /// The module->file map and the file->[module files] adjacency for import
 /// cycles. `files` is the repo-relative scan set; `mod_decls` maps each file
 /// to its top-level `mod` declarations. Crate roots are files named main.rs
@@ -180,4 +182,44 @@ fn resolve_dotted(path: &str, module_map: &HashMap<String, String>) -> Option<St
 fn file_module_path(file: &str, module_map: &HashMap<String, String>) -> Option<String> {
     let _ = file;
     module_map.iter().find(|(_, f)| *f == file).map(|(p, _)| p.clone())
+}
+
+/// `use` paths referenced by one item, raw ("crate::a::b", "super::x", ...).
+/// The last segment of each path is the imported NAME — the module edge is
+/// the path minus that segment, resolved cross-file.
+pub(super) fn use_paths(u: &ItemUse) -> Vec<String> {
+    fn walk(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<String>) {
+        match tree {
+            UseTree::Path(p) => {
+                prefix.push(p.ident.to_string());
+                walk(&p.tree, prefix, out);
+                prefix.pop();
+            }
+            UseTree::Name(n) => {
+                prefix.push(n.ident.to_string());
+                out.push(prefix.join("::"));
+                prefix.pop();
+            }
+            UseTree::Rename(r) => {
+                prefix.push(r.ident.to_string());
+                out.push(prefix.join("::"));
+                prefix.pop();
+            }
+            UseTree::Glob(_) => {
+                out.push(prefix.join("::"));
+            }
+            UseTree::Group(g) => {
+                for item in &g.items {
+                    walk(item, prefix, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut prefix: Vec<String> = Vec::new();
+    if u.leading_colon.is_some() {
+        prefix.push(String::new()); // ::a::b — absolute
+    }
+    walk(&u.tree, &mut prefix, &mut out);
+    out
 }
