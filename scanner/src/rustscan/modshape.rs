@@ -20,10 +20,17 @@ use super::RustScan;
 /// Impl blocks belong to their type (their references are the type's), `use`
 /// and `mod` are boundaries rather than items, and `#[cfg(test)]` items are
 /// skipped: a test module references everything, so it would glue the groups.
+/// Fewer items than this never fires: below it a reader holds the parts at
+/// once. The three bars are measured in
+/// `docs/plans/plan-issue-107-module-shape.md` ("`mixed-module` — shipped").
 pub const MIXED_MODULE_ITEMS: usize = 20;
 
+/// Two connected groups are the normal shape of a module that has a type and
+/// its helpers; three groups that never reference each other is the finding.
 pub const MIXED_MODULE_GROUPS: usize = 3;
 
+/// The fallback arm: a module large enough that even six disconnected parts
+/// (groups *and* stand-alone items) cannot be one concept.
 pub const MIXED_MODULE_PARTS: usize = 6;
 
 struct Cohesion {

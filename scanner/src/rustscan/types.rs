@@ -18,10 +18,22 @@ pub(super) fn receiver_name(ty: &Type) -> Option<String> {
     let Type::Path(path) = peel(ty)? else { return None };
     let segment = path.path.segments.last()?;
     let name = segment.ident.to_string();
+    // a smart pointer is carried, not owned: `Box<State>` names State as the
+    // receiver, exactly as `&State` does — the wrapper is allocation, not type
+    const POINTERS: &[&str] = &["Box", "Rc", "Arc", "Cow"];
+    if POINTERS.contains(&name.as_str()) {
+        let inner = match &segment.arguments {
+            syn::PathArguments::AngleBracketed(args) => args.args.iter().find_map(|a| match a {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            }),
+            _ => None,
+        };
+        return inner.and_then(receiver_name);
+    }
     const PLUMBING: &[&str] = &[
         "str", "String", "usize", "isize", "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128", "f32",
-        "f64", "bool", "char", "Vec", "HashMap", "HashSet", "BTreeMap", "BTreeSet", "Option", "Box", "Rc", "Arc",
-        "Cow",
+        "f64", "bool", "char", "Vec", "HashMap", "HashSet", "BTreeMap", "BTreeSet", "Option",
     ];
     if PLUMBING.contains(&name.as_str()) {
         return None;

@@ -170,7 +170,10 @@ fn is_generated(source: &str) -> bool {
 }
 
 fn is_script(rel: &str) -> bool {
-    rel.split('/').next().is_some_and(|dir| SCRIPT_DIRS.contains(&dir))
+    // any directory on the path, not just the first: `src/scripts/x.py` is as
+    // much a script as `scripts/x.py`, and the clause exists to answer that
+    // reader's objection
+    rel.split('/').rev().skip(1).any(|dir| SCRIPT_DIRS.contains(&dir))
 }
 
 impl ModuleShape {

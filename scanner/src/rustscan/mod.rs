@@ -857,6 +857,20 @@ mod tests {
     }
 
     #[test]
+    fn smart_pointer_parameters_join_their_inner_type_group() {
+        // a Box/Rc/Arc/Cow parameter is carried allocation, not a foreign
+        // receiver: `fn f(s: Box<State>)` is a State method in exile, exactly
+        // as `fn f(s: &State)` is
+        let src = "struct State { x: i32 }\nfn a(s: &Box<State>) {}\nfn b(s: std::sync::Arc<State>) {}\nfn c(s: Box<Box<State>>) {}\nfn d(e: Box<Expr>) {}\n";
+        let file = syn::parse_file(src).unwrap();
+        let shape = crate::rustscan::modshape::module_shape(&file, src);
+        // the three State takers are State's methods in exile, not free fns
+        assert_eq!(shape.functions, 0);
+        // and a pointer to a foreign type still joins that type's group
+        assert_eq!(shape.receiver_groups, vec![("Expr".to_string(), 1)]);
+    }
+
+    #[test]
     fn rust_skeleton_shapes() {
         let src = "fn f(x: u32) -> u32 { if x > 0 { x + 1 } else { x } }\n";
         let file = syn::parse_file(src).unwrap();
