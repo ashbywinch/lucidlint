@@ -10,7 +10,8 @@ use crate::finding::Finding;
 use crate::{line_of, ScanState};
 
 use super::advisory::base_name_of;
-use super::{annotation_base_name, class_methods, has_decorator, push_stmt_children};
+use super::husks::{class_methods, has_decorator};
+use super::{annotation_base_name, push_stmt_children};
 
 /// One module-defined class, as the middle-man rule reads it: the module it is
 /// declared in, whether it is an interface, the methods it declares (with the
