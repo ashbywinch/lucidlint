@@ -1,8 +1,5 @@
 //! `middle-man`: a class that only forwards to another — the class in the
 //! middle adds a hop, not a concept.
-// lucidlint: ignore-file record-shape `MiddleManCandidate` is the repo-wide pass's
-// intermediate record: it carries one delegation site between files so the pass can
-// resolve the target's class, and it owns no rules of its own
 
 use std::collections::HashSet;
 
@@ -329,4 +326,220 @@ pub fn collect_middle_man(state: &mut ScanState, body: &[Stmt], source: &str, re
     }
     state.middle_man_classes.extend(module.classes.into_values());
     state.middle_man_candidates.extend(candidates);
+}
+
+impl MiddleManClass {
+    /// The member's parameter shape when this class declares it.
+    fn declares(&self, member: &str) -> Option<&ParamShape> {
+        self.methods.get(member)
+    }
+
+    /// The interface members this class declares: the name and the parameter
+    /// names a conforming implementation must accept. Empty when the class is
+    /// not an interface.
+    fn interface_declarations(&self) -> Vec<(&str, &HashSet<String>)> {
+        if !self.is_interface {
+            return Vec::new();
+        }
+        self.methods.iter().map(|(n, s)| (n.as_str(), &s.names)).collect()
+    }
+}
+
+impl ModuleClasses {
+    /// Read the file's classes (nested ones included).
+    fn read(body: &[Stmt], module: &str) -> Self {
+        let mut out = Self {
+            classes: std::collections::HashMap::new(),
+            interface_members: std::collections::HashMap::new(),
+        };
+        let mut sq: Vec<&Stmt> = body.iter().collect();
+        while let Some(s) = sq.pop() {
+            if let Stmt::ClassDef(c) = s {
+                let methods = class_methods(c);
+                let is_interface = methods.iter().any(|f| has_decorator(f, "abstractmethod"))
+                    || class_base_names(c)
+                        .iter()
+                        .any(|b| b == "ABC" || b == "ABCMeta" || b == "Protocol")
+                    || class_metaclass_name(c).as_deref() == Some("ABCMeta");
+                let cls = MiddleManClass {
+                    name: c.name.to_string(),
+                    module: module.to_string(),
+                    is_interface,
+                    methods: methods.iter().map(|f| (f.name.to_string(), param_shape(f))).collect(),
+                    bases: class_base_names(c),
+                    attrs: class_attribute_classes(c),
+                };
+                out.declare_interface_members(&cls);
+                out.classes.insert(cls.name.clone(), cls);
+            }
+            match s {
+                Stmt::FunctionDef(f) => sq.extend(&f.body),
+                _ => push_stmt_children(s, &mut sq),
+            }
+        }
+        out
+    }
+
+    /// The repo-wide index: every scanned file's classes merged by name.
+    /// Same-named classes merge (methods, bases, attrs union) — an ambiguous
+    /// name means "could be this target", which is exactly what the
+    /// resolution asks, and the exemptions then read the union's most
+    /// forgiving declaration.
+    fn merge(classes: &[MiddleManClass]) -> Self {
+        let mut out = Self {
+            classes: std::collections::HashMap::new(),
+            interface_members: std::collections::HashMap::new(),
+        };
+        for c in classes {
+            out.declare_interface_members(c);
+            out.classes
+                .entry(c.name.clone())
+                .and_modify(|e: &mut MiddleManClass| {
+                    e.methods.extend(c.methods.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    e.bases.extend(c.bases.iter().cloned());
+                    e.attrs.extend(c.attrs.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    e.is_interface |= c.is_interface;
+                })
+                .or_insert_with(|| c.clone());
+        }
+        out
+    }
+
+    /// Record the members a class declares as an interface. Every declaration
+    /// keeps the interface's own name and module: conformance alone is not
+    /// evidence that the interface is about a given wrapper (issue #65).
+    fn declare_interface_members(&mut self, cls: &MiddleManClass) {
+        for (member, names) in cls.interface_declarations() {
+            self.interface_members
+                .entry(member.to_string())
+                .or_default()
+                .push(InterfaceDeclaration {
+                    interface: cls.name.clone(),
+                    module: cls.module.clone(),
+                    names: names.clone(),
+                });
+        }
+    }
+
+    /// Every declaration of the chain's member the receiver reaches: the
+    /// `self.<attr>` steps resolve through the index (the attribute's class,
+    /// then that class's own attributes), and the member may sit on the
+    /// receiver class or on any base of it. Empty = the chain leaves the
+    /// scanned codebase (a library's method, an attribute with no type
+    /// evidence): "call the target directly" is not advice anyone can take
+    /// there.
+    fn declarations<'a>(&'a self, owner: &str, chain: &[String]) -> Vec<&'a ParamShape> {
+        let Some((member, path)) = chain.split_last() else {
+            return Vec::new();
+        };
+        let Some(mut cls) = self.classes.get(owner) else {
+            return Vec::new();
+        };
+        for step in path {
+            match cls.attrs.get(step).and_then(|name| self.classes.get(name)) {
+                Some(next) => cls = next,
+                None => return Vec::new(),
+            }
+        }
+        let mut out = Vec::new();
+        let mut queue: Vec<&MiddleManClass> = vec![cls];
+        let mut seen: HashSet<&str> = HashSet::new();
+        while let Some(c) = queue.pop() {
+            if !seen.insert(c.name.as_str()) {
+                continue;
+            }
+            if let Some(shape) = c.declares(member) {
+                out.push(shape);
+            }
+            for b in &c.bases {
+                if let Some(base) = self.classes.get(b) {
+                    queue.push(base);
+                }
+            }
+        }
+        out
+    }
+
+    /// The bases the owner names, directly or through another base this index
+    /// knows — the class's own statement that it implements them.
+    fn named_bases(&self, owner: &str) -> HashSet<String> {
+        let mut named: HashSet<String> = HashSet::new();
+        let mut queue: Vec<String> = vec![owner.to_string()];
+        while let Some(name) = queue.pop() {
+            if !named.insert(name.clone()) {
+                continue;
+            }
+            if let Some(c) = self.classes.get(&name) {
+                queue.extend(c.bases.iter().cloned());
+            }
+        }
+        named.remove(owner);
+        named
+    }
+
+    /// Is the method the owner's OWN interface contract? The wrapper's
+    /// parameters must accept the declared member's — a conforming
+    /// implementation, not a name collision — AND the declaration must be
+    /// about this class: either the interface lives in the owner's module (the
+    /// seam sits with the class, the same rule as `class-module`'s protocol
+    /// exemption), or the owner names it as a base, at any distance through the
+    /// repo's bases. An interface declared in an unrelated module that the
+    /// class does not name is not evidence about this class: repo-wide state
+    /// must not silence a delegation (issue #65).
+    fn implements_interface_member(&self, owner: &str, module: &str, name: &str, wrapper: &ParamShape) -> bool {
+        let Some(decls) = self.interface_members.get(name) else {
+            return false;
+        };
+        let named = self.named_bases(owner);
+        decls
+            .iter()
+            .any(|d| d.names.is_subset(&wrapper.names) && (d.module == module || named.contains(d.interface.as_str())))
+    }
+}
+
+impl MiddleManCandidate {
+    /// Does the call fix policy — pass an argument the target does not require
+    /// (a keyword the target defaults, or a positional beyond its required
+    /// ones)? That IS the wrapper's job, so it is not a middle man. A
+    /// `**mapping` keyword is forwarding, not policy (the collector never
+    /// records one).
+    fn policy_fixes(&self, shape: &ParamShape) -> bool {
+        self.positional_passed > shape.positional_required || self.keywords.iter().any(|k| shape.optional.contains(k))
+    }
+
+    /// Fire? The chain resolves to a member this codebase declares, the method
+    /// is not an operator the language invokes, no interface of the owner's own
+    /// is satisfied by it, and no declaration of the target would be
+    /// policy-fixed by the call.
+    fn fires(&self, module: &ModuleClasses) -> bool {
+        if is_dunder(&self.function) {
+            return false;
+        }
+        let decls = module.declarations(&self.owner, &self.chain);
+        if decls.is_empty() {
+            return false;
+        }
+        if module.implements_interface_member(&self.owner, &self.rel, &self.function, &self.wrapper) {
+            return false;
+        }
+        !decls.iter().any(|shape| self.policy_fixes(shape))
+    }
+
+    /// The finding this candidate produces — its own coordinates and message.
+    fn finding(&self) -> Finding {
+        Finding {
+            logical_start: None,
+            seam_members: Vec::new(),
+            col: 0,
+            file: self.rel.clone(),
+            line: self.line,
+            function: self.function.clone(),
+            kind: "middle-man".into(),
+            severity: "warn".into(),
+            message: format!(
+                "'{}' is a pure delegation to self — Remove Middle Man: call the target directly",
+                self.function
+            ),
+        }
+    }
 }
