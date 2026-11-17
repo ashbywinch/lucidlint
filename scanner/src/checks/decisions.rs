@@ -15,8 +15,8 @@ use ruff_text_size::Ranged;
 use crate::finding::Finding;
 use crate::{line_of, ScanState};
 
-use super::advisory::dispatch_key;
 use super::collect_imports;
+use super::conditional_polymorphism::dispatch_key;
 
 /// Where a condition sits: the function that owns it (for the bare-return
 /// exemption) and the class that owns that function (so the action can name

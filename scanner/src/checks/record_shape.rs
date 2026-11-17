@@ -19,7 +19,9 @@ use ruff_text_size::Ranged;
 
 use crate::{finding::Finding, source::col_of, source::line_of, ScanState};
 
-use super::{class_attr_names, class_field_names, param_is_mutated, push_stmt_children, skel_children, stmt_exprs, Q};
+use super::ast::{class_attr_names, class_field_names, push_stmt_children, stmt_exprs};
+use super::skel_children;
+use super::Q;
 
 /// `_name_of`: the bare name of an annotation (typing.Any -> Any).
 fn ann_name_of(e: &Expr) -> Option<String> {
@@ -1005,3 +1007,75 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
         });
     }
 }
+
+fn param_is_mutated(body: &[Stmt], name: &str) -> bool {
+    /// `sources[…]`, `del sources[…]`, and the augmented forms. `sources["a"]
+    /// ["b"] = …` stores into `sources["a"]`, so the chain walks to its root.
+    fn subscript_of(e: &Expr, name: &str) -> bool {
+        match e {
+            Expr::Subscript(s) => rooted_at(&s.value, name),
+            _ => false,
+        }
+    }
+    fn rooted_at(e: &Expr, name: &str) -> bool {
+        match e {
+            Expr::Name(n) => n.id.as_str() == name,
+            Expr::Subscript(s) => rooted_at(&s.value, name),
+            Expr::Attribute(a) => rooted_at(&a.value, name),
+            _ => false,
+        }
+    }
+    const MUTATORS: [&str; 7] = [
+        "pop",
+        "popitem",
+        "update",
+        "clear",
+        "setdefault",
+        "__setitem__",
+        "__delitem__",
+    ];
+    let mut sq: Vec<&Stmt> = body.iter().collect();
+    while let Some(s) = sq.pop() {
+        let stored = match s {
+            Stmt::Assign(a) => a.targets.iter().any(|t| subscript_of(t, name)),
+            Stmt::AnnAssign(a) => subscript_of(&a.target, name),
+            Stmt::AugAssign(a) => subscript_of(&a.target, name),
+            Stmt::Delete(d) => d.targets.iter().any(|t| subscript_of(t, name)),
+            _ => false,
+        };
+        let mutated = stmt_exprs(s).iter().any(|e| match e {
+            Expr::Call(c) => match c.func.as_ref() {
+                Expr::Attribute(at) => MUTATORS.contains(&at.attr.as_str()) && rooted_at(&at.value, name),
+                _ => false,
+            },
+            _ => false,
+        });
+        if stored || mutated {
+            return true;
+        }
+        push_stmt_children(s, &mut sq);
+    }
+    false
+}
+
+/// `_class_key`: a module reference to a file rel.
+pub(super) fn class_key(
+    classes: &std::collections::HashMap<(String, String), &crate::ClassInfo>,
+    mrel: &str,
+    mname: &str,
+) -> Option<(String, String)> {
+    if mrel.ends_with(".py") {
+        let key = (mrel.to_string(), mname.to_string());
+        return if classes.contains_key(&key) { Some(key) } else { None };
+    }
+    let base = mrel.replace('.', "/");
+    for candidate in [format!("{base}.py"), format!("{base}/__init__.py")] {
+        let key = (candidate, mname.to_string());
+        if classes.contains_key(&key) {
+            return Some(key);
+        }
+    }
+    None
+}
+
+// ------------------------------------------------------------- #27 husks

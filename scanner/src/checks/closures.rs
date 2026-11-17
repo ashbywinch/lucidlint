@@ -11,7 +11,7 @@ use ruff_python_ast::{Expr, Stmt, StmtFunctionDef};
 
 use crate::finding::Finding;
 
-use super::{function_param_names, inner_function_count, is_closures_candidate, push_stmt_children, walk_expr_deep};
+use super::ast::{function_param_names, inner_function_count, push_stmt_children, walk_expr_deep};
 use crate::{stmt_line, ScanState};
 
 /// Closures: >= 2 inner functions/lambdas with cc >= 15, span >= 60, OR
@@ -318,4 +318,9 @@ fn expr_bindings(e: &Expr, out: &mut HashSet<String>) {
         Expr::Starred(st) => expr_bindings(&st.value, out),
         _ => {}
     }
+}
+
+/// Big enough, or mutating shared state, to be a closures candidate.
+fn is_closures_candidate(cc: u32, span: u32, mutated: &[String]) -> bool {
+    cc >= 15 || span >= 60 || !mutated.is_empty()
 }

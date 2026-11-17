@@ -10,11 +10,8 @@ use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
 
-use super::record_shape::{module_type_bindings, resolve_alias, TypeBindings};
-use super::{
-    class_field_names, class_key, function_param_names, is_collaborator_envy, push_stmt_children, stmt_exprs,
-    walk_expr_deep, PairKey, ParamKey,
-};
+use super::ast::{class_field_names, function_param_names, push_stmt_children, stmt_exprs, walk_expr_deep};
+use super::record_shape::{class_key, module_type_bindings, resolve_alias, TypeBindings};
 use crate::{line_of, ScanState};
 
 /// One anchor's clump: the functions sharing it and the pairs they share.
@@ -267,7 +264,15 @@ pub fn feature_envy_findings(state: &mut ScanState, body: &[Stmt]) {
                 // envy is reaching into a COLLABORATOR (a local aliased from
                 // self.<attr>) — not the method's inputs (params, loop
                 // targets) and not computed values (pos = self.get_metadata())
-                if !is_collaborator_envy(receiver, *n, &params, &loop_targets, &collaborators, self_reads) {
+                let reads = ReceiverReads {
+                    receiver,
+                    reads: *n,
+                    self_reads,
+                    params: &params,
+                    loop_targets: &loop_targets,
+                    collaborators: &collaborators,
+                };
+                if !reads.is_envy() {
                     continue;
                 }
                 let line = line_of(state.source, f.name.range().start());
@@ -540,3 +545,35 @@ pub fn duplicate_field_findings(state: &mut ScanState, body: &[Stmt]) {
 }
 
 // ------------------------------------------- sibling value classes (#61)
+
+/// The read reaches into a collaborator: not the receiver, not a parameter or
+/// loop target, and often enough to be a habit.
+struct ReceiverReads<'a> {
+    receiver: &'a str,
+    reads: usize,
+    self_reads: usize,
+    params: &'a HashSet<String>,
+    loop_targets: &'a HashSet<String>,
+    collaborators: &'a HashSet<String>,
+}
+
+impl ReceiverReads<'_> {
+    /// Envy is reaching into a COLLABORATOR (a local aliased from
+    /// self.<attr>) — not the method's inputs (params, loop targets) and not
+    /// computed values (pos = self.get_metadata()) — and out-reading the
+    /// method's own state by three.
+    fn is_envy(&self) -> bool {
+        self.receiver != "self"
+            && !self.params.contains(self.receiver)
+            && !self.loop_targets.contains(self.receiver)
+            && self.collaborators.contains(self.receiver)
+            && self.reads >= 4
+            && self.reads >= self.self_reads + 3
+    }
+}
+
+/// One parameter's grouping identity: its name and annotation key.
+pub(super) type ParamKey = (String, String);
+
+/// The unordered parameter pair; each annotation travels with its name.
+pub(super) type PairKey = (ParamKey, ParamKey);

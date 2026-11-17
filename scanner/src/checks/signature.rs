@@ -9,8 +9,9 @@ use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
 
+use super::ast::{annotation_base_name, body_refs_name, push_stmt_children, stmt_exprs};
 use super::global_state::SHADOWED_BUILTINS;
-use super::{annotation_base_name, body_refs_name, mutates_returned_target, push_stmt_children, stmt_exprs};
+use super::naming_units::sub_name;
 use crate::{line_of, ScanState};
 
 /// A positional call argument that is a literal True/False — the intent is
@@ -370,4 +371,22 @@ fn is_process_exit(e: &Expr) -> bool {
         },
         _ => false,
     }
+}
+
+fn mutates_returned_target(s: &Stmt, returned: &HashSet<String>) -> bool {
+    let targets: Vec<&Expr> = match s {
+        Stmt::Assign(a) => a.targets.iter().collect(),
+        Stmt::AugAssign(a) => vec![a.target.as_ref()],
+        Stmt::AnnAssign(a) => vec![a.target.as_ref()],
+        Stmt::Delete(d) => d.targets.iter().collect(),
+        _ => return false,
+    };
+    for t in targets {
+        match t {
+            Expr::Name(n) if returned.contains(n.id.as_str()) => return true,
+            Expr::Subscript(sub) if returned.contains(sub_name(sub).as_str()) => return true,
+            _ => {}
+        }
+    }
+    false
 }

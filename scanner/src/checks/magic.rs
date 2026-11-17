@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use ruff_python_ast::{Expr, Stmt};
 use ruff_text_size::Ranged;
 
-use super::{is_radix_prefix, push_stmt_children, stmt_exprs, unit_token_of_name, walk_expr_deep};
+use super::ast::{push_stmt_children, stmt_exprs, walk_expr_deep};
 
 /// Offsets of numeric literals that are data-table entries, exempt from
 /// magic-number: inside a single collection literal (dict/list/set/tuple,
@@ -248,17 +248,6 @@ fn census_value(e: &Expr, groups: &mut std::collections::HashMap<bool, Vec<usize
     }
 }
 
-// ---------------------------------------------------------------- unit tokens
-
-/// Unit tokens — words that state a physical unit (plan P2). A name or
-/// comment carrying one states the value's unit: the literal is either
-/// named by its surroundings (the assignment-target/parameter exemption) or
-/// deserves the pint-suggestion message.
-pub const UNIT_TOKENS: &[&str] = &[
-    "km", "mile", "m", "cm", "mm", "min", "minute", "sec", "second", "hour", "day", "week", "month", "year", "mph",
-    "kmh", "kg", "watt",
-];
-
 fn push_census_literal(
     n: &ruff_python_ast::ExprNumberLiteral,
     groups: &mut std::collections::HashMap<bool, Vec<usize>>,
@@ -286,8 +275,7 @@ fn census_number(e: &Expr, groups: &mut std::collections::HashMap<bool, Vec<usiz
     }
 }
 
-/// Does an identifier state a unit (P2): the nearest enclosing assignment
-/// target or parameter such as `max_walk_km`, `distance_m`.
-pub fn name_states_unit(name: &str) -> bool {
-    unit_token_of_name(name).is_some()
+/// A radix prefix (`0x`, `0o`, `0b`) — a literal that states its base.
+pub fn is_radix_prefix(prefix: &str) -> bool {
+    prefix.eq_ignore_ascii_case("0x") || prefix.eq_ignore_ascii_case("0o") || prefix.eq_ignore_ascii_case("0b")
 }

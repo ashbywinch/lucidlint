@@ -8,8 +8,8 @@ use crate::finding::Finding;
 use crate::skeleton::{skel_children, Q};
 use crate::source::line_of;
 
-use super::class_key;
 use super::latent_state::slot_names;
+use super::record_shape::class_key;
 
 const ABSTRACT_DECORATORS: [&str; 4] = [
     "abstractmethod",

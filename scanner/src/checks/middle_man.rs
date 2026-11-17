@@ -9,7 +9,7 @@ use ruff_text_size::Ranged;
 use crate::finding::Finding;
 use crate::{line_of, ScanState};
 
-use super::advisory::base_name_of;
+use super::ast::base_name_of;
 use super::husks::{class_methods, has_decorator};
 use super::{annotation_base_name, push_stmt_children};
 

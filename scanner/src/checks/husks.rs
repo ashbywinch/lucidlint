@@ -7,7 +7,7 @@ use ruff_python_ast::{Expr, Stmt, StmtClassDef, StmtFunctionDef};
 
 use crate::finding::Finding;
 
-use super::{annotation_base_name, is_static_husk, push_stmt_children};
+use super::ast::{annotation_base_name, push_stmt_children};
 use crate::{stmt_line, ScanState};
 
 fn is_self_attr_expr(e: &Expr) -> bool {
@@ -293,3 +293,9 @@ pub fn delegating_husk_findings(state: &mut ScanState, body: &[Stmt]) {
     }
 }
 // ------------------------------------------------------------- #30 forwarding-chain
+
+/// A static husk: every method static, nothing property-like, no dataclass
+/// fields, no state written.
+fn is_static_husk(all_static: bool, has_property: bool, has_dataclass_fields: bool, writes_state: bool) -> bool {
+    all_static && !has_property && !has_dataclass_fields && !writes_state
+}
