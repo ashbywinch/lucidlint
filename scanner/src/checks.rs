@@ -29,18 +29,23 @@ pub use crate::naming::VAGUE_SUFFIXES;
 
 mod advisory;
 mod decisions;
+mod docstring;
+mod duplicate_block;
+mod duplicate_def;
 mod duplicate_expression;
 mod latent_visitor;
 mod loop_family;
 mod middle_man;
 mod module_size;
 mod record_shape;
-mod review_log;
 mod scattered;
 mod shared_path;
 
 pub use advisory::{conditional_polymorphism_findings, guard_clause_findings, special_case_findings};
 pub use decisions::{unnamed_classification_findings, unnamed_condition_findings};
+pub use docstring::restating_docstring_findings;
+pub use duplicate_block::duplicate_block_findings;
+pub use duplicate_def::duplicate_def_findings;
 pub use duplicate_expression::{collect_duplicate_expressions, duplicate_expression_findings, ExpressionOccurrence};
 pub use latent_visitor::latent_visitor_findings;
 pub use loop_family::loop_pipeline_findings;
@@ -49,7 +54,6 @@ pub use middle_man::{collect_middle_man, middle_man_findings, MiddleManCandidate
 pub use module_size::{module_findings, python_module_shape, rust_module_shape, ModuleShape, TypeShape};
 pub use record_shape::record_shape_findings;
 use record_shape::{module_type_bindings, resolve_alias, TypeBindings};
-pub use review_log::{duplicate_block_findings, duplicate_def_findings, restating_docstring_findings};
 pub use scattered::{collect_scattered_instances, scattered_instance_findings, ScatteredInstance};
 pub use shared_path::{collect_path_expressions, shared_path_findings, PathExpression};
 
