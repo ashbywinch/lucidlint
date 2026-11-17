@@ -532,3 +532,71 @@ proving is the wrong axis. Left it whole; the honest split for `fix.rs` is a
 later round that first names the shared layer.
 
 Reverted to keep the gate green.
+
+## The split, carried through (2026-11-17)
+
+The rule's findings were then taken as the worklist, and the tool's own source
+was refactored until its report was clean. One finding family per commit, each
+verified against the pre-change scan of two real repos (houses 350 findings,
+family-history-album 431 — identical before and after every commit).
+
+**`checks.rs` — 7,477 lines / 245 definitions → a hub of 0 definitions.** The
+families left one concept at a time: suppressions plumbing to the suppression
+engine, then `type_ignore`, `global_state`, `signature`, `closures`,
+`latent_shapes`, `latent_state`, `sibling`, `husks`, `forwarding`,
+`process_class`, `closure_cluster`, `module_names`, `magic`, the skeleton
+builders, `duplicate_module`, `flat_folder`, `duplicate_function`, `partition`,
+the test families (`monkeypatch`, `skipif`, `fakefs`, `no_assert_test`,
+`unused`, `over_abstraction`), and the advisory trio split into
+`guard_clause`/`conditional_polymorphism`/`special_case`. What remained was the
+shared vocabulary, and that is not a module: it went to `checks/expr_walk.rs`
+(the one expression/statement walk), `checks/function_facts.rs` (what a body
+says about itself), `checks/class_facts.rs` (what a class declares) and
+`checks/naming_units.rs` (the unit vocabulary of a name). `checks.rs` now only
+declares and re-exports.
+
+**`rustscan.rs` — 51 definitions → a `rustscan/` tree.** `mod.rs` (the scan
+output and `scan_source`), `state.rs` (the walk state and its `syn::visit`
+impl), `attrs`, `stmts`, `exprs`, `types`, `decisions`, `modshape`, `skeleton`,
+`shape`, `graph`, `comments`, and one module per test rule (`fakefs`,
+`no_assert_test`, `ignored_test`). Two import cycles the split exposed were
+removed by construction: the decisions query takes the file's structs instead of
+the walk state, and `is_unasserted_test` lives with the test rules. `module_graph`
+and `cohesion` became three named passes each.
+
+**`fix.rs` — 50 definitions → a `fix/` tree, shared layer first.** The plan's
+"not a clean seam" note was right about the answer and wrong about the order:
+naming the shared layer first (the *seam* — what a candidate block needs from
+its surroundings — and the *text* splice) made the rewrites separable:
+`extract_method`, `dispatch`, `rule_table`, `loop_pipeline`, `loop_sequence`,
+`loop_hoist`.
+
+**Python scripts.** One class per module, with its entry point: `DeployCheck`,
+`CoverageGate`, `CoberturaMerge`, `PyreflyLock`, and `RuleGenerator` +
+`RuleInventory` (the scanner-emission reader). Records that were bare tuples
+became named records (`Scan`, `Subject`, `Report`, `ClassCoverage`), and the
+triplicated step loop in `deploy-check.py` became one loop over the steps.
+
+**Where the rule was the pointer, not the target.** Three findings were real
+code smells the file boundary exposed: `feature_envy`'s six threaded facts
+became `ReceiverReads::is_envy`, `count_scope_checks`' test-and-record step
+became `absence_check`, and `fakefs`/`monkeypatch`/`over_abstraction` each split
+a body that was two concepts. Where a finding was a dispatch table over AST node
+kinds (the skeleton builders, the walkers, `attrs_of`), the file-level why says
+so.
+
+### What remains
+
+Two Python modules are over the loose rung and are each a round of their own:
+
+| module | definitions | target |
+|---|---|---|
+| `lucidlint.py` | 68 | a package of one-class modules, `lucidlint.py` as the entry |
+| `fix_engine.py` | 264 | one fixer class per module |
+
+Both are one-class-per-module work like the scripts, and both need the
+packaging to follow (a package directory is not `py-modules`; the release
+bundle's copy list and `setup.py` must carry it). `scanner/src` (20 files) and
+`scanner/src/checks` (42 files) also sit at the flat-folder bar: the next
+layout step is one subfolder per domain (`checks/classes/`, `checks/tests/`,
+`checks/duplicates/`), which the rule's message names.
