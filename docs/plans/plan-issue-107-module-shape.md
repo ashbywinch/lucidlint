@@ -516,3 +516,18 @@ which caps the split at its current shape.
 
 Reverted the batch to keep the gate green; the five extractions are ready to
 re-apply the moment the rule is settled.
+
+### Also tried: `fix.rs` by rewrite kind (2026-11-17) — not a clean seam
+
+`fix.rs` (1,834 lines, 50 definitions) looks like four concepts: extract-method,
+the rule-table rewrites, the loop rewrites, and shared span text. Splitting it
+by rewrite kind fails on the seam, not on the size: the syn **visitor structs**
+(`SeamCollector`, `OutVarCollector`, `AfterReadCollector`, `BindCollector`,
+`RuleBattery`, `FlowExitVisitor`) are shared across the kinds, and
+`is_push_call`/`idents_in_expr` are used by both the loop and rule-table
+rewrites. A concept split would need a `fix/visitors.rs` — a module defined by
+*mechanism* (the syn visitor layer), which is the one thing this round keeps
+proving is the wrong axis. Left it whole; the honest split for `fix.rs` is a
+later round that first names the shared layer.
+
+Reverted to keep the gate green.
