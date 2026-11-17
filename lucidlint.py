@@ -905,18 +905,15 @@ class _RustScan:
         self._binary_cache[repo] = found
         return found
 
-    def load(self, repo: Path, files: list[SourceFile]) -> RustFindings | None:
-        return self.load_with(repo, files)
-
-    def load_with(
+    def load(
         self,
         repo: Path,
         files: list[SourceFile],
         flags: _ScanFlags | None = None,
     ) -> RustFindings | None:
+        """Findings per rel for one file set; None = Rust unavailable (Python path)."""
         if flags is None:
             flags = self._flags()
-        """Findings per rel for one file set; None = Rust unavailable (Python path)."""
         rels = tuple(sf.rel for sf in files)
         key = (repo, rels)
         if key in self._cache:

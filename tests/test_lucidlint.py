@@ -585,7 +585,7 @@ def test_unmapped_finding_files_are_reported_not_swallowed(tmp_path, capsys):
     scan = ch._RustScan()
     scan._binary_cache[repo] = script
     files = [ch.SourceFile(py=repo / "pkg" / "a.py", rel="pkg/a.py")]
-    scan.load_with(repo, files, ch._ScanFlags(graph=None, churn_json=None, include_tests=False))
+    scan.load(repo, files, ch._ScanFlags(graph=None, churn_json=None, include_tests=False))
     err = capsys.readouterr().err
     assert "a.py" in err and "dropped" in err
 
