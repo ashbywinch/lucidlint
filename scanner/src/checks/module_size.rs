@@ -36,15 +36,20 @@ use ruff_python_ast::Stmt;
 
 use crate::finding::Finding;
 
-/// The strict rung's floor: a Python module holding more definitions than this
-/// has stopped being one concept — a class, a data table or a record may hold
-/// two, never three. The rung is Python-only: in Rust a class equivalent is a
-/// type plus the functions that take it, and three of those is a normal module.
+/// The strict rung's floor: a Python module above this and at most
+/// [`MANY_DEFINITIONS`] fires `several-definitions` — a class, a data table or
+/// a record may hold two definitions, never three. Python only: in Rust a class
+/// equivalent is a type plus the functions that take it, and three of those is
+/// a normal module.
+///
+/// The two bounds are stated HERE and nowhere else; every other comment cites
+/// them. A restated bound is a second copy, and the second copy is the one that
+/// goes stale (2026-11-18 review).
 pub const SEVERAL_DEFINITIONS: usize = 2;
 
-/// The loose rung: more class equivalents than this is a grab-bag by any
-/// reading. Rust's module is judged only here, so a repo that disables the
-/// strict rung still holds Rust modules to thirty.
+/// The loose rung's floor: above it `many-definitions` fires, in both
+/// languages. Thirty ends the strict rung, so a Python module of thirty still
+/// gets the local advice and thirty-one gets the split.
 pub const MANY_DEFINITIONS: usize = 30;
 
 /// How many opening lines may carry a generator marker. Generators stamp the
@@ -192,10 +197,9 @@ impl ModuleShape {
     }
 
     /// The finding for one module, when it holds more than its rung allows.
-    /// The rungs are disjoint — one module never reports both — and their
-    /// bounds are [`SEVERAL_DEFINITIONS`] and [`MANY_DEFINITIONS`]: the
-    /// comment names the constants rather than restating their values, because
-    /// a restated value is a second copy that goes stale silently.
+    /// The rungs are disjoint — one module never reports both. Their bounds are
+    /// stated at [`SEVERAL_DEFINITIONS`] and [`MANY_DEFINITIONS`] (top of this
+    /// file); this function is the only place the comparison is written.
     pub fn module_finding(&self, rel: &str) -> Option<Finding> {
         if self.generated {
             return None;

@@ -857,6 +857,29 @@ mod tests {
     }
 
     #[test]
+    fn mixed_module_names_the_part_it_counts_when_every_item_is_an_island() {
+        // 21 unrelated free functions: the fragmentation arm fires with no
+        // groups at all. The message must not say "the groups are ." — it
+        // states the shape it measured, and says there are no families.
+        let mut src = String::new();
+        for i in 0..21 {
+            src.push_str(&format!("pub fn step_{i}(x: u32) -> u32 {{ x }}\n"));
+        }
+        let fs = scan(&src);
+        let hit = fs
+            .iter()
+            .find(|f| f.kind == "mixed-module")
+            .expect("mixed-module fires");
+        assert!(!hit.message.contains("groups are ."), "{}", hit.message);
+        assert!(
+            hit.message.contains("None of them references another: 21 items"),
+            "{}",
+            hit.message
+        );
+        assert!(hit.message.contains("names no families at all"), "{}", hit.message);
+    }
+
+    #[test]
     fn smart_pointer_parameters_join_their_inner_type_group() {
         // a Box/Rc/Arc/Cow parameter is carried allocation, not a foreign
         // receiver: `fn f(s: Box<State>)` is a State method in exile, exactly

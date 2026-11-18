@@ -37,8 +37,9 @@ struct Cohesion {
     items: usize,
     /// Connected components with >= 2 members, largest first.
     groups: Vec<Vec<String>>,
-    /// Items in no group: they reference no other item and nothing references them.
-    stand_alone: usize,
+    /// Items in no group: they reference no other item and nothing references
+    /// them. Named, not just counted — the finding says which items it saw.
+    stand_alone: Vec<String>,
 }
 
 /// The file's shape for the module-shape rules (#107): the types, the free
@@ -214,9 +215,9 @@ fn reference_groups(
     parent
 }
 
-/// The connected groups of two or more definitions (largest first), and how
-/// many definitions stand outside every group.
-fn components(names: &[String], mut parent: Vec<usize>) -> (Vec<Vec<String>>, usize) {
+/// The connected groups of two or more definitions (largest first), and the
+/// definitions that stand outside every group.
+fn components(names: &[String], mut parent: Vec<usize>) -> (Vec<Vec<String>>, Vec<String>) {
     fn find(parent: &mut [usize], mut x: usize) -> usize {
         while parent[x] != x {
             parent[x] = parent[parent[x]];
@@ -229,11 +230,15 @@ fn components(names: &[String], mut parent: Vec<usize>) -> (Vec<Vec<String>>, us
         let root = find(&mut parent, i);
         by_root.entry(root).or_default().push(name.clone());
     }
-    let mut groups: Vec<Vec<String>> = by_root.into_values().filter(|g| g.len() >= 2).collect();
-    let stand_alone = names.len() - groups.iter().map(Vec::len).sum::<usize>();
-    for group in &mut groups {
-        group.sort();
-    }
+    let (mut groups, islands): (Vec<Vec<String>>, Vec<Vec<String>>) = by_root
+        .into_values()
+        .map(|mut members| {
+            members.sort();
+            members
+        })
+        .partition(|members| members.len() >= 2);
+    let mut stand_alone: Vec<String> = islands.into_iter().flatten().collect();
+    stand_alone.sort();
     groups.sort_by(|a, b| b.len().cmp(&a.len()).then(a[0].cmp(&b[0])));
     (groups, stand_alone)
 }
@@ -307,23 +312,39 @@ fn mixed_module_finding(file: &File, name: &str) -> Option<Finding> {
     // Two arms: three families that never meet, or a big module whose items
     // fall into many disconnected parts (the grab bag — several small groups
     // and a pile of stand-alone items, which no single family size reveals).
-    let parts = shape.groups.len() + shape.stand_alone;
+    let parts = shape.groups.len() + shape.stand_alone.len();
     let several_families = shape.groups.len() >= MIXED_MODULE_GROUPS;
     let fragmented = shape.items >= MIXED_MODULE_ITEMS && parts >= MIXED_MODULE_PARTS;
     if !several_families && !fragmented {
         return None;
     }
-    let list = shape
-        .groups
-        .iter()
-        .take(3)
-        .map(|g| match g.len() {
-            1 => g[0].clone(),
-            2 => format!("{} and {}", g[0], g[1]),
-            n => format!("{} and {} others", g[0], n - 1),
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
+    // Name what the file holds, whichever shape it is: the groups by their
+    // members, or — when every item is an island — that there are no groups at
+    // all. A sentence that says "the groups are ." over an empty list is the
+    // confusion this message exists to remove (2026-11-18 review).
+    let detail = if shape.groups.is_empty() {
+        format!(
+            "None of them references another: {} items standing alone, so the file names no families at all. Group them into modules by what they operate on, and let each module's type own the functions that take it.",
+            shape.stand_alone.len()
+        )
+    } else {
+        let list = shape
+            .groups
+            .iter()
+            .take(3)
+            .map(|g| match g.len() {
+                1 => g[0].clone(),
+                2 => format!("{} and {}", g[0], g[1]),
+                n => format!("{} and {} others", g[0], n - 1),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "{} groups and {} items standing alone. The groups are {list}. Move each group into its own module, named after what its members are about.",
+            shape.groups.len(),
+            shape.stand_alone.len()
+        )
+    };
     Some(Finding {
         logical_start: None,
         seam_members: Vec::new(),
@@ -334,11 +355,8 @@ fn mixed_module_finding(file: &File, name: &str) -> Option<Finding> {
         kind: "mixed-module".into(),
         severity: "warn".into(),
         message: format!(
-            "'{name}' holds {} top-level definitions in {parts} parts that never reference each other — {} groups and {alone} items standing alone. A reader cannot tell which items belong together, because nothing in the file joins one part to the next. The groups are {list}. Move each group into its own module, named after what its members are about.",
+            "'{name}' holds {} top-level definitions in {parts} parts that never reference each other. A reader cannot tell which items belong together, because nothing in the file joins one part to the next. {detail}",
             shape.items,
-            shape.groups.len(),
-            alone = shape.stand_alone,
-            parts = parts,
         ),
     })
 }
