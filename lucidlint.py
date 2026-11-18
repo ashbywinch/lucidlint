@@ -106,13 +106,15 @@ def release_temp_input(path: Path | None) -> None:
     """Remove one scan input as soon as the scan that needed it has finished —
     the per-run files (churn, coverage) must not wait for process exit. A crash
     can then leave at most the files of the run in flight, not a session's
-    worth."""
+    worth. The lock covers the registry AND the unlink: ownership of a path is
+    decided and acted on in one critical section, so no second thread can be
+    holding the same path for a scan when it goes."""
     if path is None:
         return
     with _TEMP_LOCK:
         if path in _TEMP_INPUTS:
             _TEMP_INPUTS.remove(path)
-    path.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
 
 
 def clear_temp_inputs() -> None:
@@ -120,9 +122,9 @@ def clear_temp_inputs() -> None:
     seam. The graph contract is cached per repo for the whole process, so it is
     the one input released here rather than per scan."""
     with _TEMP_LOCK:
-        paths, _TEMP_INPUTS[:] = list(_TEMP_INPUTS), []
-    for path in paths:
-        path.unlink(missing_ok=True)
+        for path in _TEMP_INPUTS:
+            path.unlink(missing_ok=True)
+        _TEMP_INPUTS.clear()
 
 
 atexit.register(clear_temp_inputs)
