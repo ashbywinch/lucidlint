@@ -4,15 +4,20 @@
 //! ONE ladder, two rules, disjoint ranges — exactly one fires:
 //!
 //! - Python only, [`SEVERAL_DEFINITIONS`] < count <= [`MANY_DEFINITIONS`]
-//!   fires `several-definitions` (3–30 definitions);
-//! - count > [`MANY_DEFINITIONS`] fires `many-definitions` (31+), both
-//!   languages.
+//!   fires `several-definitions`;
+//! - count > [`MANY_DEFINITIONS`] fires `many-definitions`, both languages.
+//!
+//! The ranges are stated as the constants' names, never as numerals: the two
+//! values moved twice while the ladder was designed, and every prose copy that
+//! spelled them out went stale (2026-11-18 review: one function's doc stated
+//! the previous pair of ranges over the current ladder — the tool reads code
+//! shape, not prose, so nothing caught it).
 //!
 //! The split exists so a repo can set its policy: disable
-//! `several-definitions` and a Python module is judged only at 31+, or keep it
-//! and hold Python modules to three. Rust is judged at the loose rung only —
-//! a class equivalent there is a type plus the functions that take it, and a
-//! module of three is the normal unit.
+//! `several-definitions` and a Python module is judged only at the loose rung,
+//! or keep it and hold Python modules to the strict one. Rust is judged at the
+//! loose rung only — a class equivalent there is a type plus the functions that
+//! take it, and that unit is the normal module.
 //!
 //! The message branches on what the definitions ARE. A module whose
 //! definitions are mostly classes becomes a PACKAGE — one file per class
@@ -187,8 +192,10 @@ impl ModuleShape {
     }
 
     /// The finding for one module, when it holds more than its rung allows.
-    /// The rungs are disjoint: 3–10 is `several-definitions`, 11+ is
-    /// `many-definitions`, so one module never reports both.
+    /// The rungs are disjoint — one module never reports both — and their
+    /// bounds are [`SEVERAL_DEFINITIONS`] and [`MANY_DEFINITIONS`]: the
+    /// comment names the constants rather than restating their values, because
+    /// a restated value is a second copy that goes stale silently.
     pub fn module_finding(&self, rel: &str) -> Option<Finding> {
         if self.generated {
             return None;

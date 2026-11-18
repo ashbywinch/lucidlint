@@ -26,13 +26,20 @@ one ladder, with disjoint ranges so a module never reports both:
 
 | rung | fires on | kind |
 |---|---|---|
-| strict | 3–10 definitions | `several-definitions` |
-| loose | 11+ definitions | `many-definitions` |
+| strict | above `SEVERAL_DEFINITIONS`, Python only | `several-definitions` |
+| loose | above `MANY_DEFINITIONS`, both languages | `many-definitions` |
 
-The rungs exist so a repo sets its policy: keep both and hold every module to
-three, or disable `several-definitions` and hold modules only to eleven. The
-ladder is pinned by `the_two_rungs_never_fire_together` (10 → several, 11 →
-many, never both).
+The bounds live in `checks/module_size.rs` (`SEVERAL_DEFINITIONS`,
+`MANY_DEFINITIONS`) and are cited by name here: the values moved twice while the
+ladder was designed, and every prose copy that spelled them out went stale. As
+shipped, `MANY_DEFINITIONS` is 30: the strict rung is 3–30 and the loose rung
+31+. The first design drew the line at 10/11; the raise is the "shipped
+adaptation" recorded under §Cleanliness arithmetic.
+
+The rungs exist so a repo sets its policy: keep both and hold every Python module
+to three, or disable `several-definitions` and hold modules only to the loose
+rung. The ladder is pinned by `the_two_rungs_never_fire_together` (the top of the
+strict rung → `several`, one more → `many`, never both).
 
 **The advice follows what the definitions are**, not a second threshold:
 
@@ -180,15 +187,16 @@ created (`checks/shared_path.rs` 17, `checks/duplicate_expression.rs` 18,
 **The advice branches on the rung**, because the two rungs are two different
 problems:
 
-- 3–10 functions (`several-definitions`) — one concept with a missing owner:
+- the strict rung's functions (`several-definitions`) — one concept with a
+  missing owner:
   *"Name the type those functions operate on and give it an impl — an impl block
   may live in this module. If that type belongs to another crate, put the
   functions behind one trait instead: a foreign type cannot take an inherent
   impl."*
-- 11+ functions (`many-definitions`) — a grab-bag: *"Split the module by
-  concept: one module per family, each owning the types it introduces. Give a
-  family an impl when it has a local type, and keep the free function where a
-  `&mut` borrow would conflict."*
+- the loose rung's functions (`many-definitions`) — a grab-bag: *"Split the
+  module by concept: one module per family, each owning the types it
+  introduces. Give a family an impl when it has a local type, and keep the free
+  function where a `&mut` borrow would conflict."*
 
 Why the loose rung does not say "give it an impl", with the sources:
 
@@ -246,8 +254,9 @@ Measured on this repo, the count drops where the class equivalent is real:
 
 The counting change is right on its own — a type and the functions that take it
 are one thing a reader holds — but it does not by itself make the report clean:
-the rungs are 3–10 and 11+, so every family module (3–15 concepts) still fires.
-The threshold decision is the remaining one, and the numbers for it are below.
+the rungs were then 3–10 and 11+, so every family module (3–15 concepts) still
+fired. The threshold decision was the remaining one, and the numbers for it are
+below.
 
 ## Cleanliness arithmetic (measured 2026-11-16)
 
@@ -264,7 +273,8 @@ say so:
 Every extracted module is still a finding — `record_shape` 14,
 `duplicate_expression` 11, `shared_path` 15, `loop_family` 8, `review_log` 7,
 `module_size` 10, `latent_visitor` 3 — because a concept family holds 3–15
-class equivalents and the ladder flags 3–10 (`several`) and 11+ (`many`). Clean
+class equivalents and the ladder then flagged 3–10 (`several`) and 11+
+(`many`). Clean
 under the current rungs means every module holds at most **two** definitions,
 which no module with three concepts can satisfy.
 
@@ -600,3 +610,37 @@ bundle's copy list and `setup.py` must carry it). `scanner/src` (20 files) and
 `scanner/src/checks` (42 files) also sit at the flat-folder bar: the next
 layout step is one subfolder per domain (`checks/classes/`, `checks/tests/`,
 `checks/duplicates/`), which the rule's message names.
+
+## Why the tool did not catch the confusing code (2026-11-18)
+
+A review thread outlived the code it discussed, and the user's verdict was the
+useful one: *"the review bot is confused because the code is confusing"*. The
+function it named — `section_title`, which stripped a comment marker, trimmed,
+found a separator run and then guarded a length — is gone (it belonged to the
+rejected line-count rule), but the confusion was real and the tool had nothing
+to say about it.
+
+Three reasons, in order of how much they matter:
+
+1. **The tool reads shape, not comprehension.** `complexity`, `large-function`,
+   `duplicate-block` and the ladder all count something. A function whose
+   *reader* must simulate three string normalisations and a length guard has
+   low cyclomatic complexity and a short span; the shape is fine. What was
+   wrong was that the reader cannot tell what the function means without
+   running it in their head, and no family measures that.
+2. **The same confusion had a second copy in prose.** `module_finding`'s doc
+   comment stated the previous pair of rung ranges over the shipped ladder, and
+   three of the plan's sections did too. A restated fact is a duplicate the
+   `duplicate`/`duplicate-def` families do not see: they compare code to code,
+   and `docs` checks links and reachability, not claims. The durable fix is
+   structural — cite the constant, never spell its value — and that is now the
+   shape of `SEVERAL_DEFINITIONS`/`MANY_DEFINITIONS` and of this document.
+3. **A user-facing message must state the number.** The rule's message says
+   "31 top-level definitions" because the reader acts on it; a comment or a doc
+   that does the same is a second copy with no such duty. Any "prose restates a
+   constant" rule therefore has to distinguish the two surfaces first — that is
+   a design round, not a patch, and it is not built here.
+
+What is built: the range prose in `module_size.rs` names the constants (the
+doc-comment drift that survived the split is fixed), and the plan's sections
+state their date when they describe a superseded ladder.
