@@ -37,6 +37,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import xml.etree.ElementTree as ET
@@ -85,25 +86,43 @@ def _vendor_path(here: str, version: tuple[int, int] | None = None) -> str | Non
 # must not leave 40 MB files behind (2026-11-18: 173 leaked graph dumps, 2.3 GB,
 # filled /tmp and made unrelated test runs fail with EDQUOT).
 _TEMP_INPUTS: list[Path] = []
+# a run may scan in more than one thread (one repo per thread); the list is
+# shared, so append and remove take the lock
+_TEMP_LOCK = threading.Lock()
 
 
 def _temp_input(prefix: str, payload: str) -> Path:
-    """Write one scan input for the binary and remember it for cleanup. The
-    file lives until the process exits, so a second scan in the same process
-    can still read the same path."""
+    """Write one scan input for the binary and remember it for cleanup."""
     fd, name = tempfile.mkstemp(prefix=prefix, suffix=".json")
     os.close(fd)  # mkstemp opens the file; the write below reopens it
     path = Path(name)
     path.write_text(payload, encoding="utf-8")
-    _TEMP_INPUTS.append(path)
+    with _TEMP_LOCK:
+        _TEMP_INPUTS.append(path)
     return path
 
 
+def release_temp_input(path: Path | None) -> None:
+    """Remove one scan input as soon as the scan that needed it has finished —
+    the per-run files (churn, coverage) must not wait for process exit. A crash
+    can then leave at most the files of the run in flight, not a session's
+    worth."""
+    if path is None:
+        return
+    with _TEMP_LOCK:
+        if path in _TEMP_INPUTS:
+            _TEMP_INPUTS.remove(path)
+    path.unlink(missing_ok=True)
+
+
 def clear_temp_inputs() -> None:
-    """Remove every scan input this process wrote. Called at exit; also the
-    test seam."""
-    while _TEMP_INPUTS:
-        _TEMP_INPUTS.pop().unlink(missing_ok=True)
+    """Remove every scan input still registered. Called at exit; also the test
+    seam. The graph contract is cached per repo for the whole process, so it is
+    the one input released here rather than per scan."""
+    with _TEMP_LOCK:
+        paths, _TEMP_INPUTS[:] = list(_TEMP_INPUTS), []
+    for path in paths:
+        path.unlink(missing_ok=True)
 
 
 atexit.register(clear_temp_inputs)
@@ -1024,6 +1043,11 @@ class _RustScan:
                     result = None
             except _SCANNER_FAILURES:  # lucidlint: ignore swallow degraded runs report nothing — visible
                 result = None
+        # the binary has read them; they are not needed again this run
+        release_temp_input(self._pending_churn)
+        release_temp_input(self._pending_coverage)
+        self._pending_churn = None
+        self._pending_coverage = None
         wrapped = RustFindings(result, cc_result, header, suppression_census) if result is not None else None
         self._cache[key] = wrapped
         return wrapped

@@ -2697,3 +2697,17 @@ def test_scan_inputs_are_written_once_and_removed_by_cleanup(tmp_path):
     assert not path.exists()
     assert ch._TEMP_INPUTS == []
     ch.clear_temp_inputs()  # idempotent
+
+
+def test_a_scans_own_inputs_are_released_when_the_scan_finishes(tmp_path):
+    """The per-run inputs (churn, coverage) go as soon as the binary has read
+    them; only the per-repo graph contract waits for exit. A crashed run
+    therefore leaves one run's files, not a session's worth."""
+    churn = ch._temp_input("lucidlint-test-churn-", "{}")
+    graph = ch._temp_input("lucidlint-test-graph-", "{}")
+    ch.release_temp_input(churn)
+    assert not churn.exists()
+    assert graph.exists() and graph in ch._TEMP_INPUTS
+    ch.release_temp_input(None)  # a run without coverage releases nothing
+    ch.clear_temp_inputs()
+    assert not graph.exists() and ch._TEMP_INPUTS == []
