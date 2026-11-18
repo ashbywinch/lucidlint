@@ -27,6 +27,7 @@ and cheap to change; each message says what to do in those terms.
 from __future__ import annotations
 
 import argparse
+import atexit
 import datetime
 import difflib
 import json
@@ -76,6 +77,36 @@ def _vendor_path(here: str, version: tuple[int, int] | None = None) -> str | Non
         if os.path.isdir(candidate):
             return candidate
     return None
+
+
+# The JSON inputs one scan hands the binary (graph contract, churn, coverage)
+# are big — a graph dump is tens of MB — and the binary needs a PATH, not a
+# pipe. They are written per run and removed when the process exits: a gate run
+# must not leave 40 MB files behind (2026-11-18: 173 leaked graph dumps, 2.3 GB,
+# filled /tmp and made unrelated test runs fail with EDQUOT).
+_TEMP_INPUTS: list[Path] = []
+
+
+def _temp_input(prefix: str, payload: str) -> Path:
+    """Write one scan input for the binary and remember it for cleanup. The
+    file lives until the process exits, so a second scan in the same process
+    can still read the same path."""
+    fd, name = tempfile.mkstemp(prefix=prefix, suffix=".json")
+    os.close(fd)  # mkstemp opens the file; the write below reopens it
+    path = Path(name)
+    path.write_text(payload, encoding="utf-8")
+    _TEMP_INPUTS.append(path)
+    return path
+
+
+def clear_temp_inputs() -> None:
+    """Remove every scan input this process wrote. Called at exit; also the
+    test seam."""
+    while _TEMP_INPUTS:
+        _TEMP_INPUTS.pop().unlink(missing_ok=True)
+
+
+atexit.register(clear_temp_inputs)
 
 
 _vendor = _vendor_path(_here)
@@ -1019,15 +1050,13 @@ class _RustScan:
         if only_rel is None:
             self._pending_graph = SERVICES.graph.contract(repo)
             if file_churn:
-                tmp = Path(tempfile.mkstemp(prefix="lucidlint-churn-", suffix=".json")[1])
-                tmp.write_text(json.dumps(dict(file_churn)), encoding="utf-8")
-                self._pending_churn = tmp
+                self._pending_churn = _temp_input("lucidlint-churn-", json.dumps(dict(file_churn)))
             if coverage is not None and coverage.result.lines is not None:
                 # the repo's OWN snapshot is the coverage truth (R6/D6): the
                 # core reads which files it names and which lines it saw
                 # executed. A file it does not name is UNKNOWN to the core.
-                tmp = Path(tempfile.mkstemp(prefix="lucidlint-coverage-", suffix=".json")[1])
-                tmp.write_text(
+                self._pending_coverage = _temp_input(
+                    "lucidlint-coverage-",
                     json.dumps(
                         {
                             "source": coverage.result.source,
@@ -1035,9 +1064,7 @@ class _RustScan:
                             "covered": {rel: sorted(lines) for rel, lines in coverage.result.lines.items()},
                         }
                     ),
-                    encoding="utf-8",
                 )
-                self._pending_coverage = tmp
             self._pending_docs = str(repo)
             self._pending_gitignored = _gitignored_docs(repo)
 
@@ -1219,9 +1246,7 @@ class _GraphContract:
                 "edges": edges,
                 "communities": communities,
             }
-            tmp = Path(tempfile.mkstemp(prefix="lucidlint-graph-", suffix=".json")[1])
-            tmp.write_text(json.dumps(contract, separators=(",", ":")), encoding="utf-8")
-            result = tmp
+            result = _temp_input("lucidlint-graph-", json.dumps(contract, separators=(",", ":")))
         # surfaces via `result = None` — the caller falls back to non-graph
         # families; not a swallow. The direct code-review-graph API can raise
         # sqlite3.Error (corrupt/older graph.db), KeyError (rows without the

@@ -35,7 +35,9 @@ every prose copy that spelled them out went stale. Each constant is the count at
 which its rule starts, so both comparisons read `count >= MIN` — no reader has to
 decide whether a bound is inclusive (2026-11-18 review: a "floor" wording made a
 bot read thirty as belonging to neither rung). As shipped, `MANY_MIN` is 31: the
-strict rung is 3–30 and the loose rung 31+. The first design drew the line at
+strict rung is 3–30 (Python only) and the loose rung 31+ (both languages), so a
+Rust module of 30 definitions reports nothing — the strict rung is a Python
+design directive (§The message). The first design drew the line at
 10/11; the raise is the "shipped adaptation" recorded under §Cleanliness
 arithmetic.
 

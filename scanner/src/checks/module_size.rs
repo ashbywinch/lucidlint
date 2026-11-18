@@ -86,6 +86,16 @@ pub enum Language {
     Rust,
 }
 
+/// Which rung a module's definition count falls on. The two rungs are the two
+/// rules, and a count belongs to exactly one — see `ModuleShape::rung`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rung {
+    /// Python only: above the strict floor, below the loose one.
+    Several,
+    /// Both languages: at or above the loose floor.
+    Many,
+}
+
 /// One top-level type: a class, or a Rust struct/enum/trait/union. `methods`
 /// counts the methods its own body (or its `impl` blocks) define. A type with
 /// no methods is a record — a value with a name, not a concept that owns
@@ -201,26 +211,35 @@ impl ModuleShape {
         self.classes.len() + self.receiver_groups.len() + self.functions
     }
 
+    /// The rung this module sits on, or None when it holds too few definitions
+    /// for either. Disjoint by construction: the loose rung is tested first and
+    /// its bound is higher, so exactly one rung can match — a module never
+    /// reports both. The bounds are stated at [`SEVERAL_MIN`] and [`MANY_MIN`]
+    /// (top of this file).
+    ///
+    /// The strict rung is a Python design directive ("these functions should be
+    /// methods"); a Rust module of three class equivalents is the normal unit,
+    /// so Rust is judged only at the loose rung.
+    fn rung(&self) -> Option<Rung> {
+        let count = self.definitions();
+        if count >= MANY_MIN {
+            return Some(Rung::Many);
+        }
+        if self.language == Language::Python && count >= SEVERAL_MIN {
+            return Some(Rung::Several);
+        }
+        None
+    }
+
     /// The finding for one module, when it holds more than its rung allows.
-    /// The rungs are disjoint — one module never reports both, because
-    /// `MANY_MIN > SEVERAL_MIN` and the loose rung is tested first. Their
-    /// bounds are stated at [`SEVERAL_MIN`] and [`MANY_MIN`] (top of this
-    /// file); this function is the only place the comparison is written.
     pub fn module_finding(&self, rel: &str) -> Option<Finding> {
         if self.generated {
             return None;
         }
-        let count = self.definitions();
-        if count >= MANY_MIN {
-            return self.many_finding(rel);
+        match self.rung()? {
+            Rung::Many => self.many_finding(rel),
+            Rung::Several => self.several_finding(rel),
         }
-        // The strict rung is a Python design directive ("these functions
-        // should be methods"); a Rust module of three class equivalents is the
-        // normal unit, so Rust is judged only at the loose rung.
-        if self.language == Language::Python && count >= SEVERAL_MIN {
-            return self.several_finding(rel);
-        }
-        None
     }
 
     /// What the definitions ARE decides the message: classes become a package,

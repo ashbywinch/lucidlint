@@ -2683,3 +2683,17 @@ def test_fix_rust_refuses_a_missing_name(tmp_path, capsys):
     assert rc == 0
     assert "--name" in capsys.readouterr().out
     assert lib.read_text() == source
+
+
+def test_scan_inputs_are_written_once_and_removed_by_cleanup(tmp_path):
+    """The binary needs file PATHS for the graph/churn/coverage inputs, and a
+    graph dump is tens of MB. They live until the process exits and are removed
+    then — a gate run must not leave them behind (173 dumped graph contracts
+    filled /tmp and made unrelated test runs fail with EDQUOT)."""
+    path = ch._temp_input("lucidlint-test-", '{"probe": 1}')
+    assert path.read_text() == '{"probe": 1}'
+    assert path in ch._TEMP_INPUTS
+    ch.clear_temp_inputs()
+    assert not path.exists()
+    assert ch._TEMP_INPUTS == []
+    ch.clear_temp_inputs()  # idempotent
