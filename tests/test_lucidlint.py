@@ -2684,30 +2684,29 @@ def test_fix_rust_refuses_a_missing_name(tmp_path, capsys):
     assert "--name" in capsys.readouterr().out
     assert lib.read_text() == source
 
-
-def test_scan_inputs_are_written_once_and_removed_by_cleanup(tmp_path):
+def test_scan_inputs_live_in_one_process_directory():
     """The binary needs file PATHS for the graph/churn/coverage inputs, and a
-    graph dump is tens of MB. They live until the process exits and are removed
-    then — a gate run must not leave them behind (173 dumped graph contracts
-    filled /tmp and made unrelated test runs fail with EDQUOT)."""
-    path = ch._temp_input("lucidlint-test-", '{"probe": 1}')
-    assert path.read_text() == '{"probe": 1}'
-    assert path in ch._TEMP_INPUTS
-    ch.clear_temp_inputs()
-    assert not path.exists()
-    assert ch._TEMP_INPUTS == []
-    ch.clear_temp_inputs()  # idempotent
+    graph dump is tens of MB. One TemporaryDirectory owns them for the process:
+    every input is a file inside it, so the directory's own cleanup (at exit)
+    is the only sweep there is — no registry, no lock."""
+    first = ch._temp_input("lucidlint-test-a-", '{"probe": 1}')
+    second = ch._temp_input("lucidlint-test-b-", "{}")
+    assert first.parent == second.parent == ch._scan_input_dir()
+    assert first.read_text() == '{"probe": 1}'
+    ch.release_temp_input(first)
+    assert not first.exists()
+    assert second.exists()
+    ch.release_temp_input(second)
+    ch.release_temp_input(None)  # a run without that input releases nothing
+    assert not second.exists()
 
 
-def test_a_scans_own_inputs_are_released_when_the_scan_finishes(tmp_path):
-    """The per-run inputs (churn, coverage) go as soon as the binary has read
-    them; only the per-repo graph contract waits for exit. A crashed run
-    therefore leaves one run's files, not a session's worth."""
-    churn = ch._temp_input("lucidlint-test-churn-", "{}")
-    graph = ch._temp_input("lucidlint-test-graph-", "{}")
-    ch.release_temp_input(churn)
-    assert not churn.exists()
-    assert graph.exists() and graph in ch._TEMP_INPUTS
-    ch.release_temp_input(None)  # a run without coverage releases nothing
-    ch.clear_temp_inputs()
-    assert not graph.exists() and ch._TEMP_INPUTS == []
+def test_release_removes_one_input_and_leaves_the_rest_to_the_directory():
+    """A per-run input goes as soon as its scan has read it; the directory keeps
+    whatever a later scan still needs (the per-repo graph contract)."""
+    per_run = ch._temp_input("lucidlint-test-churn-", "{}")
+    cached = ch._temp_input("lucidlint-test-graph-", "{}")
+    ch.release_temp_input(per_run)
+    assert not per_run.exists()
+    assert cached.exists() and cached.parent == ch._scan_input_dir()
+    cached.unlink()  # leave the process directory as we found it

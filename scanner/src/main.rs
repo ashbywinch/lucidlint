@@ -6588,30 +6588,30 @@ def two(work, batch):
 
     #[test]
     fn the_two_rungs_never_fire_together() {
-        // 30 definitions is the top of the Python strict rung
-        let thirty = definitions_source(30, 0);
-        let f = scan_corpus(&[("pkg/thirty.py", &thirty)]);
+        // ten definitions is the top of the strict rung
+        let ten = definitions_source(10, 0);
+        let f = scan_corpus(&[("pkg/ten.py", &ten)]);
         assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
         assert!(!f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
-        // 31 is the bottom of the loose rung
-        let thirty_one = definitions_source(31, 0);
-        let f = scan_corpus(&[("pkg/thirty_one.py", &thirty_one)]);
+        // eleven is the bottom of the loose rung
+        let eleven = definitions_source(11, 0);
+        let f = scan_corpus(&[("pkg/eleven.py", &eleven)]);
         assert!(f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
         assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
         let msg = &f.iter().find(|x| x.kind == "many-definitions").unwrap().message;
         assert!(
-            msg.contains("holds 31 top-level definitions, 31 of them functions"),
+            msg.contains("holds 11 top-level definitions, 11 of them functions"),
             "{msg}"
         );
     }
 
     #[test]
     fn many_definitions_keeps_the_class_advice_for_classes() {
-        let src = several_classes_source(31, 31);
+        let src = several_classes_source(11, 11);
         let f = scan_corpus(&[("pkg/widgets.py", &src)]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
-        assert!(hits[0].message.contains("31 of them classes"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("11 of them classes"), "{}", hits[0].message);
         assert!(hits[0].message.contains("package"), "{}", hits[0].message);
     }
 
@@ -6653,12 +6653,12 @@ def two(work, batch):
         assert!(!f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
         // a module that adds owned functions to its routes still reports them,
         // and the message names the framework entry points it is not counting
-        src.push_str(&definitions_source(31, 0));
+        src.push_str(&definitions_source(11, 0));
         let f = scan_corpus(&[("pkg/routes.py", &src)]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         assert!(
-            hits[0].message.contains("31 top-level definitions"),
+            hits[0].message.contains("11 top-level definitions"),
             "{}",
             hits[0].message
         );
@@ -6692,9 +6692,9 @@ def two(work, batch):
 
     #[test]
     fn rust_functions_arm_splits_the_module_at_the_loose_rung() {
-        // 31+ free functions: the module is a grab-bag, so the action is the split
+        // 11+ free functions: the module is a grab-bag, so the action is the split
         let mut src = String::new();
-        for i in 0..31 {
+        for i in 0..11 {
             src.push_str(&format!(
                 "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
             ));
@@ -6706,7 +6706,7 @@ def two(work, batch):
         assert_eq!(hits.len(), 1, "{f:?}");
         let msg = &hits[0].message;
         assert!(
-            msg.contains("holds 31 top-level definitions (31 free functions)"),
+            msg.contains("holds 11 top-level definitions (11 free functions)"),
             "{msg}"
         );
         assert!(msg.contains("Split the module by concept"), "{msg}");
@@ -6717,9 +6717,9 @@ def two(work, batch):
     }
 
     #[test]
-    fn rust_is_judged_only_at_the_loose_rung() {
-        // 4 free functions with no receiver: Rust's strict rung does not apply,
-        // because three class equivalents in a module is the normal unit
+    fn rust_is_judged_at_the_same_rungs_as_python() {
+        // four free functions with no receiver: the strict rung fires for Rust
+        // too, and its advice is the Rust one (give the functions a type)
         let mut src = String::new();
         for i in 0..4 {
             src.push_str(&format!(
@@ -6729,10 +6729,12 @@ def two(work, batch):
         let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
         let f = checks::module_findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
-        assert!(f.is_empty(), "{f:?}");
-        // and 31 free functions do fire, with the split advice
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("give it an impl"), "{}", hits[0].message);
+        // and eleven free functions fire the loose rung, with the split advice
         let mut wide = String::new();
-        for i in 0..31 {
+        for i in 0..11 {
             wide.push_str(&format!(
                 "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
             ));

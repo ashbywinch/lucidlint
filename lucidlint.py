@@ -27,7 +27,6 @@ and cheap to change; each message says what to do in those terms.
 from __future__ import annotations
 
 import argparse
-import atexit
 import datetime
 import difflib
 import json
@@ -37,7 +36,6 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import tomllib
 import xml.etree.ElementTree as ET
@@ -82,52 +80,38 @@ def _vendor_path(here: str, version: tuple[int, int] | None = None) -> str | Non
 
 # The JSON inputs one scan hands the binary (graph contract, churn, coverage)
 # are big — a graph dump is tens of MB — and the binary needs a PATH, not a
-# pipe. They are written per run and removed when the process exits: a gate run
-# must not leave 40 MB files behind (2026-11-18: 173 leaked graph dumps, 2.3 GB,
-# filled /tmp and made unrelated test runs fail with EDQUOT).
-_TEMP_INPUTS: list[Path] = []
-# a run may scan in more than one thread (one repo per thread); the list is
-# shared, so append and remove take the lock
-_TEMP_LOCK = threading.Lock()
+# pipe. One stdlib TemporaryDirectory per process owns them: every input is a
+# file inside it, the directory removes itself (and anything left in it) at
+# exit, and a per-run input is deleted as soon as its scan has read it. There is
+# no registry to keep and no lock to take — the filesystem is the only shared
+# state, and each input's name is unique.
+_scan_inputs: tempfile.TemporaryDirectory[str] | None = None
+
+
+def _scan_input_dir() -> Path:
+    """The one directory this process writes scan inputs into. Created on first
+    use, so importing the module writes nothing."""
+    global _scan_inputs
+    if _scan_inputs is None:
+        _scan_inputs = tempfile.TemporaryDirectory(prefix="lucidlint-inputs-")
+    return Path(_scan_inputs.name)
 
 
 def _temp_input(prefix: str, payload: str) -> Path:
-    """Write one scan input for the binary and remember it for cleanup."""
-    fd, name = tempfile.mkstemp(prefix=prefix, suffix=".json")
+    """Write one scan input for the binary inside the process directory."""
+    fd, name = tempfile.mkstemp(prefix=prefix, suffix=".json", dir=_scan_input_dir())
     os.close(fd)  # mkstemp opens the file; the write below reopens it
     path = Path(name)
     path.write_text(payload, encoding="utf-8")
-    with _TEMP_LOCK:
-        _TEMP_INPUTS.append(path)
     return path
 
 
 def release_temp_input(path: Path | None) -> None:
-    """Remove one scan input as soon as the scan that needed it has finished —
-    the per-run files (churn, coverage) must not wait for process exit. A crash
-    can then leave at most the files of the run in flight, not a session's
-    worth. The lock covers the registry AND the unlink: ownership of a path is
-    decided and acted on in one critical section, so no second thread can be
-    holding the same path for a scan when it goes."""
-    if path is None:
-        return
-    with _TEMP_LOCK:
-        if path in _TEMP_INPUTS:
-            _TEMP_INPUTS.remove(path)
-            path.unlink(missing_ok=True)
-
-
-def clear_temp_inputs() -> None:
-    """Remove every scan input still registered. Called at exit; also the test
-    seam. The graph contract is cached per repo for the whole process, so it is
-    the one input released here rather than per scan."""
-    with _TEMP_LOCK:
-        for path in _TEMP_INPUTS:
-            path.unlink(missing_ok=True)
-        _TEMP_INPUTS.clear()
-
-
-atexit.register(clear_temp_inputs)
+    """Delete a per-run input as soon as the scan that needed it has finished
+    (churn, coverage). The graph contract is cached per repo for the process and
+    is left for the directory's own cleanup."""
+    if path is not None:
+        path.unlink(missing_ok=True)
 
 
 _vendor = _vendor_path(_here)

@@ -360,26 +360,27 @@ CATALOG = RuleCatalog([
          "a reader cannot hold the whole job: extract each domain step into a "
          "named function.",
          fix="extract-method"),
-    Rule("several-definitions", "warn", "architecture", "Python",
-         "A Python module holding 3–30 top-level definitions (functions and "
-         "classes; constants are data) — more than one concept's worth. The "
-         "advice follows what the definitions are: mostly classes → turn the "
-         "module into a package, one file per class; mostly functions → the "
-         "functions pass data no object owns, so name the domain concepts and "
-         "make them classes. All but one class being a method-less value record "
-         "is one concept plus its records, and is exempt; a decorated function "
-         "is a framework entry point, not a definition the module owns. Python "
-         "only: in Rust the class equivalent is a type plus the functions that "
-         "take it, so three of those is the normal module. The upper rung is "
-         "`many-definitions`, so a repo can disable this row and hold Python "
-         "modules only to 31."),
+    Rule("several-definitions", "warn", "architecture", "Both",
+         "A module holding 3–10 top-level definitions — Python functions and "
+         "classes (constants are data); Rust types, groups of functions that "
+         "take one type (a class equivalent), and functions left with no "
+         "receiver. Three definitions is more than one concept's worth, and ten "
+         "is the most one file may hold as one concept. The advice follows what "
+         "the definitions are: mostly classes → turn the module into a package, "
+         "one file per class; mostly functions → the functions pass data no "
+         "object owns, so name the domain concepts and make them classes. All "
+         "but one class being a method-less value record is one concept plus "
+         "its records, and is exempt; a decorated function is a framework entry "
+         "point, not a definition the module owns. The upper rung is "
+         "`many-definitions`, so a repo can disable this row and hold modules "
+         "only to eleven."),
     Rule("many-definitions", "warn", "architecture", "Both",
-         "A module holding more than 30 top-level definitions — Python "
+         "A module holding more than 10 top-level definitions — Python "
          "functions and classes; Rust types, groups of functions that take one "
          "type (a class equivalent), and functions left with no receiver. More "
-         "than thirty class equivalents is a grab-bag by any reading: split it "
-         "by concept, one module per family. The second rung of the "
-         "`several-definitions` ladder, and the only rung Rust is judged at."),
+         "than ten class equivalents is a grab-bag: split it by concept, one "
+         "module per family. The second rung of the `several-definitions` "
+         "ladder, in both languages."),
     Rule("closures", "fail", "architecture", "Both",
          "A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line "
          "span) — the nested structure is a class waiting to be extracted.",

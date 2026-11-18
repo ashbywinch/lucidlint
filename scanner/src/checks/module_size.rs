@@ -3,9 +3,14 @@
 //!
 //! ONE ladder, two rules, disjoint ranges — exactly one fires:
 //!
-//! - Python only, [`SEVERAL_MIN`] <= count < [`MANY_MIN`] fires
-//!   `several-definitions`;
-//! - count >= [`MANY_MIN`] fires `many-definitions`, both languages.
+//! - [`SEVERAL_MIN`] <= count < [`MANY_MIN`] fires `several-definitions`;
+//! - count >= [`MANY_MIN`] fires `many-definitions`.
+//!
+//! Both languages are judged at both rungs. The definitions are counted
+//! differently — a Rust class equivalent is a type plus the functions that take
+//! it — but the ladder is the same ladder: the count is of concepts either way,
+//! and a Rust module of three concepts is no more one module than a Python one
+//! is.
 //!
 //! The ranges are stated as the constants' names, never as numerals: the two
 //! values moved twice while the ladder was designed, and every prose copy that
@@ -36,10 +41,10 @@ use ruff_python_ast::Stmt;
 
 use crate::finding::Finding;
 
-/// The fewest definitions that make a Python module `several-definitions`:
-/// a class, a data table or a record may hold two, never three. Python only —
-/// in Rust a class equivalent is a type plus the functions that take it, and
-/// three of those is a normal module.
+/// The fewest definitions that make a module `several-definitions`: a class, a
+/// data table or a record may hold two, never three. Both languages — a Rust
+/// class equivalent is a type plus the functions that take it, so the count is
+/// of concepts either way.
 ///
 /// The rungs' bounds are stated HERE and nowhere else; every other comment
 /// cites them. A restated bound is a second copy, and the second copy is the
@@ -49,8 +54,9 @@ use crate::finding::Finding;
 pub const SEVERAL_MIN: usize = 3;
 
 /// The fewest definitions that make a module `many-definitions`, in both
-/// languages: one above the last count the strict rung covers.
-pub const MANY_MIN: usize = 31;
+/// languages: one above the last count the strict rung covers. Ten definitions
+/// is the most one file may hold as one concept; eleven is the split.
+pub const MANY_MIN: usize = 11;
 
 /// The fewest free functions that make the functions arm's claim — "the data
 /// the others share arrives as parameters" — true of the module. One helper
@@ -90,7 +96,7 @@ pub enum Language {
 /// rules, and a count belongs to exactly one — see `ModuleShape::rung`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Rung {
-    /// Python only: above the strict floor, below the loose one.
+    /// Above the strict floor, below the loose one — both languages.
     Several,
     /// Both languages: at or above the loose floor.
     Many,
@@ -217,15 +223,12 @@ impl ModuleShape {
     /// reports both. The bounds are stated at [`SEVERAL_MIN`] and [`MANY_MIN`]
     /// (top of this file).
     ///
-    /// The strict rung is a Python design directive ("these functions should be
-    /// methods"); a Rust module of three class equivalents is the normal unit,
-    /// so Rust is judged only at the loose rung.
     fn rung(&self) -> Option<Rung> {
         let count = self.definitions();
         if count >= MANY_MIN {
             return Some(Rung::Many);
         }
-        if self.language == Language::Python && count >= SEVERAL_MIN {
+        if count >= SEVERAL_MIN {
             return Some(Rung::Several);
         }
         None
@@ -286,7 +289,7 @@ impl ModuleShape {
     fn classes_message(&self, rel: &str) -> String {
         let names: Vec<&str> = self.classes.iter().map(|c| c.name.as_str()).collect();
         format!(
-            "'{rel}' holds {count} top-level definitions, {types} of them {noun} ({list}){framework}. {reader}. {package} {record}",
+            "'{rel}' holds {count} top-level definitions, {types} of them {noun} ({list}){framework}. {reader} {package} {record}",
             count = self.definitions(),
             types = names.len(),
             noun = self.type_noun(),
@@ -338,13 +341,13 @@ impl ModuleShape {
             Language::Rust => {
                 let mut parts = Vec::new();
                 if !self.classes.is_empty() {
-                    parts.push(format!("{} types", self.classes.len()));
+                    parts.push(counted(self.classes.len(), "type"));
                 }
                 if !self.receiver_groups.is_empty() {
-                    parts.push(format!("{} function groups", self.receiver_groups.len()));
+                    parts.push(counted(self.receiver_groups.len(), "function group"));
                 }
                 if self.functions > 0 {
-                    parts.push(format!("{} free functions", self.functions));
+                    parts.push(counted(self.functions, "free function"));
                 }
                 if parts.is_empty() {
                     return String::new();
@@ -429,6 +432,16 @@ impl ModuleShape {
             severity: severity.to_string(),
             message,
         }
+    }
+}
+
+/// `1 type`, `2 types` — a count with its noun, so a one-item group does not
+/// read as "1 function groups".
+fn counted(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
     }
 }
 

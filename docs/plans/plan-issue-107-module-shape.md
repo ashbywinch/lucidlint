@@ -26,20 +26,21 @@ one ladder, with disjoint ranges so a module never reports both:
 
 | rung | fires on | kind |
 |---|---|---|
-| strict | `>= SEVERAL_MIN`, Python only | `several-definitions` |
+| strict | `>= SEVERAL_MIN` and `< MANY_MIN`, both languages | `several-definitions` |
 | loose | `>= MANY_MIN`, both languages | `many-definitions` |
 
 The bounds live in `checks/module_size.rs` (`SEVERAL_MIN`, `MANY_MIN`) and are
-cited by name here: the values moved twice while the ladder was designed, and
-every prose copy that spelled them out went stale. Each constant is the count at
-which its rule starts, so both comparisons read `count >= MIN` — no reader has to
+cited by name here: the values moved while the ladder was designed, and every
+prose copy that spelled them out went stale. Each constant is the count at which
+its rule starts, so both comparisons read `count >= MIN` — no reader has to
 decide whether a bound is inclusive (2026-11-18 review: a "floor" wording made a
-bot read thirty as belonging to neither rung). As shipped, `MANY_MIN` is 31: the
-strict rung is 3–30 (Python only) and the loose rung 31+ (both languages), so a
-Rust module of 30 definitions reports nothing — the strict rung is a Python
-design directive (§The message). The first design drew the line at
-10/11; the raise is the "shipped adaptation" recorded under §Cleanliness
-arithmetic.
+bot read a count as belonging to neither rung).
+
+As shipped (ruled 2026-11-18), `SEVERAL_MIN` is 3 and `MANY_MIN` is 11: the
+strict rung is 3–10 and the loose rung 11+, in **both languages**. The ladder is
+one ladder; only the counting differs, because a Rust class equivalent is a type
+plus the functions that take it. Three concepts is not one module in Rust just
+because Rust calls its unit a type.
 
 The rungs exist so a repo sets its policy: keep both and hold every Python module
 to three, or disable `several-definitions` and hold modules only to the loose
@@ -109,14 +110,23 @@ from the count.
 
 With the tool, on each repo's own tree:
 
+Re-measured 2026-11-18 at the shipped rungs (3–10 / 11+, both languages);
+in-scope means every tracked `.py`/`.rs` file outside `tests/fixtures/`:
+
 | repo | in-scope modules | `several-definitions` | `many-definitions` |
 |---|---|---|---|
-| build-tools | 444 | 5 | 2 |
-| houses | 237 | 49 | 57 |
-| family-history-album | 323 | 67 | 26 |
+| build-tools | 110 | 51 | 17 |
+| houses | 402 | 49 | 57 |
+| family-history-album | 415 | 67 | 26 |
 
-Message arm (functions / classes): 7 / 0 here, 84 / 22 in houses, 77 / 16 in
-album.
+Message arm (functions / classes-or-types): 45 / 23 here, 84 / 22 in houses,
+77 / 16 in album.
+
+This repo's own count is the honest consequence: 68 of its 110 modules hold three
+or more definitions, so they all now report. The gate stays `GATE: PASS` (both
+rungs are warnings), and the report is the worklist — the family modules the
+split created are 3–15 class equivalents each, and the ladder says each is still
+one split away from one concept.
 
 **Where the ladder still asks for a judgement**, named with the files — these
 take `# lucidlint: ignore-file <kind> <why>`, verified to suppress and not read
@@ -162,6 +172,10 @@ binaries reports identical findings on houses and family-history-album (0 added,
 one fixed `complexity` finding differ on this repo.
 
 ## Rust
+
+Measured at the superseded 30/31 rungs; the shipped ladder is 3–10 / 11+ in both
+languages (§The rules), so these counts are the record of the earlier decision,
+not today's report.
 
 Rust counts the same definitions: top-level `fn`s are functions; `struct`,
 `enum`, `trait`, `trait alias`, `type` and `union` are the types; an `impl`
@@ -283,19 +297,28 @@ class equivalents and the ladder then flagged 3–10 (`several`) and 11+
 under the current rungs means every module holds at most **two** definitions,
 which no module with three concepts can satisfy.
 
-**Shipped adaptation (ruled 2026-11-16):**
+**Superseded adaptation (ruled 2026-11-16, reversed 2026-11-18):**
 
-1. `several-definitions` (3–30) is **Python-only**. Its message is a design
-   directive — free functions should become methods — and in Rust the target it
-   names (a class) does not exist; three class equivalents in a module is the
-   normal unit.
-2. `many-definitions` fires at **31+** for both languages. A module holding more
-   than thirty class equivalents is a grab-bag by any reading, and the target is
-   then reachable: split by concept until each module is ≤ 30.
+1. `several-definitions` was made **Python-only** (3–30). Its message is a design
+   directive — free functions should become methods — and the argument was that
+   in Rust the target it names (a class) does not exist, so three class
+   equivalents in a module is the normal unit.
+2. `many-definitions` was raised to **31+** for both languages, on the argument
+   that more than thirty class equivalents is a grab-bag by any reading.
 
-Result on this repo: 26 ladder findings -> **11** — six `many` (the four huge
-Rust modules and the two Python ones) and five `several` (the `scripts/*.py`
-CLIs, which are Python's to fix).
+**Ruled 2026-11-18: both are reversed.** The requirement was ten definitions,
+not thirty, and the rung is the same in both languages — Rust accommodates a
+slightly different definition of "class" through the counting, not through a
+different threshold. The shipped ladder is 3–10 (`several-definitions`) and 11+
+(`many-definitions`), both languages. The sections below that state the 3–30 /
+31+ adaptation are the record of the earlier decision, not the contract.
+
+Under that superseded adaptation the result was: 26 ladder findings -> 11 — six
+`many` (the four huge Rust modules and the two Python ones) and five `several`
+(the `scripts/*.py` CLIs). At the shipped rungs the same tree reports 68 (51
+`several`, 17 `many`) — see the measurement table above; every family module the
+split created is 3–10 class equivalents, so the ladder names each as one split
+short of one concept.
 
 With class-equivalent counting the remaining Rust findings would be exactly
 four — `checks.rs` 135, `rustscan.rs` 49, `fix.rs` 50, `main.rs` 45 — and
@@ -311,8 +334,8 @@ the Python strict rung keeps its "make these methods" directive.
 - both rungs registered in `rule_metadata.py`; `make rules` regenerates
   RULES.md and `rules_gen.rs`; Rust tests cover the fire and its message, the
   two-definition pass, the record exception, nested classes, generated modules,
-  the disjoint rungs, the functions arm, the class arm, the Python-only scope
-  and the shape reader;
+  the disjoint rungs, the functions arm, the class arm, the same-rungs-in-both-
+  languages rule and the shape reader;
 - the split keeps `make check`, `make test` and `make self-check` green;
 - the measurement and the known-wrong shapes above ship in the PR.
 ## Rust class-related rules, audited against the class-equivalent definition
