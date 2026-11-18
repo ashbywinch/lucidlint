@@ -13,7 +13,7 @@ use crate::skeleton::{dice_from_bigrams, skel_children, BigramInterner, Skeleton
 use crate::source::line_of;
 use crate::ScanState;
 
-use super::husks::class_methods;
+use super::class_facts::class_methods;
 use super::sibling::collect_field_assignments;
 
 /// The normalized constant token: `NAME:norm(type)` — numeric literals

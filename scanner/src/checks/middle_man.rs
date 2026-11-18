@@ -9,8 +9,8 @@ use ruff_text_size::Ranged;
 use crate::finding::Finding;
 use crate::{line_of, ScanState};
 
+use super::class_facts::{class_methods, has_decorator};
 use super::expr_walk::base_name_of;
-use super::husks::{class_methods, has_decorator};
 use super::{annotation_base_name, push_stmt_children};
 
 /// One module-defined class, as the middle-man rule reads it: the module it is

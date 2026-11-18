@@ -6587,6 +6587,31 @@ def two(work, batch):
     }
 
     #[test]
+    fn a_rust_module_of_function_groups_is_not_told_it_holds_zero_types() {
+        // a receiver group plus free functions, and no types of its own. The
+        // types arm used to fire anyway and print "0 of them types ()" — the
+        // functions arm names the group instead.
+        let mut src = String::new();
+        for i in 0..9 {
+            src.push_str(&format!("pub fn over_expr_{i}(e: &Expr) -> u32 {{\n    {i}\n}}\n\n"));
+        }
+        for i in 0..4 {
+            src.push_str(&format!(
+                "pub fn free_{i}(text: &str) -> usize {{\n    text.len() + {i}\n}}\n\n"
+            ));
+        }
+        let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
+        let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
+        let f = checks::module_findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        let msg = &hits[0].message;
+        assert!(!msg.contains("0 of them types"), "{msg}");
+        assert!(msg.contains("1 function group"), "{msg}");
+        assert!(msg.contains("The functions group by the type they take"), "{msg}");
+    }
+
+    #[test]
     fn the_two_rungs_never_fire_together() {
         // ten definitions is the top of the strict rung
         let ten = definitions_source(10, 0);

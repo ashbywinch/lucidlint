@@ -2,11 +2,13 @@
 //! and the message the reader acts on; this root only declares them and re-exports
 //! the vocabulary the rest of the crate calls.
 
+mod builtin_shadow;
 mod class_facts;
 mod closure_cluster;
 mod closures;
 mod conditional_polymorphism;
 mod decisions;
+mod delegating_husk;
 mod docstring;
 mod duplicate_block;
 mod duplicate_def;
@@ -20,7 +22,6 @@ mod forwarding;
 mod function_facts;
 mod global_state;
 mod guard_clause;
-mod husks;
 mod latent_shapes;
 mod latent_state;
 mod latent_visitor;
@@ -32,6 +33,7 @@ mod module_size;
 mod monkeypatch;
 mod naming_units;
 mod no_assert_test;
+mod noqa;
 mod over_abstraction;
 mod partition;
 mod process_class;
@@ -42,6 +44,7 @@ mod sibling;
 mod signature;
 mod skipif;
 mod special_case;
+mod static_husk;
 mod type_ignore;
 mod unused;
 
@@ -51,12 +54,14 @@ pub use crate::forwarding::ForwarderMethod;
 pub use crate::forwarding::RepoMethod;
 pub use crate::skeleton::{fn_skeleton, is_duplicate_candidate, skel_children, SkeletonFn, SkeletonModule, Q};
 pub use crate::suppressions::{apply_source_suppressions, logical_line_starts, parse_suppressions};
+pub use builtin_shadow::shadow_findings;
 pub use class_facts::annotation_base_name;
 pub(crate) use class_facts::class_attr_names;
 pub use closure_cluster::closure_cluster_findings;
 pub use closures::closure_findings;
 pub use conditional_polymorphism::conditional_polymorphism_findings;
 pub use decisions::{unnamed_classification_findings, unnamed_condition_findings};
+pub use delegating_husk::delegating_husk_findings;
 pub use docstring::restating_docstring_findings;
 pub use duplicate_block::duplicate_block_findings;
 pub use duplicate_def::duplicate_def_findings;
@@ -70,9 +75,8 @@ pub use forwarding::{collect_forwarders, forwarding_chain_findings};
 #[cfg(test)]
 pub(crate) use function_facts::inner_function_count;
 pub(crate) use function_facts::{body_refs_name, returned_names};
-pub use global_state::{global_state_findings, module_constant_names, shadow_findings};
+pub use global_state::{global_state_findings, module_constant_names};
 pub use guard_clause::guard_clause_findings;
-pub use husks::{delegating_husk_findings, static_husk_findings};
 pub use latent_shapes::{
     assembly_class_findings, misplaced_method_findings, tuple_record_findings, wide_tuple_findings,
 };
@@ -92,6 +96,7 @@ pub use monkeypatch::monkeypatch_findings;
 pub use naming_units::magic_unit_named_offsets;
 pub(crate) use naming_units::name_states_unit;
 pub use no_assert_test::no_assert_test_findings;
+pub use noqa::noqa_findings;
 pub use over_abstraction::{abstraction_findings, collect_classes, collect_imports};
 pub use partition::partition_findings;
 pub use process_class::process_class_findings;
@@ -105,5 +110,6 @@ pub use signature::{
 };
 pub use skipif::skipif_findings;
 pub use special_case::special_case_findings;
-pub use type_ignore::{noqa_findings, type_ignore_findings};
+pub use static_husk::static_husk_findings;
+pub use type_ignore::type_ignore_findings;
 pub use unused::{collect_setters, unused_findings, unused_setter_findings};

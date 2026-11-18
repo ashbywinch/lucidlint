@@ -9,10 +9,10 @@ use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
 
+use super::builtin_shadow::SHADOWED_BUILTINS;
 use super::class_facts::annotation_base_name;
 use super::expr_walk::{push_stmt_children, stmt_exprs};
 use super::function_facts::body_refs_name;
-use super::global_state::SHADOWED_BUILTINS;
 use super::naming_units::sub_name;
 use crate::{line_of, ScanState};
 

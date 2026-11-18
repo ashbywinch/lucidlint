@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use ruff_python_ast::{Expr, Stmt, StmtClassDef};
+use ruff_python_ast::{Expr, Stmt, StmtClassDef, StmtFunctionDef};
 
 /// The `self.<attr> = ...` assignments across a class's methods.
 pub(crate) fn class_attr_names(class_body: &[Stmt]) -> HashSet<String> {
@@ -67,4 +67,22 @@ pub fn annotation_base_name(e: &Expr) -> Option<String> {
         Expr::Attribute(a) => Some(a.attr.to_string()),
         _ => None,
     }
+}
+
+pub(super) fn class_methods(cls: &StmtClassDef) -> Vec<&StmtFunctionDef> {
+    cls.body
+        .iter()
+        .filter_map(|m| match m {
+            Stmt::FunctionDef(f) => Some(f),
+            _ => None,
+        })
+        .collect()
+}
+
+pub(super) fn has_decorator(f: &StmtFunctionDef, name: &str) -> bool {
+    f.decorator_list.iter().any(|d| match &d.expression {
+        Expr::Name(n) => n.id.as_str() == name,
+        Expr::Attribute(a) => a.attr.as_str() == name,
+        _ => false,
+    })
 }

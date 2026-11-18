@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use ruff_python_ast::{Expr, Parameters, Stmt};
+use ruff_python_ast::{Expr, Parameters, Stmt, StmtFunctionDef};
 
 use super::expr_walk::{push_stmt_children, stmt_exprs};
 
@@ -139,3 +139,46 @@ pub(crate) fn function_param_names(p: &Parameters, out: &mut HashSet<String>) {
 // ------------------------------------------------------------- latent-class
 // cross-function shapes (module scope): a method in exile, an anonymous
 // tuple record, and a state-threading assembly site.
+
+/// The names a function's parameter list binds (positional, keyword-only,
+/// vararg, kwarg) in order.
+pub(super) fn fn_param_names(f: &StmtFunctionDef) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in f.parameters.posonlyargs.iter().chain(&f.parameters.args) {
+        out.push(p.parameter.name.to_string());
+    }
+    for p in &f.parameters.kwonlyargs {
+        out.push(p.parameter.name.to_string());
+    }
+    if let Some(v) = &f.parameters.vararg {
+        out.push(v.name.to_string());
+    }
+    if let Some(k) = &f.parameters.kwarg {
+        out.push(k.name.to_string());
+    }
+    out
+}
+
+/// Is `body` exactly `return F(<all params positionally in order>)`? The
+/// forwarder shape shared by delegating-husk and forwarding-chain.
+pub(super) fn is_pure_forwarder_body(body: &[Stmt], callee: &mut String, params: &[String]) -> bool {
+    if body.len() != 1 {
+        return false;
+    }
+    let Stmt::Return(r) = &body[0] else { return false };
+    let Some(value) = r.value.as_deref() else { return false };
+    let Expr::Call(c) = value else { return false };
+    let Expr::Name(n) = c.func.as_ref() else { return false };
+    if c.arguments.args.len() != params.len() || !c.arguments.keywords.is_empty() {
+        return false;
+    }
+    for (arg, param) in c.arguments.args.iter().zip(params) {
+        let Expr::Name(an) = arg else { return false };
+        if an.id.as_str() != param.as_str() {
+            return false;
+        }
+    }
+    callee.clear();
+    callee.push_str(n.id.as_str());
+    true
+}

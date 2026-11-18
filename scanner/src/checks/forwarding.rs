@@ -6,7 +6,7 @@ use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
 
-use super::husks::{fn_param_names, is_pure_forwarder_body};
+use super::function_facts::{fn_param_names, is_pure_forwarder_body};
 use crate::forwarding::{ForwarderFn, ForwarderMethod, RepoMethod};
 use crate::{line_of, ScanState};
 

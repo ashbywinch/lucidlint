@@ -13,7 +13,7 @@ use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
 
-use super::husks::fn_param_names;
+use super::function_facts::fn_param_names;
 use super::{push_stmt_children, stmt_exprs, walk_expr_deep};
 use crate::{line_of, ScanState};
 

@@ -281,6 +281,12 @@ impl ModuleShape {
     /// function groups, is one class plus its value types: one concept, no
     /// finding.
     fn classes_dominate(&self) -> bool {
+        // the types arm can only speak for a module that HAS types: a Rust
+        // module of function groups and free functions was getting
+        // "0 of them types ()" (2026-11-18 review)
+        if self.classes.is_empty() {
+            return false;
+        }
         let owned = self.classes.len() + self.receiver_groups.len();
         owned > self.functions
             && (self.classes.iter().filter(|c| !c.is_record()).count() > 1 || !self.receiver_groups.is_empty())
