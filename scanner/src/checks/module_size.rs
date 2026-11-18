@@ -3,9 +3,9 @@
 //!
 //! ONE ladder, two rules, disjoint ranges — exactly one fires:
 //!
-//! - Python only, [`SEVERAL_DEFINITIONS`] < count <= [`MANY_DEFINITIONS`]
-//!   fires `several-definitions`;
-//! - count > [`MANY_DEFINITIONS`] fires `many-definitions`, both languages.
+//! - Python only, [`SEVERAL_MIN`] <= count < [`MANY_MIN`] fires
+//!   `several-definitions`;
+//! - count >= [`MANY_MIN`] fires `many-definitions`, both languages.
 //!
 //! The ranges are stated as the constants' names, never as numerals: the two
 //! values moved twice while the ladder was designed, and every prose copy that
@@ -36,21 +36,26 @@ use ruff_python_ast::Stmt;
 
 use crate::finding::Finding;
 
-/// The strict rung's floor: a Python module above this and at most
-/// [`MANY_DEFINITIONS`] fires `several-definitions` — a class, a data table or
-/// a record may hold two definitions, never three. Python only: in Rust a class
-/// equivalent is a type plus the functions that take it, and three of those is
-/// a normal module.
+/// The fewest definitions that make a Python module `several-definitions`:
+/// a class, a data table or a record may hold two, never three. Python only —
+/// in Rust a class equivalent is a type plus the functions that take it, and
+/// three of those is a normal module.
 ///
-/// The two bounds are stated HERE and nowhere else; every other comment cites
-/// them. A restated bound is a second copy, and the second copy is the one that
-/// goes stale (2026-11-18 review).
-pub const SEVERAL_DEFINITIONS: usize = 2;
+/// The rungs' bounds are stated HERE and nowhere else; every other comment
+/// cites them. A restated bound is a second copy, and the second copy is the
+/// one that goes stale (2026-11-18 review). Each constant is the count at which
+/// its rule STARTS, so both comparisons read `count >= MIN` and no reader has
+/// to decide whether a bound is inclusive.
+pub const SEVERAL_MIN: usize = 3;
 
-/// The loose rung's floor: above it `many-definitions` fires, in both
-/// languages. Thirty ends the strict rung, so a Python module of thirty still
-/// gets the local advice and thirty-one gets the split.
-pub const MANY_DEFINITIONS: usize = 30;
+/// The fewest definitions that make a module `many-definitions`, in both
+/// languages: one above the last count the strict rung covers.
+pub const MANY_MIN: usize = 31;
+
+/// The fewest free functions that make the functions arm's claim — "the data
+/// the others share arrives as parameters" — true of the module. One helper
+/// shares its data with nobody.
+const FUNCTIONS_GROUP_MIN: usize = 2;
 
 /// How many opening lines may carry a generator marker. Generators stamp the
 /// top of the file; a marker further down is prose about something else.
@@ -197,21 +202,22 @@ impl ModuleShape {
     }
 
     /// The finding for one module, when it holds more than its rung allows.
-    /// The rungs are disjoint — one module never reports both. Their bounds are
-    /// stated at [`SEVERAL_DEFINITIONS`] and [`MANY_DEFINITIONS`] (top of this
+    /// The rungs are disjoint — one module never reports both, because
+    /// `MANY_MIN > SEVERAL_MIN` and the loose rung is tested first. Their
+    /// bounds are stated at [`SEVERAL_MIN`] and [`MANY_MIN`] (top of this
     /// file); this function is the only place the comparison is written.
     pub fn module_finding(&self, rel: &str) -> Option<Finding> {
         if self.generated {
             return None;
         }
         let count = self.definitions();
-        if count > MANY_DEFINITIONS {
+        if count >= MANY_MIN {
             return self.many_finding(rel);
         }
         // The strict rung is a Python design directive ("these functions
         // should be methods"); a Rust module of three class equivalents is the
         // normal unit, so Rust is judged only at the loose rung.
-        if self.language == Language::Python && count > SEVERAL_DEFINITIONS {
+        if self.language == Language::Python && count >= SEVERAL_MIN {
             return self.several_finding(rel);
         }
         None
@@ -244,7 +250,7 @@ impl ModuleShape {
     /// others share" is false of a single helper, and a module of one class
     /// and two helpers is one concept, not several.
     fn functions_are_a_group(&self) -> bool {
-        self.functions >= SEVERAL_DEFINITIONS
+        self.functions >= FUNCTIONS_GROUP_MIN
     }
 
     /// The types arm applies when the owned concepts (types and the function

@@ -339,10 +339,13 @@ fn mixed_module_finding(file: &File, name: &str) -> Option<Finding> {
             })
             .collect::<Vec<_>>()
             .join("; ");
+        let islands = match shape.stand_alone.len() {
+            0 => String::new(),
+            n => format!(" and {n} items standing alone"),
+        };
         format!(
-            "{} groups and {} items standing alone. The groups are {list}. Move each group into its own module, named after what its members are about.",
+            "{} groups{islands}. The groups are {list}. Move each group into its own module, named after what its members are about.",
             shape.groups.len(),
-            shape.stand_alone.len()
         )
     };
     Some(Finding {

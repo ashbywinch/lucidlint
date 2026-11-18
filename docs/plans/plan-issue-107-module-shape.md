@@ -26,15 +26,18 @@ one ladder, with disjoint ranges so a module never reports both:
 
 | rung | fires on | kind |
 |---|---|---|
-| strict | above `SEVERAL_DEFINITIONS`, Python only | `several-definitions` |
-| loose | above `MANY_DEFINITIONS`, both languages | `many-definitions` |
+| strict | `>= SEVERAL_MIN`, Python only | `several-definitions` |
+| loose | `>= MANY_MIN`, both languages | `many-definitions` |
 
-The bounds live in `checks/module_size.rs` (`SEVERAL_DEFINITIONS`,
-`MANY_DEFINITIONS`) and are cited by name here: the values moved twice while the
-ladder was designed, and every prose copy that spelled them out went stale. As
-shipped, `MANY_DEFINITIONS` is 30: the strict rung is 3–30 and the loose rung
-31+. The first design drew the line at 10/11; the raise is the "shipped
-adaptation" recorded under §Cleanliness arithmetic.
+The bounds live in `checks/module_size.rs` (`SEVERAL_MIN`, `MANY_MIN`) and are
+cited by name here: the values moved twice while the ladder was designed, and
+every prose copy that spelled them out went stale. Each constant is the count at
+which its rule starts, so both comparisons read `count >= MIN` — no reader has to
+decide whether a bound is inclusive (2026-11-18 review: a "floor" wording made a
+bot read thirty as belonging to neither rung). As shipped, `MANY_MIN` is 31: the
+strict rung is 3–30 and the loose rung 31+. The first design drew the line at
+10/11; the raise is the "shipped adaptation" recorded under §Cleanliness
+arithmetic.
 
 The rungs exist so a repo sets its policy: keep both and hold every Python module
 to three, or disable `several-definitions` and hold modules only to the loose
@@ -634,7 +637,7 @@ Three reasons, in order of how much they matter:
    `duplicate`/`duplicate-def` families do not see: they compare code to code,
    and `docs` checks links and reachability, not claims. The durable fix is
    structural — cite the constant, never spell its value — and that is now the
-   shape of `SEVERAL_DEFINITIONS`/`MANY_DEFINITIONS` and of this document.
+   shape of `SEVERAL_MIN`/`MANY_MIN`/`FUNCTIONS_GROUP_MIN` and of this document.
 3. **A user-facing message must state the number.** The rule's message says
    "31 top-level definitions" because the reader acts on it; a comment or a doc
    that does the same is a second copy with no such duty. Any "prose restates a
