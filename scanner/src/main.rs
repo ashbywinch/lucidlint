@@ -708,7 +708,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     Scattered::collect_scattered_instances(state, body);
     unnamed_condition_findings(state, body, source);
     unnamed_classification_findings(state, body, source);
-    collect_middle_man(state, body, source, repo_wide);
+    MiddleMan::collect(state, body, source, repo_wide);
     Unused::collect_setters(state, body);
     LoopFamily::findings(state, body, source);
     collect_skeleton_modules(state, body, name);
@@ -975,7 +975,7 @@ fn middle_man_repo_wide(scans: &[FileScan], root_s: &str) -> Vec<Finding> {
             }
         }
     }
-    checks::middle_man_findings(&candidates, &classes)
+    checks::MiddleMan::findings(&candidates, &classes)
         .into_iter()
         .filter(|f| !already.contains(&(f.file.clone(), f.line)))
         .collect()
@@ -4631,7 +4631,7 @@ mod tests {
         reconcile_repo_wide(&mut all, undeclared, &supps_by_rel, &spent_by_rel);
         reconcile_repo_wide(
             &mut all,
-            checks::middle_man_findings(&mm_candidates, &mm_classes),
+            checks::MiddleMan::findings(&mm_candidates, &mm_classes),
             &supps_by_rel,
             &spent_by_rel,
         );

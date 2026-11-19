@@ -5,7 +5,7 @@ use ruff_python_ast::{Expr, Operator, Stmt};
 
 use crate::finding::Finding;
 
-use super::middle_man::is_dunder;
+use super::middle_man::MiddleManCandidate;
 use crate::source::Source;
 use crate::ScanState;
 
@@ -136,7 +136,9 @@ impl GlobalState {
     /// value, not a dunder, not a type alias. Mirrors the finding loop's filters
     /// so the message's count matches the constant findings.
     fn is_reported_module_constant(name: &str, value: &Expr) -> bool {
-        !is_dunder(name) && Self::is_constant_binding(value) && !Self::is_type_alias_value(name, value)
+        !MiddleManCandidate::is_dunder(name)
+            && Self::is_constant_binding(value)
+            && !Self::is_type_alias_value(name, value)
     }
 
     /// The module-level constants the rule will report, in source order. Mirrors
@@ -244,7 +246,7 @@ impl GlobalState {
             for target in targets {
                 let Expr::Name(n) = target else { continue };
                 let name = n.id.as_str();
-                if is_dunder(name) {
+                if MiddleManCandidate::is_dunder(name) {
                     continue; // module protocol metadata (__all__, __version__)
                 }
                 if call_valued {

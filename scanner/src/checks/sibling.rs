@@ -6,7 +6,7 @@ use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
 
-use super::middle_man::class_base_names;
+use super::middle_man::MiddleManClass;
 use super::sibling_class::{SiblingClass, SiblingMethod};
 use super::{annotation_base_name, fn_skeleton, push_stmt_children, stmt_exprs};
 use crate::source::Source;
@@ -230,7 +230,7 @@ impl SiblingValueClass {
             line: Source::line_of(source, c.name.range().start()),
             fields: fields.into_iter().collect(),
             field_types: types.into_iter().collect(),
-            bases: class_base_names(c),
+            bases: MiddleManClass::base_names(c),
             methods,
         }
     }

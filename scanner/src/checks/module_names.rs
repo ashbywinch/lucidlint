@@ -17,7 +17,7 @@ use crate::finding::Finding;
 
 use super::annotation_base_name;
 use super::function_facts::FunctionFacts;
-use super::middle_man::class_base_names;
+use super::middle_man::MiddleManClass;
 use crate::naming::VAGUE_SUFFIXES;
 use crate::source::Source;
 use crate::ScanState;
@@ -131,7 +131,7 @@ pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &
     let named_bases: std::collections::HashSet<String> = public
         .iter()
         .filter_map(|s| match s {
-            Stmt::ClassDef(c) if matches_stem(c.name.as_str()) => Some(class_base_names(c)),
+            Stmt::ClassDef(c) if matches_stem(c.name.as_str()) => Some(MiddleManClass::base_names(c)),
             _ => None,
         })
         .flatten()
@@ -178,12 +178,14 @@ pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &
     // class's own seam (issue #52: "the namesake class and test doubles")
     let has_other_implementer = |name: &str| {
         public.iter().any(|s| match s {
-            Stmt::ClassDef(c) => c.name.as_str() != name && class_base_names(c).iter().any(|b| b == name),
+            Stmt::ClassDef(c) => c.name.as_str() != name && MiddleManClass::base_names(c).iter().any(|b| b == name),
             _ => false,
         })
     };
     let is_the_seam = |c: &StmtClassDef| {
-        let interface = class_base_names(c).iter().any(|b| b == "Protocol" || b == "ABC");
+        let interface = MiddleManClass::base_names(c)
+            .iter()
+            .any(|b| b == "Protocol" || b == "ABC");
         if !interface || decorated_dataclass(c, &dataclass_decorators) {
             return false;
         }
