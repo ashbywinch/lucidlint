@@ -212,9 +212,12 @@ impl ModuleShape {
         if self.classes.is_empty() {
             return false;
         }
+        // more than one type that owns behaviour is the "several concerns"
+        // case; a type with no methods is a record — the exclusion this arm
+        // makes (one class plus its records is one concept)
+        let behavioural = self.classes.iter().filter(|c| c.methods > 0).count();
         let owned = self.classes.len() + self.receiver_groups.len();
-        owned > self.functions
-            && (self.classes.iter().filter(|c| c.methods > 0).count() > 1 || !self.receiver_groups.is_empty())
+        owned > self.functions && (behavioural > 1 || !self.receiver_groups.is_empty())
     }
 
     fn classes_message(&self, rel: &str) -> String {

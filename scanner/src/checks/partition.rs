@@ -156,8 +156,6 @@ impl Partition {
                 } else {
                     format!("{{{}}}", connectors.join(","))
                 };
-                let metric: usize = groups.iter().map(|g| g.len()).sum();
-                let _ = metric;
                 state.findings.push(Finding { logical_start: None, seam_members: groups.iter().flatten().cloned().collect(),
                 col: 0,
                 file: state.file.to_string(),
