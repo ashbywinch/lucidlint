@@ -4,7 +4,7 @@
 use syn::spanned::Spanned;
 use syn::{Expr, Item, Pat, Stmt};
 
-use super::loop_pipeline::{pipeline_plan, InitScope};
+use super::loop_pipeline::{InitScope, LoopPipeline};
 use super::text::FixText;
 
 /// The detector calls `loop_sequence_fixable` (same contract, bool instead
@@ -57,7 +57,7 @@ pub fn fix_loop_sequence(source: &str, line: usize) -> Result<String, String> {
                 "the chain mixes loops and other statements — reorder so the loops are consecutive".to_string(),
             );
         };
-        let (_, plan) = pipeline_plan(source, target, stmts, i, InitScope::Chain)?;
+        let (_, plan) = LoopPipeline::plan(source, target, stmts, i, InitScope::Chain)?;
         if plan.acc != acc {
             return Err(format!(
                 "the chain mixes accumulators (`{}` vs `{}`) — every loop must build the same empty-initialized collection",

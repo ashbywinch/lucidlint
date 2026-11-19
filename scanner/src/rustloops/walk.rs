@@ -28,7 +28,7 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
             // tier 1 (coding-standards.md: never offer a fix that cannot
             // apply): the directive appears ONLY when the fixer would
             // apply at this line — same contract, same refusal reasons.
-            let fixable = crate::fix::loop_pipeline_fixable(self.state.source, self.state.file, line);
+            let fixable = crate::fix::LoopPipeline::fixable(self.state.source, self.state.file, line);
             let message = if fixable {
                 "loop builds a collection — Replace Loop with Pipeline: use a combinator (.map()/.filter() to build the value, .for_each() where pushing is the whole body) — fix: loop-pipeline"
             } else {
@@ -56,7 +56,7 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
                 // apply): the directive appears ONLY when the hoister would
                 // apply at this line (placeholder name — the name is never
                 // the refusal reason).
-                let fixable = crate::fix::loop_hoist_fixable_at(self.state.source, self.state.file, line);
+                let fixable = crate::fix::LoopHoist::fixable_at(self.state.source, self.state.file, line);
                 let message = if fixable {
                     format!(
                         "loop body is {n} statements yet mutates only {acc} — hoist the per-item step into a named helper that returns the value (a domain noun for one item's contribution), then combine or fold — fix: loop-hoist --fix-name <Name>",

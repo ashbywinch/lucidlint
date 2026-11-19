@@ -25,8 +25,8 @@ mod text;
 
 pub use dispatch::fix_dispatch_registry;
 pub use extract_method::fix_extract_method;
-pub use loop_hoist::{fix_loop_hoist, loop_hoist_fixable_at};
-pub use loop_pipeline::{fix_loop_pipeline, loop_pipeline_fixable};
+pub(crate) use loop_hoist::LoopHoist;
+pub(crate) use loop_pipeline::LoopPipeline;
 pub use loop_sequence::{fix_loop_sequence, loop_sequence_fixable};
 pub use rule_table::RuleTable;
 
@@ -44,7 +44,7 @@ mod loop_tests {
     #[test]
     fn pipeline_plain_push_becomes_map_collect() {
         let src = fixture("loop_pipeline_rs.rs");
-        let out = fix_loop_pipeline(&src, 3).expect("fix applies");
+        let out = LoopPipeline::fix(&src, 3).expect("fix applies");
         assert!(
             out.contains("let out: Vec<_> = xs.iter().map(|x| *x).collect();"),
             "{out}"
@@ -57,7 +57,7 @@ mod loop_tests {
     #[test]
     fn pipeline_if_filter_becomes_filter_map() {
         let src = fixture("loop_pipeline_rs_filtered.rs");
-        let out = fix_loop_pipeline(&src, 3).expect("fix applies");
+        let out = LoopPipeline::fix(&src, 3).expect("fix applies");
         assert!(
             out.contains("let out: Vec<_> = xs.iter().filter(|x| *x > 0).map(|x| *x).collect();"),
             "{out}"
@@ -87,7 +87,7 @@ mod loop_tests {
         // with "no for-loop at line N"). The finding line selects the
         // enclosing fn.
         let src = "fn first() -> u32 {\n    1\n}\n\nfn collect(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
-        let out = fix_loop_pipeline(src, 7).expect("fix applies in the later fn");
+        let out = LoopPipeline::fix(src, 7).expect("fix applies in the later fn");
         assert!(
             out.contains("let out: Vec<_> = xs.iter().map(|x| *x).collect();"),
             "{out}"
@@ -110,7 +110,7 @@ mod hoist_tests {
     #[test]
     fn hoist_extracts_helper_and_flat_map() {
         let src = fixture("loop_hoist_rs_fix.rs");
-        let out = fix_loop_hoist(&src, 3, "contribution").expect("fix applies");
+        let out = LoopHoist::fix(&src, 3, "contribution").expect("fix applies");
         assert!(out.contains("fn _contribution("), "{out}");
         assert!(out.contains("filter_map"), "{out}");
         assert!(!out.contains("for x in xs"), "{out}");
@@ -121,9 +121,9 @@ mod hoist_tests {
     #[test]
     fn hoist_requires_a_name_and_refuses_mid_read() {
         let src = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
-        assert!(fix_loop_hoist(src, 3, "").is_err());
+        assert!(LoopHoist::fix(src, 3, "").is_err());
         let read = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        let n = out.len();\n        out.push(*x + n as u32);\n    }\n    out\n}\n";
-        assert!(fix_loop_hoist(read, 3, "h").is_err());
+        assert!(LoopHoist::fix(read, 3, "h").is_err());
     }
 
     #[test]
@@ -131,7 +131,7 @@ mod hoist_tests {
         // the paren scan this replaced would stop at the inner `)` of
         // `format!("({})", x)` — the span slice keeps the whole argument
         let src = "fn f(xs: &[u32]) -> Vec<String> {\n    let mut out: Vec<String> = Vec::new();\n    for x in xs {\n        let doubled = *x * 2;\n        if doubled > 1 {\n            out.push(format!(\"({})\", doubled));\n        }\n    }\n    out\n}\n";
-        let out = fix_loop_hoist(src, 3, "label").expect("fix applies");
+        let out = LoopHoist::fix(src, 3, "label").expect("fix applies");
         assert!(out.contains("filter_map"), "{out}");
         assert!(out.contains("return Some(format!(\"({})\", doubled));"), "{out}");
         syn::parse_str::<syn::File>(&out).expect("fixed source parses");
@@ -145,7 +145,7 @@ mod hoist_tests {
         // helper to the Option shape: filter_map + a dead `None` where an
         // unconditional single push returns T directly)
         let src = "fn f(xs: &[u32]) -> Vec<String> {\n    let mut out: Vec<String> = Vec::new();\n    for x in xs {\n        out.push(format!(\"out.push({})\", x));\n    }\n    out\n}\n";
-        let out = fix_loop_hoist(src, 3, "label").expect("fix applies");
+        let out = LoopHoist::fix(src, 3, "label").expect("fix applies");
         assert!(out.contains("\"out.push({})\""), "{out}");
         assert!(out.contains("fn _label(x: String) -> String"), "{out}");
         assert!(!out.contains("filter_map"), "{out}");
@@ -159,7 +159,7 @@ mod hoist_tests {
         // `;` — a block in the argument ends that scan mid-argument, leaving
         // the push (and an undeclared helper-local) in the helper
         let src = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out: Vec<u32> = Vec::new();\n    for x in xs {\n        let scaled = *x * 2;\n        if scaled > 1 {\n            out.push((|y: u32| { let z = y * 2; z })(scaled));\n        }\n    }\n    out\n}\n";
-        let out = fix_loop_hoist(src, 3, "label").expect("fix applies");
+        let out = LoopHoist::fix(src, 3, "label").expect("fix applies");
         assert!(
             out.contains("return Some((|y: u32| { let z = y * 2; z })(scaled));"),
             "{out}"

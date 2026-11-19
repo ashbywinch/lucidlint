@@ -1346,11 +1346,11 @@ fn main() {
                     } else if kind == "rule-table" {
                         fix::RuleTable::fix_rule_table(&src, line)
                     } else if kind == "loop-pipeline" {
-                        fix::fix_loop_pipeline(&src, line)
+                        fix::LoopPipeline::fix(&src, line)
                     } else if kind == "loop-sequence" {
                         fix::fix_loop_sequence(&src, line)
                     } else if kind == "loop-hoist" {
-                        fix::fix_loop_hoist(&src, line, name)
+                        fix::LoopHoist::fix(&src, line, name)
                     } else {
                         fix::fix_extract_method(&src, line, name)
                     };
