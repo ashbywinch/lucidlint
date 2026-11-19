@@ -710,7 +710,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     unnamed_classification_findings(state, body, source);
     collect_middle_man(state, body, source, repo_wide);
     Unused::collect_setters(state, body);
-    loop_pipeline_findings(state, body, source);
+    LoopFamily::findings(state, body, source);
     collect_skeleton_modules(state, body, name);
     Forwarding::collect(state, body);
 }

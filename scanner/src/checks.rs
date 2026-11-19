@@ -82,7 +82,7 @@ pub use latent_state::{
     collect_self_assigns, data_clump_findings, duplicate_field_findings, feature_envy_findings, undeclared_findings,
 };
 pub use latent_visitor::latent_visitor_findings;
-pub use loop_family::loop_pipeline_findings;
+pub use loop_family::LoopFamily;
 pub use magic::MagicNumber;
 pub use middle_man::{collect_middle_man, middle_man_findings, MiddleManCandidate, MiddleManClass};
 pub use module_names::{class_module_findings, strewing_findings, vague_name_findings};
