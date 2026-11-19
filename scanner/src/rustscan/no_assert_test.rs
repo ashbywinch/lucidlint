@@ -6,7 +6,7 @@ use syn::{Block, ExprMacro, File, Item, ItemFn, Path};
 
 use crate::finding::Finding;
 
-use super::attrs::has_attr;
+use super::attrs::Attrs;
 
 /// `#[test]` + `#[ignore]` — a skipped test rots, the skipif analog. Runs as a
 /// pre-pass so cfg(test) containment can't hide it.
@@ -95,8 +95,8 @@ fn block_asserts(block: &Block) -> bool {
 /// The test carries no assertion: `#[test]` without `#[ignore]`,
 /// `#[should_panic]`, or an assert in the body.
 fn is_unasserted_test(f: &ItemFn) -> bool {
-    has_attr(&f.attrs, "test")
-        && !has_attr(&f.attrs, "ignore")
-        && !has_attr(&f.attrs, "should_panic")
+    Attrs::has_attr(&f.attrs, "test")
+        && !Attrs::has_attr(&f.attrs, "ignore")
+        && !Attrs::has_attr(&f.attrs, "should_panic")
         && !block_asserts(&f.block)
 }

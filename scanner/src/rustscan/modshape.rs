@@ -6,7 +6,7 @@ use syn::{Attribute, File, FnArg, ImplItem, Item, Path};
 
 use crate::finding::Finding;
 
-use super::attrs::has_cfg_test;
+use super::attrs::Attrs;
 use super::types::{receiver_name, static_type_ident};
 use super::RustScan;
 
@@ -164,7 +164,7 @@ impl MixedModule {
     fn definition_names(file: &File) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         for item in &file.items {
-            if has_cfg_test(Self::item_attrs(item)) {
+            if Attrs::has_cfg_test(Self::item_attrs(item)) {
                 continue;
             }
             let name = match item {
@@ -204,7 +204,7 @@ impl MixedModule {
             x
         }
         for item in &file.items {
-            if has_cfg_test(Self::item_attrs(item)) {
+            if Attrs::has_cfg_test(Self::item_attrs(item)) {
                 continue;
             }
             let owner = match item {

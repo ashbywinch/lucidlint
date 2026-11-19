@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use crate::finding::Finding;
 use crate::FnCc;
 
-use super::attrs::{attrs_of, has_attr, has_cfg_test};
+use super::attrs::Attrs;
 use super::decisions::RsDecision;
 use super::exprs::{
     block_refs_self, is_assert_macro, is_compound_op, is_dbg_macro, is_unwrap_expect, tokens_contain_ident,
@@ -291,7 +291,10 @@ impl<'a> RsState<'a> {
     /// The method never uses its receiver and is not a test — it does not
     /// belong in the impl.
     fn is_detached_method(&self, f: &syn::ImplItemFn) -> bool {
-        f.sig.receiver().is_some() && !has_attr(&f.attrs, "test") && !self.in_test_code && !block_refs_self(&f.block)
+        f.sig.receiver().is_some()
+            && !Attrs::has_attr(&f.attrs, "test")
+            && !self.in_test_code
+            && !block_refs_self(&f.block)
     }
 
     /// `unnamed-condition`: three or more facts joined inline as a condition,
@@ -450,7 +453,7 @@ impl<'a> RsState<'a> {
     /// the cc/closures/large-function/skeleton bookkeeping. Test fns skip the
     /// production families.
     fn process_fn(&mut self, attrs: &[Attribute], sig: &Signature, block: &'a Block) {
-        let is_test_fn = has_attr(attrs, "test");
+        let is_test_fn = Attrs::has_attr(attrs, "test");
         let line = sig.span().start().line;
         let module_level = self.fn_stack.is_empty();
         let prev_test = self.in_test_code;
@@ -560,12 +563,12 @@ impl<'a> RsState<'a> {
 
 impl<'a> Visit<'a> for RsState<'a> {
     fn visit_item(&mut self, item: &'a Item) {
-        if has_cfg_test(attrs_of(item)) {
+        if Attrs::has_cfg_test(Attrs::attrs_of(item)) {
             return; // #[cfg(test)] subtrees are test code — skipped
         }
         // every #[allow]/#[expect] needs a reason comment on its line or the
         // line above (the house standard; cfg(test) subtrees are skipped)
-        for a in attrs_of(item) {
+        for a in Attrs::attrs_of(item) {
             self.allow_reason_check(a);
         }
         match item {

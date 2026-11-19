@@ -7,7 +7,7 @@ use syn::{File, ItemFn};
 
 use crate::finding::Finding;
 
-use super::attrs::has_attr;
+use super::attrs::Attrs;
 
 pub(crate) fn ignored_test_findings(file: &File, file_name: &str) -> Vec<Finding> {
     struct Collector {
@@ -16,7 +16,7 @@ pub(crate) fn ignored_test_findings(file: &File, file_name: &str) -> Vec<Finding
     }
     impl<'ast> Visit<'ast> for Collector {
         fn visit_item_fn(&mut self, f: &'ast ItemFn) {
-            if has_attr(&f.attrs, "test") && has_attr(&f.attrs, "ignore") {
+            if Attrs::has_attr(&f.attrs, "test") && Attrs::has_attr(&f.attrs, "ignore") {
                 self.findings.push(Finding {
                     logical_start: None,
                     seam_members: Vec::new(),
