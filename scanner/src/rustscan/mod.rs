@@ -156,7 +156,7 @@ impl RustScan {
         // suppressions parse from the whole file, filtering every family — the
         // shared why-less rule applies (`// lucidlint: ignore` needs a why)
         let comments = RsComments::rs_comment_lines(source);
-        let supps = crate::suppressions::suppressions_from_comments(&comments);
+        let supps = crate::suppressions::Suppressions::from_comments(&comments);
         // complexity findings are generated from the cc array AFTER the per-file
         // pass — honor complexity suppressions here so both paths agree, and
         // record which suppressions this retain honored so the stale check does
@@ -168,16 +168,16 @@ impl RustScan {
                 // widened window and family-aware matching that suppressed()
                 // uses (a suppression used by the cc path must not be re-flagged
                 // stale by apply_suppressions_impl)
-                for ln in crate::suppressions::window_lines(e.line) {
+                for ln in crate::suppressions::Suppressions::window_lines(e.line) {
                     if let Some(entries) = supps.line.get(&ln) {
                         for (sig, why) in entries {
-                            if crate::suppressions::signal_matches(sig, "complexity") && !why.is_empty() {
+                            if crate::suppressions::Suppressions::signal_matches(sig, "complexity") && !why.is_empty() {
                                 pre_used.lines.insert((ln, sig.clone()));
                             }
                         }
                     }
                 }
-                let line_suppressed = crate::suppressions::suppressed("complexity", e.line, &supps);
+                let line_suppressed = crate::suppressions::Suppressions::suppressed("complexity", e.line, &supps);
                 let file_suppressed = supps.file.get("complexity").is_some_and(|w| !w.is_empty());
                 if file_suppressed {
                     pre_used.files.insert("complexity".into());
@@ -191,7 +191,7 @@ impl RustScan {
             spent: &mut supps_spent,
         };
 
-        scan.findings = crate::suppressions::apply_suppressions_impl(
+        scan.findings = crate::suppressions::Suppressions::apply(
             scan.findings,
             &comments,
             name,

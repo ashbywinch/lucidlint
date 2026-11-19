@@ -4,7 +4,7 @@
 use ruff_python_ast::token::Tokens;
 
 use crate::finding::Finding;
-use crate::suppressions::comment_lines;
+use crate::suppressions::Suppressions;
 
 /// Does an `# noqa` / `# pragma: no cover` comment carry a reason?
 /// `rest` is everything after the marker. Accepts the house format — a
@@ -30,7 +30,7 @@ fn noqa_reason(rest: &str) -> bool {
 
 pub fn noqa_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Finding> {
     let mut out = Vec::new();
-    for (ln, text) in comment_lines(source, tokens) {
+    for (ln, text) in Suppressions::comment_lines(source, tokens) {
         let marker = if text.contains("# noqa") {
             "# noqa"
         } else if text.contains("# pragma: no cover") {

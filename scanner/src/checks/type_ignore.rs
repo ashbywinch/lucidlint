@@ -4,12 +4,12 @@
 use ruff_python_ast::token::Tokens;
 
 use crate::finding::Finding;
-use crate::suppressions::comment_lines;
+use crate::suppressions::Suppressions;
 
 /// `# type: ignore` without a why (a second comment on the line) is a finding.
 pub fn type_ignore_findings(source: &str, file: &str, tokens: &Tokens) -> Vec<Finding> {
     let mut out = Vec::new();
-    for (ln, text) in comment_lines(source, tokens) {
+    for (ln, text) in Suppressions::comment_lines(source, tokens) {
         if !text.contains("type: ignore") {
             continue;
         }

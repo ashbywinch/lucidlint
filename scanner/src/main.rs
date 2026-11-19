@@ -747,7 +747,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     let mut state = ScanState {
         file: name,
         source,
-        logical_starts: checks::logical_line_starts(source, parsed.tokens()),
+        logical_starts: checks::Suppressions::logical_line_starts(source, parsed.tokens()),
         magic_table_exempts: checks::MagicNumber::magic_table_exempt_offsets(&body),
         magic_const_rhs_exempts: checks::MagicNumber::magic_const_rhs_offsets(&body),
         magic_len_guard_exempts: checks::MagicNumber::magic_len_guard_offsets(&body),
@@ -831,7 +831,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         }
     }
     let tokens = parsed.tokens();
-    let supps = checks::parse_suppressions(source, tokens);
+    let supps = checks::Suppressions::parse_suppressions(source, tokens);
     // complexity findings are generated from the cc array after this pass —
     // honor complexity suppressions here so both paths agree (radon parity:
     // a fn whose complexity is suppressed must not resurface via cc)
@@ -842,16 +842,16 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
             // widened window and family-aware matching that suppressed()
             // uses (a suppression used by the cc path must not be re-flagged
             // stale by apply_suppressions_impl)
-            for ln in crate::suppressions::window_lines(e.line) {
+            for ln in crate::suppressions::Suppressions::window_lines(e.line) {
                 if let Some(entries) = supps.line.get(&ln) {
                     for (sig, why) in entries {
-                        if crate::suppressions::signal_matches(sig, "complexity") && !why.is_empty() {
+                        if crate::suppressions::Suppressions::signal_matches(sig, "complexity") && !why.is_empty() {
                             pre_used.lines.insert((ln, sig.clone()));
                         }
                     }
                 }
             }
-            let line_suppressed = crate::suppressions::suppressed("complexity", e.line, &supps);
+            let line_suppressed = crate::suppressions::Suppressions::suppressed("complexity", e.line, &supps);
             let file_suppressed = supps.file.get("complexity").is_some_and(|w| !w.is_empty());
             if file_suppressed {
                 pre_used.files.insert("complexity".into());
@@ -877,7 +877,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         spent: &mut supps_spent,
     };
     let findings =
-        checks::apply_source_suppressions(state.findings, source, name, tokens, &mut books, &magic_exempt_labels);
+        checks::Suppressions::apply_source(state.findings, source, name, tokens, &mut books, &magic_exempt_labels);
     let mut all = type_ignore_findings(source, name, tokens);
     all.extend(noqa_findings(source, name, tokens));
     all.extend(findings);
@@ -1227,7 +1227,13 @@ pub(crate) fn reconcile_repo_wide(
             Some(supps) => {
                 let empty = std::collections::HashSet::new();
                 let spent = supps_spent_by_rel.get(&file).unwrap_or(&empty);
-                let kept = crate::suppressions::filter_repo_wide(fs, supps, &mut used_line, &mut used_file, spent);
+                let kept = crate::suppressions::Suppressions::filter_repo_wide(
+                    fs,
+                    supps,
+                    &mut used_line,
+                    &mut used_file,
+                    spent,
+                );
                 all.extend(kept);
             }
             None => all.extend(fs),
@@ -1774,7 +1780,7 @@ fn main() {
             Some(supps) => {
                 let empty = std::collections::HashSet::new();
                 let spent = supps_spent_by_rel.get(&file).unwrap_or(&empty);
-                retained.extend(crate::suppressions::filter_repo_wide(
+                retained.extend(crate::suppressions::Suppressions::filter_repo_wide(
                     fs,
                     supps,
                     &mut used_ln,
@@ -2227,7 +2233,7 @@ mod tests {
         // starts; a multi-line string between comments must not lose count
         let src = "# one\nx = (\n    1 +\n    \"\"\"\nmulti\nline\n\"\"\"\n)\n# two\ny = 2  # three\n";
         let parsed = parse_module(src).unwrap();
-        let lines = crate::suppressions::comment_lines(src, parsed.tokens());
+        let lines = crate::suppressions::Suppressions::comment_lines(src, parsed.tokens());
         let got: Vec<(usize, &str)> = lines.iter().map(|(l, t)| (*l, t.as_str())).collect();
         assert_eq!(got, vec![(1, "# one"), (9, "# two"), (10, "# three")], "{got:?}");
     }
@@ -4653,7 +4659,7 @@ mod tests {
             .into_iter()
             .filter(|f| match supps_by_rel.get(&f.file) {
                 Some(supps) => {
-                    let kept = crate::suppressions::filter_repo_wide(
+                    let kept = crate::suppressions::Suppressions::filter_repo_wide(
                         vec![f.clone()],
                         supps,
                         &mut used_ln,
