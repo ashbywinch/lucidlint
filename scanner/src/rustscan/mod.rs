@@ -41,11 +41,11 @@ mod state;
 mod stmts;
 mod types;
 
-pub(crate) use comments::rs_comment_lines;
+pub(crate) use comments::RsComments;
 pub(crate) use exprs::is_compound_op;
-pub(crate) use graph::module_graph;
+pub(crate) use graph::ModuleGraph;
 pub(crate) use ignored_test::ignored_test_findings;
-pub(crate) use modshape::{mixed_module_into, module_shape};
+pub(crate) use modshape::MixedModule;
 pub(crate) use no_assert_test::no_assert_test_findings;
 pub(crate) use shape::{param_names, rust_expr_idents};
 pub(crate) use state::RsState;
@@ -125,7 +125,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
             };
         }
     };
-    let reason_lines: std::collections::HashSet<usize> = rs_comment_lines(source)
+    let reason_lines: std::collections::HashSet<usize> = RsComments::rs_comment_lines(source)
         .into_iter()
         .filter(|(_, t)| !t.trim_start_matches(['/', '*', ' ']).trim().is_empty())
         .flat_map(|(l, _)| [l, l + 1])
@@ -165,8 +165,8 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     state.findings.extend(no_assert_test_findings(&file, name));
     state.walk_file(&file);
     let mut scan = state.finish();
-    scan.module_shape = module_shape(&file, source);
-    mixed_module_into(&mut scan, &file, name);
+    scan.module_shape = MixedModule::module_shape(&file, source);
+    MixedModule::mixed_module_into(&mut scan, &file, name);
     // G4: does the file hold magic-CANDIDATE literals anywhere — the fact
     // the stale magic-number message cites when the family fires nowhere.
     // Rust's only exemptions are the position rule, so the label set is
@@ -180,7 +180,7 @@ pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
     };
     // suppressions parse from the whole file, filtering every family — the
     // shared why-less rule applies (`// lucidlint: ignore` needs a why)
-    let comments = rs_comment_lines(source);
+    let comments = RsComments::rs_comment_lines(source);
     let supps = crate::suppressions::suppressions_from_comments(&comments);
     // complexity findings are generated from the cc array AFTER the per-file
     // pass — honor complexity suppressions here so both paths agree, and
@@ -233,7 +233,7 @@ mod tests {
 
     use super::*;
     use crate::rustscan::shape::rust_fn_shape;
-    use crate::rustscan::skeleton::rs_skeleton;
+    use crate::rustscan::skeleton::RsSkeleton;
     use syn::Item;
 
     fn scan(src: &str) -> Vec<Finding> {
@@ -271,7 +271,7 @@ mod tests {
         // a `\`-continued line and a multi-line raw string each consume a
         // source line; missing either drifts every later suppression window
         let src = "fn f() {\n    let a = \"one \\\n two\";\n    let b = r#\"raw\nline\"#;\n}\n// tail comment\n";
-        let cs = rs_comment_lines(src);
+        let cs = RsComments::rs_comment_lines(src);
         let (line, text) = cs.last().expect("the tail comment");
         assert_eq!(*line, 7, "comments: {cs:?}");
         assert!(text.contains("tail comment"));
@@ -499,7 +499,7 @@ mod tests {
     fn comment_extraction_handles_hashed_raw_strings() {
         // r#"..."# content may contain " and // — neither is a comment
         let src = "let a = r#\"not // a comment \" inside\"#;\n// real comment\nlet b = r##\"has # in it\"##;\n";
-        let lines = rs_comment_lines(src);
+        let lines = RsComments::rs_comment_lines(src);
         let texts: Vec<String> = lines.iter().map(|(_, t)| t.clone()).collect();
         assert_eq!(texts.len(), 1);
         assert!(texts[0].contains("real comment"));
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn comment_extraction_is_string_aware() {
         let src = "// real comment\nlet s = \"// not a comment\";\nlet c = '/'; // trailing\n/* block\ncomment */\n";
-        let lines = rs_comment_lines(src);
+        let lines = RsComments::rs_comment_lines(src);
         let texts: Vec<String> = lines.iter().map(|(_, t)| t.clone()).collect();
         assert_eq!(texts.len(), 3); // the quoted "// not a comment" is not one
         assert!(texts.iter().any(|t| t.contains("real comment")));
@@ -557,7 +557,7 @@ mod tests {
         let mut uses: HashMap<String, Vec<String>> = HashMap::new();
         uses.insert("a.rs".into(), vec!["crate::b::helper".into()]);
         uses.insert("b.rs".into(), vec!["crate::a::helper".into()]);
-        let graph = module_graph(&files, &mods, &uses);
+        let graph = ModuleGraph::module_graph(&files, &mods, &uses);
         assert_eq!(graph.get("a.rs").map(|v| v.as_slice()), Some(&["b.rs".to_string()][..]));
         assert_eq!(graph.get("b.rs").map(|v| v.as_slice()), Some(&["a.rs".to_string()][..]));
         let fs = crate::graph_families::cycle_findings_for(&graph);
@@ -574,7 +574,7 @@ mod tests {
         mods.insert("a.rs".into(), vec![]);
         let mut uses: HashMap<String, Vec<String>> = HashMap::new();
         uses.insert("a.rs".into(), vec!["serde::Deserialize".into()]);
-        let graph = module_graph(&files, &mods, &uses);
+        let graph = ModuleGraph::module_graph(&files, &mods, &uses);
         assert!(graph.values().all(|v| v.is_empty())); // serde is not a local module — no edges
     }
 
@@ -886,7 +886,7 @@ mod tests {
         // as `fn f(s: &State)` is
         let src = "struct State { x: i32 }\nfn a(s: &Box<State>) {}\nfn b(s: std::sync::Arc<State>) {}\nfn c(s: Box<Box<State>>) {}\nfn d(e: Box<Expr>) {}\n";
         let file = syn::parse_file(src).unwrap();
-        let shape = crate::rustscan::modshape::module_shape(&file, src);
+        let shape = crate::rustscan::modshape::MixedModule::module_shape(&file, src);
         // the three State takers are State's methods in exile, not free fns
         assert_eq!(shape.functions, 0);
         // and a pointer to a foreign type still joins that type's group
@@ -900,7 +900,7 @@ mod tests {
         let Item::Fn(f) = &file.items[0] else {
             panic!("expected fn")
         };
-        let skel = rs_skeleton(&f.sig, &f.block);
+        let skel = RsSkeleton::rs_skeleton(&f.sig, &f.block);
         assert_eq!(skel[0], "Fn");
         assert_eq!(skel[1], "A");
         assert!(skel.contains(&"If".to_string()));

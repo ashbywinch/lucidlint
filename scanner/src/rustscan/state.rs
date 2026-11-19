@@ -7,17 +7,14 @@ use crate::finding::Finding;
 use crate::FnCc;
 
 use super::attrs::{attrs_of, has_attr, has_cfg_test};
-use super::decisions::{
-    names_a_decision, rs_bool_operands, rs_condition_message, rs_condition_nouns, rs_expr_text,
-    rs_names_a_type_or_constant,
-};
+use super::decisions::RsDecision;
 use super::exprs::{
     block_refs_self, is_assert_macro, is_compound_op, is_dbg_macro, is_unwrap_expect, tokens_contain_ident,
 };
 use super::fakefs::fakefs_hit;
-use super::graph::use_paths;
+use super::graph::ModuleGraph;
 use super::shape::{is_closures_shape, is_discarded_expression, is_trivial_rust_stub, rust_fn_shape};
-use super::skeleton::rs_skeleton;
+use super::skeleton::RsSkeleton;
 use super::stmts::{inner_count, is_diverge_stmt, return_values, span_lines};
 use super::types::{collect_type_idents, impl_self_name, static_type_ident};
 use super::{RsStruct, RustScan};
@@ -310,7 +307,7 @@ impl<'a> RsState<'a> {
         if is_tail {
             return;
         }
-        let operands = rs_bool_operands(cond);
+        let operands = RsDecision::rs_bool_operands(cond);
         if operands.len() < 3 {
             return;
         }
@@ -318,14 +315,14 @@ impl<'a> RsState<'a> {
         if matches!(fn_name.as_str(), "eq" | "ne" | "cmp" | "partial_cmp" | "hash") {
             return; // the operator IS the decision: the name exists
         }
-        let nouns: Vec<String> = rs_condition_nouns(cond)
+        let nouns: Vec<String> = RsDecision::rs_condition_nouns(cond)
             .into_iter()
-            .filter(|n| !rs_names_a_type_or_constant(&self.structs, n))
+            .filter(|n| !RsDecision::rs_names_a_type_or_constant(&self.structs, n))
             .collect();
-        if !names_a_decision(&nouns) {
+        if !RsDecision::names_a_decision(&nouns) {
             return;
         }
-        let message = rs_condition_message(operands.len(), &nouns, self.current_impl.as_deref());
+        let message = RsDecision::rs_condition_message(operands.len(), &nouns, self.current_impl.as_deref());
         self.finding("unnamed-condition", "warn", cond.span().start().line, &fn_name, message);
     }
 
@@ -359,7 +356,7 @@ impl<'a> RsState<'a> {
         if !classifies {
             return;
         }
-        let subject = rs_expr_text(&m.expr);
+        let subject = RsDecision::rs_expr_text(&m.expr);
         let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
         self.finding(
             "unnamed-classification",
@@ -517,7 +514,7 @@ impl<'a> RsState<'a> {
                 );
             }
             if self.is_repo_wide_module(module_level) {
-                let skel = rs_skeleton(sig, block);
+                let skel = RsSkeleton::rs_skeleton(sig, block);
                 if crate::skeleton::is_duplicate_size(skel.len(), block.stmts.len()) {
                     self.skeletons.push(crate::skeleton::SkeletonFn {
                         rel: self.file.to_string(),
@@ -582,7 +579,7 @@ impl<'a> Visit<'a> for RsState<'a> {
                 }
             }
             Item::Use(u) => {
-                self.uses.extend(use_paths(u));
+                self.uses.extend(ModuleGraph::use_paths(u));
             }
             Item::Struct(s) => {
                 if let syn::Fields::Named(named) = &s.fields {

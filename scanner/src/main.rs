@@ -1647,7 +1647,7 @@ fn main() {
             uses.insert(rel, rs.uses.clone());
         }
         let rels: Vec<String> = paths.iter().map(|p| rel_of(p, &root)).collect();
-        let graph = rustscan::module_graph(&rels, &mod_decls, &uses);
+        let graph = rustscan::ModuleGraph::module_graph(&rels, &mod_decls, &uses);
         // the module graph keys are rels to the binary's computed root — the
         // orchestrator's scan set is repo-relative, so re-anchor the findings
         // to absolute paths (resolution-neutral, like the per-file findings)
