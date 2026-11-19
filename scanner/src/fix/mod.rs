@@ -28,7 +28,7 @@ pub use extract_method::fix_extract_method;
 pub use loop_hoist::{fix_loop_hoist, loop_hoist_fixable_at};
 pub use loop_pipeline::{fix_loop_pipeline, loop_pipeline_fixable};
 pub use loop_sequence::{fix_loop_sequence, loop_sequence_fixable};
-pub use rule_table::fix_rule_table;
+pub use rule_table::RuleTable;
 
 #[cfg(test)]
 mod loop_tests {

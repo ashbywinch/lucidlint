@@ -4,7 +4,7 @@
 use syn::spanned::Spanned;
 use syn::{Expr, Item, Stmt};
 
-use super::rule_table::{block_ends_with_return, param_is_str};
+use super::rule_table::RuleTable;
 use super::text::FixText;
 
 /// A Rust dispatch chain (`if sel == "a" { ... } if sel == "b" { ... }`) is
@@ -29,7 +29,7 @@ pub(super) fn parse_dispatch_arms(
         if i.else_branch.is_some() {
             return Err("an arm has an else branch -- the match rewrite would delete it".to_string());
         }
-        if !block_ends_with_return(&i.then_branch) {
+        if !RuleTable::block_ends_with_return(&i.then_branch) {
             return Err("an arm does not end in `return` -- the match arms would need matching types".to_string());
         }
         let syn::Expr::Binary(b) = i.cond.as_ref() else {
@@ -88,7 +88,7 @@ pub fn fix_dispatch_registry(source: &str, line: usize) -> Result<String, String
     if arms.len() < 3 {
         return Err("fewer than 3 dispatch arms — a registry is not worth it".to_string());
     }
-    if !param_is_str(&target.sig, &sel) {
+    if !RuleTable::param_is_str(&target.sig, &sel) {
         return Err("the selector must be declared `&str` for the match rewrite".to_string());
     }
     // the fallback (statements after the chain) becomes the `_` arm

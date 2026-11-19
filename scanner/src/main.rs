@@ -1343,7 +1343,7 @@ fn main() {
                     let result = if kind == "dispatch-registry" {
                         fix::fix_dispatch_registry(&src, line)
                     } else if kind == "rule-table" {
-                        fix::fix_rule_table(&src, line)
+                        fix::RuleTable::fix_rule_table(&src, line)
                     } else if kind == "loop-pipeline" {
                         fix::fix_loop_pipeline(&src, line)
                     } else if kind == "loop-sequence" {
