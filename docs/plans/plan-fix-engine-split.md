@@ -173,6 +173,16 @@ not grow.
 
 The remaining families and their order are unchanged.
 
+**Step 8 — the small independent fixers — landed (2026-11-19).**
+`fixers/parameter_objects.py` (`ParameterObjects`), `fixers/magic_literal.py`
+(`MagicLiteral`), `fixers/renaming.py` (`Renaming`) and
+`fixers/feature_envy.py` (`FeatureEnvy`) now own their request method and its
+closed helpers; each `_FixRequest.fix_*` is a one-line delegate. The package
+root is at 147 definitions. `_Collaborator` and `_StmtReads` moved into
+`FeatureEnvy` (its only user) for the same import-graph reason as
+`_LoopPipelinePlan`. Verification: 318 tests, `GATE: PASS` (592 actions, 0
+fails), houses 353 / album 431 identical.
+
 ## Verification, after every step
 
 1. `make check` (ruff + pyrefly; run `make typecheck-update-baseline` only

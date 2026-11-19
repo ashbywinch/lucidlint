@@ -23,42 +23,6 @@ class _ModuleProposal(NamedTuple):
     module: str
 
 
-@dataclass
-class _RecordBuild:
-    """The record's dict names + the first build's elements (for the field
-    names) — a named return instead of a bare tuple."""
-
-    names: set[str]
-    elements: list[cst.BaseExpression] | None
-
-
-class _RecordDictHit(NamedTuple):
-    """One candidate literal: anchor position + the node + its const keys."""
-
-    line: int
-    col: int
-    node: cst.Dict
-    keys: list[str]
-
-
-class _Collaborator(NamedTuple):
-    """One `graph = self.graph` alias: the local name and the owner field it
-    aliases — a named return instead of a bare tuple."""
-
-    alias: str
-    attr: str
-
-
-class _StmtReads(NamedTuple):
-    """One top-level statement's analysis for the feature-envy move: the
-    names it reads (bound names excluded), the names it binds, and whether
-    it touches self — a named return instead of a bare tuple."""
-
-    reads: set[str]
-    bound: set[str]
-    has_self: bool
-
-
 @dataclass(frozen=True)
 class _ForwardTarget:
     """F/M's forwarder callee: a module fn (is_name) or a method on another

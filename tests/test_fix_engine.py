@@ -18,6 +18,7 @@ from test_lucidlint import make_repo, run_main
 
 import fix_engine
 from fix_engine.fixers.mechanical_fixes import MechanicalFixes
+from fix_engine.fixers.parameter_objects import ParameterObjects
 
 
 def test_tuple_record_becomes_a_class(tmp_path):
@@ -3329,15 +3330,15 @@ def test_exec_time_names_defer_function_bodies():
 
 
 def test_dataclass_import_is_recognised_and_prepended_once():
-    assert fix_engine._is_dataclass_import(cst.parse_statement("from dataclasses import dataclass\n"))
-    assert not fix_engine._is_dataclass_import(cst.parse_statement("from dataclasses import *\n"))
-    assert not fix_engine._is_dataclass_import(cst.parse_statement("import dataclasses\n"))
-    assert not fix_engine._is_dataclass_import(cst.parse_statement("from other import dataclass\n"))
-    assert not fix_engine._is_dataclass_import(cst.parse_statement("x = 1\n"))
+    assert ParameterObjects._is_dataclass_import(cst.parse_statement("from dataclasses import dataclass\n"))
+    assert not ParameterObjects._is_dataclass_import(cst.parse_statement("from dataclasses import *\n"))
+    assert not ParameterObjects._is_dataclass_import(cst.parse_statement("import dataclasses\n"))
+    assert not ParameterObjects._is_dataclass_import(cst.parse_statement("from other import dataclass\n"))
+    assert not ParameterObjects._is_dataclass_import(cst.parse_statement("x = 1\n"))
     missing = [cst.parse_statement("x = 1\n")]
-    once = fix_engine._ensure_dataclasses_import(list(missing))
-    assert fix_engine._is_dataclass_import(once[0])
-    assert fix_engine._ensure_dataclasses_import(list(once)) == once  # already present
+    once = ParameterObjects._ensure_dataclasses_import(list(missing))
+    assert ParameterObjects._is_dataclass_import(once[0])
+    assert ParameterObjects._ensure_dataclasses_import(list(once)) == once  # already present
 
 
 def test_loop_hoist_refuses_each_unsafe_loop_shape(tmp_path):
