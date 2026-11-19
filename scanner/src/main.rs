@@ -690,10 +690,10 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     StaticHusk::findings(state, body);
     delegating_husk_findings(state, body);
     process_class_findings(state, body);
-    closure_cluster_findings(state, body, source);
+    ClosureCluster::findings(state, body, source);
     duplicate_field_findings(state, body);
     record_shape_findings(state, body, source);
-    partition_findings(state, body, source);
+    Partition::findings(state, body, source);
     // review-log rules: shadowing hazards + duplicated work (all per-file)
     duplicate_def_findings(state, body);
     Docstring::findings(state, body);
@@ -703,7 +703,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     guard_clause_findings(state, body, source);
     latent_visitor_findings(state, body, source); // claims chains first — polymorphism skips them
     conditional_polymorphism_findings(state, body, source);
-    special_case_findings(state, body, source);
+    SpecialCase::findings(state, body, source);
     collect_scattered_instances(state, body);
     unnamed_condition_findings(state, body, source);
     unnamed_classification_findings(state, body, source);
@@ -711,7 +711,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     collect_setters(state, body);
     loop_pipeline_findings(state, body, source);
     collect_skeleton_modules(state, body, name);
-    collect_forwarders(state, body);
+    Forwarding::collect(state, body);
 }
 
 /// Per-buffer scans never run the repo-wide families (unused, unused-setter,
@@ -1041,7 +1041,7 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
     let mut additions: Vec<Finding> = Vec::new();
     additions.extend(checks::duplicate_findings(&skeletons));
     additions.extend(checks::duplicate_module_findings(&module_entities));
-    additions.extend(checks::forwarding_chain_findings(
+    additions.extend(checks::Forwarding::findings(
         &heads,
         &fns,
         &repo_methods,
@@ -1562,7 +1562,7 @@ fn main() {
         }
     }
     all_findings.extend(checks::FlatFolder::findings(&module_rels, &doc_rels));
-    all_findings.extend(checks::forwarding_chain_findings(
+    all_findings.extend(checks::Forwarding::findings(
         &heads,
         &fns,
         &repo_methods,
@@ -4637,7 +4637,7 @@ mod tests {
         // the suppression census + its bulk warning mirror main()'s report
         all.extend(duplicate_module_findings(&module_entities));
         let census = suppression_counts(supps_by_rel.values());
-        all.extend(forwarding_chain_findings(&heads, &fns, &repo_methods, &imports_by_rel));
+        all.extend(Forwarding::findings(&heads, &fns, &repo_methods, &imports_by_rel));
         all.extend(bulk_suppression_findings(&census, &supps_by_rel, 10));
         // mirror the production finalize: repo-wide findings honor per-file
         // suppressions too (family-aware, widened window), and a suppression

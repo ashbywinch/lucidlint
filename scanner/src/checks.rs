@@ -57,7 +57,7 @@ pub use crate::suppressions::{apply_source_suppressions, logical_line_starts, pa
 pub use builtin_shadow::shadow_findings;
 pub use class_facts::annotation_base_name;
 pub(crate) use class_facts::class_attr_names;
-pub use closure_cluster::closure_cluster_findings;
+pub use closure_cluster::ClosureCluster;
 pub use closures::closure_findings;
 pub use conditional_polymorphism::conditional_polymorphism_findings;
 pub use decisions::{unnamed_classification_findings, unnamed_condition_findings};
@@ -71,7 +71,7 @@ pub use duplicate_module::{collect_skeleton_modules, duplicate_module_findings};
 pub(crate) use expr_walk::{all_exprs, push_stmt_children, stmt_exprs, walk_expr_deep};
 pub use fakefs::fakefs_findings;
 pub use flat_folder::FlatFolder;
-pub use forwarding::{collect_forwarders, forwarding_chain_findings};
+pub use forwarding::Forwarding;
 #[cfg(test)]
 pub(crate) use function_facts::inner_function_count;
 pub(crate) use function_facts::{body_refs_name, returned_names};
@@ -98,7 +98,7 @@ pub(crate) use naming_units::name_states_unit;
 pub use no_assert_test::no_assert_test_findings;
 pub use noqa::noqa_findings;
 pub use over_abstraction::{abstraction_findings, collect_classes, collect_imports};
-pub use partition::partition_findings;
+pub use partition::Partition;
 pub use process_class::process_class_findings;
 pub use record_shape::record_shape_findings;
 pub use scattered::{collect_scattered_instances, scattered_instance_findings, ScatteredInstance};
@@ -109,7 +109,7 @@ pub use signature::{
     positional_literals_findings,
 };
 pub use skipif::skipif_findings;
-pub use special_case::special_case_findings;
+pub use special_case::SpecialCase;
 pub use static_husk::StaticHusk;
 pub use type_ignore::type_ignore_findings;
 pub use unused::{collect_setters, unused_findings, unused_setter_findings};
