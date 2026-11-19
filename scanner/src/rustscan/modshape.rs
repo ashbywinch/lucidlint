@@ -52,7 +52,7 @@ pub(crate) fn module_shape(file: &File, source: &str) -> crate::checks::ModuleSh
     attach_impl_methods(file, &mut types);
     let local: std::collections::HashSet<&str> = types.iter().map(|t| t.name.as_str()).collect();
     let (free, grouped) = foreign_receivers(file, &local);
-    crate::checks::rust_module_shape(source, free, types, grouped)
+    crate::checks::ModuleShape::rust(source, free, types, grouped)
 }
 
 /// The module's own types, each with the method count it declares itself.

@@ -91,7 +91,7 @@ pub use magic::{
 };
 pub use middle_man::{collect_middle_man, middle_man_findings, MiddleManCandidate, MiddleManClass};
 pub use module_names::{class_module_findings, strewing_findings, vague_name_findings};
-pub use module_size::{module_findings, python_module_shape, rust_module_shape, ModuleShape, TypeShape};
+pub use module_size::{ModuleShape, TypeShape};
 pub use monkeypatch::monkeypatch_findings;
 pub use naming_units::magic_unit_named_offsets;
 pub(crate) use naming_units::name_states_unit;

@@ -896,7 +896,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         scattered: state.scattered,
         duplicate_expressions: state.duplicate_expressions,
         path_expressions: state.path_expressions,
-        module_shape: checks::python_module_shape(source, &body),
+        module_shape: checks::ModuleShape::python(source, &body),
         setters: state.setters,
         refs: state.refs,
         strings: state.strings,
@@ -1089,7 +1089,7 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         .collect();
     reconcile_repo_wide(
         &mut additions,
-        checks::module_findings(&module_shapes),
+        checks::ModuleShape::findings(&module_shapes),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -1616,7 +1616,7 @@ fn main() {
         .collect();
     reconcile_repo_wide(
         &mut all_findings,
-        checks::module_findings(&module_shapes),
+        checks::ModuleShape::findings(&module_shapes),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -4622,7 +4622,7 @@ mod tests {
         );
         reconcile_repo_wide(
             &mut all,
-            checks::module_findings(&module_shapes),
+            checks::ModuleShape::findings(&module_shapes),
             &supps_by_rel,
             &spent_by_rel,
         );
@@ -6635,7 +6635,7 @@ def two(work, batch):
         }
         let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
-        let f = checks::module_findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
+        let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         let msg = &hits[0].message;
@@ -6738,7 +6738,7 @@ def two(work, batch):
         }
         let rs = rustscan::scan_source(&src, "crate/src/widgets.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/widgets.rs");
-        let f = checks::module_findings(&[("crate/src/widgets.rs".to_string(), scan.module_shape.clone())]);
+        let f = checks::ModuleShape::findings(&[("crate/src/widgets.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         let msg = &hits[0].message;
@@ -6759,7 +6759,7 @@ def two(work, batch):
         }
         let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
-        let f = checks::module_findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
+        let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         let msg = &hits[0].message;
@@ -6786,7 +6786,7 @@ def two(work, batch):
         }
         let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
-        let f = checks::module_findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
+        let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         assert!(
@@ -6805,7 +6805,7 @@ def two(work, batch):
         }
         let rs = rustscan::scan_source(&wide, "crate/src/wide.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/wide.rs");
-        let f = checks::module_findings(&[("crate/src/wide.rs".to_string(), scan.module_shape.clone())]);
+        let f = checks::ModuleShape::findings(&[("crate/src/wide.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         assert!(
@@ -6829,7 +6829,7 @@ def two(work, batch):
         let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
         assert_eq!(scan.module_shape.definitions(), 1, "{:?}", scan.module_shape);
-        let f = checks::module_findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
+        let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         assert!(f.is_empty(), "{f:?}");
         // the same functions with no receiver are 31 definitions, and report
         let mut loose = String::new();
@@ -6841,7 +6841,7 @@ def two(work, batch):
         let rs = rustscan::scan_source(&loose, "crate/src/loose.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/loose.rs");
         assert_eq!(scan.module_shape.definitions(), 31);
-        let f = checks::module_findings(&[("crate/src/loose.rs".to_string(), scan.module_shape.clone())]);
+        let f = checks::ModuleShape::findings(&[("crate/src/loose.rs".to_string(), scan.module_shape.clone())]);
         assert!(f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
     }
 
@@ -6855,7 +6855,7 @@ def two(work, batch):
         src.push_str("pub struct Table {\n    pub rows: u32,\n}\n\nimpl Table {\n    pub fn rows(&self) -> u32 {\n        self.rows\n    }\n}\n");
         let rs = rustscan::scan_source(&src, "crate/src/table.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/table.rs");
-        let f = checks::module_findings(&[("crate/src/table.rs".to_string(), scan.module_shape.clone())]);
+        let f = checks::ModuleShape::findings(&[("crate/src/table.rs".to_string(), scan.module_shape.clone())]);
         assert!(f.is_empty(), "{f:?}");
     }
 
@@ -6864,7 +6864,7 @@ def two(work, batch):
         let src =
             "class Widget:\n    def run(self):\n        pass\n\ndef step(value):\n    return value\n\nCONSTANT = 3\n";
         let parsed = parse_module(src).unwrap();
-        let shape = checks::python_module_shape(src, &parsed.syntax().body);
+        let shape = checks::ModuleShape::python(src, &parsed.syntax().body);
         assert_eq!(shape.definitions(), 2); // the class and the function; not the method or the constant
         assert_eq!(shape.classes.len(), 1);
         assert_eq!(shape.classes[0].name, "Widget");

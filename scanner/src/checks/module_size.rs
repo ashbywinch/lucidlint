@@ -112,12 +112,6 @@ pub struct TypeShape {
     pub methods: usize,
 }
 
-impl TypeShape {
-    fn is_record(&self) -> bool {
-        self.methods == 0
-    }
-}
-
 /// The shape of one module: its top-level classes, the functions it owns, and
 /// the functions a framework registered. Only the module body is read — a
 /// class's methods are that class's, and a nested class belongs to the class
@@ -136,75 +130,6 @@ pub struct ModuleShape {
     /// Decorated functions: registered with a caller outside the module.
     pub framework_functions: usize,
     pub generated: bool,
-}
-
-/// Measure one module from its parsed body and source text.
-pub fn python_module_shape(source: &str, body: &[Stmt]) -> ModuleShape {
-    let mut classes = Vec::new();
-    let mut functions = 0;
-    let mut framework_functions = 0;
-    for stmt in body {
-        match stmt {
-            Stmt::ClassDef(class) => classes.push(TypeShape {
-                name: class.name.to_string(),
-                methods: class
-                    .body
-                    .iter()
-                    .filter(|member| matches!(member, Stmt::FunctionDef(_)))
-                    .count(),
-            }),
-            Stmt::FunctionDef(function) => {
-                if function.decorator_list.is_empty() {
-                    functions += 1;
-                } else {
-                    framework_functions += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    ModuleShape {
-        language: Language::Python,
-        classes,
-        receiver_groups: Vec::new(),
-        functions,
-        framework_functions,
-        generated: is_generated(source),
-    }
-}
-
-/// Measure a Rust module from the counts its scan collected: the free `fn`s
-/// and the top-level types with the methods their `impl` blocks define. An
-/// `impl` block is not a definition of its own — its methods are the type's,
-/// exactly as a class's methods are the class's.
-pub fn rust_module_shape(
-    source: &str,
-    functions: usize,
-    classes: Vec<TypeShape>,
-    receiver_groups: Vec<(String, usize)>,
-) -> ModuleShape {
-    ModuleShape {
-        language: Language::Rust,
-        classes,
-        receiver_groups,
-        functions,
-        framework_functions: 0,
-        generated: is_generated(source),
-    }
-}
-
-fn is_generated(source: &str) -> bool {
-    source.lines().take(GENERATED_HEAD_LINES).any(|line| {
-        let lower = line.to_lowercase();
-        GENERATED_MARKERS.iter().any(|marker| lower.contains(marker))
-    })
-}
-
-fn is_script(rel: &str) -> bool {
-    // any directory on the path, not just the first: `src/scripts/x.py` is as
-    // much a script as `scripts/x.py`, and the clause exists to answer that
-    // reader's objection
-    rel.split('/').rev().skip(1).any(|dir| SCRIPT_DIRS.contains(&dir))
 }
 
 impl ModuleShape {
@@ -289,7 +214,7 @@ impl ModuleShape {
         }
         let owned = self.classes.len() + self.receiver_groups.len();
         owned > self.functions
-            && (self.classes.iter().filter(|c| !c.is_record()).count() > 1 || !self.receiver_groups.is_empty())
+            && (self.classes.iter().filter(|c| c.methods > 0).count() > 1 || !self.receiver_groups.is_empty())
     }
 
     fn classes_message(&self, rel: &str) -> String {
@@ -299,7 +224,7 @@ impl ModuleShape {
             count = self.definitions(),
             types = names.len(),
             noun = self.type_noun(),
-            list = name_list(&names),
+            list = Self::name_list(&names),
             framework = self.framework_clause(),
             principle = self.principle(),
             reader = self.reader_harm(),
@@ -317,7 +242,7 @@ impl ModuleShape {
         }
         format!(
             " The functions group by the type they take: {}.",
-            group_list(&self.receiver_groups)
+            Self::group_list(&self.receiver_groups)
         )
     }
 
@@ -347,7 +272,7 @@ impl ModuleShape {
     /// action leads with the split; the strict rung's module is one concept with
     /// a missing owner, so its action leads with the class.
     fn functions_message(&self, rel: &str, many: bool) -> String {
-        let script = if self.language == Language::Python && is_script(rel) {
+        let script = if self.language == Language::Python && Self::is_script(rel) {
             " A script is not different: the steps it runs build one program state, and no name owns it."
         } else {
             ""
@@ -372,13 +297,13 @@ impl ModuleShape {
             Language::Rust => {
                 let mut parts = Vec::new();
                 if !self.classes.is_empty() {
-                    parts.push(counted(self.classes.len(), "type"));
+                    parts.push(Self::counted(self.classes.len(), "type"));
                 }
                 if !self.receiver_groups.is_empty() {
-                    parts.push(counted(self.receiver_groups.len(), "function group"));
+                    parts.push(Self::counted(self.receiver_groups.len(), "function group"));
                 }
                 if self.functions > 0 {
-                    parts.push(counted(self.functions, "free function"));
+                    parts.push(Self::counted(self.functions, "free function"));
                 }
                 if parts.is_empty() {
                     return String::new();
@@ -466,44 +391,115 @@ impl ModuleShape {
     }
 }
 
-/// `1 type`, `2 types` — a count with its noun, so a one-item group does not
-/// read as "1 function groups".
-fn counted(n: usize, noun: &str) -> String {
-    if n == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{n} {noun}s")
+impl ModuleShape {
+    /// Measure one module from its parsed body and source text.
+    pub fn python(source: &str, body: &[Stmt]) -> ModuleShape {
+        let mut classes = Vec::new();
+        let mut functions = 0;
+        let mut framework_functions = 0;
+        for stmt in body {
+            match stmt {
+                Stmt::ClassDef(class) => classes.push(TypeShape {
+                    name: class.name.to_string(),
+                    methods: class
+                        .body
+                        .iter()
+                        .filter(|member| matches!(member, Stmt::FunctionDef(_)))
+                        .count(),
+                }),
+                Stmt::FunctionDef(function) => {
+                    if function.decorator_list.is_empty() {
+                        functions += 1;
+                    } else {
+                        framework_functions += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        ModuleShape {
+            language: Language::Python,
+            classes,
+            receiver_groups: Vec::new(),
+            functions,
+            framework_functions,
+            generated: Self::generated(source),
+        }
     }
-}
 
-/// One finding per module that holds more definitions than its rung allows.
-pub fn module_findings(scans: &[(String, ModuleShape)]) -> Vec<Finding> {
-    scans
-        .iter()
-        .filter_map(|(rel, shape)| shape.module_finding(rel))
-        .collect()
-}
-
-fn group_list(groups: &[(String, usize)]) -> String {
-    let shown: Vec<String> = groups
-        .iter()
-        .take(3)
-        .map(|(name, count)| format!("{name} ({count})"))
-        .collect();
-    let list = shown.join(", ");
-    match groups.len().saturating_sub(shown.len()) {
-        0 => list,
-        1 => format!("{list} and one more"),
-        more => format!("{list} and {more} more"),
+    /// Measure a Rust module from the counts its scan collected: the free `fn`s
+    /// and the top-level types with the methods their `impl` blocks define. An
+    /// `impl` block is not a definition of its own — its methods are the type's,
+    /// exactly as a class's methods are the class's.
+    pub fn rust(
+        source: &str,
+        functions: usize,
+        classes: Vec<TypeShape>,
+        receiver_groups: Vec<(String, usize)>,
+    ) -> ModuleShape {
+        ModuleShape {
+            language: Language::Rust,
+            classes,
+            receiver_groups,
+            functions,
+            framework_functions: 0,
+            generated: Self::generated(source),
+        }
     }
-}
 
-fn name_list(names: &[&str]) -> String {
-    let shown: Vec<&str> = names.iter().take(3).copied().collect();
-    let list = shown.join(", ");
-    match names.len().saturating_sub(shown.len()) {
-        0 => list,
-        1 => format!("{list} and one more"),
-        more => format!("{list} and {more} more"),
+    fn generated(source: &str) -> bool {
+        source.lines().take(GENERATED_HEAD_LINES).any(|line| {
+            let lower = line.to_lowercase();
+            GENERATED_MARKERS.iter().any(|marker| lower.contains(marker))
+        })
+    }
+
+    fn is_script(rel: &str) -> bool {
+        // any directory on the path, not just the first: `src/scripts/x.py` is as
+        // much a script as `scripts/x.py`, and the clause exists to answer that
+        // reader's objection
+        rel.split('/').rev().skip(1).any(|dir| SCRIPT_DIRS.contains(&dir))
+    }
+
+    /// One finding per module that holds more definitions than its rung allows.
+    pub fn findings(scans: &[(String, ModuleShape)]) -> Vec<Finding> {
+        scans
+            .iter()
+            .filter_map(|(rel, shape)| shape.module_finding(rel))
+            .collect()
+    }
+
+    fn group_list(groups: &[(String, usize)]) -> String {
+        let shown: Vec<String> = groups
+            .iter()
+            .take(3)
+            .map(|(name, count)| format!("{name} ({count})"))
+            .collect();
+        let list = shown.join(", ");
+        match groups.len().saturating_sub(shown.len()) {
+            0 => list,
+            1 => format!("{list} and one more"),
+            more => format!("{list} and {more} more"),
+        }
+    }
+
+    fn name_list(names: &[&str]) -> String {
+        let shown: Vec<&str> = names.iter().take(3).copied().collect();
+        let list = shown.join(", ");
+        match names.len().saturating_sub(shown.len()) {
+            0 => list,
+            1 => format!("{list} and one more"),
+            more => format!("{list} and {more} more"),
+        }
+    }
+
+    /// `1 type`, `2 types` — a count with its noun, so a one-item group does not
+    /// read as "1 function groups".
+    fn counted(n: usize, noun: &str) -> String {
+        if n == 1 {
+            format!("1 {noun}")
+        } else {
+            format!("{n} {noun}s")
+        }
     }
 }
