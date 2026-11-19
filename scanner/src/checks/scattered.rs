@@ -7,7 +7,8 @@ use ruff_python_ast::{Expr, Stmt};
 use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
-use crate::{line_of, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 /// `scattered-instance`: the rule object. Its methods read the collected class references.
 pub struct Scattered;
@@ -55,7 +56,7 @@ impl Scattered {
                 continue;
             }
             state.scattered.push(ScatteredInstance {
-                line: line_of(state.source, stmt.range().start()),
+                line: Source::line_of(state.source, stmt.range().start()),
                 binding: target.to_string(),
                 callee: callee.id.to_string(),
             });

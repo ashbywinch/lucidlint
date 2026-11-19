@@ -7,7 +7,7 @@ use ruff_python_ast::{Expr, Stmt};
 use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
-use crate::source::line_of;
+use crate::source::Source;
 use crate::ScanState;
 
 /// `unused` / `unused-setter`: the rule objects. Their methods read the repo's production references and the setters no caller uses.
@@ -29,7 +29,7 @@ impl Unused {
                         if is_setter {
                             state
                                 .setters
-                                .push((f.name.to_string(), line_of(source, f.name.range().start())));
+                                .push((f.name.to_string(), Source::line_of(source, f.name.range().start())));
                         }
                     }
                     Stmt::ClassDef(cd) => walk(state, &cd.body, source),

@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use crate::finding::Finding;
 use crate::skeleton::{skel_children, Q};
-use crate::source::line_of;
+use crate::source::Source;
 use crate::ScanState;
 
 const SKIPIF_NEEDLES: [&str; 5] = ["os.environ", "environ", "getenv", "os.path.exists", "sys.platform"];
@@ -29,7 +29,7 @@ fn is_pytest_mark_skip(a: &ExprAttribute) -> bool {
 /// A parked-test finding — same family (kind `skipif`) and same message as
 /// the env-needle case.
 fn parked_skip_finding(state: &mut ScanState, source: &str, offset: ruff_text_size::TextSize) {
-    let line = line_of(source, offset);
+    let line = Source::line_of(source, offset);
     state.findings.push(Finding {
         logical_start: None,
         seam_members: Vec::new(),
@@ -75,13 +75,13 @@ pub fn skipif_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                             if SKIPIF_NEEDLES.iter().any(|needle| cond.contains(needle)) {
                                 state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                                                     file: state.file.to_string(),
-                                                                    line: line_of(source, call.range().start()),
+                                                                    line: Source::line_of(source, call.range().start()),
                                                                     function: String::new(),
                                                                     kind: "skipif".into(),
                                                                     severity: "fail".into(),
                                                                     message: format!(
                                                                         "@pytest.mark.skipif on environment presence at line {} — never skip a test for a missing dependency: fake it (a fixture builds a stand-in) so it runs identically everywhere; only the E2E suite may skip",
-                                                                        line_of(source, call.range().start())
+                                                                        Source::line_of(source, call.range().start())
                                                                     ), });
                             }
                         } else if is_skip_mark(a, call, &mut reported) {

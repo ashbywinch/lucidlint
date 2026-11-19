@@ -4,7 +4,8 @@
 use ruff_python_ast::Stmt;
 
 use crate::finding::Finding;
-use crate::{stmt_line, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 /// The enumerated process set — a general `-er` test would fire on real
 /// nouns, so the process words are enumerated. MINUS the GoF pattern
@@ -51,7 +52,7 @@ pub fn process_class_findings(state: &mut ScanState, body: &[Stmt]) {
         if !PROCESS_CLASS_WORDS.iter().any(|w| name.ends_with(w)) {
             continue;
         }
-        let line = stmt_line(state.source, s);
+        let line = Source::stmt_line(state.source, s);
         state.findings.push(Finding { logical_start: None, seam_members: Vec::new(),
         col: 0,
         file: state.file.to_string(),

@@ -9,7 +9,7 @@ use crate::finding::Finding;
 use super::middle_man::class_base_names;
 use super::sibling_class::{SiblingClass, SiblingMethod};
 use super::{annotation_base_name, fn_skeleton, push_stmt_children, stmt_exprs};
-use crate::line_of;
+use crate::source::Source;
 
 /// `sibling-value-class`: the rule object. Its methods read the package's classes; the evidence and the message live together.
 pub struct SiblingValueClass;
@@ -227,7 +227,7 @@ impl SiblingValueClass {
         }
         SiblingClass {
             name: c.name.to_string(),
-            line: line_of(source, c.name.range().start()),
+            line: Source::line_of(source, c.name.range().start()),
             fields: fields.into_iter().collect(),
             field_types: types.into_iter().collect(),
             bases: class_base_names(c),

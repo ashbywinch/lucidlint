@@ -11,7 +11,7 @@ use ruff_python_ast::token::{TokenKind, Tokens};
 use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
-use crate::source::line_of;
+use crate::source::Source;
 
 /// One line-level suppression and the (signal, why) parsed from it.
 /// Line suppressions exempt a finding on that line or the line before;
@@ -677,7 +677,7 @@ pub fn logical_line_starts(source: &str, tokens: &Tokens) -> Vec<usize> {
     let mut cur: Option<usize> = None;
     let mut filled = 0usize;
     for tok in tokens.iter() {
-        let line = line_of(source, tok.range().start()).min(nlines);
+        let line = Source::line_of(source, tok.range().start()).min(nlines);
         if line > filled {
             match tok.kind() {
                 TokenKind::Newline => {

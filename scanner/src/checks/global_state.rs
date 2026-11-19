@@ -6,7 +6,8 @@ use ruff_python_ast::{Expr, Operator, Stmt};
 use crate::finding::Finding;
 
 use super::middle_man::is_dunder;
-use crate::{stmt_line, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 /// `global-state`: the rule object. Its methods read one module-level binding; the evidence and the message live together.
 pub struct GlobalState;
@@ -208,7 +209,7 @@ impl GlobalState {
     pub fn global_state_findings(state: &mut ScanState, stmt: &Stmt, module_level: bool) {
         let fn_name = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
         if let Stmt::Global(g) = stmt {
-            let line = stmt_line(state.source, stmt);
+            let line = Source::stmt_line(state.source, stmt);
             let names: Vec<&str> = g.names.iter().map(|n| n.as_str()).collect();
             state.findings.push(Finding { logical_start: None, seam_members: Vec::new(),
             col: 0,
@@ -252,7 +253,7 @@ impl GlobalState {
                 if value.is_some_and(|v| Self::is_type_alias_value(name, v)) {
                     continue; // a name for a type, not a variable a caller varies
                 }
-                let line = stmt_line(state.source, stmt);
+                let line = Source::stmt_line(state.source, stmt);
                 let message = Self::global_state_message(name, value, &state.module_constants);
                 state.findings.push(Finding {
                     logical_start: None,

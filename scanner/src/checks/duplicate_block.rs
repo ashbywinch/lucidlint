@@ -3,7 +3,7 @@
 
 use ruff_python_ast::{AnyNodeRef, Stmt};
 
-use crate::{finding::Finding, stmt_line, ScanState};
+use crate::{finding::Finding, source::Source, ScanState};
 
 use super::{skel_children, Q};
 
@@ -98,7 +98,7 @@ pub fn duplicate_block_findings(state: &mut ScanState, module_body: &[Stmt]) {
             }
             if let Some(&i) = first_seen.get(&window) {
                 if i + BLOCK_WINDOW <= j {
-                    let line = stmt_line(state.source, flat[j]);
+                    let line = Source::stmt_line(state.source, flat[j]);
                     // the directive is truthful only for deep-equal blocks
                     // (raw keys match); renamed duplicates keep the finding
                     // but no fix — agents delete by hand (review bot)

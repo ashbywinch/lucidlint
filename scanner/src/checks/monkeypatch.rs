@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use crate::finding::Finding;
 use crate::skeleton::{skel_children, Q};
-use crate::source::line_of;
+use crate::source::Source;
 use crate::ScanState;
 
 /// `monkeypatch`: the rule object. Its methods find one patch site; the evidence and the message live together.
@@ -29,7 +29,7 @@ impl Monkeypatch {
             _ => None,
         };
         if let Some(desc) = desc {
-            Self::mp_finding(state, &desc, line_of(source, d.range().start()));
+            Self::mp_finding(state, &desc, Source::line_of(source, d.range().start()));
         }
     }
 
@@ -55,7 +55,7 @@ impl Monkeypatch {
         while qi < queue.len() {
             if let Q::N(n) = queue[qi] {
                 if let AnyNodeRef::ExprCall(call) = n {
-                    let line = line_of(source, call.range().start());
+                    let line = Source::line_of(source, call.range().start());
                     if let Some(desc) = Self::patch_call(source, call, &mock_imports) {
                         Self::mp_finding(state, &desc, line);
                     }

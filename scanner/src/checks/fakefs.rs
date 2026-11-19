@@ -6,7 +6,7 @@ use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
 use crate::skeleton::{skel_children, Q};
-use crate::source::line_of;
+use crate::source::Source;
 use crate::ScanState;
 
 const FS_PATH_METHODS: [&str; 17] = [
@@ -53,7 +53,7 @@ pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
     while qi < queue.len() {
         if let Q::N(n) = queue[qi] {
             if let AnyNodeRef::StmtFunctionDef(f) = n {
-                let line = line_of(source, f.name.range().start());
+                let line = Source::line_of(source, f.name.range().start());
                 let is_test = f.name.as_str().starts_with("test_")
                     || body.iter().any(|s| {
                         matches!(s, Stmt::ClassDef(c) if c.name.to_lowercase().starts_with("test")

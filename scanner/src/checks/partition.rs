@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use crate::finding::Finding;
 use crate::skeleton::{skel_children, Q};
-use crate::source::line_of;
+use crate::source::Source;
 use crate::ScanState;
 
 /// `partition`: the rule object. Its methods read one class's field use; the evidence and the message live together.
@@ -21,7 +21,7 @@ impl Partition {
         if methods.len() < 6 {
             return None;
         }
-        let span = line_of(source, cls.range().end()) - line_of(source, cls.name.range().start());
+        let span = Source::line_of(source, cls.range().end()) - Source::line_of(source, cls.name.range().start());
         if span < 150 {
             return None;
         }
@@ -159,7 +159,7 @@ impl Partition {
                 state.findings.push(Finding { logical_start: None, seam_members: groups.iter().flatten().cloned().collect(),
                 col: 0,
                 file: state.file.to_string(),
-                line: line_of(source, cls.name.range().start()),
+                line: Source::line_of(source, cls.name.range().start()),
                 function: cls.name.to_string(),
                 kind: "partition".into(),
                 severity: "fail".into(),

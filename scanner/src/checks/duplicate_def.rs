@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use ruff_python_ast::{Expr, Stmt};
 
-use crate::{finding::Finding, stmt_line, ScanState};
+use crate::{finding::Finding, source::Source, ScanState};
 
 /// Module-scope name reuse: a def/class/import binding that shadows an earlier
 /// module-scope binding of the same name (review-log §10, finding 1 — the
@@ -17,7 +17,7 @@ pub fn duplicate_def_findings(state: &mut ScanState, module_body: &[Stmt]) {
     let (overloaded, impl_def_line, overload_bound) = overload_exemption(module_body, state.source);
     let mut seen: Vec<(String, usize)> = Vec::new();
     for s in module_body {
-        let line = stmt_line(state.source, s);
+        let line = Source::stmt_line(state.source, s);
         for (name, is_def, stub) in bound_names(s, &overload_bound) {
             if name.is_empty() {
                 continue;
@@ -134,7 +134,7 @@ fn overload_exemption(
                 // the FIRST non-overload def is the implementation the stubs
                 // declare; tracking the LAST def instead exempted a genuine
                 // duplicate after the impl and flagged the impl (review bot)
-                impl_def_line.entry(name).or_insert(stmt_line(source, s));
+                impl_def_line.entry(name).or_insert(Source::stmt_line(source, s));
             }
         }
     }

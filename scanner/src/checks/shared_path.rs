@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use ruff_python_ast::{Expr, ExprCall, Operator, Stmt, StmtFunctionDef};
 use ruff_text_size::Ranged;
 
-use crate::{finding::Finding, source::line_of, ScanState};
+use crate::{finding::Finding, source::Source, ScanState};
 
 /// One module-level path expression: the raw material for the shared-path
 /// family. `segments` is the path's shape — names, quoted literals, `<Path>`
@@ -41,7 +41,7 @@ pub fn collect_path_expressions(state: &mut ScanState, f: &StmtFunctionDef) {
         let segments = path_segments(expr, source);
         if segments.len() >= 2 {
             state.path_expressions.push(PathExpression {
-                line: line_of(source, expr.range().start()),
+                line: Source::line_of(source, expr.range().start()),
                 function: f.name.to_string(),
                 pair: pair.clone(),
                 segments,

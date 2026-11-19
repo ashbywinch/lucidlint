@@ -11,7 +11,8 @@ use ruff_text_size::Ranged;
 use crate::finding::Finding;
 
 use super::{all_exprs, class_attr_names, push_stmt_children, stmt_exprs};
-use crate::{line_of, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 /// A module-level function called from a method with `self.<attr>` arguments
 /// (or locals named like the class's attributes) matching EVERY parameter —
@@ -36,7 +37,7 @@ pub fn misplaced_method_findings(state: &mut ScanState, body: &[Stmt]) {
         if let Some(k) = &f.parameters.kwarg {
             params.push(k.name.to_string());
         }
-        let line = line_of(state.source, f.name.range().start());
+        let line = Source::line_of(state.source, f.name.range().start());
         module_fns.insert(f.name.to_string(), (line, params));
     }
     if module_fns.is_empty() {
@@ -289,7 +290,7 @@ fn walk_wide_tuples(state: &mut ScanState, body: &[Stmt], owner: &str) {
                         state,
                         a.annotation(),
                         &format!("parameter '{}' of '{}'", a.parameter.name, f.name),
-                        line_of(state.source, a.range().start()),
+                        Source::line_of(state.source, a.range().start()),
                         f.name.as_str(),
                     );
                 }
@@ -297,7 +298,7 @@ fn walk_wide_tuples(state: &mut ScanState, body: &[Stmt], owner: &str) {
                     state,
                     f.returns.as_deref(),
                     &format!("the return type of '{}'", f.name),
-                    line_of(state.source, f.name.range().start()),
+                    Source::line_of(state.source, f.name.range().start()),
                     f.name.as_str(),
                 );
                 walk_wide_tuples(state, &f.body, f.name.as_str());
@@ -333,7 +334,7 @@ fn walk_wide_tuples(state: &mut ScanState, body: &[Stmt], owner: &str) {
                         state,
                         Some(a.annotation.as_ref()),
                         &format!("'{}'", n.id.as_str()),
-                        line_of(state.source, a.target.range().start()),
+                        Source::line_of(state.source, a.target.range().start()),
                         owner,
                     );
                 }
@@ -401,7 +402,7 @@ pub fn tuple_record_findings(state: &mut ScanState, body: &[Stmt]) {
             if a.targets.len() == 1 {
                 if let Some(arity) = dict_tuple_arity(&a.value) {
                     if let Expr::Name(n) = &a.targets[0] {
-                        let line = line_of(state.source, n.range().start());
+                        let line = Source::line_of(state.source, n.range().start());
                         records.insert(n.id.to_string(), (arity, line));
                     }
                 }
@@ -501,11 +502,11 @@ pub fn assembly_class_findings(state: &mut ScanState, body: &[Stmt]) {
     let mut fns: Vec<(&StmtFunctionDef, usize)> = Vec::new();
     for s in body {
         match s {
-            Stmt::FunctionDef(f) => fns.push((f, line_of(state.source, f.name.range().start()))),
+            Stmt::FunctionDef(f) => fns.push((f, Source::line_of(state.source, f.name.range().start()))),
             Stmt::ClassDef(c) => {
                 for m in &c.body {
                     if let Stmt::FunctionDef(f) = m {
-                        fns.push((f, line_of(state.source, f.name.range().start())));
+                        fns.push((f, Source::line_of(state.source, f.name.range().start())));
                     }
                 }
             }

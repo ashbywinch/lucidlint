@@ -7,7 +7,7 @@
 use ruff_python_ast::{Expr, Stmt};
 use ruff_text_size::Ranged;
 
-use crate::{finding::Finding, source::line_of, ScanState};
+use crate::{finding::Finding, source::Source, ScanState};
 
 /// Is the guarded branch of a None/empty check a FAIL-FAST GUARD — it raises
 /// or returns an error shape (an HTTPException, a *Response, a dict with an
@@ -123,7 +123,7 @@ pub fn latent_visitor_findings(state: &mut ScanState, body: &[Stmt], source: &st
                         fam.sort_unstable();
                         fam.dedup();
                         let chain_family = fam.join("|");
-                        let line = line_of(source, s.range().start());
+                        let line = Source::line_of(source, s.range().start());
                         let e = families.entry(chain_family.clone()).or_insert((0, line));
                         e.0 += 1;
                         site_lines.insert(line, chain_family);

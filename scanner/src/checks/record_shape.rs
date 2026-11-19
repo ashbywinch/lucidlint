@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use ruff_python_ast::{AnyNodeRef, Expr, Operator, Stmt, StmtFunctionDef, UnaryOp};
 use ruff_text_size::Ranged;
 
-use crate::{finding::Finding, source::col_of, source::line_of, ScanState};
+use crate::{finding::Finding, source::Source, ScanState};
 
 use super::class_facts::{class_attr_names, class_field_names};
 use super::expr_walk::{push_stmt_children, stmt_exprs};
@@ -526,8 +526,8 @@ fn record_literal_scan(e: &Expr, source: &str, bindings: &TypeBindings, found: &
             if is_literal_record(d, &keys, scalar_map) {
                 let record = literal_value_record(d.items.iter().map(|it| &it.value), bindings);
                 found.push(RecordHit {
-                    line: line_of(source, d.range().start()),
-                    col: col_of(source, d.range().start()),
+                    line: Source::line_of(source, d.range().start()),
+                    col: Source::col_of(source, d.range().start()),
                     keys,
                     record,
                 });
@@ -583,8 +583,8 @@ fn record_literal_scan(e: &Expr, source: &str, bindings: &TypeBindings, found: &
                         .collect();
                     let record = literal_value_record(kwargs.iter().map(|k| &k.value), bindings);
                     found.push(RecordHit {
-                        line: line_of(source, c.range().start()),
-                        col: col_of(source, c.range().start()),
+                        line: Source::line_of(source, c.range().start()),
+                        col: Source::col_of(source, c.range().start()),
                         keys,
                         record,
                     });
@@ -718,8 +718,8 @@ fn module_export_edges(body: &[Stmt], source: &str) -> Vec<ExportEdge> {
                     }
                     out.push(ExportEdge {
                         name_start: f.name.range().start(),
-                        start_line: line_of(source, f.range().start()),
-                        end_line: line_of(source, f.range().end()),
+                        start_line: Source::line_of(source, f.range().start()),
+                        end_line: Source::line_of(source, f.range().end()),
                         fields: fields.clone(),
                     });
                 }
@@ -784,7 +784,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
     while qi < queue.len() {
         if let Q::N(n) = queue[qi] {
             if let AnyNodeRef::StmtFunctionDef(f) = n {
-                let def_line = line_of(source, f.name.range().start());
+                let def_line = Source::line_of(source, f.name.range().start());
                 // Issue #42: this function IS an export edge (a to_dict/to_json
                 // method whose enclosing class declares fields) — the class
                 // names the returned shape, so the return annotation has
@@ -802,7 +802,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                     // H2: the finding anchors at the ANNOTATED PARAMETER's
                     // own line (its range start), not the def line — a
                     // multi-line signature's params report on their lines.
-                    let param_line = line_of(source, pwd.parameter.range().start());
+                    let param_line = Source::line_of(source, pwd.parameter.range().start());
                     params.push((
                         pwd.parameter.name.as_str(),
                         pwd.parameter.annotation.as_deref(),
@@ -813,14 +813,14 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                     params.push((
                         v.name.as_str(),
                         v.annotation.as_deref(),
-                        line_of(source, v.range().start()),
+                        Source::line_of(source, v.range().start()),
                     ));
                 }
                 if let Some(k) = &f.parameters.kwarg {
                     params.push((
                         k.name.as_str(),
                         k.annotation.as_deref(),
-                        line_of(source, k.range().start()),
+                        Source::line_of(source, k.range().start()),
                     ));
                 }
                 // P1 sub-family classification: a dict that ARRIVES at a
@@ -891,7 +891,7 @@ pub fn record_shape_findings(state: &mut ScanState, body: &[Stmt], source: &str)
                             // annotation's position; the def line only when
                             // that cannot be resolved.
                             let ret_line = {
-                                let l = line_of(source, r.range().start());
+                                let l = Source::line_of(source, r.range().start());
                                 if l == 0 {
                                     def_line
                                 } else {

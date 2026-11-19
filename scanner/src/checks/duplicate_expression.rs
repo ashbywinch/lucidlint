@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use ruff_python_ast::{Expr, ExprCall, Operator, Stmt, StmtFunctionDef};
 use ruff_text_size::Ranged;
 
-use crate::{finding::Finding, source::col_of, source::line_of, ScanState};
+use crate::{finding::Finding, source::Source, ScanState};
 
 use super::shared_path::{fstring_shape, path_call, source_text_of};
 
@@ -79,12 +79,18 @@ impl<'a> ruff_python_ast::visitor::source_order::SourceOrderVisitor<'a> for Expr
                 let range = expr.range();
                 self.occurrences.push(ExpressionOccurrence {
                     key,
-                    line: line_of(self.source, range.start()),
+                    line: Source::line_of(self.source, range.start()),
                     function: self.function.clone(),
                     text: collapse_ws(&source_text_of(expr, self.source)),
                     nodes: expr_node_count(expr),
-                    start: (line_of(self.source, range.start()), col_of(self.source, range.start())),
-                    end: (line_of(self.source, range.end()), col_of(self.source, range.end())),
+                    start: (
+                        Source::line_of(self.source, range.start()),
+                        Source::col_of(self.source, range.start()),
+                    ),
+                    end: (
+                        Source::line_of(self.source, range.end()),
+                        Source::col_of(self.source, range.end()),
+                    ),
                 });
             }
         }

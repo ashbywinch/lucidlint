@@ -13,7 +13,8 @@ use ruff_python_ast::{CmpOp, Expr, Stmt, UnaryOp};
 use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
-use crate::{line_of, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 use super::conditional_polymorphism::dispatch_key;
 use super::over_abstraction::OverAbstraction;
@@ -188,7 +189,7 @@ fn condition_finding(
         seam_members: Vec::new(),
         col: 0,
         file: state.file.to_string(),
-        line: line_of(source, unit.range().start()),
+        line: Source::line_of(source, unit.range().start()),
         function: scope.fn_name.to_string(),
         kind: "unnamed-condition".into(),
         severity: "warn".into(),
@@ -619,7 +620,7 @@ fn push_classification(
         seam_members: Vec::new(),
         col: 0,
         file: state.file.to_string(),
-        line: line_of(source, ruff_text_size::TextSize::new(start as u32)),
+        line: Source::line_of(source, ruff_text_size::TextSize::new(start as u32)),
         function: scope.fn_name.to_string(),
         kind: "unnamed-classification".into(),
         severity: "warn".into(),

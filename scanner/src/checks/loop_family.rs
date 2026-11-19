@@ -9,7 +9,7 @@
 use ruff_python_ast::{Expr, Operator, Stmt, StmtFunctionDef};
 use ruff_text_size::Ranged;
 
-use crate::{finding::Finding, source::line_of, ScanState};
+use crate::{finding::Finding, source::Source, ScanState};
 
 // =====================================================================
 // the loop family (Replace Loop with Pipeline) — Python
@@ -323,7 +323,7 @@ impl<'a, 'b> LoopFunctionCtx<'a, 'b> {
         for s in stmts {
             match s {
                 Stmt::For(f) => {
-                    let line = line_of(self.state.source, f.range().start());
+                    let line = Source::line_of(self.state.source, f.range().start());
                     // P6: the pipeline gate checks the TARGET's binding — a
                     // loop mutating a pre-existing collection (parameter,
                     // name bound earlier, module name) builds nothing new
@@ -397,7 +397,7 @@ fn loop_function_findings(
     if let Some(k) = &f.parameters.kwarg {
         param_names.push(k.name.to_string());
     }
-    let fn_line = line_of(state.source, f.range().start());
+    let fn_line = Source::line_of(state.source, f.range().start());
     let mut ctx = LoopFunctionCtx {
         state,
         fn_name: &fn_name,
@@ -416,7 +416,7 @@ fn record_module_bindings(
     module_bindings: &mut std::collections::HashMap<String, bool>,
     source: &str,
 ) {
-    let line = line_of(source, s.range().start());
+    let line = Source::line_of(source, s.range().start());
     let mut names: Vec<(String, bool)> = Vec::new();
     collect_stmt_binding_names(s, &mut names);
     for (n, empty) in names {
@@ -449,7 +449,7 @@ fn loop_module_walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
                     let fresh = loop_pipeline_target(&f.body)
                         .is_none_or(|t| !module_bindings.get(&t).copied().unwrap_or(false));
                     if fresh && loop_body_is_pipeline(&f.body) {
-                        let line = line_of(source, f.range().start());
+                        let line = Source::line_of(source, f.range().start());
                         state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                         file: state.file.to_string(),
                         line,

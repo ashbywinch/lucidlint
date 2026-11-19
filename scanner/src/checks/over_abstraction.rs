@@ -6,7 +6,7 @@ use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
 use crate::skeleton::{skel_children, Q};
-use crate::source::line_of;
+use crate::source::Source;
 
 use super::latent_state::slot_names;
 use super::record_shape::class_key;
@@ -30,7 +30,7 @@ impl OverAbstraction {
             let (bases, abc_base) = Self::bases_of(cls);
             out.push(crate::ClassInfo {
                 name: cls.name.to_string(),
-                line: line_of(source, cls.name.range().start()),
+                line: Source::line_of(source, cls.name.range().start()),
                 abstract_: Self::has_abstract_decorator(cls) || abc_base,
                 bases,
                 declared: Self::declared_fields(cls),

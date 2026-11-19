@@ -51,7 +51,7 @@ use file_scan::{ClassInfo, FileScan, ImportInfo, SelfAssign, UndeclScan};
 use finding::{Finding, FnCc, FnScope};
 use paths::{is_out_of_scan, is_test_path, rel_of, scan_root, SCAN_SKIP_DIRS};
 use python_shape::{collect_stmt_lists, python_fn_shape};
-use source::{col_of, line_of, reset_line_starts, stmt_line};
+use source::Source;
 
 impl Finding {
     /// The finding's logical line: its own line when no construct spans
@@ -200,11 +200,11 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                     checks::collect_path_expressions(self, f);
                 }
                 let was_fn = self.current_fn.take();
-                self.current_fn = Some((f.name.to_string(), line_of(self.source, f.range.start())));
+                self.current_fn = Some((f.name.to_string(), Source::line_of(self.source, f.range.start())));
                 self.fn_spans.push((
                     f.name.to_string(),
-                    line_of(self.source, f.range.start()),
-                    line_of(self.source, f.range.end()),
+                    Source::line_of(self.source, f.range.start()),
+                    Source::line_of(self.source, f.range.end()),
                 ));
 
                 self.fn_stack.push(FnScope {
@@ -256,14 +256,15 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 // repo-wide collections: module-level defs + duplicate
                 // candidates (the def line is the NAME's line — ruff's
                 // FunctionDef range starts at the decorator)
-                let def_line = line_of(self.source, f.name.range().start());
+                let def_line = Source::line_of(self.source, f.name.range().start());
                 if module_level && !self.is_test {
                     self.defs.push((f.name.to_string(), def_line));
                     if !f.decorator_list.is_empty() {
                         self.decorated.insert(f.name.to_string());
                     }
                 }
-                let span = (line_of(self.source, f.range().end()) - line_of(self.source, f.range().start())) as u32;
+                let span = (Source::line_of(self.source, f.range().end())
+                    - Source::line_of(self.source, f.range().start())) as u32;
                 // the Python gate reads cc from radon's fn_map, which only
                 // holds module-level functions — methods/nested get cc = 0
                 let gate_cc = if module_level { cc } else { 0 };
@@ -295,7 +296,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 // class bodies: no decisions, but walked (imports/exprs inside
                 // still get visited with their function attribution)
                 if module_level && !self.is_test {
-                    let def_line = line_of(self.source, cls.name.range().start());
+                    let def_line = Source::line_of(self.source, cls.name.range().start());
                     self.class_defs.push((cls.name.to_string(), def_line));
                 }
                 walk_stmt(self, stmt);
@@ -375,7 +376,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                     logical_start: None,
                     seam_members: Vec::new(),
                     file: self.file.to_string(),
-                    line: line_of(source, call.range().start()),
+                    line: Source::line_of(source, call.range().start()),
                     col: 0,
                     function: fn_name,
                     kind: "debug-artifact".into(),
@@ -493,8 +494,8 @@ impl<'a> ScanState<'a> {
             logical_start: None,
             seam_members: Vec::new(),
             file: self.file.to_string(),
-            line: line_of(self.source, n.range.start()),
-            col: col_of(self.source, n.range.start()),
+            line: Source::line_of(self.source, n.range.start()),
+            col: Source::col_of(self.source, n.range.start()),
             function: fn_name,
             kind: "magic-number".into(),
             severity: "warn".into(),
@@ -525,7 +526,7 @@ impl<'a> ScanState<'a> {
                 logical_start: None,
                 seam_members: Vec::new(),
                 file: self.file.to_string(),
-                line: line_of(self.source, v.range().start()),
+                line: Source::line_of(self.source, v.range().start()),
                 col: 0,
                 function: fn_name,
                 kind: "noop-statement".into(),
@@ -541,7 +542,7 @@ impl<'a> ScanState<'a> {
     fn import_checks(&mut self, stmt: &'a Stmt) {
         let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
         if !self.fn_stack.is_empty() {
-            let line = stmt_line(self.source, stmt);
+            let line = Source::stmt_line(self.source, stmt);
             self.findings.push(Finding {
                 logical_start: None,
                 seam_members: Vec::new(),
@@ -576,7 +577,7 @@ impl<'a> ScanState<'a> {
                             logical_start: None,
                             seam_members: Vec::new(),
                             file: self.file.to_string(),
-                            line: stmt_line(self.source, stmt),
+                            line: Source::stmt_line(self.source, stmt),
                             col: 0,
                             function: fn_name.clone(),
                             kind: "private-import".into(),
@@ -594,7 +595,7 @@ impl<'a> ScanState<'a> {
                             logical_start: None,
                             seam_members: Vec::new(),
                             file: self.file.to_string(),
-                            line: stmt_line(self.source, stmt),
+                            line: Source::stmt_line(self.source, stmt),
                             col: 0,
                             function: fn_name.clone(),
                             kind: "private-import".into(),
@@ -624,7 +625,7 @@ impl<'a> ScanState<'a> {
                 );
                 if exits {
                     if let Some(dead) = list.get(i + 1) {
-                        let line = stmt_line(self.source, dead);
+                        let line = Source::stmt_line(self.source, dead);
                         self.findings.push(Finding {
                             logical_start: None,
                             seam_members: Vec::new(),
@@ -730,7 +731,7 @@ fn drop_repo_wide_stale_artifacts(findings: &mut Vec<Finding>) {
 }
 
 fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
-    reset_line_starts();
+    Source::reset_line_starts();
     let parsed: Parsed<ModModule> = match parse_module(source) {
         Ok(p) => p,
         Err(_) => {
@@ -800,12 +801,12 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
                 if let AnyNodeRef::StmtFunctionDef(f) = n {
                     let skel = fn_skeleton(f);
                     if is_duplicate_candidate(f, skel.len()) {
-                        let def_line = line_of(source, f.name.range().start());
+                        let def_line = Source::line_of(source, f.name.range().start());
                         state.skeletons.push(SkeletonFn {
                             rel: name.to_string(),
                             name: f.name.to_string(),
                             line: def_line,
-                            end_line: line_of(source, f.range().end()),
+                            end_line: Source::line_of(source, f.range().end()),
                             skeleton: skel,
                         });
                     }

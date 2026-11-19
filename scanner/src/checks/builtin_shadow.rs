@@ -6,7 +6,8 @@
 use ruff_python_ast::{ExceptHandler, Expr, Stmt};
 
 use crate::finding::Finding;
-use crate::{stmt_line, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 pub const SHADOWED_BUILTINS: &[&str] = &[
     "abs",
@@ -108,7 +109,7 @@ fn target_names<'a>(target: &'a Expr, out: &mut Vec<&'a str>) {
 /// binding is `global-state`'s finding, so assignments are read only inside a
 /// function.
 pub fn shadow_findings(state: &mut ScanState, stmt: &Stmt) {
-    let line = stmt_line(state.source, stmt);
+    let line = Source::stmt_line(state.source, stmt);
     let mut names: Vec<&str> = Vec::new();
     let mut role = "variable";
     let mut function = state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();

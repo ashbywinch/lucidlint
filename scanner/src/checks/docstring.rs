@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use ruff_python_ast::{Expr, Stmt};
 
-use crate::{finding::Finding, stmt_line, ScanState};
+use crate::{finding::Finding, source::Source, ScanState};
 
 /// `restating-docstring`: the rule object. Its methods read one docstring; the evidence and the message live together.
 pub struct Docstring;
@@ -89,7 +89,7 @@ impl Docstring {
             let tokens = Self::body_tokens(&body[1..]);
             let covered = words.iter().filter(|w| tokens.contains(w.as_str())).count();
             if covered as f64 / words.len() as f64 >= 0.9 {
-                let line = stmt_line(state.source, s);
+                let line = Source::stmt_line(state.source, s);
                 state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                 file: state.file.to_string(),
                                 line,

@@ -13,7 +13,8 @@ use crate::finding::Finding;
 
 use super::function_facts::FunctionFacts;
 use super::{push_stmt_children, stmt_exprs, walk_expr_deep};
-use crate::{line_of, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 /// `closure-cluster`: the rule object. Its methods read one method's nested closures.
 pub struct ClosureCluster;
@@ -151,8 +152,8 @@ impl ClosureCluster {
                     .filter(|(fns, locals)| fns.len() >= 2 && !locals.is_empty())
                     .collect();
                 let empty_params = method_params.iter().all(|p| p == "self" || p == "cls") || method_params.is_empty();
-                let span =
-                    line_of(source, method.range().end()).saturating_sub(line_of(source, method.range().start()));
+                let span = Source::line_of(source, method.range().end())
+                    .saturating_sub(Source::line_of(source, method.range().start()));
                 let degenerate = empty_params && span >= 150;
                 if cluster_comps.len() < 2 && !degenerate {
                     continue;
@@ -170,7 +171,7 @@ impl ClosureCluster {
                     })
                     .collect::<Vec<_>>()
                     .join("; ");
-                let line = line_of(source, method.name.range().start());
+                let line = Source::line_of(source, method.name.range().start());
                 state.findings.push(Finding {
                     logical_start: None,
                     seam_members: Vec::new(),

@@ -4,7 +4,8 @@
 use ruff_python_ast::{Expr, Stmt, StmtClassDef};
 
 use crate::finding::Finding;
-use crate::{stmt_line, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 use super::class_facts::{annotation_base_name, class_methods, has_decorator};
 use super::expr_walk::push_stmt_children;
@@ -103,7 +104,7 @@ impl StaticHusk {
             if !Self::is_static_husk_class(cls) {
                 continue;
             }
-            let line = stmt_line(state.source, s);
+            let line = Source::stmt_line(state.source, s);
             state.findings.push(Finding {
                 logical_start: None,
                 seam_members: Vec::new(),

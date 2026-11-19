@@ -5,7 +5,8 @@ use ruff_python_ast::{Expr, Stmt};
 use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
-use crate::{line_of, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 use super::expr_walk::base_name_of;
 
@@ -45,7 +46,7 @@ pub fn conditional_polymorphism_findings(state: &mut ScanState, body: &[Stmt], s
                 let arms: Vec<&Expr> = std::iter::once(i.test.as_ref())
                     .chain(i.elif_else_clauses.iter().filter_map(|c| c.test.as_ref()))
                     .collect();
-                let chain_line = line_of(source, s.range().start());
+                let chain_line = Source::line_of(source, s.range().start());
                 if arms.len() >= 4 && !state.claimed_dispatch.contains(&chain_line) {
                     let keys: Vec<Option<String>> = arms.iter().map(|t| dispatch_key(t)).collect();
                     if keys.iter().all(|k| k.is_some()) && keys.windows(2).all(|w| w[0] == w[1]) {

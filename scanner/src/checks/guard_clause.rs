@@ -5,7 +5,8 @@ use ruff_python_ast::Stmt;
 use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
-use crate::{line_of, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 /// Guard Clauses: a chain of if-in-if ("arrow code") — the body of an if is
 /// exactly another if. Depth >= 3 levels. The fix (invert to early returns)
@@ -24,7 +25,7 @@ pub fn guard_clause_findings(state: &mut ScanState, body: &[Stmt], source: &str)
             if let Stmt::If(i) = s {
                 let len = chain_len(s);
                 if len >= 3 {
-                    let line = line_of(source, s.range().start());
+                    let line = Source::line_of(source, s.range().start());
                     state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                             file: state.file.to_string(),
                                             line,

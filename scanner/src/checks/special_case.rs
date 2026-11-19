@@ -5,7 +5,8 @@ use ruff_python_ast::{Expr, Stmt};
 use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
-use crate::{line_of, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 use super::latent_visitor::branch_guards;
 
@@ -102,7 +103,7 @@ impl SpecialCase {
         if !(none_check || empty_check) || branch_guards(&i.body) {
             return None;
         }
-        Some((n.id.to_string(), line_of(source, i.range().start())))
+        Some((n.id.to_string(), Source::line_of(source, i.range().start())))
     }
 
     /// Visit every nested function/class body inside `stmts`, through control flow

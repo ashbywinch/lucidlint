@@ -10,7 +10,7 @@ use ruff_text_size::Ranged;
 use crate::finding::Finding;
 use crate::paths::is_vendored;
 use crate::skeleton::{dice_from_bigrams, skel_children, BigramInterner, SkeletonModule, Q};
-use crate::source::line_of;
+use crate::source::Source;
 use crate::ScanState;
 
 use super::class_facts::class_methods;
@@ -221,7 +221,7 @@ pub fn collect_skeleton_modules(state: &mut ScanState, body: &[Stmt], rel: &str)
         if skel.len() < 12 {
             continue;
         }
-        let line = line_of(state.source, c.name.range().start());
+        let line = Source::line_of(state.source, c.name.range().start());
         state.skeleton_modules.push(SkeletonModule {
             rel: rel.to_string(),
             name: c.name.to_string(),

@@ -8,7 +8,8 @@ use crate::finding::Finding;
 
 use super::function_facts::FunctionFacts;
 use crate::forwarding::{ForwarderFn, ForwarderMethod, RepoMethod};
-use crate::{line_of, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 /// `forwarding-chain`: the rule object. Its methods collect the forwarders and read one chain.
 pub struct Forwarding;
@@ -70,7 +71,7 @@ impl Forwarding {
                 state.forwarder_fns.push(ForwarderFn {
                     rel: state.file.to_string(),
                     name: f.name.to_string(),
-                    line: line_of(state.source, f.name.range().start()),
+                    line: Source::line_of(state.source, f.name.range().start()),
                     params: params.clone(),
                     callee: match method_callee {
                         Some((recv, m)) => format!("Method:{recv}:{m}"),
@@ -95,7 +96,7 @@ impl Forwarding {
                         rel: state.file.to_string(),
                         class: cls.name.to_string(),
                         name: f.name.to_string(),
-                        line: line_of(state.source, f.name.range().start()),
+                        line: Source::line_of(state.source, f.name.range().start()),
                         params: params.clone(),
                         fn_callee: callee,
                     });
@@ -104,7 +105,7 @@ impl Forwarding {
                     rel: state.file.to_string(),
                     class: cls.name.to_string(),
                     name: f.name.to_string(),
-                    line: line_of(state.source, f.name.range().start()),
+                    line: Source::line_of(state.source, f.name.range().start()),
                     params,
                 });
             }

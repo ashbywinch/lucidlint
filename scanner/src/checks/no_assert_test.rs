@@ -6,7 +6,7 @@ use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
 use crate::skeleton::{skel_children, Q};
-use crate::source::line_of;
+use crate::source::Source;
 use crate::ScanState;
 
 /// Walk a test function's full body (nested functions included) for an
@@ -51,7 +51,7 @@ pub fn no_assert_test_findings(state: &mut ScanState, body: &[Stmt], source: &st
                     state.findings.push(Finding { logical_start: None, seam_members: Vec::new(),
                     col: 0,
                     file: state.file.to_string(),
-                    line: line_of(source, f.name.range().start()),
+                    line: Source::line_of(source, f.name.range().start()),
                     function: f.name.to_string(),
                     kind: "no-assert-test".into(),
                     severity: "fail".into(),

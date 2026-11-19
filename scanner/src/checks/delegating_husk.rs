@@ -6,7 +6,8 @@ use std::collections::HashSet;
 use ruff_python_ast::{Expr, Stmt, StmtFunctionDef};
 
 use crate::finding::Finding;
-use crate::{stmt_line, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 use super::class_facts::class_methods;
 use super::function_facts::FunctionFacts;
@@ -117,7 +118,7 @@ pub fn delegating_husk_findings(state: &mut ScanState, body: &[Stmt]) {
         if chains_down {
             continue;
         }
-        let line = stmt_line(state.source, s);
+        let line = Source::stmt_line(state.source, s);
         state.findings.push(Finding {
             logical_start: None,
             seam_members: Vec::new(),

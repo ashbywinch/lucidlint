@@ -14,7 +14,8 @@ use super::class_facts::annotation_base_name;
 use super::expr_walk::{push_stmt_children, stmt_exprs};
 use super::function_facts::FunctionFacts;
 use super::naming_units::NamingUnits;
-use crate::{line_of, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 /// A positional call argument that is a literal True/False — the intent is
 /// unreadable at the call site; it should be a named keyword
@@ -46,7 +47,7 @@ pub fn boolean_arg_findings(state: &mut ScanState, call: &ExprCall, source: &str
                 seam_members: Vec::new(),
                 col: 0,
                 file: state.file.to_string(),
-                line: line_of(source, arg.range().start()),
+                line: Source::line_of(source, arg.range().start()),
                 function: fn_name.clone(),
                 kind: "boolean-arg".into(),
                 severity: "fail".into(),
@@ -118,7 +119,7 @@ pub fn positional_literals_findings(state: &mut ScanState, call: &ExprCall, sour
     };
     state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
             file: state.file.to_string(),
-            line: line_of(source, call.range().start()),
+            line: Source::line_of(source, call.range().start()),
             function: fn_name,
             kind: "positional-literals".into(),
             severity: "warn".into(),
@@ -171,7 +172,7 @@ pub fn detached_method_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
         return;
     }
     let fn_name = f.name.to_string();
-    let line = line_of(source, f.name.range().start());
+    let line = Source::line_of(source, f.name.range().start());
     state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
             file: state.file.to_string(),
             line,
@@ -200,7 +201,7 @@ pub fn long_param_list_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
     if n > 5 && !is_trivial_stub(&f.body) {
         state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
         file: state.file.to_string(),
-        line: line_of(source, f.name.range().start()),
+        line: Source::line_of(source, f.name.range().start()),
         function: f.name.to_string(),
         kind: "long-param-list".into(),
         severity: "fail".into(),
@@ -246,13 +247,13 @@ fn except_header_colon_line(source: &str, eh: &ruff_python_ast::ExceptHandlerExc
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth = depth.saturating_sub(1),
             b':' if depth == 0 => {
-                return line_of(source, ruff_text_size::TextSize::new(i as u32));
+                return Source::line_of(source, ruff_text_size::TextSize::new(i as u32));
             }
             _ => {}
         }
         i += 1;
     }
-    line_of(source, eh.range().start())
+    Source::line_of(source, eh.range().start())
 }
 
 /// The except family: swallows (fail) and broad excepts (warn).

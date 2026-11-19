@@ -19,7 +19,8 @@ use super::annotation_base_name;
 use super::function_facts::FunctionFacts;
 use super::middle_man::class_base_names;
 use crate::naming::VAGUE_SUFFIXES;
-use crate::{line_of, stmt_line, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 /// A module whose public class(es) aren't findable by name — the
 /// class-module rule. The file system is a name index: a class belongs in a
@@ -71,7 +72,7 @@ pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &
         if matches_stem(cls.name.as_str()) {
             return;
         }
-        let line = line_of(state.source, cls.name.range().start());
+        let line = Source::line_of(state.source, cls.name.range().start());
         state.findings.push(Finding { logical_start: None, seam_members: Vec::new(),
         col: 0,
         file: state.file.to_string(),
@@ -225,7 +226,7 @@ pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &
         })
         .collect();
     let Stmt::ClassDef(first) = misplaced[0] else { return };
-    let line = line_of(state.source, first.name.range().start());
+    let line = Source::line_of(state.source, first.name.range().start());
     state.findings.push(Finding { logical_start: None, seam_members: Vec::new(),
     col: 0,
     file: state.file.to_string(),
@@ -249,12 +250,12 @@ pub fn vague_name_findings(state: &mut ScanState, module_body: &[Stmt]) {
                 continue;
             }
             let methods = cls.body.iter().filter(|m| matches!(m, Stmt::FunctionDef(_))).count();
-            let span =
-                line_of(state.source, cls.range().end()).saturating_sub(line_of(state.source, cls.range().start()));
+            let span = Source::line_of(state.source, cls.range().end())
+                .saturating_sub(Source::line_of(state.source, cls.range().start()));
             if span < 120 && methods < 6 {
                 break; // thin role class — the name is the communication
             }
-            let line = stmt_line(state.source, s);
+            let line = Source::stmt_line(state.source, s);
             state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                             file: state.file.to_string(),
                             line,
@@ -298,7 +299,7 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
                 groups
                     .entry(base)
                     .or_default()
-                    .push((f.name.to_string(), stmt_line(state.source, s)));
+                    .push((f.name.to_string(), Source::stmt_line(state.source, s)));
             }
         }
     }

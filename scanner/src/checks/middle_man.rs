@@ -7,7 +7,8 @@ use ruff_python_ast::{Expr, Stmt, StmtClassDef, StmtFunctionDef};
 use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
-use crate::{line_of, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 use super::class_facts::{class_methods, has_decorator};
 use super::expr_walk::base_name_of;
@@ -261,7 +262,7 @@ fn middle_man_candidates(body: &[Stmt], source: &str) -> Vec<MiddleManCandidate>
                         .collect();
                     out.push(MiddleManCandidate {
                         rel: String::new(), // filled by the caller (the file's own rel)
-                        line: line_of(source, f.name.range().start()),
+                        line: Source::line_of(source, f.name.range().start()),
                         function: f.name.to_string(),
                         owner: owner.to_string(),
                         chain,

@@ -11,7 +11,8 @@ use crate::finding::Finding;
 
 use super::expr_walk::{push_stmt_children, walk_expr_deep};
 use super::function_facts::FunctionFacts;
-use crate::{stmt_line, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 /// `closures`: the rule object. Its methods read one function's nested definitions and captured state.
 pub struct Closures;
@@ -58,7 +59,7 @@ impl Closures {
         if !Self::is_closures_candidate(cc, span, &mutated) {
             return;
         }
-        let line = stmt_line(state.source, stmt);
+        let line = Source::stmt_line(state.source, stmt);
         // the claim is about the captured LOCAL, not an object it holds: a
         // method call on `prop.attr` is a collaborator being used, not an
         // accumulator being filled.

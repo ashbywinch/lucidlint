@@ -14,7 +14,8 @@ use super::class_facts::class_field_names;
 use super::expr_walk::{push_stmt_children, stmt_exprs, walk_expr_deep};
 use super::function_facts::FunctionFacts;
 use super::record_shape::{class_key, module_type_bindings, resolve_alias, TypeBindings};
-use crate::{line_of, ScanState};
+use crate::source::Source;
+use crate::ScanState;
 
 /// One anchor's clump: the functions sharing it and the pairs they share.
 #[derive(Default)]
@@ -87,7 +88,7 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
         if fs.len() < 3 || !reported.insert((a.clone(), b.clone())) {
             continue;
         }
-        let line = line_of(state.source, fs[0].name.range().start());
+        let line = Source::line_of(state.source, fs[0].name.range().start());
         let entry = by_anchor.entry((line, fs[0].name.to_string())).or_default();
         for f in fs {
             let name = f.name.to_string();
@@ -277,7 +278,7 @@ pub fn feature_envy_findings(state: &mut ScanState, body: &[Stmt]) {
                 if !reads.is_envy() {
                     continue;
                 }
-                let line = line_of(state.source, f.name.range().start());
+                let line = Source::line_of(state.source, f.name.range().start());
                 state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                     file: state.file.to_string(),
                                     line,
@@ -335,7 +336,7 @@ pub fn collect_self_assigns(state: &mut ScanState, body: &[Stmt]) {
                     state.self_assigns.push(crate::SelfAssign {
                         class: c.name.to_string(),
                         attr: at.attr.to_string(),
-                        line: line_of(state.source, at.range().start()),
+                        line: Source::line_of(state.source, at.range().start()),
                         function: f.name.to_string(),
                         is_init,
                     });
@@ -529,7 +530,7 @@ pub fn duplicate_field_findings(state: &mut ScanState, body: &[Stmt]) {
             if shared.len() < 2 {
                 continue;
             }
-            let line = line_of(state.source, c.name.range().start());
+            let line = Source::line_of(state.source, c.name.range().start());
             state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                             file: state.file.to_string(),
                             line,
