@@ -6,7 +6,10 @@
 use ruff_python_ast::Stmt;
 use ruff_text_size::TextSize;
 
-/// The source text and its line index: positions to line numbers, and statement starts.
+/// The source text's line index: positions to 1-based line and column, and a
+/// statement's line. The index is cached per thread and rebuilt when the
+/// source text changes (keyed by pointer and length plus the explicit reset a
+/// scan performs).
 pub struct Source;
 
 // 2000-line file of function defs paid ~10ms of line scans per 1000 defs.
@@ -30,19 +33,25 @@ impl Source {
         });
     }
 
+    /// (Re)build the index for `source` when it is not the cached text.
+    fn rebuild(cache: &mut (usize, usize, Vec<usize>), source: &str) {
+        cache.0 = source.as_ptr() as usize;
+        cache.1 = source.len();
+        cache.2.clear();
+        cache.2.push(0);
+        for (i, b) in source.bytes().enumerate() {
+            if b == b'\n' {
+                cache.2.push(i + 1);
+            }
+        }
+    }
+
+    /// 1-based line of an offset.
     pub(crate) fn line_of(source: &str, offset: TextSize) -> usize {
         LINE_STARTS.with(|c| {
             let mut c = c.borrow_mut();
             if c.0 != source.as_ptr() as usize || c.1 != source.len() {
-                c.0 = source.as_ptr() as usize;
-                c.1 = source.len();
-                c.2.clear();
-                c.2.push(0);
-                for (i, b) in source.bytes().enumerate() {
-                    if b == b'\n' {
-                        c.2.push(i + 1);
-                    }
-                }
+                Self::rebuild(&mut c, source);
             }
             c.2.partition_point(|&s| s <= offset.to_usize())
         })
@@ -53,15 +62,7 @@ impl Source {
         LINE_STARTS.with(|c| {
             let mut c = c.borrow_mut();
             if c.0 != source.as_ptr() as usize || c.1 != source.len() {
-                c.0 = source.as_ptr() as usize;
-                c.1 = source.len();
-                c.2.clear();
-                c.2.push(0);
-                for (i, b) in source.bytes().enumerate() {
-                    if b == b'\n' {
-                        c.2.push(i + 1);
-                    }
-                }
+                Self::rebuild(&mut c, source);
             }
             let off = offset.to_usize();
             off - c.2[c.2.partition_point(|&s| s <= off) - 1] + 1
