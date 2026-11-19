@@ -48,6 +48,14 @@ from types import ModuleType
 from typing import Any, NamedTuple
 
 import rule_metadata
+from orchestrator.console import CONSOLE
+from orchestrator.vendoring import vendor_path
+
+# the entry module is the facade: these names stay here because callers (and
+# the tests) reach them on `lucidlint`
+_vendor_path = vendor_path
+log = CONSOLE.warn
+_print_trimmed_diff = CONSOLE.print_diff
 
 # the fix engine is optional — the fix command degrades to a clear error
 # when the `fix` extra is not installed
@@ -57,25 +65,6 @@ import rule_metadata
 # bundle, not a wheel install), prefer it so the fix path works with no pip
 # step. A wheel/source install has no `deps/` and uses site-packages libcst.
 _here = os.path.dirname(os.path.abspath(__file__))
-
-
-def _vendor_path(here: str, version: tuple[int, int] | None = None) -> str | None:
-    """The bundled deps directory THIS interpreter can load.
-
-    libcst's parser is a compiled extension, so one build serves one Python
-    ABI. The release bundle ships one per supported version (`deps/cp312`,
-    `deps/cp313`, `deps/cp314`) and this picks the match; a flat `deps/` is
-    the fallback (a dev bundle, or a bundle from before the split).
-
-    Returns None when neither exists — the fix command then reports the
-    libcst requirement instead of failing at import.
-    """
-    major, minor = version or sys.version_info[:2]
-    tagged = os.path.join(here, "deps", f"cp{major}{minor}")
-    for candidate in (tagged, os.path.join(here, "deps")):
-        if os.path.isdir(candidate):
-            return candidate
-    return None
 
 
 # The JSON inputs one scan hands the binary (graph contract, churn, coverage)
@@ -464,8 +453,6 @@ def is_test_path(rel: str) -> bool:
     )
 
 
-def log(msg: str) -> None:
-    print(msg, file=sys.stderr)
 
 
 # --------------------------------------------------------------------------- complexity (radon)
@@ -741,26 +728,6 @@ class RustFixRequest:
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))
-
-
-def _print_trimmed_diff(before: str, after: str, rel: str) -> None:
-    """The applied change AS A DIFF — a fix the agent cannot review is a fix
-    the agent cannot trust (the houses sweep's 'always git diff after fix'
-    advice existed because the apply confirmation was a bare line)."""
-    diff = list(
-        difflib.unified_diff(
-            before.splitlines(),
-            after.splitlines(),
-            fromfile=f"{rel} (before)",
-            tofile=f"{rel} (after)",
-            lineterm="",
-        )
-    )
-    if not diff:
-        return
-    if len(diff) > 40:
-        diff = diff[:40] + [f"... ({len(diff) - 40} more diff lines omitted)"]
-    print("\n".join(diff))
 
 
 class _File(NamedTuple):
