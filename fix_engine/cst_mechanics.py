@@ -9,6 +9,7 @@ instead of restating it per family.
 
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 from typing import TypeGuard, override
 
@@ -40,6 +41,10 @@ _REPO_SKIP_DIRS = frozenset(
 
 class CstMechanics:
     """The shared CST shape helpers."""
+
+    # the builtins are ambient names: a free variable that is a builtin is not
+    # an out-variable, and a class body reading one reads nothing it owns
+    BUILTINS = frozenset(dir(builtins))
 
     @staticmethod
     def _as_range(pos: object) -> CodeRange:
