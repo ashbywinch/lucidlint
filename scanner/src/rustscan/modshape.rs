@@ -324,7 +324,7 @@ fn mixed_module_finding(file: &File, name: &str) -> Option<Finding> {
     // confusion this message exists to remove (2026-11-18 review).
     let detail = if shape.groups.is_empty() {
         format!(
-            "None of them references another: {} items standing alone, so the file names no families at all. Group them into modules by what they operate on, and let each module's type own the functions that take it.",
+            "None of them references another: {} items standing alone, so the file names no families at all. A module holds one concern, and a concern is a type with its impl. Group them into modules by what they operate on, and let each module's type own the functions that take it.",
             shape.stand_alone.len()
         )
     } else {
@@ -344,7 +344,7 @@ fn mixed_module_finding(file: &File, name: &str) -> Option<Finding> {
             n => format!(" and {n} items standing alone"),
         };
         format!(
-            "{} groups{islands}. The groups are {list}. Move each group into its own module, named after what its members are about.",
+            "{} groups{islands}. The groups are {list}. A module holds one concern, and a concern is a type with its impl. Move each group into its own module, named after what its members are about.",
             shape.groups.len(),
         )
     };

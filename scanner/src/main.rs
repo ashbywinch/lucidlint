@@ -6518,7 +6518,7 @@ def two(work, batch):
         );
         assert!(msg.contains("owns no state"), "{msg}");
         assert!(msg.contains("becomes its fields"), "{msg}");
-        assert!(msg.contains("become its methods"), "{msg}");
+        assert!(msg.contains("the functions its methods"), "{msg}");
         assert!(!msg.contains("package"), "{msg}");
         assert!(!msg.contains("A script is not different"), "{msg}");
     }
@@ -6734,7 +6734,7 @@ def two(work, batch):
             msg.contains("holds 11 top-level definitions (11 free functions)"),
             "{msg}"
         );
-        assert!(msg.contains("Split the module by concept"), "{msg}");
+        assert!(msg.contains("split the module by concern"), "{msg}");
         assert!(msg.contains("one module per family"), "{msg}");
         assert!(msg.contains("`&mut` borrow would conflict"), "{msg}");
         assert!(!msg.contains("directory of modules"), "{msg}");
@@ -6756,7 +6756,13 @@ def two(work, batch):
         let f = checks::module_findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
-        assert!(hits[0].message.contains("give it an impl"), "{}", hits[0].message);
+        assert!(
+            hits[0]
+                .message
+                .contains("give them the type they operate on as an impl"),
+            "{}",
+            hits[0].message
+        );
         // and eleven free functions fire the loose rung, with the split advice
         let mut wide = String::new();
         for i in 0..11 {
@@ -6770,7 +6776,7 @@ def two(work, batch):
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         assert!(
-            hits[0].message.contains("Split the module by concept"),
+            hits[0].message.contains("split the module by concern"),
             "{}",
             hits[0].message
         );

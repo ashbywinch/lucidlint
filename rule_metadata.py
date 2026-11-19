@@ -364,23 +364,21 @@ CATALOG = RuleCatalog([
          "A module holding 3–10 top-level definitions — Python functions and "
          "classes (constants are data); Rust types, groups of functions that "
          "take one type (a class equivalent), and functions left with no "
-         "receiver. Three definitions is more than one concept's worth, and ten "
-         "is the most one file may hold as one concept. The advice follows what "
-         "the definitions are: mostly classes → turn the module into a package, "
-         "one file per class; mostly functions → the functions pass data no "
-         "object owns, so name the domain concepts and make them classes. All "
-         "but one class being a method-less value record is one concept plus "
-         "its records, and is exempt; a decorated function is a framework entry "
-         "point, not a definition the module owns. The upper rung is "
-         "`many-definitions`, so a repo can disable this row and hold modules "
-         "only to eleven."),
+         "receiver. A module holds one concern, and a concern is a class (in "
+         "Rust, a type with its impl). The message writes both cases: if the "
+         "definitions are one concern, they become that class's fields and "
+         "methods; if they are several, the module is split until each concern "
+         "has its module and its class. All but one class being a method-less "
+         "value record is one concern plus its records, and is exempt; a "
+         "decorated function is a framework entry point, not a definition the "
+         "module owns. The upper rung is `many-definitions`."),
     Rule("many-definitions", "warn", "architecture", "Both",
          "A module holding more than 10 top-level definitions — Python "
          "functions and classes; Rust types, groups of functions that take one "
-         "type (a class equivalent), and functions left with no receiver. More "
-         "than ten class equivalents is a grab-bag: split it by concept, one "
-         "module per family. The second rung of the `several-definitions` "
-         "ladder, in both languages."),
+         "type (a class equivalent), and functions left with no receiver. Past "
+         "ten, the module is a grab bag of concerns: split it by concern, one "
+         "module per concern, each holding the class it is about. The second "
+         "rung of the `several-definitions` ladder, in both languages."),
     Rule("closures", "fail", "architecture", "Both",
          "A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line "
          "span) — the nested structure is a class waiting to be extracted.",

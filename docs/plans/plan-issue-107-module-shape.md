@@ -71,32 +71,41 @@ classes and a class's own methods are not module definitions. Generated modules
 
 ## The message
 
-Two arms, and each answers the objection it draws:
+Both arms state the same principle first — **a module holds one concern, and a
+concern is a class** (in Rust, a type with its impl) — and then write *both*
+cases, because the two cases need different fixes: one concern becomes a class's
+fields and methods; several concerns are split until each has its module and its
+class. A message that writes only one of them prescribes the wrong fix for the
+other (2026-11-19 review: "if they are the same concern then why are they not a
+class?").
 
-- **mostly classes** — `'dag/delta_vs_home_node.py' holds 6 top-level
-  definitions, 4 of them classes (DeltaVsHome, DeltaVsHomeProvenanceValue,
-  DeltaVsHomeValue and one more). A reader looking for one class reads past the
-  rest, and the import path never states which class lives where. Turn the
-  module into a package — one file per class inside it, each named after its
-  class and re-exported from `__init__.py` — so the family keeps its name. A
-  class with no methods may stay beside the class that uses it.`
+- **mostly classes** — `'rustscan/modshape.rs' holds 6 top-level definitions, 2
+  of them types (Cohesion, RefProbe). A module holds one concern, and a concern
+  is a type with its impl. A reader looking for one type reads past the rest,
+  and the module path never states which type lives where. If the types are one
+  concern, fold them into the one that owns the state. If they are several, turn
+  the module into a directory of modules — one file per type inside it,
+  re-exported from the module root — so the family keeps its name. A type with
+  no impl may stay beside the type that uses it.`
 
-  A family of classes does not scatter across the codebase: it becomes a
-  package, which keeps the family's name and gives every class its file. This is
-  the answer to `dag/expression.py`'s 12 AST nodes and `loft/live/protocols.py`'s
-  protocol registry as much as to a grab-bag.
+  A family of classes is one concern when it is one class plus records; it is
+  several concerns when more than one class owns behaviour, and then it becomes
+  a package (Python) or a directory of modules (Rust), which keeps the family's
+  name and gives every class its file.
 
-- **mostly functions** — `'scripts/gen-rules.py' holds 9 top-level
-  definitions, 9 of them functions. A free function owns no state, so the data
-  the others share arrives as parameters and every call site re-states it. A
-  script is not different: the steps it runs build one program state, and no
-  name owns it. Name the concept that data belongs to and make it a class: the
-  data becomes its fields, and the functions become its methods.`
+- **mostly functions** — `'lucidlint.py' holds 71 top-level definitions, 51 of
+  them functions. A module holds one concern, and a concern is a class. A free
+  function owns no state, so the data the functions share arrives as parameters
+  and every call site re-states it. If the functions are one concern, make them
+  a class: the data becomes its fields and the functions its methods. If they
+  are several, split the module until each concern has its module and its
+  class.`
 
-  The script sentence appears for `scripts/`, `tools/` and `bin/` paths, where
-  the objection ("it is a script, functions are fine") actually comes from. The
-  arm needs at least three functions to make its claim: "the data the others
-  share" is false of one helper, and a class plus two helpers is one concept.
+  The script sentence appears for any path with a `scripts/`, `tools/` or `bin/`
+  directory, where the objection ("it is a script, functions are fine") actually
+  comes from. Rust says the same two cases in its own terms: one concern gets
+  the type it operates on as an impl (a foreign type takes a trait), several are
+  one module per type the functions operate on.
 
 **Framework contracts are an exemption, not a marker.** A decorated top-level
 function is registered with a caller outside the module — a router, a CLI, a

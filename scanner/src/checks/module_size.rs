@@ -295,13 +295,15 @@ impl ModuleShape {
     fn classes_message(&self, rel: &str) -> String {
         let names: Vec<&str> = self.classes.iter().map(|c| c.name.as_str()).collect();
         format!(
-            "'{rel}' holds {count} top-level definitions, {types} of them {noun} ({list}){framework}. {reader} {package} {record}",
+            "'{rel}' holds {count} top-level definitions, {types} of them {noun} ({list}){framework}. {principle} {reader} {merge} {package} {record}",
             count = self.definitions(),
             types = names.len(),
             noun = self.type_noun(),
             list = name_list(&names),
             framework = self.framework_clause(),
+            principle = self.principle(),
             reader = self.reader_harm(),
+            merge = self.merge_action(),
             package = self.package_action(),
             record = self.record_exclusion(),
         )
@@ -319,9 +321,31 @@ impl ModuleShape {
         )
     }
 
+    /// The module-shape principle, stated once here and quoted by both arms:
+    /// a module holds one concern, and a concern is a class (a Rust class
+    /// equivalent is a type plus its impl). The action then depends on which
+    /// case the definitions are — one concern, or several — and both arms
+    /// write both cases (writing only one would prescribe the wrong fix for
+    /// the other).
+    fn principle(&self) -> &'static str {
+        match self.language {
+            Language::Python => "A module holds one concern, and a concern is a class.",
+            Language::Rust => "A module holds one concern, and a concern is a type with its impl.",
+        }
+    }
+
+    /// The one-concern case for the types arm: the classes are the same
+    /// concept, so the module keeps one and folds the rest in.
+    fn merge_action(&self) -> &'static str {
+        match self.language {
+            Language::Python => "If the classes are one concern, fold them into the one that owns the state.",
+            Language::Rust => "If the types are one concern, fold them into the one that owns the state.",
+        }
+    }
+
     /// `many` selects the rung: the loose rung's module is a grab-bag, so its
-    /// action is the module split; the strict rung's module is one concept with
-    /// a missing owner, so its action is local to the module.
+    /// action leads with the split; the strict rung's module is one concept with
+    /// a missing owner, so its action leads with the class.
     fn functions_message(&self, rel: &str, many: bool) -> String {
         let script = if self.language == Language::Python && is_script(rel) {
             " A script is not different: the steps it runs build one program state, and no name owns it."
@@ -329,10 +353,11 @@ impl ModuleShape {
             ""
         };
         format!(
-            "'{rel}' holds {count} top-level definitions{breakdown}{framework}. A free function owns no state, so the data the others share arrives as parameters and every call site re-states it.{groups}{script} {action}",
+            "'{rel}' holds {count} top-level definitions{breakdown}{framework}. {principle} A free function owns no state, so the data the functions share arrives as parameters and every call site re-states it.{groups}{script} {action}",
             count = self.definitions(),
             breakdown = self.functions_breakdown(),
             framework = self.framework_clause(),
+            principle = self.principle(),
             groups = self.groups_clause(),
             script = script,
             action = self.functions_action(many),
@@ -384,10 +409,10 @@ impl ModuleShape {
     fn package_action(&self) -> &'static str {
         match self.language {
             Language::Python => {
-                "Turn the module into a package — one file per class inside it, each named after its class and re-exported from __init__.py — so the family keeps its name."
+                "If they are several, turn the module into a package — one file per class inside it, named after its class and re-exported from __init__.py — so the family keeps its name."
             }
             Language::Rust => {
-                "Turn the module into a directory of modules — one file per type inside it, re-exported from the module root — so the family keeps its name."
+                "If they are several, turn the module into a directory of modules — one file per type inside it, re-exported from the module root — so the family keeps its name."
             }
         }
     }
@@ -395,13 +420,13 @@ impl ModuleShape {
     fn functions_action(&self, many: bool) -> &'static str {
         match (self.language, many) {
             (Language::Python, _) => {
-                "Name the concept that data belongs to and make it a class: the data becomes its fields, and the functions become its methods."
+                "If the functions are one concern, make them a class: the data becomes its fields and the functions its methods. If they are several, split the module until each concern has its module and its class."
             }
             (Language::Rust, false) => {
-                "Name the type those functions operate on and give it an impl — an impl block may live in this module. If that type belongs to another crate, put the functions behind one trait instead: a foreign type cannot take an inherent impl."
+                "If the functions are one concern, give them the type they operate on as an impl; a foreign type takes one trait instead. If they are several, split the module by concern, one module per type the functions operate on."
             }
             (Language::Rust, true) => {
-                "Split the module by concept: one module per family, each owning the types it introduces. Give a family an impl when it has a local type, and keep the free function where a `&mut` borrow would conflict."
+                "If the functions are several concerns, split the module by concern: one module per family, each owning the type it introduces. If they are one concern, give them the type they operate on as an impl, keeping the free function where a `&mut` borrow would conflict."
             }
         }
     }
