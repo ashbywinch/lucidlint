@@ -3,8 +3,8 @@ graph contract exporter. Both cache per repo, so a run holds one of each."""
 
 from __future__ import annotations
 
-from orchestrator.graph_contract import GraphContract
 from orchestrator.rust_scan import RustScan
+from orchestrator.services.graph_contract import GraphContract
 
 
 class Services:

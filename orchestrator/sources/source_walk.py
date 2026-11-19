@@ -18,7 +18,7 @@ from pathlib import Path
 
 from orchestrator.console import CONSOLE
 from orchestrator.host import HOST
-from orchestrator.source_file import SourceFile
+from orchestrator.sources.source_file import SourceFile
 
 # exact env/tool directories that hide vendored code; the .venv* / venv* /
 # .conda* families are matched by prefix in `excluded_part`

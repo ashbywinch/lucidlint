@@ -20,9 +20,9 @@ from typing import Any
 import rule_metadata
 from orchestrator.action import Action
 from orchestrator.baseline import Baseline
-from orchestrator.report_document import ReportDocument
-from orchestrator.report_meta import ReportMeta
-from orchestrator.seam_group import SeamGroup
+from orchestrator.report.report_document import ReportDocument
+from orchestrator.report.report_meta import ReportMeta
+from orchestrator.report.seam_group import SeamGroup
 from orchestrator.version import VERSION
 
 

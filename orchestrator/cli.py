@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from orchestrator.fix_command import FixCommand
+from orchestrator.fix.fix_command import FixCommand
 from orchestrator.gate_runner import GateRunner
 from orchestrator.version import VERSION
 

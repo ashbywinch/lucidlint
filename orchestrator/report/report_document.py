@@ -10,8 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from orchestrator.report_meta import ReportMeta
-from orchestrator.seam_group import SeamGroup
+from orchestrator.report.report_meta import ReportMeta
+from orchestrator.report.seam_group import SeamGroup
 
 
 @dataclass(frozen=True)

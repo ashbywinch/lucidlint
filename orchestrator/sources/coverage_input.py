@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from orchestrator.coverage_result import CoverageResult
+from orchestrator.sources.coverage_result import CoverageResult
 
 
 @dataclass(frozen=True)

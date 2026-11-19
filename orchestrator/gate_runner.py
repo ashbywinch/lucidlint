@@ -18,22 +18,17 @@ from pathlib import Path
 
 from orchestrator.action import Action
 from orchestrator.baseline import Baseline
-from orchestrator.config import LucidlintConfig
 from orchestrator.console import CONSOLE
-from orchestrator.coverage_context import CoverageContext, coverage_context
-from orchestrator.coverage_input import CoverageInput
-from orchestrator.coverage_result import CoverageResult
-from orchestrator.file_history import FileHistory
-from orchestrator.git_head import GitHead
 from orchestrator.host import HOST
-from orchestrator.render_ctx import RenderCtx
+from orchestrator.lucidlint_config import LucidlintConfig
+from orchestrator.report.render_ctx import RenderCtx
 from orchestrator.rust_scan import RustScan
 from orchestrator.services import SERVICES
-
-try:
-    from pygit2.enums import SortMode
-except ImportError:  # lucidlint: ignore swallow pygit2 is optional — degrades to gitless mode
-    SortMode = None  # type: ignore[assignment]
+from orchestrator.sources.coverage_context import CoverageContext, coverage_context
+from orchestrator.sources.coverage_input import CoverageInput
+from orchestrator.sources.coverage_result import CoverageResult
+from orchestrator.sources.file_history import FileHistory
+from orchestrator.sources.git_head import GitHead
 
 
 # lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
@@ -156,7 +151,6 @@ class GateRunner:
             return FileHistory(Counter(), {})
         head = ""
         cache_key = ""
-        assert SortMode is not None  # pygit2 is present here (guarded above)
         try:
             r = HOST.pygit2.Repository(str(self.repo))
             head = str(r.head.target)
@@ -180,7 +174,7 @@ class GateRunner:
         try:
             r = HOST.pygit2.Repository(str(self.repo))
             cutoff = int(time.time()) - FileHistory.MAX_AGE_DAYS * 86400
-            for seen, commit in enumerate(r.walk(r.head.target, SortMode.TIME)):
+            for seen, commit in enumerate(r.walk(r.head.target, HOST.pygit2.enums.SortMode.TIME)):
                 if seen >= FileHistory.MAX_COMMITS or commit.commit_time < cutoff:
                     break
                 date = str(commit.commit_time)

@@ -34,25 +34,25 @@ import rule_metadata
 from orchestrator.action import Action
 from orchestrator.baseline import Baseline
 from orchestrator.cli import Cli
-from orchestrator.config import LucidlintConfig
 from orchestrator.console import CONSOLE
-from orchestrator.coverage_context import CoverageContext, coverage_context
-from orchestrator.coverage_input import CoverageInput
-from orchestrator.coverage_result import CoverageResult
-from orchestrator.file_history import FileHistory
-from orchestrator.fix_command import FixCommand, FixTarget
+from orchestrator.fix.fix_command import FixCommand
 from orchestrator.gate_runner import GateRunner
-from orchestrator.git_head import GitHead
-from orchestrator.graph_contract import GraphContract
-from orchestrator.render_ctx import RenderCtx
+from orchestrator.lucidlint_config import LucidlintConfig
+from orchestrator.report.render_ctx import RenderCtx
 from orchestrator.rust_finding import RustFinding
 from orchestrator.rust_findings import RustFindings
 from orchestrator.rust_fix_request import RustFixRequest
 from orchestrator.rust_scan import INPUTS, RustScan
 from orchestrator.scan_flags import ScanFlags
 from orchestrator.services import SERVICES, Services
-from orchestrator.source_file import SourceFile
-from orchestrator.source_walk import SourceWalk, gitignored_docs
+from orchestrator.services.graph_contract import GraphContract
+from orchestrator.sources.coverage_context import CoverageContext, coverage_context
+from orchestrator.sources.coverage_input import CoverageInput
+from orchestrator.sources.coverage_result import CoverageResult
+from orchestrator.sources.file_history import FileHistory
+from orchestrator.sources.git_head import GitHead
+from orchestrator.sources.source_file import SourceFile
+from orchestrator.sources.source_walk import SourceWalk, gitignored_docs
 from orchestrator.vendoring import vendor_path
 from orchestrator.version import VERSION as _VERSION
 from orchestrator.version import version_from_bundle
@@ -80,7 +80,6 @@ __all__ = [
     "_ALL_RULE_KINDS",
     "_CoverageInput",
     "_FIX_ALIASES",
-    "_File",
     "_FixCommand",
     "_GateRunner",
     "_GraphStore",
@@ -216,7 +215,6 @@ _scan_input_dir = INPUTS.directory
 _temp_input = INPUTS.write
 release_temp_input = INPUTS.release
 _GateRunner = GateRunner
-_File = FixTarget
 _FixCommand = FixCommand
 _FIX_ALIASES = FixCommand.ALIASES
 _fix_directive_kind = FixCommand.directive_kind

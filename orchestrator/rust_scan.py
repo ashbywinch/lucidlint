@@ -19,16 +19,16 @@ from typing import Any
 
 from orchestrator.action import Action
 from orchestrator.console import CONSOLE
-from orchestrator.coverage_input import CoverageInput
-from orchestrator.coverage_request import CoverageRequest
-from orchestrator.file_history import FileHistory
 from orchestrator.host import HOST
 from orchestrator.rust_finding import RustFinding
 from orchestrator.rust_findings import RustFindings
 from orchestrator.scan_flags import ScanFlags
 from orchestrator.scan_inputs import INPUTS
-from orchestrator.source_file import SourceFile
-from orchestrator.source_walk import SourceWalk, gitignored_docs
+from orchestrator.sources.coverage_input import CoverageInput
+from orchestrator.sources.coverage_request import CoverageRequest
+from orchestrator.sources.file_history import FileHistory
+from orchestrator.sources.source_file import SourceFile
+from orchestrator.sources.source_walk import SourceWalk, gitignored_docs
 
 
 class RustScan:
@@ -46,6 +46,13 @@ class RustScan:
     # a scanner run that fails to start, hangs, or answers with an unreadable
     # contract is "Rust unavailable" — the caller fail-fasts, never a silent pass
     SCANNER_FAILURES = (OSError, SubprocessError, json.JSONDecodeError, ValueError)
+
+    @staticmethod
+    def warn(msg: str) -> None:
+        """The driver's warning line — one door, so the driver's collaboration
+        with the console is one edge and its functions speak to their own
+        module."""
+        CONSOLE.warn(msg)
 
     def __init__(self, graph: Any = None) -> None:
         # the graph contract is another service's work; the scan asks for the
@@ -79,7 +86,7 @@ class RustScan:
         if found is not None and self._scanner_build_is_stale(found):
             # a local build whose sources are newer — refusing beats testing
             # old rules; env-pinned and bundled binaries are never refused
-            CONSOLE.warn(
+            RustScan.warn(
                 f"the scanner binary at {found} is stale — scanner sources are newer; "
                 "rebuild with `make scanner-check` before running tests or the gate"
             )
@@ -170,7 +177,7 @@ class RustScan:
                             (e.get("function", ""), int(e.get("line", 0)), int(e.get("cc", 0)))
                         )
                     if unmapped:
-                        CONSOLE.warn(self._unmapped_note(unmapped))
+                        RustScan.warn(self._unmapped_note(unmapped))
                 else:
                     result = None
             except RustScan.SCANNER_FAILURES:  # lucidlint: ignore swallow degraded runs report nothing — visible
@@ -245,13 +252,13 @@ class RustScan:
         if env:
             candidates.append(Path(env))
         candidates.append(repo / "scanner" / "target" / "release" / f"lucidlint{exe}")
-        candidates.append(HOST.artifact_root / "scanner" / "target" / "release" / f"lucidlint{exe}")
-        bundle_dir = HOST.artifact_root / "bin"
+        candidates.append(HOST.artifact_root() / "scanner" / "target" / "release" / f"lucidlint{exe}")
+        bundle_dir = HOST.artifact_root() / "bin"
         candidates.append(bundle_dir / f"lucidlint{exe}")
         # a pip install ships the scan core as package-data at
         # lucidlint_bin/bin/lucidlint (setup.py builds it into the wheel) — the
         # self-contained pip channel, sibling of the module like the bundle bin
-        candidates.append(HOST.artifact_root / "lucidlint_bin" / "bin" / f"lucidlint{exe}")
+        candidates.append(HOST.artifact_root() / "lucidlint_bin" / "bin" / f"lucidlint{exe}")
         return candidates
 
     @staticmethod

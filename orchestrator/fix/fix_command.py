@@ -1,7 +1,7 @@
 """The `lucidlint fix` command: one command's whole behaviour.
 
 R27 line resolution, the engine checks, the preview surface, and the apply
-path. A fix targets one file, so `FixTarget` owns the file's own questions
+path. A fix targets one file, so `_FixTarget` owns the file's own questions
 (which lines carry a finding, what a single-file scan says, how a Rust fix
 runs), and `FixCommand` owns the request: the kind, the anchor, the name, the
 preview, and the write.
@@ -24,10 +24,10 @@ from orchestrator.console import CONSOLE
 from orchestrator.host import HOST
 from orchestrator.rust_fix_request import RustFixRequest
 from orchestrator.services import SERVICES
-from orchestrator.source_walk import SourceWalk
+from orchestrator.sources.source_walk import SourceWalk
 
 
-class FixTarget(NamedTuple):
+class _FixTarget(NamedTuple):
     """The file a fix targets — its repo and repo-relative path. The fixers
     are methods on it: every fixer needs the same (repo, rel) pair (the
     strewing pattern: functions sharing a domain class are its methods)."""
@@ -151,17 +151,20 @@ class FixCommand:
                     break
                 body.append(ln)
         return call_hunk, def_idx, body
+
     @staticmethod
     def name_required_kinds() -> set[str]:
         """The engine owns the name-required policy. With libcst absent nothing
         can APPLY anyway, so an empty set only degrades refusal wording, never
         gating (the engine-present paths always see the real set)."""
         return set(HOST.fix_engine._NAME_REQUIRED_KINDS) if HOST.fix_engine.get() else set()
+
     @staticmethod
     def name_is_invalid(name: str | None) -> bool:
         """A --name that is not a Python identifier cannot be built into a fixer's
         node; a missing name is fine (previews run nameless)."""
         return name is not None and not name.isidentifier()
+
     @staticmethod
     def identifier_problem(kind: str, name: str | None, params: list[str] | None, where: str) -> str | None:
         """The invalid-argument guard: a non-identifier --name or --params entry
@@ -178,6 +181,7 @@ class FixCommand:
             if bad:
                 return f"fix: --params entries must be valid identifiers, got {bad} at {where}"
         return None
+
     @staticmethod
     def refusal(kind: str, name: str | None, params: list[str] | None, file: str, line: int) -> str:
         """Why a fix produced nothing. A name-required kind with a missing or
@@ -194,6 +198,7 @@ class FixCommand:
         return FixCommand.identifier_problem(kind, name, params, f"{file}:{line}") or (
             f"fix: nothing to change for {kind} at {file}:{line}"
         )
+
     @staticmethod
     def directive_kind(message: str) -> str | None:
         """The fix kind a finding's directive announces — what the agent's
@@ -264,7 +269,7 @@ class FixCommand:
                 # is no Rust preview surface yet.
                 print(FixCommand.refusal(self.fix_kind, self.args.name, self._params(), self.args.file, self.args.line))
                 return 0
-            return FixTarget(self.repo, self.rel).fix_rust(self.fix_kind, self.args.line, self.args.name)
+            return _FixTarget(self.repo, self.rel).fix_rust(self.fix_kind, self.args.line, self.args.name)
         # Python: the libcst fix engine is a mandatory dependency
         fe = HOST.fix_engine.get()
         if fe is None:
@@ -285,7 +290,7 @@ class FixCommand:
         if signal:
             anchors = [
                 f.col
-                for f in FixTarget(self.repo, self.rel).scan_single_file()
+                for f in _FixTarget(self.repo, self.rel).scan_single_file()
                 if f.signal == signal and f.line == self.args.line and f.col
             ]
             col = max(anchors) if anchors else 0
@@ -331,7 +336,7 @@ class FixCommand:
         # R27: agents never compute line numbers — the tool owns its own
         # coordinates; when the file has exactly one finding of the kind,
         # no --line is needed (both the .py and .rs fix surfaces)
-        lines = FixTarget(self.repo, self.args.file).finding_lines(self.args.kind)
+        lines = _FixTarget(self.repo, self.args.file).finding_lines(self.args.kind)
         if len(lines) == 1:
             self.args.line = lines[0]
         elif not lines:
@@ -426,7 +431,9 @@ class FixCommand:
         silent when nothing of this kind remains."""
         if moved:
             return 0  # already re-attached once and it still will not write
-        lines = [ln for ln in FixTarget(self.repo, self.args.file).finding_lines(self.fix_kind) if ln != self.args.line]
+        lines = [
+            ln for ln in _FixTarget(self.repo, self.args.file).finding_lines(self.fix_kind) if ln != self.args.line
+        ]
         if len(lines) == 1:
             print(f"fix: anchor moved — {self.fix_kind} now at {self.args.file}:{lines[0]}")
             req.line = lines[0]
@@ -436,7 +443,7 @@ class FixCommand:
             # finding's col just like the direct path (schema-3)
             anchors = [
                 f.col
-                for f in FixTarget(self.repo, self.args.file).scan_single_file()
+                for f in _FixTarget(self.repo, self.args.file).scan_single_file()
                 if f.signal == (self.fix_kind if self.fix_kind != "extract-record-class" else "record-shape")
                 and f.line == req.line
                 and f.col

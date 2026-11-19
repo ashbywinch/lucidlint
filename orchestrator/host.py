@@ -22,8 +22,8 @@ class Host:
     Each seam is a proxy over the entry module's binding, so one substitution
     there replaces the collaborator for the whole run."""
 
-    @property
-    def artifact_root(self) -> Path:
+    @staticmethod
+    def artifact_root() -> Path:
         """Where this artifact lives: the entry module sits beside the package,
         so the package's parent is the bundle root, the checkout root, or the
         site-packages that holds the distribution — the one home of `deps/`,
