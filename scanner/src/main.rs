@@ -1652,7 +1652,7 @@ fn main() {
         // the module graph keys are rels to the binary's computed root — the
         // orchestrator's scan set is repo-relative, so re-anchor the findings
         // to absolute paths (resolution-neutral, like the per-file findings)
-        let mut cycle_findings = graph_families::cycle_findings_for(&graph);
+        let mut cycle_findings = graph_families::Cycles::findings_for(&graph);
         for f in &mut cycle_findings {
             if !f.file.starts_with('/') {
                 f.file = format!("{}/{}", root, f.file);
@@ -1684,11 +1684,11 @@ fn main() {
     let rels: Vec<String> = paths.iter().map(|p| Paths::rel_of(p, &root)).collect();
     if let Some(c) = &contract {
         let repo_root = Path::new(&root);
-        all_findings.extend(graph_families::high_risk_findings(repo_root, c, 0.8, include_tests));
-        all_findings.extend(graph_families::cycle_findings(repo_root, c));
-        all_findings.extend(graph_families::layer_mix_findings(repo_root, c, &rels));
-        all_findings.extend(graph_families::folder_mix_findings(repo_root, c));
-        all_findings.extend(graph_families::module_cohesion_findings(repo_root, c, 150));
+        all_findings.extend(graph_families::HighRisk::findings(repo_root, c, 0.8, include_tests));
+        all_findings.extend(graph_families::Cycles::findings(repo_root, c));
+        all_findings.extend(graph_families::LayerMix::findings(repo_root, c, &rels));
+        all_findings.extend(graph_families::FolderMix::findings(repo_root, c));
+        all_findings.extend(graph_families::Cohesion::findings(repo_root, c, 150));
     }
     if let Some(d) = &docs_root {
         let gitignored: std::collections::HashSet<String> = gitignored_json
@@ -1709,7 +1709,7 @@ fn main() {
                     let slot = cc_any.entry(rel).or_insert(0);
                     *slot = (*slot).max(e.cc);
                 }
-                all_findings.extend(graph_families::hotspot_findings(
+                all_findings.extend(graph_families::Hotspot::findings(
                     &churn,
                     &cc_any,
                     0.1,
@@ -1724,7 +1724,7 @@ fn main() {
                     .as_deref()
                     .and_then(|p| std::fs::read_to_string(p).ok())
                     .and_then(|s| serde_json::from_str::<graph_families::CoverageSnapshot>(&s).ok());
-                all_findings.extend(graph_families::churn_untested_findings(&churn, coverage.as_ref(), 0.1));
+                all_findings.extend(graph_families::ChurnUntested::findings(&churn, coverage.as_ref(), 0.1));
             }
         }
     }

@@ -25,17 +25,29 @@ fn scan_core_modules_do_not_depend_on_each_other() {
             "checks/module_size.rs",
             &["crate::graph_families", "crate::docs", "crate::lsp"],
         ),
-        ("graph_families.rs", &["crate::checks", "crate::docs", "crate::lsp"]),
+        ("graph_families", &["crate::checks", "crate::docs", "crate::lsp"]),
         ("docs.rs", &["crate::checks", "crate::graph_families", "crate::lsp"]),
         ("lsp.rs", &["crate::checks", "crate::graph_families", "crate::docs"]),
     ];
     for (file, forbidden) in rules {
-        let src = std::fs::read_to_string(src_dir.join(file)).unwrap();
-        for path in *forbidden {
-            assert!(
-                !src.contains(path),
-                "{file} must not depend on {path} — the scan-core modules are standalone; only main composes them"
-            );
+        // A module may be a file or a directory of submodules; either way
+        // every source it owns is held to the same rule.
+        let mut roots = vec![src_dir.join(file)];
+        if !roots[0].is_file() {
+            roots = std::fs::read_dir(src_dir.join(file))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+        }
+        for root in roots {
+            let src = std::fs::read_to_string(&root).unwrap();
+            for path in *forbidden {
+                assert!(
+                    !src.contains(path),
+                    "{} must not depend on {path} — the scan-core modules are standalone; only main composes them",
+                    root.display()
+                );
+            }
         }
     }
 }

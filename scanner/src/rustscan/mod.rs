@@ -538,7 +538,7 @@ mod tests {
         let graph = ModuleGraph::module_graph(&files, &mods, &uses);
         assert_eq!(graph.get("a.rs").map(|v| v.as_slice()), Some(&["b.rs".to_string()][..]));
         assert_eq!(graph.get("b.rs").map(|v| v.as_slice()), Some(&["a.rs".to_string()][..]));
-        let fs = crate::graph_families::cycle_findings_for(&graph);
+        let fs = crate::graph_families::Cycles::findings_for(&graph);
         assert_eq!(fs.len(), 1);
         assert!(fs[0].message.contains("a.rs"));
         assert!(fs[0].message.contains("b.rs"));
