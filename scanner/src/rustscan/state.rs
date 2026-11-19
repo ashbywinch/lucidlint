@@ -490,7 +490,7 @@ impl<'a> RsState<'a> {
             }
             // the loop family (collection-build / fold / sequential-pass
             // verdicts) — per-function shapes, own module below
-            crate::rustloops::rust_loop_findings(self, sig, block, &sig.ident.to_string(), line);
+            crate::rustloops::RustLoops::findings(self, sig, block, &sig.ident.to_string(), line);
             let typed = sig.inputs.iter().filter(|i| matches!(i, FnArg::Typed(_))).count();
             if typed > 5 && !RustShape::is_trivial_stub(&block.stmts) {
                 self.finding(

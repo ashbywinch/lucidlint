@@ -32,7 +32,7 @@ pub(super) fn pipeline_loop_target(f: &syn::ExprForLoop) -> Result<(String, bool
         return Err("the loop binds `_` — there is no item name to map over".to_string());
     }
     let mut bound = Vec::new();
-    crate::rustloops::pat_idents(&f.pat, &mut bound);
+    crate::rustloops::RustLoops::pat_idents(&f.pat, &mut bound);
     if bound.len() != 1 {
         return Err("the loop pattern binds more than one name".to_string());
     }
@@ -66,7 +66,7 @@ pub(super) fn pipeline_plan(
     };
     let (pat, core_is_if) = pipeline_loop_target(f)?;
     // one collection build — the detector's own predicate is the contract
-    if !crate::rustloops::body_is_pipeline(&f.body.stmts) {
+    if !crate::rustloops::RustLoops::body_is_pipeline(&f.body.stmts) {
         return Err("the loop body is not a single collection build".to_string());
     }
     let _ = core_is_if;
@@ -79,8 +79,8 @@ pub(super) fn pipeline_plan(
         Stmt::Expr(Expr::If(i), _) => &i.then_branch.stmts[0],
         _ => core,
     };
-    let acc = crate::rustloops::single_push(core)
-        .or_else(|| crate::rustloops::index_store(core))
+    let acc = crate::rustloops::RustLoops::single_push(core)
+        .or_else(|| crate::rustloops::RustLoops::index_store(core))
         .ok_or_else(|| "the loop body is not a single collection build".to_string())?;
     let filter = match f.body.stmts.as_slice() {
         [Stmt::Expr(Expr::If(i), _)] => Some(FixText::span_text(source, i.cond.span())?),
@@ -91,7 +91,7 @@ pub(super) fn pipeline_plan(
         Stmt::Expr(Expr::Assign(a), Some(_)) => FixText::span_text(source, a.right.span())?,
         _ => return Err("the loop body is not a single collection build".to_string()),
     };
-    let indexed = crate::rustloops::index_store(core).is_some();
+    let indexed = crate::rustloops::RustLoops::index_store(core).is_some();
     let init_idx = pipeline_init_index(stmts, loop_idx, scope, &acc)?;
     // the empty check: `Vec::new()` / `vec![]` / `HashSet::new()` — a
     // non-empty init would be dropped by the rewrite; refuse instead

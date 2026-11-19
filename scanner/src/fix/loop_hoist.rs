@@ -178,7 +178,7 @@ pub(super) fn hoist_no_other_write(
     impl syn::visit::Visit<'_> for WriteScan<'_> {
         fn visit_expr_assign(&mut self, node: &syn::ExprAssign) {
             let mut base = Vec::new();
-            crate::rustloops::expr_base_path(&node.left, &mut base);
+            crate::rustloops::RustLoops::expr_base_path(&node.left, &mut base);
             for b in base {
                 if b != self.acc && !self.bound.contains(&b) {
                     self.bad = Some(b);
@@ -190,7 +190,7 @@ pub(super) fn hoist_no_other_write(
         fn visit_expr_binary(&mut self, node: &syn::ExprBinary) {
             if crate::rustscan::is_compound_op(&node.op) {
                 let mut base = Vec::new();
-                crate::rustloops::expr_base_path(&node.left, &mut base);
+                crate::rustloops::RustLoops::expr_base_path(&node.left, &mut base);
                 for b in base {
                     if b != self.acc && !self.bound.contains(&b) {
                         self.bad = Some(b);
@@ -249,7 +249,7 @@ pub(super) fn hoist_plan(source: &str, stmts: &[Stmt], loop_idx: usize) -> Resul
     let mut bound = std::collections::HashSet::new();
     {
         let mut v = Vec::new();
-        crate::rustloops::pat_idents(&f.pat, &mut v);
+        crate::rustloops::RustLoops::pat_idents(&f.pat, &mut v);
         bound.extend(v);
     }
     for s in &f.body.stmts {
