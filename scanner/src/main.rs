@@ -17,8 +17,8 @@
 // lucidlint: ignore-file large-function scan_source_impl is the CLI's one-pass pipeline — extracting
 // helpers would thread six collections through a parameter object for no reader gain
 use rayon::prelude::*;
-use ruff_python_ast::visitor::source_order::{walk_expr, walk_stmt, SourceOrderVisitor};
-use ruff_python_ast::{AnyNodeRef, Expr, ModModule, Stmt};
+use ruff_python_ast::visitor::source_order::SourceOrderVisitor;
+use ruff_python_ast::{AnyNodeRef, ModModule, Stmt};
 use ruff_python_parser::{parse_module, Parsed};
 use ruff_text_size::Ranged;
 use std::collections::HashSet;
@@ -44,13 +44,13 @@ mod rustloops;
 mod rustscan;
 mod skeleton;
 mod source;
+mod state;
 mod suppressions;
 use checks::Q;
 use checks::*;
 use file_scan::{ClassInfo, FileScan, ImportInfo, SelfAssign, UndeclScan};
 use finding::{Finding, FnCc, FnScope};
 use paths::{Paths, SCAN_SKIP_DIRS};
-use python_shape::FnShape;
 use source::Source;
 
 impl Finding {
@@ -80,7 +80,7 @@ struct ScanState<'a> {
     claimed_dispatch: std::collections::HashSet<usize>,
     /// Parent chain for the magic-number position check — exprs plus the
     /// non-expr layers (stmt, keyword) that break the direct-parent link.
-    parent_stack: Vec<ParentEntry<'a>>,
+    parent_stack: Vec<state::ParentEntry<'a>>,
     /// Module-level function definitions (name, line) — non-test files.
     defs: Vec<(String, usize)>,
     /// Every function/method span (name, first line, last line) — the
@@ -144,509 +144,6 @@ struct ScanState<'a> {
 // The last line start per `line_of`/`col_of` source — a thread-local cache
 // keyed by (ptr, len): `line_of` used to scan from offset 0 for every call,
 // so a scan with F findings and C comments cost O((F+C) * file_len) — a
-/// The parent expr's KIND for the magic-number position rule — the variant
-/// discriminant, never the node: holding a cloned `Expr` per visited node
-/// deep-cloned every subtree (the scan's biggest allocation; a keystroke on
-/// a 2000-line file cloned the whole AST twice over).
-#[derive(Copy, Clone, PartialEq)]
-enum ParentExprKind {
-    BinOp,
-    Compare,
-    UnaryOp,
-    Subscript,
-    Call,
-    Other,
-}
-
-fn parent_kind(e: &Expr) -> ParentExprKind {
-    match e {
-        Expr::BinOp(_) => ParentExprKind::BinOp,
-        Expr::Compare(_) => ParentExprKind::Compare,
-        Expr::UnaryOp(_) => ParentExprKind::UnaryOp,
-        Expr::Subscript(_) => ParentExprKind::Subscript,
-        Expr::Call(_) => ParentExprKind::Call,
-        _ => ParentExprKind::Other,
-    }
-}
-
-enum ParentEntry<'a> {
-    Expr(ParentExprKind),
-    /// A positional argument of a call — the callee's name (P2: the
-    /// unit-constructor exemption).
-    CallArg {
-        callee: &'a str,
-    },
-    /// A keyword argument of a call — callee + the keyword's name (P2: a
-    /// unit-naming keyword — timedelta(minutes=20) — states the unit).
-    CallKw {
-        callee: &'a str,
-        kw: &'a str,
-    },
-    Stmt,
-}
-
-impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
-    // lucidlint: ignore large-function the ruff visitor dispatches statement kinds in CPython's visit order
-    fn visit_stmt(&mut self, stmt: &'a Stmt) {
-        // module scope = no open function scope and no class nesting (the
-        // FunctionDef arm walks bodies manually, so parent_stack is not the
-        // reliable signal here)
-        let module_level = self.fn_stack.is_empty() && self.in_class == 0;
-        match stmt {
-            Stmt::FunctionDef(f) => {
-                let module_level = self.fn_stack.is_empty() && self.in_class == 0;
-                checks::ExpressionOccurrence::collect(self, f);
-                if module_level {
-                    checks::PathExpression::collect(self, f);
-                }
-                let was_fn = self.current_fn.take();
-                self.current_fn = Some((f.name.to_string(), Source::line_of(self.source, f.range.start())));
-                self.fn_spans.push((
-                    f.name.to_string(),
-                    Source::line_of(self.source, f.range.start()),
-                    Source::line_of(self.source, f.range.end()),
-                ));
-
-                self.fn_stack.push(FnScope {
-                    returned: FunctionFacts::returned_names(&f.body),
-                });
-                self.unreachable_check(&f.body);
-                shadow_findings(self, stmt);
-                let source = self.source;
-                LongParamList::findings(self, f, source);
-                // signature exprs feed the reference scan (ast.walk covers
-                // decorators, parameter annotations/defaults, and returns)
-                for d in &f.decorator_list {
-                    self.visit_expr(&d.expression);
-                }
-                for pwd in f
-                    .parameters
-                    .posonlyargs
-                    .iter()
-                    .chain(&f.parameters.args)
-                    .chain(&f.parameters.kwonlyargs)
-                {
-                    if let Some(a) = &pwd.parameter.annotation {
-                        self.visit_expr(a.as_ref());
-                    }
-                    if let Some(d) = &pwd.default {
-                        self.visit_expr(d.as_ref());
-                    }
-                }
-                for p in [&f.parameters.vararg, &f.parameters.kwarg].into_iter().flatten() {
-                    if let Some(a) = &p.annotation {
-                        self.visit_expr(a.as_ref());
-                    }
-                }
-                if let Some(r) = &f.returns {
-                    self.visit_expr(r.as_ref());
-                }
-                for s in &f.body {
-                    self.visit_stmt(s);
-                }
-                // the push/pop invariant is per-function; a missing scope is a
-                // walker bug, not a crash — bail out of this function's checks
-                let Some(_scope) = self.fn_stack.pop() else {
-                    return;
-                };
-                // The radon-equivalent CC comes from the radonc crate (its rules
-                // match radon 6.0.1 exactly; the visitor still tracks decisions
-                // for the closures/latent-class gate).
-                let cc = radonc::function_cc(f) as u32;
-                // repo-wide collections: module-level defs + duplicate
-                // candidates (the def line is the NAME's line — ruff's
-                // FunctionDef range starts at the decorator)
-                let def_line = Source::line_of(self.source, f.name.range().start());
-                if module_level && !self.is_test {
-                    self.defs.push((f.name.to_string(), def_line));
-                    if !f.decorator_list.is_empty() {
-                        self.decorated.insert(f.name.to_string());
-                    }
-                }
-                let span = (Source::line_of(self.source, f.range().end())
-                    - Source::line_of(self.source, f.range().start())) as u32;
-                // the Python gate reads cc from radon's fn_map, which only
-                // holds module-level functions — methods/nested get cc = 0
-                let gate_cc = if module_level { cc } else { 0 };
-                Closures::closure_findings(self, stmt, gate_cc, span);
-                // a method that never touches its receiver does not belong in
-                // the class (the inverse of record-shape/strewing)
-                if self.in_class > 0 {
-                    DetachedMethod::findings(self, f, source);
-                }
-                if module_level {
-                    // the def line (name range), not the decorator — radon's
-                    // fn.lineno; the parity test's decorated-line offset
-                    // normalization existed because of this difference
-                    let (shape, shape_detail) = FnShape::python_fn_shape(&f.body);
-                    self.cc.push(FnCc {
-                        file: self.file.to_string(),
-                        function: f.name.to_string(),
-                        line: def_line,
-                        cc,
-                        shape,
-                        shape_detail,
-                    });
-                }
-                self.current_fn = was_fn;
-                return;
-            }
-            Stmt::ClassDef(cls) => {
-                self.in_class += 1;
-                // class bodies: no decisions, but walked (imports/exprs inside
-                // still get visited with their function attribution)
-                if module_level && !self.is_test {
-                    let def_line = Source::line_of(self.source, cls.name.range().start());
-                    self.class_defs.push((cls.name.to_string(), def_line));
-                }
-                walk_stmt(self, stmt);
-                self.in_class -= 1;
-                return;
-            }
-            Stmt::Expr(e) => self.noop_check(&e.value),
-            Stmt::Import(imp) => {
-                self.import_checks(stmt);
-                for a in &imp.names {
-                    self.refs.insert(a.name.to_string());
-                }
-            }
-            Stmt::ImportFrom(imp) => {
-                self.import_checks(stmt);
-                for a in &imp.names {
-                    self.refs.insert(a.name.to_string());
-                }
-            }
-            Stmt::For(_) | Stmt::With(_) | Stmt::Try(_) => {
-                if matches!(stmt, Stmt::Try(_)) {
-                    Except::findings(self, stmt);
-                }
-                shadow_findings(self, stmt);
-            }
-            Stmt::Global(_) => {
-                let module_level = false; // globals inside a function
-                GlobalState::global_state_findings(self, stmt, module_level);
-            }
-            Stmt::Assign(_) => {
-                GlobalState::global_state_findings(self, stmt, module_level);
-                shadow_findings(self, stmt);
-            }
-            Stmt::AugAssign(_) | Stmt::AnnAssign(_) | Stmt::Delete(_) => {
-                GlobalState::global_state_findings(self, stmt, module_level);
-            }
-            _ => {}
-        }
-        // CC (cyclomatic complexity) comes from the radonc crate — the scan
-        // walk itself no longer counts decisions.
-        self.parent_stack.push(ParentEntry::Stmt);
-        walk_stmt(self, stmt);
-        self.parent_stack.pop();
-    }
-
-    fn visit_expr(&mut self, expr: &'a Expr) {
-        match expr {
-            Expr::Name(n) => {
-                self.refs.insert(n.id.to_string());
-            }
-            Expr::Attribute(a) => {
-                // attribute names count as references (obj.set_x(v) uses set_x)
-                self.refs.insert(a.attr.to_string());
-            }
-            Expr::StringLiteral(s) if !self.is_test => {
-                self.strings.push(s.value.to_str().to_string());
-            }
-            _ => {}
-        }
-        // Calls are walked manually so keyword values get a Keyword parent —
-        // the generic walk would hand them the Call as parent, and the magic
-        // position rule must match Python's (status_code=403 is NOT a finding).
-        if let Expr::Call(call) = expr {
-            let source = self.source;
-            BooleanArg::findings(self, call, source);
-            PositionalLiterals::findings(self, call, source);
-            // debug-artifact (Python half): breakpoint() left in production —
-            // the dbg!/unwrap analog (Rust half lives in rustscan.rs)
-            if !self.is_test
-                && matches!(
-                    call.func.as_ref(),
-                    Expr::Name(n) if n.id.as_str() == "breakpoint"
-                )
-            {
-                let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-                self.findings.push(Finding {
-                    logical_start: None,
-                    seam_members: Vec::new(),
-                    file: self.file.to_string(),
-                    line: Source::line_of(source, call.range().start()),
-                    col: 0,
-                    function: fn_name,
-                    kind: "debug-artifact".into(),
-                    severity: "fail".into(),
-                    message: "breakpoint() left in production code — remove it".into(),
-                });
-            }
-            let callee: &'a str = match call.func.as_ref() {
-                Expr::Name(n) => n.id.as_str(),
-                Expr::Attribute(a) => a.attr.as_str(),
-                _ => "",
-            };
-            self.parent_stack.push(ParentEntry::Expr(parent_kind(expr)));
-            self.visit_expr(&call.func);
-            for arg in &call.arguments.args {
-                self.parent_stack.push(ParentEntry::CallArg { callee });
-                self.visit_expr(arg);
-                self.parent_stack.pop();
-            }
-            for kw in &call.arguments.keywords {
-                let name: &'a str = kw.arg.as_ref().map(|n| n.id.as_str()).unwrap_or("");
-                self.parent_stack.push(ParentEntry::CallKw { callee, kw: name });
-                self.visit_expr(&kw.value);
-                self.parent_stack.pop();
-            }
-            self.parent_stack.pop();
-            return;
-        }
-        // magic numbers (a warn finding — distinct from the CC that radonc owns).
-        // Magic fires ANYWHERE expressions are walked — class bodies and
-        // methods included (radon/reference parity): the fixer's constant
-        // becomes a CLASS ATTRIBUTE of the enclosing class, so a class-body
-        // finding is the rule's primary case (third-pass 4).
-        if let Expr::NumberLiteral(n) = expr {
-            self.magic_check(n);
-        }
-        self.parent_stack.push(ParentEntry::Expr(parent_kind(expr)));
-        walk_expr(self, expr);
-        self.parent_stack.pop();
-    }
-}
-
-impl<'a> ScanState<'a> {
-    /// Magic numbers: int/float literals outside (0, 1, 2) whose parent is an
-    /// operation — mirrors the Python implementation's position rule.
-    /// Exempt (B8): octal/hex/binary spellings (0o600 is intent-bearing, and
-    /// the old code rendered it as "384"), plain subscript indexes, len()
-    /// length guards, module-level named-constant RHS values, and >= 3
-    /// same-kind data-table siblings in one collection literal.
-    fn magic_check(&mut self, n: &ruff_python_ast::ExprNumberLiteral) {
-        // B8: an 0x/0o/0b spelling states its meaning in the literal itself
-        let text = &self.source[n.range()];
-        if text.len() >= 2 {
-            let prefix = &text[..2];
-            if checks::MagicNumber::is_radix_prefix(prefix) {
-                return;
-            }
-        }
-        let value = match &n.value {
-            ruff_python_ast::Number::Int(i) => i.to_string(),
-            ruff_python_ast::Number::Float(f) => f.to_string(),
-            ruff_python_ast::Number::Complex { .. } => return,
-        };
-        if matches!(value.as_str(), "0" | "1" | "2") {
-            return;
-        }
-        let parent_is_op = matches!(
-            self.parent_stack.last(),
-            Some(ParentEntry::Expr(k)) if matches!(
-                k,
-                ParentExprKind::BinOp
-                    | ParentExprKind::Compare
-                    | ParentExprKind::UnaryOp
-                    | ParentExprKind::Call
-            )
-        ) || matches!(self.parent_stack.last(), Some(ParentEntry::CallArg { .. }));
-        if !parent_is_op {
-            return; // a bare subscript index is a position code, not domain magic
-        }
-        let at = n.range().start().to_usize();
-        if self.magic_table_exempts.contains(&at)
-            || self.magic_const_rhs_exempts.contains(&at)
-            || self.magic_len_guard_exempts.contains(&at)
-            || self.magic_unit_named_exempts.contains(&at)
-        {
-            return;
-        }
-        // P2: the nearest enclosing call's callee is a unit constructor
-        // (Quantity, timedelta, TimeDelta, Distance) or its keyword names a
-        // unit (timedelta(minutes=20)) — the unit is stated at the site, so
-        // the literal is named there.
-        let nearest_call = self.parent_stack.iter().rev().find_map(|e| match e {
-            ParentEntry::CallArg { callee } => Some((*callee, "")),
-            ParentEntry::CallKw { callee, kw } => Some((*callee, *kw)),
-            _ => None,
-        });
-        if let Some((callee, kw)) = nearest_call {
-            let unit_ctor = matches!(callee, "Quantity" | "timedelta" | "TimeDelta" | "Distance");
-            let unit_kw = !kw.is_empty() && checks::NamingUnits::name_states_unit(kw);
-            if unit_ctor || unit_kw {
-                return;
-            }
-        }
-        let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-        let in_fn = if fn_name.is_empty() {
-            String::new()
-        } else {
-            format!(" in {fn_name}")
-        };
-        // P2: both mechanisms are named as glossed examples; the family is
-        // the reader's judgment, so the same message renders at every firing
-        // site and the suggestion NEVER names a unit or claims which applies.
-        let message = format!("magic number {value}{in_fn} — nothing states what it means or why this magnitude. Write it as a named constant where the computation uses it, and state what it means and why this size in the name or in one comment beside it. If the value carries units, express it in a type that understands them — Python's timedelta for durations, or a Quantity from the pint units library for physical measures. Collection-literal data tables (>= 3 same-kind numeric siblings) are exempt. — fix: magic-number --fix-name <CONST>");
-        self.findings.push(Finding {
-            logical_start: None,
-            seam_members: Vec::new(),
-            file: self.file.to_string(),
-            line: Source::line_of(self.source, n.range.start()),
-            col: Source::col_of(self.source, n.range.start()),
-            function: fn_name,
-            kind: "magic-number".into(),
-            severity: "warn".into(),
-            message,
-        });
-    }
-
-    /// No-op statements: expression statements that discard their value.
-    fn noop_check(&mut self, v: &'a Expr) {
-        let harmless = matches!(
-            v,
-            Expr::Call(_)
-                | Expr::Await(_)
-                | Expr::Yield(_)
-                | Expr::YieldFrom(_)
-                | Expr::StringLiteral(_)
-                | Expr::BytesLiteral(_)
-                | Expr::NumberLiteral(_)
-                | Expr::BooleanLiteral(_)
-                | Expr::NoneLiteral(_)
-                | Expr::EllipsisLiteral(_)
-                | Expr::Lambda(_)
-                | Expr::Named(_)
-        );
-        if !harmless {
-            let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-            self.findings.push(Finding {
-                logical_start: None,
-                seam_members: Vec::new(),
-                file: self.file.to_string(),
-                line: Source::line_of(self.source, v.range().start()),
-                col: 0,
-                function: fn_name,
-                kind: "noop-statement".into(),
-                severity: "fail".into(),
-                message: "expression statement discards its value — dead statement — fix: noop-statement".into(),
-            });
-        }
-    }
-
-    /// Inline imports (imports inside any function) and private-symbol
-    /// imports (`from pkg import _x`, `from pkg._sub import x`,
-    /// `import pkg._internal`).
-    fn import_checks(&mut self, stmt: &'a Stmt) {
-        let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-        if !self.fn_stack.is_empty() {
-            let line = Source::stmt_line(self.source, stmt);
-            self.findings.push(Finding {
-                logical_start: None,
-                seam_members: Vec::new(),
-                col: 0,
-                file: self.file.to_string(),
-                line,
-                function: fn_name.clone(),
-                kind: "inline-import".into(),
-                severity: "fail".into(),
-                message: format!("import inside function body at line {line} — move it to module top"),
-            });
-        }
-        match stmt {
-            Stmt::ImportFrom(im) => {
-                if im.module.as_ref().map(|m| m.as_str()) == Some("__future__") {
-                    return;
-                }
-                let private_module = im
-                    .module
-                    .as_ref()
-                    .map(|m| m.as_str().split('.').any(|seg| seg.starts_with('_')))
-                    .unwrap_or(false);
-                for alias in &im.names {
-                    let name = alias.name.as_str();
-                    if name.starts_with('_') || private_module {
-                        let target = if name.starts_with('_') {
-                            name.to_string()
-                        } else {
-                            format!("{}.{}", im.module.as_ref().map(|m| m.as_str()).unwrap_or(""), name)
-                        };
-                        self.findings.push(Finding {
-                            logical_start: None,
-                            seam_members: Vec::new(),
-                            file: self.file.to_string(),
-                            line: Source::stmt_line(self.source, stmt),
-                            col: 0,
-                            function: fn_name.clone(),
-                            kind: "private-import".into(),
-                            severity: "fail".into(),
-                            message: format!("imports private symbol '{target}' — never import underscore symbols"),
-                        });
-                    }
-                }
-            }
-            Stmt::Import(im) => {
-                for alias in &im.names {
-                    let name = alias.name.as_str();
-                    if name.split('.').any(|seg| seg.starts_with('_')) {
-                        self.findings.push(Finding {
-                            logical_start: None,
-                            seam_members: Vec::new(),
-                            file: self.file.to_string(),
-                            line: Source::stmt_line(self.source, stmt),
-                            col: 0,
-                            function: fn_name.clone(),
-                            kind: "private-import".into(),
-                            severity: "fail".into(),
-                            message: format!("imports private path '{name}' — never import underscore symbols"),
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Statements after an unconditional return/raise/continue/break are dead
-    /// code — one finding per statement list, exactly like the Python tool.
-    fn unreachable_check(&mut self, body: &'a [Stmt]) {
-        let mut lists: Vec<&'a [Stmt]> = vec![body];
-        for s in body {
-            FnShape::collect_stmt_lists(s, &mut lists);
-        }
-        let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-        for list in lists {
-            for (i, stmt) in list.iter().enumerate() {
-                let exits = matches!(
-                    stmt,
-                    Stmt::Return(_) | Stmt::Raise(_) | Stmt::Continue(_) | Stmt::Break(_)
-                );
-                if exits {
-                    if let Some(dead) = list.get(i + 1) {
-                        let line = Source::stmt_line(self.source, dead);
-                        self.findings.push(Finding {
-                            logical_start: None,
-                            seam_members: Vec::new(),
-                            col: 0,
-                            file: self.file.to_string(),
-                            line,
-                            function: fn_name.clone(),
-                            kind: "unreachable".into(),
-                            severity: "fail".into(),
-                            message: format!(
-                                "unreachable statement at line {line} — dead code is deleted — fix: unreachable"
-                            ),
-                        });
-                    }
-                    break;
-                }
-            }
-        }
-    }
-}
-
 impl FileScan {
     /// The repo-relative path — the scan's identity (the orchestrator's
     /// `rel`); the repo-wide merge keys everything by it.
@@ -655,128 +152,134 @@ impl FileScan {
     }
 }
 
-/// The full scan (CLI): per-file families + repo-wide collections.
-fn scan_source(source: &str, name: &str) -> FileScan {
-    let repo_wide = true;
-    scan_source_impl(source, name, repo_wide)
-}
+pub use rules_gen::{final_kind, FAMILY_KINDS, STANDARD_KINDS};
 
-/// The LSP scan: per-file families only — the duplicate-candidate BFS and
-/// its per-function skeleton walks are pure waste for a single buffer.
-/// Dispatches on the buffer's extension: .rs -> the Rust layer, else Python.
-pub fn scan_source_lsp(source: &str, name: &str) -> FileScan {
-    if name.ends_with(".rs") {
+/// The scan pipeline — the composition root's one pass over a file or repo.
+pub struct Pipeline;
+
+impl Pipeline {
+    /// The full scan (CLI): per-file families + repo-wide collections.
+    fn scan_source(source: &str, name: &str) -> FileScan {
+        let repo_wide = true;
+        Self::scan(source, name, repo_wide)
+    }
+
+    /// The LSP scan: per-file families only — the duplicate-candidate BFS and
+    /// its per-function skeleton walks are pure waste for a single buffer.
+    /// Dispatches on the buffer's extension: .rs -> the Rust layer, else Python.
+    fn scan_source_lsp(source: &str, name: &str) -> FileScan {
+        if name.ends_with(".rs") {
+            let repo_wide = false; // LSP per-buffer scans are single-file
+            let rs = rustscan::RustScan::scan(source, name, repo_wide);
+            return Self::rustscan_to_filescan_ref(&rs, name);
+        }
         let repo_wide = false; // LSP per-buffer scans are single-file
-        let rs = rustscan::RustScan::scan(source, name, repo_wide);
-        return rustscan_to_filescan_ref(&rs, name);
+        Self::scan(source, name, repo_wide)
     }
-    let repo_wide = false; // LSP per-buffer scans are single-file
-    scan_source_impl(source, name, repo_wide)
-}
 
-/// The module-level post-passes — structural families + the advisory
-/// refactorings — kept out of scan_source_impl (which was crossing the
-/// large-function line).
-fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: &str, repo_wide: bool) {
-    class_module_findings(state, body, name);
-    vague_name_findings(state, body);
-    strewing_findings(state, body);
-    MisplacedMethod::findings(state, body);
-    TupleRecord::findings(state, body);
-    WideTuple::findings(state, body);
-    AssemblyClass::findings(state, body);
-    LatentState::data_clump(state, body);
-    LatentState::feature_envy(state, body);
-    LatentState::collect_self_assigns(state, body);
-    StaticHusk::findings(state, body);
-    delegating_husk_findings(state, body);
-    process_class_findings(state, body);
-    ClosureCluster::findings(state, body, source);
-    LatentState::duplicate_field(state, body);
-    RecordShape::findings(state, body, source);
-    Partition::findings(state, body, source);
-    // review-log rules: shadowing hazards + duplicated work (all per-file)
-    duplicate_def_findings(state, body);
-    Docstring::findings(state, body);
-    duplicate_block_findings(state, body);
-    // advisory refactorings (warn): detection-only, the fix names the Fowler
-    // refactoring for the agent (or a future fix)
-    guard_clause_findings(state, body, source);
-    latent_visitor_findings(state, body, source); // claims chains first — polymorphism skips them
-    conditional_polymorphism_findings(state, body, source);
-    SpecialCase::findings(state, body, source);
-    Scattered::collect_scattered_instances(state, body);
-    UnnamedCondition::findings(state, body, source);
-    UnnamedClassification::findings(state, body, source);
-    MiddleMan::collect(state, body, source, repo_wide);
-    Unused::collect_setters(state, body);
-    LoopFamily::findings(state, body, source);
-    DuplicateModule::collect(state, body, name);
-    Forwarding::collect(state, body);
-}
+    /// The module-level post-passes — structural families + the advisory
+    /// refactorings — kept out of Self::scan_source_impl (which was crossing the
+    /// large-function line).
+    fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: &str, repo_wide: bool) {
+        class_module_findings(state, body, name);
+        vague_name_findings(state, body);
+        strewing_findings(state, body);
+        MisplacedMethod::findings(state, body);
+        TupleRecord::findings(state, body);
+        WideTuple::findings(state, body);
+        AssemblyClass::findings(state, body);
+        LatentState::data_clump(state, body);
+        LatentState::feature_envy(state, body);
+        LatentState::collect_self_assigns(state, body);
+        StaticHusk::findings(state, body);
+        delegating_husk_findings(state, body);
+        process_class_findings(state, body);
+        ClosureCluster::findings(state, body, source);
+        LatentState::duplicate_field(state, body);
+        RecordShape::findings(state, body, source);
+        Partition::findings(state, body, source);
+        // review-log rules: shadowing hazards + duplicated work (all per-file)
+        duplicate_def_findings(state, body);
+        Docstring::findings(state, body);
+        duplicate_block_findings(state, body);
+        // advisory refactorings (warn): detection-only, the fix names the Fowler
+        // refactoring for the agent (or a future fix)
+        guard_clause_findings(state, body, source);
+        latent_visitor_findings(state, body, source); // claims chains first — polymorphism skips them
+        conditional_polymorphism_findings(state, body, source);
+        SpecialCase::findings(state, body, source);
+        Scattered::collect_scattered_instances(state, body);
+        UnnamedCondition::findings(state, body, source);
+        UnnamedClassification::findings(state, body, source);
+        MiddleMan::collect(state, body, source, repo_wide);
+        Unused::collect_setters(state, body);
+        LoopFamily::findings(state, body, source);
+        DuplicateModule::collect(state, body, name);
+        Forwarding::collect(state, body);
+    }
 
-/// Per-buffer scans never run the repo-wide families (unused, unused-setter,
-/// duplicate) — their findings are evaluated only in repo_wide_merge — so
-/// their markers cannot bind here and a stale finding for one is a false
-/// fail artifact. The gate path keeps stale reporting: its merge consumes
-/// those markers and drops exactly the stale findings that survive it.
-fn drop_repo_wide_stale_artifacts(findings: &mut Vec<Finding>) {
-    findings.retain(|f| {
-        f.kind != "stale-suppression"
-            || !matches!(
-                sig_of_stale(&f.message).as_str(),
-                "unused" | "unused-setter" | "duplicate" | "undeclared-attribute"
-            )
-    });
-}
+    /// Per-buffer scans never run the repo-wide families (unused, unused-setter,
+    /// duplicate) — their findings are evaluated only in repo_wide_merge — so
+    /// their markers cannot bind here and a stale finding for one is a false
+    /// fail artifact. The gate path keeps stale reporting: its merge consumes
+    /// those markers and drops exactly the stale findings that survive it.
+    fn drop_repo_wide_stale_artifacts(findings: &mut Vec<Finding>) {
+        findings.retain(|f| {
+            f.kind != "stale-suppression"
+                || !matches!(
+                    Self::sig_of_stale(&f.message).as_str(),
+                    "unused" | "unused-setter" | "duplicate" | "undeclared-attribute"
+                )
+        });
+    }
 
-fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
-    Source::reset_line_starts();
-    let parsed: Parsed<ModModule> = match parse_module(source) {
-        Ok(p) => p,
-        Err(_) => {
-            return FileScan {
-                file_name: name.to_string(),
-                errors: 1,
-                ..Default::default()
-            };
+    fn scan(source: &str, name: &str, repo_wide: bool) -> FileScan {
+        Source::reset_line_starts();
+        let parsed: Parsed<ModModule> = match parse_module(source) {
+            Ok(p) => p,
+            Err(_) => {
+                return FileScan {
+                    file_name: name.to_string(),
+                    errors: 1,
+                    ..Default::default()
+                };
+            }
+        };
+        let errors = parsed.errors().len();
+        let body = parsed.syntax().body.clone(); // ThinVec<Stmt> — derefs to &[Stmt]
+        let mut state = ScanState {
+            file: name,
+            source,
+            logical_starts: checks::Suppressions::logical_line_starts(source, parsed.tokens()),
+            magic_table_exempts: checks::MagicNumber::magic_table_exempt_offsets(&body),
+            magic_const_rhs_exempts: checks::MagicNumber::magic_const_rhs_offsets(&body),
+            magic_len_guard_exempts: checks::MagicNumber::magic_len_guard_offsets(&body),
+            magic_unit_named_exempts: checks::NamingUnits::magic_unit_named_offsets(&body),
+            is_test: Paths::is_test_path(name),
+            module_constants: checks::GlobalState::module_constant_names(&body),
+            ..Default::default()
+        };
+        for stmt in &body {
+            state.visit_stmt(stmt);
         }
-    };
-    let errors = parsed.errors().len();
-    let body = parsed.syntax().body.clone(); // ThinVec<Stmt> — derefs to &[Stmt]
-    let mut state = ScanState {
-        file: name,
-        source,
-        logical_starts: checks::Suppressions::logical_line_starts(source, parsed.tokens()),
-        magic_table_exempts: checks::MagicNumber::magic_table_exempt_offsets(&body),
-        magic_const_rhs_exempts: checks::MagicNumber::magic_const_rhs_offsets(&body),
-        magic_len_guard_exempts: checks::MagicNumber::magic_len_guard_offsets(&body),
-        magic_unit_named_exempts: checks::NamingUnits::magic_unit_named_offsets(&body),
-        is_test: Paths::is_test_path(name),
-        module_constants: checks::GlobalState::module_constant_names(&body),
-        ..Default::default()
-    };
-    for stmt in &body {
-        state.visit_stmt(stmt);
-    }
-    module_post_passes(&mut state, &body, name, source, repo_wide);
-    if state.is_test {
-        // the rules that live in tests — scanned for alone or with --include-tests
-        Monkeypatch::findings(&mut state, &body, source);
-        skipif_findings(&mut state, &body, source);
-        fakefs_findings(&mut state, &body, source);
-        no_assert_test_findings(&mut state, &body, source);
-    }
-    // large-function: the span is a fact of THIS file's AST, computed here so
-    // the LSP and a graph-less CI run see it too (the graph contract only
-    // adds evidence about other files). Test files keep it out of the gate via
-    // the action layer's test-only filter, unless --include-tests is passed.
-    for (fn_name, start, end) in &state.fn_spans {
-        let span = end.saturating_sub(*start) + 1;
-        if span <= 120 {
-            continue;
+        Self::module_post_passes(&mut state, &body, name, source, repo_wide);
+        if state.is_test {
+            // the rules that live in tests — scanned for alone or with --include-tests
+            Monkeypatch::findings(&mut state, &body, source);
+            skipif_findings(&mut state, &body, source);
+            fakefs_findings(&mut state, &body, source);
+            no_assert_test_findings(&mut state, &body, source);
         }
-        state.findings.push(Finding {
+        // large-function: the span is a fact of THIS file's AST, computed here so
+        // the LSP and a graph-less CI run see it too (the graph contract only
+        // adds evidence about other files). Test files keep it out of the gate via
+        // the action layer's test-only filter, unless --include-tests is passed.
+        for (fn_name, start, end) in &state.fn_spans {
+            let span = end.saturating_sub(*start) + 1;
+            if span <= 120 {
+                continue;
+            }
+            state.findings.push(Finding {
             logical_start: None,
             seam_members: Vec::new(),
             col: 0,
@@ -789,517 +292,516 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
                 "'{fn_name}' spans {span} lines (>= 120) — the steps it performs are not named, so a reader cannot hold the whole job: extract each domain step into a named function"
             ),
         });
-    }
-    // duplicate candidates in ast.walk BFS order — module-level functions
-    // (any depth) come before class methods regardless of source line;
-    // skipped for a single buffer (repo-wide families need the whole repo)
-    if repo_wide && !state.is_test {
-        let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
-        let mut qi = 0usize;
-        while qi < queue.len() {
-            if let Q::N(n) = queue[qi] {
-                if let AnyNodeRef::StmtFunctionDef(f) = n {
-                    let skel = fn_skeleton(f);
-                    if Similarity::is_duplicate_candidate(f, skel.len()) {
-                        let def_line = Source::line_of(source, f.name.range().start());
-                        state.skeletons.push(SkeletonFn {
-                            rel: name.to_string(),
-                            name: f.name.to_string(),
-                            line: def_line,
-                            end_line: Source::line_of(source, f.range().end()),
-                            skeleton: skel,
-                        });
+        }
+        // duplicate candidates in ast.walk BFS order — module-level functions
+        // (any depth) come before class methods regardless of source line;
+        // skipped for a single buffer (repo-wide families need the whole repo)
+        if repo_wide && !state.is_test {
+            let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+            let mut qi = 0usize;
+            while qi < queue.len() {
+                if let Q::N(n) = queue[qi] {
+                    if let AnyNodeRef::StmtFunctionDef(f) = n {
+                        let skel = fn_skeleton(f);
+                        if Similarity::is_duplicate_candidate(f, skel.len()) {
+                            let def_line = Source::line_of(source, f.name.range().start());
+                            state.skeletons.push(SkeletonFn {
+                                rel: name.to_string(),
+                                name: f.name.to_string(),
+                                line: def_line,
+                                end_line: Source::line_of(source, f.range().end()),
+                                skeleton: skel,
+                            });
+                        }
                     }
+                    skel_children(n, &mut queue);
                 }
-                skel_children(n, &mut queue);
-            }
-            qi += 1;
-        }
-    }
-    // Phase 4a: label every emitted finding with its logical line — the first
-    // source line of the construct it sits in (a multi-line `def`/`async def`,
-    // a wrapped call, a split literal). The binder then admits a marker on the
-    // logical line or the line before it in addition to the finding's own line
-    // pair. Single-line constructs keep `None` (the finding's own line).
-    {
-        let starts = &state.logical_starts;
-        for f in &mut state.findings {
-            let line = f.line;
-            if f.logical_start.is_none() {
-                f.logical_start = starts.get(line).copied().filter(|&start| start < line);
+                qi += 1;
             }
         }
-    }
-    let tokens = parsed.tokens();
-    let supps = checks::Suppressions::parse_suppressions(source, tokens);
-    // complexity findings are generated from the cc array after this pass —
-    // honor complexity suppressions here so both paths agree (radon parity:
-    // a fn whose complexity is suppressed must not resurface via cc)
-    let mut pre_used = crate::suppressions::PreUsedSuppressions::default();
-    if !state.cc.is_empty() {
-        state.cc.retain(|e| {
-            // record what the retention's own decision honors — the SAME
-            // widened window and family-aware matching that suppressed()
-            // uses (a suppression used by the cc path must not be re-flagged
-            // stale by apply_suppressions_impl)
-            for ln in crate::suppressions::Suppressions::window_lines(e.line) {
-                if let Some(entries) = supps.line.get(&ln) {
-                    for (sig, why) in entries {
-                        if crate::suppressions::Suppressions::signal_matches(sig, "complexity") && !why.is_empty() {
-                            pre_used.lines.insert((ln, sig.clone()));
+        // Phase 4a: label every emitted finding with its logical line — the first
+        // source line of the construct it sits in (a multi-line `def`/`async def`,
+        // a wrapped call, a split literal). The binder then admits a marker on the
+        // logical line or the line before it in addition to the finding's own line
+        // pair. Single-line constructs keep `None` (the finding's own line).
+        {
+            let starts = &state.logical_starts;
+            for f in &mut state.findings {
+                let line = f.line;
+                if f.logical_start.is_none() {
+                    f.logical_start = starts.get(line).copied().filter(|&start| start < line);
+                }
+            }
+        }
+        let tokens = parsed.tokens();
+        let supps = checks::Suppressions::parse_suppressions(source, tokens);
+        // complexity findings are generated from the cc array after this pass —
+        // honor complexity suppressions here so both paths agree (radon parity:
+        // a fn whose complexity is suppressed must not resurface via cc)
+        let mut pre_used = crate::suppressions::PreUsedSuppressions::default();
+        if !state.cc.is_empty() {
+            state.cc.retain(|e| {
+                // record what the retention's own decision honors — the SAME
+                // widened window and family-aware matching that suppressed()
+                // uses (a suppression used by the cc path must not be re-flagged
+                // stale by apply_suppressions_impl)
+                for ln in crate::suppressions::Suppressions::window_lines(e.line) {
+                    if let Some(entries) = supps.line.get(&ln) {
+                        for (sig, why) in entries {
+                            if crate::suppressions::Suppressions::signal_matches(sig, "complexity") && !why.is_empty() {
+                                pre_used.lines.insert((ln, sig.clone()));
+                            }
                         }
                     }
                 }
-            }
-            let line_suppressed = crate::suppressions::Suppressions::suppressed("complexity", e.line, &supps);
-            let file_suppressed = supps.file.get("complexity").is_some_and(|w| !w.is_empty());
-            if file_suppressed {
-                pre_used.files.insert("complexity".into());
-            }
-            !line_suppressed && !file_suppressed
-        });
-    }
-    let mut supps_spent = HashSet::new();
-    // G4: the exemption-kind labels among the file's still-present
-    // magic-number candidates — threaded into the stale message so it names
-    // exactly the exemptions that apply (never unit/constant/table for
-    // indices).
-    let magic_exempt_labels = checks::MagicNumber::magic_exemption_labels(
-        &body,
-        source,
-        &state.magic_table_exempts,
-        &state.magic_const_rhs_exempts,
-        &state.magic_len_guard_exempts,
-        &state.magic_unit_named_exempts,
-    );
-    let mut books = crate::suppressions::SuppressionBooks {
-        pre_used: &pre_used,
-        spent: &mut supps_spent,
-    };
-    let findings =
-        checks::Suppressions::apply_source(state.findings, source, name, tokens, &mut books, &magic_exempt_labels);
-    let mut all = type_ignore_findings(source, name, tokens);
-    all.extend(noqa_findings(source, name, tokens));
-    all.extend(findings);
-    if !repo_wide {
-        drop_repo_wide_stale_artifacts(&mut all);
-    }
-    let classes = OverAbstraction::collect_classes(&body, source);
-    let imports = OverAbstraction::collect_imports(&body, source);
-    let sibling_classes = checks::SiblingValueClass::collect_sibling_classes(&body, source);
-    FileScan {
-        file_name: name.to_string(),
-        findings: all,
-        cc: state.cc,
-        errors,
-        defs: state.defs,
-        class_defs: state.class_defs,
-        scattered: state.scattered,
-        duplicate_expressions: state.duplicate_expressions,
-        path_expressions: state.path_expressions,
-        module_shape: checks::ModuleShape::python(source, &body),
-        setters: state.setters,
-        refs: state.refs,
-        strings: state.strings,
-        decorated: state.decorated,
-        skeletons: state.skeletons,
-        classes,
-        imports,
-        self_assigns: state.self_assigns,
-        supps,
-        supps_spent,
-        skeleton_modules: state.skeleton_modules,
-        forwarder_fns: state.forwarder_fns,
-        forwarder_methods: state.forwarder_methods,
-        repo_methods: state.repo_methods,
-        middle_man_classes: state.middle_man_classes,
-        middle_man_candidates: state.middle_man_candidates,
-        sibling_classes,
-    }
-}
-
-pub(crate) fn scan_file(path: &Path) -> FileScan {
-    let source = std::fs::read_to_string(path).unwrap_or_default();
-    let name = path.to_str().unwrap_or("<file>").to_string();
-    if name.ends_with(".rs") {
-        let repo_wide = true;
-        let rs = rustscan::RustScan::scan(&source, &name, repo_wide);
-        return rustscan_to_filescan_ref(&rs, &name);
-    }
-    let mut scan = scan_source(&source, &name);
-    scan.file_name = name;
-    scan
-}
-
-/// Every Python file under `root` (the scan walk; `SCAN_SKIP_DIRS` prunes
-/// venvs/caches/build output). Shared by the full gate scan and the LSP's
-/// incremental save path — the LSP stats these paths instead of re-scanning.
-pub(crate) fn repo_files(root: &Path) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !SCAN_SKIP_DIRS.contains(&name) {
-                    stack.push(p);
+                let line_suppressed = crate::suppressions::Suppressions::suppressed("complexity", e.line, &supps);
+                let file_suppressed = supps.file.get("complexity").is_some_and(|w| !w.is_empty());
+                if file_suppressed {
+                    pre_used.files.insert("complexity".into());
                 }
-            } else if p.extension().is_some_and(|x| x == "py") {
-                paths.push(p);
-            }
-        }
-    }
-    paths.sort();
-    paths
-}
-
-/// The repo-wide middle-man family (#44) over a set of scans: the index is the
-/// union of every file's classes — one class per file is the house convention,
-/// so the target of a delegation usually lives in another file and a
-/// file-local index would read almost every real target as outside the
-/// codebase. A candidate a single-buffer scan already reported (same file and
-/// line) is not reported a second time.
-fn middle_man_repo_wide(scans: &[FileScan], root_s: &str) -> Vec<Finding> {
-    let mut classes: Vec<checks::MiddleManClass> = Vec::new();
-    let mut candidates: Vec<checks::MiddleManCandidate> = Vec::new();
-    let mut already: HashSet<(String, usize)> = HashSet::new();
-    for scan in scans {
-        let rel = scan.rel_of(root_s);
-        classes.extend(scan.middle_man_classes.iter().cloned());
-        candidates.extend(scan.middle_man_candidates.iter().cloned());
-        for f in &scan.findings {
-            if f.kind == "middle-man" {
-                already.insert((rel.clone(), f.line));
-            }
-        }
-    }
-    checks::MiddleMan::findings(&candidates, &classes)
-        .into_iter()
-        .filter(|f| !already.contains(&(f.file.clone(), f.line)))
-        .collect()
-}
-
-/// The repo-wide merge (duplicate + unused + unused-setter, reconciled
-/// through each file's suppressions) over a set of scans — the expensive
-/// part of a repo-wide scan is the per-file scan, so the LSP reuses cached
-/// scans and re-runs only this pure in-memory aggregation on save.
-pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collections::HashMap<String, Vec<Finding>> {
-    let mut skeletons = Vec::new();
-    let mut definitions: Vec<(String, String, usize, bool)> = Vec::new();
-    let mut setters: Vec<(String, String, usize)> = Vec::new();
-    let mut prod_refs = HashSet::new();
-    let mut test_refs = HashSet::new();
-    let mut strings = Vec::new();
-    let mut supps_by_rel: std::collections::HashMap<String, crate::suppressions::Suppressions> =
-        std::collections::HashMap::new();
-    let mut supps_spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
-        std::collections::HashMap::new();
-    for scan in scans {
-        let rel = scan.rel_of(root_s);
-        let is_test = Paths::is_test_path(&rel);
-        for s in &scan.skeletons {
-            skeletons.push(SkeletonFn {
-                rel: rel.clone(),
-                name: s.name.clone(),
-                line: s.line,
-                end_line: s.end_line,
-                skeleton: s.skeleton.clone(),
+                !line_suppressed && !file_suppressed
             });
         }
-        for (name, line) in &scan.defs {
-            definitions.push((rel.clone(), name.clone(), *line, false));
+        let mut supps_spent = HashSet::new();
+        // G4: the exemption-kind labels among the file's still-present
+        // magic-number candidates — threaded into the stale message so it names
+        // exactly the exemptions that apply (never unit/constant/table for
+        // indices).
+        let magic_exempt_labels = checks::MagicNumber::magic_exemption_labels(
+            &body,
+            source,
+            &state.magic_table_exempts,
+            &state.magic_const_rhs_exempts,
+            &state.magic_len_guard_exempts,
+            &state.magic_unit_named_exempts,
+        );
+        let mut books = crate::suppressions::SuppressionBooks {
+            pre_used: &pre_used,
+            spent: &mut supps_spent,
+        };
+        let findings =
+            checks::Suppressions::apply_source(state.findings, source, name, tokens, &mut books, &magic_exempt_labels);
+        let mut all = type_ignore_findings(source, name, tokens);
+        all.extend(noqa_findings(source, name, tokens));
+        all.extend(findings);
+        if !repo_wide {
+            Self::drop_repo_wide_stale_artifacts(&mut all);
         }
-        for (name, line) in &scan.class_defs {
-            definitions.push((rel.clone(), name.clone(), *line, true));
+        let classes = OverAbstraction::collect_classes(&body, source);
+        let imports = OverAbstraction::collect_imports(&body, source);
+        let sibling_classes = checks::SiblingValueClass::collect_sibling_classes(&body, source);
+        FileScan {
+            file_name: name.to_string(),
+            findings: all,
+            cc: state.cc,
+            errors,
+            defs: state.defs,
+            class_defs: state.class_defs,
+            scattered: state.scattered,
+            duplicate_expressions: state.duplicate_expressions,
+            path_expressions: state.path_expressions,
+            module_shape: checks::ModuleShape::python(source, &body),
+            setters: state.setters,
+            refs: state.refs,
+            strings: state.strings,
+            decorated: state.decorated,
+            skeletons: state.skeletons,
+            classes,
+            imports,
+            self_assigns: state.self_assigns,
+            supps,
+            supps_spent,
+            skeleton_modules: state.skeleton_modules,
+            forwarder_fns: state.forwarder_fns,
+            forwarder_methods: state.forwarder_methods,
+            repo_methods: state.repo_methods,
+            middle_man_classes: state.middle_man_classes,
+            middle_man_candidates: state.middle_man_candidates,
+            sibling_classes,
         }
-        for (name, line) in &scan.setters {
-            setters.push((rel.clone(), name.clone(), *line));
-        }
-        if is_test {
-            test_refs.extend(scan.refs.iter().cloned());
-        } else {
-            prod_refs.extend(scan.refs.iter().cloned());
-            strings.extend(scan.strings.iter().cloned());
-        }
-        prod_refs.extend(scan.decorated.iter().cloned());
-        supps_by_rel.insert(rel.clone(), scan.supps.clone());
-        supps_spent_by_rel.insert(rel.clone(), scan.supps_spent.clone());
     }
-    let mut module_entities = Vec::new();
-    let mut heads = Vec::new();
-    let mut fns = Vec::new();
-    let mut repo_methods = Vec::new();
-    let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
-    for scan in scans {
-        module_entities.extend(scan.skeleton_modules.iter().cloned());
-        heads.extend(scan.forwarder_methods.iter().cloned());
-        fns.extend(scan.forwarder_fns.iter().cloned());
-        repo_methods.extend(scan.repo_methods.iter().cloned());
-        imports_by_rel.insert(scan.rel_of(root_s), scan.imports.clone());
-    }
-    let mut additions: Vec<Finding> = Vec::new();
-    additions.extend(checks::duplicate_findings(&skeletons));
-    additions.extend(checks::DuplicateModule::findings(&module_entities));
-    additions.extend(checks::Forwarding::findings(
-        &heads,
-        &fns,
-        &repo_methods,
-        &imports_by_rel,
-    ));
-    let mut repo_wide_unused = checks::Unused::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
-    repo_wide_unused.extend(checks::Unused::unused_setter_findings(&setters, &prod_refs, &test_refs));
-    reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
-    let class_names: HashSet<String> = definitions
-        .iter()
-        .filter(|(_, _, _, is_class)| *is_class)
-        .map(|(_, name, _, _)| name.clone())
-        .collect();
-    let scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> =
-        scans.iter().map(|s| (s.rel_of(root_s), s.scattered.clone())).collect();
-    reconcile_repo_wide(
-        &mut additions,
-        checks::Scattered::scattered_instance_findings(&scattered_scans, &class_names),
-        &supps_by_rel,
-        &supps_spent_by_rel,
-    );
-    let path_scans: Vec<(String, Vec<checks::PathExpression>)> = scans
-        .iter()
-        .map(|s| (s.rel_of(root_s), s.path_expressions.clone()))
-        .collect();
-    reconcile_repo_wide(
-        &mut additions,
-        checks::PathExpression::findings(&path_scans),
-        &supps_by_rel,
-        &supps_spent_by_rel,
-    );
-    let duplicate_expr_scans: Vec<(String, Vec<checks::ExpressionOccurrence>)> = scans
-        .iter()
-        .map(|s| (s.rel_of(root_s), s.duplicate_expressions.clone()))
-        .collect();
-    reconcile_repo_wide(
-        &mut additions,
-        checks::ExpressionOccurrence::findings(&duplicate_expr_scans),
-        &supps_by_rel,
-        &supps_spent_by_rel,
-    );
-    let module_shapes: Vec<(String, checks::ModuleShape)> = scans
-        .iter()
-        .map(|s| (s.rel_of(root_s), s.module_shape.clone()))
-        .collect();
-    reconcile_repo_wide(
-        &mut additions,
-        checks::ModuleShape::findings(&module_shapes),
-        &supps_by_rel,
-        &supps_spent_by_rel,
-    );
-    let undecl_scans: Vec<UndeclScan> = scans
-        .iter()
-        .map(|s| UndeclScan {
-            rel: s.rel_of(root_s),
-            classes: s.classes.clone(),
-            imports: s.imports.clone(),
-            self_assigns: s.self_assigns.clone(),
-        })
-        .collect();
-    let undeclared = checks::LatentState::undeclared(&undecl_scans);
-    reconcile_repo_wide(&mut additions, undeclared, &supps_by_rel, &supps_spent_by_rel);
-    reconcile_repo_wide(
-        &mut additions,
-        middle_man_repo_wide(scans, root_s),
-        &supps_by_rel,
-        &supps_spent_by_rel,
-    );
-    let sibling_scans: Vec<(String, Vec<checks::SiblingClass>)> = scans
-        .iter()
-        .map(|s| (s.rel_of(root_s), s.sibling_classes.clone()))
-        .collect();
-    reconcile_repo_wide(
-        &mut additions,
-        checks::SiblingValueClass::sibling_value_class_findings(&sibling_scans),
-        &supps_by_rel,
-        &supps_spent_by_rel,
-    );
-    let mut by_file: std::collections::HashMap<String, Vec<Finding>> = std::collections::HashMap::new();
-    for f in additions {
-        by_file.entry(f.file.clone()).or_default().push(f);
-    }
-    by_file
-}
 
-/// The Rust layer's scan into the shared FileScan shape. The Python-specific
-/// collections (defs/refs/strings/decorated/classes/imports) stay empty:
-/// `unused` is rustc dead_code's job and the graph families need the Rust
-/// exporter — the rustscan data (mod/use/structs) travels via `RustScan`.
-fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
-    let supps = rs.supps.clone();
-    FileScan {
-        file_name: name.to_string(),
-        findings: rs.findings.clone(),
-        cc: rs.cc.clone(),
-        errors: rs.errors,
-        defs: Vec::new(),
-        class_defs: Vec::new(),
-        scattered: Vec::new(),
-        duplicate_expressions: Vec::new(),
-        path_expressions: Vec::new(),
-        module_shape: rs.module_shape.clone(),
-        setters: Vec::new(),
-        refs: HashSet::new(),
-        strings: Vec::new(),
-        decorated: HashSet::new(),
-        skeletons: rs.skeletons.clone(),
-        skeleton_modules: Vec::new(),
-        forwarder_fns: Vec::new(),
-        forwarder_methods: Vec::new(),
-        repo_methods: Vec::new(),
-        middle_man_classes: Vec::new(),
-        middle_man_candidates: Vec::new(),
-        sibling_classes: Vec::new(),
-        classes: Vec::new(),
-        imports: Vec::new(),
-        self_assigns: Vec::new(),
-        supps,
-        supps_spent: rs.supps_spent.clone(),
+    fn scan_file(path: &Path) -> FileScan {
+        let source = std::fs::read_to_string(path).unwrap_or_default();
+        let name = path.to_str().unwrap_or("<file>").to_string();
+        if name.ends_with(".rs") {
+            let repo_wide = true;
+            let rs = rustscan::RustScan::scan(&source, &name, repo_wide);
+            return Self::rustscan_to_filescan_ref(&rs, &name);
+        }
+        let mut scan = Self::scan_source(&source, &name);
+        scan.file_name = name;
+        scan
     }
-}
-/// The finding model's final action kind — the JSON contract carries it so
-/// the Python orchestrator consumes findings without further mapping.
-///
-/// Two identifiers per finding, don't conflate them:
-///
-/// - `kind` — display kind, `final_kind` output (named buckets; families
-///   without one collapse to "standard", the message explains the rest).
-/// - `signal` — the raw family kind; THIS is what suppressions match on
-///   (`lucidlint: ignore <signal>`, config `ignore = [<signal>]`,
-///   RULE_GROUPS membership, baseline identity).
-///
-/// FAMILY_KINDS, STANDARD_KINDS, `final_kind`, and `rule_groups` are
-/// GENERATED from the rule catalog (rule_metadata.py) by `make rules` — see
-/// rules_gen.rs. Registering a rule is ONE edit in the catalog; everything
-/// here follows from it and the drift gate pins the generated file.
-pub use rules_gen::{final_kind, FAMILY_KINDS, STANDARD_KINDS};
 
-fn sig_of_stale(msg: &str) -> String {
-    // line form: "suppression '// lucidlint: ignore <sig>' at line N no longer fires"
-    if let Some(i) = msg.find("ignore ") {
-        return msg[i + 7..]
-            .split(|c: char| c.is_whitespace() || c == '\'' || c == '>')
-            .next()
-            .unwrap_or("")
-            .to_string();
-    }
-    // file form: "file suppression '... ignore-file <sig>' no longer fires"
-    if let Some(i) = msg.find("ignore-file ") {
-        return msg[i + 12..]
-            .split(|c: char| c.is_whitespace() || c == '\'')
-            .next()
-            .unwrap_or("")
-            .to_string();
-    }
-    String::new()
-}
-
-/// Repo-wide findings (unused, duplicate) are computed after the per-file
-/// suppression pass, so an `# lucidlint: ignore <sig>` comment for one was
-/// never consumed and got flagged stale — and the finding stayed. Re-honor
-/// the file's suppressions for those repo-wide findings (family-aware, widened
-/// window) and drop the stale-suppression findings the consumed comments
-/// caused (review-log B3). The survivors are appended to `all` in place.
-pub(crate) fn reconcile_repo_wide(
-    all: &mut Vec<Finding>,
-    repo_wide: Vec<Finding>,
-    supps_by_rel: &std::collections::HashMap<String, crate::suppressions::Suppressions>,
-    supps_spent_by_rel: &std::collections::HashMap<String, std::collections::HashSet<(usize, String)>>,
-) {
-    let mut used_line: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
-    let mut used_file: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // batch each file's findings so innermost-peel capacity is computed
-    // over the whole group — and pairs the per-file pass already spent are
-    // not spent again here
-    let mut by_file: std::collections::BTreeMap<String, Vec<Finding>> = Default::default();
-    for f in repo_wide {
-        by_file.entry(f.file.clone()).or_default().push(f);
-    }
-    for (file, fs) in by_file {
-        match supps_by_rel.get(&file) {
-            Some(supps) => {
-                let empty = std::collections::HashSet::new();
-                let spent = supps_spent_by_rel.get(&file).unwrap_or(&empty);
-                let kept = crate::suppressions::Suppressions::filter_repo_wide(
-                    fs,
-                    supps,
-                    &mut used_line,
-                    &mut used_file,
-                    spent,
-                );
-                all.extend(kept);
+    /// Every Python file under `root` (the scan walk; `SCAN_SKIP_DIRS` prunes
+    /// venvs/caches/build output). Shared by the full gate scan and the LSP's
+    /// incremental save path — the LSP stats these paths instead of re-scanning.
+    fn repo_files(root: &Path) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if !SCAN_SKIP_DIRS.contains(&name) {
+                        stack.push(p);
+                    }
+                } else if p.extension().is_some_and(|x| x == "py") {
+                    paths.push(p);
+                }
             }
-            None => all.extend(fs),
         }
+        paths.sort();
+        paths
     }
-    if used_line.is_empty() && used_file.is_empty() {
-        return;
-    }
-    all.retain(|g| {
-        if g.kind != "stale-suppression" {
-            return true;
-        }
-        let sig = sig_of_stale(&g.message);
-        !used_file.contains(&sig) && !used_line.contains(&(g.line, sig))
-    });
-}
 
-/// Suppression census: how many `lucidlint: ignore` sites each signal has
-/// across the scanned set (line-level AND file-level). The census feeds the
-/// report's `suppressions` field and the bulk-suppression warning - repeated
-/// identical whys are a policy decision, not per-site judgment.
-fn suppression_counts<'a>(
-    supps_list: impl IntoIterator<Item = &'a crate::suppressions::Suppressions>,
-) -> std::collections::HashMap<String, usize> {
-    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for supps in supps_list {
-        for entries in supps.line.values() {
-            for (sig, _) in entries {
+    /// The repo-wide middle-man family (#44) over a set of scans: the index is the
+    /// union of every file's classes — one class per file is the house convention,
+    /// so the target of a delegation usually lives in another file and a
+    /// file-local index would read almost every real target as outside the
+    /// codebase. A candidate a single-buffer scan already reported (same file and
+    /// line) is not reported a second time.
+    fn middle_man_repo_wide(scans: &[FileScan], root_s: &str) -> Vec<Finding> {
+        let mut classes: Vec<checks::MiddleManClass> = Vec::new();
+        let mut candidates: Vec<checks::MiddleManCandidate> = Vec::new();
+        let mut already: HashSet<(String, usize)> = HashSet::new();
+        for scan in scans {
+            let rel = scan.rel_of(root_s);
+            classes.extend(scan.middle_man_classes.iter().cloned());
+            candidates.extend(scan.middle_man_candidates.iter().cloned());
+            for f in &scan.findings {
+                if f.kind == "middle-man" {
+                    already.insert((rel.clone(), f.line));
+                }
+            }
+        }
+        checks::MiddleMan::findings(&candidates, &classes)
+            .into_iter()
+            .filter(|f| !already.contains(&(f.file.clone(), f.line)))
+            .collect()
+    }
+
+    /// The repo-wide merge (duplicate + unused + unused-setter, reconciled
+    /// through each file's suppressions) over a set of scans — the expensive
+    /// part of a repo-wide scan is the per-file scan, so the LSP reuses cached
+    /// scans and re-runs only this pure in-memory aggregation on save.
+    fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collections::HashMap<String, Vec<Finding>> {
+        let mut skeletons = Vec::new();
+        let mut definitions: Vec<(String, String, usize, bool)> = Vec::new();
+        let mut setters: Vec<(String, String, usize)> = Vec::new();
+        let mut prod_refs = HashSet::new();
+        let mut test_refs = HashSet::new();
+        let mut strings = Vec::new();
+        let mut supps_by_rel: std::collections::HashMap<String, crate::suppressions::Suppressions> =
+            std::collections::HashMap::new();
+        let mut supps_spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
+            std::collections::HashMap::new();
+        for scan in scans {
+            let rel = scan.rel_of(root_s);
+            let is_test = Paths::is_test_path(&rel);
+            for s in &scan.skeletons {
+                skeletons.push(SkeletonFn {
+                    rel: rel.clone(),
+                    name: s.name.clone(),
+                    line: s.line,
+                    end_line: s.end_line,
+                    skeleton: s.skeleton.clone(),
+                });
+            }
+            for (name, line) in &scan.defs {
+                definitions.push((rel.clone(), name.clone(), *line, false));
+            }
+            for (name, line) in &scan.class_defs {
+                definitions.push((rel.clone(), name.clone(), *line, true));
+            }
+            for (name, line) in &scan.setters {
+                setters.push((rel.clone(), name.clone(), *line));
+            }
+            if is_test {
+                test_refs.extend(scan.refs.iter().cloned());
+            } else {
+                prod_refs.extend(scan.refs.iter().cloned());
+                strings.extend(scan.strings.iter().cloned());
+            }
+            prod_refs.extend(scan.decorated.iter().cloned());
+            supps_by_rel.insert(rel.clone(), scan.supps.clone());
+            supps_spent_by_rel.insert(rel.clone(), scan.supps_spent.clone());
+        }
+        let mut module_entities = Vec::new();
+        let mut heads = Vec::new();
+        let mut fns = Vec::new();
+        let mut repo_methods = Vec::new();
+        let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
+        for scan in scans {
+            module_entities.extend(scan.skeleton_modules.iter().cloned());
+            heads.extend(scan.forwarder_methods.iter().cloned());
+            fns.extend(scan.forwarder_fns.iter().cloned());
+            repo_methods.extend(scan.repo_methods.iter().cloned());
+            imports_by_rel.insert(scan.rel_of(root_s), scan.imports.clone());
+        }
+        let mut additions: Vec<Finding> = Vec::new();
+        additions.extend(checks::duplicate_findings(&skeletons));
+        additions.extend(checks::DuplicateModule::findings(&module_entities));
+        additions.extend(checks::Forwarding::findings(
+            &heads,
+            &fns,
+            &repo_methods,
+            &imports_by_rel,
+        ));
+        let mut repo_wide_unused = checks::Unused::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+        repo_wide_unused.extend(checks::Unused::unused_setter_findings(&setters, &prod_refs, &test_refs));
+        Self::reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
+        let class_names: HashSet<String> = definitions
+            .iter()
+            .filter(|(_, _, _, is_class)| *is_class)
+            .map(|(_, name, _, _)| name.clone())
+            .collect();
+        let scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> =
+            scans.iter().map(|s| (s.rel_of(root_s), s.scattered.clone())).collect();
+        Self::reconcile_repo_wide(
+            &mut additions,
+            checks::Scattered::scattered_instance_findings(&scattered_scans, &class_names),
+            &supps_by_rel,
+            &supps_spent_by_rel,
+        );
+        let path_scans: Vec<(String, Vec<checks::PathExpression>)> = scans
+            .iter()
+            .map(|s| (s.rel_of(root_s), s.path_expressions.clone()))
+            .collect();
+        Self::reconcile_repo_wide(
+            &mut additions,
+            checks::PathExpression::findings(&path_scans),
+            &supps_by_rel,
+            &supps_spent_by_rel,
+        );
+        let duplicate_expr_scans: Vec<(String, Vec<checks::ExpressionOccurrence>)> = scans
+            .iter()
+            .map(|s| (s.rel_of(root_s), s.duplicate_expressions.clone()))
+            .collect();
+        Self::reconcile_repo_wide(
+            &mut additions,
+            checks::ExpressionOccurrence::findings(&duplicate_expr_scans),
+            &supps_by_rel,
+            &supps_spent_by_rel,
+        );
+        let module_shapes: Vec<(String, checks::ModuleShape)> = scans
+            .iter()
+            .map(|s| (s.rel_of(root_s), s.module_shape.clone()))
+            .collect();
+        Self::reconcile_repo_wide(
+            &mut additions,
+            checks::ModuleShape::findings(&module_shapes),
+            &supps_by_rel,
+            &supps_spent_by_rel,
+        );
+        let undecl_scans: Vec<UndeclScan> = scans
+            .iter()
+            .map(|s| UndeclScan {
+                rel: s.rel_of(root_s),
+                classes: s.classes.clone(),
+                imports: s.imports.clone(),
+                self_assigns: s.self_assigns.clone(),
+            })
+            .collect();
+        let undeclared = checks::LatentState::undeclared(&undecl_scans);
+        Self::reconcile_repo_wide(&mut additions, undeclared, &supps_by_rel, &supps_spent_by_rel);
+        Self::reconcile_repo_wide(
+            &mut additions,
+            Self::middle_man_repo_wide(scans, root_s),
+            &supps_by_rel,
+            &supps_spent_by_rel,
+        );
+        let sibling_scans: Vec<(String, Vec<checks::SiblingClass>)> = scans
+            .iter()
+            .map(|s| (s.rel_of(root_s), s.sibling_classes.clone()))
+            .collect();
+        Self::reconcile_repo_wide(
+            &mut additions,
+            checks::SiblingValueClass::sibling_value_class_findings(&sibling_scans),
+            &supps_by_rel,
+            &supps_spent_by_rel,
+        );
+        let mut by_file: std::collections::HashMap<String, Vec<Finding>> = std::collections::HashMap::new();
+        for f in additions {
+            by_file.entry(f.file.clone()).or_default().push(f);
+        }
+        by_file
+    }
+
+    /// The Rust layer's scan into the shared FileScan shape. The Python-specific
+    /// collections (defs/refs/strings/decorated/classes/imports) stay empty:
+    /// `unused` is rustc dead_code's job and the graph families need the Rust
+    /// exporter — the rustscan data (mod/use/structs) travels via `RustScan`.
+    fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
+        let supps = rs.supps.clone();
+        FileScan {
+            file_name: name.to_string(),
+            findings: rs.findings.clone(),
+            cc: rs.cc.clone(),
+            errors: rs.errors,
+            defs: Vec::new(),
+            class_defs: Vec::new(),
+            scattered: Vec::new(),
+            duplicate_expressions: Vec::new(),
+            path_expressions: Vec::new(),
+            module_shape: rs.module_shape.clone(),
+            setters: Vec::new(),
+            refs: HashSet::new(),
+            strings: Vec::new(),
+            decorated: HashSet::new(),
+            skeletons: rs.skeletons.clone(),
+            skeleton_modules: Vec::new(),
+            forwarder_fns: Vec::new(),
+            forwarder_methods: Vec::new(),
+            repo_methods: Vec::new(),
+            middle_man_classes: Vec::new(),
+            middle_man_candidates: Vec::new(),
+            sibling_classes: Vec::new(),
+            classes: Vec::new(),
+            imports: Vec::new(),
+            self_assigns: Vec::new(),
+            supps,
+            supps_spent: rs.supps_spent.clone(),
+        }
+    }
+    /// The finding model's final action kind — the JSON contract carries it so
+    /// the Python orchestrator consumes findings without further mapping.
+    ///
+    /// Two identifiers per finding, don't conflate them:
+    ///
+    /// - `kind` — display kind, `final_kind` output (named buckets; families
+    ///   without one collapse to "standard", the message explains the rest).
+    /// - `signal` — the raw family kind; THIS is what suppressions match on
+    ///   (`lucidlint: ignore <signal>`, config `ignore = [<signal>]`,
+    ///   RULE_GROUPS membership, baseline identity).
+    ///
+    /// FAMILY_KINDS, STANDARD_KINDS, `final_kind`, and `rule_groups` are
+    /// GENERATED from the rule catalog (rule_metadata.py) by `make rules` — see
+    /// rules_gen.rs. Registering a rule is ONE edit in the catalog; everything
+    /// here follows from it and the drift gate pins the generated file.
+    fn sig_of_stale(msg: &str) -> String {
+        // line form: "suppression '// lucidlint: ignore <sig>' at line N no longer fires"
+        if let Some(i) = msg.find("ignore ") {
+            return msg[i + 7..]
+                .split(|c: char| c.is_whitespace() || c == '\'' || c == '>')
+                .next()
+                .unwrap_or("")
+                .to_string();
+        }
+        // file form: "file suppression '... ignore-file <sig>' no longer fires"
+        if let Some(i) = msg.find("ignore-file ") {
+            return msg[i + 12..]
+                .split(|c: char| c.is_whitespace() || c == '\'')
+                .next()
+                .unwrap_or("")
+                .to_string();
+        }
+        String::new()
+    }
+
+    /// Repo-wide findings (unused, duplicate) are computed after the per-file
+    /// suppression pass, so an `# lucidlint: ignore <sig>` comment for one was
+    /// never consumed and got flagged stale — and the finding stayed. Re-honor
+    /// the file's suppressions for those repo-wide findings (family-aware, widened
+    /// window) and drop the stale-suppression findings the consumed comments
+    /// caused (review-log B3). The survivors are appended to `all` in place.
+    fn reconcile_repo_wide(
+        all: &mut Vec<Finding>,
+        repo_wide: Vec<Finding>,
+        supps_by_rel: &std::collections::HashMap<String, crate::suppressions::Suppressions>,
+        supps_spent_by_rel: &std::collections::HashMap<String, std::collections::HashSet<(usize, String)>>,
+    ) {
+        let mut used_line: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+        let mut used_file: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // batch each file's findings so innermost-peel capacity is computed
+        // over the whole group — and pairs the per-file pass already spent are
+        // not spent again here
+        let mut by_file: std::collections::BTreeMap<String, Vec<Finding>> = Default::default();
+        for f in repo_wide {
+            by_file.entry(f.file.clone()).or_default().push(f);
+        }
+        for (file, fs) in by_file {
+            match supps_by_rel.get(&file) {
+                Some(supps) => {
+                    let empty = std::collections::HashSet::new();
+                    let spent = supps_spent_by_rel.get(&file).unwrap_or(&empty);
+                    let kept = crate::suppressions::Suppressions::filter_repo_wide(
+                        fs,
+                        supps,
+                        &mut used_line,
+                        &mut used_file,
+                        spent,
+                    );
+                    all.extend(kept);
+                }
+                None => all.extend(fs),
+            }
+        }
+        if used_line.is_empty() && used_file.is_empty() {
+            return;
+        }
+        all.retain(|g| {
+            if g.kind != "stale-suppression" {
+                return true;
+            }
+            let sig = Self::sig_of_stale(&g.message);
+            !used_file.contains(&sig) && !used_line.contains(&(g.line, sig))
+        });
+    }
+
+    /// Suppression census: how many `lucidlint: ignore` sites each signal has
+    /// across the scanned set (line-level AND file-level). The census feeds the
+    /// report's `suppressions` field and the bulk-suppression warning - repeated
+    /// identical whys are a policy decision, not per-site judgment.
+    fn suppression_counts<'a>(
+        supps_list: impl IntoIterator<Item = &'a crate::suppressions::Suppressions>,
+    ) -> std::collections::HashMap<String, usize> {
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for supps in supps_list {
+            for entries in supps.line.values() {
+                for (sig, _) in entries {
+                    *counts.entry(sig.clone()).or_insert(0) += 1;
+                }
+            }
+            for sig in supps.file.keys() {
                 *counts.entry(sig.clone()).or_insert(0) += 1;
             }
         }
-        for sig in supps.file.keys() {
-            *counts.entry(sig.clone()).or_insert(0) += 1;
-        }
+        counts
     }
-    counts
-}
 
-/// One warn finding per signal suppressed at >= threshold sites, attached to
-/// the file carrying the most of them. Visibility, not enforcement: the
-/// pattern itself (mass per-site suppression) is what a reviewer must see.
-fn bulk_suppression_findings(
-    counts: &std::collections::HashMap<String, usize>,
-    supps_by_rel: &std::collections::HashMap<String, crate::suppressions::Suppressions>,
-    threshold: usize,
-) -> Vec<Finding> {
-    let mut out = Vec::new();
-    for (kind, n) in counts {
-        if *n < threshold {
-            continue;
-        }
-        let mut top: Option<(&String, usize)> = None;
-        for (rel, supps) in supps_by_rel {
-            let sites = supps.line.values().flatten().filter(|(sig, _)| sig == kind).count()
-                + supps.file.keys().filter(|k| k.as_str() == kind).count();
-            if sites > 0 && top.is_none_or(|(_, c)| sites > c) {
-                top = Some((rel, sites));
+    /// One warn finding per signal suppressed at >= threshold sites, attached to
+    /// the file carrying the most of them. Visibility, not enforcement: the
+    /// pattern itself (mass per-site suppression) is what a reviewer must see.
+    fn bulk_suppression_findings(
+        counts: &std::collections::HashMap<String, usize>,
+        supps_by_rel: &std::collections::HashMap<String, crate::suppressions::Suppressions>,
+        threshold: usize,
+    ) -> Vec<Finding> {
+        let mut out = Vec::new();
+        for (kind, n) in counts {
+            if *n < threshold {
+                continue;
             }
-        }
-        out.push(Finding { logical_start: None, seam_members: Vec::new(), file: top.map(|(r, _)| r.clone()).unwrap_or_default(), line: 1, col: 0, function: String::new(), kind: "bulk-suppression".into(), severity: "warn".into(), message: format!(
+            let mut top: Option<(&String, usize)> = None;
+            for (rel, supps) in supps_by_rel {
+                let sites = supps.line.values().flatten().filter(|(sig, _)| sig == kind).count()
+                    + supps.file.keys().filter(|k| k.as_str() == kind).count();
+                if sites > 0 && top.is_none_or(|(_, c)| sites > c) {
+                    top = Some((rel, sites));
+                }
+            }
+            out.push(Finding { logical_start: None, seam_members: Vec::new(), file: top.map(|(r, _)| r.clone()).unwrap_or_default(), line: 1, col: 0, function: String::new(), kind: "bulk-suppression".into(), severity: "warn".into(), message: format!(
             "{kind} suppressed at {n} sites - repeated identical whys are POLICY, not per-site judgment: \
         move the rule into [lucidlint.guidance] config guidance or a documented config ignore, or fix the recurring cause"
         ) });
+        }
+        out.sort_by(|a, b| a.kind.cmp(&b.kind));
+        out
     }
-    out.sort_by(|a, b| a.kind.cmp(&b.kind));
-    out
 }
 
 // lucidlint: ignore large-function the CLI orchestrates every repo-wide family in one flow — extracting helpers would thread six collections
@@ -1449,10 +951,10 @@ fn main() {
                 let repo_wide = true;
                 let rs = rustscan::RustScan::scan(&source, path, repo_wide);
                 let rel = path.clone();
-                let fs = rustscan_to_filescan_ref(&rs, &rel);
+                let fs = Pipeline::rustscan_to_filescan_ref(&rs, &rel);
                 (Some(rs), fs)
             } else {
-                (None, scan_file(Path::new(path)))
+                (None, Pipeline::scan_file(Path::new(path)))
             }
         })
         .collect();
@@ -1519,8 +1021,8 @@ fn main() {
         .iter()
         .map(|s| (Paths::rel_of(&s.file_name, &root), s.supps_spent.clone()))
         .collect();
-    let suppression_census = suppression_counts(scans.iter().map(|s| &s.supps));
-    let bulk_suppressions = bulk_suppression_findings(&suppression_census, &supps_by_rel, 10);
+    let suppression_census = Pipeline::suppression_counts(scans.iter().map(|s| &s.supps));
+    let bulk_suppressions = Pipeline::bulk_suppression_findings(&suppression_census, &supps_by_rel, 10);
     let mut module_entities = Vec::new();
     let mut heads = Vec::new();
     let mut fns = Vec::new();
@@ -1580,7 +1082,7 @@ fn main() {
     // comment suppresses the finding and is not reported stale (review-log B3)
     let mut repo_wide_unused = Unused::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
     repo_wide_unused.extend(checks::Unused::unused_setter_findings(&setters, &prod_refs, &test_refs));
-    reconcile_repo_wide(&mut all_findings, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
+    Pipeline::reconcile_repo_wide(&mut all_findings, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
     let class_names: HashSet<String> = definitions
         .iter()
         .filter(|(_, _, _, is_class)| *is_class)
@@ -1590,7 +1092,7 @@ fn main() {
         .iter()
         .map(|s| (Paths::rel_of(&s.file_name, &root), s.scattered.clone()))
         .collect();
-    reconcile_repo_wide(
+    Pipeline::reconcile_repo_wide(
         &mut all_findings,
         checks::Scattered::scattered_instance_findings(&scattered_scans, &class_names),
         &supps_by_rel,
@@ -1600,7 +1102,7 @@ fn main() {
         .iter()
         .map(|s| (Paths::rel_of(&s.file_name, &root), s.path_expressions.clone()))
         .collect();
-    reconcile_repo_wide(
+    Pipeline::reconcile_repo_wide(
         &mut all_findings,
         checks::PathExpression::findings(&path_scans),
         &supps_by_rel,
@@ -1610,7 +1112,7 @@ fn main() {
         .iter()
         .map(|s| (Paths::rel_of(&s.file_name, &root), s.duplicate_expressions.clone()))
         .collect();
-    reconcile_repo_wide(
+    Pipeline::reconcile_repo_wide(
         &mut all_findings,
         checks::ExpressionOccurrence::findings(&duplicate_expr_scans),
         &supps_by_rel,
@@ -1621,15 +1123,15 @@ fn main() {
         .iter()
         .map(|s| (Paths::rel_of(&s.file_name, &root), s.module_shape.clone()))
         .collect();
-    reconcile_repo_wide(
+    Pipeline::reconcile_repo_wide(
         &mut all_findings,
         checks::ModuleShape::findings(&module_shapes),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
-    reconcile_repo_wide(
+    Pipeline::reconcile_repo_wide(
         &mut all_findings,
-        middle_man_repo_wide(&scans, &root),
+        Pipeline::middle_man_repo_wide(&scans, &root),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -1637,7 +1139,7 @@ fn main() {
         .iter()
         .map(|s| (Paths::rel_of(&s.file_name, &root), s.sibling_classes.clone()))
         .collect();
-    reconcile_repo_wide(
+    Pipeline::reconcile_repo_wide(
         &mut all_findings,
         checks::SiblingValueClass::sibling_value_class_findings(&sibling_scans),
         &supps_by_rel,
@@ -1801,7 +1303,7 @@ fn main() {
             if f.kind != "stale-suppression" {
                 return true;
             }
-            let sig = sig_of_stale(&f.message);
+            let sig = Pipeline::sig_of_stale(&f.message);
             let used = used_ln.contains(&(f.line, sig.clone())) || used_fl.contains(&sig);
             !used
         })
@@ -1851,6 +1353,8 @@ const RUST_FIX_KINDS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::python_shape::FnShape;
 
     use crate::paths::Paths;
 
@@ -1979,7 +1483,7 @@ mod tests {
     }
 
     fn scan_cc(src: &str) -> (Vec<Finding>, Vec<FnCc>, usize) {
-        let scan = scan_source(src, "prod_mod.py");
+        let scan = Pipeline::scan_source(src, "prod_mod.py");
         (scan.findings, scan.cc, scan.errors)
     }
 
@@ -3250,13 +2754,13 @@ mod tests {
         // cannot bind in a per-buffer scan — flagging them stale there was
         // a false fail artifact (the gate's repo-wide merge evaluates them).
         let src = include_str!("../../tests/fixtures/rust/per_buffer_scan_does_not_stale_repo_wide_markers__01.py");
-        let per_buffer = scan_source_impl(src, "prod_mod.py", false);
+        let per_buffer = Pipeline::scan(src, "prod_mod.py", false);
         assert!(
             !per_buffer.findings.iter().any(|f| f.kind == "stale-suppression"),
             "{:?}",
             per_buffer.findings
         );
-        let gate = scan_source_impl(src, "prod_mod.py", true);
+        let gate = Pipeline::scan(src, "prod_mod.py", true);
         assert!(
             gate.findings.iter().any(|f| f.kind == "stale-suppression"),
             "{:?}",
@@ -3804,8 +3308,8 @@ mod tests {
     fn abstraction_single_concrete_is_found() {
         let src_a = include_str!("../../tests/fixtures/rust/abstraction_single_concrete_is_found__01.py");
         let src_b = include_str!("../../tests/fixtures/rust/abstraction_single_concrete_is_found__02.py");
-        let scan_a = scan_source(src_a, "a.py");
-        let scan_b = scan_source(src_b, "b.py");
+        let scan_a = Pipeline::scan_source(src_a, "a.py");
+        let scan_b = Pipeline::scan_source(src_b, "b.py");
         let scans = vec![
             ("a.py".to_string(), scan_a.classes, scan_a.imports),
             ("b.py".to_string(), scan_b.classes, scan_b.imports),
@@ -3819,8 +3323,8 @@ mod tests {
     fn abstraction_two_subclasses_passes() {
         let src_a = include_str!("../../tests/fixtures/rust/abstraction_two_subclasses_passes__01.py");
         let src_b = include_str!("../../tests/fixtures/rust/abstraction_two_subclasses_passes__02.py");
-        let scan_a = scan_source(src_a, "a.py");
-        let scan_b = scan_source(src_b, "b.py");
+        let scan_a = Pipeline::scan_source(src_a, "a.py");
+        let scan_b = Pipeline::scan_source(src_b, "b.py");
         let scans = vec![
             ("a.py".to_string(), scan_a.classes, scan_a.imports),
             ("b.py".to_string(), scan_b.classes, scan_b.imports),
@@ -4553,7 +4057,7 @@ mod tests {
         let mut mm_candidates: Vec<checks::MiddleManCandidate> = Vec::new();
         let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
         for (name, src) in files {
-            let mut scan = scan_source(src, name);
+            let mut scan = Pipeline::scan_source(src, name);
             scan.file_name = name.to_string();
             supps_by_rel.insert(name.to_string(), std::mem::take(&mut scan.supps));
             spent_by_rel.insert(name.to_string(), std::mem::take(&mut scan.supps_spent));
@@ -4606,39 +4110,39 @@ mod tests {
         all.extend(duplicate_findings(&skeletons));
         let mut repo_wide_unused = Unused::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
         repo_wide_unused.extend(checks::Unused::unused_setter_findings(&setters, &prod_refs, &test_refs));
-        reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel, &spent_by_rel);
+        Pipeline::reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel, &spent_by_rel);
         let class_names: HashSet<String> = definitions
             .iter()
             .filter(|(_, _, _, is_class)| *is_class)
             .map(|(_, name, _, _)| name.clone())
             .collect();
-        reconcile_repo_wide(
+        Pipeline::reconcile_repo_wide(
             &mut all,
             checks::Scattered::scattered_instance_findings(&scattered_scans, &class_names),
             &supps_by_rel,
             &spent_by_rel,
         );
-        reconcile_repo_wide(
+        Pipeline::reconcile_repo_wide(
             &mut all,
             checks::PathExpression::findings(&path_scans),
             &supps_by_rel,
             &spent_by_rel,
         );
-        reconcile_repo_wide(
+        Pipeline::reconcile_repo_wide(
             &mut all,
             checks::ExpressionOccurrence::findings(&duplicate_expr_scans),
             &supps_by_rel,
             &spent_by_rel,
         );
-        reconcile_repo_wide(
+        Pipeline::reconcile_repo_wide(
             &mut all,
             checks::ModuleShape::findings(&module_shapes),
             &supps_by_rel,
             &spent_by_rel,
         );
         let undeclared = LatentState::undeclared(&undecl_scans);
-        reconcile_repo_wide(&mut all, undeclared, &supps_by_rel, &spent_by_rel);
-        reconcile_repo_wide(
+        Pipeline::reconcile_repo_wide(&mut all, undeclared, &supps_by_rel, &spent_by_rel);
+        Pipeline::reconcile_repo_wide(
             &mut all,
             checks::MiddleMan::findings(&mm_candidates, &mm_classes),
             &supps_by_rel,
@@ -4646,9 +4150,9 @@ mod tests {
         );
         // the suppression census + its bulk warning mirror main()'s report
         all.extend(DuplicateModule::findings(&module_entities));
-        let census = suppression_counts(supps_by_rel.values());
+        let census = Pipeline::suppression_counts(supps_by_rel.values());
         all.extend(Forwarding::findings(&heads, &fns, &repo_methods, &imports_by_rel));
-        all.extend(bulk_suppression_findings(&census, &supps_by_rel, 10));
+        all.extend(Pipeline::bulk_suppression_findings(&census, &supps_by_rel, 10));
         // mirror the production finalize: repo-wide findings honor per-file
         // suppressions too (family-aware, widened window), and a suppression
         // the retain uses is not stale
@@ -4677,7 +4181,7 @@ mod tests {
                 if f.kind != "stale-suppression" {
                     return true;
                 }
-                let sig = sig_of_stale(&f.message);
+                let sig = Pipeline::sig_of_stale(&f.message);
                 !used_ln.contains(&(f.line, sig.clone())) && !used_fl.contains(&sig)
             })
             .collect();
@@ -6647,7 +6151,7 @@ def two(work, batch):
             ));
         }
         let rs = rustscan::RustScan::scan(&src, "crate/src/steps.rs", true);
-        let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
@@ -6750,7 +6254,7 @@ def two(work, batch):
             src.push_str(&format!("pub struct Widget{i} {{ size: u32 }}\n\nimpl Widget{i} {{\n    pub fn run(&self) -> u32 {{\n        self.size\n    }}\n}}\n\n"));
         }
         let rs = rustscan::RustScan::scan(&src, "crate/src/widgets.rs", true);
-        let scan = rustscan_to_filescan_ref(&rs, "crate/src/widgets.rs");
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/widgets.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/widgets.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
@@ -6771,7 +6275,7 @@ def two(work, batch):
             ));
         }
         let rs = rustscan::RustScan::scan(&src, "crate/src/steps.rs", true);
-        let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
@@ -6798,7 +6302,7 @@ def two(work, batch):
             ));
         }
         let rs = rustscan::RustScan::scan(&src, "crate/src/steps.rs", true);
-        let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
@@ -6817,7 +6321,7 @@ def two(work, batch):
             ));
         }
         let rs = rustscan::RustScan::scan(&wide, "crate/src/wide.rs", true);
-        let scan = rustscan_to_filescan_ref(&rs, "crate/src/wide.rs");
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/wide.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/wide.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
@@ -6840,7 +6344,7 @@ def two(work, batch):
         }
         src.push_str("pub struct State {\n    pub count: u32,\n}\n");
         let rs = rustscan::RustScan::scan(&src, "crate/src/steps.rs", true);
-        let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
         assert_eq!(scan.module_shape.definitions(), 1, "{:?}", scan.module_shape);
         let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         assert!(f.is_empty(), "{f:?}");
@@ -6852,7 +6356,7 @@ def two(work, batch):
             ));
         }
         let rs = rustscan::RustScan::scan(&loose, "crate/src/loose.rs", true);
-        let scan = rustscan_to_filescan_ref(&rs, "crate/src/loose.rs");
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/loose.rs");
         assert_eq!(scan.module_shape.definitions(), 31);
         let f = checks::ModuleShape::findings(&[("crate/src/loose.rs".to_string(), scan.module_shape.clone())]);
         assert!(f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
@@ -6867,7 +6371,7 @@ def two(work, batch):
         }
         src.push_str("pub struct Table {\n    pub rows: u32,\n}\n\nimpl Table {\n    pub fn rows(&self) -> u32 {\n        self.rows\n    }\n}\n");
         let rs = rustscan::RustScan::scan(&src, "crate/src/table.rs", true);
-        let scan = rustscan_to_filescan_ref(&rs, "crate/src/table.rs");
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/table.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/table.rs".to_string(), scan.module_shape.clone())]);
         assert!(f.is_empty(), "{f:?}");
     }
@@ -7045,14 +6549,14 @@ def two(work, batch):
         // target in another file is invisible there: the rule stays silent
         // rather than guessing, and fires once the target is in the buffer
         let wrapper = "class Wrapper:\n    def __init__(self) -> None:\n        self._inner = Inner()\n\n    def render(self) -> str:\n        return self._inner.render()\n";
-        let alone = scan_source_impl(wrapper, "wrapper.py", false);
+        let alone = Pipeline::scan(wrapper, "wrapper.py", false);
         assert!(
             !alone.findings.iter().any(|f| f.kind == "middle-man"),
             "{:?}",
             alone.findings
         );
         let together = format!("class Inner:\n    def render(self) -> str:\n        return \"x\"\n\n\n{wrapper}");
-        let both = scan_source_impl(&together, "wrapper.py", false);
+        let both = Pipeline::scan(&together, "wrapper.py", false);
         assert!(
             both.findings.iter().any(|f| f.kind == "middle-man"),
             "{:?}",

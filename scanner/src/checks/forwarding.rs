@@ -71,7 +71,6 @@ impl Forwarding {
                 state.forwarder_fns.push(ForwarderFn {
                     rel: state.file.to_string(),
                     name: f.name.to_string(),
-                    line: Source::line_of(state.source, f.name.range().start()),
                     params: params.clone(),
                     callee: match method_callee {
                         Some((recv, m)) => format!("Method:{recv}:{m}"),

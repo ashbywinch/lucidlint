@@ -7,7 +7,6 @@
 pub struct ForwarderFn {
     pub rel: String,
     pub name: String,
-    pub line: usize,
     pub params: Vec<String>,
     /// "Fn:<name>" for a module-fn callee, "Method:<recv-param>:<method>" for
     /// a method callee on another class.

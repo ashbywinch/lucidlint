@@ -11,7 +11,7 @@
 //! Editors point at: `lucidlint --lsp`
 
 use crate::config::{Config, LucidConfig};
-use crate::{finding::Finding, scan_source_lsp, FileScan};
+use crate::{finding::Finding, FileScan, Pipeline};
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -144,7 +144,7 @@ impl LspState {
     /// merge re-runs over the cache.
     fn append_repo_wide_diags(&mut self, rel: &str, cfg: &LucidConfig, diags: &mut Vec<serde_json::Value>) {
         let Some(root) = self.root.clone() else { return };
-        let paths = crate::repo_files(&root);
+        let paths = crate::Pipeline::repo_files(&root);
         let mut scans: Vec<FileScan> = Vec::with_capacity(paths.len());
         for path in paths {
             let meta = std::fs::metadata(&path);
@@ -166,7 +166,7 @@ impl LspState {
             if let Some((true, true, scan)) = cached {
                 scans.push(scan.clone());
             } else if let Ok(meta) = meta {
-                let scan = crate::scan_file(&path);
+                let scan = crate::Pipeline::scan_file(&path);
                 self.scan_cache.insert(
                     key,
                     (
@@ -179,7 +179,7 @@ impl LspState {
             }
         }
         let root_s = root.to_string_lossy().to_string();
-        let by_file = crate::repo_wide_merge(&scans, &root_s);
+        let by_file = crate::Pipeline::repo_wide_merge(&scans, &root_s);
         if let Some(fs) = by_file.get(rel) {
             for f in fs {
                 if let Some(d) = Self::repo_wide_diag(f, rel, cfg) {
@@ -351,7 +351,7 @@ impl LspState {
     }
 
     fn scan_buffer(uri: &str, text: &str) -> FileScan {
-        let mut scan = scan_source_lsp(text, &Self::uri_to_path(uri));
+        let mut scan = Pipeline::scan_source_lsp(text, &Self::uri_to_path(uri));
         scan.file_name = Self::uri_to_path(uri);
         scan
     }
