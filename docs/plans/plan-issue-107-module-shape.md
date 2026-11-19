@@ -683,6 +683,65 @@ modules, with `lucidlint.py` kept as the entry point. Both moves must carry the
 release bundle's copy list and `setup.py`'s package list, which is why they are
 their own round rather than the tail of this one.
 
+### Round 3 (2026-11-19): the Python ladder, half carried
+
+**`lucidlint.py` is done: 2,806 lines / 71 definitions → 224 lines / 1
+definition (`main`).** The orchestrator is a package of one-class modules and
+the entry is the composition root:
+
+| module | owns |
+|---|---|
+| `orchestrator/host.py`, `substitutable.py` | the substitutable seams (`subprocess`, `_pygit2`, the graph store) — bound on the ENTRY module because that is the surface a test or a consumer substitutes, read at call time |
+| `orchestrator/vendoring.py`, `version.py` | the bundle's `deps/` directory and the artifact's version stamp |
+| `orchestrator/console.py` | the two out-of-band output doors (warning line, trimmed diff) |
+| `orchestrator/action.py` | `Action` and its identity/merge keys |
+| `orchestrator/sources/` | `SourceWalk` (git file list, docs harvest, rglob fallback), `FileHistory`, `GitHead`, the coverage records and the coverage request |
+| `orchestrator/report/` | `RenderCtx` (text, summary, JSON), the report documents, a seam group |
+| `orchestrator/rust_scan.py` + the rust records | the scan driver, its flags, its inputs, the finding records |
+| `orchestrator/services/` | `GraphContract` and the service pair |
+| `orchestrator/gate_runner.py`, `lucidlint_config.py`, `baseline.py` | the run's pipeline, the project config, the acknowledged baseline |
+| `orchestrator/fix/fix_command.py`, `cli.py` | the fix command, the CLI |
+
+`lucidlint.py` keeps the `deps/` bootstrap, the optional bindings and the
+facade re-exports the tests reach (`ch.Action`, `ch._GateRunner`, …). The
+release bundle copies both package directories (`Makefile`, `release.yml`),
+`setup.py`/`pyproject.toml` list them, and `make wheel-check` /
+`make bundle-check` pass. Behaviour is unchanged: houses 353 and album 431
+with identical finding sets.
+
+Three findings the split itself surfaced were fixed rather than suppressed:
+the scan driver's two console calls became one warning door (its graph
+`layer-mix` edge), `pygit2`'s sort mode is read through the host seam instead
+of a module binding, and the graph export's three wire dicts became records.
+
+**`fix_engine.py` is a package now, and its shared layer is named.** The file
+moved to `fix_engine/__init__.py` (so `import fix_engine` is unchanged) and
+the libcst mechanics every transform uses — node positions, class-body
+bindings, module-level names, def removal, the compiler-shorthand tests — are
+`fix_engine/cst_mechanics.py`'s `CstMechanics` class. That leaves 246 definitions in the
+package root and the `many-definitions` finding with them.
+
+The measured owner map for the rest (the closure of each fixer's references,
+`_FixRequest` excluded because it is the hub every shape calls):
+
+| fixer family | definitions |
+|---|---|
+| mechanical (deletes, keyword args, undeclared member, duplicate def/docstring/block) | 45 |
+| record (tuple-record, extract-record-class) | 17 |
+| loop (extract-method's seam is separate; the loop rewrites) | 25 |
+| class (strewing) | 58 |
+| parameter-object | 10 |
+| magic literal + rename | 9 |
+| feature envy | 15 |
+| composite (husk, chain, split-module, extract-module, dispatch, rule-table) | 112 |
+| shared (now `CstMechanics`) | 16 |
+
+Each family is one class whose transformers become nested classes; the 16
+shared names are already out. The composite family wants a second split
+before it is one class (husk / chain / module-split / module-extract /
+dispatch / rule-table). The `_FixRequest` methods that remain are the
+dispatch and the request itself, and they call each family's class.
+
 ## Why the tool did not catch the confusing code (2026-11-18)
 
 A review thread outlived the code it discussed, and the user's verdict was the

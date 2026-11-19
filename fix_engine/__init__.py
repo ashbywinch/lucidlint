@@ -28,29 +28,28 @@ import libcst as cst
 import libcst.matchers as m
 from libcst.metadata import CodePosition, ExpressionContextProvider, ParentNodeProvider, PositionProvider
 
-from fix_engine.cst_support import Cst
+from fix_engine.cst_mechanics import CstMechanics
 
 # the package root is the public surface: names that moved to a module stay
 # reachable here, because consumers and the tests import them from fix_engine
-_as_range = Cst._as_range
-_as_node = Cst._as_node
-_iter_nodes = Cst._iter_nodes
-_iter_nodes_pruned = Cst._iter_nodes_pruned
-_expr_names = Cst._expr_names
-_collect_alias_names = Cst._collect_alias_names
-_is_keyword_name = Cst._is_keyword_name
-_is_self_attribute = Cst._is_self_attribute
-_import_base_name = Cst._import_base_name
-_is_docstring_stmt = Cst._is_docstring_stmt
-_py_files = Cst._py_files
-_record_class_def = Cst._record_class_def
-_self_attr_target = Cst._self_attr_target
-_hoist_target_names = Cst._hoist_target_names
-_extraction_is_private = Cst._extraction_is_private
-_RemoveNodes = Cst._RemoveNodes
-_EnclosingClass = Cst._EnclosingClass
-_EnclosingFn = Cst._EnclosingFn
-
+_as_range = CstMechanics._as_range
+_as_node = CstMechanics._as_node
+_iter_nodes = CstMechanics._iter_nodes
+_iter_nodes_pruned = CstMechanics._iter_nodes_pruned
+_expr_names = CstMechanics._expr_names
+_collect_alias_names = CstMechanics._collect_alias_names
+_is_keyword_name = CstMechanics._is_keyword_name
+_is_self_attribute = CstMechanics._is_self_attribute
+_import_base_name = CstMechanics._import_base_name
+_is_docstring_stmt = CstMechanics._is_docstring_stmt
+_py_files = CstMechanics._py_files
+_record_class_def = CstMechanics._record_class_def
+_self_attr_target = CstMechanics._self_attr_target
+_hoist_target_names = CstMechanics._hoist_target_names
+_extraction_is_private = CstMechanics._extraction_is_private
+_RemoveNodes = CstMechanics._RemoveNodes
+_EnclosingClass = CstMechanics._EnclosingClass
+_EnclosingFn = CstMechanics._EnclosingFn
 
 
 def _non_receiver_param_names(params: Sequence[cst.Param]) -> list[str]:
@@ -63,8 +62,6 @@ def _module_contains(module: cst.Module, fn: cst.FunctionDef | None) -> bool:
     return fn is not None and any(s is fn for s in module.body)
 
 
-
-
 def _for_index_at_line(metadata: cst.CSTTransformer, stmts: list[cst.BaseStatement], line: int) -> int | None:
     """The index of the `for` statement at the given source line."""
     return next(
@@ -72,7 +69,7 @@ def _for_index_at_line(metadata: cst.CSTTransformer, stmts: list[cst.BaseStateme
             i
             for i, s in enumerate(stmts)
             if isinstance(s, cst.For)
-            and Cst._as_range(metadata.get_metadata(PositionProvider, s)).start.line == line
+            and CstMechanics._as_range(metadata.get_metadata(PositionProvider, s)).start.line == line
         ),
         None,
     )
@@ -94,12 +91,10 @@ MECHANICAL_KINDS = {
     "undeclared-attribute": "annotate the undeclared member: self.x: T = v (T inferred from the value)",
     "loop-pipeline": "Replace Loop with Pipeline: the single-mutation loop becomes a comprehension",
     "loop-sequence": (
-        "Replace Loop Sequence with Pipeline: the shared-accumulator loop chain "
-        "becomes concatenated comprehensions"
+        "Replace Loop Sequence with Pipeline: the shared-accumulator loop chain becomes concatenated comprehensions"
     ),
     "loop-hoist": (
-        "Replace Loop with Hoist + Pipeline: the loop body becomes a per-item helper, "
-        "the loop becomes a comprehension"
+        "Replace Loop with Hoist + Pipeline: the loop body becomes a per-item helper, the loop becomes a comprehension"
     ),
 }
 
@@ -152,12 +147,12 @@ _NAME_REQUIRED_KINDS = {
     "loop-hoist",
 }
 # Every kind the fix command can actually apply. A finding message may
-    # restrict advertising to what the fix command can actually apply: a
-    # finding message may advertise "— fix: <kind>" ONLY when the kind is
-    # here — suggesting a fix that cannot apply sends agents hand-editing
-    # around working automation, or guessing at a seam. (Rust-file kinds are
-    # guarded by the Rust binary's own refusal; Python kinds refused by the
-    # gate's unknown-kind guard.)
+# restrict advertising to what the fix command can actually apply: a
+# finding message may advertise "— fix: <kind>" ONLY when the kind is
+# here — suggesting a fix that cannot apply sends agents hand-editing
+# around working automation, or guessing at a seam. (Rust-file kinds are
+# guarded by the Rust binary's own refusal; Python kinds refused by the
+# gate's unknown-kind guard.)
 FIXABLE_KINDS = set(MECHANICAL_KINDS) | set(_STRUCTURAL_FIXERS) | {"extract-module"}
 
 
@@ -189,7 +184,7 @@ class _FixRequest:
     opts: FixOptions
     max_decisions: int | None = None
     source: str | None = None
-    wrote: bool = False        # set by fix_finding: the file was actually rewritten
+    wrote: bool = False  # set by fix_finding: the file was actually rewritten
     decline: str | None = None  # set by fix_finding/fixers: why nothing was written
     col: int = 0  # schema-3 anchor column; disambiguates same-line twins
     # Multi-file transactions (R8): the fixer's OTHER writes beyond the
@@ -329,7 +324,7 @@ class _FixRequest:
         cannot have external callers, so it takes the underscore)."""
         if name is None:
             name = "_extracted"
-        elif Cst._extraction_is_private() and not name.startswith("_"):
+        elif CstMechanics._extraction_is_private() and not name.startswith("_"):
             name = "_" + name
         module, wrapper, state = self._fn_seam_analysis()
         if state.fn_node is None or len(state.flat) < 2:
@@ -446,7 +441,7 @@ class _FixRequest:
             @override
             def visit_ClassDef(self, node) -> None:
                 nonlocal old
-                if old is None and Cst._as_range(self.get_metadata(PositionProvider, node)).start.line == line:
+                if old is None and CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line == line:
                     old = node.name.value
 
         wrapper.visit(_Find())
@@ -455,7 +450,7 @@ class _FixRequest:
         renamed = wrapper.visit(_RenameClass(line, old, name)).code
         return None if renamed == source else renamed
 
-# lucidlint: ignore closures the nested visitors are one-purpose probe walks — hoisting names nothing the domain owns
+    # lucidlint: ignore closures the nested visitors are one-purpose probes; hoisting names nothing owned
     def fix_dissolve_husk(self) -> str | None:
         source, line = self._loaded_source(), self.line
         """Dissolve a delegating-husk (#27): every method is exactly
@@ -478,7 +473,7 @@ class _FixRequest:
             def visit_ClassDef(self, node):
                 if (
                     self.cls is None
-                    and Cst._as_range(self.get_metadata(PositionProvider, node)).start.line == self.target_line
+                    and CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line == self.target_line
                 ):
                     self.cls = node
 
@@ -499,7 +494,7 @@ class _FixRequest:
         husk = cls.name.value
         # repo-wide analysis: every file's references must be rewireable
         # (direct `Husk().m(...)` calls or a `h = Husk()` + `h.m(...)` pattern)
-        files = Cst._py_files(self.repo)
+        files = CstMechanics._py_files(self.repo)
         new_sources: dict[str, str] = {}
         for path in files:
             rel = path.relative_to(self.repo).as_posix()
@@ -526,7 +521,7 @@ class _FixRequest:
             self.extra_writes.append((rel, ns))
         return origin_new
 
-# lucidlint: ignore latent-class the chain facts thread through module helpers — _FixRequest is the boundary
+    # lucidlint: ignore latent-class the chain facts thread through module helpers — _FixRequest is the boundary
     def fix_collapse_chain(self) -> str | None:
         """Collapse a forwarding chain (#30): method M (class C) whose body is
         exactly `return F(<all params>)`, module fn F whose body is exactly
@@ -599,9 +594,7 @@ class _FixRequest:
         matches = [
             (d_rel, d_cls, d_method)
             for d_rel, d_cls, d_method in _methods_named(self.repo, n_name)
-            if d_cls.name.value != head.class_name
-            and _non_receiver_param_names(d_method.params.params)
-            == arg_params
+            if d_cls.name.value != head.class_name and _non_receiver_param_names(d_method.params.params) == arg_params
         ]
         if len(matches) != 1:
             return None  # ambiguous — no structural certainty
@@ -633,9 +626,7 @@ class _FixRequest:
             body=[
                 cst.Return(
                     cst.Call(
-                        func=cst.Attribute(
-                            value=cst.Name(terminal.recv), attr=cst.Name(terminal.name)
-                        ),
+                        func=cst.Attribute(value=cst.Name(terminal.recv), attr=cst.Name(terminal.name)),
                         args=[cst.Arg(cst.Name(p)) for p in args],
                     )
                 )
@@ -657,9 +648,7 @@ class _FixRequest:
             return None
         promoted = terminal.method.with_changes(name=cst.Name(terminal.name))
         new_class = head.class_node.with_changes(
-            body=head.class_node.body.with_changes(
-                body=[*head.class_node.body.body, promoted]
-            )
+            body=head.class_node.body.with_changes(body=[*head.class_node.body.body, promoted])
         )
         origin_new = _replace_class_body(module, self.line, new_class).code
         args = [p for p in head.params if p != terminal.recv]
@@ -673,9 +662,7 @@ class _FixRequest:
                 )
             ]
         )
-        origin_new = _replace_method_body(
-            cst.parse_module(origin_new), head.method, m_body, self.line
-        ).code
+        origin_new = _replace_method_body(cst.parse_module(origin_new), head.method, m_body, self.line).code
         origin_new = self._drop_middle(origin_new, head, mid)
         if terminal.rel != self.rel:
             d_new = _remove_class(_module_of(self.repo, terminal.rel), d_name)
@@ -696,7 +683,7 @@ class _FixRequest:
         self.extra_writes.append((mid.rel, _remove_fn(mid.module, head.callee.name)))
         return origin_new
 
-# lucidlint: ignore latent-class the nested visitors are one-purpose probe walks — hoisting names nothing owned
+    # lucidlint: ignore latent-class the nested visitors are one-purpose probe walks — hoisting names nothing owned
     def fix_split_module(self) -> str | None:
         """Split a multi-class module (#31): the misplaced public classes move
         to files named after them — flat siblings when independent, a package
@@ -720,9 +707,7 @@ class _FixRequest:
         if refusal is not None:
             self.decline = refusal
             return None
-        outcome = _ModuleSplit(self.repo, origin, module, subjects).execute(
-            wrapper, self.opts.name
-        )
+        outcome = _ModuleSplit(self.repo, origin, module, subjects).execute(wrapper, self.opts.name)
         if outcome.decline is not None:
             self.decline = outcome.decline
             return None
@@ -754,7 +739,7 @@ class _FixRequest:
             return None
         if _name_occurrences(self.repo, probe.name) > 2:
             return None  # something references the name — a delete would break it
-        return wrapper.module.visit(Cst._RemoveNodes([probe.found])).code
+        return wrapper.module.visit(CstMechanics._RemoveNodes([probe.found])).code
 
     def fix_restating_docstring(self) -> str | None:
         source, line = self._loaded_source(), self.line
@@ -776,7 +761,7 @@ class _FixRequest:
 
             @override
             def visit_FunctionDef(self, node) -> None:
-                pos = Cst._as_range(self.get_metadata(PositionProvider, node))
+                pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
                 if pos.start.line <= self.target <= pos.end.line:
                     self.fn = node  # last (innermost) containing function wins
 
@@ -811,7 +796,7 @@ class _FixRequest:
                 block_stmts = list(parent.body)
                 if block_stmts and all(s in target_set for s in block_stmts):
                     return None
-        return wrapper.module.visit(Cst._RemoveNodes(targets)).code
+        return wrapper.module.visit(CstMechanics._RemoveNodes(targets)).code
 
     def _extract_module_proposal(self) -> _ModuleProposal | None:
         source = self._loaded_source()
@@ -995,12 +980,12 @@ class _FixRequest:
             return None
         module = cst.parse_module(source)
         wrapper = cst.MetadataWrapper(module)
-        finder = Cst._EnclosingFn(self.line)
+        finder = CstMechanics._EnclosingFn(self.line)
         wrapper.visit(finder)
         method = finder.found
         if method is None or not isinstance(method, cst.FunctionDef):
             return None
-        owner_cls = Cst._EnclosingClass(self.line)
+        owner_cls = CstMechanics._EnclosingClass(self.line)
         wrapper.visit(owner_cls)
         owner = owner_cls.found
         if owner is None:
@@ -1103,7 +1088,7 @@ class _FixRequest:
         annotation inference."""
         module = cst.parse_module(self.source or "")
         wrapper = cst.MetadataWrapper(module)
-        finder = Cst._EnclosingFn(line)
+        finder = CstMechanics._EnclosingFn(line)
         wrapper.visit(finder)
         fn = finder.found
         if fn is None:
@@ -1143,7 +1128,7 @@ class _FixRequest:
         transformed = wrapper.visit(_RecordToClass(self.rel, record_dicts, class_name, field_names))
         # the class def plus an EmptyLine — byte-identical to the old
         # Expr(SimpleStatementLine) wrap, which codegen'd a trailing newline
-        new_body: list = [Cst._record_class_def(class_name, field_names), cst.EmptyLine()]
+        new_body: list = [CstMechanics._record_class_def(class_name, field_names), cst.EmptyLine()]
         new_body.extend(transformed.body)
         return cst.Module(body=new_body).code
 
@@ -1184,10 +1169,8 @@ class _FixRequest:
                 field = f"{field}_{i}"
             key_map[k] = field
         bind_names = _record_bind_names(wrapper, target_dict)
-        rewritten = wrapper.visit(
-            _DictToClass(self.line, self.col, class_name, key_map, frozenset(bind_names))
-        )
-        new_body: list = [Cst._record_class_def(class_name, list(key_map.values())), cst.EmptyLine()]
+        rewritten = wrapper.visit(_DictToClass(self.line, self.col, class_name, key_map, frozenset(bind_names)))
+        new_body: list = [CstMechanics._record_class_def(class_name, list(key_map.values())), cst.EmptyLine()]
         new_body.extend(rewritten.body)
         return cst.Module(body=new_body).code
 
@@ -1233,7 +1216,7 @@ class _FixRequest:
                 nonlocal callee
                 if callee is not None:
                     return
-                pos = Cst._as_range(self.get_metadata(PositionProvider, node))
+                pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
                 if pos.start.line <= line <= pos.end.line and isinstance(node.func, cst.Name):
                     callee = node.func.value
 
@@ -1343,6 +1326,8 @@ class _FixRequest:
             if dele.exists() and not dele.is_dir():
                 dele.unlink()
         return description
+
+
 STRUCTURAL_KINDS = {
     "extract-method": "extract the seam into a private function (preview without a name, apply with --fix-name)",
     "extract-class": "move the strewing free functions into a class, rewriting call sites",
@@ -1373,9 +1358,7 @@ STRUCTURAL_KINDS = {
     "long-param-list": "Introduce Parameter Object: bundle the params into a dataclass",
     "dispatch-registry": "convert the if/elif dispatch chain into a dict of selector -> handler functions",
     "rule-table": "hoist the latent data structure: the if/append battery becomes a (condition, violation) table",
-    "dissolve-husk": (
-        "dissolve the delegating-husk: rewire its callers to the module functions, delete the husk"
-    ),
+    "dissolve-husk": ("dissolve the delegating-husk: rewire its callers to the module functions, delete the husk"),
     "collapse-chain": (
         "collapse the forwarding chain: rewire the head method to the terminal (rewire or promote, "
         "never blind inline), delete the middle forwarder"
@@ -1456,7 +1439,7 @@ class _DeclareMember(cst.CSTTransformer):
 
     @override
     def leave_Assign(self, original_node, updated_node):
-        pos = Cst._as_range(self.get_metadata(PositionProvider, original_node))
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
         if pos.start.line != self.target_line:
             return updated_node
         if len(updated_node.targets) != 1:
@@ -1625,8 +1608,6 @@ def _find_record_builds(module: cst.Module) -> _RecordBuild:
     return _RecordBuild(names, elements)
 
 
-
-
 class _RecordDictHit(NamedTuple):
     """One candidate literal: anchor position + the node + its const keys."""
 
@@ -1648,7 +1629,7 @@ class _FindRecordDicts(cst.CSTVisitor):
 
     @override
     def visit_Dict(self, node) -> None:
-        pos = Cst._as_range(self.get_metadata(PositionProvider, node))
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
         if pos.start.line != self.line:
             return
         keys: list[str] = []
@@ -1663,9 +1644,7 @@ class _FindRecordDicts(cst.CSTVisitor):
             self.hits.append(_RecordDictHit(pos.start.line, pos.start.column + 1, node, keys))
 
 
-def _find_record_dicts(
-    wrapper: cst.MetadataWrapper, line: int
-) -> list[_RecordDictHit]:
+def _find_record_dicts(wrapper: cst.MetadataWrapper, line: int) -> list[_RecordDictHit]:
     finder = _FindRecordDicts(line)
     wrapper.visit(finder)
     return finder.hits
@@ -1683,9 +1662,7 @@ def _dict_constant_keys(d: cst.Dict) -> list[str]:
     return keys
 
 
-def _record_bind_names(
-    wrapper: cst.MetadataWrapper, target_dict: cst.Dict
-) -> set[str]:
+def _record_bind_names(wrapper: cst.MetadataWrapper, target_dict: cst.Dict) -> set[str]:
     """Names bound to THIS dict literal by assignment (`payload = {...}`)."""
     names: set[str] = set()
 
@@ -1737,7 +1714,7 @@ class _DictToClass(cst.CSTTransformer):
 
     @override
     def leave_Dict(self, original_node, updated_node):
-        pos = Cst._as_range(self.get_metadata(PositionProvider, original_node))
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
         if not self._at_finding_position(pos):
             return updated_node
         keywords = []
@@ -1752,10 +1729,14 @@ class _DictToClass(cst.CSTTransformer):
             if field is None:
                 continue
             keywords.append(
-                cst.Arg(keyword=cst.Name(field), value=el.value, equal=cst.AssignEqual(
-                    whitespace_before=cst.SimpleWhitespace(""),
-                    whitespace_after=cst.SimpleWhitespace(""),
-                ))
+                cst.Arg(
+                    keyword=cst.Name(field),
+                    value=el.value,
+                    equal=cst.AssignEqual(
+                        whitespace_before=cst.SimpleWhitespace(""),
+                        whitespace_after=cst.SimpleWhitespace(""),
+                    ),
+                )
             )
         return cst.Call(func=cst.Name(self.class_name), args=keywords)
 
@@ -1791,8 +1772,6 @@ class _StmtReads(NamedTuple):
     has_self: bool
 
 
-
-
 def _collaborator_aliases(method: cst.FunctionDef) -> list[_Collaborator]:
     """The (alias, attr) pairs: `graph = self.graph` assignments in the
     method — the collaborators the method may envy."""
@@ -1807,7 +1786,7 @@ def _collaborator_aliases(method: cst.FunctionDef) -> list[_Collaborator]:
         if not isinstance(target, cst.Name):
             continue
         value = assign.value
-        if Cst._is_self_attribute(value):
+        if CstMechanics._is_self_attribute(value):
             assert isinstance(value, cst.Attribute)
             out.append(_Collaborator(target.value, value.attr.value))
     return out
@@ -1826,8 +1805,6 @@ def _alias_field_reads(method: cst.FunctionDef, alias: str) -> int:
 
     method.visit(_V())
     return count
-
-
 
 
 def _annotates_self_attr(assign: cst.AnnAssign, target: cst.BaseExpression, attr: str) -> bool:
@@ -1939,9 +1916,7 @@ def _is_field_pair_target(target: cst.BaseExpression) -> bool:
     """The loop target destructures a key and a tuple of fields:
     `for k, (a, b) in ...`."""
     return (
-        isinstance(target, cst.Tuple)
-        and len(target.elements) == 2
-        and isinstance(target.elements[1].value, cst.Tuple)
+        isinstance(target, cst.Tuple) and len(target.elements) == 2 and isinstance(target.elements[1].value, cst.Tuple)
     )
 
 
@@ -1966,26 +1941,26 @@ def _stmt_analysis(stmt: cst.BaseStatement | cst.BaseSmallStatement) -> _StmtRea
         @override
         def visit_Assign(self, node) -> None:
             for t in node.targets:
-                bound.update(Cst._hoist_target_names(t.target))
+                bound.update(CstMechanics._hoist_target_names(t.target))
 
         @override
         def visit_AnnAssign(self, node) -> None:
             if node.target:
-                bound.update(Cst._hoist_target_names(node.target))
+                bound.update(CstMechanics._hoist_target_names(node.target))
 
         @override
         def visit_For(self, node) -> None:
-            bound.update(Cst._hoist_target_names(node.target))
+            bound.update(CstMechanics._hoist_target_names(node.target))
 
         @override
         def visit_CompFor(self, node) -> None:
-            bound.update(Cst._hoist_target_names(node.target))
+            bound.update(CstMechanics._hoist_target_names(node.target))
 
         @override
         def visit_With(self, node) -> None:
             for item in node.items:
                 if item.asname is not None:
-                    bound.update(Cst._hoist_target_names(item.asname.name))
+                    bound.update(CstMechanics._hoist_target_names(item.asname.name))
 
     stmt.visit(_V())
     return _StmtReads(reads - bound - attr_names, bound, has_self)
@@ -2041,7 +2016,7 @@ class _DeleteStatement(cst.CSTTransformer):
     def leave_SimpleStatementLine(self, original_node, updated_node):
         if self.deleted:
             return updated_node
-        pos = Cst._as_range(self.get_metadata(PositionProvider, original_node))
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
         if pos.start.line <= self.target_line <= pos.end.line:
             self.deleted = True
             return cst.RemoveFromParent()
@@ -2064,7 +2039,7 @@ class _DeleteComment(cst.CSTTransformer):
             return updated_node
         if "lucidlint: ignore" not in updated_node.comment.value:
             return updated_node
-        pos = Cst._as_range(self.get_metadata(PositionProvider, original_node))
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
         if pos.start.line == self.target_line:
             self.deleted = True
             return cst.RemoveFromParent()
@@ -2079,7 +2054,7 @@ class _DeleteComment(cst.CSTTransformer):
         if isinstance(updated_node, cst.Comment):
             if self.deleted or "lucidlint: ignore" not in updated_node.value:
                 return updated_node
-            pos = Cst._as_range(self.get_metadata(PositionProvider, original_node))
+            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
             if pos.start.line == self.target_line:
                 self.deleted = True
                 return cst.RemoveFromParent()
@@ -2114,7 +2089,7 @@ class _KeywordArgs(cst.CSTTransformer):
             return True
         if self.callee is not None and node.func.value != self.callee:
             return True
-        pos = Cst._as_range(self.get_metadata(PositionProvider, node))
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
         if not (pos.start.line <= self.target_line <= pos.end.line):
             return True
         self.target_start, self.target_end = pos.start, pos.end
@@ -2122,7 +2097,7 @@ class _KeywordArgs(cst.CSTTransformer):
 
     @override
     def leave_Call(self, original_node, updated_node):
-        pos = Cst._as_range(self.get_metadata(PositionProvider, original_node))
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
         if (self.target_start, self.target_end) != (pos.start, pos.end) or not updated_node.args:
             return updated_node
         # rebuild the positional args with keywords, in param order. Once the
@@ -2268,7 +2243,6 @@ class _LoopsIntoComprehensions(cst.CSTTransformer):
     not prior contents. Unsupported or unsafe shapes set `decline`; a
     missing target stays silent (the stale-finding protocol)."""
 
-
     METADATA_DEPENDENCIES = (PositionProvider, ParentNodeProvider)
 
     def __init__(self, line: int, sequence: bool, fresh_name: str = "item") -> None:
@@ -2298,7 +2272,7 @@ class _LoopsIntoComprehensions(cst.CSTTransformer):
             parent = self.get_metadata(ParentNodeProvider, block)
             if not isinstance(parent, cst.FunctionDef):
                 return None
-            def_line = Cst._as_range(self.get_metadata(PositionProvider, parent)).start.line
+            def_line = CstMechanics._as_range(self.get_metadata(PositionProvider, parent)).start.line
             if def_line != self.line:
                 return None
             first = next((i for i, s in enumerate(stmts) if not isinstance(s, cst.EmptyLine)), None)
@@ -2325,7 +2299,6 @@ class _LoopsIntoComprehensions(cst.CSTTransformer):
                 return None
             loop_count = 1
         return self._rewrite_plan(stmts, first_idx, loop_count)
-
 
     def _chain_length(self, stmts, start: int) -> int:
         n = 0
@@ -2398,7 +2371,6 @@ class _LoopsIntoComprehensions(cst.CSTTransformer):
         new_stmt = init.with_changes(body=[new_small])
         return stmts, init_idx, (first_idx + loop_count) - init_idx, new_stmt
 
-
     @staticmethod
     def _small_stmt(stmt):
         """The small statement inside a statement line (blocks hold
@@ -2407,7 +2379,6 @@ class _LoopsIntoComprehensions(cst.CSTTransformer):
         if isinstance(stmt, cst.SimpleStatementLine) and len(stmt.body) == 1:
             return stmt.body[0]
         return stmt
-
 
     def _loop_plan(self, for_node: cst.For) -> _LoopPipelinePlan | None:
         if for_node.orelse:
@@ -2456,18 +2427,32 @@ class _LoopsIntoComprehensions(cst.CSTTransformer):
             return isinstance(value, cst.List) and not value.elements
         if collection == "dict":
             return isinstance(value, cst.Dict) and not value.elements
-        return (
-            _is_empty_set_call(value)
-        )
-
+        return _is_empty_set_call(value)
 
 
 _HOIST_MUTATORS = {
-    "append", "add", "extend", "appendleft", "update", "setdefault", "add_update", "discard", "remove",
+    "append",
+    "add",
+    "extend",
+    "appendleft",
+    "update",
+    "setdefault",
+    "add_update",
+    "discard",
+    "remove",
 }
 _OTHER_MUTATORS = _HOIST_MUTATORS | {
-    "pop", "insert", "sort", "reverse", "clear", "put", "push", "enqueue", "__setitem__",
+    "pop",
+    "insert",
+    "sort",
+    "reverse",
+    "clear",
+    "put",
+    "push",
+    "enqueue",
+    "__setitem__",
 }
+
 
 class _NameRewriter(cst.CSTTransformer):
     """Rename every occurrence of one name — the hoist re-targets the
@@ -2484,12 +2469,6 @@ class _NameRewriter(cst.CSTTransformer):
         return updated_node
 
 
-
-
-
-
-
-
 def _stmt_seq(x) -> list:
     """A statement suite as a list: an IndentedBlock, an `else` clause's
     block, or a plain list (None is empty)."""
@@ -2503,19 +2482,19 @@ def _stmt_seq(x) -> list:
 def _bind_small(small, bound: set[str]) -> None:
     """The names one small statement binds."""
     if isinstance(small, cst.AnnAssign):
-        bound.update(Cst._hoist_target_names(small.target))
+        bound.update(CstMechanics._hoist_target_names(small.target))
     elif isinstance(small, cst.Assign):
         for t in small.targets:
-            bound.update(Cst._hoist_target_names(t))
+            bound.update(CstMechanics._hoist_target_names(t))
     elif isinstance(small, cst.AugAssign):
-        bound.update(Cst._hoist_target_names(small.target))
+        bound.update(CstMechanics._hoist_target_names(small.target))
 
 
 def _bind_children(stmt, bound: set[str]) -> None:
     """The names a compound statement binds across its child blocks."""
     seqs: list = []
     if isinstance(stmt, cst.For):
-        bound.update(Cst._expr_names(stmt.target))
+        bound.update(CstMechanics._expr_names(stmt.target))
         seqs = _stmt_seq(stmt.body) + _stmt_seq(stmt.orelse)
     elif isinstance(stmt, (cst.While, cst.If)):
         seqs = _stmt_seq(stmt.body) + _stmt_seq(stmt.orelse)
@@ -2526,7 +2505,7 @@ def _bind_children(stmt, bound: set[str]) -> None:
     elif isinstance(stmt, cst.With):
         for item in stmt.items:
             if item.asname is not None:
-                bound.update(Cst._expr_names(item.asname.name))
+                bound.update(CstMechanics._expr_names(item.asname.name))
         seqs = _stmt_seq(stmt.body)
     elif isinstance(stmt, cst.Match):
         for case in stmt.cases:
@@ -2543,6 +2522,7 @@ def _bind_names(stmt, bound: set[str]) -> None:
             _bind_small(small, bound)
         return
     _bind_children(stmt, bound)
+
 
 def _loop_body_bound(stmts: list[cst.BaseStatement]) -> set[str]:
     """The names BOUND inside a loop body (temps) — the temps the hoist
@@ -2573,7 +2553,7 @@ class _LoopHoistExtractor(cst.CSTTransformer):
 
     def __init__(self, line: int, name: str, helper_local: str = "val", element: str = "part") -> None:
         self.line = line
-        if Cst._extraction_is_private() and not name.startswith("_"):
+        if CstMechanics._extraction_is_private() and not name.startswith("_"):
             name = "_" + name
         self.name = name
         self.helper_local = helper_local
@@ -2666,7 +2646,7 @@ class _LoopHoistExtractor(cst.CSTTransformer):
         acc: str | None = None
         collection: str | None = None
         receivers: set[int] = set()  # Name node ids that ARE the append/add receiver
-        nodes = list(Cst._iter_nodes(body_stmts))
+        nodes = list(CstMechanics._iter_nodes(body_stmts))
         for n in nodes:
             if not isinstance(n, cst.Call) or not isinstance(n.func, cst.Attribute):
                 continue
@@ -2693,8 +2673,7 @@ class _LoopHoistExtractor(cst.CSTTransformer):
                 collection = "list" if method == "append" else "set"
             elif base.value != acc:
                 self.decline = (
-                    f"the body accumulates BOTH `{acc}` and `{base.value}` — the hoist "
-                    "rewrite needs one accumulator"
+                    f"the body accumulates BOTH `{acc}` and `{base.value}` — the hoist rewrite needs one accumulator"
                 )
                 return None
             receivers.add(id(base))
@@ -2704,12 +2683,11 @@ class _LoopHoistExtractor(cst.CSTTransformer):
         for n in nodes:
             if _reads_accumulator_mid_build(n, acc, receivers):
                 self.decline = (
-                    f"the body READS `{acc}` mid-build — a comprehension has no partial "
-                    "state to read; refactor by hand"
+                    f"the body READS `{acc}` mid-build — a comprehension has no partial state to read; refactor by hand"
                 )
                 return None
         for s in body_stmts:
-            for n in Cst._iter_nodes_pruned([s]):
+            for n in CstMechanics._iter_nodes_pruned([s]):
                 if isinstance(n, cst.AnnAssign):
                     target_list: list = [n.target]
                 elif isinstance(n, cst.Assign):
@@ -2719,7 +2697,7 @@ class _LoopHoistExtractor(cst.CSTTransformer):
                 else:
                     continue
                 for t in target_list:
-                    for sub in Cst._iter_nodes(t):
+                    for sub in CstMechanics._iter_nodes(t):
                         if _writes_other_name(sub, bound, acc):
                             self.decline = (
                                 f"the body also writes `{sub.value}` — the hoist rewrite "
@@ -2829,6 +2807,8 @@ def _annotation_base(node) -> str | None:
     if isinstance(ann, cst.Name):
         return ann.value
     return None
+
+
 @dataclass
 class StrewingGroup:
     """The free-function group extract-class moves — shared leading type,
@@ -2837,6 +2817,7 @@ class StrewingGroup:
     shared: str
     fns: list[str] = field(default_factory=list)
     anchor: int = 0
+
 
 def _strewing_group(source: str, anchor_line: int) -> StrewingGroup | None:
     """The (shared type, fn names, fn source of the anchor) for the strewing
@@ -2860,7 +2841,7 @@ def _strewing_group(source: str, anchor_line: int) -> StrewingGroup | None:
             nonlocal anchor_ann
             if node.name.value == "__init__":
                 return
-            pos = Cst._as_range(self.get_metadata(PositionProvider, node))
+            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
             if pos.start.line == anchor_line:
                 pass
                 if node.params.params:
@@ -3138,8 +3119,6 @@ class _FnBodyState:
         return list(block_sids), free_vars
 
 
-
-
 class _Analyse(cst.CSTVisitor):
     """Collects the target function's body statement data — flattened so
     seams can descend into compound statements (a big loop's inner chunks
@@ -3155,7 +3134,7 @@ class _Analyse(cst.CSTVisitor):
     def visit_FunctionDef(self, node) -> None:
         if (
             self.state.fn_node is not None
-            or Cst._as_range(self.get_metadata(PositionProvider, node)).start.line != self.state.line
+            or CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line != self.state.line
         ):
             return
         self.state.fn_node = node
@@ -3174,7 +3153,7 @@ class _Analyse(cst.CSTVisitor):
             sid = id(s)
             self.state.flat.append((sid, id(container), idx))
             self.state.nodes[sid] = s
-            p = Cst._as_range(self.get_metadata(PositionProvider, s))
+            p = CstMechanics._as_range(self.get_metadata(PositionProvider, s))
             self.state.stmt_spans[sid] = (p.start.line, p.end.line)
             self.state.first_use[sid] = {}
             self.state.writes[sid] = set()
@@ -3207,13 +3186,13 @@ class _Analyse(cst.CSTVisitor):
             if isinstance(n, (cst.Return, cst.Yield)):
                 return True
             if isinstance(n, (cst.Break, cst.Continue)):
-                p = Cst._as_node(self.get_metadata(ParentNodeProvider, n))
+                p = CstMechanics._as_node(self.get_metadata(ParentNodeProvider, n))
                 ok = False
                 while p is not None and not isinstance(p, cst.Module):
                     if isinstance(p, (cst.For, cst.While)):
                         ok = id(p) in loops
                         break
-                    p = Cst._as_node(self.get_metadata(ParentNodeProvider, p))
+                    p = CstMechanics._as_node(self.get_metadata(ParentNodeProvider, p))
                 if not ok:
                     return True
         return False
@@ -3223,8 +3202,8 @@ class _Analyse(cst.CSTVisitor):
         if self.state.fn_node is None:
             return
         sid = None
-        parent = Cst._as_node(self.get_metadata(ParentNodeProvider, node))
-        if Cst._is_keyword_name(node, parent):
+        parent = CstMechanics._as_node(self.get_metadata(ParentNodeProvider, node))
+        if CstMechanics._is_keyword_name(node, parent):
             return  # a keyword-argument name (f(a=1)) is not a variable ref
         while parent is not None and not isinstance(parent, cst.Module):
             if parent is self.state.fn_node:
@@ -3232,7 +3211,7 @@ class _Analyse(cst.CSTVisitor):
             if id(parent) in self.state.nodes:
                 sid = id(parent)
                 break
-            parent = Cst._as_node(self.get_metadata(ParentNodeProvider, parent))
+            parent = CstMechanics._as_node(self.get_metadata(ParentNodeProvider, parent))
         if sid is None:
             return  # the fn's own signature/name — not a body read
         try:
@@ -3275,19 +3254,17 @@ def _module_level_names(module: cst.Module) -> set[str]:
     return names
 
 
-
-
 def collect_stmt_names(add_target, line_stmt, names):
     stmts = line_stmt.body if isinstance(line_stmt, cst.SimpleStatementLine) else [line_stmt]
     for stmt in stmts:
         if isinstance(stmt, cst.Import):
-            Cst._collect_alias_names(names, stmt)
+            CstMechanics._collect_alias_names(names, stmt)
         elif isinstance(stmt, cst.ImportFrom):
             if isinstance(stmt.names, cst.ImportStar):
                 continue  # `from x import *` binds no importable name
             for a in stmt.names:
                 if a.asname is not None:
-                    names.update( Cst._hoist_target_names(a.asname.name))
+                    names.update(CstMechanics._hoist_target_names(a.asname.name))
                 elif isinstance(a.name, cst.Name) and a.name.value != "*":
                     names.add(a.name.value)
         elif isinstance(stmt, (cst.Assign, cst.AnnAssign)):
@@ -3296,8 +3273,6 @@ def collect_stmt_names(add_target, line_stmt, names):
                 add_target(t)
         elif isinstance(stmt, (cst.FunctionDef, cst.ClassDef)):
             names.add(stmt.name.value)
-
-
 
 
 def _is_nested_target(wrapper: cst.MetadataWrapper, fn_node) -> bool:
@@ -3320,8 +3295,6 @@ def _min_seam_decisions(state) -> int:
     fn_sid = id(state.fn_node)
     total = sum(state.decisions[sid] for sid, container, _ in state.flat if container == fn_sid)
     return max(0, total - 14) if total > 14 else 0
-
-
 
 
 class _CollectStores(cst.CSTVisitor):
@@ -3412,7 +3385,7 @@ class _ReceiverToSelf(cst.CSTTransformer):
         fn = self._current or ""
         old = self.receivers.get(fn)
         parent = self.get_metadata(ParentNodeProvider, original_node)
-        if Cst._is_keyword_name(original_node, parent):
+        if CstMechanics._is_keyword_name(original_node, parent):
             return updated_node  # f(state=1): a keyword name, not the receiver
         if old is None or updated_node.value != old:
             return updated_node
@@ -3590,7 +3563,7 @@ def _find_fn_at(wrapper, line: int, name: str | None = None) -> cst.FunctionDef 
             """The first def at the finding's line (optionally by name)."""
             if found is not None:
                 return False
-            if Cst._as_range(self.get_metadata(PositionProvider, node)).start.line != line:
+            if CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line != line:
                 return False
             return name is None or node.name.value == name
 
@@ -3620,7 +3593,7 @@ class _FnBodyRewrite(cst.CSTTransformer):
     def leave_FunctionDef(self, original_node, updated_node):
         if updated_node.name.value != self.fn_name:
             return updated_node
-        if Cst._as_range(self.get_metadata(PositionProvider, original_node)).start.line != self.line:
+        if CstMechanics._as_range(self.get_metadata(PositionProvider, original_node)).start.line != self.line:
             return updated_node
         new_body = updated_node.body.visit(_BodyParamRewrite(list(self.params)))
         receiver = [p for p in updated_node.params.params if p.name is not None and p.name.value in ("self", "cls")]
@@ -3632,7 +3605,6 @@ class _FnBodyRewrite(cst.CSTTransformer):
             params=updated_node.params.with_changes(params=[*receiver, options_param]),
             body=new_body,
         )
-
 
 
 class _ClassOwningLine(cst.CSTVisitor):
@@ -3652,7 +3624,7 @@ class _ClassOwningLine(cst.CSTVisitor):
     @override
     def visit_ClassDef(self, node) -> None:
         self.depth += 1
-        pos = Cst._as_range(self.get_metadata(PositionProvider, node))
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
         if pos.start.line <= self.line <= pos.end.line and self.depth > self.owner_depth:
             self.owner = node
             self.owner_depth = self.depth
@@ -3660,6 +3632,7 @@ class _ClassOwningLine(cst.CSTVisitor):
     @override
     def leave_ClassDef(self, original_node) -> None:
         self.depth -= 1
+
 
 class _FindLiteral(cst.CSTVisitor):
     """The numeric literal anchored at (line, col) — the schema-3 col pins
@@ -3675,7 +3648,7 @@ class _FindLiteral(cst.CSTVisitor):
     def _match(self, node) -> bool:
         if self.value is not None:
             return False
-        pos = Cst._as_range(self.get_metadata(PositionProvider, node)).start
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start
         if pos.line != self.line:
             return False
         if self.col > 0 and pos.column + 1 != self.col:
@@ -3709,7 +3682,7 @@ class _InsertClassConstant(cst.CSTTransformer):
     def leave_ClassDef(self, original_node, updated_node):
         if self.done:
             return updated_node
-        pos = Cst._as_range(self.get_metadata(PositionProvider, original_node))
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
         if not (pos.start.line <= self.line <= pos.end.line):
             return updated_node
         self.done = True
@@ -3735,7 +3708,7 @@ class _ReplaceLiteral(cst.CSTTransformer):
     def _match(self, original_node) -> bool:
         if self.replaced:
             return False
-        pos = Cst._as_range(self.get_metadata(PositionProvider, original_node)).start
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node)).start
         return pos.line == self.target_line and (self.col == 0 or pos.column + 1 == self.col)
 
     @override
@@ -3765,7 +3738,7 @@ class _RenameClass(cst.CSTTransformer):
 
     @override
     def leave_ClassDef(self, original_node, updated_node):
-        pos = Cst._as_range(self.get_metadata(PositionProvider, original_node))
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
         if pos.start.line == self.target_line and updated_node.name.value == self.old:
             return updated_node.with_changes(name=cst.Name(self.new))
         return updated_node
@@ -3872,9 +3845,6 @@ def _stmt_decision_count(stmt) -> int:
 # (move a domain's defs to a new module) — the family-album review log §10/§11.
 
 
-
-
-
 class _NameCount(cst.CSTVisitor):
     def __init__(self, name: str) -> None:
         self.name: str = name
@@ -3893,7 +3863,7 @@ def _name_occurrences(repo: Path, name: str) -> int:
     duplicate-def safety check: a delete is only offered when the shadowing
     def is provably unreferenced (the two def sites are the only hits)."""
     total = 0
-    for p in Cst._py_files(repo):
+    for p in CstMechanics._py_files(repo):
         try:
             module = cst.parse_module(p.read_text(encoding="utf-8"))
         except Exception:  # parse errors in other files are their own findings
@@ -3919,7 +3889,7 @@ class _FindModuleDef(cst.CSTVisitor):
 
     @override
     def visit_FunctionDef(self, node) -> None:
-        pos = Cst._as_range(self.get_metadata(PositionProvider, node))
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
         if self._is_target_at_top(pos):
             self.found, self.name = node, node.name.value
         self.depth += 1
@@ -3934,7 +3904,7 @@ class _FindModuleDef(cst.CSTVisitor):
 
     @override
     def visit_ClassDef(self, node) -> None:
-        pos = Cst._as_range(self.get_metadata(PositionProvider, node))
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
         if self._is_target_at_top(pos):
             self.found, self.name = node, node.name.value
         self.depth += 1
@@ -3942,8 +3912,6 @@ class _FindModuleDef(cst.CSTVisitor):
     @override
     def leave_ClassDef(self, original_node) -> None:
         self.depth -= 1
-
-
 
 
 def _strip_first_docstring(updated: cst.FunctionDef | cst.ClassDef, original: object) -> cst.FunctionDef | cst.ClassDef:
@@ -3973,7 +3941,7 @@ class _StripDocstring(cst.CSTTransformer):
     def leave_FunctionDef(self, original_node, updated_node):
         if self.done:
             return updated_node
-        if Cst._as_range(self.get_metadata(PositionProvider, original_node)).start.line == self.line:
+        if CstMechanics._as_range(self.get_metadata(PositionProvider, original_node)).start.line == self.line:
             self.done = True
             return _strip_first_docstring(updated_node, original_node)
         return updated_node
@@ -3982,7 +3950,7 @@ class _StripDocstring(cst.CSTTransformer):
     def leave_ClassDef(self, original_node, updated_node):
         if self.done:
             return updated_node
-        if Cst._as_range(self.get_metadata(PositionProvider, original_node)).start.line == self.line:
+        if CstMechanics._as_range(self.get_metadata(PositionProvider, original_node)).start.line == self.line:
             self.done = True
             return _strip_first_docstring(updated_node, original_node)
         return updated_node
@@ -4017,6 +3985,7 @@ def _flatten_stmts(stmts, out: list) -> None:
         elif isinstance(s, cst.Match):
             for case in s.cases:
                 _flatten_stmts(list(case.body.body), out)
+
 
 # lucidlint: ignore complexity the dispatch is a parser-shape table, not branch decision logic
 def _forwarder_callee_of(method: cst.FunctionDef) -> str | None:
@@ -4079,9 +4048,7 @@ def _rewire_husk_sites(module: cst.Module, husk: str, method_fns: dict[str, str]
             if isinstance(func, cst.Attribute) and isinstance(func.value, cst.Call):
                 # Husk().m(<args>) -> Fm(<args>)
                 inner = func.value
-                if (
-                    _is_husk_method_call(inner, func, husk, method_fns)
-                ):
+                if _is_husk_method_call(inner, func, husk, method_fns):
                     return updated_node.with_changes(func=cst.Name(method_fns[func.attr.value]))
             # h.m(<args>) -> Fm(<args>) for a proven instance variable
             if _is_husk_attr_call(func, instances, method_fns):
@@ -4124,7 +4091,7 @@ def _rewire_husk_sites(module: cst.Module, husk: str, method_fns: dict[str, str]
     drop_probe = _HuskProbe()
     rewired.visit(drop_probe)
     if drop_probe.statements:
-        rewired = rewired.visit(Cst._RemoveNodes(drop_probe.statements))
+        rewired = rewired.visit(CstMechanics._RemoveNodes(drop_probe.statements))
     # the husk class itself is deleted by the caller — scan leftovers on the
     # tree WITHOUT it (the class's own subtree must not count as a reference)
     scanned = rewired.visit(_RemoveHuskClass(husk))
@@ -4148,6 +4115,7 @@ class _RemoveHuskClass(cst.CSTTransformer):
             return cst.RemoveFromParent()
         return updated_node
 
+
 def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
     """The origin's module-level imports binding a referenced name — what the
     new module needs (libcst wraps imports in SimpleStatementLine)."""
@@ -4162,9 +4130,9 @@ def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
             if isinstance(inner, cst.Import):
                 for alias in inner.names:
                     bound = (
-                         Cst._hoist_target_names(alias.asname.name)
+                        CstMechanics._hoist_target_names(alias.asname.name)
                         if alias.asname is not None
-                        else {Cst._import_base_name(alias.name)}
+                        else {CstMechanics._import_base_name(alias.name)}
                     )
                     if bound & referenced:
                         moved.append(cst.SimpleStatementLine(body=[inner]))
@@ -4176,7 +4144,7 @@ def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
                     if not isinstance(alias.name, cst.Name):
                         continue
                     bound = (
-                         Cst._hoist_target_names(alias.asname.name)
+                        CstMechanics._hoist_target_names(alias.asname.name)
                         if alias.asname is not None
                         else {alias.name.value}
                     )
@@ -4211,9 +4179,7 @@ def _origin_after_move(module: cst.Module, move: set[str], opts, rel: str) -> li
     )
     insert_at = 0
     for i, s in enumerate(remaining):
-        if (
-            _is_import_line(s)
-        ):
+        if _is_import_line(s):
             insert_at = i + 1
     remaining.insert(insert_at, reexport)
     return remaining
@@ -4292,7 +4258,7 @@ class _MethodAtLine(cst.CSTVisitor):
         for stmt in node.body.body:
             if not isinstance(stmt, cst.FunctionDef):
                 continue
-            pos = Cst._as_range(self.get_metadata(PositionProvider, stmt))
+            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, stmt))
             if pos.start.line == self.target_line:
                 self.owner = (node.name.value, node, stmt)
                 return
@@ -4327,11 +4293,7 @@ def _chain_middle(repo: Path, head: _ChainHead) -> _ChainMiddle | None:
         return None
     # a method callee absorbs the receiver param (`store.load(key)` passes only
     # `key`); a module-fn callee takes all params
-    expected = (
-        [p for p in params if p != callee.attr_method[0]]
-        if callee.attr_method is not None
-        else params
-    )
+    expected = [p for p in params if p != callee.attr_method[0]] if callee.attr_method is not None else params
     if args != expected:
         return None
     return _ChainMiddle(found.rel, found.module, params, callee)
@@ -4374,7 +4336,7 @@ def _module_fn_node(module: cst.Module, name: str) -> cst.FunctionDef | None:
 def _find_module_fn(repo: Path, name: str) -> _ModuleFn | None:
     """One module-level function by name, resolved across the repo — the
     lookup returns the file, the module, and the node together."""
-    for path in Cst._py_files(repo):
+    for path in CstMechanics._py_files(repo):
         module = cst.parse_module(path.read_text(encoding="utf-8"))
         node = _module_fn_node(module, name)
         if node is not None:
@@ -4384,7 +4346,7 @@ def _find_module_fn(repo: Path, name: str) -> _ModuleFn | None:
 
 def _call_sites(repo: Path, name: str) -> int:
     total = 0
-    for path in Cst._py_files(repo):
+    for path in CstMechanics._py_files(repo):
         mod = cst.parse_module(path.read_text(encoding="utf-8"))
 
         class _Count(cst.CSTVisitor):
@@ -4403,7 +4365,7 @@ def _call_sites(repo: Path, name: str) -> int:
 
 
 def _reexported(repo: Path, name: str) -> bool:
-    for path in Cst._py_files(repo):
+    for path in CstMechanics._py_files(repo):
         mod = cst.parse_module(path.read_text(encoding="utf-8"))
         for stmt in mod.body:
             if isinstance(stmt, cst.SimpleStatementLine):
@@ -4428,8 +4390,10 @@ def _depends_on(repo: Path, rel: str, d_rel: str) -> bool:
             continue
         for inner in stmt.body:
             if isinstance(inner, cst.ImportFrom) and inner.module is not None:
-                mod_name = inner.module if isinstance(inner.module, str) else (
-                    inner.module.value if hasattr(inner.module, "value") else ""
+                mod_name = (
+                    inner.module
+                    if isinstance(inner.module, str)
+                    else (inner.module.value if hasattr(inner.module, "value") else "")
                 )
                 if str(mod_name).split(".")[-1] == target_stem:
                     return True
@@ -4438,7 +4402,7 @@ def _depends_on(repo: Path, rel: str, d_rel: str) -> bool:
 
 def _methods_named(repo: Path, name: str) -> list[tuple[str, cst.ClassDef, cst.FunctionDef]]:
     out: list[tuple[str, cst.ClassDef, cst.FunctionDef]] = []
-    for path in Cst._py_files(repo):
+    for path in CstMechanics._py_files(repo):
         mod = cst.parse_module(path.read_text(encoding="utf-8"))
         for stmt in mod.body:
             if not isinstance(stmt, cst.ClassDef):
@@ -4457,17 +4421,13 @@ def _class_has_identity(cls: cst.ClassDef) -> bool:
         def visit_Assign(self, node):
             nonlocal writes_self
             for t in node.targets:
-                if (
-                    Cst._is_self_attribute(t.target)
-                ):
+                if CstMechanics._is_self_attribute(t.target):
                     writes_self = True
 
         @override
         def visit_AnnAssign(self, node):
             nonlocal writes_self
-            if (
-                Cst._is_self_attribute(node.target)
-            ):
+            if CstMechanics._is_self_attribute(node.target):
                 writes_self = True
 
     cls.visit(_Scan())
@@ -4495,7 +4455,7 @@ def _method_uses_self(method: cst.FunctionDef) -> bool:
 
 def _zero_external_refs(repo: Path, class_name: str) -> bool:
     total = 0
-    for path in Cst._py_files(repo):
+    for path in CstMechanics._py_files(repo):
         mod = cst.parse_module(path.read_text(encoding="utf-8"))
         for node in _module_name_nodes(mod):
             if node.value == class_name:
@@ -4507,6 +4467,7 @@ def _module_name_nodes(module: cst.Module) -> list[cst.Name]:
     class _AllNames(cst.CSTVisitor):
         def __init__(self):
             self.names: list[cst.Name] = []
+
         @override
         def visit_Name(self, node):
             self.names.append(node)
@@ -4527,7 +4488,7 @@ class _MethodBodyRewriteByLine(cst.CSTTransformer):
     @override
     def leave_FunctionDef(self, original_node, updated_node):
         if updated_node.name.value == self.name:
-            pos = Cst._as_range(self.get_metadata(PositionProvider, original_node))
+            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
             if pos.start.line == self.line:
                 return updated_node.with_changes(body=updated_node.body.with_changes(body=self.body))
         return updated_node
@@ -4538,7 +4499,7 @@ def _replace_method_body(
     module: cst.Module, method: cst.FunctionDef, body: cst.SimpleStatementLine, line: int | None = None
 ) -> cst.Module:
     if line is None:
-        line = Cst._as_range(cst.MetadataWrapper(module).resolve(PositionProvider)[method]).start.line
+        line = CstMechanics._as_range(cst.MetadataWrapper(module).resolve(PositionProvider)[method]).start.line
     return cst.MetadataWrapper(module).visit(_MethodBodyRewriteByLine(line, method.name.value, [body]))
 
 
@@ -4554,7 +4515,7 @@ class _ReplaceClassByLine(cst.CSTTransformer):
     def leave_ClassDef(self, original_node, updated_node):
         if self.done:
             return updated_node
-        pos = Cst._as_range(self.get_metadata(PositionProvider, original_node))
+        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
         if pos.start.line == self.line:
             self.done = True
             return self.new_class
@@ -4659,9 +4620,7 @@ def _stmt_is_plain_assign(stmt) -> bool:
     for inner in stmt.body:
         if isinstance(inner, (cst.Import, cst.ImportFrom, cst.Pass)):
             continue
-        if isinstance(inner, cst.Assign) and all(
-            isinstance(t.target, cst.Name) for t in inner.targets
-        ):
+        if isinstance(inner, cst.Assign) and all(isinstance(t.target, cst.Name) for t in inner.targets):
             continue
         if isinstance(inner, cst.AnnAssign) and isinstance(inner.target, cst.Name):
             continue
@@ -4680,9 +4639,7 @@ def _module_constants(top: Sequence) -> list[tuple[str, cst.SimpleStatementLine]
         if _is_single_name_assign(inner):
             assert isinstance(inner, cst.Assign) and isinstance(inner.targets[0].target, cst.Name)
             out.append((inner.targets[0].target.value, stmt))
-        elif isinstance(inner, cst.AnnAssign) and inner.value is not None and isinstance(
-            inner.target, cst.Name
-        ):
+        elif isinstance(inner, cst.AnnAssign) and inner.value is not None and isinstance(inner.target, cst.Name):
             out.append((inner.target.value, stmt))
     return out
 
@@ -4698,8 +4655,7 @@ def _const_value(stmt: cst.SimpleStatementLine) -> cst.BaseExpression:
 
 def _module_has_relative_imports(module: cst.Module) -> bool:
     return any(
-        isinstance(s, cst.SimpleStatementLine)
-        and any(isinstance(i, cst.ImportFrom) and i.relative for i in s.body)
+        isinstance(s, cst.SimpleStatementLine) and any(isinstance(i, cst.ImportFrom) and i.relative for i in s.body)
         for s in module.body
     )
 
@@ -4714,18 +4670,17 @@ def _class_body_binds(cls: cst.ClassDef, name: str) -> bool:
         elif isinstance(stmt, cst.SimpleStatementLine):
             for inner in stmt.body:
                 if isinstance(inner, cst.Assign) and any(
-                    name in Cst._hoist_target_names(t.target) for t in inner.targets
+                    name in CstMechanics._hoist_target_names(t.target) for t in inner.targets
                 ):
                     return True
                 if _binds_hoisted_name(inner, name):
                     return True
                 if isinstance(inner, (cst.Import, cst.ImportFrom)):
                     bound: set[str] = set()
-                    Cst._collect_alias_names(bound, inner)
+                    CstMechanics._collect_alias_names(bound, inner)
                     if name in bound:
                         return True
     return False
-
 
 
 # lucidlint: ignore complexity the dispatch is a parser-shape table, not branch decision logic
@@ -4792,6 +4747,7 @@ def _exec_time_names(wrapper: cst.MetadataWrapper, node) -> set[str]:
     node.visit(probe)
     return probe.names
 
+
 # lucidlint: ignore complexity the dispatch is a parser-shape table, not branch decision logic
 def _consts_moving_into(
     const_stmts: list[tuple[str, cst.SimpleStatementLine]],
@@ -4812,7 +4768,7 @@ def _consts_moving_into(
     others = {n for cid, refs in class_refs.items() if cid != cls_id for n in refs}
     order = {n: i for i, (n, _s) in enumerate(const_stmts)}
     value_of = {n: _const_value(s) for n, s in const_stmts}
-    value_refs_of = {n: Cst._expr_names(v) - _BUILTINS for n, v in value_of.items()}
+    value_refs_of = {n: CstMechanics._expr_names(v) - _BUILTINS for n, v in value_of.items()}
     readers_via_value: dict[str, set[str]] = {}
     for reader, vrefs in value_refs_of.items():
         for k in vrefs:
@@ -4869,8 +4825,6 @@ class _RewriteMovedConstRefs(cst.CSTTransformer):
         return cst.Attribute(value=cst.Name(self.cls_name), attr=updated_node)
 
 
-
-
 def _class_with_moved_consts(
     wrapper: cst.MetadataWrapper, cls: cst.ClassDef, moved: set[str], cls_name: str
 ) -> cst.ClassDef:
@@ -4881,7 +4835,7 @@ def _class_with_moved_consts(
         return cls
     attrs = [s for n, s in _module_constants(wrapper.module.body) if n in moved]
     body = list(cls.body.body)
-    insert = 1 if body and Cst._is_docstring_stmt(body[0]) else 0
+    insert = 1 if body and CstMechanics._is_docstring_stmt(body[0]) else 0
     new_body = body[:insert] + attrs + body[insert:]
     cls2 = cls.with_changes(body=cls.body.with_changes(body=new_body))
     return cast(cst.ClassDef, cls2.visit(_RewriteMovedConstRefs(wrapper, moved, cls_name)))
@@ -4963,10 +4917,7 @@ def _refuse_split_reordering(top: Sequence, subjects: list[cst.ClassDef]) -> str
             continue
         if _stmt_is_plain_assign(stmt):
             continue
-        return (
-            "module-level executable statements between classes would be "
-            "reordered by the split — split by hand"
-        )
+        return "module-level executable statements between classes would be reordered by the split — split by hand"
     return None
 
 
@@ -4985,7 +4936,6 @@ class _ModuleSplit:
     plan the constant moves, cluster, name the layout, refuse the unsafe
     shapes, build the sources — so the phases read in order."""
 
-
     def __init__(self, repo: Path, origin: _SplitOrigin, module: cst.Module, subjects: list[cst.ClassDef]) -> None:
         self.repo = repo
         self.origin = origin
@@ -4999,13 +4949,10 @@ class _ModuleSplit:
         self.residual = [
             stmt
             for stmt in module.body
-            if id(stmt) not in {id(s) for s in subjects}
-            and id(stmt) not in {id(s) for _name, s in self.const_stmts}
+            if id(stmt) not in {id(s) for s in subjects} and id(stmt) not in {id(s) for _name, s in self.const_stmts}
         ]
         self.residual_def_names = {
-            stmt.name.value
-            for stmt in self.residual
-            if isinstance(stmt, (cst.FunctionDef, cst.ClassDef))
+            stmt.name.value for stmt in self.residual if isinstance(stmt, (cst.FunctionDef, cst.ClassDef))
         }
         self.residual_def_names |= self.const_names - self.moved_all
         self.residual_subject_refs = self._residual_subject_refs()
@@ -5033,9 +4980,7 @@ class _ModuleSplit:
             if _const_imported_elsewhere(self.repo, self.origin.rel, self.module, name)
         }
         return {
-            id(subject): _consts_moving_into(
-                self.const_stmts, class_refs, residual_refs, external, subject
-            )
+            id(subject): _consts_moving_into(self.const_stmts, class_refs, residual_refs, external, subject)
             for subject in self.subjects
         }
 
@@ -5051,7 +4996,7 @@ class _ModuleSplit:
                 continue  # imports bind their own names — not class references
             refs |= _free_names_of(stmt) & self.subject_names
         for _name, stmt in self.const_stmts:
-            refs |= Cst._expr_names(_const_value(stmt)) & self.subject_names
+            refs |= CstMechanics._expr_names(_const_value(stmt)) & self.subject_names
         return refs
 
     def components(self) -> list[list[cst.ClassDef]]:
@@ -5061,9 +5006,7 @@ class _ModuleSplit:
         parent = {id(subject): id(subject) for subject in self.subjects}
         for i, first in enumerate(self.subjects):
             for second in self.subjects[i + 1 :]:
-                if (
-                    _functions_collide(first, second, self.free_of, self.attrs_of)
-                ):
+                if _functions_collide(first, second, self.free_of, self.attrs_of):
                     parent[_union_find(parent, id(first))] = _union_find(parent, id(second))
         class_index = {id(stmt): i for i, stmt in enumerate(self.module.body)}
         components: dict[int, list[cst.ClassDef]] = {}
@@ -5090,8 +5033,7 @@ class _ModuleSplit:
                     any_package=False,
                     snake={},
                     decline=(
-                        "the cohesive sub-cluster needs a package name — name the "
-                        "package with a domain noun (--name)"
+                        "the cohesive sub-cluster needs a package name — name the package with a domain noun (--name)"
                     ),
                 )
         any_package = any(name is not None for _component, name in members)
@@ -5124,7 +5066,8 @@ class _ModuleSplit:
                 refs = _exec_time_names(wrapper, stmt) & self.subject_names
                 if refs:
                     return (
-                        "module-level code evaluates " + ", ".join(sorted(refs))
+                        "module-level code evaluates "
+                        + ", ".join(sorted(refs))
                         + " at import time — the package __init__ runs before the "
                         "re-exports — split by hand"
                     )
@@ -5150,8 +5093,7 @@ class _ModuleSplit:
                 # the origin file itself is being replaced — only a DIFFERENT
                 # `name.py` or an existing `name/` directory blocks the package
                 if (self.repo / package_dir).exists() or (
-                    (self.repo / f"{package_dir}.py").exists()
-                    and f"{package_dir}.py" != self.origin.rel
+                    (self.repo / f"{package_dir}.py").exists() and f"{package_dir}.py" != self.origin.rel
                 ):
                     if name == self.origin.stem and package_name is None:
                         return f"a package named '{name}' already exists — pass --name <name>"
@@ -5174,11 +5116,7 @@ class _ModuleSplit:
                         edges[subject.name.value].add(other.name.value)
             cycle = _graph_cycle(nodes, edges)
             if cycle:
-                return (
-                    "the split would create an import cycle ("
-                    + " -> ".join(cycle)
-                    + ") — split by hand"
-                )
+                return "the split would create an import cycle (" + " -> ".join(cycle) + ") — split by hand"
         return None
 
     def refuse_residual_cycles(self) -> str | None:
@@ -5192,15 +5130,10 @@ class _ModuleSplit:
         ]
         if bad:
             return (
-                "the split would create an import cycle between '"
-                + bad[0]
-                + "' and the origin module — split by hand"
+                "the split would create an import cycle between '" + bad[0] + "' and the origin module — split by hand"
             )
         if _module_star_imported(self.repo, self.origin.rel, self.module):
-            return (
-                "a file does 'from ... import *' on the origin — the split "
-                "cannot retarget it — split by hand"
-            )
+            return "a file does 'from ... import *' on the origin — the split cannot retarget it — split by hand"
         return None
 
     @staticmethod
@@ -5208,9 +5141,7 @@ class _ModuleSplit:
         """Each subject class's import path after the split: the package name,
         or the snake-cased flat sibling."""
         return {
-            subject.name.value: (
-                [name] if name is not None else [layout.snake[subject.name.value]]
-            )
+            subject.name.value: ([name] if name is not None else [layout.snake[subject.name.value]])
             for component, name in layout.members
             for subject in component
         }
@@ -5240,9 +5171,7 @@ class _ModuleSplit:
             else:
                 package_dir = f"{self.origin.directory}/{name}" if self.origin.directory else name
                 init_body = list(self.residual) + [
-                    cst.SimpleStatementLine(
-                        body=[_from_import_node([c.name.value], [c.name.value], 1)]
-                    )
+                    cst.SimpleStatementLine(body=[_from_import_node([c.name.value], [c.name.value], 1)])
                     for c in component
                 ]
                 writes.append((f"{package_dir}/__init__.py", cst.Module(body=init_body).code))
@@ -5279,22 +5208,10 @@ class _ModuleSplit:
         """The origin residual: the kept statements in their original order
         plus the from-imports the residual needs for the moved classes."""
         subject_ids = {id(subject) for subject in self.subjects}
-        moved_def_ids = {
-            id(stmt) for name, stmt in self.const_stmts if name in self.moved_all
-        }
-        kept = [
-            stmt
-            for stmt in self.module.body
-            if id(stmt) not in subject_ids and id(stmt) not in moved_def_ids
-        ]
+        moved_def_ids = {id(stmt) for name, stmt in self.const_stmts if name in self.moved_all}
+        kept = [stmt for stmt in self.module.body if id(stmt) not in subject_ids and id(stmt) not in moved_def_ids]
         additions = [
-            cst.SimpleStatementLine(
-                body=[
-                    _from_import_node(
-                        targets[name], [name], 1 if self.origin.in_package else 0
-                    )
-                ]
-            )
+            cst.SimpleStatementLine(body=[_from_import_node(targets[name], [name], 1 if self.origin.in_package else 0)])
             for name in sorted(self.residual_subject_refs)
         ]
         return cst.Module(body=_insert_header_imports(kept, additions)).code
@@ -5308,7 +5225,7 @@ class _ModuleSplit:
         if whole_pkg:
             return origin_source, {}
         rewritten: dict[str, str] = {}
-        for path in Cst._py_files(self.repo):
+        for path in CstMechanics._py_files(self.repo):
             rel = path.relative_to(self.repo).as_posix()
             text = origin_source if rel == self.origin.rel else path.read_text(encoding="utf-8")
             new = _split_rewrite_source(text, rel, self.origin.origin_path, targets)
@@ -5393,13 +5310,11 @@ class _SplitCtx(NamedTuple):
     residual_def_names: set[str]
     moved: set[str]
     package: str | None  # None = flat sibling; else the package directory
-    origin_dots: int     # relative dots for `from <origin> import X`
-    member_dots: int     # relative dots for `from .<Class> import <Class>`
+    origin_dots: int  # relative dots for `from <origin> import X`
+    member_dots: int  # relative dots for `from .<Class> import <Class>`
 
 
-def _from_import_node(
-    module_comps: list[str], names: list[str] | list[cst.ImportAlias], dots: int
-) -> cst.ImportFrom:
+def _from_import_node(module_comps: list[str], names: list[str] | list[cst.ImportAlias], dots: int) -> cst.ImportFrom:
     """`from <module> import <names>` with `dots` relative dots; module
     components are a dotted Name/Attribute chain when present."""
     module: cst.BaseExpression | None = None
@@ -5407,10 +5322,7 @@ def _from_import_node(
         module = cst.Name(module_comps[0])
         for part in module_comps[1:]:
             module = cst.Attribute(value=module, attr=cst.Name(part))
-    aliases = [
-        a if isinstance(a, cst.ImportAlias) else cst.ImportAlias(name=cst.Name(a))
-        for a in names
-    ]
+    aliases = [a if isinstance(a, cst.ImportAlias) else cst.ImportAlias(name=cst.Name(a)) for a in names]
     if not isinstance(module, (cst.Name, cst.Attribute)):
         module = cst.Name(str(module))
     return cst.ImportFrom(
@@ -5507,9 +5419,7 @@ def _alias_points_to_origin(parts: list[str], origin_path: list[str], alias_map:
     return len(parts) == 1 and parts[0] in alias_map and alias_map[parts[0]] == origin_path
 
 
-def _import_refers_to_origin(
-    ifrom: cst.ImportFrom, importer_dir: list[str], origin_path: list[str]
-) -> bool:
+def _import_refers_to_origin(ifrom: cst.ImportFrom, importer_dir: list[str], origin_path: list[str]) -> bool:
     """Does this ImportFrom resolve to the origin module (absolute full path,
     relative dots resolving to the origin's directory)?"""
     comps = _resolve_dotted(ifrom.module) if ifrom.module is not None else []
@@ -5608,7 +5518,7 @@ class _SplitImportRewrite(cst.CSTTransformer):
 def _insert_header_imports(body: list, additions: list) -> list:
     """Insert the added imports after any module docstring — imports must sit
     before the statements that reference the names they bind."""
-    i = 1 if body and Cst._is_docstring_stmt(body[0]) else 0
+    i = 1 if body and CstMechanics._is_docstring_stmt(body[0]) else 0
     return body[:i] + additions + body[i:]
 
 
@@ -5650,23 +5560,18 @@ def _add_module_imports(module: cst.Module, dotted_paths: set[str]) -> cst.Modul
     inserted after the docstring — `prod_mod.User` became `user.User`, which
     needs the module binding."""
     lines = [
-        cst.SimpleStatementLine(
-            body=[cst.Import(names=[cst.ImportAlias(name=_dotted_expr(p.split(".")))])]
-        )
+        cst.SimpleStatementLine(body=[cst.Import(names=[cst.ImportAlias(name=_dotted_expr(p.split(".")))])])
         for p in sorted(dotted_paths)
     ]
     return module.with_changes(body=_insert_header_imports(list(module.body), lines))
 
 
-
-def _const_imported_elsewhere(
-    repo: Path, rel: str, module: cst.Module, name: str
-) -> bool:
+def _const_imported_elsewhere(repo: Path, rel: str, module: cst.Module, name: str) -> bool:
     """Is the constant imported or attribute-read from another file? A moved
     constant must be sole-owned by its class (BQ6) — an external reader would
     break."""
     origin_path = _module_parts(rel)
-    for path in Cst._py_files(repo):
+    for path in CstMechanics._py_files(repo):
         if path.relative_to(repo).as_posix() == rel:
             continue
         try:
@@ -5711,8 +5616,7 @@ class _ConstImportScan(cst.CSTVisitor):
         if not _import_refers_to_origin(node, self.importer_dir, self.origin_path):
             return
         if isinstance(node.names, cst.ImportStar) or any(
-            isinstance(a.name, cst.Name) and a.name.value == self.name
-            for a in node.names
+            isinstance(a.name, cst.Name) and a.name.value == self.name for a in node.names
         ):
             self.hit = True
 
@@ -5731,7 +5635,7 @@ def _module_star_imported(repo: Path, rel: str, module: cst.Module) -> bool:
     """Does any other file `from <origin> import *`? The flat rewrite cannot
     retarget a star import — the moved classes would silently vanish from it."""
     origin_path = _module_parts(rel)
-    for path in Cst._py_files(repo):
+    for path in CstMechanics._py_files(repo):
         if path.relative_to(repo).as_posix() == rel:
             continue
         try:
@@ -5743,16 +5647,12 @@ def _module_star_imported(repo: Path, rel: str, module: cst.Module) -> bool:
             if not isinstance(stmt, cst.SimpleStatementLine):
                 continue
             for inner in stmt.body:
-                if (
-                    _is_star_import_from_origin(inner, importer_dir, origin_path)
-                ):
+                if _is_star_import_from_origin(inner, importer_dir, origin_path):
                     return True
     return False
 
 
-def _origin_imported_anywhere(
-    repo: Path, sources: dict[str, str], rel: str, origin_path: list[str]
-) -> bool:
+def _origin_imported_anywhere(repo: Path, sources: dict[str, str], rel: str, origin_path: list[str]) -> bool:
     """BQ6(f): an emptied origin is deleted only when no import statement in
     the produced repo names it anymore."""
     for p_rel, source in sources.items():
@@ -5767,9 +5667,7 @@ def _origin_imported_anywhere(
             if not isinstance(stmt, cst.SimpleStatementLine):
                 continue
             for inner in stmt.body:
-                if isinstance(inner, cst.ImportFrom) and not isinstance(
-                    inner.names, cst.ImportStar
-                ):
+                if isinstance(inner, cst.ImportFrom) and not isinstance(inner.names, cst.ImportStar):
                     if _import_refers_to_origin(inner, importer_dir, origin_path):
                         return True
                 elif isinstance(inner, cst.Import):
@@ -5810,9 +5708,8 @@ def _graph_cycle(nodes: list[str], edges: dict[str, set[str]]) -> list[str] | No
 
 def _module_empty(new_source: str) -> bool:
     mod = cst.parse_module(new_source)
-    return all(
-        not isinstance(s, (cst.FunctionDef, cst.ClassDef, cst.SimpleStatementLine)) for s in mod.body
-    )
+    return all(not isinstance(s, (cst.FunctionDef, cst.ClassDef, cst.SimpleStatementLine)) for s in mod.body)
+
 
 def _module_bindings(module: cst.Module) -> set[str]:
     """The names module-level assignments/constants bind — the extract-module
@@ -5825,9 +5722,9 @@ def _module_bindings(module: cst.Module) -> set[str]:
         inner = stmt.body[0]
         if isinstance(inner, cst.Assign):
             for t in inner.targets:
-                bound |=  Cst._hoist_target_names(t.target)
+                bound |= CstMechanics._hoist_target_names(t.target)
         elif isinstance(inner, cst.AnnAssign) and inner.target is not None:
-            bound |=  Cst._hoist_target_names(inner.target)
+            bound |= CstMechanics._hoist_target_names(inner.target)
     return bound
 
 
@@ -5875,26 +5772,26 @@ class _FreeNames(cst.CSTVisitor):
     @override
     def visit_Assign(self, node) -> None:
         for t in node.targets:
-            self.bound.update(Cst._hoist_target_names(t.target))
+            self.bound.update(CstMechanics._hoist_target_names(t.target))
 
     @override
     def visit_AnnAssign(self, node) -> None:
         if node.target:
-            self.bound.update(Cst._hoist_target_names(node.target))
+            self.bound.update(CstMechanics._hoist_target_names(node.target))
 
     @override
     def visit_For(self, node) -> None:
-        self.bound.update(Cst._hoist_target_names(node.target))
+        self.bound.update(CstMechanics._hoist_target_names(node.target))
 
     @override
     def visit_CompFor(self, node) -> None:
-        self.bound.update(Cst._hoist_target_names(node.target))
+        self.bound.update(CstMechanics._hoist_target_names(node.target))
 
     @override
     def visit_With(self, node) -> None:
         for item in node.items:
             if item.asname is not None:
-                self.bound.update(Cst._hoist_target_names(item.asname.name))
+                self.bound.update(CstMechanics._hoist_target_names(item.asname.name))
 
     @override
     def visit_ExceptHandler(self, node) -> None:
@@ -5902,8 +5799,6 @@ class _FreeNames(cst.CSTVisitor):
         # not `.value` (review finding: a crash on any `except ... as e:`)
         if isinstance(node.name, cst.AsName) and isinstance(node.name.name, cst.Name):
             self.bound.add(node.name.name.value)
-
-
 
 
 class _FindFnLine(cst.CSTVisitor):
@@ -5918,7 +5813,10 @@ class _FindFnLine(cst.CSTVisitor):
 
     @override
     def visit_FunctionDef(self, node) -> None:
-        if self.found is None and Cst._as_range(self.get_metadata(PositionProvider, node)).start.line == self.line:
+        if (
+            self.found is None
+            and CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line == self.line
+        ):
             self.found = node
 
 
@@ -5934,28 +5832,26 @@ class _BoundNames(cst.CSTVisitor):
     @override
     def visit_Assign(self, node: cst.Assign) -> None:
         for t in node.targets:
-            self.bound.update(Cst._hoist_target_names(t.target))
+            self.bound.update(CstMechanics._hoist_target_names(t.target))
 
     @override
     def visit_AnnAssign(self, node: cst.AnnAssign) -> None:
         if node.target:
-            self.bound.update(Cst._hoist_target_names(node.target))
+            self.bound.update(CstMechanics._hoist_target_names(node.target))
 
     @override
     def visit_For(self, node: cst.For) -> None:
-        self.bound.update(Cst._hoist_target_names(node.target))
+        self.bound.update(CstMechanics._hoist_target_names(node.target))
 
     @override
     def visit_CompFor(self, node: cst.CompFor) -> None:
-        self.bound.update(Cst._hoist_target_names(node.target))
+        self.bound.update(CstMechanics._hoist_target_names(node.target))
 
     @override
     def visit_With(self, node: cst.With) -> None:
         for item in node.items:
             if item.asname is not None:
-                self.bound.update(Cst._hoist_target_names(item.asname.name))
-
-
+                self.bound.update(CstMechanics._hoist_target_names(item.asname.name))
 
 
 # ambient names a dispatch arm may read without a handler parameter: the
@@ -6098,9 +5994,7 @@ def _dispatch_chain_shape(fn: cst.FunctionDef, body: list) -> _DispatchShape | N
     if len(chain) < 3:
         return None  # >= 3 arms make a registry worth it
     tail = body[first_if + len(chain) :]
-    if (
-        not _is_single_return_tail(tail)
-    ):
+    if not _is_single_return_tail(tail):
         return None  # v1: a single trailing `return <default>` is the no-match path
     return preamble, chain, selector or "", tail[0].body[0]
 
@@ -6386,10 +6280,7 @@ def _append_value(branch, acc: str):
     if not isinstance(app_stmt, cst.Expr) or not isinstance(app_stmt.value, cst.Call):
         return None
     call = app_stmt.value
-    if (
-        not _is_accumulator_append(call, acc)
-        or len(call.args) != 1
-    ):
+    if not _is_accumulator_append(call, acc) or len(call.args) != 1:
         return None
     return call.args[0].value
 
@@ -6460,6 +6351,8 @@ def _annotation_text(expr: cst.BaseExpression) -> str:
     """The annotation's generated text, so two spellings of one shape compare
     equal."""
     return cst.Module(body=[]).code_for_node(expr)
+
+
 class _BindsName(cst.CSTVisitor):
     """Does the module already bind `name` (class, def, or assignment target)?
     A generated class of that name would shadow or duplicate it."""
@@ -6518,7 +6411,7 @@ class _FindWideTuples(cst.CSTVisitor):
 
     @override
     def visit_AnnAssign(self, node) -> None:
-        if Cst._as_range(self.get_metadata(PositionProvider, node)).start.line != self.line:
+        if CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line != self.line:
             return
         if not isinstance(node.target, cst.Name):
             return
@@ -6529,28 +6422,22 @@ class _FindWideTuples(cst.CSTVisitor):
         if _is_arity_tuple(node.value, arity):
             assert isinstance(node.value, cst.Tuple)
             elements = tuple(element.value for element in node.value.elements)
-        self.sites.append(
-            _WideTupleSite("assign", node.target.value, arity, node.annotation.annotation, elements)
-        )
+        self.sites.append(_WideTupleSite("assign", node.target.value, arity, node.annotation.annotation, elements))
 
     @override
     def visit_FunctionDef(self, node) -> None:
-        if Cst._as_range(self.get_metadata(PositionProvider, node)).start.line != self.line:
+        if CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line != self.line:
             return
         for param in [*node.params.posonly_params, *node.params.params, *node.params.kwonly_params]:
             if param.annotation is None:
                 continue
             arity = _fixed_tuple_arity(param.annotation.annotation)
             if arity is not None and arity >= 3:
-                self.sites.append(
-                    _WideTupleSite("param", param.name.value, arity, param.annotation.annotation, None)
-                )
+                self.sites.append(_WideTupleSite("param", param.name.value, arity, param.annotation.annotation, None))
         if node.returns is not None:
             arity = _fixed_tuple_arity(node.returns.annotation)
             if arity is not None and arity >= 3:
-                self.sites.append(
-                    _WideTupleSite("return", node.name.value, arity, node.returns.annotation, None)
-                )
+                self.sites.append(_WideTupleSite("return", node.name.value, arity, node.returns.annotation, None))
 
 
 def _fixed_tuple_arity(node: cst.BaseExpression | None) -> int | None:
@@ -6693,7 +6580,7 @@ def _wide_tuple_fix(req: _FixRequest) -> str | None:
         return None
     fields = _record_field_names(site.elements, site.arity)
     transformed = wrapper.visit(_WideTupleToRecord(_annotation_text(site.annotation), site.arity, class_name))
-    body: list = [Cst._record_class_def(class_name, fields), cst.EmptyLine(), *transformed.body]
+    body: list = [CstMechanics._record_class_def(class_name, fields), cst.EmptyLine(), *transformed.body]
     return cst.Module(body=body).code
 
 
@@ -6832,7 +6719,7 @@ def _clump_at(module: cst.Module, line: int, positions) -> _Clump | None:
                 left, right = params[i], params[j]
                 key = (left, right) if left[0] <= right[0] else (right, left)
                 pairs.setdefault(key, []).append(fn)
-    anchor = next((f for f in fns if Cst._as_range(positions[f]).start.line == line), None)
+    anchor = next((f for f in fns if CstMechanics._as_range(positions[f]).start.line == line), None)
     if anchor is None:
         return None
     qualifying = sorted(pair for pair, group in pairs.items() if len(group) >= 3 and anchor in group)
@@ -6885,10 +6772,7 @@ class _DataClumpToRecord(cst.CSTTransformer):
         )
 
     def _own_params(self, node: cst.FunctionDef) -> set[str]:
-        return {
-            p.name.value
-            for p in [*node.params.posonly_params, *node.params.params, *node.params.kwonly_params]
-        }
+        return {p.name.value for p in [*node.params.posonly_params, *node.params.params, *node.params.kwonly_params]}
 
     @override
     def visit_FunctionDef(self, node) -> None:
@@ -6917,9 +6801,7 @@ class _DataClumpToRecord(cst.CSTTransformer):
             # render as `def f(x, )`
             params[-1] = params[-1].with_changes(comma=cst.MaybeSentinel.DEFAULT)
         return updated_node.with_changes(
-            params=updated_node.params.with_changes(
-                params=[cst.Param(cst.Name(self.param_name)), *params]
-            )
+            params=updated_node.params.with_changes(params=[cst.Param(cst.Name(self.param_name)), *params])
         )
 
     @override
@@ -6930,7 +6812,7 @@ class _DataClumpToRecord(cst.CSTTransformer):
         if updated_node.value in self._shadow_stack[-1]:
             return updated_node
         parent = self.get_metadata(ParentNodeProvider, original_node)
-        if Cst._is_keyword_name(original_node, parent):
+        if CstMechanics._is_keyword_name(original_node, parent):
             return updated_node
         try:
             ctx = self.get_metadata(ExpressionContextProvider, original_node)
@@ -6955,8 +6837,7 @@ class _DataClumpToRecord(cst.CSTTransformer):
         b_arg = pos_args[idx_b] if idx_b < len(pos_args) else keywords.get(self.pair[1])
         if a_arg is None or b_arg is None:
             self.decline = (
-                f"the call to '{fn}' does not pass both '{self.pair[0]}' and '{self.pair[1]}' "
-                "— thread the pair by hand"
+                f"the call to '{fn}' does not pass both '{self.pair[0]}' and '{self.pair[1]}' — thread the pair by hand"
             )
             return updated_node
         a_val, b_val = a_arg.value, b_arg.value
@@ -6965,18 +6846,14 @@ class _DataClumpToRecord(cst.CSTTransformer):
             # it on instead of rebuilding it from its own fields
             replacement: cst.BaseExpression = cst.Name(self.param_name)
         else:
-            replacement = cst.Call(
-                func=cst.Name(self.class_name), args=[cst.Arg(a_val), cst.Arg(b_val)]
-            )
+            replacement = cst.Call(func=cst.Name(self.class_name), args=[cst.Arg(a_val), cst.Arg(b_val)])
         # the untouched args keep their own nodes: their comments and
         # formatting survive the rewrite
         kept = [arg for i, arg in enumerate(pos_args) if i not in (idx_a, idx_b)]
         kept.insert(min(idx_a, idx_b), cst.Arg(replacement))
         new_args = list(kept)
         new_args.extend(
-            arg
-            for arg in updated_node.args
-            if arg.keyword is not None and arg.keyword.value not in self.pair
+            arg for arg in updated_node.args if arg.keyword is not None and arg.keyword.value not in self.pair
         )
         return updated_node.with_changes(args=new_args)
 
@@ -7034,8 +6911,7 @@ def _data_clump_fix(req: _FixRequest) -> str | None:
     culprit = _imported_elsewhere(req.repo, req.rel, {fn.name.value for fn in clump.fns})
     if culprit:
         req.decline = (
-            f"'{culprit}' imports a clump function — its call site is outside this module; "
-            "thread the pair by hand"
+            f"'{culprit}' imports a clump function — its call site is outside this module; thread the pair by hand"
         )
         return None
     stores = _CollectStores()
@@ -7045,7 +6921,7 @@ def _data_clump_fix(req: _FixRequest) -> str | None:
     if transformer.decline:
         req.decline = transformer.decline
         return None
-    body: list = [Cst._record_class_def(class_name, [pair_a, pair_b]), cst.EmptyLine(), *transformed.body]
+    body: list = [CstMechanics._record_class_def(class_name, [pair_a, pair_b]), cst.EmptyLine(), *transformed.body]
     return cst.Module(body=body).code
 
 
@@ -7121,9 +6997,7 @@ def _init_plan(init: cst.FunctionDef | None) -> _InitPlan | None:
     params = init.params
     if _has_irregular_params(params):
         return None
-    init_params = [
-        (param.name.value, param.annotation, param.default) for param in params.params[1:]
-    ]
+    init_params = [(param.name.value, param.annotation, param.default) for param in params.params[1:]]
     assigns: list[tuple[str, cst.BaseExpression]] = []
     docstring: cst.SimpleStatementLine | None = None
     for stmt in init.body.body:
@@ -7150,19 +7024,17 @@ def _partition_plan(cls: cst.ClassDef) -> _PartitionAttempt:
     extra = [
         stmt
         for stmt in cls.body.body
-        if not isinstance(stmt, cst.FunctionDef) and not Cst._is_docstring_stmt(stmt)
+        if not isinstance(stmt, cst.FunctionDef) and not CstMechanics._is_docstring_stmt(stmt)
     ]
     if extra:
         return _PartitionAttempt(
             None,
-            "the class carries statements besides a docstring — they cannot be attributed to "
-            "one group; split by hand",
+            "the class carries statements besides a docstring — they cannot be attributed to one group; split by hand",
         )
     if len(methods) < 6:
         return _PartitionAttempt(
             None,
-            f"the class has only {len(methods)} methods — not the latent-partition shape (6+); "
-            "the anchor is stale",
+            f"the class has only {len(methods)} methods — not the latent-partition shape (6+); the anchor is stale",
         )
     init = next((method for method in methods if method.name.value == "__init__"), None)
     parsed = _init_plan(init)
@@ -7218,8 +7090,7 @@ def _partition_plan(cls: cst.ClassDef) -> _PartitionAttempt:
     if orphan:
         return _PartitionAttempt(
             None,
-            f"'{orphan[0]}' is initialized but touched by no method — it belongs to no group; "
-            "split by hand",
+            f"'{orphan[0]}' is initialized but touched by no method — it belongs to no group; split by hand",
         )
     plan = _PartitionPlan(
         groups=tuple(
@@ -7238,7 +7109,7 @@ def _init_stmt(field: str, value: cst.BaseExpression) -> cst.BaseStatement:
     return cst.SimpleStatementLine(
         body=[
             cst.Assign(
-                targets=Cst._self_attr_target(field),
+                targets=CstMechanics._self_attr_target(field),
                 value=value,
             )
         ]
@@ -7282,7 +7153,7 @@ def _partition_fix(req: _FixRequest) -> str | None:
     # back into `module.body`, and metadata resolves by NODE IDENTITY
     wrapper = cst.MetadataWrapper(cst.parse_module(source))
     module = wrapper.module
-    finder = Cst._EnclosingClass(line)
+    finder = CstMechanics._EnclosingClass(line)
     wrapper.visit(finder)
     cls = finder.found
     if cls is None or not any(stmt is cls for stmt in module.body):
@@ -7308,7 +7179,11 @@ def _partition_fix(req: _FixRequest) -> str | None:
             req.decline = f"'{name}' is already bound in {req.rel} — pass another --name"
             return None
     class_docstring = next(
-        (stmt for stmt in cls.body.body if isinstance(stmt, cst.SimpleStatementLine) and Cst._is_docstring_stmt(stmt)),
+        (
+            stmt
+            for stmt in cls.body.body
+            if isinstance(stmt, cst.SimpleStatementLine) and CstMechanics._is_docstring_stmt(stmt)
+        ),
         None,
     )
     replacements: list[cst.BaseStatement] = []
@@ -7316,13 +7191,11 @@ def _partition_fix(req: _FixRequest) -> str | None:
         init_stmts: list[cst.BaseStatement] = []
         if i == 0 and plan.init_docstring is not None:
             init_stmts.append(plan.init_docstring)
-        retained = [
-            (field, value) for field, value in plan.init_fields if field in group.fields
-        ]
+        retained = [(field, value) for field, value in plan.init_fields if field in group.fields]
         init_stmts.extend(_init_stmt(field, value) for field, value in retained)
         needed = set(group.fields)
         for _field, value in retained:
-            needed |= set(Cst._expr_names(value))
+            needed |= set(CstMechanics._expr_names(value))
         # a valid Python signature keeps its defaulted parameters last, so any
         # kept subset is valid: a skipped parameter can never be required
         init_params = [
@@ -7333,9 +7206,7 @@ def _partition_fix(req: _FixRequest) -> str | None:
         head: list[cst.BaseStatement] = []
         if i == 0 and class_docstring is not None:
             head.append(class_docstring)
-        group_cls = _group_class(
-            class_names[i], cls, list(group.methods), _GroupInit(init_stmts, init_params), head
-        )
+        group_cls = _group_class(class_names[i], cls, list(group.methods), _GroupInit(init_stmts, init_params), head)
         if i:
             group_cls = group_cls.with_changes(leading_lines=[cst.EmptyLine()])
         replacements.append(group_cls)
@@ -7343,6 +7214,7 @@ def _partition_fix(req: _FixRequest) -> str | None:
     index = next(i for i, stmt in enumerate(body) if stmt is cls)
     body[index : index + 1] = replacements
     return module.with_changes(body=body).code
+
 
 # ------------------------------------------------- unnamed-condition: named decisions
 # Each names one decision a fixer makes inline, so the guard reads as the
@@ -7396,7 +7268,11 @@ def _is_single_name_assign(stmt: cst.BaseSmallStatement) -> bool:
 def _binds_hoisted_name(stmt: cst.BaseSmallStatement, name: str) -> bool:
     """The annotated assignment binds `name` (directly or through a target
     tuple)."""
-    return isinstance(stmt, cst.AnnAssign) and stmt.target is not None and name in Cst._hoist_target_names(stmt.target)
+    return (
+        isinstance(stmt, cst.AnnAssign)
+        and stmt.target is not None
+        and name in CstMechanics._hoist_target_names(stmt.target)
+    )
 
 
 def _split_target_exists(repo: Path, target: str, rel: str, rewritten) -> bool:
@@ -7466,9 +7342,7 @@ def _is_arity_tuple(value: cst.BaseExpression | None, arity: int) -> bool:
 def _is_tuple_subscript(node: cst.BaseExpression | None) -> bool:
     """`tuple[...]` / `Tuple[...]` — the annotation that hides a record."""
     return (
-        isinstance(node, cst.Subscript)
-        and isinstance(node.value, cst.Name)
-        and node.value.value in ("tuple", "Tuple")
+        isinstance(node, cst.Subscript) and isinstance(node.value, cst.Name) and node.value.value in ("tuple", "Tuple")
     )
 
 
@@ -7498,10 +7372,11 @@ def _has_irregular_params(params: cst.Parameters) -> bool:
         or params.star_kwarg is not None
     )
 
+
 def _is_plain_self_assign(target, stmt) -> bool:
     """The statement is `self.<attr> = <value not read from self>` — one field
     initialised from outside."""
-    if target is None or not Cst._is_self_attribute(target):
+    if target is None or not CstMechanics._is_self_attribute(target):
         return False
     return isinstance(stmt, cst.Assign) and not _reads_self(stmt.value)
 

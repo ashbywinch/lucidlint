@@ -15,28 +15,30 @@ from typing import TypeGuard, override
 import libcst as cst
 from libcst.metadata import CodeRange, PositionProvider
 
-_REPO_SKIP_DIRS = {
-    ".git",
-    ".venv",
-    "venv",
-    "node_modules",
-    "__pycache__",
-    ".lucidlint-cache",
-    ".ruff_cache",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".pyrefly-cache",
-    "htmlcov",
-    "dist",
-    "build",
-    "target",
-    ".code-review-graph",
-    ".tox",
-    ".eggs",
-}
+_REPO_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        ".lucidlint-cache",
+        ".ruff_cache",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".pyrefly-cache",
+        "htmlcov",
+        "dist",
+        "build",
+        "target",
+        ".code-review-graph",
+        ".tox",
+        ".eggs",
+    }
+)
 
 
-class Cst:
+class CstMechanics:
     """The shared CST shape helpers."""
 
     @staticmethod
@@ -46,16 +48,19 @@ class Cst:
         always present for nodes visited inside a MetadataWrapper."""
         assert isinstance(pos, CodeRange)
         return pos
+
     @staticmethod
     def _as_node(node: object) -> cst.CSTNode:
         """The resolved metadata node — the same UNDEFINED-sentinel widening as
         _as_range, for providers that return nodes (ParentNodeProvider)."""
         assert isinstance(node, cst.CSTNode)
         return node
+
     @staticmethod
     def _self_attr_target(name: str) -> list[cst.AssignTarget]:
         """The `self.<name>` assignment target a record constructor stores."""
         return [cst.AssignTarget(cst.Attribute(cst.Name("self"), cst.Name(name)))]
+
     @staticmethod
     def _record_class_def(class_name: str, field_names: list[str]) -> cst.ClassDef:
         """The record class: __init__ taking the fields, storing them. A class,
@@ -64,7 +69,7 @@ class Cst:
             cst.SimpleStatementLine(
                 body=[
                     cst.Assign(
-                        targets=Cst._self_attr_target(f),
+                        targets=CstMechanics._self_attr_target(f),
                         value=cst.Name(f),
                     )
                 ]
@@ -80,6 +85,7 @@ class Cst:
             name=cst.Name(class_name),
             body=cst.IndentedBlock(body=[init]),
         )
+
     class _EnclosingClass(cst.CSTVisitor):
         """The innermost ClassDef containing the line — the method's owner."""
 
@@ -91,13 +97,15 @@ class Cst:
 
         @override
         def visit_ClassDef(self, node) -> None:
-            pos = Cst._as_range(self.get_metadata(PositionProvider, node))
+            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
             if pos.start.line <= self.line <= pos.end.line:
                 self.found = node
+
     @staticmethod
     def _is_self_attribute(value: cst.BaseExpression) -> bool:
         """`self.<attr>` — an attribute read on the receiver."""
         return isinstance(value, cst.Attribute) and isinstance(value.value, cst.Name) and value.value.value == "self"
+
     @staticmethod
     def _iter_nodes(nodes):
         """Every node in the subtree, parents before children; accepts a node
@@ -107,7 +115,8 @@ class Cst:
         for n in nodes:
             yield n
             for c in n.children:
-                yield from Cst._iter_nodes(c)
+                yield from CstMechanics._iter_nodes(c)
+
     @staticmethod
     def _iter_nodes_pruned(nodes):
         """Like `_iter_nodes` but never descends into nested scopes — a `def`
@@ -120,26 +129,29 @@ class Cst:
             if isinstance(n, (cst.FunctionDef, cst.ClassDef)):
                 continue
             for c in n.children:
-                yield from Cst._iter_nodes_pruned(c)
+                yield from CstMechanics._iter_nodes_pruned(c)
+
     @staticmethod
     def _hoist_target_names(t) -> set[str]:
         """The names a binding TARGET binds — Name/Tuple/List/Starred (a
         subscript/attribute target is a WRITE, not a binding)."""
         if isinstance(t, cst.AssignTarget):
-            return Cst._hoist_target_names(t.target)
+            return CstMechanics._hoist_target_names(t.target)
         if isinstance(t, cst.Name):
             return {t.value}
         if isinstance(t, (cst.Tuple, cst.List)):
             out: set[str] = set()
             for el in t.elements:
-                out.update(Cst._hoist_target_names(el.value))
+                out.update(CstMechanics._hoist_target_names(el.value))
             return out
         if isinstance(t, cst.StarredElement):
-            return Cst._hoist_target_names(t.value)
+            return CstMechanics._hoist_target_names(t.value)
         return set()
+
     @staticmethod
     def _expr_names(e) -> set[str]:
-        return {n.value for n in Cst._iter_nodes([e]) if isinstance(n, cst.Name)}
+        return {n.value for n in CstMechanics._iter_nodes([e]) if isinstance(n, cst.Name)}
+
     @staticmethod
     def _is_keyword_name(node, parent) -> bool:
         """A Name that is a keyword-argument's keyword (`f(a=1)` — the `a`) is
@@ -147,6 +159,7 @@ class Cst:
         phantom parameters (the `leading_lines` in `with_changes(leading_lines=[])`
         would appear as a free var and the rewritten call would NameError)."""
         return isinstance(parent, cst.Arg) and parent.keyword is node
+
     @staticmethod
     def _import_base_name(name: cst.Attribute | cst.Name) -> str:
         """The first component of a dotted module path: `a.b.c` binds `a`."""
@@ -155,13 +168,15 @@ class Cst:
             base = base.value
         assert isinstance(base, cst.Name)  # an import's dotted path bottoms at a Name
         return base.value
+
     @staticmethod
     def _collect_alias_names(names, stmt):
         for a in stmt.names:
             if a.asname is not None:
-                names.update( Cst._hoist_target_names(a.asname.name))
+                names.update(CstMechanics._hoist_target_names(a.asname.name))
             else:
-                names.add(Cst._import_base_name(a.name))
+                names.add(CstMechanics._import_base_name(a.name))
+
     @staticmethod
     def _extraction_is_private() -> bool:
         """Is an extracted function private (leading underscore)? Yes — a fresh
@@ -171,6 +186,7 @@ class Cst:
         name gets the underscore whether the agent supplies it or not."""
 
         return True
+
     @staticmethod
     def _py_files(repo: Path) -> list[Path]:
         """Every .py file under the repo, skipping venvs/caches/build output."""
@@ -189,6 +205,7 @@ class Cst:
                 elif p.suffix == ".py":
                     out.append(p)
         return sorted(out)
+
     class _RemoveNodes(cst.CSTTransformer):
         """Remove exactly the given nodes from the tree (identity)."""
 
@@ -200,6 +217,7 @@ class Cst:
             if original_node in self.targets:
                 return cst.RemoveFromParent()
             return updated_node
+
     @staticmethod
     def _is_docstring_stmt(
         stmt: cst.BaseSmallStatement | cst.BaseStatement,
@@ -210,6 +228,7 @@ class Cst:
             and isinstance(stmt.body[0], cst.Expr)
             and isinstance(stmt.body[0].value, (cst.SimpleString, cst.ConcatenatedString))
         )
+
     class _EnclosingFn(cst.CSTVisitor):
         """The innermost FunctionDef whose span contains the line — the member
         assignment's enclosing constructor, for the annotation inference."""
@@ -222,7 +241,6 @@ class Cst:
 
         @override
         def visit_FunctionDef(self, node) -> None:
-            pos = Cst._as_range(self.get_metadata(PositionProvider, node))
+            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
             if pos.start.line <= self.line <= pos.end.line:
                 self.found = node
-
