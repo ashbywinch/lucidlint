@@ -5,7 +5,7 @@ use syn::spanned::Spanned;
 use syn::{Expr, Item, Stmt};
 
 use super::rule_table::{block_ends_with_return, param_is_str};
-use super::text::{byte_offset, span_text};
+use super::text::FixText;
 
 /// A Rust dispatch chain (`if sel == "a" { ... } if sel == "b" { ... }`) is
 /// most lucidly a `match` — Rust's idiomatic dispatch table. Lossless text
@@ -61,7 +61,7 @@ pub(super) fn parse_dispatch_arms(
             return Err("two arms dispatch on the same literal".to_string());
         }
         lits.push(lit.clone());
-        let block = span_text(source, i.then_branch.span())?;
+        let block = FixText::span_text(source, i.then_branch.span())?;
         arms.push(format!("{lit} => {block}"));
         idx += 1;
     }
@@ -93,8 +93,8 @@ pub fn fix_dispatch_registry(source: &str, line: usize) -> Result<String, String
     }
     // the fallback (statements after the chain) becomes the `_` arm
     let tail_text = if idx < stmts.len() {
-        let start = byte_offset(source, stmts[idx].span().start());
-        let end = byte_offset(source, stmts[stmts.len() - 1].span().end());
+        let start = FixText::byte_offset(source, stmts[idx].span().start());
+        let end = FixText::byte_offset(source, stmts[stmts.len() - 1].span().end());
         source[start..end].to_string()
     } else {
         String::new()
@@ -114,8 +114,8 @@ pub fn fix_dispatch_registry(source: &str, line: usize) -> Result<String, String
     match_text.push_str(wild);
     match_text.push_str("\n}");
     // splice: replace [first-if start .. end of last body statement]
-    let splice_start = byte_offset(source, stmts[first_if].span().start());
-    let splice_end = byte_offset(source, stmts[stmts.len() - 1].span().end());
+    let splice_start = FixText::byte_offset(source, stmts[first_if].span().start());
+    let splice_end = FixText::byte_offset(source, stmts[stmts.len() - 1].span().end());
     let mut out = String::new();
     out.push_str(&source[..splice_start]);
     out.push_str(&match_text);

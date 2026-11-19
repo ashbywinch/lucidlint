@@ -5,7 +5,7 @@ use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{Expr, FnArg, Item, ItemFn, Lit, Pat, Stmt};
 
-use super::text::{byte_offset, span_text};
+use super::text::FixText;
 
 /// Does the block end with a `return ...;` statement? Only such arms are
 /// match-rewritable blind: diverging arms need no matching types.
@@ -54,8 +54,8 @@ pub(super) fn rule_battery_shape(source: &str, target: &ItemFn) -> Result<RuleBa
         .filter_map(|a| match a {
             FnArg::Typed(t) => match t.pat.as_ref() {
                 Pat::Ident(pi) => {
-                    let ts = byte_offset(source, t.ty.span().start());
-                    let te = byte_offset(source, t.ty.span().end());
+                    let ts = FixText::byte_offset(source, t.ty.span().start());
+                    let te = FixText::byte_offset(source, t.ty.span().end());
                     Some((pi.ident.to_string(), source[ts..te].trim().to_string()))
                 }
                 _ => None,
@@ -94,7 +94,7 @@ pub(super) fn rule_battery_shape(source: &str, target: &ItemFn) -> Result<RuleBa
         let Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. }) = &mc.args[0] else {
             return Err("an arm pushes a non-string literal".to_string());
         };
-        let cond_text = span_text(source, i.cond.span())?;
+        let cond_text = FixText::span_text(source, i.cond.span())?;
         for name in idents_in_expr(&i.cond) {
             if !pset.contains(&name) {
                 return Err(format!(
@@ -160,9 +160,9 @@ pub fn fix_rule_table(source: &str, line: usize) -> Result<String, String> {
     // The header slice runs from the ITEM start (attrs + visibility + fn
     // keyword) — slicing from the signature start dropped #[cfg]/#[allow]
     // attrs and `pub` (review-log H3).
-    let fn_start = byte_offset(source, target.span().start());
-    let body_start = byte_offset(source, target.block.brace_token.span.open().start()) + 1;
-    let body_end = byte_offset(source, target.block.brace_token.span.close().end()) - 1;
+    let fn_start = FixText::byte_offset(source, target.span().start());
+    let body_start = FixText::byte_offset(source, target.block.brace_token.span.open().start()) + 1;
+    let body_end = FixText::byte_offset(source, target.block.brace_token.span.close().end()) - 1;
     let mut new_body = String::from("\n");
     let type_only: Vec<String> = params.iter().map(|(_, t)| t.clone()).collect();
     let fn_type = format!("fn({}) -> bool", type_only.join(", "));
@@ -186,7 +186,7 @@ pub fn fix_rule_table(source: &str, line: usize) -> Result<String, String> {
     // `//!` docs) — prepending before them would break the file
     let inner_end = file.attrs.iter().map(|a| a.span().end()).max();
     let insert_at = match inner_end {
-        Some(e) => byte_offset(source, e),
+        Some(e) => FixText::byte_offset(source, e),
         None => 0,
     };
     let mut out = String::new();

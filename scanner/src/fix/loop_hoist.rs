@@ -4,7 +4,7 @@
 use syn::spanned::Spanned;
 use syn::{Expr, FnArg, Pat, Stmt};
 
-use super::text::{byte_offset, enclosing_fn, pat_bindings, span_text};
+use super::text::FixText;
 
 /// The hoist plan: the single accumulator the body appends to, the push sites'
 /// argument spans (the helper's return value), their RECEIVER spans (the
@@ -236,12 +236,12 @@ pub(super) fn hoist_plan(source: &str, stmts: &[Stmt], loop_idx: usize) -> Resul
     struct Lets(std::collections::HashSet<String>);
     impl syn::visit::Visit<'_> for Lets {
         fn visit_local(&mut self, node: &syn::Local) {
-            pat_bindings(&node.pat, &mut self.0);
+            FixText::pat_bindings(&node.pat, &mut self.0);
         }
         fn visit_item_fn(&mut self, node: &syn::ItemFn) {
             for p in &node.sig.inputs {
                 if let FnArg::Typed(t) = p {
-                    pat_bindings(&t.pat, &mut self.0);
+                    FixText::pat_bindings(&t.pat, &mut self.0);
                 }
             }
         }
@@ -260,7 +260,7 @@ pub(super) fn hoist_plan(source: &str, stmts: &[Stmt], loop_idx: usize) -> Resul
     let (plan, receivers) = hoist_push_accum(&f.body.stmts, &bound)?;
     hoist_no_mid_read(&f.body.stmts, &plan.acc, &receivers)?;
     hoist_no_other_write(&f.body.stmts, &bound, &plan.acc)?;
-    let iter = span_text(source, f.expr.span())?;
+    let iter = FixText::span_text(source, f.expr.span())?;
     Ok((plan, target, iter))
 }
 
@@ -294,8 +294,8 @@ pub(super) fn hoist_retarget_pushes(
         .iter()
         .map(|s| {
             (
-                byte_offset(source, s.start()).saturating_sub(body_start),
-                byte_offset(source, s.end()).saturating_sub(body_start),
+                FixText::byte_offset(source, s.start()).saturating_sub(body_start),
+                FixText::byte_offset(source, s.end()).saturating_sub(body_start),
             )
         })
         .collect();
@@ -380,8 +380,8 @@ pub(super) fn hoist_item_ty(
     };
     let init_ty = match &init.pat {
         Pat::Type(pt) => {
-            let ts = byte_offset(source, pt.ty.span().start());
-            let te = byte_offset(source, pt.ty.span().end());
+            let ts = FixText::byte_offset(source, pt.ty.span().start());
+            let te = FixText::byte_offset(source, pt.ty.span().end());
             source[ts..te].trim().to_string()
         }
         _ => {
@@ -451,7 +451,7 @@ pub(super) fn hoist_helper_text(
             continue;
         }
         rebuilt.push_str(&moved[cursor..*start]);
-        let arg = span_text(source, *arg_span)
+        let arg = FixText::span_text(source, *arg_span)
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
         rebuilt.push_str(&format!("return Some({arg});"));
@@ -487,7 +487,7 @@ pub fn fix_loop_hoist(source: &str, line: usize, name: &str) -> Result<String, S
         format!("_{name}")
     };
     let file = syn::parse_file(source).map_err(|_| "the file does not parse".to_string())?;
-    let target = enclosing_fn(&file, line).ok_or_else(|| format!("no function contains line {line}"))?;
+    let target = FixText::enclosing_fn(&file, line).ok_or_else(|| format!("no function contains line {line}"))?;
     let stmts = &target.block.stmts;
     let loop_idx = stmts
         .iter()
@@ -501,8 +501,8 @@ pub fn fix_loop_hoist(source: &str, line: usize, name: &str) -> Result<String, S
     let Stmt::Expr(Expr::ForLoop(f), _) = &stmts[loop_idx] else {
         return Err("the statement at the finding line is not a for-loop".to_string());
     };
-    let body_start = byte_offset(source, f.body.brace_token.span.open().start()) + 1;
-    let body_end = byte_offset(source, f.body.brace_token.span.close().end()) - 1;
+    let body_start = FixText::byte_offset(source, f.body.brace_token.span.open().start()) + 1;
+    let body_end = FixText::byte_offset(source, f.body.brace_token.span.close().end()) - 1;
     let body_text = source[body_start..body_end].to_string();
     let mut moved = body_text;
     hoist_retarget_pushes(&mut moved, body_start, source, &plan.receiver_spans, &helper_local)?;
@@ -524,8 +524,8 @@ pub fn fix_loop_hoist(source: &str, line: usize, name: &str) -> Result<String, S
         .zip(&plan.push_args)
         .map(|(stmt, arg)| {
             (
-                byte_offset(source, stmt.start()).saturating_sub(body_start),
-                byte_offset(source, stmt.end()).saturating_sub(body_start),
+                FixText::byte_offset(source, stmt.start()).saturating_sub(body_start),
+                FixText::byte_offset(source, stmt.end()).saturating_sub(body_start),
                 *arg,
             )
         })
@@ -555,14 +555,14 @@ pub fn fix_loop_hoist(source: &str, line: usize, name: &str) -> Result<String, S
         format!("let {acc}: Vec<_> = {iter}.iter().map(|{param}| {helper_name}({param})).collect();")
     };
     // splice 1: replace [init start .. loop end] with the new let
-    let splice_start = byte_offset(source, stmts[init_idx].span().start());
-    let splice_end = byte_offset(source, stmts[loop_idx].span().end());
+    let splice_start = FixText::byte_offset(source, stmts[init_idx].span().start());
+    let splice_end = FixText::byte_offset(source, stmts[loop_idx].span().end());
     let mut out = String::new();
     out.push_str(&source[..splice_start]);
     out.push_str(&new_let);
     out.push_str(&source[splice_end..]);
     // splice 2: insert the helper before the target fn
-    let fn_start = byte_offset(&out, target.span().start());
+    let fn_start = FixText::byte_offset(&out, target.span().start());
     let mut final_out = String::new();
     final_out.push_str(&out[..fn_start]);
     final_out.push_str(&helper);

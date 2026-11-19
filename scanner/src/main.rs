@@ -1737,12 +1737,12 @@ fn main() {
                 "function": e.function,
                 "kind": "complexity",
                 "severity": "fail",
-                "message": crate::fix_render::full_fix_command(
+                "message": crate::fix_render::FixRender::full_fix_command(
                     &e.file,
                     e.line,
-                    &crate::fix_render::complexity_message(e.cc, e.shape, &e.shape_detail),
+                    &crate::fix_render::FixRender::complexity_message(e.cc, e.shape, &e.shape_detail),
                 ),
-                "fix_kind": checks::fix_kind_of_message(&crate::fix_render::complexity_message(e.cc, e.shape, &e.shape_detail))
+                "fix_kind": checks::FixRender::fix_kind_of_message(&crate::fix_render::FixRender::complexity_message(e.cc, e.shape, &e.shape_detail))
                     .unwrap_or("extract-method"),
             }));
         }
@@ -1812,9 +1812,9 @@ fn main() {
                 "kind": final_kind(&f.kind),
                 "signal": f.kind,
                 "severity": f.severity,
-                "message": crate::fix_render::full_fix_command(&f.file, f.line, &f.message),
+                "message": crate::fix_render::FixRender::full_fix_command(&f.file, f.line, &f.message),
                 "seam_members": f.seam_members,
-                "fix_kind": fix_kind_of_message(&f.message).unwrap_or_else(|| kind_fix_default(&f.kind)),
+                "fix_kind": FixRender::fix_kind_of_message(&f.message).unwrap_or_else(|| FixRender::kind_fix_default(&f.kind)),
             })
         })
         .collect();
@@ -1854,20 +1854,20 @@ mod tests {
         // the prose "--fix-name <name>" slot started a token with a
         // semicolon and produced "--name apply" for every plain-shape
         // complexity finding)
-        let msg = crate::fix_render::complexity_message(16, "plain", "x");
-        let cmd = crate::fix_render::full_fix_command("src/a.py", 5, &msg);
+        let msg = crate::fix_render::FixRender::complexity_message(16, "plain", "x");
+        let cmd = crate::fix_render::FixRender::full_fix_command("src/a.py", 5, &msg);
         assert!(cmd.contains("--kind extract-method"), "{cmd}");
         assert!(!cmd.contains("--name"), "{cmd}");
         assert!(!cmd.contains("apply"), "{cmd}");
         // name-bearing directives keep their exact placeholder slot
-        let m2 = crate::fix_render::full_fix_command(
+        let m2 = crate::fix_render::FixRender::full_fix_command(
             "src/a.py",
             5,
             "magic number 3 \u{2014} name it as a constant \u{2014} fix: magic-number --fix-name <CONST>",
         );
         assert!(m2.contains("--name <CONST>"), "{m2}");
         // a prose token merely STARTING with --fix-name is ignored (exact match)
-        let m3 = crate::fix_render::full_fix_command(
+        let m3 = crate::fix_render::FixRender::full_fix_command(
             "src/a.py",
             5,
             "x \u{2014} fix: extract-method (preview; --fix-name; prose)",
@@ -1946,7 +1946,7 @@ mod tests {
         // the rewrite must carry them or the agent gets a command the fix
         let msg = "module x holds 2 domains — fix: extract-module --fix-name text --params tokenize,words";
 
-        let cmd = crate::fix_render::full_fix_command("tools/layout.py", 0, msg);
+        let cmd = crate::fix_render::FixRender::full_fix_command("tools/layout.py", 0, msg);
         assert!(cmd.contains("--kind extract-module"), "{cmd}");
         assert!(cmd.contains("--name text"), "{cmd}");
         assert!(cmd.contains("--params tokenize,words"), "{cmd}");

@@ -4,8 +4,8 @@
 use syn::spanned::Spanned;
 use syn::{FnArg, Ident, Item, ItemFn, Pat, Stmt};
 
-use super::seam::{is_control_flow, seam_analysis};
-use super::text::byte_offset;
+use super::seam::Seam;
+use super::text::FixText;
 
 /// Extract a param-only, no-out-var seam of `line`'s fn into `name`.
 /// Returns Ok(rewritten source) or Err(why no seam exists) — the "nothing to
@@ -43,11 +43,11 @@ pub fn fix_extract_method(source: &str, line: usize, name: &str) -> Result<Strin
             if start == 0 && start + len == stmts.len() {
                 continue; // the whole body is not a seam
             }
-            if seam.iter().any(|s| is_control_flow(s)) {
+            if seam.iter().any(|s| Seam::is_control_flow(s)) {
                 continue;
             }
             let after: Vec<&Stmt> = stmts[start + len..].to_vec();
-            if let Some(free) = seam_analysis(seam, &after, &params) {
+            if let Some(free) = Seam::seam_analysis(seam, &after, &params) {
                 return apply(source, target, seam, &free, name).ok_or_else(|| {
                     "the seam's free variables are not a subset of the function's parameters".to_string()
                 });
@@ -60,10 +60,10 @@ pub fn fix_extract_method(source: &str, line: usize, name: &str) -> Result<Strin
 pub(super) fn apply(source: &str, target: &ItemFn, seam: &[&Stmt], free: &[Ident], name: &str) -> Option<String> {
     let first = seam.first()?.span().start();
     let last = seam.last()?.span().end();
-    let seam_start = byte_offset(source, first);
-    let seam_end = byte_offset(source, last);
+    let seam_start = FixText::byte_offset(source, first);
+    let seam_end = FixText::byte_offset(source, last);
     // the target fn's start — insert the helper just before it
-    let fn_start = byte_offset(source, target.span().start());
+    let fn_start = FixText::byte_offset(source, target.span().start());
     // each free var's type, sliced losslessly from the signature
     let mut sig = Vec::new();
     for p in free {
@@ -74,8 +74,8 @@ pub(super) fn apply(source: &str, target: &ItemFn, seam: &[&Stmt], free: &[Ident
             },
             _ => None,
         })?;
-        let ts = byte_offset(source, ty_span.start());
-        let te = byte_offset(source, ty_span.end());
+        let ts = FixText::byte_offset(source, ty_span.start());
+        let te = FixText::byte_offset(source, ty_span.end());
         sig.push((p.to_string(), source[ts..te].trim().to_string()));
     }
     let params: Vec<String> = sig.iter().map(|(n, t)| format!("{n}: {t}")).collect();
@@ -86,8 +86,8 @@ pub(super) fn apply(source: &str, target: &ItemFn, seam: &[&Stmt], free: &[Ident
     let generics = if target.sig.generics.params.is_empty() {
         String::new()
     } else {
-        let gs = byte_offset(source, target.sig.generics.span().start());
-        let ge = byte_offset(source, target.sig.generics.span().end());
+        let gs = FixText::byte_offset(source, target.sig.generics.span().start());
+        let ge = FixText::byte_offset(source, target.sig.generics.span().end());
         source[gs..ge].to_string()
     };
     // the helper, with the seam body spliced in losslessly (indent preserved

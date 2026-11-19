@@ -48,7 +48,7 @@ mod static_husk;
 mod type_ignore;
 mod unused;
 
-pub use crate::fix_render::{fix_kind_of_message, kind_fix_default};
+pub use crate::fix_render::FixRender;
 pub use crate::forwarding::ForwarderFn;
 pub use crate::forwarding::ForwarderMethod;
 pub use crate::forwarding::RepoMethod;

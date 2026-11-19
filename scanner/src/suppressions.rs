@@ -749,7 +749,7 @@ pub fn apply_source_suppressions(
 mod tests {
     use super::*;
 
-    use crate::fix_render::complexity_message;
+    use crate::fix_render::FixRender;
 
     #[test]
     fn complexity_message_routes_by_shape() {
@@ -757,16 +757,16 @@ mod tests {
         // registry, a rule battery the named checks — not a blind
         // extract-method (the directive stays extract-method: it is the real
         // auto-fix; the prose names the more lucid shape)
-        let dispatch = complexity_message(36, "dispatch", "tool");
+        let dispatch = FixRender::complexity_message(36, "dispatch", "tool");
         assert!(dispatch.contains("dispatch chain over 'tool'"), "{dispatch}");
         assert!(dispatch.contains("HOIST THE HIDDEN DATA STRUCTURE"), "{dispatch}");
         assert!(dispatch.contains("lambda closures"), "{dispatch}");
         assert!(dispatch.contains("fix: dispatch-registry"), "{dispatch}");
-        let rules = complexity_message(42, "rules", "violations");
+        let rules = FixRender::complexity_message(42, "rules", "violations");
         assert!(rules.contains("HOIST THE HIDDEN DATA STRUCTURE"), "{rules}");
         assert!(rules.contains("(condition, violation) table"), "{rules}");
         assert!(rules.contains("fix: rule-table"), "{rules}");
-        let plain = complexity_message(20, "plain", "");
+        let plain = FixRender::complexity_message(20, "plain", "");
         assert!(
             plain.contains("extract part of this function into a named method"),
             "{plain}"

@@ -5,7 +5,7 @@ use syn::spanned::Spanned;
 use syn::{Expr, Item, Pat, Stmt};
 
 use super::loop_pipeline::{pipeline_plan, InitScope};
-use super::text::byte_offset;
+use super::text::FixText;
 
 /// The detector calls `loop_sequence_fixable` (same contract, bool instead
 /// of the rewrite) before advertising `fix: loop-sequence` on a shared /
@@ -84,8 +84,8 @@ pub fn fix_loop_sequence(source: &str, line: usize) -> Result<String, String> {
         return Err("fewer than 2 pipeline loops — not a sequence".to_string());
     }
     let replacement = format!("let {acc}: Vec<_> = {};", comps.join(" + "));
-    let splice_start = byte_offset(source, stmts[first].span().start());
-    let splice_end = byte_offset(source, stmts[last_loop].span().end());
+    let splice_start = FixText::byte_offset(source, stmts[first].span().start());
+    let splice_end = FixText::byte_offset(source, stmts[last_loop].span().end());
     let mut out = String::new();
     out.push_str(&source[..splice_start]);
     out.push_str(&replacement);

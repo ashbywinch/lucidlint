@@ -5,7 +5,7 @@ use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{Expr, ItemFn, Pat, Stmt};
 
-use super::text::{byte_offset, enclosing_fn, span_text};
+use super::text::FixText;
 
 /// One loop's pipeline plan: the accumulator, the shape (pure-push keeps
 /// the borrowed item, an if-filter narrows it, an index store needs the
@@ -83,12 +83,12 @@ pub(super) fn pipeline_plan(
         .or_else(|| crate::rustloops::index_store(core))
         .ok_or_else(|| "the loop body is not a single collection build".to_string())?;
     let filter = match f.body.stmts.as_slice() {
-        [Stmt::Expr(Expr::If(i), _)] => Some(span_text(source, i.cond.span())?),
+        [Stmt::Expr(Expr::If(i), _)] => Some(FixText::span_text(source, i.cond.span())?),
         _ => None,
     };
     let push_arg = match core {
-        Stmt::Expr(Expr::MethodCall(m), Some(_)) => span_text(source, m.args[0].span())?,
-        Stmt::Expr(Expr::Assign(a), Some(_)) => span_text(source, a.right.span())?,
+        Stmt::Expr(Expr::MethodCall(m), Some(_)) => FixText::span_text(source, m.args[0].span())?,
+        Stmt::Expr(Expr::Assign(a), Some(_)) => FixText::span_text(source, a.right.span())?,
         _ => return Err("the loop body is not a single collection build".to_string()),
     };
     let indexed = crate::rustloops::index_store(core).is_some();
@@ -106,7 +106,7 @@ pub(super) fn pipeline_plan(
     // for-loops over the same accumulator are NOT reads — the sequence
     // fixer plans each loop separately and concatenates them.
     pipeline_no_mid_read(stmts, init_idx, loop_idx, &acc)?;
-    let iter = span_text(source, f.expr.span())?;
+    let iter = FixText::span_text(source, f.expr.span())?;
     let _ = target;
     Ok((
         init_idx,
@@ -274,7 +274,7 @@ pub fn loop_pipeline_fixable(source: &str, _file: &str, line: usize) -> bool {
     let Ok(file) = syn::parse_file(source) else {
         return false;
     };
-    let Some(target) = enclosing_fn(&file, line) else {
+    let Some(target) = FixText::enclosing_fn(&file, line) else {
         return false;
     };
     let stmts = &target.block.stmts;
@@ -289,7 +289,7 @@ pub fn loop_pipeline_fixable(source: &str, _file: &str, line: usize) -> bool {
 
 pub fn fix_loop_pipeline(source: &str, line: usize) -> Result<String, String> {
     let file = syn::parse_file(source).map_err(|_| "the file does not parse".to_string())?;
-    let target = enclosing_fn(&file, line).ok_or_else(|| format!("no function contains line {line}"))?;
+    let target = FixText::enclosing_fn(&file, line).ok_or_else(|| format!("no function contains line {line}"))?;
     // the loop AT the finding line — top-level statements only
     let stmts = &target.block.stmts;
     let loop_idx = stmts
@@ -324,8 +324,8 @@ pub fn fix_loop_pipeline(source: &str, line: usize) -> Result<String, String> {
     };
     // splice: replace [init start .. loop end] with the one `let` (the
     // init's own indent survives as part of the prefix — nothing to add)
-    let splice_start = byte_offset(source, stmts[init_idx].span().start());
-    let splice_end = byte_offset(source, stmts[loop_idx].span().end());
+    let splice_start = FixText::byte_offset(source, stmts[init_idx].span().start());
+    let splice_end = FixText::byte_offset(source, stmts[loop_idx].span().end());
     let mut out = String::new();
     out.push_str(&source[..splice_start]);
     out.push_str(&replacement);
