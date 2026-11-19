@@ -14,7 +14,7 @@ use crate::source::line_of;
 use crate::ScanState;
 
 use super::class_facts::class_methods;
-use super::sibling::collect_field_assignments;
+use super::sibling::SiblingValueClass;
 
 /// The normalized constant token: `NAME:norm(type)` — numeric literals
 /// normalised, strings stripped, bools canonical (R4). None for non-literal
@@ -76,7 +76,12 @@ fn declared_record_fields(classes: &[&StmtClassDef]) -> Vec<String> {
             if let Stmt::FunctionDef(f) = m {
                 let mut assigned: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
                 let mut types: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-                collect_field_assignments(&f.body, &std::collections::HashMap::new(), &mut assigned, &mut types);
+                SiblingValueClass::collect_field_assignments(
+                    &f.body,
+                    &std::collections::HashMap::new(),
+                    &mut assigned,
+                    &mut types,
+                );
                 fields.extend(assigned);
             }
         }

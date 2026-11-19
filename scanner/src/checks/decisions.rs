@@ -15,8 +15,8 @@ use ruff_text_size::Ranged;
 use crate::finding::Finding;
 use crate::{line_of, ScanState};
 
-use super::collect_imports;
 use super::conditional_polymorphism::dispatch_key;
+use super::over_abstraction::OverAbstraction;
 
 /// Where a condition sits: the function that owns it (for the bare-return
 /// exemption) and the class that owns that function (so the action can name
@@ -68,7 +68,10 @@ fn answer_shape(body: &[Stmt]) -> AnswerShape {
 /// combination means — the name is the fix, and the object the name belongs
 /// to is a fact the AST already holds.
 pub fn unnamed_condition_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
-    let imported: HashSet<String> = collect_imports(body, source).into_iter().map(|i| i.alias).collect();
+    let imported: HashSet<String> = OverAbstraction::collect_imports(body, source)
+        .into_iter()
+        .map(|i| i.alias)
+        .collect();
     walk_conditions(state, body, source, ConditionScope::default(), &imported);
 }
 

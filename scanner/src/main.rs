@@ -267,7 +267,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 // the Python gate reads cc from radon's fn_map, which only
                 // holds module-level functions — methods/nested get cc = 0
                 let gate_cc = if module_level { cc } else { 0 };
-                closure_findings(self, stmt, gate_cc, span);
+                Closures::closure_findings(self, stmt, gate_cc, span);
                 // a method that never touches its receiver does not belong in
                 // the class (the inverse of record-shape/strewing)
                 if self.in_class > 0 {
@@ -323,14 +323,14 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             }
             Stmt::Global(_) => {
                 let module_level = false; // globals inside a function
-                global_state_findings(self, stmt, module_level);
+                GlobalState::global_state_findings(self, stmt, module_level);
             }
             Stmt::Assign(_) => {
-                global_state_findings(self, stmt, module_level);
+                GlobalState::global_state_findings(self, stmt, module_level);
                 shadow_findings(self, stmt);
             }
             Stmt::AugAssign(_) | Stmt::AnnAssign(_) | Stmt::Delete(_) => {
-                global_state_findings(self, stmt, module_level);
+                GlobalState::global_state_findings(self, stmt, module_level);
             }
             _ => {}
         }
@@ -704,11 +704,11 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     latent_visitor_findings(state, body, source); // claims chains first — polymorphism skips them
     conditional_polymorphism_findings(state, body, source);
     SpecialCase::findings(state, body, source);
-    collect_scattered_instances(state, body);
+    Scattered::collect_scattered_instances(state, body);
     unnamed_condition_findings(state, body, source);
     unnamed_classification_findings(state, body, source);
     collect_middle_man(state, body, source, repo_wide);
-    collect_setters(state, body);
+    Unused::collect_setters(state, body);
     loop_pipeline_findings(state, body, source);
     collect_skeleton_modules(state, body, name);
     Forwarding::collect(state, body);
@@ -752,7 +752,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         magic_len_guard_exempts: checks::magic_len_guard_offsets(&body),
         magic_unit_named_exempts: checks::magic_unit_named_offsets(&body),
         is_test: is_test_path(name),
-        module_constants: checks::module_constant_names(&body),
+        module_constants: checks::GlobalState::module_constant_names(&body),
         ..Default::default()
     };
     for stmt in &body {
@@ -883,9 +883,9 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     if !repo_wide {
         drop_repo_wide_stale_artifacts(&mut all);
     }
-    let classes = collect_classes(&body, source);
-    let imports = collect_imports(&body, source);
-    let sibling_classes = checks::collect_sibling_classes(&body, source);
+    let classes = OverAbstraction::collect_classes(&body, source);
+    let imports = OverAbstraction::collect_imports(&body, source);
+    let sibling_classes = checks::SiblingValueClass::collect_sibling_classes(&body, source);
     FileScan {
         file_name: name.to_string(),
         findings: all,
@@ -1047,8 +1047,8 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         &repo_methods,
         &imports_by_rel,
     ));
-    let mut repo_wide_unused = checks::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
-    repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
+    let mut repo_wide_unused = checks::Unused::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+    repo_wide_unused.extend(checks::Unused::unused_setter_findings(&setters, &prod_refs, &test_refs));
     reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
     let class_names: HashSet<String> = definitions
         .iter()
@@ -1059,7 +1059,7 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         scans.iter().map(|s| (s.rel_of(root_s), s.scattered.clone())).collect();
     reconcile_repo_wide(
         &mut additions,
-        checks::scattered_instance_findings(&scattered_scans, &class_names),
+        checks::Scattered::scattered_instance_findings(&scattered_scans, &class_names),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -1116,7 +1116,7 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         .collect();
     reconcile_repo_wide(
         &mut additions,
-        checks::sibling_value_class_findings(&sibling_scans),
+        checks::SiblingValueClass::sibling_value_class_findings(&sibling_scans),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -1571,8 +1571,8 @@ fn main() {
     // unused is a repo-wide family computed AFTER the per-file suppression
     // pass — reconcile it through those suppressions so an `ignore unused <why>`
     // comment suppresses the finding and is not reported stale (review-log B3)
-    let mut repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
-    repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
+    let mut repo_wide_unused = Unused::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+    repo_wide_unused.extend(checks::Unused::unused_setter_findings(&setters, &prod_refs, &test_refs));
     reconcile_repo_wide(&mut all_findings, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
     let class_names: HashSet<String> = definitions
         .iter()
@@ -1585,7 +1585,7 @@ fn main() {
         .collect();
     reconcile_repo_wide(
         &mut all_findings,
-        checks::scattered_instance_findings(&scattered_scans, &class_names),
+        checks::Scattered::scattered_instance_findings(&scattered_scans, &class_names),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -1632,7 +1632,7 @@ fn main() {
         .collect();
     reconcile_repo_wide(
         &mut all_findings,
-        checks::sibling_value_class_findings(&sibling_scans),
+        checks::SiblingValueClass::sibling_value_class_findings(&sibling_scans),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -1697,7 +1697,7 @@ fn main() {
             .unwrap_or_default();
         all_findings.extend(docs::docs_findings(Path::new(d), &gitignored));
     }
-    all_findings.extend(abstraction_findings(&class_scans));
+    all_findings.extend(OverAbstraction::abstraction_findings(&class_scans));
     if let Some(p) = &churn_path {
         if let Ok(s) = std::fs::read_to_string(p) {
             if let Ok(churn) = serde_json::from_str::<std::collections::HashMap<String, usize>>(&s) {
@@ -3800,7 +3800,7 @@ mod tests {
             ("a.py".to_string(), scan_a.classes, scan_a.imports),
             ("b.py".to_string(), scan_b.classes, scan_b.imports),
         ];
-        let f = checks::abstraction_findings(&scans);
+        let f = checks::OverAbstraction::abstraction_findings(&scans);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].function, "Base");
     }
@@ -3815,7 +3815,7 @@ mod tests {
             ("a.py".to_string(), scan_a.classes, scan_a.imports),
             ("b.py".to_string(), scan_b.classes, scan_b.imports),
         ];
-        let f = checks::abstraction_findings(&scans);
+        let f = checks::OverAbstraction::abstraction_findings(&scans);
         assert!(f.is_empty());
     }
 
@@ -4594,8 +4594,8 @@ mod tests {
             prod_refs.extend(scan.decorated.iter().cloned());
         }
         all.extend(duplicate_findings(&skeletons));
-        let mut repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
-        repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
+        let mut repo_wide_unused = Unused::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+        repo_wide_unused.extend(checks::Unused::unused_setter_findings(&setters, &prod_refs, &test_refs));
         reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel, &spent_by_rel);
         let class_names: HashSet<String> = definitions
             .iter()
@@ -4604,7 +4604,7 @@ mod tests {
             .collect();
         reconcile_repo_wide(
             &mut all,
-            checks::scattered_instance_findings(&scattered_scans, &class_names),
+            checks::Scattered::scattered_instance_findings(&scattered_scans, &class_names),
             &supps_by_rel,
             &spent_by_rel,
         );
@@ -4871,8 +4871,8 @@ mod tests {
         let src = include_str!("../../tests/fixtures/rust/sibling_value_class_shared_base_passes__01.py");
         let parsed = parse_module(src).expect("fixture parses");
         let body = parsed.syntax().body.clone();
-        let classes = checks::collect_sibling_classes(&body, src);
-        let f = checks::sibling_value_class_findings(&[("pkg/expr.py".to_string(), classes)]);
+        let classes = checks::SiblingValueClass::collect_sibling_classes(&body, src);
+        let f = checks::SiblingValueClass::sibling_value_class_findings(&[("pkg/expr.py".to_string(), classes)]);
         assert!(!f.iter().any(|x| x.kind == "sibling-value-class"), "{f:?}");
     }
 
@@ -4900,8 +4900,8 @@ mod tests {
         let src = include_str!("../../tests/fixtures/rust/sibling_value_class_shared_accessors_fires__01.py");
         let parsed = parse_module(src).expect("fixture parses");
         let body = parsed.syntax().body.clone();
-        let classes = checks::collect_sibling_classes(&body, src);
-        let f = checks::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
+        let classes = checks::SiblingValueClass::collect_sibling_classes(&body, src);
+        let f = checks::SiblingValueClass::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].kind, "sibling-value-class");
         assert_eq!(f[0].severity, "warn");
@@ -4918,8 +4918,8 @@ mod tests {
         let src = include_str!("../../tests/fixtures/rust/sibling_value_class_containment_passes__01.py");
         let parsed = parse_module(src).expect("fixture parses");
         let body = parsed.syntax().body.clone();
-        let classes = checks::collect_sibling_classes(&body, src);
-        let f = checks::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
+        let classes = checks::SiblingValueClass::collect_sibling_classes(&body, src);
+        let f = checks::SiblingValueClass::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
         assert!(!f.iter().any(|x| x.kind == "sibling-value-class"), "{f:?}");
     }
 
@@ -4931,8 +4931,8 @@ mod tests {
             include_str!("../../tests/fixtures/rust/sibling_value_class_forward_reference_containment_passes__01.py");
         let parsed = parse_module(src).expect("fixture parses");
         let body = parsed.syntax().body.clone();
-        let classes = checks::collect_sibling_classes(&body, src);
-        let f = checks::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
+        let classes = checks::SiblingValueClass::collect_sibling_classes(&body, src);
+        let f = checks::SiblingValueClass::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
         assert!(!f.iter().any(|x| x.kind == "sibling-value-class"), "{f:?}");
     }
 
@@ -4946,9 +4946,12 @@ mod tests {
         for (rel, src) in [("pkg/a.py", a), ("pkg/b.py", b.as_str())] {
             let parsed = parse_module(src).expect("source parses");
             let body = parsed.syntax().body.clone();
-            classes.push((rel.to_string(), checks::collect_sibling_classes(&body, src)));
+            classes.push((
+                rel.to_string(),
+                checks::SiblingValueClass::collect_sibling_classes(&body, src),
+            ));
         }
-        let f = checks::sibling_value_class_findings(&classes);
+        let f = checks::SiblingValueClass::sibling_value_class_findings(&classes);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].file, "pkg/b.py");
     }

@@ -58,7 +58,7 @@ pub use builtin_shadow::shadow_findings;
 pub use class_facts::annotation_base_name;
 pub(crate) use class_facts::class_attr_names;
 pub use closure_cluster::ClosureCluster;
-pub use closures::closure_findings;
+pub use closures::Closures;
 pub use conditional_polymorphism::conditional_polymorphism_findings;
 pub use decisions::{unnamed_classification_findings, unnamed_condition_findings};
 pub use delegating_husk::delegating_husk_findings;
@@ -75,7 +75,7 @@ pub use forwarding::Forwarding;
 #[cfg(test)]
 pub(crate) use function_facts::inner_function_count;
 pub(crate) use function_facts::{body_refs_name, returned_names};
-pub use global_state::{global_state_findings, module_constant_names};
+pub use global_state::GlobalState;
 pub use guard_clause::guard_clause_findings;
 pub use latent_shapes::{
     assembly_class_findings, misplaced_method_findings, tuple_record_findings, wide_tuple_findings,
@@ -97,13 +97,13 @@ pub use naming_units::magic_unit_named_offsets;
 pub(crate) use naming_units::name_states_unit;
 pub use no_assert_test::no_assert_test_findings;
 pub use noqa::noqa_findings;
-pub use over_abstraction::{abstraction_findings, collect_classes, collect_imports};
+pub use over_abstraction::OverAbstraction;
 pub use partition::Partition;
 pub use process_class::process_class_findings;
 pub use record_shape::record_shape_findings;
-pub use scattered::{collect_scattered_instances, scattered_instance_findings, ScatteredInstance};
+pub use scattered::{Scattered, ScatteredInstance};
 pub use shared_path::{collect_path_expressions, shared_path_findings, PathExpression};
-pub use sibling::{collect_sibling_classes, sibling_value_class_findings, SiblingClass};
+pub use sibling::{SiblingClass, SiblingValueClass};
 pub use signature::{
     boolean_arg_findings, detached_method_findings, except_findings, long_param_list_findings,
     positional_literals_findings,
@@ -112,4 +112,4 @@ pub use skipif::skipif_findings;
 pub use special_case::SpecialCase;
 pub use static_husk::StaticHusk;
 pub use type_ignore::type_ignore_findings;
-pub use unused::{collect_setters, unused_findings, unused_setter_findings};
+pub use unused::Unused;
