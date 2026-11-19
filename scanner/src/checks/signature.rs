@@ -13,7 +13,7 @@ use super::builtin_shadow::SHADOWED_BUILTINS;
 use super::class_facts::annotation_base_name;
 use super::expr_walk::{push_stmt_children, stmt_exprs};
 use super::function_facts::body_refs_name;
-use super::naming_units::sub_name;
+use super::naming_units::NamingUnits;
 use crate::{line_of, ScanState};
 
 /// A positional call argument that is a literal True/False — the intent is
@@ -386,7 +386,7 @@ fn mutates_returned_target(s: &Stmt, returned: &HashSet<String>) -> bool {
     for t in targets {
         match t {
             Expr::Name(n) if returned.contains(n.id.as_str()) => return true,
-            Expr::Subscript(sub) if returned.contains(sub_name(sub).as_str()) => return true,
+            Expr::Subscript(sub) if returned.contains(NamingUnits::sub_name(sub).as_str()) => return true,
             _ => {}
         }
     }

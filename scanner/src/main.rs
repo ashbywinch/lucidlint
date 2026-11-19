@@ -430,7 +430,7 @@ impl<'a> ScanState<'a> {
         let text = &self.source[n.range()];
         if text.len() >= 2 {
             let prefix = &text[..2];
-            if checks::is_radix_prefix(prefix) {
+            if checks::MagicNumber::is_radix_prefix(prefix) {
                 return;
             }
         }
@@ -474,7 +474,7 @@ impl<'a> ScanState<'a> {
         });
         if let Some((callee, kw)) = nearest_call {
             let unit_ctor = matches!(callee, "Quantity" | "timedelta" | "TimeDelta" | "Distance");
-            let unit_kw = !kw.is_empty() && checks::name_states_unit(kw);
+            let unit_kw = !kw.is_empty() && checks::NamingUnits::name_states_unit(kw);
             if unit_ctor || unit_kw {
                 return;
             }
@@ -747,10 +747,10 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         file: name,
         source,
         logical_starts: checks::logical_line_starts(source, parsed.tokens()),
-        magic_table_exempts: checks::magic_table_exempt_offsets(&body),
-        magic_const_rhs_exempts: checks::magic_const_rhs_offsets(&body),
-        magic_len_guard_exempts: checks::magic_len_guard_offsets(&body),
-        magic_unit_named_exempts: checks::magic_unit_named_offsets(&body),
+        magic_table_exempts: checks::MagicNumber::magic_table_exempt_offsets(&body),
+        magic_const_rhs_exempts: checks::MagicNumber::magic_const_rhs_offsets(&body),
+        magic_len_guard_exempts: checks::MagicNumber::magic_len_guard_offsets(&body),
+        magic_unit_named_exempts: checks::NamingUnits::magic_unit_named_offsets(&body),
         is_test: is_test_path(name),
         module_constants: checks::GlobalState::module_constant_names(&body),
         ..Default::default()
@@ -863,7 +863,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     // magic-number candidates — threaded into the stale message so it names
     // exactly the exemptions that apply (never unit/constant/table for
     // indices).
-    let magic_exempt_labels = checks::magic_exemption_labels(
+    let magic_exempt_labels = checks::MagicNumber::magic_exemption_labels(
         &body,
         source,
         &state.magic_table_exempts,

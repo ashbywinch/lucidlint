@@ -85,16 +85,13 @@ pub use latent_state::{
 };
 pub use latent_visitor::latent_visitor_findings;
 pub use loop_family::loop_pipeline_findings;
-pub use magic::{
-    is_radix_prefix, magic_const_rhs_offsets, magic_exemption_labels, magic_len_guard_offsets,
-    magic_table_exempt_offsets,
-};
+pub use magic::MagicNumber;
 pub use middle_man::{collect_middle_man, middle_man_findings, MiddleManCandidate, MiddleManClass};
 pub use module_names::{class_module_findings, strewing_findings, vague_name_findings};
 pub use module_size::{ModuleShape, TypeShape};
 pub use monkeypatch::Monkeypatch;
-pub use naming_units::magic_unit_named_offsets;
-pub(crate) use naming_units::name_states_unit;
+pub use naming_units::NamingUnits;
+
 pub use no_assert_test::no_assert_test_findings;
 pub use noqa::noqa_findings;
 pub use over_abstraction::OverAbstraction;
