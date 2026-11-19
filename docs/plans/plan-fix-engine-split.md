@@ -50,7 +50,7 @@ files). Both folders stay under the `flat-folder` bar.
 |---|---|---|
 | `fix_engine/__init__.py` | — | the public surface: the kind tables (`MECHANICAL_KINDS`, `STRUCTURAL_KINDS`, the fixer registry, `FIXABLE_KINDS`, `PREVIEW_KINDS`, `KIND_ALIASES`), the facade re-exports, `FixOptions` |
 | `cst_mechanics.py` | `CstMechanics` | done |
-| `records.py` | — | the 20 private records (`_ModuleProposal`, `_LoopPipelinePlan`, `_ChainHead`, `_SplitLayout`, the partition/clump plans, …) — a module of records is exempt |
+| `records.py` | — | the private records (`_ModuleProposal`, `_ChainHead`, `_SplitLayout`, the partition/clump plans, `_ModuleRef`, …) — a module of records is exempt; a record its fixer alone uses may live in that fixer (`MechanicalFixes._LoopPipelinePlan`) |
 | `fix_options.py` | `FixOptions` | the agent-supplied bits a fix may need |
 | `strewing_group.py` | `StrewingGroup` | the strewing seam record |
 | `request.py` | `_FixRequest` (name kept: the tests import it) | the request, `propose_finding`/`fix_finding`, and the dispatch table |
@@ -146,6 +146,32 @@ that are design decisions, not mechanical fixes. The next pass starts here:
 
 None of the six is a behaviour change; they are the per-family cleanup the
 "Rules this split will meet" table predicted.
+
+**Mechanical family — landed (2026-11-19).** `fix_engine/fixers/mechanical_fixes.py`
+now holds `MechanicalFixes`: the four request methods and 31 top-level
+definitions (39 in all), with the loop transformers and the delete/keyword/
+annotation visitors as nested classes. The package root is at 178 definitions.
+The six findings were resolved without a suppression:
+
+- the two `global-state` constants are class attributes;
+- the stale `complexity`/`data-clump` whys were deleted with their code (the
+  file-level whys stay: their code is still at the root);
+- `latent-class` was the real seam: the split-module lookups now take the
+  `_ModuleRef(repo, name)` record from `records.py` instead of restating the
+  pair in five signatures;
+- `private-import` and the import cycle it would have caused are gone by
+  moving `_LoopPipelinePlan` into `MechanicalFixes` itself. The plan's
+  "`records.py` holds every record" rule gave way to the import graph: a fixer
+  module may not import the package root (`from fix_engine import records`),
+  and the only user of that plan is this fixer.
+
+Verification: 318 tests, `GATE: PASS` (592 actions, 0 fails), houses 353 /
+album 431 with identical `(file, kind, message)` sets, `make bundle-check` and
+`make wheel-check` green. The moved findings (duplicate blocks, loop-pipeline,
+magic numbers, the duplicate visitors) moved with their code; the total did
+not grow.
+
+The remaining families and their order are unchanged.
 
 ## Verification, after every step
 

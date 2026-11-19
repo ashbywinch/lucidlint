@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from test_lucidlint import make_repo, run_main
 
 import fix_engine
+from fix_engine.fixers.mechanical_fixes import MechanicalFixes
 
 
 def test_tuple_record_becomes_a_class(tmp_path):
@@ -3206,7 +3207,7 @@ def test_flatten_stmts_walks_every_nested_block_kind():
         "        y2 = 5\n"
     )
     flat = []
-    fix_engine._flatten_stmts(module.body, flat)
+    MechanicalFixes._flatten_stmts(module.body, flat)
     kinds = [type(s) for s in flat]
     assert len(flat) > len(module.body)  # nested bodies are included
     for kind in (cst.If, cst.For, cst.While, cst.Try, cst.With, cst.Match):
@@ -3287,7 +3288,7 @@ def test_name_ref_kind_reads_the_execution_context():
 
 def test_infer_member_type_names_only_what_it_can_prove():
     def infer(text: str, param_types: dict[str, str] | None = None) -> str | None:
-        return fix_engine._infer_member_type(
+        return MechanicalFixes._infer_member_type(
             cst.parse_expression(text), param_types or {}
         )
 
@@ -3308,7 +3309,7 @@ def test_subscript_mutation_plan_maps_a_dict_store_only():
     def plan(text: str):
         statement = cst.parse_statement(text)
         assert isinstance(statement, cst.SimpleStatementLine)
-        return fix_engine._subscript_mutation_plan(cast(cst.Assign, statement.body[0]))
+        return MechanicalFixes._subscript_mutation_plan(cast(cst.Assign, statement.body[0]))
 
     mapped = plan("d[k] = v\n")
     assert mapped is not None
@@ -3523,7 +3524,7 @@ def test_collapse_chain_rewires_a_module_function_terminal(tmp_path):
 def test_bind_children_walks_every_compound_statement():
     def bound(src: str) -> set[str]:
         names: set[str] = set()
-        fix_engine._bind_children(cst.parse_statement(src), names)
+        MechanicalFixes._bind_children(cst.parse_statement(src), names)
         return names
 
     assert {"i", "a"} <= bound("for i in xs:\n    a = 1\n")

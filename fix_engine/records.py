@@ -9,6 +9,7 @@ the shapes the fixers pass — not a set of concerns.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import NamedTuple
 
 import libcst as cst
@@ -21,6 +22,7 @@ class _ModuleProposal(NamedTuple):
     origin: str
     module: str
 
+
 @dataclass
 class _RecordBuild:
     """The record's dict names + the first build's elements (for the field
@@ -28,6 +30,7 @@ class _RecordBuild:
 
     names: set[str]
     elements: list[cst.BaseExpression] | None
+
 
 class _RecordDictHit(NamedTuple):
     """One candidate literal: anchor position + the node + its const keys."""
@@ -37,12 +40,14 @@ class _RecordDictHit(NamedTuple):
     node: cst.Dict
     keys: list[str]
 
+
 class _Collaborator(NamedTuple):
     """One `graph = self.graph` alias: the local name and the owner field it
     aliases — a named return instead of a bare tuple."""
 
     alias: str
     attr: str
+
 
 class _StmtReads(NamedTuple):
     """One top-level statement's analysis for the feature-envy move: the
@@ -53,17 +58,6 @@ class _StmtReads(NamedTuple):
     bound: set[str]
     has_self: bool
 
-@dataclass
-class _LoopPipelinePlan:
-    """One loop's accumulation shape for the comprehension rewrite: the
-    accumulator, the collection kind, and the element/key/flatten exprs."""
-
-    acc: str
-    collection: str  # "list" | "set" | "dict"
-    element: cst.BaseExpression | None  # the appended/added value or the dict value
-    key: cst.BaseExpression | None  # the dict key (subscript store) or None
-    flatten: cst.BaseExpression | None  # the extend/`+= [a, b]` value whose ITEMS join
-    if_test: cst.BaseExpression | None  # the one-filter test or None
 
 @dataclass(frozen=True)
 class _ForwardTarget:
@@ -73,6 +67,7 @@ class _ForwardTarget:
     is_name: bool
     name: str = ""
     attr_method: tuple[str, str] | None = None
+
 
 class _ChainHead(NamedTuple):
     """A forwarding chain's head: the method, its class, the parameters it
@@ -84,6 +79,7 @@ class _ChainHead(NamedTuple):
     params: list[str]
     callee: _ForwardTarget
 
+
 class _ChainMiddle(NamedTuple):
     """The module function the head forwards into: where it lives, the module
     it belongs to, its parameters, and where that forwards."""
@@ -93,6 +89,7 @@ class _ChainMiddle(NamedTuple):
     params: list[str]
     callee: _ForwardTarget
 
+
 class _ModuleFn(NamedTuple):
     """One module-level function resolved repo-wide: the file it lives in, the
     parsed module, and its node — the three facts a caller needs together."""
@@ -100,6 +97,7 @@ class _ModuleFn(NamedTuple):
     rel: str
     module: cst.Module
     node: cst.FunctionDef
+
 
 class _ChainTerminal(NamedTuple):
     """The method the chain reaches through its middle: D.N, plus the
@@ -111,6 +109,7 @@ class _ChainTerminal(NamedTuple):
     cls: cst.ClassDef
     method: cst.FunctionDef
 
+
 class _SplitLayout(NamedTuple):
     """The split's shape: one entry per produced module (its classes and the
     package name, or None for a flat sibling file), the snake names the flat
@@ -121,6 +120,7 @@ class _SplitLayout(NamedTuple):
     snake: dict[str, str]
     decline: str | None = None
 
+
 class _SplitOutcome(NamedTuple):
     """What a split produced: the origin's new source ("" when the origin is
     deleted), the other files to write, the files to delete, and the reason it
@@ -130,6 +130,7 @@ class _SplitOutcome(NamedTuple):
     writes: list[tuple[str, str]]
     deletes: list[str]
     decline: str | None = None
+
 
 class _SplitCtx(NamedTuple):
     """Everything a class-file build needs to route the class's free names to
@@ -145,6 +146,7 @@ class _SplitCtx(NamedTuple):
     origin_dots: int  # relative dots for `from <origin> import X`
     member_dots: int  # relative dots for `from .<Class> import <Class>`
 
+
 class _WideTupleSite(NamedTuple):
     """One fixed-arity tuple annotation on the anchor line: where it lives,
     the annotated name, its arity, and the build site's element expressions
@@ -156,12 +158,14 @@ class _WideTupleSite(NamedTuple):
     annotation: cst.BaseExpression
     elements: tuple[cst.BaseExpression, ...] | None
 
+
 class _Clump(NamedTuple):
     """The recovered clump: the shared pair (in the anchor's signature order)
     and the module-level defs carrying it, in source order."""
 
     pair: tuple[str, str]
     fns: tuple[cst.FunctionDef, ...]
+
 
 class _PartitionGroup(NamedTuple):
     """One field-disjoint method group: its methods in source order and the
@@ -170,6 +174,7 @@ class _PartitionGroup(NamedTuple):
     methods: tuple[cst.FunctionDef, ...]
     fields: tuple[str, ...]
 
+
 class _GroupInit(NamedTuple):
     """One group's synthesized __init__: the field assignments it keeps and
     the parameters those assignments need (name, annotation, default)."""
@@ -177,14 +182,24 @@ class _GroupInit(NamedTuple):
     statements: list[cst.BaseStatement]
     params: list[cst.Param]
 
+
 class _PartitionPlan(NamedTuple):
     groups: tuple[_PartitionGroup, ...]
     init_fields: tuple[tuple[str, cst.BaseExpression], ...]
     init_docstring: cst.BaseStatement | None
     init_params: tuple[tuple[str, cst.Annotation | None, cst.BaseExpression | None], ...]
 
+
 class _PartitionAttempt(NamedTuple):
     """The plan, or the specific reason it cannot be computed."""
 
     plan: _PartitionPlan | None
     decline: str
+
+
+class _ModuleRef(NamedTuple):
+    """One module-level name in its repo: the thing the split and husk lookups
+    ask about, as one parameter instead of a (repo, name) pair everywhere."""
+
+    repo: Path
+    name: str
