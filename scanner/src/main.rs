@@ -706,8 +706,8 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     conditional_polymorphism_findings(state, body, source);
     SpecialCase::findings(state, body, source);
     Scattered::collect_scattered_instances(state, body);
-    unnamed_condition_findings(state, body, source);
-    unnamed_classification_findings(state, body, source);
+    UnnamedCondition::findings(state, body, source);
+    UnnamedClassification::findings(state, body, source);
     MiddleMan::collect(state, body, source, repo_wide);
     Unused::collect_setters(state, body);
     LoopFamily::findings(state, body, source);

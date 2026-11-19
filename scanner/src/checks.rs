@@ -61,7 +61,7 @@ pub(crate) use class_facts::class_attr_names;
 pub use closure_cluster::ClosureCluster;
 pub use closures::Closures;
 pub use conditional_polymorphism::conditional_polymorphism_findings;
-pub use decisions::{unnamed_classification_findings, unnamed_condition_findings};
+pub(crate) use decisions::{UnnamedClassification, UnnamedCondition};
 pub use delegating_husk::delegating_husk_findings;
 pub use docstring::Docstring;
 pub use duplicate_block::duplicate_block_findings;
