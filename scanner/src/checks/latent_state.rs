@@ -12,7 +12,7 @@ use crate::finding::Finding;
 
 use super::class_facts::class_field_names;
 use super::expr_walk::{push_stmt_children, stmt_exprs, walk_expr_deep};
-use super::function_facts::function_param_names;
+use super::function_facts::FunctionFacts;
 use super::record_shape::{class_key, module_type_bindings, resolve_alias, TypeBindings};
 use crate::{line_of, ScanState};
 
@@ -251,7 +251,7 @@ pub fn feature_envy_findings(state: &mut ScanState, body: &[Stmt]) {
         for m in &c.body {
             let Stmt::FunctionDef(f) = m else { continue };
             let mut params = HashSet::new();
-            function_param_names(&f.parameters, &mut params);
+            FunctionFacts::function_param_names(&f.parameters, &mut params);
             let mut loop_targets = HashSet::new();
             loop_target_names(&f.body, &mut loop_targets);
             let mut collaborators = HashSet::new();

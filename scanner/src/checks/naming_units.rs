@@ -12,7 +12,7 @@ use ruff_text_size::Ranged;
 use std::collections::HashSet;
 
 use super::expr_walk::{stmt_exprs, walk_expr_deep};
-use super::function_facts::function_param_names;
+use super::function_facts::FunctionFacts;
 
 /// The unit vocabulary of a name: which word states the unit, and which literals a name explains.
 pub struct NamingUnits;
@@ -115,7 +115,7 @@ impl NamingUnits {
                 match s {
                     Stmt::FunctionDef(f) => {
                         let mut p = params.clone();
-                        function_param_names(&f.parameters, &mut p);
+                        FunctionFacts::function_param_names(&f.parameters, &mut p);
                         walk(&f.body, &p, out);
                     }
                     Stmt::ClassDef(c) => walk(&c.body, params, out),

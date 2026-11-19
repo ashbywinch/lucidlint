@@ -10,7 +10,7 @@ use ruff_python_ast::{Expr, Stmt, StmtFunctionDef};
 use crate::finding::Finding;
 
 use super::expr_walk::{push_stmt_children, walk_expr_deep};
-use super::function_facts::{function_param_names, inner_function_count};
+use super::function_facts::FunctionFacts;
 use crate::{stmt_line, ScanState};
 
 /// `closures`: the rule object. Its methods read one function's nested definitions and captured state.
@@ -50,7 +50,7 @@ impl Closures {
     /// collaborator an accumulator.
     pub fn closure_findings(state: &mut ScanState, stmt: &Stmt, cc: u32, span: u32) {
         let Stmt::FunctionDef(f) = stmt else { return };
-        let inner = inner_function_count(stmt);
+        let inner = FunctionFacts::inner_function_count(stmt);
         if inner < 2 {
             return;
         }
@@ -106,12 +106,12 @@ impl Closures {
     fn captured_state_writes(f: &StmtFunctionDef, through_attributes: bool) -> Vec<String> {
         let (inners, outer_bound) = Self::scope_fns_and_bindings(&f.body);
         let mut params = HashSet::new();
-        function_param_names(&f.parameters, &mut params);
+        FunctionFacts::function_param_names(&f.parameters, &mut params);
         let mut mutated: Vec<String> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for inner in inners {
             let mut inner_bound = HashSet::new();
-            function_param_names(&inner.parameters, &mut inner_bound);
+            FunctionFacts::function_param_names(&inner.parameters, &mut inner_bound);
             let (_, deeper) = Self::scope_fns_and_bindings(&inner.body);
             inner_bound.extend(deeper);
             let candidates: HashSet<&str> = outer_bound

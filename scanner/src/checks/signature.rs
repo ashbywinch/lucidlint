@@ -12,7 +12,7 @@ use crate::finding::Finding;
 use super::builtin_shadow::SHADOWED_BUILTINS;
 use super::class_facts::annotation_base_name;
 use super::expr_walk::{push_stmt_children, stmt_exprs};
-use super::function_facts::body_refs_name;
+use super::function_facts::FunctionFacts;
 use super::naming_units::NamingUnits;
 use crate::{line_of, ScanState};
 
@@ -157,7 +157,7 @@ pub fn detached_method_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
     }
     // super() needs the binding even when the body never names the receiver
     // (super().__init__(v) carries no literal self)
-    if body_refs_name(&f.body, "super") {
+    if FunctionFacts::body_refs_name(&f.body, "super") {
         return;
     }
     // an override's binding is the base class's contract, not a local call
@@ -167,7 +167,7 @@ pub fn detached_method_findings(state: &mut ScanState, f: &StmtFunctionDef, sour
     }) {
         return;
     }
-    if body_refs_name(&f.body, recv) {
+    if FunctionFacts::body_refs_name(&f.body, recv) {
         return;
     }
     let fn_name = f.name.to_string();

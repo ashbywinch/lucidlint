@@ -15,8 +15,9 @@ use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
 
+use super::annotation_base_name;
+use super::function_facts::FunctionFacts;
 use super::middle_man::class_base_names;
-use super::{annotation_base_name, body_refs_name};
 use crate::naming::VAGUE_SUFFIXES;
 use crate::{line_of, stmt_line, ScanState};
 
@@ -293,7 +294,7 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
             // param has nothing to share — moving it into the class would make
             // the class field-disjoint (partition) and the fix would thrash
             let recv = f.parameters.args[0].parameter.name.id.as_str();
-            if class_names.contains(&base) && body_refs_name(&f.body, recv) {
+            if class_names.contains(&base) && FunctionFacts::body_refs_name(&f.body, recv) {
                 groups
                     .entry(base)
                     .or_default()

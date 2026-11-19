@@ -8,7 +8,7 @@ use crate::{stmt_line, ScanState};
 
 use super::class_facts::{annotation_base_name, class_methods, has_decorator};
 use super::expr_walk::push_stmt_children;
-use super::function_facts::body_refs_name;
+use super::function_facts::FunctionFacts;
 
 /// `static-husk`: the rule object. Its methods read one class; the evidence and the message live together.
 pub struct StaticHusk;
@@ -91,7 +91,8 @@ impl StaticHusk {
         // a classmethod that never touches `cls` is a staticmethod in all but
         // name: it holds no state either
         let all_static = methods.iter().all(|m| {
-            has_decorator(m, "staticmethod") || (has_decorator(m, "classmethod") && !body_refs_name(&m.body, "cls"))
+            has_decorator(m, "staticmethod")
+                || (has_decorator(m, "classmethod") && !FunctionFacts::body_refs_name(&m.body, "cls"))
         });
         Self::is_static_husk(all_static, has_property, has_dataclass_fields, writes_state)
     }

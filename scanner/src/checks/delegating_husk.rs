@@ -9,7 +9,7 @@ use crate::finding::Finding;
 use crate::{stmt_line, ScanState};
 
 use super::class_facts::class_methods;
-use super::function_facts::{fn_param_names, is_pure_forwarder_body};
+use super::function_facts::FunctionFacts;
 
 /// Is `body` exactly `return <callee>(<params>)` with EVERY param passed
 /// positionally in order — the pure-forwarder SHAPE shared by
@@ -75,7 +75,7 @@ pub fn delegating_husk_findings(state: &mut ScanState, body: &[Stmt]) {
         .iter()
         .filter_map(|s| match s {
             Stmt::FunctionDef(f) => {
-                let params = fn_param_names(f);
+                let params = FunctionFacts::fn_param_names(f);
                 if is_forwarder_shaped(&f.body, &params) {
                     Some(f.name.to_string())
                 } else {
@@ -86,7 +86,7 @@ pub fn delegating_husk_findings(state: &mut ScanState, body: &[Stmt]) {
         })
         .collect();
     let method_params = |m: &StmtFunctionDef| {
-        fn_param_names(m)
+        FunctionFacts::fn_param_names(m)
             .into_iter()
             .filter(|p| p != "self" && p != "cls")
             .collect::<Vec<_>>()
@@ -100,7 +100,7 @@ pub fn delegating_husk_findings(state: &mut ScanState, body: &[Stmt]) {
         if methods.iter().any(|m| {
             let mut callee = String::new();
             let params = method_params(m);
-            !is_pure_forwarder_body(&m.body, &mut callee, &params) || !module_fns.contains(&callee)
+            !FunctionFacts::is_pure_forwarder_body(&m.body, &mut callee, &params) || !module_fns.contains(&callee)
         }) {
             continue;
         }
@@ -110,7 +110,7 @@ pub fn delegating_husk_findings(state: &mut ScanState, body: &[Stmt]) {
         for m in &methods {
             let params = method_params(m);
             let mut callee = String::new();
-            if is_pure_forwarder_body(&m.body, &mut callee, &params) && forwarder_fns.contains(&callee) {
+            if FunctionFacts::is_pure_forwarder_body(&m.body, &mut callee, &params) && forwarder_fns.contains(&callee) {
                 chains_down = true;
             }
         }

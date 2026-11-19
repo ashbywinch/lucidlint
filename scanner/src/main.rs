@@ -208,7 +208,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 ));
 
                 self.fn_stack.push(FnScope {
-                    returned: returned_names(&f.body),
+                    returned: FunctionFacts::returned_names(&f.body),
                 });
                 self.unreachable_check(&f.body);
                 shadow_findings(self, stmt);
@@ -2786,7 +2786,7 @@ mod tests {
         let src = include_str!("../../tests/fixtures/rust/real_tfl_build_cost_groups_counts_two__01.py");
         let parsed = ruff_python_parser::parse_module(src).unwrap();
         let body = parsed.syntax().body.clone();
-        let inner = checks::inner_function_count(&body[0]);
+        let inner = checks::FunctionFacts::inner_function_count(&body[0]);
         assert_eq!(inner, 2, "real fn inner count: {inner}");
     }
 

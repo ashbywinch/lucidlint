@@ -6,7 +6,7 @@ use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
 
-use super::function_facts::{fn_param_names, is_pure_forwarder_body};
+use super::function_facts::FunctionFacts;
 use crate::forwarding::{ForwarderFn, ForwarderMethod, RepoMethod};
 use crate::{line_of, ScanState};
 
@@ -56,15 +56,15 @@ impl Forwarding {
         let module_fn_params: std::collections::HashMap<String, Vec<String>> = body
             .iter()
             .filter_map(|s| match s {
-                Stmt::FunctionDef(f) => Some((f.name.to_string(), fn_param_names(f))),
+                Stmt::FunctionDef(f) => Some((f.name.to_string(), FunctionFacts::fn_param_names(f))),
                 _ => None,
             })
             .collect();
         for s in body {
             let Stmt::FunctionDef(f) = s else { continue };
-            let params = fn_param_names(f);
+            let params = FunctionFacts::fn_param_names(f);
             let mut name_callee = String::new();
-            let is_head = is_pure_forwarder_body(&f.body, &mut name_callee, &params);
+            let is_head = FunctionFacts::is_pure_forwarder_body(&f.body, &mut name_callee, &params);
             let method_callee = Self::method_forwarder_callee(&f.body, &params);
             if is_head || method_callee.is_some() {
                 state.forwarder_fns.push(ForwarderFn {
@@ -83,12 +83,14 @@ impl Forwarding {
             let Stmt::ClassDef(cls) = s else { continue };
             for m in &cls.body {
                 let Stmt::FunctionDef(f) = m else { continue };
-                let params: Vec<String> = fn_param_names(f)
+                let params: Vec<String> = FunctionFacts::fn_param_names(f)
                     .into_iter()
                     .filter(|p| p != "self" && p != "cls")
                     .collect();
                 let mut callee = String::new();
-                if is_pure_forwarder_body(&f.body, &mut callee, &params) && module_fn_params.contains_key(&callee) {
+                if FunctionFacts::is_pure_forwarder_body(&f.body, &mut callee, &params)
+                    && module_fn_params.contains_key(&callee)
+                {
                     state.forwarder_methods.push(ForwarderMethod {
                         rel: state.file.to_string(),
                         class: cls.name.to_string(),

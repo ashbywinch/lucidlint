@@ -73,9 +73,8 @@ pub(crate) use expr_walk::{all_exprs, push_stmt_children, stmt_exprs, walk_expr_
 pub use fakefs::fakefs_findings;
 pub use flat_folder::FlatFolder;
 pub use forwarding::Forwarding;
-#[cfg(test)]
-pub(crate) use function_facts::inner_function_count;
-pub(crate) use function_facts::{body_refs_name, returned_names};
+pub use function_facts::FunctionFacts;
+
 pub use global_state::GlobalState;
 pub use guard_clause::guard_clause_findings;
 pub use latent_shapes::{

@@ -11,7 +11,7 @@ use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
 
-use super::function_facts::fn_param_names;
+use super::function_facts::FunctionFacts;
 use super::{push_stmt_children, stmt_exprs, walk_expr_deep};
 use crate::{line_of, ScanState};
 
@@ -105,7 +105,7 @@ impl ClosureCluster {
                 if nested.is_empty() {
                     continue;
                 }
-                let method_params = fn_param_names(method);
+                let method_params = FunctionFacts::fn_param_names(method);
                 let mut locals: HashSet<String> = method_params.iter().cloned().collect();
                 Self::collect_bound_names(&method.body, &mut locals);
                 // per nested fn: the method locals it references
@@ -113,7 +113,7 @@ impl ClosureCluster {
                 for f in &nested {
                     let mut refs = HashSet::new();
                     Self::referenced_names(&f.body, &mut refs);
-                    let own_params: HashSet<String> = fn_param_names(f).into_iter().collect();
+                    let own_params: HashSet<String> = FunctionFacts::fn_param_names(f).into_iter().collect();
                     refs = refs.difference(&own_params).cloned().collect();
                     refs = refs.intersection(&locals).cloned().collect();
                     fn_refs.push((f.name.to_string(), refs));
