@@ -41,13 +41,13 @@ pub struct SiblingClass {
     pub methods: Vec<SiblingMethod>,
 }
 
-impl SiblingClass {
+impl SiblingValueClass {
     /// The fields both classes hold. One generic name is coincidence; two is
     /// the same value seen twice.
-    fn shared_fields(&self, other: &Self) -> Vec<&str> {
-        self.fields
+    fn shared_fields<'a>(a: &'a SiblingClass, b: &SiblingClass) -> Vec<&'a str> {
+        a.fields
             .iter()
-            .filter(|f| other.fields.contains(f))
+            .filter(|f| b.fields.contains(f))
             .map(|f| f.as_str())
             .collect()
     }
@@ -75,38 +75,37 @@ impl SiblingClass {
     /// they share a domain base, so the shared half already has a home — the
     /// base. Reporting them as duplicates invites merging variants into one
     /// class with a flag, which erases the distinction they exist for.
-    fn shares_domain_base(&self, other: &Self) -> bool {
-        self.bases
+    fn shares_domain_base(a: &SiblingClass, b: &SiblingClass) -> bool {
+        a.bases
             .iter()
-            .any(|b| other.bases.contains(b) && !Self::FRAMEWORK_BASES.contains(&b.as_str()))
+            .any(|base| b.bases.contains(base) && !Self::FRAMEWORK_BASES.contains(&base.as_str()))
     }
 
     /// How the two classes are joined — containment, inheritance, a shared
     /// domain base, or a signature that names the other class. Composition,
     /// not duplication: the containment case belongs to `duplicate-field`.
-    fn composed_with(&self, other: &Self) -> bool {
-        self.bases.contains(&other.name)
-            || other.bases.contains(&self.name)
-            || self.shares_domain_base(other)
-            || self.field_types.contains(&other.name)
-            || other.field_types.contains(&self.name)
-            || self.methods.iter().any(|m| m.mentions.contains(&other.name))
-            || other.methods.iter().any(|m| m.mentions.contains(&self.name))
+    fn composed_with(a: &SiblingClass, b: &SiblingClass) -> bool {
+        a.bases.contains(&b.name)
+            || b.bases.contains(&a.name)
+            || Self::shares_domain_base(a, b)
+            || a.field_types.contains(&b.name)
+            || b.field_types.contains(&a.name)
+            || a.methods.iter().any(|m| m.mentions.contains(&b.name))
+            || b.methods.iter().any(|m| m.mentions.contains(&a.name))
     }
 
     /// The accessors this class derives from `shared`, structurally equal
     /// (dice >= 0.9) to one on `other` that reads the same fields.
-    fn matching_accessors<'a>(&'a self, other: &'a Self, shared: &[&str]) -> Vec<&'a str> {
+    fn matching_accessors<'a>(a: &'a SiblingClass, b: &'a SiblingClass, shared: &[&str]) -> Vec<&'a str> {
         let shared_set: std::collections::HashSet<&str> = shared.iter().copied().collect();
         let reads_only_shared = |m: &&SiblingMethod| {
             !m.name.starts_with("__") && !m.uses.is_empty() && m.uses.iter().all(|u| shared_set.contains(u.as_str()))
         };
-        self.methods
+        a.methods
             .iter()
             .filter(reads_only_shared)
             .filter(|m| {
-                other
-                    .methods
+                b.methods
                     .iter()
                     .filter(reads_only_shared)
                     .any(|n| crate::skeleton::dice_similarity(&m.skeleton, &n.skeleton) >= 0.9)
@@ -118,12 +117,12 @@ impl SiblingClass {
     /// The finding when `other` is this class's duplicate — the later class in
     /// scan order is the likely duplicate; the earlier one is what the
     /// codebase already reaches for.
-    fn duplicate_of(&self, other_rel: &str, other: &Self) -> Option<Finding> {
-        let shared = self.shared_fields(other);
-        if shared.len() < 2 || self.composed_with(other) {
+    fn duplicate_of(a: &SiblingClass, other_rel: &str, b: &SiblingClass) -> Option<Finding> {
+        let shared = Self::shared_fields(a, b);
+        if shared.len() < 2 || Self::composed_with(a, b) {
             return None;
         }
-        let accessors = self.matching_accessors(other, &shared);
+        let accessors = Self::matching_accessors(a, b, &shared);
         if accessors.len() < 2 {
             return None;
         }
@@ -133,14 +132,14 @@ impl SiblingClass {
             seam_members: Vec::new(),
             col: 0,
             file: other_rel.to_string(),
-            line: other.line,
-            function: format!("{}, {}", self.name, other.name),
+            line: b.line,
+            function: format!("{}, {}", a.name, b.name),
             kind: "sibling-value-class".into(),
             severity: "warn".into(),
             message: format!(
                 "'{}' and '{}' both hold {} and derive {} the same way, with no containment — the same data has two homes. If they are variants of one thing, give them the base that owns the shared half; if they are the same value, keep one and move the other's extra accessors onto it. Decide which before editing: merging two variants erases the distinction they exist for.",
-                self.name,
-                other.name,
+                a.name,
+                b.name,
                 shared.join(", "),
                 shown
             ),
@@ -394,7 +393,7 @@ impl SiblingValueClass {
                 for j in (i + 1)..classes.len() {
                     let (_, a) = classes[i];
                     let (rel_b, b) = classes[j];
-                    if let Some(f) = a.duplicate_of(rel_b, b) {
+                    if let Some(f) = SiblingValueClass::duplicate_of(a, rel_b, b) {
                         out.push(f);
                     }
                 }

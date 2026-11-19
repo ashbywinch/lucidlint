@@ -45,24 +45,6 @@ struct Cohesion {
     stand_alone: Vec<String>,
 }
 
-/// The paths an item uses, restricted to the module's own definition names.
-struct RefProbe<'a> {
-    known: &'a std::collections::HashSet<String>,
-    found: std::collections::HashSet<String>,
-}
-
-impl<'ast> Visit<'ast> for RefProbe<'_> {
-    fn visit_path(&mut self, path: &'ast Path) {
-        if let Some(first) = path.segments.first() {
-            let ident = first.ident.to_string();
-            if self.known.contains(&ident) {
-                self.found.insert(ident);
-            }
-        }
-        visit::visit_path(self, path);
-    }
-}
-
 impl MixedModule {
     /// The file's shape for the module-shape rules (#107): the types, the free
     /// `fn`s that take one of them (a group is a class equivalent), and the free
@@ -195,6 +177,24 @@ impl MixedModule {
         known: &std::collections::HashSet<String>,
         index: &std::collections::HashMap<&str, usize>,
     ) -> Vec<usize> {
+        /// The paths an item uses, restricted to the module's own definition names.
+        struct RefProbe<'a> {
+            known: &'a std::collections::HashSet<String>,
+            found: std::collections::HashSet<String>,
+        }
+
+        impl<'ast> Visit<'ast> for RefProbe<'_> {
+            fn visit_path(&mut self, path: &'ast Path) {
+                if let Some(first) = path.segments.first() {
+                    let ident = first.ident.to_string();
+                    if self.known.contains(&ident) {
+                        self.found.insert(ident);
+                    }
+                }
+                visit::visit_path(self, path);
+            }
+        }
+
         let mut parent: Vec<usize> = (0..known.len()).collect();
         fn find(parent: &mut [usize], mut x: usize) -> usize {
             while parent[x] != x {
