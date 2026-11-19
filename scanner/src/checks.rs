@@ -62,7 +62,7 @@ pub use closures::closure_findings;
 pub use conditional_polymorphism::conditional_polymorphism_findings;
 pub use decisions::{unnamed_classification_findings, unnamed_condition_findings};
 pub use delegating_husk::delegating_husk_findings;
-pub use docstring::restating_docstring_findings;
+pub use docstring::Docstring;
 pub use duplicate_block::duplicate_block_findings;
 pub use duplicate_def::duplicate_def_findings;
 pub use duplicate_expression::{collect_duplicate_expressions, duplicate_expression_findings, ExpressionOccurrence};
@@ -70,7 +70,7 @@ pub use duplicate_function::duplicate_findings;
 pub use duplicate_module::{collect_skeleton_modules, duplicate_module_findings};
 pub(crate) use expr_walk::{all_exprs, push_stmt_children, stmt_exprs, walk_expr_deep};
 pub use fakefs::fakefs_findings;
-pub use flat_folder::flat_folder_findings;
+pub use flat_folder::FlatFolder;
 pub use forwarding::{collect_forwarders, forwarding_chain_findings};
 #[cfg(test)]
 pub(crate) use function_facts::inner_function_count;
@@ -92,7 +92,7 @@ pub use magic::{
 pub use middle_man::{collect_middle_man, middle_man_findings, MiddleManCandidate, MiddleManClass};
 pub use module_names::{class_module_findings, strewing_findings, vague_name_findings};
 pub use module_size::{ModuleShape, TypeShape};
-pub use monkeypatch::monkeypatch_findings;
+pub use monkeypatch::Monkeypatch;
 pub use naming_units::magic_unit_named_offsets;
 pub(crate) use naming_units::name_states_unit;
 pub use no_assert_test::no_assert_test_findings;
@@ -110,6 +110,6 @@ pub use signature::{
 };
 pub use skipif::skipif_findings;
 pub use special_case::special_case_findings;
-pub use static_husk::static_husk_findings;
+pub use static_husk::StaticHusk;
 pub use type_ignore::type_ignore_findings;
 pub use unused::{collect_setters, unused_findings, unused_setter_findings};

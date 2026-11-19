@@ -687,7 +687,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     data_clump_findings(state, body);
     feature_envy_findings(state, body);
     collect_self_assigns(state, body);
-    static_husk_findings(state, body);
+    StaticHusk::findings(state, body);
     delegating_husk_findings(state, body);
     process_class_findings(state, body);
     closure_cluster_findings(state, body, source);
@@ -696,7 +696,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     partition_findings(state, body, source);
     // review-log rules: shadowing hazards + duplicated work (all per-file)
     duplicate_def_findings(state, body);
-    restating_docstring_findings(state, body);
+    Docstring::findings(state, body);
     duplicate_block_findings(state, body);
     // advisory refactorings (warn): detection-only, the fix names the Fowler
     // refactoring for the agent (or a future fix)
@@ -761,7 +761,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
     module_post_passes(&mut state, &body, name, source, repo_wide);
     if state.is_test {
         // the rules that live in tests — scanned for alone or with --include-tests
-        monkeypatch_findings(&mut state, &body, source);
+        Monkeypatch::findings(&mut state, &body, source);
         skipif_findings(&mut state, &body, source);
         fakefs_findings(&mut state, &body, source);
         no_assert_test_findings(&mut state, &body, source);
@@ -1561,7 +1561,7 @@ fn main() {
             module_rels.push(rel);
         }
     }
-    all_findings.extend(checks::flat_folder_findings(&module_rels, &doc_rels));
+    all_findings.extend(checks::FlatFolder::findings(&module_rels, &doc_rels));
     all_findings.extend(checks::forwarding_chain_findings(
         &heads,
         &fns,
@@ -4959,7 +4959,7 @@ mod tests {
         // one folder (modules + docs) has no structure to browse
         let modules: Vec<String> = (0..18).map(|i| format!("pkg/m{i}.py")).collect();
         let docs: Vec<String> = (0..2).map(|i| format!("pkg/d{i}.md")).collect();
-        let f = checks::flat_folder_findings(&modules, &docs);
+        let f = checks::FlatFolder::findings(&modules, &docs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].kind, "flat-folder");
         assert_eq!(f[0].severity, "warn");
@@ -4971,13 +4971,13 @@ mod tests {
     #[test]
     fn flat_folder_stays_silent_below_twenty() {
         let modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
-        assert!(checks::flat_folder_findings(&modules, &[]).is_empty());
+        assert!(checks::FlatFolder::findings(&modules, &[]).is_empty());
     }
 
     #[test]
     fn flat_folder_counts_docs_and_skips_init() {
         let docs: Vec<String> = (0..21).map(|i| format!("docs/d{i}.md")).collect();
-        let f = checks::flat_folder_findings(&[], &docs);
+        let f = checks::FlatFolder::findings(&[], &docs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].file, "docs");
         // a docs pile has no modules to group: the action must match the shape
@@ -4990,7 +4990,7 @@ mod tests {
         // init is still a clean folder
         let mut modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
         modules.push("pkg/__init__.py".to_string());
-        assert!(checks::flat_folder_findings(&modules, &[]).is_empty());
+        assert!(checks::FlatFolder::findings(&modules, &[]).is_empty());
     }
 
     #[test]
@@ -5008,7 +5008,7 @@ mod tests {
         for i in 0..15 {
             modules.push(format!("pkg/thing_node_{i}.py"));
         }
-        let f = checks::flat_folder_findings(&modules, &[]);
+        let f = checks::FlatFolder::findings(&modules, &[]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].message.contains("coherent domain subsets"), "{}", f[0].message);
         assert!(f[0].message.contains("commute (6)"), "{}", f[0].message);
@@ -5027,7 +5027,7 @@ mod tests {
             .chain((0..5).map(|i| format!("bus/bus_route_{i}.py")))
             .chain((0..9).map(|i| format!("bus/thing_{i}.py")))
             .collect();
-        let f = checks::flat_folder_findings(&modules, &[]);
+        let f = checks::FlatFolder::findings(&modules, &[]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(!f[0].message.contains("bus ("), "{}", f[0].message);
         assert!(f[0].message.contains("stop (6)"), "{}", f[0].message);
@@ -5041,7 +5041,7 @@ mod tests {
             .chain((0..4).map(|i| format!("pkg/SchoolGate{i}.py")))
             .chain((0..10).map(|i| format!("pkg/ThingNode{i}.py")))
             .collect();
-        let f = checks::flat_folder_findings(&modules, &[]);
+        let f = checks::FlatFolder::findings(&modules, &[]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].message.contains("commute (6)"), "{}", f[0].message);
         assert!(f[0].message.contains("school (4)"), "{}", f[0].message);
@@ -5054,7 +5054,7 @@ mod tests {
             .map(|i| format!("houses/nodes/thing_node_{i}.py"))
             .chain((0..8).map(|i| format!("houses/nodes/commute_{i}.py")))
             .collect();
-        let f = checks::flat_folder_findings(&modules, &[]);
+        let f = checks::FlatFolder::findings(&modules, &[]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].message.contains("commute (8)"), "{}", f[0].message);
         assert!(!f[0].message.contains("node ("), "{}", f[0].message);
@@ -5066,7 +5066,7 @@ mod tests {
         // modules the reader opens
         let mut modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
         modules.push("__init__.py".to_string());
-        assert!(checks::flat_folder_findings(&modules, &[]).is_empty());
+        assert!(checks::FlatFolder::findings(&modules, &[]).is_empty());
     }
 
     #[test]
@@ -5075,7 +5075,7 @@ mod tests {
         // not two, and never summed across sibling folders
         let modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
         let docs: Vec<String> = (0..19).map(|i| format!("pkg/d{i}.md")).collect();
-        let f = checks::flat_folder_findings(&modules, &docs);
+        let f = checks::FlatFolder::findings(&modules, &docs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].message.contains("19 modules"), "{}", f[0].message);
         assert!(f[0].message.contains("19 docs"), "{}", f[0].message);
