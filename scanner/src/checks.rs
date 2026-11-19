@@ -66,9 +66,9 @@ pub use delegating_husk::delegating_husk_findings;
 pub use docstring::Docstring;
 pub use duplicate_block::duplicate_block_findings;
 pub use duplicate_def::duplicate_def_findings;
-pub use duplicate_expression::{collect_duplicate_expressions, duplicate_expression_findings, ExpressionOccurrence};
+pub(crate) use duplicate_expression::ExpressionOccurrence;
 pub use duplicate_function::duplicate_findings;
-pub use duplicate_module::{collect_skeleton_modules, duplicate_module_findings};
+pub use duplicate_module::DuplicateModule;
 pub(crate) use expr_walk::{all_exprs, push_stmt_children, stmt_exprs, walk_expr_deep};
 pub use fakefs::fakefs_findings;
 pub use flat_folder::FlatFolder;
@@ -78,9 +78,7 @@ pub use function_facts::FunctionFacts;
 pub use global_state::GlobalState;
 pub use guard_clause::guard_clause_findings;
 pub use latent_shapes::{AssemblyClass, MisplacedMethod, TupleRecord, WideTuple};
-pub use latent_state::{
-    collect_self_assigns, data_clump_findings, duplicate_field_findings, feature_envy_findings, undeclared_findings,
-};
+pub use latent_state::LatentState;
 pub use latent_visitor::latent_visitor_findings;
 pub use loop_family::LoopFamily;
 pub use magic::MagicNumber;

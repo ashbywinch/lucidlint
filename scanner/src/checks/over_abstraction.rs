@@ -8,7 +8,7 @@ use crate::finding::Finding;
 use crate::skeleton::{skel_children, Q};
 use crate::source::Source;
 
-use super::latent_state::slot_names;
+use super::latent_state::LatentState;
 use super::record_shape::RecordShape;
 
 /// `over-abstraction`: the rule object. Its methods read the class + import index; the evidence and the message live together.
@@ -123,7 +123,7 @@ impl OverAbstraction {
                     for t in &a.targets {
                         if let Expr::Name(n) = t {
                             if n.id.as_str() == "__slots__" {
-                                if let Some(tuple) = slot_names(&a.value) {
+                                if let Some(tuple) = LatentState::slot_names(&a.value) {
                                     declared.extend(tuple);
                                 }
                             }

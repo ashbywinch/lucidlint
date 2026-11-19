@@ -195,7 +195,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
         match stmt {
             Stmt::FunctionDef(f) => {
                 let module_level = self.fn_stack.is_empty() && self.in_class == 0;
-                checks::collect_duplicate_expressions(self, f);
+                checks::ExpressionOccurrence::collect(self, f);
                 if module_level {
                     checks::collect_path_expressions(self, f);
                 }
@@ -685,14 +685,14 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     TupleRecord::findings(state, body);
     WideTuple::findings(state, body);
     AssemblyClass::findings(state, body);
-    data_clump_findings(state, body);
-    feature_envy_findings(state, body);
-    collect_self_assigns(state, body);
+    LatentState::data_clump(state, body);
+    LatentState::feature_envy(state, body);
+    LatentState::collect_self_assigns(state, body);
     StaticHusk::findings(state, body);
     delegating_husk_findings(state, body);
     process_class_findings(state, body);
     ClosureCluster::findings(state, body, source);
-    duplicate_field_findings(state, body);
+    LatentState::duplicate_field(state, body);
     RecordShape::findings(state, body, source);
     Partition::findings(state, body, source);
     // review-log rules: shadowing hazards + duplicated work (all per-file)
@@ -711,7 +711,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     MiddleMan::collect(state, body, source, repo_wide);
     Unused::collect_setters(state, body);
     LoopFamily::findings(state, body, source);
-    collect_skeleton_modules(state, body, name);
+    DuplicateModule::collect(state, body, name);
     Forwarding::collect(state, body);
 }
 
@@ -1041,7 +1041,7 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
     }
     let mut additions: Vec<Finding> = Vec::new();
     additions.extend(checks::duplicate_findings(&skeletons));
-    additions.extend(checks::duplicate_module_findings(&module_entities));
+    additions.extend(checks::DuplicateModule::findings(&module_entities));
     additions.extend(checks::Forwarding::findings(
         &heads,
         &fns,
@@ -1080,7 +1080,7 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         .collect();
     reconcile_repo_wide(
         &mut additions,
-        checks::duplicate_expression_findings(&duplicate_expr_scans),
+        checks::ExpressionOccurrence::findings(&duplicate_expr_scans),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -1103,7 +1103,7 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
             self_assigns: s.self_assigns.clone(),
         })
         .collect();
-    let undeclared = checks::undeclared_findings(&undecl_scans);
+    let undeclared = checks::LatentState::undeclared(&undecl_scans);
     reconcile_repo_wide(&mut additions, undeclared, &supps_by_rel, &supps_spent_by_rel);
     reconcile_repo_wide(
         &mut additions,
@@ -1544,7 +1544,7 @@ fn main() {
     }
     all_findings.extend(duplicate_findings(&py_skeletons));
     all_findings.extend(duplicate_findings(&rs_skeletons));
-    all_findings.extend(checks::duplicate_module_findings(&module_entities));
+    all_findings.extend(checks::DuplicateModule::findings(&module_entities));
     // flat-folder: what a reader browses per directory — modules + docs,
     // counted from the scan set and the docs root (no graph needed)
     let mut module_rels: Vec<String> = Vec::new();
@@ -1606,7 +1606,7 @@ fn main() {
         .collect();
     reconcile_repo_wide(
         &mut all_findings,
-        checks::duplicate_expression_findings(&duplicate_expr_scans),
+        checks::ExpressionOccurrence::findings(&duplicate_expr_scans),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -4617,7 +4617,7 @@ mod tests {
         );
         reconcile_repo_wide(
             &mut all,
-            checks::duplicate_expression_findings(&duplicate_expr_scans),
+            checks::ExpressionOccurrence::findings(&duplicate_expr_scans),
             &supps_by_rel,
             &spent_by_rel,
         );
@@ -4627,7 +4627,7 @@ mod tests {
             &supps_by_rel,
             &spent_by_rel,
         );
-        let undeclared = undeclared_findings(&undecl_scans);
+        let undeclared = LatentState::undeclared(&undecl_scans);
         reconcile_repo_wide(&mut all, undeclared, &supps_by_rel, &spent_by_rel);
         reconcile_repo_wide(
             &mut all,
@@ -4636,7 +4636,7 @@ mod tests {
             &spent_by_rel,
         );
         // the suppression census + its bulk warning mirror main()'s report
-        all.extend(duplicate_module_findings(&module_entities));
+        all.extend(DuplicateModule::findings(&module_entities));
         let census = suppression_counts(supps_by_rel.values());
         all.extend(Forwarding::findings(&heads, &fns, &repo_methods, &imports_by_rel));
         all.extend(bulk_suppression_findings(&census, &supps_by_rel, 10));
