@@ -120,6 +120,13 @@ Small and leaf-first, so each step is provable on its own:
 | 11 | `dispatch_registry.py`, `rule_table.py` | leaf rewrites |
 | 12 | the entry: keep only imports, the kind tables and the facade | the ladder finding is gone here |
 
+**Progress (2026-11-19).** Steps 1 and 4 are landed: `records.py` /
+`fix_options.py` / `strewing_group.py` (22 records and the options out) and
+`method_extraction.py` (`MethodExtraction`, 18 definitions, the request keeps
+three delegates). The package root is at 209 definitions; behaviour is
+unchanged (houses 353 / album 431 identical, 318 tests, `GATE: PASS`). The
+remaining order is unchanged; the mechanical family is next.
+
 ## Verification, after every step
 
 1. `make check` (ruff + pyrefly; run `make typecheck-update-baseline` only
