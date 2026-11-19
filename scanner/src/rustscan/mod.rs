@@ -126,7 +126,7 @@ impl RustScan {
             current_fn: None,
             expr_stack: Vec::new(),
             in_test_code: false,
-            is_test_file: crate::is_test_path(name),
+            is_test_file: crate::paths::Paths::is_test_path(name),
             repo_wide,
             current_impl: None,
             bare_body: false,

@@ -8,7 +8,7 @@ use ruff_python_ast::{AnyNodeRef, Expr, Stmt, StmtClassDef};
 use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
-use crate::paths::is_vendored;
+use crate::paths::Paths;
 use crate::skeleton::{dice_from_bigrams, skel_children, BigramInterner, SkeletonModule, Q};
 use crate::source::Source;
 use crate::ScanState;
@@ -431,7 +431,7 @@ pub fn duplicate_module_findings(entities: &[SkeletonModule]) -> Vec<Finding> {
 /// The module is outside the identity scan: test code, a package marker, or
 /// vendored.
 fn is_skipped_module(state: &ScanState, rel: &str) -> bool {
-    state.is_test || rel.ends_with("__init__.py") || is_vendored(rel)
+    state.is_test || rel.ends_with("__init__.py") || Paths::is_vendored(rel)
 }
 
 /// Two class skeletons carry different field sets — siblings, not a fork.

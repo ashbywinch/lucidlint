@@ -49,7 +49,7 @@ use checks::Q;
 use checks::*;
 use file_scan::{ClassInfo, FileScan, ImportInfo, SelfAssign, UndeclScan};
 use finding::{Finding, FnCc, FnScope};
-use paths::{is_out_of_scan, is_test_path, rel_of, scan_root, SCAN_SKIP_DIRS};
+use paths::{Paths, SCAN_SKIP_DIRS};
 use python_shape::{collect_stmt_lists, python_fn_shape};
 use source::Source;
 
@@ -651,7 +651,7 @@ impl FileScan {
     /// The repo-relative path — the scan's identity (the orchestrator's
     /// `rel`); the repo-wide merge keys everything by it.
     pub fn rel_of(&self, root_s: &str) -> String {
-        rel_of(&self.file_name, root_s)
+        Paths::rel_of(&self.file_name, root_s)
     }
 }
 
@@ -752,7 +752,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
         magic_const_rhs_exempts: checks::MagicNumber::magic_const_rhs_offsets(&body),
         magic_len_guard_exempts: checks::MagicNumber::magic_len_guard_offsets(&body),
         magic_unit_named_exempts: checks::NamingUnits::magic_unit_named_offsets(&body),
-        is_test: is_test_path(name),
+        is_test: Paths::is_test_path(name),
         module_constants: checks::GlobalState::module_constant_names(&body),
         ..Default::default()
     };
@@ -998,7 +998,7 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         std::collections::HashMap::new();
     for scan in scans {
         let rel = scan.rel_of(root_s);
-        let is_test = is_test_path(&rel);
+        let is_test = Paths::is_test_path(&rel);
         for s in &scan.skeletons {
             skeletons.push(SkeletonFn {
                 rel: rel.clone(),
@@ -1430,7 +1430,7 @@ fn main() {
         }
         i += 1;
     }
-    let root = scan_root(&paths, root_override.as_deref());
+    let root = Paths::scan_root(&paths, root_override.as_deref());
     let mut scans = Vec::new();
     // per-file scans are independent — parse in parallel (rayon), then the
     // repo-wide passes consume the scans in ORDER (duplicate first-seen,
@@ -1467,8 +1467,8 @@ fn main() {
     let mut test_refs = HashSet::new();
     let mut strings = Vec::new();
     for scan in &scans {
-        let rel = rel_of(&scan.file_name, &root);
-        let is_test = is_test_path(&rel);
+        let rel = Paths::rel_of(&scan.file_name, &root);
+        let is_test = Paths::is_test_path(&rel);
         for s in &scan.skeletons {
             skeletons.push(SkeletonFn {
                 rel: rel.clone(),
@@ -1503,15 +1503,15 @@ fn main() {
     // class/import collection before the scans are consumed)
     let class_scans: Vec<(String, Vec<ClassInfo>, Vec<ImportInfo>)> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.classes.clone(), s.imports.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.classes.clone(), s.imports.clone()))
         .collect();
     let supps_by_rel: std::collections::HashMap<String, crate::suppressions::Suppressions> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.supps.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.supps.clone()))
         .collect();
     let supps_spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.supps_spent.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.supps_spent.clone()))
         .collect();
     let suppression_census = suppression_counts(scans.iter().map(|s| &s.supps));
     let bulk_suppressions = bulk_suppression_findings(&suppression_census, &supps_by_rel, 10);
@@ -1528,7 +1528,7 @@ fn main() {
         heads.extend(scan.forwarder_methods.iter().cloned());
         fns.extend(scan.forwarder_fns.iter().cloned());
         repo_methods.extend(scan.repo_methods.iter().cloned());
-        imports_by_rel.insert(rel_of(&scan.file_name, &root), scan.imports.clone());
+        imports_by_rel.insert(Paths::rel_of(&scan.file_name, &root), scan.imports.clone());
     }
     all_findings.extend(bulk_suppressions);
     // per-language duplicate pools: a Python fn and a Rust fn with the same
@@ -1550,10 +1550,10 @@ fn main() {
     let mut module_rels: Vec<String> = Vec::new();
     let mut doc_rels: Vec<String> = Vec::new();
     for p in &paths {
-        let rel = rel_of(p, &root);
+        let rel = Paths::rel_of(p, &root);
         // count what the scan browses: production code unless the caller asked
         // for tests, and never upstream's vendored tree
-        if is_out_of_scan(include_tests, &rel) {
+        if Paths::is_out_of_scan(include_tests, &rel) {
             continue;
         }
         if p.ends_with(".md") {
@@ -1582,7 +1582,7 @@ fn main() {
         .collect();
     let scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.scattered.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.scattered.clone()))
         .collect();
     reconcile_repo_wide(
         &mut all_findings,
@@ -1592,7 +1592,7 @@ fn main() {
     );
     let path_scans: Vec<(String, Vec<checks::PathExpression>)> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.path_expressions.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.path_expressions.clone()))
         .collect();
     reconcile_repo_wide(
         &mut all_findings,
@@ -1602,7 +1602,7 @@ fn main() {
     );
     let duplicate_expr_scans: Vec<(String, Vec<checks::ExpressionOccurrence>)> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.duplicate_expressions.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.duplicate_expressions.clone()))
         .collect();
     reconcile_repo_wide(
         &mut all_findings,
@@ -1613,7 +1613,7 @@ fn main() {
     // large-module: the file's own shape, measured where the parser held it
     let module_shapes: Vec<(String, checks::ModuleShape)> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.module_shape.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.module_shape.clone()))
         .collect();
     reconcile_repo_wide(
         &mut all_findings,
@@ -1629,7 +1629,7 @@ fn main() {
     );
     let sibling_scans: Vec<(String, Vec<checks::SiblingClass>)> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.sibling_classes.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.sibling_classes.clone()))
         .collect();
     reconcile_repo_wide(
         &mut all_findings,
@@ -1643,11 +1643,11 @@ fn main() {
         let mut mod_decls: std::collections::HashMap<String, Vec<(String, bool)>> = std::collections::HashMap::new();
         let mut uses: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
         for rs in &rust_scans {
-            let rel = rel_of(&rs.file_name(), &root);
+            let rel = Paths::rel_of(&rs.file_name(), &root);
             mod_decls.insert(rel.clone(), rs.mod_decls.clone());
             uses.insert(rel, rs.uses.clone());
         }
-        let rels: Vec<String> = paths.iter().map(|p| rel_of(p, &root)).collect();
+        let rels: Vec<String> = paths.iter().map(|p| Paths::rel_of(p, &root)).collect();
         let graph = rustscan::ModuleGraph::module_graph(&rels, &mod_decls, &uses);
         // the module graph keys are rels to the binary's computed root — the
         // orchestrator's scan set is repo-relative, so re-anchor the findings
@@ -1681,7 +1681,7 @@ fn main() {
     } else {
         None
     };
-    let rels: Vec<String> = paths.iter().map(|p| rel_of(p, &root)).collect();
+    let rels: Vec<String> = paths.iter().map(|p| Paths::rel_of(p, &root)).collect();
     if let Some(c) = &contract {
         let repo_root = Path::new(&root);
         all_findings.extend(graph_families::high_risk_findings(repo_root, c, 0.8, include_tests));
@@ -1705,7 +1705,7 @@ fn main() {
                 // max CC per file from the scan itself — recompute without the graph
                 let mut cc_any: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
                 for e in &all_cc {
-                    let rel = rel_of(&e.file, &root);
+                    let rel = Paths::rel_of(&e.file, &root);
                     let slot = cc_any.entry(rel).or_insert(0);
                     *slot = (*slot).max(e.cc);
                 }
@@ -1846,7 +1846,7 @@ const RUST_FIX_KINDS: &[&str] = &[
 mod tests {
     use super::*;
 
-    use crate::paths::{repo_root, repo_root_impl};
+    use crate::paths::Paths;
 
     #[test]
     fn full_fix_command_never_fabricates_name_from_prose() {
@@ -1883,7 +1883,7 @@ mod tests {
         // graph-family rel resolution (large-function/high-risk/
         // layer-mix/folder-mix never fired through the orchestrator)
         let cwd = Path::new("/work/repo");
-        let root = repo_root_impl(
+        let root = Paths::repo_root_impl(
             &[
                 "tests/a.py".to_string(),
                 "tests/b.py".to_string(),
@@ -1904,9 +1904,9 @@ mod tests {
         // Relative inputs are resolved against the cwd FIRST, so the cwd IS
         // the scan root the caller passed them from.
         let cwd = Path::new("/work/repo");
-        let root = repo_root_impl(&["pkg/a.py".to_string(), "pkg/b.py".to_string()], cwd);
+        let root = Paths::repo_root_impl(&["pkg/a.py".to_string(), "pkg/b.py".to_string()], cwd);
         assert_eq!(root, "/work/repo");
-        let single = repo_root_impl(&["pkg/only.py".to_string()], cwd);
+        let single = Paths::repo_root_impl(&["pkg/only.py".to_string()], cwd);
         assert_eq!(single, "/work/repo");
     }
 
@@ -1915,7 +1915,7 @@ mod tests {
         // a relative half is defined relative to the cwd — the prefix of a
         // mixed pair cannot be trusted
         let cwd = Path::new("/work/repo");
-        let root = repo_root_impl(&["/elsewhere/core.py".to_string(), "pkg/a.py".to_string()], cwd);
+        let root = Paths::repo_root_impl(&["/elsewhere/core.py".to_string(), "pkg/a.py".to_string()], cwd);
         assert_eq!(root, "/work/repo");
     }
 
@@ -1924,14 +1924,14 @@ mod tests {
         // the orchestrator names the scan root; the file layout must not
         // decide it
         let paths = vec!["pkg/a.py".to_string(), "pkg/b.py".to_string()];
-        assert_eq!(scan_root(&paths, Some("/work/repo")), "/work/repo");
-        assert_eq!(scan_root(&paths, None), repo_root(&paths));
+        assert_eq!(Paths::scan_root(&paths, Some("/work/repo")), "/work/repo");
+        assert_eq!(Paths::scan_root(&paths, None), Paths::repo_root(&paths));
     }
 
     #[test]
     fn repo_root_absolute_paths_unchanged() {
         let cwd = Path::new("/work/repo");
-        let root = repo_root_impl(
+        let root = Paths::repo_root_impl(
             &[
                 "/home/u/proj/tests/a.py".to_string(),
                 "/home/u/proj/tools/b.py".to_string(),
@@ -4550,7 +4550,7 @@ mod tests {
             spent_by_rel.insert(name.to_string(), std::mem::take(&mut scan.supps_spent));
             all.extend(scan.findings);
             let rel = name.to_string();
-            let is_test = is_test_path(&rel);
+            let is_test = Paths::is_test_path(&rel);
             for s in &scan.skeletons {
                 skeletons.push(SkeletonFn {
                     rel: rel.clone(),

@@ -301,7 +301,7 @@ impl MixedModule {
     /// test paths (a generated module has no reader to organise for, and a test
     /// module is not the module's design).
     pub(crate) fn mixed_module_into(scan: &mut RustScan, file: &File, name: &str) {
-        if scan.module_shape.generated || crate::is_test_path(name) {
+        if scan.module_shape.generated || crate::paths::Paths::is_test_path(name) {
             return;
         }
         if let Some(finding) = Self::mixed_module_finding(file, name) {
