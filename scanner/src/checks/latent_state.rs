@@ -13,7 +13,7 @@ use crate::finding::Finding;
 use super::class_facts::class_field_names;
 use super::expr_walk::{push_stmt_children, stmt_exprs, walk_expr_deep};
 use super::function_facts::FunctionFacts;
-use super::record_shape::{class_key, module_type_bindings, resolve_alias, TypeBindings};
+use super::record_shape::{RecordShape, TypeBindings};
 use crate::source::Source;
 use crate::ScanState;
 
@@ -40,7 +40,7 @@ fn param_annotation_key(p: &ruff_python_ast::ParameterWithDefault, bindings: &Ty
         .annotation
         .as_deref()
         .map(|a| {
-            let resolved = resolve_alias(a, bindings);
+            let resolved = RecordShape::resolve_alias(a, bindings);
             source[resolved.range()]
                 .chars()
                 .filter(|c| !c.is_whitespace())
@@ -54,7 +54,7 @@ fn param_annotation_key(p: &ruff_python_ast::ParameterWithDefault, bindings: &Ty
 /// pair — the pair travels together, so it is a data clump; introduce a
 /// parameter object.
 pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
-    let bindings = module_type_bindings(body);
+    let bindings = RecordShape::module_type_bindings(body);
     let mut funcs: Vec<(&StmtFunctionDef, Vec<ParamKey>)> = Vec::new();
     for s in body {
         let Stmt::FunctionDef(f) = s else { continue };
@@ -422,7 +422,7 @@ pub fn undeclared_findings(scans: &[crate::UndeclScan]) -> Vec<Finding> {
                 Vec::new()
             };
             for anc in candidates {
-                let Some(anc_key) = class_key(classes, &anc.0, &anc.1) else {
+                let Some(anc_key) = RecordShape::class_key(classes, &anc.0, &anc.1) else {
                     continue;
                 };
                 if declares(classes, import_maps, &anc_key, attr, visited) {

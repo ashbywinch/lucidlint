@@ -95,7 +95,7 @@ pub use noqa::noqa_findings;
 pub use over_abstraction::OverAbstraction;
 pub use partition::Partition;
 pub use process_class::process_class_findings;
-pub use record_shape::record_shape_findings;
+pub use record_shape::RecordShape;
 pub use scattered::{Scattered, ScatteredInstance};
 pub use shared_path::{collect_path_expressions, shared_path_findings, PathExpression};
 pub use sibling::SiblingValueClass;

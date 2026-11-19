@@ -9,7 +9,7 @@ use crate::skeleton::{skel_children, Q};
 use crate::source::Source;
 
 use super::latent_state::slot_names;
-use super::record_shape::class_key;
+use super::record_shape::RecordShape;
 
 /// `over-abstraction`: the rule object. Its methods read the class + import index; the evidence and the message live together.
 pub struct OverAbstraction;
@@ -198,7 +198,7 @@ impl OverAbstraction {
             for c in cls_list {
                 for base in &c.bases {
                     for (mrel, mname) in Self::base_candidates(base, rel, &import_map) {
-                        let Some(key) = class_key(&classes, &mrel, &mname) else {
+                        let Some(key) = RecordShape::class_key(&classes, &mrel, &mname) else {
                             continue;
                         };
                         if key == (rel.clone(), c.name.clone()) {

@@ -693,7 +693,7 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     process_class_findings(state, body);
     ClosureCluster::findings(state, body, source);
     duplicate_field_findings(state, body);
-    record_shape_findings(state, body, source);
+    RecordShape::findings(state, body, source);
     Partition::findings(state, body, source);
     // review-log rules: shadowing hazards + duplicated work (all per-file)
     duplicate_def_findings(state, body);
