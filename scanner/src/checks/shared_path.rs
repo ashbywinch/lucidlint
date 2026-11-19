@@ -308,6 +308,10 @@ impl PathExpression {
                 .cmp(&a.modules.len())
                 .then(b_run.len().cmp(&a_run.len()))
                 .then(b.uses.cmp(&a.uses))
+                // equal-scoring runs are common (several one-segment
+                // suffixes); the run itself is the last word, so a HashMap's
+                // iteration order never decides which one the reader sees
+                .then_with(|| a_run.cmp(b_run))
         });
         let mut selected: Vec<(Vec<String>, RunGroup)> = Vec::new();
         for (run, group) in candidates {

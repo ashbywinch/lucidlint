@@ -26,7 +26,14 @@ def rust_fixable_from_dispatch() -> set[str]:
     match arms so the orchestrator's constant and the dispatcher cannot
     drift apart."""
     src = (SCANNER_SRC / "main.rs").read_text()
-    return {m.replace("_", "-") for m in re.findall(r"fix::fix_([a-z_]+)\(", src)}
+    snake = {m.replace("_", "-") for m in re.findall(r"fix::fix_([a-z_]+)\(", src)}
+    # the class-based fixers (LoopPipeline::fix, LoopHoist::fix) — the same
+    # dispatcher routes, named by the type that owns the rewrite
+    camel = {
+        re.sub(r"(?<!^)(?=[A-Z])", "-", m).lower()
+        for m in re.findall(r"fix::([A-Za-z]+)::fix\(", src)
+    }
+    return snake | camel
 
 
 def tails_of(src: str) -> list[str]:
@@ -51,7 +58,9 @@ def test_python_finding_tails_name_python_fixable_kinds():
 
 def test_rust_finding_tails_name_rust_fixable_kinds():
     rustscan = sorted((SCANNER_SRC / "rustscan").rglob("*.rs"))
-    src = "".join(p.read_text() for p in rustscan) + (SCANNER_SRC / "rustloops.rs").read_text()
+    src = "".join(p.read_text() for p in rustscan) + "".join(
+        p.read_text() for p in sorted((SCANNER_SRC / "rustloops").rglob("*.rs"))
+    )
     fixable = rust_fixable_from_dispatch()
     offenders = [k for k in tails_of(src) if k not in fixable]
     assert offenders == [], f"fix directives with no Rust fixer: {offenders}"
