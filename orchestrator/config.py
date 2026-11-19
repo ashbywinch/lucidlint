@@ -11,6 +11,7 @@ change mid-run.
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -19,7 +20,7 @@ import rule_metadata
 
 # the raw TOML payload — a wire-format blob, not a domain record (record-shape
 # exempts the deserializer boundary by naming it)
-_RawConfig = dict[str, Any]
+_RawConfig = Mapping[str, Any]
 
 
 @dataclass

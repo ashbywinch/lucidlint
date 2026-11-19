@@ -35,6 +35,7 @@ class Host:
         self.pygit2 = Substitutable("_pygit2")
         self.graph_store = Substitutable("_GraphStore")
         self.graph_registry = Substitutable("_Registry")
+        self.fix_engine = Substitutable("fix_engine")
 
 
 HOST = Host()

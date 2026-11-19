@@ -156,6 +156,7 @@ class GateRunner:
             return FileHistory(Counter(), {})
         head = ""
         cache_key = ""
+        assert SortMode is not None  # pygit2 is present here (guarded above)
         try:
             r = HOST.pygit2.Repository(str(self.repo))
             head = str(r.head.target)
