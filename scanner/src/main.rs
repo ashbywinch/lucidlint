@@ -197,7 +197,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 let module_level = self.fn_stack.is_empty() && self.in_class == 0;
                 checks::ExpressionOccurrence::collect(self, f);
                 if module_level {
-                    checks::collect_path_expressions(self, f);
+                    checks::PathExpression::collect(self, f);
                 }
                 let was_fn = self.current_fn.take();
                 self.current_fn = Some((f.name.to_string(), Source::line_of(self.source, f.range.start())));
@@ -1070,7 +1070,7 @@ pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collecti
         .collect();
     reconcile_repo_wide(
         &mut additions,
-        checks::shared_path_findings(&path_scans),
+        checks::PathExpression::findings(&path_scans),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -1596,7 +1596,7 @@ fn main() {
         .collect();
     reconcile_repo_wide(
         &mut all_findings,
-        checks::shared_path_findings(&path_scans),
+        checks::PathExpression::findings(&path_scans),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -4611,7 +4611,7 @@ mod tests {
         );
         reconcile_repo_wide(
             &mut all,
-            checks::shared_path_findings(&path_scans),
+            checks::PathExpression::findings(&path_scans),
             &supps_by_rel,
             &spent_by_rel,
         );

@@ -17,7 +17,7 @@ use ruff_text_size::Ranged;
 
 use crate::{finding::Finding, source::Source, ScanState};
 
-use super::shared_path::{fstring_shape, path_call, source_text_of};
+use super::shared_path::PathExpression;
 
 /// One substantive expression's occurrence: the canonical shape, the source
 /// text for the message, and the extent for the parent/child dedup.
@@ -70,7 +70,7 @@ impl ExpressionOccurrence {
                             key,
                             line: Source::line_of(self.source, range.start()),
                             function: self.function.clone(),
-                            text: ExpressionOccurrence::collapse_ws(&source_text_of(expr, self.source)),
+                            text: ExpressionOccurrence::collapse_ws(&PathExpression::source_text_of(expr, self.source)),
                             nodes: ExpressionOccurrence::expr_node_count(expr),
                             start: (
                                 Source::line_of(self.source, range.start()),
@@ -236,7 +236,7 @@ impl ExpressionOccurrence {
     /// expression is still part of that expression's shape.
     fn is_path_root(expr: &Expr) -> bool {
         match expr {
-            Expr::Call(call) => path_call(call),
+            Expr::Call(call) => PathExpression::path_call(call),
             Expr::BinOp(b) if matches!(b.op, Operator::Div) => {
                 Self::contains_path_literal(&b.left)
                     || Self::contains_path_literal(&b.right)
@@ -269,7 +269,7 @@ impl ExpressionOccurrence {
         impl<'a> SourceOrderVisitor<'a> for Find {
             fn visit_expr(&mut self, expr: &'a Expr) {
                 if let Expr::Call(call) = expr {
-                    if path_call(call) {
+                    if PathExpression::path_call(call) {
                         self.0 = true;
                     }
                 }
@@ -323,13 +323,13 @@ impl ExpressionOccurrence {
                 format!("{func}({})", all.join(", "))
             }
             Expr::StringLiteral(_) if key => "<key>".to_string(),
-            Expr::FString(f) => fstring_shape(f),
+            Expr::FString(f) => PathExpression::fstring_shape(f),
             Expr::StringLiteral(_)
             | Expr::BytesLiteral(_)
             | Expr::NumberLiteral(_)
             | Expr::BooleanLiteral(_)
             | Expr::NoneLiteral(_)
-            | Expr::EllipsisLiteral(_) => source_text_of(expr, source),
+            | Expr::EllipsisLiteral(_) => PathExpression::source_text_of(expr, source),
             Expr::BinOp(b) => format!(
                 "({} {:?} {})",
                 Self::expression_key(&b.left, source, false, false),

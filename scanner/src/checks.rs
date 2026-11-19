@@ -95,7 +95,7 @@ pub use partition::Partition;
 pub use process_class::process_class_findings;
 pub use record_shape::RecordShape;
 pub use scattered::{Scattered, ScatteredInstance};
-pub use shared_path::{collect_path_expressions, shared_path_findings, PathExpression};
+pub(crate) use shared_path::PathExpression;
 pub use sibling::SiblingValueClass;
 pub use sibling_class::SiblingClass;
 pub use signature::{BooleanArg, DetachedMethod, Except, LongParamList, PositionalLiterals};
