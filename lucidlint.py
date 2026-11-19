@@ -48,14 +48,31 @@ from types import ModuleType
 from typing import Any, NamedTuple
 
 import rule_metadata
+from orchestrator.action import Action
 from orchestrator.console import CONSOLE
+from orchestrator.source_file import SourceFile
+from orchestrator.source_walk import SourceWalk, gitignored_docs
 from orchestrator.vendoring import vendor_path
+
+# Run as a script the module is `__main__`; the host seams resolve the
+# entry module by its installed name, so make that name point here in both
+# modes (the import form already has it).
+sys.modules.setdefault("lucidlint", sys.modules[__name__])
 
 # the entry module is the facade: these names stay here because callers (and
 # the tests) reach them on `lucidlint`
 _vendor_path = vendor_path
 log = CONSOLE.warn
 _print_trimmed_diff = CONSOLE.print_diff
+# the source list and docs walk live in orchestrator.sources; the names stay
+# here because the entry module is the facade
+action_key = Action.key
+_position_key = Action.position_key
+_merge_key = Action.merge_key
+_excluded_part = SourceWalk.excluded_part
+is_test_path = SourceWalk.is_test_path
+_md_rels = SourceWalk.md_rels
+_gitignored_docs = gitignored_docs
 
 # the fix engine is optional — the fix command degrades to a clear error
 # when the `fix` extra is not installed
@@ -114,27 +131,6 @@ except ImportError:
 
 # Role/pattern suffixes from coding-standards.md: communicative for a thin
 # framework-role class (MVC controller, event handler) that delegates; a smell
-
-
-EXCLUDED_DIRS = {
-    ".git",
-    ".venv",
-    "node_modules",
-    "__pycache__",
-    "dist",
-    "build",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-}
-
-
-def _excluded_part(part: str) -> bool:
-    """An env/tool directory hides vendored code — .venv-htr, .conda-tools,
-    node_modules, .mypy_cache, etc. Exact names in EXCLUDED_DIRS plus the
-    .venv* / venv* env-dir families (a repo's real modules never live there)."""
-    env_prefixes = (".venv", "venv", ".conda")
-    return part in EXCLUDED_DIRS or part.startswith(env_prefixes)
 
 
 ACTION_KINDS = (
@@ -372,31 +368,6 @@ class _RenderCtx:
             _render_actions(repo, args, warns, [], None, self.config_ignore_keys)
 
 
-@dataclass
-class Action:
-    """One finding. Kind families: complexity/large-function merge per target;
-    hotspot/hub-file/high-risk/record-shape are separate problems."""
-
-    kind: str
-    severity: str
-    file: str
-    line: int
-    function: str
-    message: str
-    metric: float
-    churn: int
-    last_modified: str
-    tested: str
-    signal: str = ""  # suppression identity — the raw family kind from the scanner
-    note: str = ""
-    raw: float = 0.0
-    priority: int = 0
-    kinds: list[str] = field(default_factory=list)
-    callers: list[str] = field(default_factory=list)
-    col: int = 0  # schema-3 anchor column; 0 = line-level
-    seam_members: tuple[str, ...] = ()  # clump identity (#34) — the seam
-    # grouping keys on this; the three carriers carry it, others empty
-    fix_kind: str = ""  # the structured fix kind (schema 4) — the directive's
     # kind when present, else the rule's default link (Rule.fix); empty =
     # fix-less finding, never constructed into a Fix
 
@@ -442,17 +413,6 @@ class GitHead:
 
     branch: str
     commit: str
-
-
-def is_test_path(rel: str) -> bool:
-    parts = rel.split("/")
-    return (
-        "tests" in parts
-        or "__tests__" in parts
-        or any(part.startswith("test_") or part.endswith("_test.py") for part in parts[-1:])
-    )
-
-
 
 
 # --------------------------------------------------------------------------- complexity (radon)
@@ -505,194 +465,6 @@ def _raw_score(kind: str, metric: float, churn: int, callers: int | None = None)
     if kind == "high-risk" and callers:
         score *= 1 + min(callers / 5, 1.0)
     return score
-
-
-@dataclass(frozen=True)
-class SourceFile:
-    """One scanned .py file: its path and repo-relative name."""
-
-    py: Path
-    rel: str
-
-
-def _md_rels(stdout: str) -> tuple[str, ...]:
-    """The markdown paths in a NUL-separated git path list."""
-    return tuple(sorted(p for p in stdout.split("\0") if p.endswith(".md")))
-
-
-def _git_ignored_md(repo: Path) -> tuple[str, ...]:
-    """The .md paths git itself reports as ignored — one `git ls-files` call,
-    no filesystem walk. `--exclude-standard` honours .gitignore,
-    .git/info/exclude and the global excludes file, and git does not descend a
-    nested checkout (another worktree of this repo is a single opaque entry),
-    so a sibling checkout's markdown is never enumerated. Empty when git or
-    the repository is missing — nothing is ignored then."""
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", "*.md"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    # TimeoutExpired is NOT an OSError: the timeout below is the reason a hung
-    # git is caught here at all
-    except (OSError, subprocess.TimeoutExpired) as e:  # lucidlint: ignore swallow git missing — nothing is ignored
-        log(f"git ls-files --ignored: {e}")
-        return ()
-    if proc.returncode != 0:
-        return ()
-    return _md_rels(proc.stdout)
-
-
-def _repo_md_paths(repo: Path) -> tuple[str, ...]:
-    """The repo's own .md files — git's answer (tracked plus
-    untracked-not-ignored), the enumeration `_py_files` uses. EVERY doc the
-    repo owns is enumerated, wherever it lives: the harvest must not decide
-    which markdown counts by re-deriving the scan's roots. Ignored docs are
-    not the shipped doc set and a nested checkout is one opaque entry to git,
-    so neither is enumerated — and a vendored tree is ignored, which is what
-    `--exclude-standard` answers."""
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "*.md"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired) as e:  # lucidlint: ignore swallow git missing — nothing harvested
-        log(f"git ls-files: {e}")
-        return ()
-    if proc.returncode != 0:
-        return ()
-    return _md_rels(proc.stdout)
-
-
-def _gitignored_docs(repo: Path) -> tuple[str, ...]:
-    """Repo-relative .md paths git ignores — private docs (review-log R3). The
-    docs scan must treat them as intentionally absent: they are not shipped,
-    so a link to one is not a broken link and an orphan one is not an
-    undiscoverable doc. Both halves are git's answer: the ignored files from
-    `ls-files`, the referenced-but-absent ones from `check-ignore` on the
-    references the repo's own docs make (a private doc may never have been
-    committed, so no enumeration can see it — only the reference does)."""
-    ignored = set(_git_ignored_md(repo))
-    refs: set[str] = set()
-    for rel in _repo_md_paths(repo):
-        p = repo / rel
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        # a dangling symlink or an unreadable doc is not a reason to fail the
-        # scan — one stale link used to kill the whole run
-        except OSError:  # lucidlint: ignore swallow unreadable doc — it can carry no reference
-            continue
-        for hit in re.findall(r"`([^`]+\.md)`|\[[^\]]*\]\(([^)]+\.md)\)", text):
-            ref = hit[0] or hit[1]
-            # a parent-relative or absolute reference lies OUTSIDE the
-            # repo — `git check-ignore` aborts the whole batch on one
-            # (rc 128, no output); those are never repo-ignored anyway
-            if ref.startswith(("../", "/")):
-                continue
-            # references resolve like the Rust docs scan: `docs/`- and
-            # `standards/`-prefixed names against the repo ROOT, anything
-            # else (a sibling bare name) against the doc's own directory —
-            # `other.md` from docs/sub/guide.md is docs/sub/other.md, not
-            # repo-root other.md (review bot)
-            cand = repo / ref if ref.startswith(("docs/", "standards/")) else p.parent / ref
-            try:
-                refs.add(cand.resolve().relative_to(repo).as_posix())
-            except ValueError:
-                continue  # resolved outside the repo
-    if refs:
-        try:
-            proc = subprocess.run(
-                ["git", "-C", str(repo), "check-ignore", "--stdin"],
-                input="\n".join(sorted(refs)),
-                capture_output=True,
-                text=True,
-            )
-        # no git binary — the referenced-absent-doc query degrades; the
-        # ls-files answer still stands (gitless mode, review bot)
-        except OSError as e:  # lucidlint: ignore swallow terminal boundary — gitless env, no caller to propagate to
-            log(f"git check-ignore unavailable ({e}) — referenced-absent docs stay visible")
-        else:
-            for line in proc.stdout.splitlines():
-                line = line.strip()
-                if line.endswith(".md"):
-                    ignored.add(line.replace(os.sep, "/"))
-    return tuple(sorted(ignored))
-
-
-def _rglob_sources(repo: Path) -> list[SourceFile]:
-    """The fallback source list when git is unavailable."""
-    return [
-        SourceFile(py, py.relative_to(repo).as_posix())
-        for py in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.rs")) + sorted(repo.rglob("*.md"))
-        if not any(_excluded_part(part) for part in py.parts)
-    ]
-
-
-def _py_files(repo: Path, only_rel: str | None = None) -> list[SourceFile]:
-    """The repo's own .py and .rs files — git's answer, not an invented list.
-
-    `git ls-files --cached --others --exclude-standard` = tracked files plus
-    untracked-not-ignored: exactly what the repo's .gitignore defines as its
-    code (venvs, caches, generated output never qualify, whatever they are
-    named). One call per run, NUL-split, no quoting issues. With only_rel
-    set, returns just that file (the --file / LSP mode).
-    """
-    if only_rel is not None:
-        py = repo / only_rel
-        return [SourceFile(py, only_rel)] if py.is_file() and py.suffix in (".py", ".rs", ".md") else []
-    if _pygit2 is None or not (repo / ".git").exists():
-        # no pygit2 (CI runners, bare pythons): ask git itself — the answer
-        # honors .gitignore, so an ignored dir (a repo's own .tools/lucidlint
-        # bundle, a venv) is never scanned. rglob only when git is also
-        # unavailable — a git-less repo has nothing ignored to respect.
-        if (repo / ".git").exists():
-            try:
-                proc = subprocess.run(
-                    ["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if proc.returncode == 0:
-                    rels = [
-                        p
-                        for p in proc.stdout.split("\0")
-                        if p.endswith((".py", ".rs", ".md")) and not p.startswith("tests/fixtures/")
-                    ]
-                    return [SourceFile(repo / rel, rel) for rel in sorted(rels)]
-            # lucidlint: ignore swallow git missing or unrunnable — degrade to the rglob walk rather than crash
-            except Exception as e:
-                log(f"git ls-files: {e}")
-        return _rglob_sources(repo)  # no git — certain: silent fallback
-    try:
-        r = _pygit2.Repository(str(repo))
-        tracked = {e.path for e in r.index if e.path.endswith((".py", ".rs", ".md"))}
-        # Untracked non-ignored files: walk working tree
-        untracked = set()
-        for root, dirs, files in os.walk(repo):
-            if ".git" in dirs:
-                dirs.remove(".git")
-            for f in files:
-                if f.endswith((".py", ".rs", ".md")):
-                    full = Path(root) / f
-                    rel = str(full.relative_to(repo))
-                    if rel in tracked:
-                        continue
-                    try:
-                        if not r.path_is_ignored(rel):
-                            untracked.add(rel)
-                    except ValueError:  # lucidlint: ignore swallow ambiguous path — treat as untracked
-                        untracked.add(rel)
-        rels = sorted(r for r in (tracked | untracked) if not r.startswith("tests/fixtures/"))
-        return [SourceFile(repo / rel, rel) for rel in rels]
-    except KeyError:
-        return _rglob_sources(repo)  # not a git repo — certain: silent fallback
-    except Exception as e:
-        log(f"file list: {e}")  # unexpected — show the actual error
-        return _rglob_sources(repo)
 
 
 class RustFinding(NamedTuple):
@@ -799,7 +571,7 @@ class _File(NamedTuple):
         repo, rel = self.repo, self.rel
         let_include_tests = False  # the fix resolves one file's findings
         SERVICES.rust_scan.prepare(repo, rel, let_include_tests, Counter())
-        files = _py_files(repo, rel)
+        files = SourceWalk(repo).py_files(rel)
         rust = SERVICES.rust_scan.load(repo, files)
         if rust is None:
             return
@@ -1239,7 +1011,6 @@ class _GraphContract:
 SERVICES = _Services()
 
 
-
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="lucidlint",
@@ -1362,16 +1133,8 @@ def _version() -> str:
 _VERSION = _version()
 
 
-# lucidlint: ignore strewing the shared leading parameter is the render context — the functions ARE the render pipeline
-def action_key(a: Action) -> str:
-    return f"{a.kind}:{a.file}:{a.line}:{a.function}"
 
 
-def _position_key(a: Action) -> str:
-    """record-shape reports per annotated position; its message names the
-    parameter or return, so two positions on one signature line stay
-    distinct. Other kinds are per-line — their duplicates are echoes."""
-    return a.message if a.kind == "record-shape" else ""
 
 
 def _coverage_context(repo: Path, covered, coverage_source: str) -> CoverageContext:
@@ -1397,16 +1160,6 @@ def _coverage_context(repo: Path, covered, coverage_source: str) -> CoverageCont
     return CoverageContext(label=coverage_source, graph_preferred=graph_preferred, stale_note=stale_note)
 
 
-def _merge_key(a: Action) -> tuple:
-    """complexity + large-function on the same function are ONE fix; every
-    other kind is per-LINE — two positional-literals calls in one function
-    are two different fixes at two lines, and merging them would hide one
-    finding behind the other (the fix loop would thrash). record-shape is
-    per-POSITION: its message names the parameter or return, so two
-    annotated positions on one signature line stay distinct."""
-    if a.kind in ("complexity", "large-function"):
-        return (a.file, a.function, "fn")
-    return (a.file, a.function, a.line, a.kind, _position_key(a))
 
 
 class _Baseline(NamedTuple):
@@ -2762,7 +2515,7 @@ def _scan_rust(
             "the scan binary is required — build it with `make scanner-check` or install the lucidlint release bundle"
         )
     SERVICES.rust_scan.prepare(repo, only_rel, args.include_tests, file_churn, coverage)
-    files = _py_files(repo, only_rel)
+    files = SourceWalk(repo).py_files(only_rel)
     rust = SERVICES.rust_scan.load(repo, files)
     if rust is None:
         raise RuntimeError("the Rust scan core failed — rebuild with `make scanner-check`")
