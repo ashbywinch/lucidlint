@@ -7,145 +7,12 @@ use ruff_text_size::Ranged;
 use crate::finding::Finding;
 
 use super::middle_man::class_base_names;
+use super::sibling_class::{SiblingClass, SiblingMethod};
 use super::{annotation_base_name, fn_skeleton, push_stmt_children, stmt_exprs};
 use crate::line_of;
 
 /// `sibling-value-class`: the rule object. Its methods read the package's classes; the evidence and the message live together.
 pub struct SiblingValueClass;
-
-/// One method's shape for the sibling pass: the body's skeleton (compared with
-/// the duplicate machinery), the `self.<x>` attributes it reads, and the
-/// annotation names in its signature (a pair that mentions the other class is
-/// composition, not duplication).
-#[derive(Clone)]
-pub struct SiblingMethod {
-    pub name: String,
-    pub skeleton: Vec<String>,
-    pub uses: Vec<String>,
-    pub mentions: Vec<String>,
-}
-
-/// One class's shape for the sibling pass: the instance fields it holds and
-/// what its methods read — enough to compare two value classes without
-/// borrowing the file they came from (one class per file is the house
-/// convention, so a same-file-only rule would barely fire).
-#[derive(Clone)]
-pub struct SiblingClass {
-    pub name: String,
-    pub line: usize,
-    /// instance field names: class-body annotations + `self.x =` assignments
-    pub fields: Vec<String>,
-    /// annotation base names of those fields, when present
-    pub field_types: Vec<String>,
-    pub bases: Vec<String>,
-    pub methods: Vec<SiblingMethod>,
-}
-
-impl SiblingValueClass {
-    /// The fields both classes hold. One generic name is coincidence; two is
-    /// the same value seen twice.
-    fn shared_fields<'a>(a: &'a SiblingClass, b: &SiblingClass) -> Vec<&'a str> {
-        a.fields
-            .iter()
-            .filter(|f| b.fields.contains(f))
-            .map(|f| f.as_str())
-            .collect()
-    }
-
-    /// Framework bases that do not make two classes variants of one DOMAIN
-    /// abstraction — a shared pydantic/Protocol base still leaves two duplicate
-    /// value classes to reconcile.
-    const FRAMEWORK_BASES: &'static [&'static str] = &[
-        "object",
-        "BaseModel",
-        "Protocol",
-        "ABC",
-        "ABCMeta",
-        "NamedTuple",
-        "TypedDict",
-        "Generic",
-        "Enum",
-        "IntEnum",
-        "StrEnum",
-        "Flag",
-        "Exception",
-    ];
-
-    /// Two operators of one formula language, two node kinds of one pipeline:
-    /// they share a domain base, so the shared half already has a home — the
-    /// base. Reporting them as duplicates invites merging variants into one
-    /// class with a flag, which erases the distinction they exist for.
-    fn shares_domain_base(a: &SiblingClass, b: &SiblingClass) -> bool {
-        a.bases
-            .iter()
-            .any(|base| b.bases.contains(base) && !Self::FRAMEWORK_BASES.contains(&base.as_str()))
-    }
-
-    /// How the two classes are joined — containment, inheritance, a shared
-    /// domain base, or a signature that names the other class. Composition,
-    /// not duplication: the containment case belongs to `duplicate-field`.
-    fn composed_with(a: &SiblingClass, b: &SiblingClass) -> bool {
-        a.bases.contains(&b.name)
-            || b.bases.contains(&a.name)
-            || Self::shares_domain_base(a, b)
-            || a.field_types.contains(&b.name)
-            || b.field_types.contains(&a.name)
-            || a.methods.iter().any(|m| m.mentions.contains(&b.name))
-            || b.methods.iter().any(|m| m.mentions.contains(&a.name))
-    }
-
-    /// The accessors this class derives from `shared`, structurally equal
-    /// (dice >= 0.9) to one on `other` that reads the same fields.
-    fn matching_accessors<'a>(a: &'a SiblingClass, b: &'a SiblingClass, shared: &[&str]) -> Vec<&'a str> {
-        let shared_set: std::collections::HashSet<&str> = shared.iter().copied().collect();
-        let reads_only_shared = |m: &&SiblingMethod| {
-            !m.name.starts_with("__") && !m.uses.is_empty() && m.uses.iter().all(|u| shared_set.contains(u.as_str()))
-        };
-        a.methods
-            .iter()
-            .filter(reads_only_shared)
-            .filter(|m| {
-                b.methods
-                    .iter()
-                    .filter(reads_only_shared)
-                    .any(|n| crate::skeleton::dice_similarity(&m.skeleton, &n.skeleton) >= 0.9)
-            })
-            .map(|m| m.name.as_str())
-            .collect()
-    }
-
-    /// The finding when `other` is this class's duplicate — the later class in
-    /// scan order is the likely duplicate; the earlier one is what the
-    /// codebase already reaches for.
-    fn duplicate_of(a: &SiblingClass, other_rel: &str, b: &SiblingClass) -> Option<Finding> {
-        let shared = Self::shared_fields(a, b);
-        if shared.len() < 2 || Self::composed_with(a, b) {
-            return None;
-        }
-        let accessors = Self::matching_accessors(a, b, &shared);
-        if accessors.len() < 2 {
-            return None;
-        }
-        let shown = accessors.iter().take(3).copied().collect::<Vec<_>>().join(", ");
-        Some(Finding {
-            logical_start: None,
-            seam_members: Vec::new(),
-            col: 0,
-            file: other_rel.to_string(),
-            line: b.line,
-            function: format!("{}, {}", a.name, b.name),
-            kind: "sibling-value-class".into(),
-            severity: "warn".into(),
-            message: format!(
-                "'{}' and '{}' both hold {} and derive {} the same way, with no containment — the same data has two homes. If they are variants of one thing, give them the base that owns the shared half; if they are the same value, keep one and move the other's extra accessors onto it. Decide which before editing: merging two variants erases the distinction they exist for.",
-                a.name,
-                b.name,
-                shared.join(", "),
-                shown
-            ),
-        })
-    }
-}
 
 impl SiblingValueClass {
     /// The `self.<x>` attribute name of an expression, when it is one.
@@ -393,7 +260,7 @@ impl SiblingValueClass {
                 for j in (i + 1)..classes.len() {
                     let (_, a) = classes[i];
                     let (rel_b, b) = classes[j];
-                    if let Some(f) = SiblingValueClass::duplicate_of(a, rel_b, b) {
+                    if let Some(f) = a.duplicate_of(rel_b, b) {
                         out.push(f);
                     }
                 }

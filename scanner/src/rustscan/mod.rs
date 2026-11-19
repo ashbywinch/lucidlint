@@ -32,6 +32,7 @@ mod graph;
 mod ignored_test;
 mod modshape;
 mod no_assert_test;
+mod probe;
 mod shape;
 mod skeleton;
 mod state;
@@ -82,28 +83,6 @@ impl RustScan {
     }
 
     pub fn scan(source: &str, name: &str, repo_wide: bool) -> RustScan {
-        /// G4: does the file hold a magic-CANDIDATE literal (value outside 0/1/2)
-        /// anywhere — the fact the stale magic-number message cites when the family
-        /// fires nowhere: the position rule exempted the values; the numbers are
-        /// not gone. The visit default reaches every expression (pattern literals
-        /// included) in one pass.
-        struct NumericLiteralProbe {
-            found: bool,
-        }
-        impl<'ast> syn::visit::Visit<'ast> for NumericLiteralProbe {
-            fn visit_expr_lit(&mut self, el: &'ast syn::ExprLit) {
-                if let syn::Lit::Int(i) = &el.lit {
-                    if crate::magic::is_magic_value(i.base10_digits()) {
-                        self.found = true;
-                    }
-                } else if let syn::Lit::Float(f) = &el.lit {
-                    if crate::magic::is_magic_value(f.base10_digits()) {
-                        self.found = true;
-                    }
-                }
-            }
-        }
-
         let file = match syn::parse_file(source) {
             Ok(f) => f,
             Err(_) => {
@@ -223,6 +202,8 @@ impl RustScan {
         scan
     }
 }
+
+use self::probe::NumericLiteralProbe;
 
 #[cfg(test)]
 mod tests {

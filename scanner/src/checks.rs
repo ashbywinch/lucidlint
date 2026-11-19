@@ -41,6 +41,7 @@ mod record_shape;
 mod scattered;
 mod shared_path;
 mod sibling;
+mod sibling_class;
 mod signature;
 mod skipif;
 mod special_case;
@@ -100,7 +101,8 @@ pub use process_class::process_class_findings;
 pub use record_shape::record_shape_findings;
 pub use scattered::{Scattered, ScatteredInstance};
 pub use shared_path::{collect_path_expressions, shared_path_findings, PathExpression};
-pub use sibling::{SiblingClass, SiblingValueClass};
+pub use sibling::SiblingValueClass;
+pub use sibling_class::SiblingClass;
 pub use signature::{
     boolean_arg_findings, detached_method_findings, except_findings, long_param_list_findings,
     positional_literals_findings,
