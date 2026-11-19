@@ -11,6 +11,8 @@ wherever it is made.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from orchestrator.substitutable import Substitutable
 
 
@@ -19,6 +21,14 @@ class Host:
     git/graph libraries, and the location of the vendored deps directory.
     Each seam is a proxy over the entry module's binding, so one substitution
     there replaces the collaborator for the whole run."""
+
+    @property
+    def artifact_root(self) -> Path:
+        """Where this artifact lives: the entry module sits beside the package,
+        so the package's parent is the bundle root, the checkout root, or the
+        site-packages that holds the distribution — the one home of `deps/`,
+        `version.txt`, `bin/` and `lucidlint_bin/`."""
+        return Path(__file__).resolve().parent.parent
 
     def __init__(self) -> None:
         self.subprocess = Substitutable("subprocess")
