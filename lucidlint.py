@@ -49,6 +49,11 @@ from typing import Any, NamedTuple
 import rule_metadata
 from orchestrator.action import Action
 from orchestrator.console import CONSOLE
+from orchestrator.coverage_context import CoverageContext, coverage_context
+from orchestrator.coverage_input import CoverageInput
+from orchestrator.coverage_result import CoverageResult
+from orchestrator.file_history import FileHistory
+from orchestrator.git_head import GitHead
 from orchestrator.source_file import SourceFile
 from orchestrator.source_walk import SourceWalk, gitignored_docs
 from orchestrator.vendoring import vendor_path
@@ -71,6 +76,12 @@ _print_trimmed_diff = CONSOLE.print_diff
 # the source list and docs walk live in orchestrator.sources; the names stay
 # here because the entry module is the facade
 action_key = Action.key
+_coverage_context = coverage_context
+_CoverageInput = CoverageInput
+_numbits_to_lines = CoverageResult.numbits_to_lines
+_raw_score = FileHistory.raw_score
+_iso_day = FileHistory.iso_day
+_tracked_churn_path = FileHistory.tracked_churn_path
 _position_key = Action.position_key
 _merge_key = Action.merge_key
 _excluded_part = SourceWalk.excluded_part
@@ -375,99 +386,18 @@ class _RenderCtx:
     # fix-less finding, never constructed into a Fix
 
 
-@dataclass
-class FileHistory:
-    """Per-file change counts and last-touched dates from git history."""
-
-    churn: Counter[str]
-    last_modified: dict[str, str]
 
 
-@dataclass
-class CoverageResult:
-    """Covered line sets and the source they came from."""
-
-    lines: dict[str, set[int]] | None
-    source: str
 
 
-@dataclass
-class CoverageContext:
-    """Coverage provenance + staleness verdict for the run."""
-
-    label: str
-    graph_preferred: bool
-    stale_note: str
 
 
-@dataclass(frozen=True)
-class _CoverageInput:
-    """The repo's own snapshot plus its staleness verdict — the one coverage
-    input the scan core needs to decide whether it can claim a file is
-    unverified (R6): a stale snapshot downgrades the claim to verify."""
-
-    result: CoverageResult
-    stale: bool
 
 
-@dataclass
-class GitHead:
-    """Branch and short commit for report provenance."""
-
-    branch: str
-    commit: str
 
 
-# --------------------------------------------------------------------------- complexity (radon)
-# how much history the churn signal needs: 200 commits reaches ~2 weeks on
-# an active repo and years on a quiet one — the percentile ranking is
-# relative within the window, so the bound adapts to the repo's activity;
-# the age cap is the hard floor for the "is this still live?" judgement
-_CHURN_MAX_COMMITS = 200
-_CHURN_MAX_AGE_DAYS = 730
 
 
-def _numbits_to_lines(numbits: bytes) -> set[int]:
-    """Decode coverage.py line_bits: bit (n-1)%8 of byte (n-1)//8 => line n."""
-    lines: set[int] = set()
-    for byte_idx, byte in enumerate(numbits):
-        if byte:
-            for bit in range(8):
-                if byte & (1 << bit):
-                    lines.add(byte_idx * 8 + bit + 1)
-    return lines
-
-
-def _raw_score(kind: str, metric: float, churn: int, callers: int | None = None) -> float:
-    """Continuous risk score: normalized metric x root-weighted churn factor
-    (x fan-in for high-risk).
-
-    Normalized to a 1-99 percentile ranking in main, so the list spreads
-    instead of saturating at 99. The churn factor is the SQUARE ROOT of the
-    linear one: a 10x churn gap is ~3.2x raw risk, not 10x, so complexity
-    and size keep equal weight with churn (F5 — the top line names the code
-    whose change costs the most, and a big untouched function costs more
-    than a small heavily-churned one).
-    """
-    # kind -> norm constant; naming each entry hides the table
-    norm = {
-        "latent-class": 0.7,
-        "standard": 0.6,
-        "docs": 0.5,
-        "folder-mix": 0.5,
-        "layer-mix": 0.5,
-        "vague-name": 0.7,
-        "record-shape": 0.7,
-        "complexity": min(metric / 40, 1.0),
-        "large-function": min(metric / 200, 1.0),
-        "hub-file": min(metric / 400, 1.0),
-        "hotspot": min(metric / 40, 1.0),
-        "high-risk": min(metric, 1.0),
-    }.get(kind, 0.5)
-    score = norm * ((1 + min(churn / 30, 1.5)) ** 0.5)
-    if kind == "high-risk" and callers:
-        score *= 1 + min(callers / 5, 1.0)
-    return score
 
 
 class RustFinding(NamedTuple):
@@ -1108,27 +1038,6 @@ def parse_args() -> argparse.Namespace:
 
 
 
-def _coverage_context(repo: Path, covered, coverage_source: str) -> CoverageContext:
-    """Coverage provenance label + staleness verdict. The snapshot compared is
-    the one the loader actually read (coverage.xml, else `.coverage`) — using
-    the other file's mtime either hides a stale snapshot or invents one."""
-    snapshot = repo / "coverage.xml" if (repo / "coverage.xml").exists() else repo / ".coverage"
-    if coverage_source == ".coverage" and (repo / ".coverage").exists():
-        coverage_source += (
-            " (mtime " + time.strftime("%Y-%m-%d %H:%M", time.localtime((repo / ".coverage").stat().st_mtime)) + ")"
-        )
-    graph_preferred = False
-    stale_note = ""
-    if covered is not None and snapshot.exists():
-        cov_mtime = snapshot.stat().st_mtime
-        newest_test = max((p.stat().st_mtime for p in (repo / "tests").rglob("*.py")), default=0.0)
-        if newest_test > cov_mtime:
-            graph_preferred = True
-            stale_note = (
-                " (coverage snapshot older than the repo's tests — graph verdict used; "
-                "verify against htmlcov/ if present)"
-            )
-    return CoverageContext(label=coverage_source, graph_preferred=graph_preferred, stale_note=stale_note)
 
 
 
@@ -1194,12 +1103,6 @@ def _load_baseline(path) -> _Baseline:
     return _Baseline(set(), {})
 
 
-def _iso_day(value: str) -> str:
-    """The epoch git hands us, as a date a reader can place in time."""
-    try:
-        return datetime.date.fromtimestamp(int(value)).isoformat()
-    except (ValueError, OSError, OverflowError):
-        return value
 
 
 def _facts_line(a: Action) -> str | None:
@@ -1528,9 +1431,6 @@ class _LucidlintConfig:
     guidance: dict[str, str] = field(default_factory=dict)
 
 
-def _tracked_churn_path(path: str) -> bool:
-    """A source/doc path the churn scan counts."""
-    return path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/"))
 
 
 # lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
@@ -1593,7 +1493,7 @@ class _GateRunner:
             self.args,
             fh.churn,
             only_rel=self.args.file,
-            coverage=_CoverageInput(cr, cc.graph_preferred),
+            coverage=CoverageInput(cr, cc.graph_preferred),
         )
         self.actions = _actions_from_rust(rust, self.args.include_tests, fh.churn, fh.last_modified)
         self.report_header = rust.header
@@ -1656,9 +1556,9 @@ class _GateRunner:
         try:
             r = _pygit2.Repository(str(self.repo))
             head = str(r.head.target)
-            cutoff = int(time.time()) - _CHURN_MAX_AGE_DAYS * 86400
+            cutoff = int(time.time()) - FileHistory.MAX_AGE_DAYS * 86400
             cutoff_day = time.strftime("%Y-%m-%d", time.localtime(cutoff))
-            cache_key = f"churn-{head}-{_CHURN_MAX_COMMITS}-{cutoff_day}.json"
+            cache_key = f"churn-{head}-{FileHistory.MAX_COMMITS}-{cutoff_day}.json"
             cache_path = self.repo / ".lucidlint-cache" / cache_key
             try:
                 data = json.loads(cache_path.read_text())
@@ -1675,9 +1575,9 @@ class _GateRunner:
         last: dict[str, str] = {}
         try:
             r = _pygit2.Repository(str(self.repo))
-            cutoff = int(time.time()) - _CHURN_MAX_AGE_DAYS * 86400
+            cutoff = int(time.time()) - FileHistory.MAX_AGE_DAYS * 86400
             for seen, commit in enumerate(r.walk(r.head.target, SortMode.TIME)):
-                if seen >= _CHURN_MAX_COMMITS or commit.commit_time < cutoff:
+                if seen >= FileHistory.MAX_COMMITS or commit.commit_time < cutoff:
                     break
                 date = str(commit.commit_time)
                 changed = set()
