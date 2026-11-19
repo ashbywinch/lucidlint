@@ -1314,7 +1314,7 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("--lsp") {
         // stdio JSON-RPC language server — in-process scans, no spawns
-        lsp::run();
+        lsp::LspState::run();
         return;
     }
     if args.first().map(String::as_str) == Some("--fix") {
