@@ -127,6 +127,26 @@ three delegates). The package root is at 209 definitions; behaviour is
 unchanged (houses 353 / album 431 identical, 318 tests, `GATE: PASS`). The
 remaining order is unchanged; the mechanical family is next.
 
+**Mechanical family — tried and reverted (2026-11-19).** The move itself works
+(38 definitions, tests green, root 209 → 178), but it produced six findings
+that are design decisions, not mechanical fixes. The next pass starts here:
+
+1. `private-import`: `records._LoopPipelinePlan` must be reached the way the
+   package root does (`from fix_engine import records` + attribute), not by
+   importing an underscore symbol.
+2. `global-state` ×2: `_HOIST_MUTATORS` / `_OTHER_MUTATORS` become class
+   attributes of `MechanicalFixes` (the `CstMechanics.BUILTINS` pattern).
+3. `stale-suppression` ×2: the inline `ignore complexity` / `ignore
+   data-clump` whys travelled with the loop code but no longer fire at the
+   new site — they are dropped, not copied.
+4. `latent-class` in `__init__.py`: the split-module helpers' `(name, repo)`
+   parameter pair surfaces once the code around it moves; it is the same data
+   clump the reviewed `ignore` in the old file covered, and belongs with the
+   split-module family when that family moves (a named record or its why).
+
+None of the six is a behaviour change; they are the per-family cleanup the
+"Rules this split will meet" table predicted.
+
 ## Verification, after every step
 
 1. `make check` (ruff + pyrefly; run `make typecheck-update-baseline` only
