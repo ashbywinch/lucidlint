@@ -100,10 +100,7 @@ pub use scattered::{Scattered, ScatteredInstance};
 pub use shared_path::{collect_path_expressions, shared_path_findings, PathExpression};
 pub use sibling::SiblingValueClass;
 pub use sibling_class::SiblingClass;
-pub use signature::{
-    boolean_arg_findings, detached_method_findings, except_findings, long_param_list_findings,
-    positional_literals_findings,
-};
+pub use signature::{BooleanArg, DetachedMethod, Except, LongParamList, PositionalLiterals};
 pub use skipif::skipif_findings;
 pub use special_case::SpecialCase;
 pub use static_husk::StaticHusk;

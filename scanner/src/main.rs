@@ -213,7 +213,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 self.unreachable_check(&f.body);
                 shadow_findings(self, stmt);
                 let source = self.source;
-                long_param_list_findings(self, f, source);
+                LongParamList::findings(self, f, source);
                 // signature exprs feed the reference scan (ast.walk covers
                 // decorators, parameter annotations/defaults, and returns)
                 for d in &f.decorator_list {
@@ -272,7 +272,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                 // a method that never touches its receiver does not belong in
                 // the class (the inverse of record-shape/strewing)
                 if self.in_class > 0 {
-                    detached_method_findings(self, f, source);
+                    DetachedMethod::findings(self, f, source);
                 }
                 if module_level {
                     // the def line (name range), not the decorator — radon's
@@ -318,7 +318,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             }
             Stmt::For(_) | Stmt::With(_) | Stmt::Try(_) => {
                 if matches!(stmt, Stmt::Try(_)) {
-                    except_findings(self, stmt);
+                    Except::findings(self, stmt);
                 }
                 shadow_findings(self, stmt);
             }
@@ -361,8 +361,8 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
         // position rule must match Python's (status_code=403 is NOT a finding).
         if let Expr::Call(call) = expr {
             let source = self.source;
-            boolean_arg_findings(self, call, source);
-            positional_literals_findings(self, call, source);
+            BooleanArg::findings(self, call, source);
+            PositionalLiterals::findings(self, call, source);
             // debug-artifact (Python half): breakpoint() left in production —
             // the dbg!/unwrap analog (Rust half lives in rustscan.rs)
             if !self.is_test
