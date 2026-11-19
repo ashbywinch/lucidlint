@@ -54,12 +54,14 @@ from orchestrator.coverage_input import CoverageInput
 from orchestrator.coverage_result import CoverageResult
 from orchestrator.file_history import FileHistory
 from orchestrator.git_head import GitHead
+from orchestrator.graph_contract import GraphContract
 from orchestrator.render_ctx import RenderCtx
 from orchestrator.rust_finding import RustFinding
 from orchestrator.rust_findings import RustFindings
 from orchestrator.rust_fix_request import RustFixRequest
 from orchestrator.rust_scan import INPUTS, RustScan
 from orchestrator.scan_flags import ScanFlags
+from orchestrator.services import SERVICES, Services
 from orchestrator.source_file import SourceFile
 from orchestrator.source_walk import SourceWalk, gitignored_docs
 from orchestrator.vendoring import vendor_path
@@ -146,6 +148,11 @@ _raw_score = FileHistory.raw_score
 _iso_day = FileHistory.iso_day
 _RenderCtx = RenderCtx
 _RustScan = RustScan
+_Services = Services
+RULE_GROUPS = rule_metadata.CATALOG.groups()
+_ALL_RULE_KINDS = frozenset(rule_metadata.CATALOG.kinds())
+CONTRACT_VERSION = GraphContract.CONTRACT_VERSION
+_SCANNER_FAILURES = RustScan.SCANNER_FAILURES
 _ScanFlags = ScanFlags
 _rust_finding_rel = RustScan._rust_finding_rel
 _actions_from_rust = RustScan._actions_from_rust
@@ -344,16 +351,6 @@ class _File(NamedTuple):
 
 
 
-# Rule groups — reference by name in the config file to suppress whole
-# groups across the codebase. DERIVED from the rule catalog
-# (rule_metadata.py) — the config.rs mirror is generated from the same
-# source by `make rules`, so the gate and the LSP cannot drift.
-RULE_GROUPS = rule_metadata.CATALOG.groups()
-
-# every registered check kind — the fix command's kind check distinguishes
-# a real check that happens to have no auto-fix from a mistyped name
-_ALL_RULE_KINDS = frozenset(rule_metadata.CATALOG.kinds())
-
 # variant kind -> its display family (latent-class, loop-pipeline). A
 # finding whose display kind IS its suppression family needs no recipe —
 # `ignore latent-class <why>` covers every variant (RULES.md); offering
@@ -363,14 +360,6 @@ _ALL_RULE_KINDS = frozenset(rule_metadata.CATALOG.kinds())
 
 
 
-class _Services:
-    """The gate's two external services in one object: the Rust scan core and
-    the graph contract exporter. Both cache per repo, so the gate holds one of
-    each for the whole run."""
-
-    def __init__(self) -> None:
-        self.graph = _GraphContract()
-        self.rust_scan = RustScan(self.graph)
 
 
 # the failure modes of a scanner invocation — a subprocess that dies, times
@@ -393,82 +382,6 @@ except ImportError:  # lucidlint: ignore swallow pygit2 is optional — degrades
 CONTRACT_VERSION = 1
 
 
-class _GraphContract:
-    """The code-review-graph export contract, built through the tool's own
-    public API (GraphStore + Registry) — the gate never touches the SQLite
-    schema or the DB location, and never shells out. None = tool missing or
-    no graph. The contract JSON is consumed by the Rust binary via --graph."""
-
-    def __init__(self) -> None:
-        self._cache: dict[Path, Path | None] = {}
-
-    def contract(self, repo: Path) -> Path | None:
-        if repo in self._cache:
-            return self._cache[repo]
-        if _GraphStore is None:
-            self._cache[repo] = None
-            return None
-        result: Path | None = None
-        try:
-            data_dir = _Registry().get_data_dir_for_repo(str(repo)) if _Registry else None
-            db = Path(data_dir) / "graph.db" if data_dir else repo / ".code-review-graph" / "graph.db"
-            if not db.exists():
-                self._cache[repo] = None
-                return None
-            store = _GraphStore(db)
-            with store:
-                community_ids = store.get_all_community_ids()
-                nodes = []
-                for file_path in store.get_all_files():
-                    for gnode in store.get_nodes_by_file(file_path):
-                        nodes.append(
-                            # to the external code-review-graph store
-                            {
-                                "kind": gnode.kind,
-                                "name": gnode.name,
-                                "qualified_name": gnode.qualified_name,
-                                "file_path": gnode.file_path,
-                                "line_start": gnode.line_start,
-                                "line_end": gnode.line_end,
-                                "params": gnode.params,
-                                "return_type": gnode.return_type,
-                                "community_id": community_ids.get(gnode.qualified_name),
-                            }
-                        )
-                edges = []
-                for e in store.get_all_edges():
-                    edges.append(
-                        # to the external code-review-graph store
-                        {
-                            "kind": e.kind,
-                            "source": e.source_qualified,
-                            "target": e.target_qualified,
-                            "file_path": e.file_path,
-                        }
-                    )
-                communities = {}
-                for row in store.get_communities_list():
-                    communities[str(row["id"])] = row["name"]
-            contract = {
-                "contract_version": CONTRACT_VERSION,
-                "nodes": nodes,
-                "edges": edges,
-                "communities": communities,
-            }
-            result = _temp_input("lucidlint-graph-", json.dumps(contract, separators=(",", ":")))
-        # surfaces via `result = None` — the caller falls back to non-graph
-        # families; not a swallow. The direct code-review-graph API can raise
-        # sqlite3.Error (corrupt/older graph.db), KeyError (rows without the
-        # expected columns), or TypeError/AttributeError (version mismatch) —
-        # all must degrade, not crash the scan (PRD R21)
-        except (*_SCANNER_FAILURES, sqlite3.Error, KeyError, TypeError, AttributeError) as e:
-            log(f"graph contract export failed for {repo}: {e}")
-            result = None
-        self._cache[repo] = result
-        return result
-
-
-SERVICES = _Services()
 
 
 def parse_args() -> argparse.Namespace:

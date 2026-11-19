@@ -23,8 +23,16 @@ class Substitutable:
     def __init__(self, name: str) -> None:
         self._name = name
 
-    def __getattr__(self, attr: str) -> Any:
+    def get(self) -> Any:
+        """The binding's current value."""
         entry = sys.modules.get("lucidlint")
         if entry is None:  # imported as a library, with no entry module
-            raise AttributeError(f"{self._name}.{attr}: the binding lives on the lucidlint entry module")
-        return getattr(getattr(entry, self._name), attr)
+            raise AttributeError(f"{self._name}: the binding lives on the lucidlint entry module")
+        return getattr(entry, self._name)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Call the binding (a class or a factory) with these arguments."""
+        return self.get()(*args, **kwargs)
+
+    def __getattr__(self, attr: str) -> Any:
+        return getattr(self.get(), attr)
