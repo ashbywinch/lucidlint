@@ -681,10 +681,10 @@ fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: 
     class_module_findings(state, body, name);
     vague_name_findings(state, body);
     strewing_findings(state, body);
-    misplaced_method_findings(state, body);
-    tuple_record_findings(state, body);
-    wide_tuple_findings(state, body);
-    assembly_class_findings(state, body);
+    MisplacedMethod::findings(state, body);
+    TupleRecord::findings(state, body);
+    WideTuple::findings(state, body);
+    AssemblyClass::findings(state, body);
     data_clump_findings(state, body);
     feature_envy_findings(state, body);
     collect_self_assigns(state, body);

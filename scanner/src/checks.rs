@@ -77,9 +77,7 @@ pub use function_facts::FunctionFacts;
 
 pub use global_state::GlobalState;
 pub use guard_clause::guard_clause_findings;
-pub use latent_shapes::{
-    assembly_class_findings, misplaced_method_findings, tuple_record_findings, wide_tuple_findings,
-};
+pub use latent_shapes::{AssemblyClass, MisplacedMethod, TupleRecord, WideTuple};
 pub use latent_state::{
     collect_self_assigns, data_clump_findings, duplicate_field_findings, feature_envy_findings, undeclared_findings,
 };
