@@ -50,7 +50,7 @@ use checks::*;
 use file_scan::{ClassInfo, FileScan, ImportInfo, SelfAssign, UndeclScan};
 use finding::{Finding, FnCc, FnScope};
 use paths::{Paths, SCAN_SKIP_DIRS};
-use python_shape::{collect_stmt_lists, python_fn_shape};
+use python_shape::FnShape;
 use source::Source;
 
 impl Finding {
@@ -278,7 +278,7 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                     // the def line (name range), not the decorator — radon's
                     // fn.lineno; the parity test's decorated-line offset
                     // normalization existed because of this difference
-                    let (shape, shape_detail) = python_fn_shape(&f.body);
+                    let (shape, shape_detail) = FnShape::python_fn_shape(&f.body);
                     self.cc.push(FnCc {
                         file: self.file.to_string(),
                         function: f.name.to_string(),
@@ -614,7 +614,7 @@ impl<'a> ScanState<'a> {
     fn unreachable_check(&mut self, body: &'a [Stmt]) {
         let mut lists: Vec<&'a [Stmt]> = vec![body];
         for s in body {
-            collect_stmt_lists(s, &mut lists);
+            FnShape::collect_stmt_lists(s, &mut lists);
         }
         let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
         for list in lists {
@@ -6932,25 +6932,25 @@ def two(work, batch):
         // ifs over the same selector is a dispatch chain; a battery of ifs
         // appending to the same list is a rules battery
         let dispatch = include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__01.py");
-        let (shape, detail) = python_fn_shape(&first_py_fn_body(dispatch));
+        let (shape, detail) = FnShape::python_fn_shape(&first_py_fn_body(dispatch));
         assert_eq!((shape, detail.as_str()), ("dispatch", "sel"));
         let rules = include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__02.py");
-        let (shape, detail) = python_fn_shape(&first_py_fn_body(rules));
+        let (shape, detail) = FnShape::python_fn_shape(&first_py_fn_body(rules));
         assert_eq!((shape, detail.as_str()), ("rules", "out"));
         let plain = include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__03.py");
-        let (shape, _) = python_fn_shape(&first_py_fn_body(plain));
+        let (shape, _) = FnShape::python_fn_shape(&first_py_fn_body(plain));
         assert_eq!(shape, "plain");
         // the OFFER equals the FIX: a battery the rule-table fix cannot
         // apply to (a check with a nested if — not a single append) is NOT
         // routed to rule-table; it is "plain" so the message offers
         // extract-method instead (no false directive)
         let unfixable = include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__04.py");
-        let (shape, _) = python_fn_shape(&first_py_fn_body(unfixable));
+        let (shape, _) = FnShape::python_fn_shape(&first_py_fn_body(unfixable));
         assert_eq!(shape, "plain", "an unhoistable battery must not be offered rule-table");
         // a dispatch with an elif is not the fixable shape
         let unfixable_d =
             include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__05.py");
-        let (shape, _) = python_fn_shape(&first_py_fn_body(unfixable_d));
+        let (shape, _) = FnShape::python_fn_shape(&first_py_fn_body(unfixable_d));
         assert_eq!(shape, "plain", "an elif dispatch must not be offered dispatch-registry");
     }
 
