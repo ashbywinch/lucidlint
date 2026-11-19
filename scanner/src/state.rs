@@ -516,3 +516,46 @@ impl<'a> ScanState<'a> {
         }
     }
 }
+
+impl ScanState<'_> {
+    /// The module-level post-passes — structural families + the advisory
+    /// refactorings — kept out of Self::scan_source_impl (which was crossing the
+    /// large-function line).
+    pub(crate) fn module_post_passes(&mut self, body: &[Stmt], name: &str, source: &str, repo_wide: bool) {
+        class_module_findings(self, body, name);
+        vague_name_findings(self, body);
+        strewing_findings(self, body);
+        MisplacedMethod::findings(self, body);
+        TupleRecord::findings(self, body);
+        WideTuple::findings(self, body);
+        AssemblyClass::findings(self, body);
+        LatentState::data_clump(self, body);
+        LatentState::feature_envy(self, body);
+        LatentState::collect_self_assigns(self, body);
+        StaticHusk::findings(self, body);
+        delegating_husk_findings(self, body);
+        process_class_findings(self, body);
+        ClosureCluster::findings(self, body, source);
+        LatentState::duplicate_field(self, body);
+        RecordShape::findings(self, body, source);
+        Partition::findings(self, body, source);
+        // review-log rules: shadowing hazards + duplicated work (all per-file)
+        duplicate_def_findings(self, body);
+        Docstring::findings(self, body);
+        duplicate_block_findings(self, body);
+        // advisory refactorings (warn): detection-only, the fix names the Fowler
+        // refactoring for the agent (or a future fix)
+        guard_clause_findings(self, body, source);
+        latent_visitor_findings(self, body, source); // claims chains first — polymorphism skips them
+        conditional_polymorphism_findings(self, body, source);
+        SpecialCase::findings(self, body, source);
+        Scattered::collect_scattered_instances(self, body);
+        UnnamedCondition::findings(self, body, source);
+        UnnamedClassification::findings(self, body, source);
+        MiddleMan::collect(self, body, source, repo_wide);
+        Unused::collect_setters(self, body);
+        LoopFamily::findings(self, body, source);
+        DuplicateModule::collect(self, body, name);
+        Forwarding::collect(self, body);
+    }
+}

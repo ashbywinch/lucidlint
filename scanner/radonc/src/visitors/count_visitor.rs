@@ -26,6 +26,19 @@ impl CountVisitor {
         counter.d + 1
     }
 
+    /// The decisions a match contributes: one per case except a wildcard
+    /// (`case _:` / `case x:`) — radon's `visit_Match` rule.
+    fn match_cases(m: &ruff_python_ast::StmtMatch) -> i32 {
+        m.cases
+            .iter()
+            .map(|case| {
+                let wild = matches!(&case.pattern, Pattern::MatchAs(p)
+                    if p.pattern.is_none() && p.name.is_none());
+                if wild { 0 } else { 1 }
+            })
+            .sum()
+    }
+
     /// The class's own complexity: 1 + its non-method body decisions + the sum
     /// of its methods' CCs (radon's `visit_ClassDef`: a class body starts at 1
     /// and each method contributes `functions_complexity + len(functions)`).
@@ -127,19 +140,7 @@ impl<'a> SourceOrderVisitor<'a> for CountVisitor {
                 return;
             }
             Stmt::Match(m) => {
-                self.d += m
-                    .cases
-                    .iter()
-                    .map(|case| {
-                        let wild = matches!(&case.pattern, Pattern::MatchAs(p)
-                        if p.pattern.is_none() && p.name.is_none());
-                        if wild {
-                            0
-                        } else {
-                            1
-                        }
-                    })
-                    .sum::<i32>();
+                self.d += Self::match_cases(m);
                 self.visit_expr(&m.subject);
                 for case in &m.cases {
                     for s in &case.body {

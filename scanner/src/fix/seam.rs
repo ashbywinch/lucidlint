@@ -70,8 +70,13 @@ impl Seam {
         bound
     }
 
-    /// The seam's free variables (fn params it reads) and whether it is safe.
-    pub(super) fn seam_analysis(stmts: &[&Stmt], after: &[&Stmt], params: &[Ident]) -> Option<Vec<Ident>> {
+    /// The seam's free variables — the parameters it reads — or None when a
+    /// read cannot be given a type (self, an unknown name).
+    fn seam_free(
+        stmts: &[&Stmt],
+        bound: &std::collections::HashSet<String>,
+        params: &std::collections::HashSet<String>,
+    ) -> Option<Vec<Ident>> {
         /// The seam's reads: a name it neither binds nor receives is unknown.
         struct SeamCollector<'a> {
             bound: &'a std::collections::HashSet<String>,
@@ -111,6 +116,24 @@ impl Seam {
                 self.visit_expr(&node.base);
             }
         }
+        let mut free: Vec<Ident> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut ok = true;
+        for s in stmts {
+            SeamCollector {
+                bound,
+                params,
+                free: &mut free,
+                seen: &mut seen,
+                ok: &mut ok,
+            }
+            .visit_stmt(s);
+        }
+        ok.then_some(free)
+    }
+
+    /// Does an after-statement read a seam-local the seam computed?
+    fn reads_seam_local(after: &[&Stmt], seam_writes: &std::collections::HashSet<String>) -> bool {
         /// Names computed in the seam and read in the after-statements — out-vars.
         struct OutVarCollector<'a> {
             seam_writes: &'a std::collections::HashSet<String>,
@@ -129,6 +152,19 @@ impl Seam {
                 self.visit_expr(&node.receiver);
             }
         }
+        let mut out = false;
+        for s in after {
+            OutVarCollector {
+                seam_writes,
+                out: &mut out,
+            }
+            .visit_stmt(s);
+        }
+        out
+    }
+
+    /// Does an after-statement read one of the seam's free names?
+    fn reads_after(after: &[&Stmt], names: &std::collections::HashSet<String>) -> bool {
         /// Does any statement READ one of `names`?
         struct AfterReadCollector<'a> {
             names: &'a std::collections::HashSet<String>,
@@ -144,51 +180,27 @@ impl Seam {
                 }
             }
         }
-        let pset: std::collections::HashSet<String> = params.iter().map(|i| i.to_string()).collect();
-        let bound = Self::seam_bindings(stmts);
-        let mut free: Vec<Ident> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut ok = true;
-        for s in stmts {
-            SeamCollector {
-                bound: &bound,
-                params: &pset,
-                free: &mut free,
-                seen: &mut seen,
-                ok: &mut ok,
-            }
-            .visit_stmt(s);
-        }
-        if !ok {
-            return None;
-        }
-        // out-vars: any seam-local read in the after-statements
         let mut out = false;
         for s in after {
-            OutVarCollector {
-                seam_writes: &bound,
-                out: &mut out,
-            }
-            .visit_stmt(s);
+            AfterReadCollector { names, out: &mut out }.visit_stmt(s);
         }
-        if out {
+        out
+    }
+
+    /// The seam's free variables (fn params it reads) and whether it is safe.
+    pub(super) fn seam_analysis(stmts: &[&Stmt], after: &[&Stmt], params: &[Ident]) -> Option<Vec<Ident>> {
+        let pset: std::collections::HashSet<String> = params.iter().map(|i| i.to_string()).collect();
+        let bound = Self::seam_bindings(stmts);
+        let free = Self::seam_free(stmts, &bound, &pset)?;
+        // out-vars: any seam-local read in the after-statements
+        if Self::reads_seam_local(after, &bound) {
             return None;
         }
         // a free PARAM read in the after-statements would be MOVED into the
         // helper by value — the after-read becomes use-of-moved-value; refuse
         let free_set: std::collections::HashSet<String> = free.iter().map(|i| i.to_string()).collect();
-        if !free_set.is_empty() {
-            let mut after_read = false;
-            for s in after {
-                AfterReadCollector {
-                    names: &free_set,
-                    out: &mut after_read,
-                }
-                .visit_stmt(s);
-            }
-            if after_read {
-                return None;
-            }
+        if !free_set.is_empty() && Self::reads_after(after, &free_set) {
+            return None;
         }
         // a param SHADOWED by a seam-local binding that the seam also READS:
         // the read may be of the param (before the shadow) — the binding set is

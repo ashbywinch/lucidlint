@@ -18,7 +18,7 @@
 // helpers would thread six collections through a parameter object for no reader gain
 use rayon::prelude::*;
 use ruff_python_ast::visitor::source_order::SourceOrderVisitor;
-use ruff_python_ast::{AnyNodeRef, ModModule, Stmt};
+use ruff_python_ast::{AnyNodeRef, ModModule};
 use ruff_python_parser::{parse_module, Parsed};
 use ruff_text_size::Ranged;
 use std::collections::HashSet;
@@ -177,47 +177,6 @@ impl Pipeline {
         Self::scan(source, name, repo_wide)
     }
 
-    /// The module-level post-passes — structural families + the advisory
-    /// refactorings — kept out of Self::scan_source_impl (which was crossing the
-    /// large-function line).
-    fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: &str, repo_wide: bool) {
-        class_module_findings(state, body, name);
-        vague_name_findings(state, body);
-        strewing_findings(state, body);
-        MisplacedMethod::findings(state, body);
-        TupleRecord::findings(state, body);
-        WideTuple::findings(state, body);
-        AssemblyClass::findings(state, body);
-        LatentState::data_clump(state, body);
-        LatentState::feature_envy(state, body);
-        LatentState::collect_self_assigns(state, body);
-        StaticHusk::findings(state, body);
-        delegating_husk_findings(state, body);
-        process_class_findings(state, body);
-        ClosureCluster::findings(state, body, source);
-        LatentState::duplicate_field(state, body);
-        RecordShape::findings(state, body, source);
-        Partition::findings(state, body, source);
-        // review-log rules: shadowing hazards + duplicated work (all per-file)
-        duplicate_def_findings(state, body);
-        Docstring::findings(state, body);
-        duplicate_block_findings(state, body);
-        // advisory refactorings (warn): detection-only, the fix names the Fowler
-        // refactoring for the agent (or a future fix)
-        guard_clause_findings(state, body, source);
-        latent_visitor_findings(state, body, source); // claims chains first — polymorphism skips them
-        conditional_polymorphism_findings(state, body, source);
-        SpecialCase::findings(state, body, source);
-        Scattered::collect_scattered_instances(state, body);
-        UnnamedCondition::findings(state, body, source);
-        UnnamedClassification::findings(state, body, source);
-        MiddleMan::collect(state, body, source, repo_wide);
-        Unused::collect_setters(state, body);
-        LoopFamily::findings(state, body, source);
-        DuplicateModule::collect(state, body, name);
-        Forwarding::collect(state, body);
-    }
-
     /// Per-buffer scans never run the repo-wide families (unused, unused-setter,
     /// duplicate) — their findings are evaluated only in repo_wide_merge — so
     /// their markers cannot bind here and a stale finding for one is a false
@@ -262,7 +221,7 @@ impl Pipeline {
         for stmt in &body {
             state.visit_stmt(stmt);
         }
-        Self::module_post_passes(&mut state, &body, name, source, repo_wide);
+        state.module_post_passes(&body, name, source, repo_wide);
         if state.is_test {
             // the rules that live in tests — scanned for alone or with --include-tests
             Monkeypatch::findings(&mut state, &body, source);
@@ -1355,6 +1314,7 @@ mod tests {
     use super::*;
 
     use crate::python_shape::FnShape;
+    use ruff_python_ast::Stmt;
 
     use crate::paths::Paths;
 

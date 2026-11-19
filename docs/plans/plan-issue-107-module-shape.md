@@ -648,6 +648,41 @@ bundle's copy list and `setup.py` must carry it). `scanner/src` (20 files) and
 layout step is one subfolder per domain (`checks/classes/`, `checks/tests/`,
 `checks/duplicates/`), which the rule's message names.
 
+### Round 2 (2026-11-19): the Rust ladder is empty
+
+The 25 modules that still fired at the start of the round are now 2 — the two
+Python giants above. Every Rust module was brought to one concern by one of
+four moves, and the pattern repeats because the ladder's own message states it:
+
+| the module held | the move | examples |
+|---|---|---|
+| one rule, many free helpers | the helpers become associated functions on the type that owns the concern | `ModuleShape`, `FnShape`, `RustShape`, `SkeletonWalk`, `LucidState`, `PathExpression`, `ExpressionOccurrence`, `Suppressions`, `LspState`, `Pipeline` |
+| several rules sharing a file | one module per rule, each a type; the module root re-exports | `checks/latent_shapes/`, `checks/signature/`, `checks/decisions/`, `checks/middle_man/`, `graph_families/`, `skeleton/` |
+| a rule's visitors / contexts | a local struct inside the one method that uses it | `BindCollector`, `SeamCollector`, `ExprProbe`, `PathProbe`, `LineMarkerCtx`, `StaleCtx` |
+| a record plus the functions that take it | the functions become the record's methods, so `record-shape` stays green | `MiddleManClass`, `RegionReads`-style readers, `CountVisitor` |
+
+`scanner/src/main.rs` keeps the composition root: `Pipeline` owns the scans and
+`state.rs` owns the `ScanState` visitor, so the crate root no longer holds the
+pipeline and the walker in one module.
+
+**One behaviour fix came out of the refactor.** `shared-path` chose its winner
+from a `HashMap`, so two equal-scoring runs left the report to hash order: the
+same album checkout reported `"registry"` on one run and `"work"` on the next.
+The run text is now the final tie-break (a deterministic report is a
+precondition for the before/after comparison the round uses). Finding counts on
+houses (353) and album (431) are unchanged, and the two runs now agree with
+each other and with the archived baseline.
+
+**What is left, in order.** `fix_engine.py` first: its 264 definitions already
+name the seams — the record, loop, extract and composite sections — and each
+section is one fixer class whose CST transformers become nested classes (a
+nested type is that fixer's implementation, not a second concern). Then
+`lucidlint.py`: scanning, the Rust bridge, the docs walk, rendering, the
+baseline, the fix command and the gate runner become a package of one-class
+modules, with `lucidlint.py` kept as the entry point. Both moves must carry the
+release bundle's copy list and `setup.py`'s package list, which is why they are
+their own round rather than the tail of this one.
+
 ## Why the tool did not catch the confusing code (2026-11-18)
 
 A review thread outlived the code it discussed, and the user's verdict was the
