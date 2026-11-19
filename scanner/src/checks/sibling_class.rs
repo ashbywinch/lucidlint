@@ -98,7 +98,7 @@ impl SiblingClass {
                     .methods
                     .iter()
                     .filter(reads_only_shared)
-                    .any(|n| crate::skeleton::dice_similarity(&m.skeleton, &n.skeleton) >= 0.9)
+                    .any(|n| crate::skeleton::Similarity::dice_similarity(&m.skeleton, &n.skeleton) >= 0.9)
             })
             .map(|m| m.name.as_str())
             .collect()

@@ -800,7 +800,7 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
             if let Q::N(n) = queue[qi] {
                 if let AnyNodeRef::StmtFunctionDef(f) = n {
                     let skel = fn_skeleton(f);
-                    if is_duplicate_candidate(f, skel.len()) {
+                    if Similarity::is_duplicate_candidate(f, skel.len()) {
                         let def_line = Source::line_of(source, f.name.range().start());
                         state.skeletons.push(SkeletonFn {
                             rel: name.to_string(),
@@ -2191,21 +2191,24 @@ mod tests {
     fn duplicate_fast_path_matches_reference_dice() {
         // the sorted-index-bigram fast path must agree with the reference
         // multiset dice on the pinned repetition cases (2026-08-17 review-log)
-        use crate::skeleton::dice_similarity;
+        use crate::skeleton::Similarity;
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let rep = s(&["a", "b", "a", "b"]);
         let uniq = s(&["a", "b", "a"]);
         let interner = crate::skeleton::BigramInterner::new(&[&rep, &uniq]);
         let fa = interner.bigrams_of(0);
         let fb = interner.bigrams_of(1);
-        assert_eq!(crate::skeleton::dice_from_bigrams(fa, fb), dice_similarity(&rep, &uniq));
-        assert_eq!(crate::skeleton::dice_from_bigrams(fa, fa), 1.0);
+        assert_eq!(
+            crate::skeleton::Similarity::dice_from_bigrams(fa, fb),
+            Similarity::dice_similarity(&rep, &uniq)
+        );
+        assert_eq!(crate::skeleton::Similarity::dice_from_bigrams(fa, fa), 1.0);
         // empty skeletons: never a duplicate, matches the reference
         let e = Vec::<String>::new();
         let interner2 = crate::skeleton::BigramInterner::new(&[&e, &rep]);
         assert_eq!(
-            crate::skeleton::dice_from_bigrams(interner2.bigrams_of(0), interner2.bigrams_of(1)),
-            dice_similarity(&e, &rep)
+            crate::skeleton::Similarity::dice_from_bigrams(interner2.bigrams_of(0), interner2.bigrams_of(1)),
+            Similarity::dice_similarity(&e, &rep)
         );
     }
 
@@ -4778,17 +4781,17 @@ mod tests {
         // score Dice < 0.9 — the set-hash shortcut reported these as 100%
         // similar (2026-08-17 review-log). There is no hash shortcut; the
         // pair must NOT be flagged.
-        use crate::skeleton::dice_similarity;
+        use crate::skeleton::Similarity;
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         // [a,b,a,b] has multiset bigrams (a,b),(b,a),(a,b) — the (a,b) repeats
         let rep = s(&["a", "b", "a", "b"]);
         // [a,b,a] has (a,b),(b,a) — same unique set, one fewer (a,b)
         let uniq = s(&["a", "b", "a"]);
-        let sim = dice_similarity(&rep, &uniq);
+        let sim = Similarity::dice_similarity(&rep, &uniq);
         // 2*2 / (3+2) = 0.8 < 0.9 — NOT a duplicate despite equal unique sets
         assert!(sim < 0.9, "dice must count bigram multiplicities: {sim}");
         // sanity: the exact multiset is 1.0
-        assert_eq!(dice_similarity(&rep, &s(&["a", "b", "a", "b"])), 1.0);
+        assert_eq!(Similarity::dice_similarity(&rep, &s(&["a", "b", "a", "b"])), 1.0);
     }
 
     #[test]
@@ -4848,9 +4851,9 @@ mod tests {
     fn dice_partial_similarity_below_threshold() {
         let a: Vec<String> = "A B C D E".split(' ').map(str::to_string).collect();
         let b: Vec<String> = "A B X Y Z".split(' ').map(str::to_string).collect();
-        assert!(crate::skeleton::dice_similarity(&a, &b) < 0.9);
+        assert!(crate::skeleton::Similarity::dice_similarity(&a, &b) < 0.9);
         let same: Vec<String> = "A B C D E".split(' ').map(str::to_string).collect();
-        assert_eq!(crate::skeleton::dice_similarity(&a, &same), 1.0);
+        assert_eq!(crate::skeleton::Similarity::dice_similarity(&a, &same), 1.0);
     }
 
     #[test]

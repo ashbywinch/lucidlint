@@ -9,7 +9,7 @@ use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
 use crate::paths::Paths;
-use crate::skeleton::{dice_from_bigrams, skel_children, BigramInterner, SkeletonModule, Q};
+use crate::skeleton::{skel_children, BigramInterner, Similarity, SkeletonModule, Q};
 use crate::source::Source;
 use crate::ScanState;
 
@@ -322,7 +322,7 @@ impl DuplicateModule {
                 if Self::consts_differ(e, later) {
                     continue;
                 }
-                if dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j)) >= 0.9 {
+                if Similarity::dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j)) >= 0.9 {
                     return Some(j);
                 }
             }
@@ -360,7 +360,7 @@ impl DuplicateModule {
                 .cloned()
                 .collect();
             matched.sort();
-            let sim = dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j));
+            let sim = Similarity::dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j));
             let what = if later.entity == "class" { "classes" } else { "modules" };
             let members_text = if matched.is_empty() {
                 String::new()

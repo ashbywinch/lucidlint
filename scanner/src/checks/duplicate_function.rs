@@ -4,7 +4,7 @@
 use rayon::prelude::*;
 
 use crate::finding::Finding;
-use crate::skeleton::{dice_from_bigrams, BigramInterner, SkeletonFn};
+use crate::skeleton::{BigramInterner, Similarity, SkeletonFn};
 
 /// Cross-file copy-paste findings (`_duplicate_actions`).
 ///
@@ -45,7 +45,7 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
                 let bucket = &buckets[&len];
                 let start = bucket.partition_point(|&j| j <= i);
                 for &j in &bucket[start..] {
-                    let sim = dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j));
+                    let sim = Similarity::dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j));
                     if sim >= 0.9 {
                         // a function nested inside another always resembles it:
                         // the span contains the other's — containment, not

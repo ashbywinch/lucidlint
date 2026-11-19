@@ -518,7 +518,7 @@ impl<'a> RsState<'a> {
             }
             if self.is_repo_wide_module(module_level) {
                 let skel = RsSkeleton::rs_skeleton(sig, block);
-                if crate::skeleton::is_duplicate_size(skel.len(), block.stmts.len()) {
+                if crate::skeleton::Similarity::is_duplicate_size(skel.len(), block.stmts.len()) {
                     self.skeletons.push(crate::skeleton::SkeletonFn {
                         rel: self.file.to_string(),
                         name: sig.ident.to_string(),

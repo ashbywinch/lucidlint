@@ -1,9 +1,6 @@
 //! `duplicate-expression` (#104): the same substantive expression in two
 //! places. One copy can drift from the others, so the shape earns a name —
 //! a helper, a predicate, or a type alias.
-// lucidlint: ignore-file complexity the expression-shape walker is ONE exhaustive
-// dispatch over every Expr variant — the arm count is the AST's surface, not
-// branching, and splitting it would scatter a single mapping
 // lucidlint: ignore-file boolean-arg the two flags are the walker's API contract
 // (keep the callee's name, abstract the literal key), not unnamed modes — Rust
 // has no named arguments

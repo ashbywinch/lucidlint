@@ -53,7 +53,7 @@ pub use crate::fix_render::FixRender;
 pub use crate::forwarding::ForwarderFn;
 pub use crate::forwarding::ForwarderMethod;
 pub use crate::forwarding::RepoMethod;
-pub use crate::skeleton::{fn_skeleton, is_duplicate_candidate, skel_children, SkeletonFn, SkeletonModule, Q};
+pub use crate::skeleton::{fn_skeleton, skel_children, Similarity, SkeletonFn, SkeletonModule, Q};
 pub use crate::suppressions::{apply_source_suppressions, logical_line_starts, parse_suppressions};
 pub use builtin_shadow::shadow_findings;
 pub use class_facts::annotation_base_name;
