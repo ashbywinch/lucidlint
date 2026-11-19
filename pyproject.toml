@@ -55,10 +55,10 @@ requires = ["setuptools>=77.0", "wheel>=0.40"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["lucidlint", "fix_engine", "rule_metadata"]
+py-modules = ["lucidlint", "rule_metadata"]
 
 [tool.setuptools.packages.find]
-include = ["lucidlint_bin*", "orchestrator*"]
+include = ["lucidlint_bin*", "orchestrator*", "fix_engine*"]
 
 [tool.setuptools.package-data]
 lucidlint_bin = ["bin/*"]

@@ -90,7 +90,8 @@ jobs:
           cp "scanner/target/${target}/release/lucidlint${exe}" "dist/${dir}/bin/lucidlint${exe}"
           cp lucidlint.py "dist/${dir}/"
           cp rule_metadata.py "dist/${dir}/"
-          cp fix_engine.py "dist/${dir}/"
+          cp -r fix_engine "dist/${dir}/"
+          cp -r orchestrator "dist/${dir}/"
           cp release/Makefile "dist/${dir}/Makefile"
           printf '%s\n' "$ver" > "dist/${dir}/version.txt"
           # self-contain the fix engine's libcst so the fix path works from
