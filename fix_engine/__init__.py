@@ -28,10 +28,33 @@ import libcst as cst
 import libcst.matchers as m
 from libcst.metadata import CodePosition, ExpressionContextProvider, ParentNodeProvider, PositionProvider
 
+from fix_engine import records as _records
 from fix_engine.cst_mechanics import CstMechanics
+from fix_engine.fix_options import FixOptions
+from fix_engine.strewing_group import StrewingGroup
 
-# the package root is the public surface: names that moved to a module stay
-# reachable here, because consumers and the tests import them from fix_engine
+_ChainHead = _records._ChainHead
+_ChainMiddle = _records._ChainMiddle
+_ChainTerminal = _records._ChainTerminal
+_Clump = _records._Clump
+_Collaborator = _records._Collaborator
+_ForwardTarget = _records._ForwardTarget
+_GroupInit = _records._GroupInit
+_LoopPipelinePlan = _records._LoopPipelinePlan
+_ModuleFn = _records._ModuleFn
+_ModuleProposal = _records._ModuleProposal
+_PartitionAttempt = _records._PartitionAttempt
+_PartitionGroup = _records._PartitionGroup
+_PartitionPlan = _records._PartitionPlan
+_RecordBuild = _records._RecordBuild
+_RecordDictHit = _records._RecordDictHit
+_SplitCtx = _records._SplitCtx
+_SplitLayout = _records._SplitLayout
+_SplitOutcome = _records._SplitOutcome
+_StmtReads = _records._StmtReads
+_WideTupleSite = _records._WideTupleSite
+# the shared mechanics stay reachable from the package root: consumers and the
+# tests import them from fix_engine
 _as_range = CstMechanics._as_range
 _as_node = CstMechanics._as_node
 _iter_nodes = CstMechanics._iter_nodes
@@ -50,6 +73,7 @@ _extraction_is_private = CstMechanics._extraction_is_private
 _RemoveNodes = CstMechanics._RemoveNodes
 _EnclosingClass = CstMechanics._EnclosingClass
 _EnclosingFn = CstMechanics._EnclosingFn
+
 
 
 def _non_receiver_param_names(params: Sequence[cst.Param]) -> list[str]:
@@ -99,16 +123,6 @@ MECHANICAL_KINDS = {
 }
 
 
-@dataclass
-class FixOptions:
-    """The agent-supplied bits a fix may need: the callee signature for
-    positional-literals, the class name for extract-class."""
-
-    params: list[str] | None = None
-    name: str | None = None
-    # the callee whose --params these are (external callees): binds the fix to
-    # THAT call on nested lines instead of the innermost spanning one
-    callee: str | None = None
 
 
 # the structural fixers by kind — a dispatch registry: each arm's handler is
@@ -156,12 +170,6 @@ _NAME_REQUIRED_KINDS = {
 FIXABLE_KINDS = set(MECHANICAL_KINDS) | set(_STRUCTURAL_FIXERS) | {"extract-module"}
 
 
-class _ModuleProposal(NamedTuple):
-    """The extract-module split result: the new origin source and the new
-    module source — a named record instead of a bare tuple."""
-
-    origin: str
-    module: str
 
 
 # lucidlint: ignore-file global-state the module constants are this tool's configuration tables —
@@ -1573,13 +1581,6 @@ class _RecordToClass(cst.CSTTransformer):
         )
 
 
-@dataclass
-class _RecordBuild:
-    """The record's dict names + the first build's elements (for the field
-    names) — a named return instead of a bare tuple."""
-
-    names: set[str]
-    elements: list[cst.BaseExpression] | None
 
 
 def _find_record_builds(module: cst.Module) -> _RecordBuild:
@@ -1608,13 +1609,6 @@ def _find_record_builds(module: cst.Module) -> _RecordBuild:
     return _RecordBuild(names, elements)
 
 
-class _RecordDictHit(NamedTuple):
-    """One candidate literal: anchor position + the node + its const keys."""
-
-    line: int
-    col: int
-    node: cst.Dict
-    keys: list[str]
 
 
 class _FindRecordDicts(cst.CSTVisitor):
@@ -1754,22 +1748,8 @@ class _DictToClass(cst.CSTTransformer):
         return updated_node
 
 
-class _Collaborator(NamedTuple):
-    """One `graph = self.graph` alias: the local name and the owner field it
-    aliases — a named return instead of a bare tuple."""
-
-    alias: str
-    attr: str
 
 
-class _StmtReads(NamedTuple):
-    """One top-level statement's analysis for the feature-envy move: the
-    names it reads (bound names excluded), the names it binds, and whether
-    it touches self — a named return instead of a bare tuple."""
-
-    reads: set[str]
-    bound: set[str]
-    has_self: bool
 
 
 def _collaborator_aliases(method: cst.FunctionDef) -> list[_Collaborator]:
@@ -2139,17 +2119,6 @@ class _KeywordArgs(cst.CSTTransformer):
         return updated_node.with_changes(args=new_args)
 
 
-@dataclass
-class _LoopPipelinePlan:
-    """One loop's accumulation shape for the comprehension rewrite: the
-    accumulator, the collection kind, and the element/key/flatten exprs."""
-
-    acc: str
-    collection: str  # "list" | "set" | "dict"
-    element: cst.BaseExpression | None  # the appended/added value or the dict value
-    key: cst.BaseExpression | None  # the dict key (subscript store) or None
-    flatten: cst.BaseExpression | None  # the extend/`+= [a, b]` value whose ITEMS join
-    if_test: cst.BaseExpression | None  # the one-filter test or None
 
 
 def _call_mutation_plan(node: cst.Expr) -> _LoopPipelinePlan | None:
@@ -2809,14 +2778,6 @@ def _annotation_base(node) -> str | None:
     return None
 
 
-@dataclass
-class StrewingGroup:
-    """The free-function group extract-class moves — shared leading type,
-    the fn names in source order, the anchor line."""
-
-    shared: str
-    fns: list[str] = field(default_factory=list)
-    anchor: int = 0
 
 
 def _strewing_group(source: str, anchor_line: int) -> StrewingGroup | None:
@@ -4185,55 +4146,14 @@ def _origin_after_move(module: cst.Module, move: set[str], opts, rel: str) -> li
     return remaining
 
 
-@dataclass(frozen=True)
-class _ForwardTarget:
-    """F/M's forwarder callee: a module fn (is_name) or a method on another
-    object ((recv-param, method))."""
-
-    is_name: bool
-    name: str = ""
-    attr_method: tuple[str, str] | None = None
 
 
-class _ChainHead(NamedTuple):
-    """A forwarding chain's head: the method, its class, the parameters it
-    passes through, and the call it forwards to."""
-
-    class_name: str
-    class_node: cst.ClassDef
-    method: cst.FunctionDef
-    params: list[str]
-    callee: _ForwardTarget
 
 
-class _ChainMiddle(NamedTuple):
-    """The module function the head forwards into: where it lives, the module
-    it belongs to, its parameters, and where that forwards."""
-
-    rel: str
-    module: cst.Module
-    params: list[str]
-    callee: _ForwardTarget
 
 
-class _ModuleFn(NamedTuple):
-    """One module-level function resolved repo-wide: the file it lives in, the
-    parsed module, and its node — the three facts a caller needs together."""
-
-    rel: str
-    module: cst.Module
-    node: cst.FunctionDef
 
 
-class _ChainTerminal(NamedTuple):
-    """The method the chain reaches through its middle: D.N, plus the
-    receiver parameter the head passes for it."""
-
-    recv: str
-    name: str
-    rel: str
-    cls: cst.ClassDef
-    method: cst.FunctionDef
 
 
 def _wrapped_module(source: str) -> tuple[cst.Module, cst.MetadataWrapper]:
@@ -4860,26 +4780,8 @@ class _SplitOrigin(NamedTuple):
         return self.segments + [self.stem]
 
 
-class _SplitLayout(NamedTuple):
-    """The split's shape: one entry per produced module (its classes and the
-    package name, or None for a flat sibling file), the snake names the flat
-    targets use, and the decline when the shape cannot be named."""
-
-    members: list[tuple[list[cst.ClassDef], str | None]]
-    any_package: bool
-    snake: dict[str, str]
-    decline: str | None = None
 
 
-class _SplitOutcome(NamedTuple):
-    """What a split produced: the origin's new source ("" when the origin is
-    deleted), the other files to write, the files to delete, and the reason it
-    refused (None on success)."""
-
-    origin: str | None
-    writes: list[tuple[str, str]]
-    deletes: list[str]
-    decline: str | None = None
 
 
 def _split_origin(rel: str) -> _SplitOrigin:
@@ -5299,19 +5201,6 @@ class _ModuleSplit:
         return self.finalize(origin_source, writes, rewritten, whole_pkg)
 
 
-class _SplitCtx(NamedTuple):
-    """Everything a class-file build needs to route the class's free names to
-    the right imports: the origin identity, the other subjects, the residual
-    members, the constants moving in — and the layout's import forms."""
-
-    stem: str
-
-    subjects: set[str]
-    residual_def_names: set[str]
-    moved: set[str]
-    package: str | None  # None = flat sibling; else the package directory
-    origin_dots: int  # relative dots for `from <origin> import X`
-    member_dots: int  # relative dots for `from .<Class> import <Class>`
 
 
 def _from_import_node(module_comps: list[str], names: list[str] | list[cst.ImportAlias], dots: int) -> cst.ImportFrom:
@@ -6387,16 +6276,6 @@ def _binds_name(module: cst.Module, name: str) -> bool:
 # --------------------------------------------------------------------------- wide-tuple
 
 
-class _WideTupleSite(NamedTuple):
-    """One fixed-arity tuple annotation on the anchor line: where it lives,
-    the annotated name, its arity, and the build site's element expressions
-    (None when the annotation has no matching tuple literal)."""
-
-    where: str
-    var: str
-    arity: int
-    annotation: cst.BaseExpression
-    elements: tuple[cst.BaseExpression, ...] | None
 
 
 class _FindWideTuples(cst.CSTVisitor):
@@ -6587,12 +6466,6 @@ def _wide_tuple_fix(req: _FixRequest) -> str | None:
 # --------------------------------------------------------------------------- data-clump
 
 
-class _Clump(NamedTuple):
-    """The recovered clump: the shared pair (in the anchor's signature order)
-    and the module-level defs carrying it, in source order."""
-
-    pair: tuple[str, str]
-    fns: tuple[cst.FunctionDef, ...]
 
 
 class _ImportedNames(cst.CSTVisitor):
@@ -6928,34 +6801,12 @@ def _data_clump_fix(req: _FixRequest) -> str | None:
 # --------------------------------------------------------------------------- partition
 
 
-class _PartitionGroup(NamedTuple):
-    """One field-disjoint method group: its methods in source order and the
-    fields only they touch."""
-
-    methods: tuple[cst.FunctionDef, ...]
-    fields: tuple[str, ...]
 
 
-class _GroupInit(NamedTuple):
-    """One group's synthesized __init__: the field assignments it keeps and
-    the parameters those assignments need (name, annotation, default)."""
-
-    statements: list[cst.BaseStatement]
-    params: list[cst.Param]
 
 
-class _PartitionPlan(NamedTuple):
-    groups: tuple[_PartitionGroup, ...]
-    init_fields: tuple[tuple[str, cst.BaseExpression], ...]
-    init_docstring: cst.BaseStatement | None
-    init_params: tuple[tuple[str, cst.Annotation | None, cst.BaseExpression | None], ...]
 
 
-class _PartitionAttempt(NamedTuple):
-    """The plan, or the specific reason it cannot be computed."""
-
-    plan: _PartitionPlan | None
-    decline: str
 
 
 def _self_field_reads(node: cst.CSTNode) -> set[str]:
