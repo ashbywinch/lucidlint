@@ -638,7 +638,7 @@ Two Python modules are over the loose rung and are each a round of their own:
 
 | module | definitions | target |
 |---|---|---|
-| `lucidlint.py` | 68 | a package of one-class modules, `lucidlint.py` as the entry |
+| `lucidlint.py` | 71 | a package of one-class modules, `lucidlint.py` as the entry |
 | `fix_engine.py` | 264 | one fixer class per module |
 
 Both are one-class-per-module work like the scripts, and both need the
