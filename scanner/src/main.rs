@@ -1176,13 +1176,7 @@ fn main() {
                     let slot = cc_any.entry(rel).or_insert(0);
                     *slot = (*slot).max(e.cc);
                 }
-                all_findings.extend(graph_families::Hotspot::findings(
-                    &churn,
-                    &cc_any,
-                    0.1,
-                    15,
-                    &std::collections::HashMap::new(),
-                ));
+                all_findings.extend(graph_families::Hotspot::findings(&churn, &cc_any, 0.1, 15));
                 // churn-untested: the repo's OWN coverage snapshot decides
                 // (coverage.xml / .coverage, R6) — never the graph's TESTED_BY
                 // approximation, which misses body imports and cannot speak

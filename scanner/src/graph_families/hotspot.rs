@@ -13,7 +13,6 @@ impl Hotspot {
         cc_by_file: &HashMap<String, u32>,
         top_frac: f64,
         min_cc: u32,
-        last_modified: &HashMap<String, String>,
     ) -> Vec<Finding> {
         let cutoff = ((churn.len() as f64) * top_frac).max(1.0) as usize;
         let mut entries: Vec<(&String, &usize)> = churn.iter().collect();
@@ -39,7 +38,6 @@ impl Hotspot {
                 severity: "fail".into(),
                 message: format!("changed {count}x (top {cutoff} by churn) — volatile part: max CC {max_cc} in {rel}"),
             });
-            let _ = last_modified;
         }
         out
     }

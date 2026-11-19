@@ -11,10 +11,6 @@ pub struct GNode {
     pub qualified_name: String,
     pub file_path: String,
     pub line_start: Option<i64>,
-    /// The node's last line — part of the contract's wire shape; no family
-    /// reads it today (large-function moved to the per-file scan).
-    #[allow(dead_code)]
-    pub line_end: Option<i64>,
     pub community_id: Option<i64>,
 }
 
