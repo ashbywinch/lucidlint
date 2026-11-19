@@ -41,7 +41,6 @@ import tomllib
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import asdict, dataclass, field
-from importlib import metadata
 from pathlib import Path
 from subprocess import SubprocessError
 from types import ModuleType
@@ -53,14 +52,19 @@ from orchestrator.console import CONSOLE
 from orchestrator.source_file import SourceFile
 from orchestrator.source_walk import SourceWalk, gitignored_docs
 from orchestrator.vendoring import vendor_path
+from orchestrator.version import VERSION as _VERSION
+from orchestrator.version import version_from_bundle
 
-# Run as a script the module is `__main__`; the host seams resolve the
-# entry module by its installed name, so make that name point here in both
-# modes (the import form already has it).
+# the entry module's own directory: the release bundle's root (deps/,
+# version.txt) sits beside it
+_here = os.path.dirname(os.path.abspath(__file__))
+# Run as a script the module is `__main__`; the host seams resolve the entry
+# module by its installed name, so make that name point here in both modes.
 sys.modules.setdefault("lucidlint", sys.modules[__name__])
 
 # the entry module is the facade: these names stay here because callers (and
 # the tests) reach them on `lucidlint`
+_version_from_bundle = version_from_bundle
 _vendor_path = vendor_path
 log = CONSOLE.warn
 _print_trimmed_diff = CONSOLE.print_diff
@@ -81,7 +85,6 @@ _gitignored_docs = gitignored_docs
 # `deps/` dir (review-log B8): when a `deps/` sits next to this file (the
 # bundle, not a wheel install), prefer it so the fix path works with no pip
 # step. A wheel/source install has no `deps/` and uses site-packages libcst.
-_here = os.path.dirname(os.path.abspath(__file__))
 
 
 # The JSON inputs one scan hands the binary (graph contract, churn, coverage)
@@ -1095,42 +1098,10 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _version_from_bundle(here: Path) -> str | None:
-    """The version.txt a release bundle ships (the tag, written with a
-    leading v) — None when the file is absent or empty. The bundle has no
-    pyproject.toml, so without this the bundle's Python entry point
-    reports 0.0.0.dev while bin/lucidlint reports the tag."""
-    try:
-        raw = (here / "version.txt").read_text().strip().lstrip("v")
-    except OSError:
-        return None
-    return raw or None
 
 
-def _version() -> str:
-    """The artifact's own stamp (a bundle's version.txt, the tag written
-    at release time), else the installed package version, else the
-    source-checkout version from pyproject.toml — NEVER a hardcoded
-    literal (the README/version drift class; pyproject.toml is the single
-    source for a checkout, tests pin it equal to the Rust crate version,
-    and the release workflow writes version.txt from the tag). The
-    artifact's stamp wins: a bundle run inside an environment that has
-    some other lucidlint installed still reports its own tag."""
-    here = Path(__file__).resolve().parent
-    bundled = _version_from_bundle(here)
-    if bundled is not None:
-        return bundled
-    try:
-        return metadata.version("lucidlint")
-    except Exception:
-        try:
-            with (here / "pyproject.toml").open("rb") as f:
-                return str(tomllib.load(f)["project"]["version"])
-        except Exception:
-            return "0.0.0.dev"
 
 
-_VERSION = _version()
 
 
 
