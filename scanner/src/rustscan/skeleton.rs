@@ -1,4 +1,3 @@
-
 //! The Rust skeleton: a signature and body with names and literals abstracted
 //! away, so two functions can be compared by shape.
 
