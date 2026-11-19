@@ -10,7 +10,7 @@
 //!
 //! Editors point at: `lucidlint --lsp`
 
-use crate::config::{load_lucidlint_config, LucidConfig};
+use crate::config::{Config, LucidConfig};
 use crate::{finding::Finding, scan_source_lsp, FileScan};
 
 use std::collections::HashMap;
@@ -272,10 +272,10 @@ impl LspState {
         let path = PathBuf::from(uri_to_path(uri));
         if self.root.is_none() {
             self.root = Self::derive_root(&path);
-            self.config = self.root.as_ref().map(|r| load_lucidlint_config(r));
+            self.config = self.root.as_ref().map(|r| Config::load_lucidlint_config(r));
         }
         let root = self.root.as_ref()?;
-        let cfg = self.config.get_or_insert_with(|| load_lucidlint_config(root));
+        let cfg = self.config.get_or_insert_with(|| Config::load_lucidlint_config(root));
         let rel = path.strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/");
         Some((rel, cfg.clone()))
     }
@@ -419,7 +419,7 @@ pub fn dispatch(state: &mut LspState, msg: &serde_json::Value, out: &mut impl Wr
                 .map(|u| uri_to_path(u).to_string());
             if let Some(r) = root_uri {
                 let root = PathBuf::from(r);
-                state.config = Some(load_lucidlint_config(&root));
+                state.config = Some(Config::load_lucidlint_config(&root));
                 state.root = Some(root);
             }
             send_response(

@@ -1696,7 +1696,7 @@ fn main() {
             .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
             .map(|v| v.into_iter().collect())
             .unwrap_or_default();
-        all_findings.extend(docs::docs_findings(Path::new(d), &gitignored));
+        all_findings.extend(docs::Docs::docs_findings(Path::new(d), &gitignored));
     }
     all_findings.extend(OverAbstraction::abstraction_findings(&class_scans));
     if let Some(p) = &churn_path {
@@ -3786,7 +3786,7 @@ mod tests {
 ",
         )
         .unwrap();
-        let f = docs::docs_findings(&dir, &std::collections::HashSet::new());
+        let f = docs::Docs::docs_findings(&dir, &std::collections::HashSet::new());
         assert!(f.iter().any(|x| x.kind == "docs-link" && x.message.contains("nope.md")));
         let _ = std::fs::remove_dir_all(&dir);
     }
