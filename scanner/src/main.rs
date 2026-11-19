@@ -315,7 +315,12 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
                     self.refs.insert(a.name.to_string());
                 }
             }
-            Stmt::Try(_) => except_findings(self, stmt),
+            Stmt::For(_) | Stmt::With(_) | Stmt::Try(_) => {
+                if matches!(stmt, Stmt::Try(_)) {
+                    except_findings(self, stmt);
+                }
+                shadow_findings(self, stmt);
+            }
             Stmt::Global(_) => {
                 let module_level = false; // globals inside a function
                 global_state_findings(self, stmt, module_level);
@@ -2637,6 +2642,17 @@ mod tests {
         assert_eq!(sh.len(), 3);
     }
 
+    #[test]
+    fn shadow_bindings_include_loop_with_and_except_targets() {
+        // a for target, a with-as name and an except-as name are bindings too
+        let f = scan_src(
+            "def run(items):\n    for list in items:\n        pass\n    with open('x') as dict:\n        pass\n    try:\n        pass\n    except ValueError as type:\n        pass\n",
+        );
+        let sh: Vec<&Finding> = f.iter().filter(|x| x.kind == "builtin-shadow").collect();
+        assert_eq!(sh.len(), 3, "{f:?}");
+        assert!(sh.iter().all(|s| s.message.starts_with("variable '")), "{f:?}");
+    }
+
     // ------------------------------------------------------------- signature hygiene
     #[test]
     fn long_param_list_is_found() {
@@ -3844,6 +3860,23 @@ mod tests {
             hits[0].message
         );
     }
+    #[test]
+    fn static_husk_fires_when_classmethods_never_touch_cls() {
+        // a classmethod that never reads `cls` holds no state, exactly as a
+        // staticmethod does
+        let f = scan_src(
+            "class Paths:\n    @classmethod\n    def join(cls, a, b):\n        return a + b\n\n    @classmethod\n    def split(cls, value):\n        return value.split('/')\n",
+        );
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "static-husk").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+    }
+
+    #[test]
+    fn static_husk_exempts_a_classmethod_that_uses_cls() {
+        let f = scan_src("class Registry:\n    @classmethod\n    def make(cls):\n        return cls()\n");
+        assert!(!f.iter().any(|x| x.kind == "static-husk"), "{f:?}");
+    }
+
     #[test]
     fn static_husk_exclusions_do_not_fire() {
         for (fx, src) in [
