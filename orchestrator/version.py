@@ -14,7 +14,7 @@ import tomllib
 from importlib import metadata
 from pathlib import Path
 
-from orchestrator.host import HOST
+from orchestrator.artifact import artifact_root
 
 
 class Version:
@@ -26,7 +26,7 @@ class Version:
         # the artifact root: the entry module sits beside this package, so the
         # package's parent is the bundle root, the checkout root, or the
         # site-packages that holds the distribution
-        self.here = here or HOST.artifact_root()
+        self.here = here or artifact_root()
 
     def from_bundle(self) -> str | None:
         """The version.txt a release bundle ships (the tag, written with a
@@ -57,9 +57,3 @@ class Version:
 
 
 VERSION = Version().detect()
-
-
-def version_from_bundle(here: Path) -> str | None:
-    """The version a bundle at `here` ships — the module's one-shot entry for
-    a caller that has the directory and nothing else."""
-    return Version(here).from_bundle()

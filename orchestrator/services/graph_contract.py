@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from orchestrator.console import CONSOLE
-from orchestrator.host import HOST
+from orchestrator.host import Host
 from orchestrator.rust_scan import RustScan
 from orchestrator.scan_inputs import INPUTS
 
@@ -61,24 +61,25 @@ class GraphContract:
 
     CONTRACT_VERSION = 1
 
-    def __init__(self) -> None:
+    def __init__(self, host: Host) -> None:
+        self._host = host
         self._cache: dict[Path, Path | None] = {}
 
     def contract(self, repo: Path) -> Path | None:
         if repo in self._cache:
             return self._cache[repo]
-        if HOST.graph_store.get() is None:
+        if self._host.graph_store is None:
             self._cache[repo] = None
             return None
         result: Path | None = None
         try:
-            registry = HOST.graph_registry
-            data_dir = registry().get_data_dir_for_repo(str(repo)) if registry.get() else None
+            registry = self._host.graph_registry
+            data_dir = registry().get_data_dir_for_repo(str(repo)) if registry is not None else None
             db = Path(data_dir) / "graph.db" if data_dir else repo / ".code-review-graph" / "graph.db"
             if not db.exists():
                 self._cache[repo] = None
                 return None
-            store = HOST.graph_store(db)
+            store = self._host.graph_store(db)
             with store:
                 community_ids = store.get_all_community_ids()
                 nodes = []

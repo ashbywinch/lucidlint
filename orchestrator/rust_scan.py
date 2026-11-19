@@ -17,9 +17,10 @@ from pathlib import Path
 from subprocess import SubprocessError
 from typing import Any
 
+from orchestrator.artifact import artifact_root
 from orchestrator.action import Action
 from orchestrator.console import CONSOLE
-from orchestrator.host import HOST
+from orchestrator.host import Host
 from orchestrator.rust_finding import RustFinding
 from orchestrator.rust_findings import RustFindings
 from orchestrator.scan_flags import ScanFlags
@@ -54,10 +55,11 @@ class RustScan:
         module."""
         CONSOLE.warn(msg)
 
-    def __init__(self, graph: Any = None) -> None:
+    def __init__(self, host: Host, graph: Any) -> None:
         # the graph contract is another service's work; the scan asks for the
         # export path rather than reaching for a process-wide registry. A scan
         # with no collaborator runs without the graph families.
+        self._host = host
         self.graph = graph
         self._cache: dict[tuple[Path, tuple[str, ...]], RustFindings | None] = {}
         self._binary_cache: dict[Path, Path | None] = {}
@@ -136,7 +138,7 @@ class RustScan:
                 # its cwd): findings — and the fix: directives they carry —
                 # stay repo-relative, matching the Action model
                 cmd += [str(sf.rel) for sf in files]
-                proc = HOST.subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=str(repo))
+                proc = self._host.process.run(cmd, capture_output=True, text=True, timeout=300, cwd=str(repo))
                 if proc.returncode == 0:
                     data = json.loads(proc.stdout)
                     if data.get("schema_version") != 4:
@@ -225,7 +227,7 @@ class RustScan:
                 )
                 self._pending_coverage = INPUTS.write("lucidlint-coverage-", request.to_json())
             self._pending_docs = str(repo)
-            self._pending_gitignored = gitignored_docs(repo)
+            self._pending_gitignored = gitignored_docs(repo, self._host)
 
     def _flags(self) -> ScanFlags:
         return ScanFlags(
@@ -252,13 +254,13 @@ class RustScan:
         if env:
             candidates.append(Path(env))
         candidates.append(repo / "scanner" / "target" / "release" / f"lucidlint{exe}")
-        candidates.append(HOST.artifact_root() / "scanner" / "target" / "release" / f"lucidlint{exe}")
-        bundle_dir = HOST.artifact_root() / "bin"
+        candidates.append(artifact_root() / "scanner" / "target" / "release" / f"lucidlint{exe}")
+        bundle_dir = artifact_root() / "bin"
         candidates.append(bundle_dir / f"lucidlint{exe}")
         # a pip install ships the scan core as package-data at
         # lucidlint_bin/bin/lucidlint (setup.py builds it into the wheel) — the
         # self-contained pip channel, sibling of the module like the bundle bin
-        candidates.append(HOST.artifact_root() / "lucidlint_bin" / "bin" / f"lucidlint{exe}")
+        candidates.append(artifact_root() / "lucidlint_bin" / "bin" / f"lucidlint{exe}")
         return candidates
 
     @staticmethod
@@ -391,7 +393,7 @@ class RustScan:
                 "or install the lucidlint release bundle"
             )
         self.prepare(repo, only_rel, args.include_tests, file_churn, coverage)
-        files = SourceWalk(repo).py_files(only_rel)
+        files = SourceWalk(repo, self._host).py_files(only_rel)
         rust = self.load(repo, files)
         if rust is None:
             raise RuntimeError("the Rust scan core failed — rebuild with `make scanner-check`")

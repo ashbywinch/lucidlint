@@ -19,11 +19,11 @@ from pathlib import Path
 from orchestrator.action import Action
 from orchestrator.baseline import Baseline
 from orchestrator.console import CONSOLE
-from orchestrator.host import HOST
+from orchestrator.host import Host
 from orchestrator.lucidlint_config import LucidlintConfig
 from orchestrator.report.render_ctx import RenderCtx
 from orchestrator.rust_scan import RustScan
-from orchestrator.services import SERVICES
+from orchestrator.services import Services
 from orchestrator.sources.coverage_context import CoverageContext, coverage_context
 from orchestrator.sources.coverage_input import CoverageInput
 from orchestrator.sources.coverage_result import CoverageResult
@@ -41,9 +41,11 @@ class GateRunner:
     main() as parameters — the shape the assembly-class rule flags as a
     class in waiting."""
 
-    def __init__(self, repo: Path, args: argparse.Namespace):
+    def __init__(self, repo: Path, args: argparse.Namespace, host: Host, services: Services):
         self.repo: Path = repo
         self.args: argparse.Namespace = args
+        self._host: Host = host
+        self.services: Services = services
         self.fh: FileHistory | None = None
         self.cr: CoverageResult | None = None
         self.cc: CoverageContext | None = None
@@ -86,7 +88,7 @@ class GateRunner:
         assert cc is not None, "gather() precedes collect"
         cr = self.cr
         assert cr is not None, "gather() precedes collect"
-        rust = SERVICES.rust_scan.scan(
+        rust = self.services.rust_scan.scan(
             self.repo,
             self.args,
             fh.churn,
@@ -145,14 +147,14 @@ class GateRunner:
         the walk entirely. `last_modified` is the NEWEST touch (the walk is
         newest-first; first-seen-wins).
         """
-        if HOST.pygit2 is None or not (self.repo / ".git").exists():
+        if self._host.pygit2 is None or not (self.repo / ".git").exists():
             # no pygit2 or not a git self.repo — the absence is certain and nothing
             # can fix it in this run: silent (never announce an unfixable gap)
             return FileHistory(Counter(), {})
         head = ""
         cache_key = ""
         try:
-            r = HOST.pygit2.Repository(str(self.repo))
+            r = self._host.pygit2.Repository(str(self.repo))
             head = str(r.head.target)
             cutoff = int(time.time()) - FileHistory.MAX_AGE_DAYS * 86400
             cutoff_day = time.strftime("%Y-%m-%d", time.localtime(cutoff))
@@ -172,9 +174,9 @@ class GateRunner:
         churn: Counter[str] = Counter()
         last: dict[str, str] = {}
         try:
-            r = HOST.pygit2.Repository(str(self.repo))
+            r = self._host.pygit2.Repository(str(self.repo))
             cutoff = int(time.time()) - FileHistory.MAX_AGE_DAYS * 86400
-            for seen, commit in enumerate(r.walk(r.head.target, HOST.pygit2.enums.SortMode.TIME)):
+            for seen, commit in enumerate(r.walk(r.head.target, self._host.pygit2.enums.SortMode.TIME)):
                 if seen >= FileHistory.MAX_COMMITS or commit.commit_time < cutoff:
                     break
                 date = str(commit.commit_time)
@@ -280,7 +282,9 @@ class GateRunner:
 
     def _refresh_coverage(self) -> None:
         """Run the self.repo's coverage suite so verdicts are fresh."""
-        HOST.subprocess.run(["make", "-C", str(self.repo), "coverage"], capture_output=True, text=True, timeout=1800)
+        self._host.process.run(
+            ["make", "-C", str(self.repo), "coverage"], capture_output=True, text=True, timeout=1800
+        )
 
     def _load_lucidlint_config(self) -> LucidlintConfig:
         """The repo's project-wide config (cached per repo for the process)."""
@@ -289,10 +293,10 @@ class GateRunner:
     def _git_head(self) -> GitHead:
         """Current branch and short commit for report provenance, via pygit2.
         Returns empty strings when git or pygit2 is unavailable."""
-        if HOST.pygit2 is None:
+        if self._host.pygit2 is None:
             return GitHead(branch="", commit="")
         try:
-            r = HOST.pygit2.Repository(str(self.repo))
+            r = self._host.pygit2.Repository(str(self.repo))
             return GitHead(branch=r.head.shorthand or "", commit=str(r.head.target)[:7])
         # git-absent is a supported mode — the handler returns the empty head
         except Exception:

@@ -19,10 +19,35 @@ import sys
 import tarfile
 from collections import Counter
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import lucidlint as ch
+import fix_engine
+import rule_metadata
+from lucidlint import main
+from orchestrator.action import Action
+from orchestrator.baseline import Baseline
+from orchestrator.fix.fix_command import FixCommand
+from orchestrator.gate_runner import GateRunner
+from orchestrator.host import Host
+from orchestrator.report.render_ctx import RenderCtx
+from orchestrator.rust_finding import RustFinding
+from orchestrator.rust_findings import RustFindings
+from orchestrator.rust_scan import INPUTS, RustScan
+from orchestrator.scan_flags import ScanFlags
+from orchestrator.services import Services
+from orchestrator.services.graph_contract import GraphContract
+from orchestrator.sources.coverage_context import coverage_context
+from orchestrator.sources.coverage_input import CoverageInput
+from orchestrator.sources.coverage_result import CoverageResult
+from orchestrator.sources.file_history import FileHistory
+from orchestrator.sources.source_file import SourceFile
+from orchestrator.sources.source_walk import SourceWalk, gitignored_docs
+from orchestrator.vendoring import vendor_path
+from orchestrator.version import VERSION, Version
+
+ALL_RULE_KINDS = frozenset(rule_metadata.CATALOG.kinds())
+RULE_GROUPS = rule_metadata.CATALOG.groups()
 
 APP_SRC = """def alpha(a):
     if a:
@@ -82,21 +107,45 @@ class FakeSubprocess:
 
 
 class Env:
-    """Injects fakes into lucidlint and restores on exit (no monkeypatch).
-    git calls are routed; the Rust binary passes through to the real one."""
+    """A host whose process module is a fake: git calls are routed, the Rust
+    binary passes through to the real one."""
 
     def __init__(self, routes=None):
-        self._saved = {}
         self.routes = routes or []
 
     def __enter__(self):
         self.fake = FakeSubprocess(self.routes)
-        self._saved["subprocess"] = ch.subprocess
-        ch.subprocess = cast(Any, self.fake)
+        self.host = make_host(process=self.fake)
         return self
 
     def __exit__(self, *exc):
-        ch.subprocess = self._saved["subprocess"]
+        return False
+
+
+_UNSET = object()
+
+
+def make_host(process=None, pygit2=_UNSET, graph_store=_UNSET, graph_registry=_UNSET, engine=_UNSET) -> Host:
+    """A host over the real collaborators, with the named ones substituted."""
+    real = Host.default()
+    return Host(
+        process=process or real.process,
+        pygit2=real.pygit2 if pygit2 is _UNSET else pygit2,
+        graph_store=real.graph_store if graph_store is _UNSET else graph_store,
+        graph_registry=real.graph_registry if graph_registry is _UNSET else graph_registry,
+        fix_engine=real.fix_engine if engine is _UNSET else engine,
+    )
+
+
+def services(host=None) -> Services:
+    """The one services pair a run needs, over the given host."""
+    return Services(host or Host.default())
+
+
+def runner(repo: Path, args: argparse.Namespace | None = None, host: Host | None = None) -> GateRunner:
+    """A gate runner over a real host, for the unit-level tests."""
+    host = host or Host.default()
+    return GateRunner(repo, args or gate_args(), host, Services(host))
 
 
 # --------------------------------------------------------------------------- fixtures/helpers
@@ -150,12 +199,12 @@ def git_routes(history="", diff="", branch="test-branch", commit="abc1234", log_
     return routes
 
 
-def run_main(repo, *extra, routes=None):
+def run_main(repo, *extra, routes=None, host=None):
     saved_argv = sys.argv
     sys.argv = ["lucidlint.py", "--repo", str(repo), *extra]
     try:
-        with Env(routes=routes or git_routes()):
-            return ch.main()
+        with Env(routes=routes or git_routes()) as env:
+            return main(host=host or env.host)
     finally:
         sys.argv = saved_argv
 
@@ -181,7 +230,7 @@ def gate_args() -> argparse.Namespace:
 def test_coverage_xml_unparseable(tmp_path):
     repo = make_repo(tmp_path)
     (repo / "coverage.xml").write_text("not xml at all")
-    cr = ch._GateRunner(repo, gate_args()).load_coverage()
+    cr = runner(repo).load_coverage()
     assert cr.source == "coverage.xml unparseable"
     assert cr.lines is None
 
@@ -196,7 +245,7 @@ def test_coverage_xml_malformed_line_skipped(tmp_path, capsys):
         "<class filename=\"notes.txt\"><line hits=\"1\" number=\"1\"/></class>"
         "</coverage>"
     )
-    cr = ch._GateRunner(repo, gate_args()).load_coverage()
+    cr = runner(repo).load_coverage()
     # the malformed <line> is skipped with a log; the valid one survives; the .txt class is skipped
     assert cr.lines == {"houses/app.py": {2}}
     assert "malformed <line>" in capsys.readouterr().err
@@ -211,7 +260,7 @@ def test_coverage_sqlite_skips_unknown_and_nonpy(tmp_path):
     db.execute("INSERT INTO line_bits VALUES (1, X'05'), (2, X'05'), (3, X'05')")
     db.commit()
     db.close()
-    cr = ch._GateRunner(repo, gate_args()).load_coverage()
+    cr = runner(repo).load_coverage()
     # file_id 2 has no file row (skipped); notes.txt is not .py (skipped); app.py lines 1,3 covered
     assert cr.lines == {"houses/app.py": {1, 3}}
 
@@ -219,7 +268,7 @@ def test_coverage_sqlite_skips_unknown_and_nonpy(tmp_path):
 def test_coverage_sqlite_unreadable(tmp_path):
     repo = make_repo(tmp_path)
     (repo / ".coverage").write_bytes(b"this is not a sqlite database at all, definitely")
-    cr = ch._GateRunner(repo, gate_args()).load_coverage()
+    cr = runner(repo).load_coverage()
     assert cr.source == ".coverage unreadable"
 
 
@@ -231,11 +280,11 @@ def test_coverage_context_staleness(tmp_path):
     os_utime(repo / ".coverage", (now, now))
     test = repo / "tests" / "unit" / "test_app.py"
     os_utime(test, (now - 1000, now - 1000))  # tests older than the snapshot
-    cc = ch._coverage_context(repo, {"houses/app.py": {1}}, ".coverage")
+    cc = coverage_context(repo, {"houses/app.py": {1}}, ".coverage")
     assert cc.graph_preferred is False
     assert "mtime" in cc.label
     os_utime(test, (now + 1000, now + 1000))  # a newer test makes the snapshot stale
-    cc = ch._coverage_context(repo, {"houses/app.py": {1}}, ".coverage")
+    cc = coverage_context(repo, {"houses/app.py": {1}}, ".coverage")
     assert cc.graph_preferred is True
     assert "snapshot older" in cc.stale_note
 
@@ -250,7 +299,7 @@ def test_coverage_context_compares_the_snapshot_the_loader_read(tmp_path):
     os_utime = __import__("os").utime
     os_utime(repo / "coverage.xml", (now, now))
     os_utime(test, (now + 1000, now + 1000))
-    cc = ch._coverage_context(repo, {"houses/app.py": {1}}, "coverage.xml")
+    cc = coverage_context(repo, {"houses/app.py": {1}}, "coverage.xml")
     assert cc.graph_preferred is True
 
 
@@ -258,12 +307,13 @@ def test_prepare_hands_the_repo_coverage_snapshot_to_the_core(tmp_path):
     """R6: the core decides "unverified" from the repo's OWN snapshot — the
     prepare step passes which files it names and which lines it saw executed."""
     repo = make_repo(tmp_path)
-    snapshot = ch._CoverageInput(
-        ch.CoverageResult({"houses/app.py": {1, 3}, "scripts/oneoff.py": set()}, "coverage.xml"),
+    snapshot = CoverageInput(
+        CoverageResult({"houses/app.py": {1, 3}, "scripts/oneoff.py": set()}, "coverage.xml"),
         False,
     )
-    ch.SERVICES.rust_scan.prepare(repo, None, False, Counter(), snapshot)
-    path = ch.SERVICES.rust_scan._pending_coverage
+    scan = services().rust_scan
+    scan.prepare(repo, None, False, Counter(), snapshot)
+    path = scan._pending_coverage
     assert path is not None
     assert json.loads(path.read_text()) == {
         "source": "coverage.xml",
@@ -276,8 +326,9 @@ def test_prepare_without_a_snapshot_writes_no_coverage_input(tmp_path):
     """No snapshot = no claim: the core gets no coverage file at all, never an
     empty one it could read as "nothing is covered" (R6)."""
     repo = make_repo(tmp_path)
-    ch.SERVICES.rust_scan.prepare(repo, None, False, Counter(), ch._CoverageInput(ch.CoverageResult(None, ""), False))
-    assert ch.SERVICES.rust_scan._pending_coverage is None
+    scan = services().rust_scan
+    scan.prepare(repo, None, False, Counter(), CoverageInput(CoverageResult(None, ""), False))
+    assert scan._pending_coverage is None
 
 
 def test_large_function_fires_without_the_graph(tmp_path, capsys):
@@ -330,19 +381,14 @@ def test_file_history_parser_edges(tmp_path):
     # fixture: houses/app.py touched in c1+c2 (churn 2), Makefile never
     # exists (not .py — must be skipped), oneoff.py in c3
     repo = materialize_test_repo(tmp_path)
-    fh = ch._GateRunner(repo, gate_args()).file_history()
+    fh = runner(repo).file_history()
     assert fh.churn["houses/app.py"] == 2
     assert "Makefile" not in fh.churn  # not .py — skipped
     assert fh.last_modified["houses/app.py"]  # commit-timestamp present
 
 
 def _file_history_with(routes, repo):
-    saved = ch.subprocess
-    ch.subprocess = cast(Any, FakeSubprocess(routes))
-    try:
-        return ch._GateRunner(repo, gate_args()).file_history()
-    finally:
-        ch.subprocess = saved
+    return runner(repo, host=make_host(process=FakeSubprocess(routes))).file_history()
 
 
 def test_file_history_timeout_and_nonzero(tmp_path):
@@ -381,11 +427,11 @@ def test_gate_output_has_no_diff_talk(tmp_path, capsys):
 
 # --------------------------------------------------------------------------- scoring/merge/baseline units
 def test_raw_score_high_risk_callers():
-    base = ch._raw_score("high-risk", 0.5, 0)
-    assert ch._raw_score("high-risk", 0.5, 0, callers=6) == base * 2.0  # capped factor 1 + 6/5
-    assert ch._raw_score("high-risk", 0.5, 0, callers=1) == base * 1.2
+    base = FileHistory.raw_score("high-risk", 0.5, 0)
+    assert FileHistory.raw_score("high-risk", 0.5, 0, callers=6) == base * 2.0  # capped factor 1 + 6/5
+    assert FileHistory.raw_score("high-risk", 0.5, 0, callers=1) == base * 1.2
     # only high-risk scales with fan-in — standard ignores callers entirely
-    assert ch._raw_score("standard", 0.5, 0, callers=6) == ch._raw_score("standard", 0.5, 0)
+    assert FileHistory.raw_score("standard", 0.5, 0, callers=6) == FileHistory.raw_score("standard", 0.5, 0)
 
 
 def test_merge_keeps_distinct_line_findings(tmp_path, capsys):
@@ -420,11 +466,11 @@ def test_record_shape_keeps_same_line_parameter_findings(tmp_path, capsys):
 
 
 def test_merge_warn_into_fail_target():
-    fail = ch.Action("complexity", "fail", "houses/app.py", 3, "alpha", "m1", 1, 0, "", "", note="n1", raw=2)
+    fail = Action("complexity", "fail", "houses/app.py", 3, "alpha", "m1", 1, 0, "", "", note="n1", raw=2)
     # same target (file+function+kind-group) but a different line — distinct dedupe keys,
     # same merge key: the merge path (not the dedupe path) must handle the warn
-    warn = ch.Action("complexity", "warn", "houses/app.py", 5, "alpha", "m2", 1, 0, "", "", note="n2", raw=1)
-    out = ch._GateRunner(Path("."), gate_args())._dedupe_merge([fail, warn])
+    warn = Action("complexity", "warn", "houses/app.py", 5, "alpha", "m2", 1, 0, "", "", note="n2", raw=1)
+    out = runner(Path("."))._dedupe_merge([fail, warn])
     assert len(out) == 1
     assert out[0].severity == "fail"  # a warn merged into a fail target keeps the gate
     assert "n2" in out[0].note
@@ -480,7 +526,7 @@ def test_sibling_value_class_names_both_classes(tmp_path, capsys):
 def test_config_ignored_detail_reconciles_with_the_total():
     # a truncated list that sums short reads as a miscount: the ledger states
     # a total the detail beside it must explain (album round: 599 vs 627)
-    ctx = ch._RenderCtx(
+    ctx = RenderCtx(
         repo=Path("."),
         args=gate_args(),
         branch="b",
@@ -498,30 +544,30 @@ def test_config_ignored_detail_reconciles_with_the_total():
 def test_facts_line_never_guesses_the_anchor_kind():
     # the anchor field carries a class name too — "This function changed
     # often" on a class is a mislabel
-    a = ch.Action(
+    a = Action(
         "latent-class", "fail", "x.py", 10, "BatchPaths", "m", 1.0, 12, "1700000000", ""
     )
-    line = ch._facts_line(a)
+    line = RenderCtx._facts_line(a)
     assert line is not None
     assert "function" not in line.lower(), line
     assert "changed often" in line.lower(), line
 
 
 def test_lifecycle_note_renders_a_date_not_an_epoch(tmp_path):
-    a = ch.Action(
+    a = Action(
         "unused", "warn", "tools/scan.py", 10, "f", "m", 1.0, 2, "1792686177", ""
     )
-    runner = ch._GateRunner(Path("."), gate_args())
-    runner._lifecycle_notes([a])
+    gate = runner(Path("."))
+    gate._lifecycle_notes([a])
     assert "2026-10-22" in a.note, a.note
     assert "1792686177" not in a.note, a.note
 
 
 def test_config_ignored_advice_does_not_invite_extending_the_scope(capsys):
-    a = ch.Action(
+    a = Action(
         "standard", "warn", "tools/archive.py", 10, "_slug", "m", 1.0, 0, "", "", signal="duplicate"
     )
-    ch._render_file_group("tools/archive.py", [a], {"duplicate": "tools/eval_memory.py"})
+    RenderCtx._render_file_group("tools/archive.py", [a], {"duplicate": "tools/eval_memory.py"})
     out = capsys.readouterr().out
     assert "extend the ignore scope" not in out, out
     assert "tools/eval_memory.py" in out, out
@@ -532,37 +578,37 @@ def test_bundle_deps_picks_the_interpreter_tag(tmp_path):
     # side, and the running interpreter picks its own
     (tmp_path / "deps" / "cp312" / "libcst").mkdir(parents=True)
     (tmp_path / "deps" / "cp314" / "libcst").mkdir(parents=True)
-    assert ch._vendor_path(str(tmp_path), (3, 14)) == str(tmp_path / "deps" / "cp314")
-    assert ch._vendor_path(str(tmp_path), (3, 12)) == str(tmp_path / "deps" / "cp312")
+    assert vendor_path(str(tmp_path), (3, 14)) == str(tmp_path / "deps" / "cp314")
+    assert vendor_path(str(tmp_path), (3, 12)) == str(tmp_path / "deps" / "cp312")
     # an unsupported version falls back to a flat deps/ (dev bundle) ...
-    assert ch._vendor_path(str(tmp_path), (3, 11)) == str(tmp_path / "deps")
+    assert vendor_path(str(tmp_path), (3, 11)) == str(tmp_path / "deps")
     # ... and reports nothing to import from when there is no deps/ at all
     empty = tmp_path / "no-deps"
     empty.mkdir()
-    assert ch._vendor_path(str(empty), (3, 14)) is None
+    assert vendor_path(str(empty), (3, 14)) is None
 
 
 def test_bundle_deps_flat_fallback_still_loads(tmp_path):
     # a bundle built before the per-version split has one flat deps/
     flat = tmp_path / "deps" / "libcst"
     flat.mkdir(parents=True)
-    assert ch._vendor_path(str(tmp_path), (3, 12)) == str(tmp_path / "deps")
+    assert vendor_path(str(tmp_path), (3, 12)) == str(tmp_path / "deps")
 
 
 def test_report_names_its_own_version(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     run_main(repo, "--warn")
     out = capsys.readouterr().out
-    assert f"lucidlint {ch._VERSION}" in out, out[:400]
+    assert f"lucidlint {VERSION}" in out, out[:400]
 
 
 def test_rust_finding_rel_unmappable(tmp_path):
     repo = make_repo(tmp_path)
     rels = {"houses/app.py", "scripts/oneoff.py"}
-    assert ch._rust_finding_rel("houses/app.py", repo, rels) == "houses/app.py"
-    assert ch._rust_finding_rel(str(repo / "houses" / "app.py"), repo, rels) == "houses/app.py"
-    assert ch._rust_finding_rel("/elsewhere/x.py", repo, rels) is None  # outside the repo
-    assert ch._rust_finding_rel("houses/missing.py", repo, rels) is None  # not in this scan set
+    assert RustScan._rust_finding_rel("houses/app.py", repo, rels) == "houses/app.py"
+    assert RustScan._rust_finding_rel(str(repo / "houses" / "app.py"), repo, rels) == "houses/app.py"
+    assert RustScan._rust_finding_rel("/elsewhere/x.py", repo, rels) is None  # outside the repo
+    assert RustScan._rust_finding_rel("houses/missing.py", repo, rels) is None  # not in this scan set
 
 
 def test_unmapped_finding_files_are_reported_not_swallowed(tmp_path, capsys):
@@ -582,10 +628,10 @@ def test_unmapped_finding_files_are_reported_not_swallowed(tmp_path, capsys):
         "JSON\n"
     )
     script.chmod(0o755)
-    scan = ch._RustScan()
+    scan = RustScan(Host.default(), None)
     scan._binary_cache[repo] = script
-    files = [ch.SourceFile(py=repo / "pkg" / "a.py", rel="pkg/a.py")]
-    scan.load(repo, files, ch._ScanFlags(graph=None, churn_json=None, include_tests=False))
+    files = [SourceFile(py=repo / "pkg" / "a.py", rel="pkg/a.py")]
+    scan.load(repo, files, ScanFlags(graph=None, churn_json=None, include_tests=False))
     err = capsys.readouterr().err
     assert "a.py" in err and "dropped" in err
 
@@ -815,12 +861,13 @@ def test_no_pygit2_file_list_uses_git_and_honors_gitignore(tmp_path):
         (lambda a: str(a[0]).endswith("lucidlint"), PASSTHROUGH, 0),
         (lambda a: a[0] == "make" and "coverage" in a, "", 0),
     ]
-    saved = ch._pygit2
-    ch._pygit2 = None  # the no-pygit2 consumer path
+    saved_argv = sys.argv
+    sys.argv = ["lucidlint.py", "--repo", str(repo)]
     try:
-        rc = run_main(repo, routes=routes)
+        with Env(routes=routes) as env:
+            rc = main(host=make_host(process=env.fake, pygit2=None))
     finally:
-        ch._pygit2 = saved
+        sys.argv = saved_argv
     assert rc == 0  # .tools/self.py would fail (CC 60) — its exclusion IS the check
 
 
@@ -841,8 +888,8 @@ def test_gitignored_docs_survives_missing_git(tmp_path):
     def is_git(args):
         return args[:2] == ["git", "-C"]
 
-    with Env(routes=[(is_git, FileNotFoundError, 0)]):
-        assert ch._gitignored_docs(repo) == ()
+    with Env(routes=[(is_git, FileNotFoundError, 0)]) as env:
+        assert gitignored_docs(repo, env.host) == ()
 
 
 def test_gitignored_docs_survives_a_hung_git(tmp_path):
@@ -865,12 +912,7 @@ def test_gitignored_docs_survives_a_hung_git(tmp_path):
         def run(args, **kwargs):
             raise subprocess.TimeoutExpired(args, kwargs.get("timeout") or 0)
 
-    saved = ch.subprocess
-    ch.subprocess = cast(Any, HungGit())
-    try:
-        assert ch._gitignored_docs(repo) == ()
-    finally:
-        ch.subprocess = saved
+    assert gitignored_docs(repo, make_host(process=HungGit())) == ()
 
 
 def test_gitignored_docs_survives_missing_check_ignore(tmp_path):
@@ -884,7 +926,7 @@ def test_gitignored_docs_survives_missing_check_ignore(tmp_path):
     (repo / "docs" / "guide.md").write_text("see `docs/absent-private.md`\n")
     (repo / "docs" / "private.md").write_text("# private\n")
     (repo / ".gitignore").write_text("docs/private.md\ndocs/absent-private.md\n")
-    assert ch._gitignored_docs(repo) == ("docs/absent-private.md", "docs/private.md")
+    assert gitignored_docs(repo, Host.default()) == ("docs/absent-private.md", "docs/private.md")
 
     def is_git(args, sub):
         return args[:2] == ["git", "-C"] and args[3] == sub
@@ -893,8 +935,8 @@ def test_gitignored_docs_survives_missing_check_ignore(tmp_path):
         (lambda a: is_git(a, "ls-files"), PASSTHROUGH, 0),
         (lambda a: is_git(a, "check-ignore"), FileNotFoundError, 0),
     ]
-    with Env(routes=routes):
-        assert ch._gitignored_docs(repo) == ("docs/private.md",)
+    with Env(routes=routes) as env:
+        assert gitignored_docs(repo, env.host) == ("docs/private.md",)
 
 
 def test_gitignored_docs_survives_a_dangling_md_symlink(tmp_path):
@@ -910,7 +952,7 @@ def test_gitignored_docs_survives_a_dangling_md_symlink(tmp_path):
     (repo / "docs" / "broken.md").symlink_to(repo / "docs" / "gone.md")
     (repo / ".gitignore").write_text("docs/private.md\n")
 
-    assert ch._gitignored_docs(repo) == ("docs/private.md",)
+    assert gitignored_docs(repo, Host.default()) == ("docs/private.md",)
 
 
 def test_gitignored_docs_ignores_a_nested_checkout(tmp_path):
@@ -928,7 +970,7 @@ def test_gitignored_docs_ignores_a_nested_checkout(tmp_path):
     (nested / "docs" / "inner.md").write_text("see `docs/absent-private.md`\n")
     (repo / ".gitignore").write_text("nested/\ndocs/absent-private.md\n")
 
-    assert ch._gitignored_docs(repo) == ()
+    assert gitignored_docs(repo, Host.default()) == ()
 
 
 def test_gitignored_docs_harvests_every_non_ignored_doc(tmp_path):
@@ -944,7 +986,7 @@ def test_gitignored_docs_harvests_every_non_ignored_doc(tmp_path):
     (repo / "notes" / "plan.md").write_text("see `docs/absent-private.md`\n")
     (repo / ".gitignore").write_text("docs/absent-private.md\n")
 
-    assert ch._gitignored_docs(repo) == ("docs/absent-private.md",)
+    assert gitignored_docs(repo, Host.default()) == ("docs/absent-private.md",)
 
 
 def test_gitignored_docs_ignores_an_ignored_docs_own_refs(tmp_path):
@@ -957,7 +999,7 @@ def test_gitignored_docs_ignores_an_ignored_docs_own_refs(tmp_path):
     (repo / "docs" / "private.md").write_text("see `docs/absent-secret.md`\n")
     (repo / ".gitignore").write_text("docs/private.md\ndocs/absent-secret.md\n")
 
-    assert ch._gitignored_docs(repo) == ("docs/private.md",)
+    assert gitignored_docs(repo, Host.default()) == ("docs/private.md",)
 
 
 def test_gitignored_docs_resolves_sibling_refs_against_the_file(tmp_path):
@@ -979,7 +1021,7 @@ def test_gitignored_docs_resolves_sibling_refs_against_the_file(tmp_path):
         return args[:2] == ["git", "-C"] and args[3] == "check-ignore"
 
     with Env(routes=[(lambda a: ls_files(a), PASSTHROUGH, 0), (lambda a: is_check_ignore(a), "", 0)]) as env:
-        ch._gitignored_docs(repo)
+        gitignored_docs(repo, env.host)
     idx = next(i for i, a in enumerate(env.fake.calls) if is_check_ignore(a))
     stdin = env.fake.call_kwargs[idx]["input"]
     assert "docs/sub/other.md" in stdin, f"sibling ref must resolve against the file: {stdin!r}"
@@ -992,7 +1034,7 @@ def test_refresh_coverage_runs_make(tmp_path):
         saved_argv = sys.argv
         sys.argv = ["lucidlint.py", "--repo", str(repo), "--refresh-coverage"]
         try:
-            rc = ch.main()
+            rc = main(host=env.host)
         finally:
             sys.argv = saved_argv
     assert rc == 0
@@ -1030,28 +1072,23 @@ def test_scanner_garbage_findings_dropped(tmp_path, capsys):
 
 def test_scanner_cache_hits(tmp_path):
     repo = make_repo(tmp_path)
-    rs = ch._RustScan()
     fs = FakeSubprocess([(lambda a: str(a[0]).endswith("lucidlint"), PASSTHROUGH, 0)])
-    files = [ch.SourceFile(repo / "houses/app.py", "houses/app.py")]
+    rs = RustScan(make_host(process=fs), None)
+    files = [SourceFile(repo / "houses/app.py", "houses/app.py")]
     rs._pending_graph = None  # exactly what prepare() sets when no graph/churn is available
     rs._pending_churn = None
     rs._pending_tests = False
     rs._pending_docs = None
-    saved = ch.subprocess
-    ch.subprocess = cast(Any, fs)
-    try:
-        assert rs.load(repo, files) is not None
-        assert rs.load(repo, files) is not None
-    finally:
-        ch.subprocess = saved
+    assert rs.load(repo, files) is not None
+    assert rs.load(repo, files) is not None
     assert sum(1 for a in fs.calls if str(a[0]).endswith("lucidlint")) == 1
 
 
 def test_scanner_binary_missing_raises(tmp_path):
     repo = make_repo(tmp_path)
-    rs = ch._RustScan()
+    rs = RustScan(Host.default(), None)
     rs._binary_cache[repo] = None  # simulate an unbuilt binary
-    files = [ch.SourceFile(repo / "houses/app.py", "houses/app.py")]
+    files = [SourceFile(repo / "houses/app.py", "houses/app.py")]
     rs._pending_graph = None
     rs._pending_churn = None
     rs._pending_tests = False
@@ -1072,24 +1109,24 @@ def test_graph_contract_failure_degrades(tmp_path, capsys):
 
 
 def test_actions_from_rust_test_only_filter():
-    rf = ch.RustFindings(
+    rf = RustFindings(
         {"tests/unit/test_app.py": [
-            ch.RustFinding(kind="magic-number", signal="magic-number", severity="fail",
+            RustFinding(kind="magic-number", signal="magic-number", severity="fail",
                            file="tests/unit/test_app.py", line=1, function="", message="not test-only"),
-            ch.RustFinding(kind="standard", signal="monkeypatch", severity="fail",
+            RustFinding(kind="standard", signal="monkeypatch", severity="fail",
                            file="tests/unit/test_app.py", line=2, function="", message="test-only rule"),
         ]},
         {},
     )
-    acts = ch._actions_from_rust(rf, include_tests=False, file_churn=Counter(), last_modified={})
+    acts = RustScan._actions_from_rust(rf, include_tests=False, file_churn=Counter(), last_modified={})
     assert [a.message for a in acts] == ["test-only rule"]  # only TEST_ONLY_SIGNALS survive
 
 
 def test_render_actions_acks(tmp_path, capsys):
     repo = make_repo(tmp_path)
     import argparse
-    ack = ch.Action("standard", "ack", "houses/app.py", 1, "", "m", 1, 0, "", "")
-    ch._render_actions(repo, argparse.Namespace(baseline=None), [], [ack])
+    ack = Action("standard", "ack", "houses/app.py", 1, "", "m", 1, 0, "", "")
+    RenderCtx._render_actions(repo, argparse.Namespace(baseline=None), [], [ack])
     assert "acknowledged in baseline (1): houses/app.py:1" in capsys.readouterr().out
 
 
@@ -1099,9 +1136,9 @@ def test_render_latent_class_variant_shows_no_suppression_recipe(capsys):
     for the family variants (the finding message names the fix direction;
     `ignore latent-class <why>` family suppression is RULES.md's business,
     and --json still carries the raw signal)."""
-    a = ch.Action("latent-class", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a = Action("latent-class", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
     a.signal = "data-clump"
-    ch._render_file_group("x.py", [a])
+    RenderCtx._render_file_group("x.py", [a])
     assert "suppress with:" not in capsys.readouterr().out
 
 
@@ -1110,10 +1147,10 @@ def test_render_stamps_judgement_and_mechanical(capsys):
     # #33(a): a name-required fix renders [JUDGEMENT]; a fixable kind outside
     # it renders [MECHANICAL]; fix-less findings get neither — the stamp is
     # render-time, computed from the structured fix_kind
-    judge = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 1, 0, "", "", fix_kind="extract-method")
-    mech = ch.Action("standard", "fail", "y.py", 4, "g", "m", 1, 0, "", "", fix_kind="loop-pipeline")
-    plain = ch.Action("standard", "fail", "z.py", 5, "h", "m", 1, 0, "", "")
-    ch._render_file_group("x.py", [judge, mech, plain])
+    judge = Action("complexity", "fail", "x.py", 3, "f", "m", 1, 0, "", "", fix_kind="extract-method")
+    mech = Action("standard", "fail", "y.py", 4, "g", "m", 1, 0, "", "", fix_kind="loop-pipeline")
+    plain = Action("standard", "fail", "z.py", 5, "h", "m", 1, 0, "", "")
+    RenderCtx._render_file_group("x.py", [judge, mech, plain])
     out = capsys.readouterr().out
     assert "[JUDGEMENT]" in out, out
     assert "[MECHANICAL]" in out, out
@@ -1126,11 +1163,11 @@ def test_render_stamps_split_module_judgement_and_fixers_mechanical(capsys):
     # grouping decision, not a mechanical fact — the judgement marker makes
     # the stamp render [JUDGEMENT] for a class-module finding; dissolve-husk
     # and collapse-chain keep [MECHANICAL]
-    judge = ch.Action("standard", "fail", "x.py", 1, "Employee", "m", 1, 0, "", "", fix_kind="split-module")
+    judge = Action("standard", "fail", "x.py", 1, "Employee", "m", 1, 0, "", "", fix_kind="split-module")
     judge.signal = "class-module"
-    husk = ch.Action("standard", "fail", "y.py", 4, "g", "m", 1, 0, "", "", fix_kind="dissolve-husk")
-    chain = ch.Action("standard", "fail", "z.py", 5, "h", "m", 1, 0, "", "", fix_kind="collapse-chain")
-    ch._render_file_group("x.py", [judge, husk, chain])
+    husk = Action("standard", "fail", "y.py", 4, "g", "m", 1, 0, "", "", fix_kind="dissolve-husk")
+    chain = Action("standard", "fail", "z.py", 5, "h", "m", 1, 0, "", "", fix_kind="collapse-chain")
+    RenderCtx._render_file_group("x.py", [judge, husk, chain])
     out = capsys.readouterr().out
     assert "[JUDGEMENT]" in out, out
     assert out.count("[JUDGEMENT]") == 1, out
@@ -1178,17 +1215,17 @@ def test_seam_groups_combine_overlapping_member_sets():
     # #34: union-find over overlapping seam_members sets — the issue's
     # 62-findings case renders ONE heading; the groups array is always present
     actions = [
-        ch.Action("latent-class", "fail", "a.py", i, f"f{i}", "m", 1, 0, "", "",
+        Action("latent-class", "fail", "a.py", i, f"f{i}", "m", 1, 0, "", "",
                   seam_members=("fingerprint", "folder"), fix_kind="extract-class")
         for i in (1, 2, 3)
     ]
-    groups = ch._seam_groups(actions)
+    groups = RenderCtx._seam_groups(actions)
     assert len(groups) == 1, groups
     findings = cast(list[int], groups[0]["findings"])
     assert len(findings) == 3
     heading = cast(str, groups[0]["heading"])
     assert "share ONE seam" in heading
-    assert ch._seam_groups(actions[:1]) == []  # below the >=3 bar
+    assert RenderCtx._seam_groups(actions[:1]) == []  # below the >=3 bar
 
 # ------------------------------------------------------------------ #26-#34 evaluation round: render mechanics (B1-B6)
 def test_seam_heading_never_renders_empty_member_list():
@@ -1196,11 +1233,11 @@ def test_seam_heading_never_renders_empty_member_list():
     # all of them — the heading must drop the parenthetical, never render
     # "the seams: )" (round: "these 14 findings share ONE seam (the seams: )")
     actions = [
-        ch.Action("latent-class", "fail", "a.py", i, f"f{i}", "m", 1, 0, "", "",
+        Action("latent-class", "fail", "a.py", i, f"f{i}", "m", 1, 0, "", "",
                   seam_members=members, fix_kind="extract-class")
         for i, members in enumerate((("a", "b"), ("b", "c"), ("c", "d")), start=1)
     ]
-    groups = ch._seam_groups(actions)
+    groups = RenderCtx._seam_groups(actions)
     assert len(groups) == 1, groups
     heading = cast(str, groups[0]["heading"])
     assert "share ONE seam" in heading
@@ -1215,13 +1252,13 @@ def test_per_item_lines_keep_severity_marker_not_risk_tag(capsys):
     # LOWEST display value). Severity survives as the [warn] marker; fail
     # findings carry none — the raw metrics render as the facts line
     # (_facts_line): named facts, never a percentile, never "risk".
-    fail = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 1, 0, "", "", priority=99)
-    ch._render_file_group("x.py", [fail])
+    fail = Action("complexity", "fail", "x.py", 3, "f", "m", 1, 0, "", "", priority=99)
+    RenderCtx._render_file_group("x.py", [fail])
     out = capsys.readouterr().out
     assert "[RISK" not in out
     assert "[P99]" not in out
-    warn = ch.Action("magic-number", "warn", "x.py", 5, "g", "m", 1, 0, "", "", priority=42)
-    ch._render_file_group("x.py", [warn])
+    warn = Action("magic-number", "warn", "x.py", 5, "g", "m", 1, 0, "", "", priority=42)
+    RenderCtx._render_file_group("x.py", [warn])
     out = capsys.readouterr().out
     assert "[warn]" in out
     assert "[RISK" not in out
@@ -1232,8 +1269,8 @@ def test_facts_line_names_complex_and_churn_facts(capsys):
     # clause per notable fact (CC >= 15, churn >= 10, callers >= 10), joined
     # with "and"; never a percentile, never "risk". A CC-17 high-churn
     # finding renders the exact plan sentence.
-    a = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 17.0, 14, "", "")
-    ch._render_file_group("x.py", [a])
+    a = Action("complexity", "fail", "x.py", 3, "f", "m", 17.0, 14, "", "")
+    RenderCtx._render_file_group("x.py", [a])
     out = capsys.readouterr().out
     assert (
         "-> Is complex (17 decision points) and changed often (14 changes)." in out
@@ -1243,8 +1280,8 @@ def test_facts_line_names_complex_and_churn_facts(capsys):
 def test_facts_line_absent_on_quiet_finding(capsys):
     # Phase 4: a CC-4 finding that never changed meets no bar — no facts
     # line renders.
-    a = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 4.0, 0, "", "")
-    ch._render_file_group("x.py", [a])
+    a = Action("complexity", "fail", "x.py", 3, "f", "m", 4.0, 0, "", "")
+    RenderCtx._render_file_group("x.py", [a])
     out = capsys.readouterr().out
     assert "-> This function" not in out
     assert "decision points" not in out
@@ -1255,23 +1292,23 @@ def test_facts_line_skips_absent_metrics_and_names_callers():
     # Phase 4: "use only what is present" — a metric that is absent (the
     # scanner default of 1.0), no churn, no callers renders nothing; the
     # callers clause fires only when the fan-in list is present and >= 10.
-    quiet = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "")
-    assert ch._facts_line(quiet) is None
-    few = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "",
+    quiet = Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "")
+    assert RenderCtx._facts_line(quiet) is None
+    few = Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "",
                     callers=[f"c{i}" for i in range(9)])
-    assert ch._facts_line(few) is None
-    many = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "",
+    assert RenderCtx._facts_line(few) is None
+    many = Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "",
                      callers=[f"c{i}" for i in range(11)])
-    assert ch._facts_line(many) == "Has 11 callers."
-    triple = ch.Action("complexity", "fail", "x.py", 3, "f", "m", 20.0, 12, "", "",
+    assert RenderCtx._facts_line(many) == "Has 11 callers."
+    triple = Action("complexity", "fail", "x.py", 3, "f", "m", 20.0, 12, "", "",
                        callers=[f"c{i}" for i in range(10)])
-    assert ch._facts_line(triple) == (
+    assert RenderCtx._facts_line(triple) == (
         "Is complex (20 decision points), changed often (12 changes), and has 10 callers."
     )
     # the anchor may be a class name (latent-class, record-shape on a class):
     # the line states the facts, never a guessed "function"
-    noloc = ch.Action("standard", "fail", "x.py", 3, "", "m", 1.0, 12, "", "")
-    assert ch._facts_line(noloc) == "Changed often (12 changes)."
+    noloc = Action("standard", "fail", "x.py", 3, "", "m", 1.0, 12, "", "")
+    assert RenderCtx._facts_line(noloc) == "Changed often (12 changes)."
 
 
 def test_summary_header_names_scope_not_change_cost(tmp_path, capsys):
@@ -1281,8 +1318,8 @@ def test_summary_header_names_scope_not_change_cost(tmp_path, capsys):
     # :116 is not CC>=15). The gate names the mode and the scope only; no
     # line carries a percentile or the words "risk"/"change-cost".
     repo = make_repo(tmp_path)
-    top = ch.Action("record-shape", "fail", "tools/adopt.py", 116, "from_dict", "m", 1.0, 0, "", "", priority=99)
-    ch._RenderCtx(repo, gate_args(), "main", "abc1234", "no coverage", False).render_summary([top], [], [])
+    top = Action("record-shape", "fail", "tools/adopt.py", 116, "from_dict", "m", 1.0, 0, "", "", priority=99)
+    RenderCtx(repo, gate_args(), "main", "abc1234", "no coverage", False).render_summary([top], [], [])
     out = capsys.readouterr().out
     assert "GATE: FAIL — across 1 failing target" in out
     assert "tools/adopt.py" not in out  # the header names no action
@@ -1452,9 +1489,9 @@ def test_config_ignored_family_advisory_skips_marker_remedy(capsys):
     # B5 (unit): for a displayed-family finding (kind != signal) whose signal
     # is config-ignored, the suppress line names the config key instead of a
     # bare per-site marker as the remedy
-    a = ch.Action("standard", "fail", "scripts/oneoff.py", 3, "main", "m", 1, 0, "", "")
+    a = Action("standard", "fail", "scripts/oneoff.py", 3, "main", "m", 1, 0, "", "")
     a.signal = "global-state"
-    ch._render_file_group("scripts/oneoff.py", [a], ignore_keys={"global-state": "'houses/**'"})
+    RenderCtx._render_file_group("scripts/oneoff.py", [a], ignore_keys={"global-state": "'houses/**'"})
     out = capsys.readouterr().out
     assert "suppress with: global-state" in out
     assert "a config entry ignores this signal for 'houses/**' only" in out
@@ -1467,9 +1504,9 @@ def test_suppression_advice_states_marker_window(capsys):
     # bind (that read as advice to move the marker — there is no such advice).
     # G5: the sentence gains the truncated-why statement — binding is keyed by
     # the SIGNAL NAME, so a why text cut mid-word at the line end still binds
-    a = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a = Action("standard", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
     a.signal = "inline-import"
-    ch._render_file_group("x.py", [a])
+    RenderCtx._render_file_group("x.py", [a])
     out = capsys.readouterr().out
     assert "suppress with: inline-import" in out
     assert (
@@ -1485,9 +1522,9 @@ def test_render_links_suppression_signal_to_family_fix(capsys):
     # (class-module -> split-module) links them in ONE line — "suppress
     # with: class-module" beside "fix: --kind split-module" read as two
     # unrelated commands (round-3 CONFUSING)
-    a = ch.Action("standard", "fail", "x.py", 1, "Employee", "m", 1, 0, "", "", fix_kind="split-module")
+    a = Action("standard", "fail", "x.py", 1, "Employee", "m", 1, 0, "", "", fix_kind="split-module")
     a.signal = "class-module"
-    ch._render_file_group("x.py", [a])
+    RenderCtx._render_file_group("x.py", [a])
     out = capsys.readouterr().out
     assert "suppress with: class-module (this family's fix: split-module)" in out
 
@@ -1497,11 +1534,11 @@ def test_render_message_leads_suppression_pointer(capsys):
     # marker-window sentence / config-ignored advisory where they apply)
     # appends AFTER it, so the action reads first and the pointer appears
     # exactly once (the messages themselves carry no suppression wording)
-    a = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a = Action("standard", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
     a.signal = "inline-import"
-    b = ch.Action("standard", "fail", "y.py", 4, "g", "cfg-msg", 1, 0, "", "")
+    b = Action("standard", "fail", "y.py", 4, "g", "cfg-msg", 1, 0, "", "")
     b.signal = "global-state"
-    ch._render_file_group("x.py", [a, b], ignore_keys={"global-state": "'houses/**'"})
+    RenderCtx._render_file_group("x.py", [a, b], ignore_keys={"global-state": "'houses/**'"})
     out = capsys.readouterr().out
     assert out.index("— m") < out.index("suppress with: inline-import"), out
     assert "binds by its signal name" in out
@@ -1609,15 +1646,15 @@ def test_bulk_suppression_renders_at_report_level(capsys):
     # B6: a bulk-suppression finding is a repo-wide count — it must render
     # ONCE at report level, NOT inside a per-file section at its arbitrary
     # anchor file (round: layout.py:1)
-    bulk = ch.Action(
+    bulk = Action(
         "bulk-suppression", "warn", "layout.py", 1, "",
         "record-shape suppressed at 12 sites - repeated identical whys are POLICY, "
         "not per-site judgment: move the rule into [lucidlint.guidance] config guidance "
         "or a documented config ignore, or fix the recurring cause",
         1, 0, "", "",
     )
-    warn = ch.Action("magic-number", "warn", "x.py", 3, "f", "m1", 1, 0, "", "")
-    ch._render_actions(Path("repo"), argparse.Namespace(baseline=None), [bulk, warn], [])
+    warn = Action("magic-number", "warn", "x.py", 3, "f", "m1", 1, 0, "", "")
+    RenderCtx._render_actions(Path("repo"), argparse.Namespace(baseline=None), [bulk, warn], [])
     out = capsys.readouterr().out
     assert "layout.py" not in out
     assert "bulk suppression (policy — a repo-level decision, not a file site):" in out
@@ -1641,16 +1678,16 @@ def test_render_standard_bucket_keeps_the_suppression_signal(capsys):
     suppression identity — the raw signal is the only keyword that works, so
     the report must still name it (the display kind `standard` cannot be
     suppressed)."""
-    a = ch.Action("standard", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a = Action("standard", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
     a.signal = "inline-import"
-    ch._render_file_group("x.py", [a])
+    RenderCtx._render_file_group("x.py", [a])
     assert "suppress with: inline-import" in capsys.readouterr().out
 
 
 def test_render_actions_omits_signal_when_it_matches(capsys):
-    a = ch.Action("swallow", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a = Action("swallow", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
     a.signal = "swallow"
-    ch._render_file_group("x.py", [a])
+    RenderCtx._render_file_group("x.py", [a])
     assert "suppress with:" not in capsys.readouterr().out
 
 
@@ -1684,9 +1721,11 @@ def test_empty_repo_passes_clean(tmp_path, capsys):
 def test_missing_binary_fails_fast(tmp_path):
     repo = make_repo(tmp_path)
     # the binary cache says "not built" — the gate must raise, never pass un-scanned
-    ch.SERVICES.rust_scan._binary_cache[repo] = None
+    host = Host.default()
+    scan_services = Services(host)
+    scan_services.rust_scan._binary_cache[repo] = None
     try:
-        run_main(repo)
+        GateRunner(repo, gate_args(), host, scan_services).run()
         raise AssertionError("expected RuntimeError")
     except RuntimeError as e:
         assert "scan binary is required" in str(e)
@@ -1710,17 +1749,17 @@ def test_scanner_build_staleness_is_a_path_mtime_decision(tmp_path):
     binary.write_text("elf")
     touch(binary, 1000.0)
     touch(src, 2000.0)  # source newer than the binary -> stale
-    assert ch._scanner_build_is_stale(binary) is True
+    assert RustScan._scanner_build_is_stale(binary) is True
 
     touch(src, 500.0)  # binary newer -> fresh
-    assert ch._scanner_build_is_stale(binary) is False
+    assert RustScan._scanner_build_is_stale(binary) is False
 
     # bundled shape (…/bin/lucidlint): never a local build, never refused
     bundled = tmp_path / "bin" / "lucidlint"
     bundled.parent.mkdir(parents=True)
     bundled.write_text("elf")
     touch(bundled, 1000.0)
-    assert ch._scanner_build_is_stale(bundled) is False
+    assert RustScan._scanner_build_is_stale(bundled) is False
 
 # --------------------------------------------------------------------------- rust layer
 def test_rust_files_are_scanned(tmp_path, capsys):
@@ -1786,13 +1825,13 @@ def test_raw_score_uses_the_metric():
 
     score higher at equal churn (a constant 1.0 metric flattened every
     complexity/large-function finding to the same priority)."""
-    assert ch._raw_score("complexity", 60, 10) > ch._raw_score("complexity", 15, 10)
-    assert ch._raw_score("large-function", 300, 5) > ch._raw_score("large-function", 100, 5)
+    assert FileHistory.raw_score("complexity", 60, 10) > FileHistory.raw_score("complexity", 15, 10)
+    assert FileHistory.raw_score("large-function", 300, 5) > FileHistory.raw_score("large-function", 100, 5)
     # the churn factor still scales within a metric — but root-weighted: a
     # 6x churn gap is ~1.31x raw risk, not the linear 1.71x (F5: complexity
     # and size must keep equal weight with churn)
-    assert ch._raw_score("complexity", 20, 30) > ch._raw_score("complexity", 20, 5)
-    assert ch._raw_score("complexity", 20, 30) < ch._raw_score("complexity", 20, 5) * 1.5
+    assert FileHistory.raw_score("complexity", 20, 30) > FileHistory.raw_score("complexity", 20, 5)
+    assert FileHistory.raw_score("complexity", 20, 30) < FileHistory.raw_score("complexity", 20, 5) * 1.5
 
 
 def test_high_complexity_low_churn_outranks_low_complexity_high_churn():
@@ -1800,7 +1839,7 @@ def test_high_complexity_low_churn_outranks_low_complexity_high_churn():
     # complexity/size get equal weight with churn — a CC-40 never-touched
     # function outranks a CC-20 heavily-churned one (the linear factor
     # ordered them 1.0 vs 1.25 the other way)
-    assert ch._raw_score("complexity", 40, 0) > ch._raw_score("complexity", 20, 200)
+    assert FileHistory.raw_score("complexity", 40, 0) > FileHistory.raw_score("complexity", 20, 200)
 
 
 def test_preview_refusal_on_no_seam_is_silent(tmp_path, capsys):
@@ -1943,7 +1982,7 @@ def test_scanner_candidates_carry_the_exe_suffix():
     build produces lucidlint.exe; a suffixless candidate silently falls back
     to no scanner at all."""
     repo = Path("/tmp/repo")
-    for p in ch._scanner_candidates(repo, ".exe"):
+    for p in RustScan._scanner_candidates(repo, ".exe"):
         assert p.name == "lucidlint.exe" or p.name.endswith(".exe"), p
 
 
@@ -1953,7 +1992,7 @@ def test_graph_contract_corrupt_db_degrades(tmp_path):
     db_dir = tmp_path / ".code-review-graph"
     db_dir.mkdir()
     (db_dir / "graph.db").write_bytes(b"this is not a sqlite database at all")
-    contract = ch.SERVICES.graph
+    contract = services().graph
     result = contract.contract(tmp_path)
     assert result is None  # either the extra is absent (early None) or the
     # corrupt db raised and was caught — never an exception
@@ -1987,7 +2026,7 @@ def _rules_md_names() -> set[str]:
 def test_rule_groups_cover_every_family_kind():
     """Every emitted kind belongs to exactly one RULE_GROUPS group (group
     suppression would silently miss an unregistered family)."""
-    members = ch.RULE_GROUPS.all_kinds()
+    members = RULE_GROUPS.all_kinds()
     for kind in sorted(_family_kinds()):
         assert kind in members, f"kind '{kind}' is emitted but not in any RULE_GROUPS group"
 
@@ -1996,7 +2035,7 @@ def test_rule_groups_have_no_dead_kinds():
     """Every group member is an emitted kind — a stale member is dead config
     (suppressing a signal the scanner never emits)."""
     kinds = _family_kinds()
-    for group, members in ch.RULE_GROUPS.items():
+    for group, members in RULE_GROUPS.items():
         for kind in members:
             assert kind in kinds, f"'{kind}' is in group:{group} but the scanner never emits it"
 
@@ -2005,7 +2044,7 @@ def test_config_groups_accessors():
     """The record's accessors say what consumers mean: kinds_in an unknown
     group is empty (an unknown `group:` ignore expands to nothing), and
     all_kinds is the registration universe."""
-    g = ch.RULE_GROUPS
+    g = RULE_GROUPS
     assert g.kinds_in("no-such-group") == set()
     assert g.kinds_in("swallow") == set()  # a KIND is not a group — the type stops the mixup
     known = {kind for kinds in g.items() for kind in kinds[1]}
@@ -2066,13 +2105,13 @@ def test_bundle_version_file_is_read_and_normalized(tmp_path):
     bundled = tmp_path / "bundle"
     bundled.mkdir()
     (bundled / "version.txt").write_text("v9.9.9\n")
-    assert ch._version_from_bundle(bundled) == "9.9.9"
+    assert Version(bundled).from_bundle() == "9.9.9"
     (bundled / "version.txt").write_text("0.6.3\n")
-    assert ch._version_from_bundle(bundled) == "0.6.3"
+    assert Version(bundled).from_bundle() == "0.6.3"
     (bundled / "version.txt").write_text("   \n")
-    assert ch._version_from_bundle(bundled) is None
+    assert Version(bundled).from_bundle() is None
     (bundled / "version.txt").unlink()
-    assert ch._version_from_bundle(bundled) is None
+    assert Version(bundled).from_bundle() is None
 
 
 def test_rules_md_is_generated():
@@ -2103,34 +2142,34 @@ def test_rules_md_documents_every_family_kind():
 
 # --------------------------------------------------------------------------- utilities
 def test_numbits_to_lines():
-    assert ch._numbits_to_lines(b"\x01") == {1}
-    assert ch._numbits_to_lines(b"\x05") == {1, 3}
-    assert ch._numbits_to_lines(b"") == set()
+    assert CoverageResult.numbits_to_lines(b"\x01") == {1}
+    assert CoverageResult.numbits_to_lines(b"\x05") == {1, 3}
+    assert CoverageResult.numbits_to_lines(b"") == set()
 
 
 def test_numbits_roundtrip():
-    bits = ch._numbits_to_lines(bytes([0b10101]))
+    bits = CoverageResult.numbits_to_lines(bytes([0b10101]))
     assert bits == {1, 3, 5}
-    assert ch._numbits_to_lines(bytes([0])) == set()
+    assert CoverageResult.numbits_to_lines(bytes([0])) == set()
 
 
 def test_rel_path():
-    assert ch._GateRunner(Path("/repo"), gate_args()).rel_path("/repo/a/b.py") == "a/b.py"
-    assert ch._GateRunner(Path("/repo"), gate_args()).rel_path("a/b.py") == "a/b.py"
-    assert ch._GateRunner(Path("/repo"), gate_args()).rel_path("/elsewhere/x.py") == "/elsewhere/x.py"
+    assert runner(Path("/repo")).rel_path("/repo/a/b.py") == "a/b.py"
+    assert runner(Path("/repo")).rel_path("a/b.py") == "a/b.py"
+    assert runner(Path("/repo")).rel_path("/elsewhere/x.py") == "/elsewhere/x.py"
 
 
 def test_is_test_path():
-    assert ch.is_test_path("tests/unit/test_x.py")
-    assert ch.is_test_path("test_standalone.py")
-    assert not ch.is_test_path("houses/app.py")
-    assert not ch.is_test_path("scripts/tool.py")
+    assert SourceWalk.is_test_path("tests/unit/test_x.py")
+    assert SourceWalk.is_test_path("test_standalone.py")
+    assert not SourceWalk.is_test_path("houses/app.py")
+    assert not SourceWalk.is_test_path("scripts/tool.py")
 
 
 # --------------------------------------------------------------------------- coverage
 def test_load_coverage_none(tmp_path):
     repo = make_repo(tmp_path)
-    cr = ch._GateRunner(repo, gate_args()).load_coverage()
+    cr = runner(repo).load_coverage()
     assert cr.lines is None
 
 
@@ -2141,7 +2180,7 @@ def test_load_coverage_xml(tmp_path):
         '<lines><line number="1" hits="1"/><line number="2" hits="0"/></lines>'
         "</class></classes></package></packages></coverage>"
     )
-    cr = ch._GateRunner(repo, gate_args()).load_coverage()
+    cr = runner(repo).load_coverage()
     assert cr.lines is not None
     assert cr.lines.get("houses/app.py") == {1}
 
@@ -2154,7 +2193,7 @@ def test_load_coverage_dot(tmp_path):
     db.execute("INSERT INTO file (path) VALUES ('houses/app.py')")
     db.execute("INSERT INTO line_bits VALUES (1, ?)", (b"\x01",))
     db.commit()
-    cr = ch._GateRunner(repo, gate_args()).load_coverage()
+    cr = runner(repo).load_coverage()
     assert cr.lines is not None
     assert cr.lines.get("houses/app.py") == {1}
 
@@ -2166,14 +2205,14 @@ def test_load_coverage_prefers_xml(tmp_path):
         '<coverage><packages><package><classes><class filename="houses/app.py">'
         '<lines><line number="1" hits="1"/></lines></class></classes></package></packages></coverage>'
     )
-    cr = ch._GateRunner(repo, gate_args()).load_coverage()
+    cr = runner(repo).load_coverage()
     assert "coverage.xml" in cr.source
 
 
 # --------------------------------------------------------------------------- git
 def test_file_history(tmp_path):
     repo = materialize_test_repo(tmp_path)
-    fh = ch._GateRunner(repo, gate_args()).file_history()
+    fh = runner(repo).file_history()
     assert fh.churn["houses/app.py"] == 2  # base + modify
     assert fh.churn["scripts/oneoff.py"] == 1
     assert fh.churn["tests/unit/test_app.py"] == 1
@@ -2462,7 +2501,7 @@ def test_rust_rule_groups_match_python():
     rust_groups = {}
     for m in re.finditer(r'\(\s*"([\w-]+)",\s*&\[\s*((?:"[a-z-]+",?\s*)+)', rust_src):
         rust_groups[m.group(1)] = set(re.findall(r'"([a-z-]+)"', m.group(2)))
-    from lucidlint import RULE_GROUPS
+
     assert set(rust_groups) == set(RULE_GROUPS.groups()), "group names drifted"
     for name, kinds in RULE_GROUPS.items():
         assert rust_groups[name] == set(kinds), f"group '{name}' drifted"
@@ -2536,21 +2575,15 @@ def test_graph_contract_exports_the_store_wire_shape(tmp_path):
     data_dir = tmp_path / "graph"
     data_dir.mkdir()
     (data_dir / "graph.db").touch()
-    saved_store, saved_registry = ch._GraphStore, ch._Registry
-    saved_cache = dict(ch.SERVICES.graph._cache)
-    ch._GraphStore = cast(Any, _FakeGraphStore)
-    ch._Registry = cast(Any, lambda: _FakeRegistry(data_dir))  # the API is a zero-arg factory
-    try:
-        ch.SERVICES.graph._cache.clear()
-        path = ch.SERVICES.graph.contract(repo)
-        assert path is not None
-        exported = json.loads(path.read_text())
-    finally:
-        ch._GraphStore, ch._Registry = saved_store, saved_registry
-        ch.SERVICES.graph._cache.clear()
-        ch.SERVICES.graph._cache.update(saved_cache)
+    host = make_host(
+        graph_store=_FakeGraphStore,
+        graph_registry=lambda: _FakeRegistry(data_dir),  # the API is a zero-arg factory
+    )
+    path = Services(host).graph.contract(repo)
+    assert path is not None
+    exported = json.loads(path.read_text())
 
-    assert exported["contract_version"] == ch.CONTRACT_VERSION
+    assert exported["contract_version"] == GraphContract.CONTRACT_VERSION
     assert exported["nodes"] == [
         {
             "kind": "Function",
@@ -2572,15 +2605,8 @@ def test_graph_contract_exports_the_store_wire_shape(tmp_path):
 
 def test_graph_contract_degrades_without_a_store(tmp_path):
     repo = make_repo(tmp_path)
-    saved = (ch._GraphStore, ch._Registry, dict(ch.SERVICES.graph._cache))
-    ch._GraphStore = None
-    try:
-        ch.SERVICES.graph._cache.clear()
-        assert ch.SERVICES.graph.contract(repo) is None
-    finally:
-        ch._GraphStore, ch._Registry = saved[0], saved[1]
-        ch.SERVICES.graph._cache.clear()
-        ch.SERVICES.graph._cache.update(saved[2])
+    graph = Services(make_host(graph_store=None, graph_registry=None)).graph
+    assert graph.contract(repo) is None
 
 
 def test_graph_contract_degrades_when_the_db_or_store_is_broken(tmp_path):
@@ -2589,69 +2615,65 @@ def test_graph_contract_degrades_when_the_db_or_store_is_broken(tmp_path):
     repo = make_repo(tmp_path)
     data_dir = tmp_path / "graph"
     data_dir.mkdir()
-    saved = (ch._GraphStore, ch._Registry, dict(ch.SERVICES.graph._cache))
-    ch._Registry = cast(Any, lambda: _FakeRegistry(data_dir))
-    try:
-        ch.SERVICES.graph._cache.clear()
-        assert ch.SERVICES.graph.contract(repo) is None  # no graph.db
+    graph = Services(
+        make_host(graph_store=_FakeGraphStore, graph_registry=lambda: _FakeRegistry(data_dir))
+    ).graph
+    assert graph.contract(repo) is None  # no graph.db
 
-        (data_dir / "graph.db").touch()
+    (data_dir / "graph.db").touch()
 
-        class _BrokenStore:
-            def __init__(self, db):
-                pass
+    class _BrokenStore:
+        def __init__(self, db):
+            pass
 
-            def __enter__(self):
-                raise sqlite3.OperationalError("bad schema")
+        def __enter__(self):
+            raise sqlite3.OperationalError("bad schema")
 
-        ch._GraphStore = cast(Any, _BrokenStore)
-        ch.SERVICES.graph._cache.clear()
-        assert ch.SERVICES.graph.contract(repo) is None
-    finally:
-        ch._GraphStore, ch._Registry = saved[0], saved[1]
-        ch.SERVICES.graph._cache.clear()
-        ch.SERVICES.graph._cache.update(saved[2])
+    broken = Services(
+        make_host(graph_store=_BrokenStore, graph_registry=lambda: _FakeRegistry(data_dir))
+    ).graph
+    assert broken.contract(repo) is None
 
 
 def test_fix_directive_kind_reads_both_message_forms():
     command = "m — fix: lucidlint fix --kind extract-method --file a.py --line 3 --name <N>"
-    assert ch._fix_directive_kind(command) == "extract-method"
-    assert ch._fix_directive_kind("m — fix: magic-number --fix-name <CONST>") == "magic-number"
-    assert ch._fix_directive_kind("m — fix: lucidlint fix prose only") is None
-    assert ch._fix_directive_kind("no directive here") is None
+    assert FixCommand.directive_kind(command) == "extract-method"
+    assert FixCommand.directive_kind("m — fix: magic-number --fix-name <CONST>") == "magic-number"
+    assert FixCommand.directive_kind("m — fix: lucidlint fix prose only") is None
+    assert FixCommand.directive_kind("no directive here") is None
 
 
 def test_baseline_entry_shapes_and_file_state(tmp_path):
-    assert ch._baseline_entry_is_current("swallow:a.py:3:f")
-    assert not ch._baseline_entry_is_current("swallow:a.py:f")  # line-less legacy
-    assert not ch._baseline_entry_is_current({"kind": "swallow"})
-    assert ch._baseline_file_state(tmp_path / "absent.json") == (0, 0)
+    assert Baseline.entry_is_current("swallow:a.py:3:f")
+    assert not Baseline.entry_is_current("swallow:a.py:f")  # line-less legacy
+    assert not Baseline.entry_is_current({"kind": "swallow"})
+    assert Baseline.file_state(tmp_path / "absent.json") == (0, 0)
 
     unreadable = tmp_path / "bad.json"
     unreadable.write_text("{not json")
-    assert ch._baseline_file_state(unreadable) == (0, 0)
+    assert Baseline.file_state(unreadable) == (0, 0)
 
     not_a_list = tmp_path / "dict.json"
     not_a_list.write_text('{"actions": {"a": 1}}')
-    assert ch._baseline_file_state(not_a_list) == (0, 0)
+    assert Baseline.file_state(not_a_list) == (0, 0)
 
     mixed = tmp_path / "mixed.json"
     mixed.write_text(json.dumps({"actions": ["swallow:a.py:3:f", {"kind": "swallow"}]}))
-    assert ch._baseline_file_state(mixed) == (1, 1)
+    assert Baseline.file_state(mixed) == (1, 1)
 
 
 def test_iso_day_formats_an_epoch_and_passes_garbage_through():
-    assert ch._iso_day("1700000000") == "2023-11-14"
-    assert ch._iso_day("not an epoch") == "not an epoch"
-    assert ch._iso_day("") == ""
+    assert FileHistory.iso_day("1700000000") == "2023-11-14"
+    assert FileHistory.iso_day("not an epoch") == "not an epoch"
+    assert FileHistory.iso_day("") == ""
 
 
 def test_fix_identifier_problem_names_the_bad_argument():
-    assert ch._fix_identifier_problem("magic-number", "9bad", None, "a.py:1")
-    assert ch._fix_identifier_problem("magic-number", None, ["ok", "no-dash"], "a.py:1")
-    assert ch._fix_identifier_problem("magic-number", "NINETY", ["tax"], "a.py:1") is None
+    assert FixCommand.identifier_problem("magic-number", "9bad", None, "a.py:1", fix_engine)
+    assert FixCommand.identifier_problem("magic-number", None, ["ok", "no-dash"], "a.py:1", fix_engine)
+    assert FixCommand.identifier_problem("magic-number", "NINETY", ["tax"], "a.py:1", fix_engine) is None
     # extract-method has no name requirement — the fixer derives a private name
-    assert ch._fix_identifier_problem("extract-method", "9bad", None, "a.py:1") is None
+    assert FixCommand.identifier_problem("extract-method", "9bad", None, "a.py:1", fix_engine) is None
 
 
 def test_config_per_path_ignore_accepts_a_group_and_a_plain_signal(tmp_path):
@@ -2659,7 +2681,7 @@ def test_config_per_path_ignore_accepts_a_group_and_a_plain_signal(tmp_path):
     (repo / ".lucidlint.toml").write_text(
         '[lucidlint."houses/*"]\nignore = ["group:architecture", "magic-number"]\n'
     )
-    config = ch._GateRunner(repo, gate_args())._load_lucidlint_config()
+    config = runner(repo)._load_lucidlint_config()
     patterns = dict(config.per_path_ignore)
     assert set(patterns["houses/*"]) >= {"magic-number", "complexity", "large-function"}
 
@@ -2689,24 +2711,24 @@ def test_scan_inputs_live_in_one_process_directory():
     graph dump is tens of MB. One TemporaryDirectory owns them for the process:
     every input is a file inside it, so the directory's own cleanup (at exit)
     is the only sweep there is — no registry, no lock."""
-    first = ch._temp_input("lucidlint-test-a-", '{"probe": 1}')
-    second = ch._temp_input("lucidlint-test-b-", "{}")
-    assert first.parent == second.parent == ch._scan_input_dir()
+    first = INPUTS.write("lucidlint-test-a-", '{"probe": 1}')
+    second = INPUTS.write("lucidlint-test-b-", "{}")
+    assert first.parent == second.parent == INPUTS.directory()
     assert first.read_text() == '{"probe": 1}'
-    ch.release_temp_input(first)
+    INPUTS.release(first)
     assert not first.exists()
     assert second.exists()
-    ch.release_temp_input(second)
-    ch.release_temp_input(None)  # a run without that input releases nothing
+    INPUTS.release(second)
+    INPUTS.release(None)  # a run without that input releases nothing
     assert not second.exists()
 
 
 def test_release_removes_one_input_and_leaves_the_rest_to_the_directory():
     """A per-run input goes as soon as its scan has read it; the directory keeps
     whatever a later scan still needs (the per-repo graph contract)."""
-    per_run = ch._temp_input("lucidlint-test-churn-", "{}")
-    cached = ch._temp_input("lucidlint-test-graph-", "{}")
-    ch.release_temp_input(per_run)
+    per_run = INPUTS.write("lucidlint-test-churn-", "{}")
+    cached = INPUTS.write("lucidlint-test-graph-", "{}")
+    INPUTS.release(per_run)
     assert not per_run.exists()
-    assert cached.exists() and cached.parent == ch._scan_input_dir()
+    assert cached.exists() and cached.parent == INPUTS.directory()
     cached.unlink()  # leave the process directory as we found it

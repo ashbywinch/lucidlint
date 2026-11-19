@@ -691,7 +691,7 @@ the entry is the composition root:
 
 | module | owns |
 |---|---|
-| `orchestrator/host.py`, `substitutable.py` | the substitutable seams (`subprocess`, `_pygit2`, the graph store) — bound on the ENTRY module because that is the surface a test or a consumer substitutes, read at call time |
+| `orchestrator/host.py`, `artifact.py` | the injected environment (`process`, `pygit2`, the graph pair, `fix_engine`) and the artifact root — a plain object built once at the composition root (the first cut used a `Substitutable` proxy and `HOST`; removed, see below) |
 | `orchestrator/vendoring.py`, `version.py` | the bundle's `deps/` directory and the artifact's version stamp |
 | `orchestrator/console.py` | the two out-of-band output doors (warning line, trimmed diff) |
 | `orchestrator/action.py` | `Action` and its identity/merge keys |
@@ -702,12 +702,12 @@ the entry is the composition root:
 | `orchestrator/gate_runner.py`, `lucidlint_config.py`, `baseline.py` | the run's pipeline, the project config, the acknowledged baseline |
 | `orchestrator/fix/fix_command.py`, `cli.py` | the fix command, the CLI |
 
-`lucidlint.py` keeps the `deps/` bootstrap, the optional bindings and the
-facade re-exports the tests reach (`ch.Action`, `ch._GateRunner`, …). The
-release bundle copies both package directories (`Makefile`, `release.yml`),
-`setup.py`/`pyproject.toml` list them, and `make wheel-check` /
-`make bundle-check` pass. Behaviour is unchanged: houses 353 and album 431
-with identical finding sets.
+`lucidlint.py` keeps the `deps/` bootstrap and, in the first cut, the optional
+bindings and the facade re-exports the tests reached (`ch.Action`,
+`ch._GateRunner`, …). The release bundle copies both package directories
+(`Makefile`, `release.yml`), `setup.py`/`pyproject.toml` list them, and
+`make wheel-check` / `make bundle-check` pass. Behaviour is unchanged: houses
+353 and album 431 with identical finding sets.
 
 Three findings the split itself surfaced were fixed rather than suppressed:
 the scan driver's two console calls became one warning door (its graph
@@ -754,6 +754,40 @@ The staging is chosen so each step is green: 1–2 change types, 3 changes the
 root, 4–5 change tests and the published surface. Until step 4 lands, the
 tests still pass because the proxy is still there; the proxy is deleted with
 the last assignment that uses it.
+
+**The shim is out (2026-11-19).** All five stages landed together, because
+each intermediate would have kept the proxy alive:
+
+- `orchestrator/substitutable.py` is deleted. `Host` is a frozen dataclass of
+  the five collaborators; `Host.default()` imports them with `import_module`,
+  and one absent half of the graph extra leaves both graph fields `None` (the
+  same pairing the old `try` block enforced). `artifact_root` moved to
+  `orchestrator/artifact.py` so the host module holds one class.
+- Every collaborator receives its host (or the `Services` pair) through its
+  constructor: `SourceWalk(repo, host)`, `GraphContract(host)`,
+  `RustScan(host, graph)`, `Services(host)`, `GateRunner(repo, args, host,
+  services)`, `FixCommand(args, repo, host, services)`. The command objects
+  take the one `Services` instance, so the old process-wide `SERVICES`
+  singleton became one pair per run; `Cli` is the only builder.
+- `Cli(args, host=None)` is the composition root. `lucidlint.py` publishes
+  `main` only: it keeps the `deps/` bootstrap and hands the parsed arguments
+  to `Cli`, whose `host` parameter is how a test or an embedding client
+  injects fakes.
+- The tests build hosts: `Env` returns `make_host(process=FakeSubprocess(...))`
+  and `run_main` passes it to `main(host=...)`; the `ch.subprocess`,
+  `ch._pygit2`, `ch._GraphStore` and `ch._Registry` assignments are gone, and
+  each `ch.SERVICES` use is a locally built `Services(host)`. Internals are
+  imported from their owning modules.
+- `__all__` is `["main"]`. The one-shot `version_from_bundle` helper had no
+  production caller left, so it was deleted and its test constructs
+  `Version(here).from_bundle()`.
+
+Verification at the final step: `make check`, 318 tests, `make self-check`
+(GATE: PASS, 0 fails), `make bundle-check` and `make wheel-check` green;
+houses 353 / album 431 with identical `(file, kind, message)` sets. The self
+scan drops one action (592): with the entry's `ignore-file` whys gone, the
+`complexity` census falls below the `bulk-suppression` threshold, so that
+warning disappears rather than moves.
 
 **`fix_engine.py` is a package now, and its shared layer is named.** The file
 moved to `fix_engine/__init__.py` (so `import fix_engine` is unchanged) and

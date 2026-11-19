@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 
 from orchestrator.console import CONSOLE
-from orchestrator.host import HOST
+from orchestrator.host import Host
 from orchestrator.sources.source_file import SourceFile
 
 # exact env/tool directories that hide vendored code; the .venv* / venv* /
@@ -40,8 +40,9 @@ EXCLUDED_DIRS = frozenset(
 class SourceWalk:
     """The source files and documentation set of one repo."""
 
-    def __init__(self, repo: Path) -> None:
+    def __init__(self, repo: Path, host: Host) -> None:
         self.repo = repo
+        self._host = host
 
     @staticmethod
     def excluded_part(part: str) -> bool:
@@ -73,7 +74,7 @@ class SourceWalk:
         so a sibling checkout's markdown is never enumerated. Empty when git or
         the repository is missing — nothing is ignored then."""
         try:
-            proc = HOST.subprocess.run(
+            proc = self._host.process.run(
                 [
                     "git",
                     "-C",
@@ -94,7 +95,7 @@ class SourceWalk:
         # git is caught here at all
         except (
             OSError,
-            HOST.subprocess.TimeoutExpired,
+            self._host.process.TimeoutExpired,
         ) as e:  # lucidlint: ignore swallow git missing — nothing is ignored
             CONSOLE.warn(f"git ls-files --ignored: {e}")
             return ()
@@ -111,7 +112,7 @@ class SourceWalk:
         so neither is enumerated — and a vendored tree is ignored, which is what
         `--exclude-standard` answers."""
         try:
-            proc = HOST.subprocess.run(
+            proc = self._host.process.run(
                 [
                     "git",
                     "-C",
@@ -130,7 +131,7 @@ class SourceWalk:
             )
         except (
             OSError,
-            HOST.subprocess.TimeoutExpired,
+            self._host.process.TimeoutExpired,
         ) as e:  # lucidlint: ignore swallow git missing — nothing harvested
             CONSOLE.warn(f"git ls-files: {e}")
             return ()
@@ -175,7 +176,7 @@ class SourceWalk:
                     continue  # resolved outside the repo
         if refs:
             try:
-                proc = HOST.subprocess.run(
+                proc = self._host.process.run(
                     ["git", "-C", str(self.repo), "check-ignore", "--stdin"],
                     input="\n".join(sorted(refs)),
                     capture_output=True,
@@ -215,14 +216,14 @@ class SourceWalk:
         if only_rel is not None:
             py = repo / only_rel
             return [SourceFile(py, only_rel)] if py.is_file() and py.suffix in (".py", ".rs", ".md") else []
-        if HOST.pygit2 is None or not (repo / ".git").exists():
+        if self._host.pygit2 is None or not (repo / ".git").exists():
             # no pygit2 (CI runners, bare pythons): ask git itself — the answer
             # honors .gitignore, so an ignored dir (a repo's own .tools/lucidlint
             # bundle, a venv) is never scanned. rglob only when git is also
             # unavailable — a git-less repo has nothing ignored to respect.
             if (repo / ".git").exists():
                 try:
-                    proc = HOST.subprocess.run(
+                    proc = self._host.process.run(
                         ["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
                         capture_output=True,
                         text=True,
@@ -240,7 +241,7 @@ class SourceWalk:
                     CONSOLE.warn(f"git ls-files: {e}")
             return self.rglob_sources()  # no git — certain: silent fallback
         try:
-            r = HOST.pygit2.Repository(str(repo))
+            r = self._host.pygit2.Repository(str(repo))
             tracked = {e.path for e in r.index if e.path.endswith((".py", ".rs", ".md"))}
             # Untracked non-ignored files: walk working tree
             untracked = set()
@@ -267,7 +268,7 @@ class SourceWalk:
             return self.rglob_sources()
 
 
-def gitignored_docs(repo: Path) -> tuple[str, ...]:
+def gitignored_docs(repo: Path, host: Host) -> tuple[str, ...]:
     """The repo's ignored docs — the module's one-shot entry for a caller that
-    has the repo and nothing else."""
-    return SourceWalk(repo).gitignored_docs()
+    has the repo and its host."""
+    return SourceWalk(repo, host).gitignored_docs()

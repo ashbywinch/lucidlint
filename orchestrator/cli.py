@@ -13,6 +13,8 @@ from pathlib import Path
 
 from orchestrator.fix.fix_command import FixCommand
 from orchestrator.gate_runner import GateRunner
+from orchestrator.host import Host
+from orchestrator.services import Services
 from orchestrator.version import VERSION
 
 
@@ -20,9 +22,11 @@ class Cli:
     """The command line: one parsed request, one dispatch. The arguments are
     its state, so the run reads them instead of re-parsing."""
 
-    def __init__(self, args: argparse.Namespace) -> None:
+    def __init__(self, args: argparse.Namespace, host: Host | None = None) -> None:
         self.args = args
         self.repo = args.repo.resolve()
+        self.host = host or Host.default()
+        self.services = Services(self.host)
 
     @staticmethod
     def parse_args() -> argparse.Namespace:
@@ -118,7 +122,7 @@ class Cli:
         return self._gate()
 
     def _fix(self) -> int:
-        return FixCommand(self.args, self.repo).run()
+        return FixCommand(self.args, self.repo, self.host, self.services).run()
 
     def _gate(self) -> int:
-        return GateRunner(self.repo, self.args).run()
+        return GateRunner(self.repo, self.args, self.host, self.services).run()

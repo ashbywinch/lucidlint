@@ -21,39 +21,43 @@ from typing import NamedTuple
 
 import rule_metadata
 from orchestrator.console import CONSOLE
-from orchestrator.host import HOST
+from orchestrator.host import Host
 from orchestrator.rust_fix_request import RustFixRequest
-from orchestrator.services import SERVICES
+from orchestrator.services import Services
 from orchestrator.sources.source_walk import SourceWalk
 
 
 class _FixTarget(NamedTuple):
-    """The file a fix targets — its repo and repo-relative path. The fixers
-    are methods on it: every fixer needs the same (repo, rel) pair (the
-    strewing pattern: functions sharing a domain class are its methods)."""
+    """The file a fix targets — its repo, its repo-relative path, and the
+    host/services the fixers run against. The fixers are methods on it: every
+    fixer needs the same (repo, rel) pair (the strewing pattern: functions
+    sharing a domain class are its methods)."""
 
     repo: Path
     rel: str
+    host: Host
+    services: Services
 
     def fix_rust(self, kind: str, line: int, name: str | None) -> int:
         """A Rust fix runs in the scan core (syn), not the Python/libcst
         engine: invoke the binary's --fix mode, which edits in place."""
         repo, rel = self.repo, self.rel
-        binary = SERVICES.rust_scan.binary(repo)
+        engine = self.host.fix_engine
+        binary = self.services.rust_scan.binary(repo)
         if binary is None:
             print("fix: the Rust scan core is required — build it with `make scanner-check`")
             return 1
         target = repo / rel
         before = target.read_text(encoding="utf-8") if target.exists() else None
-        if kind in FixCommand.name_required_kinds() and not (name or "").strip():
+        if kind in FixCommand.name_required_kinds(engine) and not (name or "").strip():
             # the scanner would get "" and either write `fn ()` or fail
             # with "nothing to change" — both lie about a missing
             # prerequisite. Refuse with the naming guidance instead.
-            print(FixCommand.refusal(kind, None, None, rel, line))
+            print(FixCommand.refusal(kind, None, None, f"{rel}:{line}", engine))
             return 0
         spec = RustFixRequest(kind=kind, file=str(target), line=line, name=name or "").to_json()
         try:
-            proc = HOST.subprocess.run(
+            proc = self.host.process.run(
                 [str(binary), "--fix", spec], capture_output=True, text=True, timeout=120, cwd=str(repo)
             )
         except SubprocessError:
@@ -95,9 +99,9 @@ class _FixTarget(NamedTuple):
         """Scan this file, yielding its findings."""
         repo, rel = self.repo, self.rel
         let_include_tests = False  # the fix resolves one file's findings
-        SERVICES.rust_scan.prepare(repo, rel, let_include_tests, Counter())
-        files = SourceWalk(repo).py_files(rel)
-        rust = SERVICES.rust_scan.load(repo, files)
+        self.services.rust_scan.prepare(repo, rel, let_include_tests, Counter())
+        files = SourceWalk(repo, self.host).py_files(rel)
+        rust = self.services.rust_scan.load(repo, files)
         if rust is None:
             return
         yield from rust.by_rel.get(rel, [])
@@ -153,11 +157,11 @@ class FixCommand:
         return call_hunk, def_idx, body
 
     @staticmethod
-    def name_required_kinds() -> set[str]:
+    def name_required_kinds(engine) -> set[str]:
         """The engine owns the name-required policy. With libcst absent nothing
         can APPLY anyway, so an empty set only degrades refusal wording, never
         gating (the engine-present paths always see the real set)."""
-        return set(HOST.fix_engine._NAME_REQUIRED_KINDS) if HOST.fix_engine.get() else set()
+        return set(engine._NAME_REQUIRED_KINDS) if engine is not None else set()
 
     @staticmethod
     def name_is_invalid(name: str | None) -> bool:
@@ -166,12 +170,12 @@ class FixCommand:
         return name is not None and not name.isidentifier()
 
     @staticmethod
-    def identifier_problem(kind: str, name: str | None, params: list[str] | None, where: str) -> str | None:
+    def identifier_problem(kind: str, name: str | None, params: list[str] | None, where: str, engine) -> str | None:
         """The invalid-argument guard: a non-identifier --name or --params entry
         would construct an invalid libcst node inside a fixer. Refused before
         dispatch with a message; a MISSING name is NOT refused here — previews
         run nameless by contract."""
-        if kind in FixCommand.name_required_kinds() and FixCommand.name_is_invalid(name):
+        if kind in FixCommand.name_required_kinds(engine) and FixCommand.name_is_invalid(name):
             return (
                 f"fix: --name must be a valid Python identifier, got '{name}' "
                 f"at {where} - replace the message's <placeholder> with the real name"
@@ -183,20 +187,20 @@ class FixCommand:
         return None
 
     @staticmethod
-    def refusal(kind: str, name: str | None, params: list[str] | None, file: str, line: int) -> str:
+    def refusal(kind: str, name: str | None, params: list[str] | None, where: str, engine) -> str:
         """Why a fix produced nothing. A name-required kind with a missing or
         non-identifier name is NOT 'nothing to change' — it is an unsatisfied
         prerequisite, and the silence would read as the finding being
         unfixable (the LSP placeholder flow depends on this message)."""
-        if kind in FixCommand.name_required_kinds() and name is None:
+        if kind in FixCommand.name_required_kinds(engine) and name is None:
             # an unsatisfied prerequisite, not 'nothing to change': the silence
             # would read as unfixable (the LSP placeholder flow depends on this)
             return (
                 f"fix: {kind} needs a semantic name the tool cannot invent "
-                f"(--name <Name>) at {file}:{line} - name it with a domain noun; naming is the judgement call"
+                f"(--name <Name>) at {where} - name it with a domain noun; naming is the judgement call"
             )
-        return FixCommand.identifier_problem(kind, name, params, f"{file}:{line}") or (
-            f"fix: nothing to change for {kind} at {file}:{line}"
+        return FixCommand.identifier_problem(kind, name, params, where, engine) or (
+            f"fix: nothing to change for {kind} at {where}"
         )
 
     @staticmethod
@@ -224,9 +228,11 @@ class FixCommand:
     # fix surfaces accept either and normalize here
     ALIASES = {"latent-class": "extract-class", "complexity": "extract-method", "large-function": "extract-method"}
 
-    def __init__(self, args, repo: Path):
+    def __init__(self, args, repo: Path, host: Host, services: Services):
         self.args: argparse.Namespace = args
         self.repo: Path = repo
+        self.host: Host = host
+        self.services: Services = services
         self.rel: str = args.file or ""
         self.fix_kind: str = ""
 
@@ -250,7 +256,7 @@ class FixCommand:
         # A MISSING name still previews — the preview IS the line-number-free
         # contract; only the apply needs the commitment.
         bad = FixCommand.identifier_problem(
-            self.fix_kind, self.args.name, self._params(), f"{self.args.file}:{self.args.line}"
+            self.fix_kind, self.args.name, self._params(), f"{self.args.file}:{self.args.line}", self.host.fix_engine
         )
         if bad:
             print(bad)
@@ -267,11 +273,21 @@ class FixCommand:
                 # `fn ()` — invalid Rust — so refuse silently (R28; the
                 # directive prose already told the agent to pass --name). There
                 # is no Rust preview surface yet.
-                print(FixCommand.refusal(self.fix_kind, self.args.name, self._params(), self.args.file, self.args.line))
+                print(
+                    FixCommand.refusal(
+                        self.fix_kind,
+                        self.args.name,
+                        self._params(),
+                        f"{self.args.file}:{self.args.line}",
+                        self.host.fix_engine,
+                    )
+                )
                 return 0
-            return _FixTarget(self.repo, self.rel).fix_rust(self.fix_kind, self.args.line, self.args.name)
+            return _FixTarget(self.repo, self.rel, self.host, self.services).fix_rust(
+                self.fix_kind, self.args.line, self.args.name
+            )
         # Python: the libcst fix engine is a mandatory dependency
-        fe = HOST.fix_engine.get()
+        fe = self.host.fix_engine
         if fe is None:
             # the release bundle vendors libcst in deps/ when it can (the
             # static musl bundle cannot); a wheel install always declares it
@@ -290,7 +306,7 @@ class FixCommand:
         if signal:
             anchors = [
                 f.col
-                for f in _FixTarget(self.repo, self.rel).scan_single_file()
+                for f in _FixTarget(self.repo, self.rel, self.host, self.services).scan_single_file()
                 if f.signal == signal and f.line == self.args.line and f.col
             ]
             col = max(anchors) if anchors else 0
@@ -336,7 +352,7 @@ class FixCommand:
         # R27: agents never compute line numbers — the tool owns its own
         # coordinates; when the file has exactly one finding of the kind,
         # no --line is needed (both the .py and .rs fix surfaces)
-        lines = _FixTarget(self.repo, self.args.file).finding_lines(self.args.kind)
+        lines = _FixTarget(self.repo, self.args.file, self.host, self.services).finding_lines(self.args.kind)
         if len(lines) == 1:
             self.args.line = lines[0]
         elif not lines:
@@ -407,7 +423,7 @@ class FixCommand:
                 # autofix pending agent-supplied input, at a good anchor
                 print(f"fix: {self.fix_kind} at {self.args.file}:{req.line} needs input — {req.decline}")
                 return 0
-            if self.fix_kind in FixCommand.name_required_kinds() and self.args.name is None:
+            if self.fix_kind in FixCommand.name_required_kinds(self.host.fix_engine) and self.args.name is None:
                 print(
                     f"fix: {self.fix_kind} at {self.args.file}:{req.line} needs a semantic name "
                     f"the tool cannot invent — pass --name <Name> (name it with a domain noun)"
@@ -432,7 +448,9 @@ class FixCommand:
         if moved:
             return 0  # already re-attached once and it still will not write
         lines = [
-            ln for ln in _FixTarget(self.repo, self.args.file).finding_lines(self.fix_kind) if ln != self.args.line
+            ln
+            for ln in _FixTarget(self.repo, self.args.file, self.host, self.services).finding_lines(self.fix_kind)
+            if ln != self.args.line
         ]
         if len(lines) == 1:
             print(f"fix: anchor moved — {self.fix_kind} now at {self.args.file}:{lines[0]}")
@@ -443,7 +461,7 @@ class FixCommand:
             # finding's col just like the direct path (schema-3)
             anchors = [
                 f.col
-                for f in _FixTarget(self.repo, self.args.file).scan_single_file()
+                for f in _FixTarget(self.repo, self.args.file, self.host, self.services).scan_single_file()
                 if f.signal == (self.fix_kind if self.fix_kind != "extract-record-class" else "record-shape")
                 and f.line == req.line
                 and f.col
@@ -463,7 +481,7 @@ class FixCommand:
         split's cross-file layout). A scan failure is NOT flipped into a
         fix failure — the apply already succeeded."""
         try:
-            rust = SERVICES.rust_scan.scan(self.repo, self.args, Counter(), None)
+            rust = self.services.rust_scan.scan(self.repo, self.args, Counter(), None)
         except Exception:
             return
         remaining = [

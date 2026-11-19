@@ -15,7 +15,9 @@ import re
 from pathlib import Path
 
 import fix_engine
-import lucidlint as ch
+import lucidlint
+from orchestrator.host import Host
+from orchestrator.services import Services
 
 SCANNER_SRC = Path(__file__).resolve().parent.parent / "scanner" / "src"
 TAIL = re.compile(r"— fix: ([a-z-]+)")
@@ -126,7 +128,7 @@ def test_fix_refuses_engine_less_kind_on_rust_file(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     target = repo / "houses" / "lib.rs"
     target.write_text("fn main() {}\n")
-    binary = ch.SERVICES.rust_scan.binary(repo)
+    binary = Services(Host.default()).rust_scan.binary(repo)
     assert binary is not None
     spec = json.dumps({"kind": "boolean-arg", "file": str(target), "line": 1, "name": ""})
     proc = subprocess.run([str(binary), "--fix", spec], capture_output=True, text=True, cwd=str(repo))
@@ -156,6 +158,6 @@ def run_fix(repo, *extra):
     saved = sys.argv
     sys.argv = ["lucidlint.py", "--repo", str(repo), *extra]
     try:
-        return ch.main()
+        return lucidlint.main()
     finally:
         sys.argv = saved
