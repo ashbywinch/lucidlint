@@ -410,7 +410,7 @@ impl<'a, 'b> LoopFnCtx<'a, 'b> {
                     let mut own = Vec::new();
                     pat_idents(&f.pat, &mut own);
                     let mutated = self.surviving_mutations(&f.body.stmts, &own);
-                    let reads: Vec<String> = rustscan::rust_expr_idents(&f.expr)
+                    let reads: Vec<String> = rustscan::RustShape::expr_idents(&f.expr)
                         .into_iter()
                         .filter(|r| self.survivors.contains(r) && !own.contains(r))
                         .collect();
@@ -422,7 +422,7 @@ impl<'a, 'b> LoopFnCtx<'a, 'b> {
                 }
                 syn::Expr::While(w) => {
                     let mutated = self.surviving_mutations(&w.body.stmts, &[]);
-                    let reads: Vec<String> = rustscan::rust_expr_idents(&w.cond)
+                    let reads: Vec<String> = rustscan::RustShape::expr_idents(&w.cond)
                         .into_iter()
                         .filter(|r| self.survivors.contains(r))
                         .collect();
@@ -600,7 +600,7 @@ pub(crate) fn rust_loop_findings(
     fn_name: &str,
     fn_line: usize,
 ) {
-    let mut survivors = rustscan::param_names(sig);
+    let mut survivors = rustscan::RustShape::param_names(sig);
     bind_fn_stmts(&block.stmts, &mut survivors);
     let mut ctx = LoopFnCtx {
         state,

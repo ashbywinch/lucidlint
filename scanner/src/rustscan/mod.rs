@@ -45,7 +45,7 @@ pub(crate) use graph::ModuleGraph;
 pub(crate) use ignored_test::ignored_test_findings;
 pub(crate) use modshape::MixedModule;
 pub(crate) use no_assert_test::no_assert_test_findings;
-pub(crate) use shape::{param_names, rust_expr_idents};
+pub(crate) use shape::RustShape;
 pub(crate) use state::RsState;
 
 /// One struct: name, declaration line, named-field count, line span.
@@ -210,7 +210,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::rustscan::shape::rust_fn_shape;
+    use crate::rustscan::shape::RustShape;
     use crate::rustscan::skeleton::RsSkeleton;
     use syn::Item;
 
@@ -637,7 +637,7 @@ mod tests {
             syn::Item::Fn(f) => (f.block.stmts.clone(), f.sig.clone()),
             _ => panic!("not a fn"),
         };
-        let (shape, detail) = rust_fn_shape(&body, &sig);
+        let (shape, detail) = RustShape::fn_shape(&body, &sig);
         assert_eq!((shape, detail.as_str()), ("dispatch", "sel"));
         let rules = "fn check(a: &M) -> Vec<&str> {\n    let mut out = vec![];\n    if a.get(1) { out.push(\"x\"); }\n    if a.get(2) { out.push(\"y\"); }\n    if a.get(3) { out.push(\"z\"); }\n    out\n}\n";
         let file = syn::parse_file(rules).unwrap();
@@ -645,7 +645,7 @@ mod tests {
             syn::Item::Fn(f) => (f.block.stmts.clone(), f.sig.clone()),
             _ => panic!("not a fn"),
         };
-        let (shape, detail) = rust_fn_shape(&body, &sig2);
+        let (shape, detail) = RustShape::fn_shape(&body, &sig2);
         assert_eq!((shape, detail.as_str()), ("rules", "out"));
         let plain = "fn f(a: i32) -> i32 { a + 1 }\n";
         let file = syn::parse_file(plain).unwrap();
@@ -653,7 +653,7 @@ mod tests {
             syn::Item::Fn(f) => (f.block.stmts.clone(), f.sig.clone()),
             _ => panic!("not a fn"),
         };
-        let (shape, _) = rust_fn_shape(&body, &sig3);
+        let (shape, _) = RustShape::fn_shape(&body, &sig3);
         assert_eq!(shape, "plain");
     }
 

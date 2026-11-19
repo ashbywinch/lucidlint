@@ -13,7 +13,7 @@ use super::exprs::{
 };
 use super::fakefs::fakefs_hit;
 use super::graph::ModuleGraph;
-use super::shape::{is_closures_shape, is_discarded_expression, is_trivial_rust_stub, rust_fn_shape};
+use super::shape::RustShape;
 use super::skeleton::RsSkeleton;
 use super::stmts::{inner_count, is_diverge_stmt, return_values, span_lines};
 use super::types::{collect_type_idents, impl_self_name, static_type_ident};
@@ -436,7 +436,7 @@ impl<'a> RsState<'a> {
         let compound_assign = matches!(e, Expr::Binary(b) if is_compound_op(&b.op));
         // return/break/continue are control flow, not discarded values
         let control = matches!(e, Expr::Return(_) | Expr::Break(_) | Expr::Continue(_));
-        if is_discarded_expression(compound_assign, control, harmless) {
+        if RustShape::is_discarded_expression(compound_assign, control, harmless) {
             let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
             let line = e.span().start().line;
             self.finding(
@@ -476,7 +476,7 @@ impl<'a> RsState<'a> {
         if !self.in_test_code {
             // closures->latent-class: >= 2 inner fns/closures on a big fn
             let inner = inner_count(block);
-            if is_closures_shape(inner, cc, span) {
+            if RustShape::is_closures_shape(inner, cc, span) {
                 self.finding(
                     "closures",
                     "fail",
@@ -492,7 +492,7 @@ impl<'a> RsState<'a> {
             // verdicts) — per-function shapes, own module below
             crate::rustloops::rust_loop_findings(self, sig, block, &sig.ident.to_string(), line);
             let typed = sig.inputs.iter().filter(|i| matches!(i, FnArg::Typed(_))).count();
-            if typed > 5 && !is_trivial_rust_stub(&block.stmts) {
+            if typed > 5 && !RustShape::is_trivial_stub(&block.stmts) {
                 self.finding(
                     "long-param-list",
                     "fail",
@@ -532,7 +532,7 @@ impl<'a> RsState<'a> {
         if module_level && !self.in_test_code {
             // the gate reads cc from the scan's own array — module-level fns
             // only, mirroring radon's fn_map (methods/nested get cc = 0)
-            let (shape, shape_detail) = rust_fn_shape(&block.stmts, sig);
+            let (shape, shape_detail) = RustShape::fn_shape(&block.stmts, sig);
             self.cc.push(FnCc {
                 file: self.file.to_string(),
                 function: sig.ident.to_string(),
