@@ -714,6 +714,47 @@ the scan driver's two console calls became one warning door (its graph
 `layer-mix` edge), `pygit2`'s sort mode is read through the host seam instead
 of a module binding, and the graph export's three wire dicts became records.
 
+**The facade and the host proxy are a shim, and they come out.** The first
+cut of this round kept `lucidlint.py` re-exporting ~60 internals and resolved
+the optional libraries through `Substitutable` (a proxy that reads
+`lucidlint.subprocess`, `lucidlint._pygit2`, … at call time) because the tests
+substitute those names on the entry module. Re-reading the constraint, that
+was the wrong call: the rule is *do not paper over a behaviour change by
+editing a test*, not *never touch a test*. The proxy is a service locator over
+entry-module globals and the re-export block publishes the implementation —
+both are what the composition-root pattern exists to avoid.
+
+The replacement, in stages:
+
+1. **`Host` becomes a plain object, not a proxy.** Fields: `process`,
+   `pygit2`, `graph_store`, `graph_registry`, `fix_engine`; `Host.default()`
+   is the single place that imports the concrete optional libraries (via
+   `import_module`, so an absent one is `None`). `artifact_root` is a module
+   function or a field, not a lookup.
+2. **Constructor injection.** `SourceWalk(repo, host)`,
+   `GraphContract(host)`, `RustScan(host, graph)`, `Services(host)`,
+   `GateRunner(repo, args, host)`, `FixCommand(args, repo, host)`. No module
+   reaches for a global; a missing collaborator is a `TypeError` at
+   construction, not an `AttributeError` mid-run.
+3. **One composition root.** `Cli(args, host=None)` builds
+   `host = host or Host.default()` and `Services(host)`; `lucidlint.py`'s
+   `main` keeps the `deps/` bootstrap and calls `Cli(...).run()`. The optional
+   `host=` parameter is explicit *parameterisation*, not a shim: clients get a
+   one-argument default, tests pass a fake.
+4. **Tests construct hosts.** `Env`/`run_main` build `Host(process=FakeSubprocess(routes), pygit2=None, …)`
+   once; the `ch.subprocess = fake` / `ch._pygit2 = None` / `ch._GraphStore = …`
+   assignments are deleted. `ch.SERVICES` becomes a locally built
+   `Services(host)`.
+5. **The entry publishes `main` only.** Tests import the internals they need
+   from the owning modules (`orchestrator.action.Action`,
+   `orchestrator.report.render_ctx.RenderCtx`, …). `__all__` shrinks to the
+   public surface; nothing internal is re-exported.
+
+The staging is chosen so each step is green: 1–2 change types, 3 changes the
+root, 4–5 change tests and the published surface. Until step 4 lands, the
+tests still pass because the proxy is still there; the proxy is deleted with
+the last assignment that uses it.
+
 **`fix_engine.py` is a package now, and its shared layer is named.** The file
 moved to `fix_engine/__init__.py` (so `import fix_engine` is unchanged) and
 the libcst mechanics every transform uses — node positions, class-body
