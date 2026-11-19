@@ -666,7 +666,7 @@ fn scan_source(source: &str, name: &str) -> FileScan {
 pub fn scan_source_lsp(source: &str, name: &str) -> FileScan {
     if name.ends_with(".rs") {
         let repo_wide = false; // LSP per-buffer scans are single-file
-        let rs = rustscan::scan_source(source, name, repo_wide);
+        let rs = rustscan::RustScan::scan(source, name, repo_wide);
         return rustscan_to_filescan_ref(&rs, name);
     }
     let repo_wide = false; // LSP per-buffer scans are single-file
@@ -922,7 +922,7 @@ pub(crate) fn scan_file(path: &Path) -> FileScan {
     let name = path.to_str().unwrap_or("<file>").to_string();
     if name.ends_with(".rs") {
         let repo_wide = true;
-        let rs = rustscan::scan_source(&source, &name, repo_wide);
+        let rs = rustscan::RustScan::scan(&source, &name, repo_wide);
         return rustscan_to_filescan_ref(&rs, &name);
     }
     let mut scan = scan_source(&source, &name);
@@ -1440,7 +1440,7 @@ fn main() {
             if path.ends_with(".rs") {
                 let source = std::fs::read_to_string(path).unwrap_or_default();
                 let repo_wide = true;
-                let rs = rustscan::scan_source(&source, path, repo_wide);
+                let rs = rustscan::RustScan::scan(&source, path, repo_wide);
                 let rel = path.clone();
                 let fs = rustscan_to_filescan_ref(&rs, &rel);
                 (Some(rs), fs)
@@ -6636,7 +6636,7 @@ def two(work, batch):
                 "pub fn free_{i}(text: &str) -> usize {{\n    text.len() + {i}\n}}\n\n"
             ));
         }
-        let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
+        let rs = rustscan::RustScan::scan(&src, "crate/src/steps.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
@@ -6739,7 +6739,7 @@ def two(work, batch):
         for i in 0..31 {
             src.push_str(&format!("pub struct Widget{i} {{ size: u32 }}\n\nimpl Widget{i} {{\n    pub fn run(&self) -> u32 {{\n        self.size\n    }}\n}}\n\n"));
         }
-        let rs = rustscan::scan_source(&src, "crate/src/widgets.rs", true);
+        let rs = rustscan::RustScan::scan(&src, "crate/src/widgets.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/widgets.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/widgets.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
@@ -6760,7 +6760,7 @@ def two(work, batch):
                 "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
             ));
         }
-        let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
+        let rs = rustscan::RustScan::scan(&src, "crate/src/steps.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
@@ -6787,7 +6787,7 @@ def two(work, batch):
                 "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
             ));
         }
-        let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
+        let rs = rustscan::RustScan::scan(&src, "crate/src/steps.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
@@ -6806,7 +6806,7 @@ def two(work, batch):
                 "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
             ));
         }
-        let rs = rustscan::scan_source(&wide, "crate/src/wide.rs", true);
+        let rs = rustscan::RustScan::scan(&wide, "crate/src/wide.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/wide.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/wide.rs".to_string(), scan.module_shape.clone())]);
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
@@ -6829,7 +6829,7 @@ def two(work, batch):
             ));
         }
         src.push_str("pub struct State {\n    pub count: u32,\n}\n");
-        let rs = rustscan::scan_source(&src, "crate/src/steps.rs", true);
+        let rs = rustscan::RustScan::scan(&src, "crate/src/steps.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
         assert_eq!(scan.module_shape.definitions(), 1, "{:?}", scan.module_shape);
         let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
@@ -6841,7 +6841,7 @@ def two(work, batch):
                 "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
             ));
         }
-        let rs = rustscan::scan_source(&loose, "crate/src/loose.rs", true);
+        let rs = rustscan::RustScan::scan(&loose, "crate/src/loose.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/loose.rs");
         assert_eq!(scan.module_shape.definitions(), 31);
         let f = checks::ModuleShape::findings(&[("crate/src/loose.rs".to_string(), scan.module_shape.clone())]);
@@ -6856,7 +6856,7 @@ def two(work, batch):
             src.push_str(&format!("pub struct Row{i} {{ pub size: u32 }}\n\n"));
         }
         src.push_str("pub struct Table {\n    pub rows: u32,\n}\n\nimpl Table {\n    pub fn rows(&self) -> u32 {\n        self.rows\n    }\n}\n");
-        let rs = rustscan::scan_source(&src, "crate/src/table.rs", true);
+        let rs = rustscan::RustScan::scan(&src, "crate/src/table.rs", true);
         let scan = rustscan_to_filescan_ref(&rs, "crate/src/table.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/table.rs".to_string(), scan.module_shape.clone())]);
         assert!(f.is_empty(), "{f:?}");

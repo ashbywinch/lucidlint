@@ -1,6 +1,3 @@
-// lucidlint: ignore-file complexity the syn walkers are single dispatch tables — match-arm count,
-// not branching; keep NEW functions under cc 15
-
 //! The Rust language layer — syn-based per-file scan.
 //!
 //! Seam: the same `Finding`/`FnCc` model as the Python layer, the same shared
@@ -83,6 +80,126 @@ impl RustScan {
     pub fn file_name(&self) -> String {
         self.file_name.clone()
     }
+
+    pub fn scan(source: &str, name: &str, repo_wide: bool) -> RustScan {
+        let file = match syn::parse_file(source) {
+            Ok(f) => f,
+            Err(_) => {
+                return RustScan {
+                    supps: crate::suppressions::Suppressions::default(),
+                    supps_spent: Default::default(),
+                    file_name: name.to_string(),
+                    findings: Vec::new(),
+                    cc: Vec::new(),
+                    errors: 1,
+                    skeletons: Vec::new(),
+                    mod_decls: Vec::new(),
+                    uses: Vec::new(),
+                    module_shape: Default::default(),
+                };
+            }
+        };
+        let reason_lines: std::collections::HashSet<usize> = RsComments::rs_comment_lines(source)
+            .into_iter()
+            .filter(|(_, t)| !t.trim_start_matches(['/', '*', ' ']).trim().is_empty())
+            .flat_map(|(l, _)| [l, l + 1])
+            .collect();
+
+        let mut state = RsState {
+            supps: crate::suppressions::Suppressions::default(),
+            supps_spent: Default::default(),
+            file: name,
+            source,
+            file_name: name.to_string(),
+            reason_lines,
+            findings: Vec::new(),
+            cc: Vec::new(),
+            skeletons: Vec::new(),
+            mod_decls: Vec::new(),
+            uses: Vec::new(),
+            structs: Vec::new(),
+            impls: Vec::new(),
+            fn_params: Vec::new(),
+            strew_candidates: Vec::new(),
+            fn_stack: Vec::new(),
+            current_fn: None,
+            expr_stack: Vec::new(),
+            in_test_code: false,
+            is_test_file: crate::is_test_path(name),
+            repo_wide,
+            current_impl: None,
+            bare_body: false,
+            valued_returns: 0,
+            at_tail: false,
+            body_block: false,
+        };
+        // the test-only rules run even inside #[cfg(test)] mods — a pre-pass over
+        // the whole file, then the production walk skips test subtrees
+        state.findings.extend(ignored_test_findings(&file, name));
+        state.findings.extend(no_assert_test_findings(&file, name));
+        state.walk_file(&file);
+        let mut scan = state.finish();
+        scan.module_shape = MixedModule::module_shape(&file, source);
+        MixedModule::mixed_module_into(&mut scan, &file, name);
+        // G4: does the file hold magic-CANDIDATE literals anywhere — the fact
+        // the stale magic-number message cites when the family fires nowhere.
+        // Rust's only exemptions are the position rule, so the label set is
+        // ["position/index"] or empty.
+        let mut probe = NumericLiteralProbe { found: false };
+        syn::visit::Visit::visit_file(&mut probe, &file);
+        let magic_exempt_labels: Vec<&'static str> = if probe.found {
+            vec!["position/index"]
+        } else {
+            Vec::new()
+        };
+        // suppressions parse from the whole file, filtering every family — the
+        // shared why-less rule applies (`// lucidlint: ignore` needs a why)
+        let comments = RsComments::rs_comment_lines(source);
+        let supps = crate::suppressions::suppressions_from_comments(&comments);
+        // complexity findings are generated from the cc array AFTER the per-file
+        // pass — honor complexity suppressions here so both paths agree, and
+        // record which suppressions this retain honored so the stale check does
+        // not re-flag them
+        let mut pre_used = crate::suppressions::PreUsedSuppressions::default();
+        if !scan.cc.is_empty() {
+            scan.cc.retain(|e| {
+                // record what the retention's own decision honors — the SAME
+                // widened window and family-aware matching that suppressed()
+                // uses (a suppression used by the cc path must not be re-flagged
+                // stale by apply_suppressions_impl)
+                for ln in crate::suppressions::window_lines(e.line) {
+                    if let Some(entries) = supps.line.get(&ln) {
+                        for (sig, why) in entries {
+                            if crate::suppressions::signal_matches(sig, "complexity") && !why.is_empty() {
+                                pre_used.lines.insert((ln, sig.clone()));
+                            }
+                        }
+                    }
+                }
+                let line_suppressed = crate::suppressions::suppressed("complexity", e.line, &supps);
+                let file_suppressed = supps.file.get("complexity").is_some_and(|w| !w.is_empty());
+                if file_suppressed {
+                    pre_used.files.insert("complexity".into());
+                }
+                !line_suppressed && !file_suppressed
+            });
+        }
+        let mut supps_spent = std::collections::HashSet::new();
+        let mut books = crate::suppressions::SuppressionBooks {
+            pre_used: &pre_used,
+            spent: &mut supps_spent,
+        };
+
+        scan.findings = crate::suppressions::apply_suppressions_impl(
+            scan.findings,
+            &comments,
+            name,
+            "//",
+            &mut books,
+            &magic_exempt_labels,
+        );
+        scan
+    }
 }
 
 /// G4: does the file hold a magic-CANDIDATE literal (value outside 0/1/2)
@@ -107,126 +224,6 @@ impl<'ast> syn::visit::Visit<'ast> for NumericLiteralProbe {
     }
 }
 
-pub fn scan_source(source: &str, name: &str, repo_wide: bool) -> RustScan {
-    let file = match syn::parse_file(source) {
-        Ok(f) => f,
-        Err(_) => {
-            return RustScan {
-                supps: crate::suppressions::Suppressions::default(),
-                supps_spent: Default::default(),
-                file_name: name.to_string(),
-                findings: Vec::new(),
-                cc: Vec::new(),
-                errors: 1,
-                skeletons: Vec::new(),
-                mod_decls: Vec::new(),
-                uses: Vec::new(),
-                module_shape: Default::default(),
-            };
-        }
-    };
-    let reason_lines: std::collections::HashSet<usize> = RsComments::rs_comment_lines(source)
-        .into_iter()
-        .filter(|(_, t)| !t.trim_start_matches(['/', '*', ' ']).trim().is_empty())
-        .flat_map(|(l, _)| [l, l + 1])
-        .collect();
-
-    let mut state = RsState {
-        supps: crate::suppressions::Suppressions::default(),
-        supps_spent: Default::default(),
-        file: name,
-        source,
-        file_name: name.to_string(),
-        reason_lines,
-        findings: Vec::new(),
-        cc: Vec::new(),
-        skeletons: Vec::new(),
-        mod_decls: Vec::new(),
-        uses: Vec::new(),
-        structs: Vec::new(),
-        impls: Vec::new(),
-        fn_params: Vec::new(),
-        strew_candidates: Vec::new(),
-        fn_stack: Vec::new(),
-        current_fn: None,
-        expr_stack: Vec::new(),
-        in_test_code: false,
-        is_test_file: crate::is_test_path(name),
-        repo_wide,
-        current_impl: None,
-        bare_body: false,
-        valued_returns: 0,
-        at_tail: false,
-        body_block: false,
-    };
-    // the test-only rules run even inside #[cfg(test)] mods — a pre-pass over
-    // the whole file, then the production walk skips test subtrees
-    state.findings.extend(ignored_test_findings(&file, name));
-    state.findings.extend(no_assert_test_findings(&file, name));
-    state.walk_file(&file);
-    let mut scan = state.finish();
-    scan.module_shape = MixedModule::module_shape(&file, source);
-    MixedModule::mixed_module_into(&mut scan, &file, name);
-    // G4: does the file hold magic-CANDIDATE literals anywhere — the fact
-    // the stale magic-number message cites when the family fires nowhere.
-    // Rust's only exemptions are the position rule, so the label set is
-    // ["position/index"] or empty.
-    let mut probe = NumericLiteralProbe { found: false };
-    syn::visit::Visit::visit_file(&mut probe, &file);
-    let magic_exempt_labels: Vec<&'static str> = if probe.found {
-        vec!["position/index"]
-    } else {
-        Vec::new()
-    };
-    // suppressions parse from the whole file, filtering every family — the
-    // shared why-less rule applies (`// lucidlint: ignore` needs a why)
-    let comments = RsComments::rs_comment_lines(source);
-    let supps = crate::suppressions::suppressions_from_comments(&comments);
-    // complexity findings are generated from the cc array AFTER the per-file
-    // pass — honor complexity suppressions here so both paths agree, and
-    // record which suppressions this retain honored so the stale check does
-    // not re-flag them
-    let mut pre_used = crate::suppressions::PreUsedSuppressions::default();
-    if !scan.cc.is_empty() {
-        scan.cc.retain(|e| {
-            // record what the retention's own decision honors — the SAME
-            // widened window and family-aware matching that suppressed()
-            // uses (a suppression used by the cc path must not be re-flagged
-            // stale by apply_suppressions_impl)
-            for ln in crate::suppressions::window_lines(e.line) {
-                if let Some(entries) = supps.line.get(&ln) {
-                    for (sig, why) in entries {
-                        if crate::suppressions::signal_matches(sig, "complexity") && !why.is_empty() {
-                            pre_used.lines.insert((ln, sig.clone()));
-                        }
-                    }
-                }
-            }
-            let line_suppressed = crate::suppressions::suppressed("complexity", e.line, &supps);
-            let file_suppressed = supps.file.get("complexity").is_some_and(|w| !w.is_empty());
-            if file_suppressed {
-                pre_used.files.insert("complexity".into());
-            }
-            !line_suppressed && !file_suppressed
-        });
-    }
-    let mut supps_spent = std::collections::HashSet::new();
-    let mut books = crate::suppressions::SuppressionBooks {
-        pre_used: &pre_used,
-        spent: &mut supps_spent,
-    };
-
-    scan.findings = crate::suppressions::apply_suppressions_impl(
-        scan.findings,
-        &comments,
-        name,
-        "//",
-        &mut books,
-        &magic_exempt_labels,
-    );
-    scan
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -237,7 +234,7 @@ mod tests {
     use syn::Item;
 
     fn scan(src: &str) -> Vec<Finding> {
-        scan_source(src, "prod_mod.rs", true).findings
+        RustScan::scan(src, "prod_mod.rs", true).findings
     }
 
     fn fixture(name: &str) -> String {
@@ -248,7 +245,7 @@ mod tests {
     }
 
     fn scan_cc(src: &str) -> Vec<FnCc> {
-        scan_source(src, "prod_mod.rs", true).cc
+        RustScan::scan(src, "prod_mod.rs", true).cc
     }
 
     fn has_kind(fs: &[Finding], k: &str) -> bool {
@@ -524,8 +521,8 @@ mod tests {
             "fn alpha(x: u32) -> u32 {\n    let mut n = x;\n    for i in 0..10 {\n        n += i;\n    }\n    n\n}\n";
         let b =
             "fn beta(y: u32) -> u32 {\n    let mut m = y;\n    for j in 0..10 {\n        m += j;\n    }\n    m\n}\n";
-        let sa = scan_source(a, "a.rs", true);
-        let sb = scan_source(b, "b.rs", true);
+        let sa = RustScan::scan(a, "a.rs", true);
+        let sb = RustScan::scan(b, "b.rs", true);
         let mut pool: Vec<crate::skeleton::SkeletonFn> = Vec::new();
         pool.extend(sa.skeletons.iter().map(|s| crate::skeleton::SkeletonFn {
             rel: "a.rs".into(),
