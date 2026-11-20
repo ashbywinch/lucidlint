@@ -6,21 +6,43 @@ violations whose condition holds.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import libcst as cst
 
 from fix_engine.cst_mechanics import CstMechanics
 
-# the dispatch-chain collections — named so the signatures are not bare
-# record collections (the record-shape rule's escape hatch)
-_BatteryCheck = tuple[cst.BaseExpression, cst.BaseExpression]
-_BatteryShape = tuple[str, list[_BatteryCheck], list, list]
-_AccInit = tuple[str, int]
-_RuleTableBuild = tuple[cst.SimpleStatementLine, cst.SimpleStatementLine]
+
+class _AccumulatorInit(NamedTuple):
+    """The `acc = []` opener: the accumulator's name and where it sits."""
+
+    name: str
+    index: int
 
 
-# lucidlint: ignore-file record-shape the dispatch/rule analyses are cst construction
-# plans — their tuples are local multi-value returns between private helpers, and a
-# class per hop is ceremony (the same reviewed why the pre-split module carried)
+class _BatteryCheck(NamedTuple):
+    """One rule-battery check: its condition and the violation it appends."""
+
+    condition: cst.BaseExpression
+    violation: cst.BaseExpression
+
+
+class _BatteryShape(NamedTuple):
+    """A rule battery's parts: the accumulator, the checks, the locals before
+    it, and the statements after it."""
+
+    accumulator: str
+    checks: list[_BatteryCheck]
+    preamble: list
+    tail: list
+
+
+class _RuleTablePlan(NamedTuple):
+    """The hoisted table statement and the collector that produces the
+    accumulator."""
+
+    table: cst.SimpleStatementLine
+    collector: cst.SimpleStatementLine
 
 
 class RuleTable:
@@ -57,7 +79,7 @@ class RuleTable:
         return cst.Module(body=out_body).code
 
     @staticmethod
-    def _acc_init(body: list) -> _AccInit | None:
+    def _acc_init(body: list) -> _AccumulatorInit | None:
         """The `acc = []` opener (plain or annotated `acc: list = []`) — (acc
         name, its index) or None. Preamble statements may precede it (the hoisted
         lambdas capture them)."""
@@ -67,10 +89,10 @@ class RuleTable:
             a = stmt.body[0]
             if RuleTable._is_empty_list_assign(a):
                 assert isinstance(a, cst.Assign) and isinstance(a.targets[0].target, cst.Name)
-                return a.targets[0].target.value, i
+                return _AccumulatorInit(a.targets[0].target.value, i)
             if RuleTable._is_empty_list_annassign(a):
                 assert isinstance(a, cst.AnnAssign) and isinstance(a.target, cst.Name)
-                return a.target.value, i
+                return _AccumulatorInit(a.target.value, i)
         return None
 
     @staticmethod
@@ -141,16 +163,16 @@ class RuleTable:
             value = RuleTable._append_value(stmt.body, acc)
             if value is None:
                 return None  # v1: one append per check
-            checks.append((stmt.test, value))
+            checks.append(_BatteryCheck(stmt.test, value))
             idx += 1
         if len(checks) < 3:
             return None  # fewer than 3 checks is not a battery
         # everything after the last check is the TAIL — kept verbatim (the
         # collector comprehension produces `acc`, then the tail uses it)
-        return acc, checks, preamble, list(body[idx:])
+        return _BatteryShape(acc, checks, preamble, list(body[idx:]))
 
     @staticmethod
-    def _rule_table_build(acc: str, checks: list) -> _RuleTableBuild:
+    def _rule_table_build(acc: str, checks: list[_BatteryCheck]) -> _RuleTablePlan:
         """The hoisted table — `rules = [(lambda: <cond>, <violation>), ...]` —
         and the collector comprehension `acc = [v for _cond, v in rules if _cond()]`.
         The lambdas close over the enclosing scope: shared preamble locals are
@@ -189,4 +211,4 @@ class RuleTable:
                 )
             ]
         )
-        return table, collector
+        return _RuleTablePlan(table, collector)

@@ -5,14 +5,12 @@ Each arm's literal selects a handler, and one call dispatches.
 
 from __future__ import annotations
 
-from typing import override
+from typing import NamedTuple, override
 
 import libcst as cst
 
 from fix_engine.cst_mechanics import CstMechanics
 
-# the dispatch-chain collections — named so the signatures are not bare
-# record collections (the record-shape rule's escape hatch)
 _AMBIENT = frozenset(
     {
         "str",
@@ -79,17 +77,54 @@ _AMBIENT = frozenset(
     }
 )
 
-_DispatchArm = tuple[str, str | bytes, list[cst.BaseStatement]]
-_DispatchChain = list[tuple[str, list[cst.BaseStatement]]]
-_DispatchShape = tuple[list[cst.BaseStatement], _DispatchChain, str, cst.Return]
-_DispatchArms = tuple[list | None, str | None]
-_RuleBuild = tuple[list[cst.FunctionDef], list]
-_DispatchBuild = tuple[list[cst.FunctionDef], cst.SimpleStatementLine]
+class _DispatchArm(NamedTuple):
+    """One parsed chain arm: the selector, its literal, and the body."""
+
+    selector: str
+    literal: str | bytes
+    body: list[cst.BaseStatement]
 
 
-# lucidlint: ignore-file record-shape the dispatch/rule analyses are cst construction
-# plans — their tuples are local multi-value returns between private helpers, and a
-# class per hop is ceremony (the same reviewed why the pre-split module carried)
+class _ChainArm(NamedTuple):
+    """The literal that selects an arm and the statements it runs."""
+
+    literal: str | bytes
+    body: list[cst.BaseStatement]
+
+
+class _DispatchArms(NamedTuple):
+    """The contiguous arms over one selector, or a pair of Nones when the run
+    is not the table shape."""
+
+    chain: list[_ChainArm] | None
+    selector: str | None
+
+
+class _DispatchShape(NamedTuple):
+    """A dispatch chain's parts: the locals computed before it, the arms, the
+    selector, and the no-match return."""
+
+    preamble: list[cst.BaseStatement]
+    chain: list[_ChainArm]
+    selector: str
+    default: cst.Return
+
+
+class _DispatchHandlers(NamedTuple):
+    """The generated handler functions and the registry statement that names
+    them."""
+
+    handlers: list[cst.FunctionDef]
+    registry: cst.SimpleStatementLine
+
+
+class _DispatchScope(NamedTuple):
+    """Per-arm bound and read names, and whether any arm reads the selector —
+    None instead when an arm reads a name bound in a sibling."""
+
+    bounds: list[set[str]]
+    reads: list[set[str]]
+    selector_read: bool
 
 
 class DispatchRegistry:
@@ -183,17 +218,17 @@ class DispatchRegistry:
                 break
             parsed = DispatchRegistry._parse_dispatch_arm(stmt)
             if parsed is None:
-                return None, None
+                return _DispatchArms(None, None)
             sel, lit, arm_body = parsed
             if selector is None:
                 selector = sel
             elif sel != selector:
-                return None, None
-            chain.append((lit, arm_body))
-        return chain, selector
+                return _DispatchArms(None, None)
+            chain.append(_ChainArm(lit, arm_body))
+        return _DispatchArms(chain, selector)
 
     @staticmethod
-    def _dispatch_build(chain: _DispatchChain, union: list[str], existing: set[str]) -> _DispatchBuild:
+    def _dispatch_build(chain: list[_ChainArm], union: list[str], existing: set[str]) -> _DispatchHandlers:
         """The handler functions (_<slug> taking the free-var union) and the
         registry dict. The handlers are defined before the registry — the dict
         evaluates their names at module load. The literal IS the handler's name
@@ -223,7 +258,7 @@ class DispatchRegistry:
                 cst.Assign(targets=[cst.AssignTarget(cst.Name("_REGISTRY"))], value=cst.Dict(elements=registry_entries))
             ]
         )
-        return handlers, registry
+        return _DispatchHandlers(handlers, registry)
 
     @staticmethod
     def _dispatch_call(selector: str, default, union: list[str]) -> list:
@@ -271,7 +306,7 @@ class DispatchRegistry:
         tail = body[first_if + len(chain) :]
         if not DispatchRegistry._is_single_return_tail(tail):
             return None  # v1: a single trailing `return <default>` is the no-match path
-        return preamble, chain, selector or "", tail[0].body[0]
+        return _DispatchShape(preamble, chain, selector or "", tail[0].body[0])
 
     @staticmethod
     def _dispatch_lambda_call(selector: str, default) -> list:
@@ -313,7 +348,7 @@ class DispatchRegistry:
         return cst.Module(body=[new_fn if s is fn else s for s in wrapper.module.body]).code
 
     @staticmethod
-    def _dispatch_lambda_table(chain: _DispatchChain, exprs: list) -> cst.SimpleStatementLine:
+    def _dispatch_lambda_table(chain: list[_ChainArm], exprs: list) -> cst.SimpleStatementLine:
         """`_tools = {"lit": lambda: <expr>, ...}` — the hoisted latent data
         structure. The lambdas capture the enclosing scope: no free-var analysis,
         no names, no param plumbing."""
@@ -365,7 +400,7 @@ class DispatchRegistry:
         return cst.Module(body=out_body).code
 
     @staticmethod
-    def _dispatch_scope_analysis(chain, selector) -> tuple[list[set[str]], list[set[str]], bool] | None:
+    def _dispatch_scope_analysis(chain, selector) -> _DispatchScope | None:
         """Per-arm bound + read name analysis. Returns (bounds, reads, selector_read)
         or None when an arm reads a name bound in a sibling arm (the value does
         not exist at the uniform call site — the rewrite would crash every
@@ -382,7 +417,7 @@ class DispatchRegistry:
             for j, b in enumerate(bounds):
                 if i != j and reads[i] & b:
                     return None
-        return bounds, reads, any(selector in r for r in reads)
+        return _DispatchScope(bounds, reads, any(selector in r for r in reads))
 
     @staticmethod
     def _is_single_return_tail(tail: list) -> bool:
@@ -422,7 +457,7 @@ class DispatchRegistry:
         body = stmt.body
         if not isinstance(body, cst.IndentedBlock) or not body.body:
             return None
-        return left.value, comp.comparator.evaluated_value, list(body.body)
+        return _DispatchArm(left.value, comp.comparator.evaluated_value, list(body.body))
 
     @staticmethod
     def _read_names(nodes) -> list[str]:
