@@ -66,11 +66,11 @@ _as_range = ModuleOutline.span
 _as_node = ModuleOutline.resolve_node
 _iter_nodes = ModuleOutline.iter_nodes
 _iter_nodes_pruned = ModuleOutline.iter_nodes_pruned
-_expr_names = CstMechanics._expr_names
-_collect_alias_names = CstMechanics._collect_alias_names
+_expr_names = Bindings.expr_names
+_collect_alias_names = Bindings.collect_alias_names
 _is_keyword_name = ModuleOutline.is_keyword_name
 _is_self_attribute = ModuleOutline.is_self_attribute
-_import_base_name = CstMechanics._import_base_name
+_import_base_name = Bindings.import_base_name
 _is_docstring_stmt = ModuleOutline.is_docstring_stmt
 
 _py_files = SourceFiles.py_files
@@ -1681,7 +1681,7 @@ def _class_body_binds(cls: cst.ClassDef, name: str) -> bool:
                     return True
                 if isinstance(inner, (cst.Import, cst.ImportFrom)):
                     bound: set[str] = set()
-                    CstMechanics._collect_alias_names(bound, inner)
+                    Bindings.collect_alias_names(bound, inner)
                     if name in bound:
                         return True
     return False
@@ -1772,7 +1772,7 @@ def _consts_moving_into(
     others = {n for cid, refs in class_refs.items() if cid != cls_id for n in refs}
     order = {n: i for i, (n, _s) in enumerate(const_stmts)}
     value_of = {n: _const_value(s) for n, s in const_stmts}
-    value_refs_of = {n: CstMechanics._expr_names(v) - CstMechanics.BUILTINS for n, v in value_of.items()}
+    value_refs_of = {n: Bindings.expr_names(v) - Bindings.BUILTINS for n, v in value_of.items()}
     readers_via_value: dict[str, set[str]] = {}
     for reader, vrefs in value_refs_of.items():
         for k in vrefs:
@@ -1978,7 +1978,7 @@ class _ModuleSplit:
                 continue  # imports bind their own names — not class references
             refs |= _free_names_of(stmt) & self.subject_names
         for _name, stmt in self.const_stmts:
-            refs |= CstMechanics._expr_names(_const_value(stmt)) & self.subject_names
+            refs |= Bindings.expr_names(_const_value(stmt)) & self.subject_names
         return refs
 
     def components(self) -> list[list[cst.ClassDef]]:
@@ -2311,7 +2311,7 @@ def _split_class_source(
     the origin's imports binding its free names; a from-origin import for a
     residual member; a from-`.Class` import for a sibling subject) + the
     class itself with its constants and references rewritten."""
-    free = _class_free_names(cls) - ctx.moved - CstMechanics.BUILTINS
+    free = _class_free_names(cls) - ctx.moved - Bindings.BUILTINS
     imports = CstMechanics._moved_imports(module, free)  # verbatim copies for import-bound names
     constructed: list = []
     for n in sorted(free):
@@ -3525,7 +3525,7 @@ def _partition_fix(req: _FixRequest) -> str | None:
         init_stmts.extend(_init_stmt(field, value) for field, value in retained)
         needed = set(group.fields)
         for _field, value in retained:
-            needed |= set(CstMechanics._expr_names(value))
+            needed |= set(Bindings.expr_names(value))
         # a valid Python signature keeps its defaulted parameters last, so any
         # kept subset is valid: a skipped parameter can never be required
         init_params = [

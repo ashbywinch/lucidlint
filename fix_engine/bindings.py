@@ -8,9 +8,12 @@ scope.
 
 from __future__ import annotations
 
+import builtins
 from typing import override
 
 import libcst as cst
+
+from fix_engine.module_outline import ModuleOutline
 
 
 class Bindings:
@@ -18,6 +21,36 @@ class Bindings:
 
     def __init__(self, scope: cst.CSTNode) -> None:
         self.scope = scope
+
+    @staticmethod
+    @staticmethod
+    def import_base_name(name: cst.Attribute | cst.Name) -> str:
+        """The first component of a dotted module path: `a.b.c` binds `a`."""
+        base: cst.BaseExpression = name
+        while isinstance(base, cst.Attribute):
+            base = base.value
+        assert isinstance(base, cst.Name)  # an import's dotted path bottoms at a Name
+        return base.value
+
+    # the builtins are ambient: a free variable that is a builtin is not an
+    # out-variable, and a class body reading one reads nothing it owns
+    # the builtins are ambient names: a free variable that is a builtin is not
+    # an out-variable, and a class body reading one reads nothing it owns
+    BUILTINS = frozenset(dir(builtins))
+
+    @staticmethod
+    @staticmethod
+    def expr_names(e) -> set[str]:
+        return {n.value for n in ModuleOutline.iter_nodes([e]) if isinstance(n, cst.Name)}
+
+    @staticmethod
+    @staticmethod
+    def collect_alias_names(names, stmt):
+        for a in stmt.names:
+            if a.asname is not None:
+                names.update(Bindings.hoist_target_names(a.asname.name))
+            else:
+                names.add(Bindings.import_base_name(a.name))
 
     def free_names(self) -> set[str]:
         """The names the scope READS from enclosing scopes: every Name in its

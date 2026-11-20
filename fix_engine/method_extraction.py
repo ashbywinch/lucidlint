@@ -373,7 +373,7 @@ class MethodExtraction:
             # builtins and true module globals (not shadowed by a fn-local) are
             # ambient in the extracted fn; writes to them are not out-variables
             shadowed = {n for n in self.module_globals if n in self.fn_writes}
-            ambient = CstMechanics.BUILTINS | (self.module_globals - shadowed)
+            ambient = Bindings.BUILTINS | (self.module_globals - shadowed)
             free -= ambient
             writes_all -= ambient
             if self._window_has_outvars(i, j, writes_all) or not free:
@@ -601,7 +601,7 @@ class MethodExtraction:
         stmts = line_stmt.body if isinstance(line_stmt, cst.SimpleStatementLine) else [line_stmt]
         for stmt in stmts:
             if isinstance(stmt, cst.Import):
-                CstMechanics._collect_alias_names(names, stmt)
+                Bindings.collect_alias_names(names, stmt)
             elif isinstance(stmt, cst.ImportFrom):
                 if isinstance(stmt.names, cst.ImportStar):
                     continue  # `from x import *` binds no importable name

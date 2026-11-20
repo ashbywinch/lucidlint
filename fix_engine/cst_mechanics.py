@@ -9,21 +9,16 @@ instead of restating it per family.
 
 from __future__ import annotations
 
-import builtins
 from typing import override
 
 import libcst as cst
 
 from fix_engine.bindings import Bindings
-from fix_engine.module_outline import ModuleOutline
 
 
 class CstMechanics:
     """The shared CST shape helpers."""
 
-    # the builtins are ambient names: a free variable that is a builtin is not
-    # an out-variable, and a class body reading one reads nothing it owns
-    BUILTINS = frozenset(dir(builtins))
 
 
 
@@ -62,27 +57,9 @@ class CstMechanics:
 
 
 
-    @staticmethod
-    def _expr_names(e) -> set[str]:
-        return {n.value for n in ModuleOutline.iter_nodes([e]) if isinstance(n, cst.Name)}
 
 
-    @staticmethod
-    def _import_base_name(name: cst.Attribute | cst.Name) -> str:
-        """The first component of a dotted module path: `a.b.c` binds `a`."""
-        base: cst.BaseExpression = name
-        while isinstance(base, cst.Attribute):
-            base = base.value
-        assert isinstance(base, cst.Name)  # an import's dotted path bottoms at a Name
-        return base.value
 
-    @staticmethod
-    def _collect_alias_names(names, stmt):
-        for a in stmt.names:
-            if a.asname is not None:
-                names.update(Bindings.hoist_target_names(a.asname.name))
-            else:
-                names.add(CstMechanics._import_base_name(a.name))
 
     @staticmethod
     def _extraction_is_private() -> bool:
@@ -130,7 +107,7 @@ class CstMechanics:
                         bound = (
                             Bindings.hoist_target_names(alias.asname.name)
                             if alias.asname is not None
-                            else {CstMechanics._import_base_name(alias.name)}
+                            else {Bindings.import_base_name(alias.name)}
                         )
                         if bound & referenced:
                             moved.append(cst.SimpleStatementLine(body=[inner]))

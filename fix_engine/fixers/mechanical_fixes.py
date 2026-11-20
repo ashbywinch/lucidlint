@@ -923,7 +923,7 @@ class MechanicalFixes:
         """The names a compound statement binds across its child blocks."""
         seqs: list = []
         if isinstance(stmt, cst.For):
-            bound.update(CstMechanics._expr_names(stmt.target))
+            bound.update(Bindings.expr_names(stmt.target))
             seqs = MechanicalFixes._stmt_seq(stmt.body) + MechanicalFixes._stmt_seq(stmt.orelse)
         elif isinstance(stmt, (cst.While, cst.If)):
             seqs = MechanicalFixes._stmt_seq(stmt.body) + MechanicalFixes._stmt_seq(stmt.orelse)
@@ -938,7 +938,7 @@ class MechanicalFixes:
         elif isinstance(stmt, cst.With):
             for item in stmt.items:
                 if item.asname is not None:
-                    bound.update(CstMechanics._expr_names(item.asname.name))
+                    bound.update(Bindings.expr_names(item.asname.name))
             seqs = MechanicalFixes._stmt_seq(stmt.body)
         elif isinstance(stmt, cst.Match):
             for case in stmt.cases:
