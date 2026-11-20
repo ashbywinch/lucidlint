@@ -115,3 +115,25 @@ mechanic:
 Nothing above can be removed without someone saying what the code should say
 instead — a helper name, a merged pass, a struct, a suppression, a folder.
 That is the tool doing its job: the remaining findings are judgement.
+
+## The repo-wide merge, after the refactor
+
+`Pipeline::repo_wide_merge` (the LSP path) is now one line:
+`RepoScan::of(scans, root_s).by_file()`. `scanner/src/repo_scan.rs` owns the
+corpus — the pools each repo-wide rule reads (`skeletons`, `definitions`,
+`setters`, `references`, `suppressions`, `modules`, `forwarders`), each a
+named field with a doc comment saying what the rule uses it for — and
+`by_file` asks each rule once, one line each, then applies that file's
+suppressions. The definition and setter rows are records (`Definition`,
+`Setter`) rather than `(rel, name, line, is_class)` tuples, so `unused` reads
+`definition.is_class` instead of counting positions. `main.rs` lost 331 lines
+to the change; the CLI's own gather is untouched.
+
+**A divergence this surfaced, left as a decision.** The CLI gate has never run
+the `undeclared-attribute` family: only the LSP merge did. Consolidating the
+CLI path onto `RepoScan` made the gate report the family for the first time —
++73 findings on houses and +270 on album (all of them real undeclared
+members), which is a behaviour change, not a refactor. It is excluded from
+the gate path for now (`RepoScan::gate_findings` was dropped; the CLI keeps
+its own gather), and the fix is one line in `main` once the owner agrees to
+the new findings. Filed as a decision, not a finding.

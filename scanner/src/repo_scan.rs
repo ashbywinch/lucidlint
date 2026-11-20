@@ -71,6 +71,11 @@ impl<'a> RepoScan<'a> {
     /// Gather the scans into the pools every repo-wide rule reads.
     pub fn of(scans: &'a [FileScan], root: &str) -> Self {
         let rels: Vec<String> = scans.iter().map(|scan| scan.rel_of(root)).collect();
+        Self::gather(scans, rels)
+    }
+
+    /// The corpus over the given per-file rels.
+    fn gather(scans: &'a [FileScan], rels: Vec<String>) -> Self {
         let skeletons = scans
             .iter()
             .zip(&rels)
@@ -155,10 +160,17 @@ impl<'a> RepoScan<'a> {
     }
 
     /// Every repo-wide finding, each file's suppressions applied, grouped by the
-    /// file it is filed under. One line per rule, each naming the pool it reads.
+    /// file it is filed under.
     pub fn by_file(&self) -> HashMap<String, Vec<Finding>> {
+        Self::grouped(self.findings())
+    }
+
+    /// Every repo-wide finding, each file's suppressions applied. Each family is
+    /// filtered on its own — a marker's innermost-peel capacity is computed over
+    /// the findings of the family it was written for.
+    pub fn findings(&self) -> Vec<Finding> {
         let mut findings = Vec::new();
-        self.add(&mut findings, checks::duplicate_findings(&self.skeletons));
+        self.add(&mut findings, self.duplicates());
         self.add(&mut findings, checks::DuplicateModule::findings(&self.modules));
         self.add(
             &mut findings,
@@ -204,11 +216,25 @@ impl<'a> RepoScan<'a> {
             &mut findings,
             checks::SiblingValueClass::sibling_value_class_findings(&self.per_file(|scan| &scan.sibling_classes)),
         );
-        Self::grouped(findings)
+        findings
     }
 
-    /// Apply each file's `lucidlint: ignore` comments to one rule's findings and
-    /// keep what survives.
+    /// The `duplicate` rule's findings, compared within a language: a Python
+    /// function and a Rust function with the same shape are a port, not a
+    /// copy-paste duplicate, so the two pools are never cross-matched.
+    fn duplicates(&self) -> Vec<Finding> {
+        let (rust, python): (Vec<SkeletonFn>, Vec<_>) = self
+            .skeletons
+            .iter()
+            .cloned()
+            .partition(|shape| shape.rel.ends_with(".rs"));
+        let mut found = checks::duplicate_findings(&python);
+        found.extend(checks::duplicate_findings(&rust));
+        found
+    }
+
+    /// Apply each file's `lucidlint: ignore` comments to one family's findings
+    /// and keep what survives — one family at a time, as the gate does.
     fn add(&self, findings: &mut Vec<Finding>, found: Vec<Finding>) {
         let mut used_line: HashSet<(usize, String)> = HashSet::new();
         let mut used_file: HashSet<String> = HashSet::new();
@@ -233,7 +259,7 @@ impl<'a> RepoScan<'a> {
         if used_line.is_empty() && used_file.is_empty() {
             return;
         }
-        // a suppression this pass never used is stale — the ledger must show it
+        // a suppression this family never used is stale — the ledger must show it
         findings.retain(|finding| {
             if finding.kind != "stale-suppression" {
                 return true;
