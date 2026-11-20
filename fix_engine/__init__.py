@@ -23,6 +23,7 @@ from libcst.metadata import PositionProvider as PositionProvider
 from fix_engine import request as _request
 from fix_engine.bindings import Bindings
 from fix_engine.fix_options import FixOptions as FixOptions
+from fix_engine.fixers.module_splitting import ModuleSplitting
 from fix_engine.method_extraction import MethodExtraction
 from fix_engine.module_outline import ModuleOutline
 from fix_engine.rewrite import Rewrite
@@ -50,8 +51,8 @@ FIXABLE_KINDS = set(MECHANICAL_KINDS) | set(_STRUCTURAL_FIXERS) | {"extract-modu
 # the shared mechanics stay reachable from the package root: consumers and the
 # tests import them from fix_engine
 _as_range = ModuleOutline.span
-_name_ref_kind = _request.ModuleSplitting._name_ref_kind
-_exec_time_names = _request.ModuleSplitting._exec_time_names
+_name_ref_kind = ModuleSplitting._name_ref_kind
+_exec_time_names = ModuleSplitting._exec_time_names
 _as_node = ModuleOutline.resolve_node
 _iter_nodes = ModuleOutline.iter_nodes
 _iter_nodes_pruned = ModuleOutline.iter_nodes_pruned
