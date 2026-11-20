@@ -68,6 +68,27 @@ pub struct RepoScan<'a> {
 }
 
 impl<'a> RepoScan<'a> {
+    /// Every finding kind the corpus computes — the families deferred to the
+    /// save-time merge, so a per-buffer scan must not judge their markers
+    /// stale. A new family is added here and in [`RepoScan::reconcile`]
+    /// together.
+    pub const FAMILIES: &'static [&'static str] = &[
+        "duplicate",
+        "duplicate-expression",
+        "duplicate-module",
+        "forwarding-chain",
+        "many-definitions",
+        "middle-man",
+        "over-abstraction",
+        "scattered-instance",
+        "several-definitions",
+        "shared-path",
+        "sibling-value-class",
+        "undeclared-attribute",
+        "unused",
+        "unused-setter",
+    ];
+
     /// Gather the scans into the pools every repo-wide rule reads.
     pub fn of(scans: &'a [FileScan], root: &str) -> Self {
         let rels: Vec<String> = scans.iter().map(|scan| scan.rel_of(root)).collect();
@@ -425,6 +446,18 @@ mod tests {
             .collect();
         assert_eq!(over.len(), 1, "{found:?}");
         assert_eq!(over[0].file, "a.py");
+    }
+
+    #[test]
+    fn corpus_families_are_registered_and_sorted() {
+        let families = RepoScan::FAMILIES;
+        let mut sorted = families.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted, families, "keep FAMILIES sorted and unique");
+        for kind in families {
+            assert!(crate::FAMILY_KINDS.contains(kind), "'{kind}' is not a registered kind");
+        }
     }
 
     #[test]

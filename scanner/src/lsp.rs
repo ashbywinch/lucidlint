@@ -859,6 +859,20 @@ mod tests {
 
     // temp dir — same sanctioned real-FS seam as tests/test_lsp.py
     #[test]
+    fn per_buffer_scan_does_not_call_a_deferred_family_stale() {
+        // a marker for any family the corpus answers on save is not stale
+        // here: the per-buffer scan cannot see the finding it names, so the
+        // verdict is the absence of a scan, not the absence of a finding
+        let src = "# lucidlint: ignore scattered-instance the corpus answers this family on save\nx = 1\n";
+        let scan = LspState::scan_buffer("file:///tmp/buf.py", src);
+        assert!(
+            !scan.findings.iter().any(|finding| finding.kind == "stale-suppression"),
+            "{:?}",
+            scan.findings
+        );
+    }
+
+    #[test]
     fn didsave_publishes_repo_wide_unused_for_saved_file() {
         // review-log §10: a function that is dead REPO-WIDE never showed in
         // the editor (the per-buffer scan cannot know). On save, the

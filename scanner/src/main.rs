@@ -235,11 +235,15 @@ impl Pipeline {
     /// those markers and drops exactly the stale findings that survive it.
     fn drop_repo_wide_stale_artifacts(findings: &mut Vec<Finding>) {
         findings.retain(|f| {
-            f.kind != "stale-suppression"
-                || !matches!(
-                    crate::suppressions::Suppressions::signal_of_stale(&f.message).as_str(),
-                    "unused" | "unused-setter" | "duplicate" | "undeclared-attribute"
-                )
+            if f.kind != "stale-suppression" {
+                return true;
+            }
+            // every family the corpus answers on save: the per-buffer scan's
+            // "nothing fires here" is a missing scan, not a missing finding
+            let signal = crate::suppressions::Suppressions::signal_of_stale(&f.message);
+            !crate::repo_scan::RepoScan::FAMILIES
+                .iter()
+                .any(|kind| crate::suppressions::Suppressions::signal_matches(&signal, kind))
         });
     }
 
