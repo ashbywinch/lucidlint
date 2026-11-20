@@ -11,7 +11,7 @@ from typing import Any, override
 import libcst as cst
 from libcst.metadata import PositionProvider
 
-from fix_engine.cst_mechanics import CstMechanics
+from fix_engine.module_outline import ModuleOutline
 
 
 class MagicLiteral:
@@ -84,7 +84,7 @@ class MagicLiteral:
         @override
         def visit_ClassDef(self, node) -> None:
             self.depth += 1
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
             if pos.start.line <= self.line <= pos.end.line and self.depth > self.owner_depth:
                 self.owner = node
                 self.owner_depth = self.depth
@@ -107,7 +107,7 @@ class MagicLiteral:
         def _match(self, node) -> bool:
             if self.value is not None:
                 return False
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, node)).start
             if pos.line != self.line:
                 return False
             if self.col > 0 and pos.column + 1 != self.col:
@@ -140,7 +140,7 @@ class MagicLiteral:
         def leave_ClassDef(self, original_node, updated_node):
             if self.done:
                 return updated_node
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, original_node))
             if not (pos.start.line <= self.line <= pos.end.line):
                 return updated_node
             self.done = True
@@ -165,7 +165,7 @@ class MagicLiteral:
         def _match(self, original_node) -> bool:
             if self.replaced:
                 return False
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node)).start
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, original_node)).start
             return pos.line == self.target_line and (self.col == 0 or pos.column + 1 == self.col)
 
         @override

@@ -38,6 +38,7 @@ from fix_engine.fixers.record_fixes import RecordFixes
 from fix_engine.fixers.renaming import Renaming
 from fix_engine.fixers.rule_table import RuleTable
 from fix_engine.method_extraction import MethodExtraction
+from fix_engine.module_outline import ModuleOutline
 from fix_engine.module_source import ModuleSource
 from fix_engine.source_files import SourceFiles
 from fix_engine.strewing_group import StrewingGroup
@@ -60,16 +61,16 @@ _SplitOutcome = _records._SplitOutcome
 _WideTupleSite = _records._WideTupleSite
 # the shared mechanics stay reachable from the package root: consumers and the
 # tests import them from fix_engine
-_as_range = CstMechanics._as_range
-_as_node = CstMechanics._as_node
-_iter_nodes = CstMechanics._iter_nodes
-_iter_nodes_pruned = CstMechanics._iter_nodes_pruned
+_as_range = ModuleOutline.span
+_as_node = ModuleOutline.resolve_node
+_iter_nodes = ModuleOutline.iter_nodes
+_iter_nodes_pruned = ModuleOutline.iter_nodes_pruned
 _expr_names = CstMechanics._expr_names
 _collect_alias_names = CstMechanics._collect_alias_names
-_is_keyword_name = CstMechanics._is_keyword_name
-_is_self_attribute = CstMechanics._is_self_attribute
+_is_keyword_name = ModuleOutline.is_keyword_name
+_is_self_attribute = ModuleOutline.is_self_attribute
 _import_base_name = CstMechanics._import_base_name
-_is_docstring_stmt = CstMechanics._is_docstring_stmt
+_is_docstring_stmt = ModuleOutline.is_docstring_stmt
 
 _py_files = SourceFiles.py_files
 _record_class_def = CstMechanics._record_class_def
@@ -77,8 +78,6 @@ _self_attr_target = CstMechanics._self_attr_target
 _hoist_target_names = CstMechanics._hoist_target_names
 _extraction_is_private = CstMechanics._extraction_is_private
 _RemoveNodes = CstMechanics._RemoveNodes
-_EnclosingClass = CstMechanics._EnclosingClass
-_EnclosingFn = CstMechanics._EnclosingFn
 
 # the method-extraction mechanics stay reachable from the package root (the tests
 # and the scanner-side helpers import them there)
@@ -302,7 +301,7 @@ class _FixRequest:
             def visit_ClassDef(self, node):
                 if (
                     self.cls is None
-                    and CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line == self.target_line
+                    and ModuleOutline.span(self.get_metadata(PositionProvider, node)).start.line == self.target_line
                 ):
                     self.cls = node
 
@@ -916,7 +915,7 @@ def _strewing_group(source: str, anchor_line: int) -> StrewingGroup | None:
             nonlocal anchor_ann
             if node.name.value == "__init__":
                 return
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
             if pos.start.line == anchor_line:
                 pass
                 if node.params.params:
@@ -1032,7 +1031,7 @@ class _ReceiverToSelf(cst.CSTTransformer):
         fn = self._current or ""
         old = self.receivers.get(fn)
         parent = self.get_metadata(ParentNodeProvider, original_node)
-        if CstMechanics._is_keyword_name(original_node, parent):
+        if ModuleOutline.is_keyword_name(original_node, parent):
             return updated_node  # f(state=1): a keyword name, not the receiver
         if old is None or updated_node.value != old:
             return updated_node
@@ -1268,7 +1267,7 @@ class _MethodAtLine(cst.CSTVisitor):
         for stmt in node.body.body:
             if not isinstance(stmt, cst.FunctionDef):
                 continue
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, stmt))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, stmt))
             if pos.start.line == self.target_line:
                 self.owner = (node.name.value, node, stmt)
                 return
@@ -1431,13 +1430,13 @@ def _class_has_identity(cls: cst.ClassDef) -> bool:
         def visit_Assign(self, node):
             nonlocal writes_self
             for t in node.targets:
-                if CstMechanics._is_self_attribute(t.target):
+                if ModuleOutline.is_self_attribute(t.target):
                     writes_self = True
 
         @override
         def visit_AnnAssign(self, node):
             nonlocal writes_self
-            if CstMechanics._is_self_attribute(node.target):
+            if ModuleOutline.is_self_attribute(node.target):
                 writes_self = True
 
     cls.visit(_Scan())
@@ -1498,7 +1497,7 @@ class _MethodBodyRewriteByLine(cst.CSTTransformer):
     @override
     def leave_FunctionDef(self, original_node, updated_node):
         if updated_node.name.value == self.name:
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, original_node))
             if pos.start.line == self.line:
                 return updated_node.with_changes(body=updated_node.body.with_changes(body=self.body))
         return updated_node
@@ -1509,7 +1508,7 @@ def _replace_method_body(
     module: cst.Module, method: cst.FunctionDef, body: cst.SimpleStatementLine, line: int | None = None
 ) -> cst.Module:
     if line is None:
-        line = CstMechanics._as_range(cst.MetadataWrapper(module).resolve(PositionProvider)[method]).start.line
+        line = ModuleOutline.span(cst.MetadataWrapper(module).resolve(PositionProvider)[method]).start.line
     return cst.MetadataWrapper(module).visit(_MethodBodyRewriteByLine(line, method.name.value, [body]))
 
 
@@ -1525,7 +1524,7 @@ class _ReplaceClassByLine(cst.CSTTransformer):
     def leave_ClassDef(self, original_node, updated_node):
         if self.done:
             return updated_node
-        pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
+        pos = ModuleOutline.span(self.get_metadata(PositionProvider, original_node))
         if pos.start.line == self.line:
             self.done = True
             return self.new_class
@@ -1845,7 +1844,7 @@ def _class_with_moved_consts(
         return cls
     attrs = [s for n, s in _module_constants(wrapper.module.body) if n in moved]
     body = list(cls.body.body)
-    insert = 1 if body and CstMechanics._is_docstring_stmt(body[0]) else 0
+    insert = 1 if body and ModuleOutline.is_docstring_stmt(body[0]) else 0
     new_body = body[:insert] + attrs + body[insert:]
     cls2 = cls.with_changes(body=cls.body.with_changes(body=new_body))
     return cast(cst.ClassDef, cls2.visit(_RewriteMovedConstRefs(wrapper, moved, cls_name)))
@@ -2491,7 +2490,7 @@ class _SplitImportRewrite(cst.CSTTransformer):
 def _insert_header_imports(body: list, additions: list) -> list:
     """Insert the added imports after any module docstring — imports must sit
     before the statements that reference the names they bind."""
-    i = 1 if body and CstMechanics._is_docstring_stmt(body[0]) else 0
+    i = 1 if body and ModuleOutline.is_docstring_stmt(body[0]) else 0
     return body[:i] + additions + body[i:]
 
 
@@ -2787,7 +2786,7 @@ class _FindWideTuples(cst.CSTVisitor):
 
     @override
     def visit_AnnAssign(self, node) -> None:
-        if CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line != self.line:
+        if ModuleOutline.span(self.get_metadata(PositionProvider, node)).start.line != self.line:
             return
         if not isinstance(node.target, cst.Name):
             return
@@ -2802,7 +2801,7 @@ class _FindWideTuples(cst.CSTVisitor):
 
     @override
     def visit_FunctionDef(self, node) -> None:
-        if CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line != self.line:
+        if ModuleOutline.span(self.get_metadata(PositionProvider, node)).start.line != self.line:
             return
         for param in [*node.params.posonly_params, *node.params.params, *node.params.kwonly_params]:
             if param.annotation is None:
@@ -3087,7 +3086,7 @@ def _clump_at(module: cst.Module, line: int, positions) -> _Clump | None:
                 left, right = params[i], params[j]
                 key = (left, right) if left[0] <= right[0] else (right, left)
                 pairs.setdefault(key, []).append(fn)
-    anchor = next((f for f in fns if CstMechanics._as_range(positions[f]).start.line == line), None)
+    anchor = next((f for f in fns if ModuleOutline.span(positions[f]).start.line == line), None)
     if anchor is None:
         return None
     qualifying = sorted(pair for pair, group in pairs.items() if len(group) >= 3 and anchor in group)
@@ -3180,7 +3179,7 @@ class _DataClumpToRecord(cst.CSTTransformer):
         if updated_node.value in self._shadow_stack[-1]:
             return updated_node
         parent = self.get_metadata(ParentNodeProvider, original_node)
-        if CstMechanics._is_keyword_name(original_node, parent):
+        if ModuleOutline.is_keyword_name(original_node, parent):
             return updated_node
         try:
             ctx = self.get_metadata(ExpressionContextProvider, original_node)
@@ -3362,7 +3361,7 @@ def _partition_plan(cls: cst.ClassDef) -> _PartitionAttempt:
     extra = [
         stmt
         for stmt in cls.body.body
-        if not isinstance(stmt, cst.FunctionDef) and not CstMechanics._is_docstring_stmt(stmt)
+        if not isinstance(stmt, cst.FunctionDef) and not ModuleOutline.is_docstring_stmt(stmt)
     ]
     if extra:
         return _PartitionAttempt(
@@ -3491,9 +3490,7 @@ def _partition_fix(req: _FixRequest) -> str | None:
     # back into `module.body`, and metadata resolves by NODE IDENTITY
     wrapper = cst.MetadataWrapper(cst.parse_module(source))
     module = wrapper.module
-    finder = CstMechanics._EnclosingClass(line)
-    wrapper.visit(finder)
-    cls = finder.found
+    cls = ModuleOutline(wrapper).enclosing_class(line)
     if cls is None or not any(stmt is cls for stmt in module.body):
         req.decline = f"no module-level class anchored at {req.rel}:{line} — the anchor is stale"
         return None
@@ -3520,7 +3517,7 @@ def _partition_fix(req: _FixRequest) -> str | None:
         (
             stmt
             for stmt in cls.body.body
-            if isinstance(stmt, cst.SimpleStatementLine) and CstMechanics._is_docstring_stmt(stmt)
+            if isinstance(stmt, cst.SimpleStatementLine) and ModuleOutline.is_docstring_stmt(stmt)
         ),
         None,
     )
@@ -3674,7 +3671,7 @@ def _has_irregular_params(params: cst.Parameters) -> bool:
 def _is_plain_self_assign(target, stmt) -> bool:
     """The statement is `self.<attr> = <value not read from self>` — one field
     initialised from outside."""
-    if target is None or not CstMechanics._is_self_attribute(target):
+    if target is None or not ModuleOutline.is_self_attribute(target):
         return False
     return isinstance(stmt, cst.Assign) and not _reads_self(stmt.value)
 

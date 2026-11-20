@@ -10,6 +10,7 @@ from typing import NamedTuple, override
 import libcst as cst
 
 from fix_engine.cst_mechanics import CstMechanics
+from fix_engine.module_outline import ModuleOutline
 
 _AMBIENT = frozenset(
     {
@@ -143,10 +144,9 @@ class DispatchRegistry:
         variables (minus the selector) so the dispatch call is uniform."""
         module = cst.parse_module(source)
         wrapper = cst.MetadataWrapper(module)
-        finder = CstMechanics._FindFnLine(line)
-        wrapper.visit(finder)
-        fn = finder.found
-        if fn is None or not CstMechanics._module_contains(wrapper.module, fn):
+        outline = ModuleOutline(wrapper)
+        fn = outline.function_at(line)
+        if fn is None or not outline.contains(fn):
             return None
         body = list(fn.body.body)
         shaped = DispatchRegistry._dispatch_chain_shape(fn, body)

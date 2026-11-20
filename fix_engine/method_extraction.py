@@ -14,6 +14,7 @@ import libcst as cst
 from libcst.metadata import ExpressionContextProvider, ParentNodeProvider, PositionProvider
 
 from fix_engine.cst_mechanics import CstMechanics
+from fix_engine.module_outline import ModuleOutline
 
 
 class MethodExtraction:
@@ -118,7 +119,7 @@ class MethodExtraction:
         def visit_FunctionDef(self, node) -> None:
             if (
                 self.state.fn_node is not None
-                or CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line != self.state.line
+                or ModuleOutline.span(self.get_metadata(PositionProvider, node)).start.line != self.state.line
             ):
                 return
             self.state.fn_node = node
@@ -137,7 +138,7 @@ class MethodExtraction:
                 sid = id(s)
                 self.state.flat.append((sid, id(container), idx))
                 self.state.nodes[sid] = s
-                p = CstMechanics._as_range(self.get_metadata(PositionProvider, s))
+                p = ModuleOutline.span(self.get_metadata(PositionProvider, s))
                 self.state.stmt_spans[sid] = (p.start.line, p.end.line)
                 self.state.first_use[sid] = {}
                 self.state.writes[sid] = set()
@@ -170,13 +171,13 @@ class MethodExtraction:
                 if isinstance(n, (cst.Return, cst.Yield)):
                     return True
                 if isinstance(n, (cst.Break, cst.Continue)):
-                    p = CstMechanics._as_node(self.get_metadata(ParentNodeProvider, n))
+                    p = ModuleOutline.resolve_node(self.get_metadata(ParentNodeProvider, n))
                     ok = False
                     while p is not None and not isinstance(p, cst.Module):
                         if isinstance(p, (cst.For, cst.While)):
                             ok = id(p) in loops
                             break
-                        p = CstMechanics._as_node(self.get_metadata(ParentNodeProvider, p))
+                        p = ModuleOutline.resolve_node(self.get_metadata(ParentNodeProvider, p))
                     if not ok:
                         return True
             return False
@@ -186,8 +187,8 @@ class MethodExtraction:
             if self.state.fn_node is None:
                 return
             sid = None
-            parent = CstMechanics._as_node(self.get_metadata(ParentNodeProvider, node))
-            if CstMechanics._is_keyword_name(node, parent):
+            parent = ModuleOutline.resolve_node(self.get_metadata(ParentNodeProvider, node))
+            if ModuleOutline.is_keyword_name(node, parent):
                 return  # a keyword-argument name (f(a=1)) is not a variable ref
             while parent is not None and not isinstance(parent, cst.Module):
                 if parent is self.state.fn_node:
@@ -195,7 +196,7 @@ class MethodExtraction:
                 if id(parent) in self.state.nodes:
                     sid = id(parent)
                     break
-                parent = CstMechanics._as_node(self.get_metadata(ParentNodeProvider, parent))
+                parent = ModuleOutline.resolve_node(self.get_metadata(ParentNodeProvider, parent))
             if sid is None:
                 return  # the fn's own signature/name — not a body read
             try:

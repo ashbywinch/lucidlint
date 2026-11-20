@@ -11,6 +11,7 @@ from typing import Any, NamedTuple, override
 import libcst as cst
 
 from fix_engine.cst_mechanics import CstMechanics
+from fix_engine.module_outline import ModuleOutline
 
 
 class FeatureEnvy:
@@ -46,14 +47,11 @@ class FeatureEnvy:
             return None
         module = cst.parse_module(source)
         wrapper = cst.MetadataWrapper(module)
-        finder = CstMechanics._EnclosingFn(self.request.line)
-        wrapper.visit(finder)
-        method = finder.found
+        outline = ModuleOutline(wrapper)
+        method = outline.enclosing_function(self.request.line)
         if method is None or not isinstance(method, cst.FunctionDef):
             return None
-        owner_cls = CstMechanics._EnclosingClass(self.request.line)
-        wrapper.visit(owner_cls)
-        owner = owner_cls.found
+        owner = outline.enclosing_class(self.request.line)
         if owner is None:
             return None
         aliases = FeatureEnvy._collaborator_aliases(method)
@@ -180,7 +178,7 @@ class FeatureEnvy:
             if not isinstance(target, cst.Name):
                 continue
             value = assign.value
-            if CstMechanics._is_self_attribute(value):
+            if ModuleOutline.is_self_attribute(value):
                 assert isinstance(value, cst.Attribute)
                 out.append(FeatureEnvy._Collaborator(target.value, value.attr.value))
         return out

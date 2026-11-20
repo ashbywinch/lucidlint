@@ -16,6 +16,7 @@ import libcst.matchers as m
 from libcst.metadata import CodePosition, ParentNodeProvider, PositionProvider
 
 from fix_engine.cst_mechanics import CstMechanics
+from fix_engine.module_outline import ModuleOutline
 from fix_engine.source_files import SourceFiles
 
 
@@ -161,7 +162,7 @@ class MechanicalFixes:
 
             @override
             def visit_FunctionDef(self, node) -> None:
-                pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
+                pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
                 if pos.start.line <= self.target <= pos.end.line:
                     self.fn = node  # last (innermost) containing function wins
 
@@ -203,9 +204,7 @@ class MechanicalFixes:
         annotation inference."""
         module = cst.parse_module(self.request.source or "")
         wrapper = cst.MetadataWrapper(module)
-        finder = CstMechanics._EnclosingFn(line)
-        wrapper.visit(finder)
-        fn = finder.found
+        fn = ModuleOutline(wrapper).enclosing_function(line)
         if fn is None:
             return {}
         result: dict[str, str] = {}
@@ -256,7 +255,7 @@ class MechanicalFixes:
                 nonlocal callee
                 if callee is not None:
                     return
-                pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
+                pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
                 if pos.start.line <= line <= pos.end.line and isinstance(node.func, cst.Name):
                     callee = node.func.value
 
@@ -277,7 +276,7 @@ class MechanicalFixes:
 
         @override
         def leave_Assign(self, original_node, updated_node):
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, original_node))
             if pos.start.line != self.target_line:
                 return updated_node
             if len(updated_node.targets) != 1:
@@ -314,7 +313,7 @@ class MechanicalFixes:
                 return updated_node
             if "lucidlint: ignore" not in updated_node.comment.value:
                 return updated_node
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, original_node))
             if pos.start.line == self.target_line:
                 self.deleted = True
                 return cst.RemoveFromParent()
@@ -329,7 +328,7 @@ class MechanicalFixes:
             if isinstance(updated_node, cst.Comment):
                 if self.deleted or "lucidlint: ignore" not in updated_node.value:
                     return updated_node
-                pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
+                pos = ModuleOutline.span(self.get_metadata(PositionProvider, original_node))
                 if pos.start.line == self.target_line:
                     self.deleted = True
                     return cst.RemoveFromParent()
@@ -349,7 +348,7 @@ class MechanicalFixes:
         def leave_SimpleStatementLine(self, original_node, updated_node):
             if self.deleted:
                 return updated_node
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, original_node))
             if pos.start.line <= self.target_line <= pos.end.line:
                 self.deleted = True
                 return cst.RemoveFromParent()
@@ -369,7 +368,7 @@ class MechanicalFixes:
 
         @override
         def visit_FunctionDef(self, node) -> None:
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
             if self._is_target_at_top(pos):
                 self.found, self.name = node, node.name.value
             self.depth += 1
@@ -384,7 +383,7 @@ class MechanicalFixes:
 
         @override
         def visit_ClassDef(self, node) -> None:
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
             if self._is_target_at_top(pos):
                 self.found, self.name = node, node.name.value
             self.depth += 1
@@ -420,7 +419,7 @@ class MechanicalFixes:
                 return True
             if self.callee is not None and node.func.value != self.callee:
                 return True
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
             if not (pos.start.line <= self.target_line <= pos.end.line):
                 return True
             self.target_start, self.target_end = pos.start, pos.end
@@ -428,7 +427,7 @@ class MechanicalFixes:
 
         @override
         def leave_Call(self, original_node, updated_node):
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, original_node))
             if (self.target_start, self.target_end) != (pos.start, pos.end) or not updated_node.args:
                 return updated_node
             # rebuild the positional args with keywords, in param order. Once the
@@ -582,7 +581,7 @@ class MechanicalFixes:
             acc: str | None = None
             collection: str | None = None
             receivers: set[int] = set()  # Name node ids that ARE the append/add receiver
-            nodes = list(CstMechanics._iter_nodes(body_stmts))
+            nodes = list(ModuleOutline.iter_nodes(body_stmts))
             for n in nodes:
                 if not isinstance(n, cst.Call) or not isinstance(n.func, cst.Attribute):
                     continue
@@ -625,7 +624,7 @@ class MechanicalFixes:
                     )
                     return None
             for s in body_stmts:
-                for n in CstMechanics._iter_nodes_pruned([s]):
+                for n in ModuleOutline.iter_nodes_pruned([s]):
                     if isinstance(n, cst.AnnAssign):
                         target_list: list = [n.target]
                     elif isinstance(n, cst.Assign):
@@ -635,7 +634,7 @@ class MechanicalFixes:
                     else:
                         continue
                     for t in target_list:
-                        for sub in CstMechanics._iter_nodes(t):
+                        for sub in ModuleOutline.iter_nodes(t):
                             if MechanicalFixes._writes_other_name(sub, bound, acc):
                                 self.decline = (
                                     f"the body also writes `{sub.value}` — the hoist rewrite "
@@ -685,7 +684,7 @@ class MechanicalFixes:
                 parent = self.get_metadata(ParentNodeProvider, block)
                 if not isinstance(parent, cst.FunctionDef):
                     return None
-                def_line = CstMechanics._as_range(self.get_metadata(PositionProvider, parent)).start.line
+                def_line = ModuleOutline.span(self.get_metadata(PositionProvider, parent)).start.line
                 if def_line != self.line:
                     return None
                 first = next((i for i, s in enumerate(stmts) if not isinstance(s, cst.EmptyLine)), None)
@@ -881,7 +880,7 @@ class MechanicalFixes:
         def leave_FunctionDef(self, original_node, updated_node):
             if self.done:
                 return updated_node
-            if CstMechanics._as_range(self.get_metadata(PositionProvider, original_node)).start.line == self.line:
+            if ModuleOutline.span(self.get_metadata(PositionProvider, original_node)).start.line == self.line:
                 self.done = True
                 return MechanicalFixes._strip_first_docstring(updated_node, original_node)
             return updated_node
@@ -890,7 +889,7 @@ class MechanicalFixes:
         def leave_ClassDef(self, original_node, updated_node):
             if self.done:
                 return updated_node
-            if CstMechanics._as_range(self.get_metadata(PositionProvider, original_node)).start.line == self.line:
+            if ModuleOutline.span(self.get_metadata(PositionProvider, original_node)).start.line == self.line:
                 self.done = True
                 return MechanicalFixes._strip_first_docstring(updated_node, original_node)
             return updated_node
@@ -1034,7 +1033,7 @@ class MechanicalFixes:
                 i
                 for i, s in enumerate(stmts)
                 if isinstance(s, cst.For)
-                and CstMechanics._as_range(metadata.get_metadata(PositionProvider, s)).start.line == line
+                and ModuleOutline.span(metadata.get_metadata(PositionProvider, s)).start.line == line
             ),
             None,
         )

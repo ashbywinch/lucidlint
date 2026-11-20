@@ -11,7 +11,7 @@ from typing import Any, override
 import libcst as cst
 from libcst.metadata import PositionProvider
 
-from fix_engine.cst_mechanics import CstMechanics
+from fix_engine.module_outline import ModuleOutline
 
 
 class Renaming:
@@ -37,7 +37,7 @@ class Renaming:
             @override
             def visit_ClassDef(self, node) -> None:
                 nonlocal old
-                if old is None and CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line == line:
+                if old is None and ModuleOutline.span(self.get_metadata(PositionProvider, node)).start.line == line:
                     old = node.name.value
 
         wrapper.visit(_Find())
@@ -58,7 +58,7 @@ class Renaming:
 
         @override
         def leave_ClassDef(self, original_node, updated_node):
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, original_node))
             if pos.start.line == self.target_line and updated_node.name.value == self.old:
                 return updated_node.with_changes(name=cst.Name(self.new))
             return updated_node

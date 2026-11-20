@@ -10,10 +10,11 @@ instead of restating it per family.
 from __future__ import annotations
 
 import builtins
-from typing import TypeGuard, override
+from typing import override
 
 import libcst as cst
-from libcst.metadata import CodeRange, PositionProvider
+
+from fix_engine.module_outline import ModuleOutline
 
 
 class CstMechanics:
@@ -23,20 +24,7 @@ class CstMechanics:
     # an out-variable, and a class body reading one reads nothing it owns
     BUILTINS = frozenset(dir(builtins))
 
-    @staticmethod
-    def _as_range(pos: object) -> CodeRange:
-        """The resolved metadata position. libcst's get_metadata types its result
-        through an UNDEFINED sentinel default — narrow to the CodeRange that is
-        always present for nodes visited inside a MetadataWrapper."""
-        assert isinstance(pos, CodeRange)
-        return pos
 
-    @staticmethod
-    def _as_node(node: object) -> cst.CSTNode:
-        """The resolved metadata node — the same UNDEFINED-sentinel widening as
-        _as_range, for providers that return nodes (ParentNodeProvider)."""
-        assert isinstance(node, cst.CSTNode)
-        return node
 
     @staticmethod
     def _self_attr_target(name: str) -> list[cst.AssignTarget]:
@@ -68,50 +56,9 @@ class CstMechanics:
             body=cst.IndentedBlock(body=[init]),
         )
 
-    class _EnclosingClass(cst.CSTVisitor):
-        """The innermost ClassDef containing the line — the method's owner."""
 
-        METADATA_DEPENDENCIES = (PositionProvider,)
 
-        def __init__(self, line: int) -> None:
-            self.line: int = line
-            self.found: cst.ClassDef | None = None
 
-        @override
-        def visit_ClassDef(self, node) -> None:
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
-            if pos.start.line <= self.line <= pos.end.line:
-                self.found = node
-
-    @staticmethod
-    def _is_self_attribute(value: cst.BaseExpression) -> bool:
-        """`self.<attr>` — an attribute read on the receiver."""
-        return isinstance(value, cst.Attribute) and isinstance(value.value, cst.Name) and value.value.value == "self"
-
-    @staticmethod
-    def _iter_nodes(nodes):
-        """Every node in the subtree, parents before children; accepts a node
-        or an iterable of nodes."""
-        if isinstance(nodes, cst.CSTNode):
-            nodes = [nodes]
-        for n in nodes:
-            yield n
-            for c in n.children:
-                yield from CstMechanics._iter_nodes(c)
-
-    @staticmethod
-    def _iter_nodes_pruned(nodes):
-        """Like `_iter_nodes` but never descends into nested scopes — a `def`
-        or `class` inside the walked body owns its locals; their writes are
-        not the body's writes."""
-        if isinstance(nodes, cst.CSTNode):
-            nodes = [nodes]
-        for n in nodes:
-            yield n
-            if isinstance(n, (cst.FunctionDef, cst.ClassDef)):
-                continue
-            for c in n.children:
-                yield from CstMechanics._iter_nodes_pruned(c)
 
     @staticmethod
     def _hoist_target_names(t) -> set[str]:
@@ -132,15 +79,8 @@ class CstMechanics:
 
     @staticmethod
     def _expr_names(e) -> set[str]:
-        return {n.value for n in CstMechanics._iter_nodes([e]) if isinstance(n, cst.Name)}
+        return {n.value for n in ModuleOutline.iter_nodes([e]) if isinstance(n, cst.Name)}
 
-    @staticmethod
-    def _is_keyword_name(node, parent) -> bool:
-        """A Name that is a keyword-argument's keyword (`f(a=1)` — the `a`) is
-        not a variable reference; counting it made the seam analysis fabricate
-        phantom parameters (the `leading_lines` in `with_changes(leading_lines=[])`
-        would appear as a free var and the rewritten call would NameError)."""
-        return isinstance(parent, cst.Arg) and parent.keyword is node
 
     @staticmethod
     def _import_base_name(name: cst.Attribute | cst.Name) -> str:
@@ -182,56 +122,10 @@ class CstMechanics:
                 return cst.RemoveFromParent()
             return updated_node
 
-    @staticmethod
-    def _is_docstring_stmt(
-        stmt: cst.BaseSmallStatement | cst.BaseStatement,
-    ) -> TypeGuard[cst.SimpleStatementLine]:
-        return (
-            isinstance(stmt, cst.SimpleStatementLine)
-            and len(stmt.body) == 1
-            and isinstance(stmt.body[0], cst.Expr)
-            and isinstance(stmt.body[0].value, (cst.SimpleString, cst.ConcatenatedString))
-        )
-
-    class _EnclosingFn(cst.CSTVisitor):
-        """The innermost FunctionDef whose span contains the line — the member
-        assignment's enclosing constructor, for the annotation inference."""
-
-        METADATA_DEPENDENCIES = (PositionProvider,)
-
-        def __init__(self, line: int) -> None:
-            self.line: int = line
-            self.found: cst.FunctionDef | None = None
-
-        @override
-        def visit_FunctionDef(self, node) -> None:
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
-            if pos.start.line <= self.line <= pos.end.line:
-                self.found = node
 
 
-    class _FindFnLine(cst.CSTVisitor):
-        """Locate the first FunctionDef whose def line equals the target — its
-        node comes from the wrapper's (metadata-resolvable) tree."""
 
-        METADATA_DEPENDENCIES = (PositionProvider,)
 
-        def __init__(self, line: int) -> None:
-            self.line: int = line
-            self.found: cst.FunctionDef | None = None
-
-        @override
-        def visit_FunctionDef(self, node) -> None:
-            if (
-                self.found is None
-                and CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line == self.line
-            ):
-                self.found = node
-
-    @staticmethod
-    def _module_contains(module: cst.Module, fn: cst.FunctionDef | None) -> bool:
-        """Is the function still a direct child of the module?"""
-        return fn is not None and any(s is fn for s in module.body)
 
     class _FreeNames(cst.CSTVisitor):
         """The names a function READS from enclosing scopes: every Name node in

@@ -12,7 +12,7 @@ import libcst as cst
 import libcst.matchers as m
 from libcst.metadata import PositionProvider
 
-from fix_engine.cst_mechanics import CstMechanics
+from fix_engine.module_outline import ModuleOutline
 
 
 class ParameterObjects:
@@ -140,7 +140,7 @@ class ParameterObjects:
         def leave_FunctionDef(self, original_node, updated_node):
             if updated_node.name.value != self.fn_name:
                 return updated_node
-            if CstMechanics._as_range(self.get_metadata(PositionProvider, original_node)).start.line != self.line:
+            if ModuleOutline.span(self.get_metadata(PositionProvider, original_node)).start.line != self.line:
                 return updated_node
             new_body = updated_node.body.visit(ParameterObjects._BodyParamRewrite(list(self.params)))
             receiver = [p for p in updated_node.params.params if p.name is not None and p.name.value in ("self", "cls")]
@@ -198,7 +198,7 @@ class ParameterObjects:
                 """The first def at the finding's line (optionally by name)."""
                 if found is not None:
                     return False
-                if CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line != line:
+                if ModuleOutline.span(self.get_metadata(PositionProvider, node)).start.line != line:
                     return False
                 return name is None or node.name.value == name
 

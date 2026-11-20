@@ -14,6 +14,7 @@ import libcst as cst
 from libcst.metadata import PositionProvider
 
 from fix_engine.cst_mechanics import CstMechanics
+from fix_engine.module_outline import ModuleOutline
 
 
 class RecordFixes:
@@ -150,7 +151,7 @@ class RecordFixes:
 
         @override
         def leave_Dict(self, original_node, updated_node):
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, original_node))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, original_node))
             if not self._at_finding_position(pos):
                 return updated_node
             keywords = []
@@ -201,7 +202,7 @@ class RecordFixes:
 
         @override
         def visit_Dict(self, node) -> None:
-            pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
             if pos.start.line != self.line:
                 return
             keys: list[str] = []
