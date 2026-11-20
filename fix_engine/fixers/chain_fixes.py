@@ -424,12 +424,14 @@ class ChainFixes:
         out: list[tuple[str, cst.ClassDef, cst.FunctionDef]] = []
         for path in SourceFiles(ref.repo).py_files():
             mod = cst.parse_module(path.read_text(encoding="utf-8"))
-            for stmt in mod.body:
-                if not isinstance(stmt, cst.ClassDef):
-                    continue
-                for mem in stmt.body.body:
-                    if isinstance(mem, cst.FunctionDef) and mem.name.value == ref.name:
-                        out.append((path.relative_to(ref.repo).as_posix(), stmt, mem))
+            rel = path.relative_to(ref.repo).as_posix()
+            out.extend(
+                (rel, stmt, mem)
+                for stmt in mod.body
+                if isinstance(stmt, cst.ClassDef)
+                for mem in stmt.body.body
+                if isinstance(mem, cst.FunctionDef) and mem.name.value == ref.name
+            )
         return out
 
     @staticmethod

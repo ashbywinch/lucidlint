@@ -213,11 +213,11 @@ class MechanicalFixes:
         fn = ModuleOutline(wrapper).enclosing_function(line)
         if fn is None:
             return {}
-        result: dict[str, str] = {}
-        for p in list(fn.params.posonly_params) + list(fn.params.params) + list(fn.params.kwonly_params):
-            if p.annotation is not None:
-                result[p.name.value] = cst.Module(body=[]).code_for_node(p.annotation.annotation)
-        return result
+        return {
+            p.name.value: cst.Module(body=[]).code_for_node(p.annotation.annotation)
+            for p in [*fn.params.posonly_params, *fn.params.params, *fn.params.kwonly_params]
+            if p.annotation is not None
+        }
 
     def _repo_params(self, callee: str) -> list[str] | None:
         repo, rel = self.request.repo, self.request.rel

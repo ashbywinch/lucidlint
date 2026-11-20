@@ -388,18 +388,17 @@ class MethodExtraction:
             """The statement's subtree ids in SOURCE ORDER — first-use analysis
             must see a write before a later read or it fabricates free variables
             (the phantom-param bug)."""
-            out = [sid]
-            for child in self.container_sids.get(sid, []):
-                out.extend(self._subtree_sids(child))
-            return out
+            return [sid] + [
+                inner for child in self.container_sids.get(sid, []) for inner in self._subtree_sids(child)
+            ]
 
         def _window_sids(self, i: int, j: int) -> list[int]:
             """The window's statement ids plus all descendant ids (a compound's
             body) in SOURCE ORDER, so the free/out-var math sees the whole
             subtree with writes before reads."""
-            sids: list[int] = []
-            for k in range(i, j + 1):
-                sids.extend(self._subtree_sids(self.flat[k][0]))
+            sids: list[int] = [
+                inner for k in range(i, j + 1) for inner in self._subtree_sids(self.flat[k][0])
+            ]
             return sids
 
         def _window_has_outvars(self, i: int, j: int, writes_all: set[str]) -> bool:

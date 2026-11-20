@@ -92,9 +92,7 @@ class FeatureEnvy:
             reads, _, _ = FeatureEnvy._stmt_analysis(stmt)
             remaining_reads |= reads
         outputs = [n for n in derived_order if n in remaining_reads]
-        new_body: list = []
-        for stmt in movable:
-            new_body.append(FeatureEnvy._rewrite_receiver_to_self(stmt, alias))
+        new_body: list = [FeatureEnvy._rewrite_receiver_to_self(stmt, alias) for stmt in movable]
         ret = cst.Return(value=cst.Tuple(elements=[cst.Element(cst.Name(n)) for n in outputs]) if outputs else None)
         new_body.append(cst.SimpleStatementLine(body=[ret]))
         new_method = cst.FunctionDef(

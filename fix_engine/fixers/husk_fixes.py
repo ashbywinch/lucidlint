@@ -88,8 +88,7 @@ class HuskFixes:
         origin_new = Rewrite(cst.parse_module(origin_rewired)).without_class(husk).code
         if origin_new == source and not new_sources:
             return None  # nothing rewired and nothing deleted — stale
-        for rel, ns in new_sources.items():
-            self.request.extra_writes.append((rel, ns))
+        self.request.extra_writes.extend(new_sources.items())
         return origin_new
 
     @staticmethod
