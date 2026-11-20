@@ -66,6 +66,7 @@ _as_range = ModuleOutline.span
 _as_node = ModuleOutline.resolve_node
 _iter_nodes = ModuleOutline.iter_nodes
 _iter_nodes_pruned = ModuleOutline.iter_nodes_pruned
+_class_body_binds = Bindings.class_body_binds
 _expr_names = Bindings.expr_names
 _collect_alias_names = Bindings.collect_alias_names
 _is_keyword_name = ModuleOutline.is_keyword_name
@@ -591,7 +592,7 @@ class _FixRequest:
         # module-level assignments/constants the moved code reads would be
         # missing from the new module (a runtime NameError) — refuse; moving
         # them would break the origin's remaining code (review finding)
-        if referenced & _module_bindings(module):
+        if referenced & Bindings.module_bindings(module):
             return None
         new_module = cst.Module(
             body=[*CstMechanics._moved_imports(module, referenced), *(top_defs[n] for n in opts.params)]
@@ -1465,24 +1466,10 @@ def _zero_external_refs(repo: Path, class_name: str) -> bool:
     total = 0
     for path in SourceFiles(repo).py_files():
         mod = cst.parse_module(path.read_text(encoding="utf-8"))
-        for node in _module_name_nodes(mod):
+        for node in Bindings.module_name_nodes(mod):
             if node.value == class_name:
                 total += 1
     return total <= 1  # only the definition itself
-
-
-def _module_name_nodes(module: cst.Module) -> list[cst.Name]:
-    class _AllNames(cst.CSTVisitor):
-        def __init__(self):
-            self.names: list[cst.Name] = []
-
-        @override
-        def visit_Name(self, node):
-            self.names.append(node)
-
-    v = _AllNames()
-    module.visit(v)
-    return v.names
 
 
 class _MethodBodyRewriteByLine(cst.CSTTransformer):
@@ -1664,29 +1651,6 @@ def _module_has_relative_imports(module: cst.Module) -> bool:
     )
 
 
-def _class_body_binds(cls: cst.ClassDef, name: str) -> bool:
-    """Does the class's body bind `name` at class-body level (an attribute
-    with the same name as the constant about to move in)?"""
-    for stmt in cls.body.body:
-        if isinstance(stmt, (cst.FunctionDef, cst.ClassDef)):
-            if stmt.name.value == name:
-                return True
-        elif isinstance(stmt, cst.SimpleStatementLine):
-            for inner in stmt.body:
-                if isinstance(inner, cst.Assign) and any(
-                    name in Bindings.hoist_target_names(t.target) for t in inner.targets
-                ):
-                    return True
-                if _binds_hoisted_name(inner, name):
-                    return True
-                if isinstance(inner, (cst.Import, cst.ImportFrom)):
-                    bound: set[str] = set()
-                    Bindings.collect_alias_names(bound, inner)
-                    if name in bound:
-                        return True
-    return False
-
-
 # lucidlint: ignore complexity the dispatch is a parser-shape table, not branch decision logic
 def _name_ref_kind(wrapper: cst.MetadataWrapper, node: cst.Name) -> str:
     """A Name reference's execution context: 'skip' (a binding or a
@@ -1784,7 +1748,7 @@ def _consts_moving_into(
         and n not in residual_refs
         and n not in others
         and n not in external_consts
-        and not _class_body_binds(cls, n)
+        and not Bindings.class_body_binds(cls, n)
     }
     while True:
         changed = False
@@ -2676,23 +2640,6 @@ def _graph_cycle(nodes: list[str], edges: dict[str, set[str]]) -> list[str] | No
 def _module_empty(new_source: str) -> bool:
     mod = cst.parse_module(new_source)
     return all(not isinstance(s, (cst.FunctionDef, cst.ClassDef, cst.SimpleStatementLine)) for s in mod.body)
-
-
-def _module_bindings(module: cst.Module) -> set[str]:
-    """The names module-level assignments/constants bind — the extract-module
-    split refuses when moved code reads one (the new module would NameError;
-    moving the binding would break the origin)."""
-    bound: set[str] = set()
-    for stmt in module.body:
-        if not (isinstance(stmt, cst.SimpleStatementLine) and len(stmt.body) == 1):
-            continue
-        inner = stmt.body[0]
-        if isinstance(inner, cst.Assign):
-            for t in inner.targets:
-                bound |= Bindings.hoist_target_names(t.target)
-        elif isinstance(inner, cst.AnnAssign) and inner.target is not None:
-            bound |= Bindings.hoist_target_names(inner.target)
-    return bound
 
 
 # --------------------------------------------------------------------------- dispatch-registry
@@ -3593,16 +3540,6 @@ def _breaks_forwarding_chain(callee, args: list, params: list) -> bool:
 def _is_single_name_assign(stmt: cst.BaseSmallStatement) -> bool:
     """`name = value` with exactly one plain-name target."""
     return isinstance(stmt, cst.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0].target, cst.Name)
-
-
-def _binds_hoisted_name(stmt: cst.BaseSmallStatement, name: str) -> bool:
-    """The annotated assignment binds `name` (directly or through a target
-    tuple)."""
-    return (
-        isinstance(stmt, cst.AnnAssign)
-        and stmt.target is not None
-        and name in Bindings.hoist_target_names(stmt.target)
-    )
 
 
 def _split_target_exists(repo: Path, target: str, rel: str, rewritten) -> bool:

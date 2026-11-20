@@ -52,6 +52,61 @@ class Bindings:
             else:
                 names.add(Bindings.import_base_name(a.name))
 
+    @staticmethod
+    def module_name_nodes(module: cst.Module) -> list[cst.Name]:
+        """Every Name node at module level (a visitor probe)."""
+        class _AllNames(cst.CSTVisitor):
+            def __init__(self):
+                self.names: list[cst.Name] = []
+
+            @override
+            def visit_Name(self, node):
+                self.names.append(node)
+
+        probe = _AllNames()
+        module.visit(probe)
+        return probe.names
+
+    @staticmethod
+    def class_body_binds(cls: cst.ClassDef, name: str) -> bool:
+        """Does the class's body bind `name` at class-body level (an attribute
+        with the same name as the constant about to move in)?"""
+        for stmt in cls.body.body:
+            if isinstance(stmt, (cst.FunctionDef, cst.ClassDef)):
+                if stmt.name.value == name:
+                    return True
+            elif isinstance(stmt, cst.SimpleStatementLine):
+                for inner in stmt.body:
+                    if isinstance(inner, cst.Assign) and any(
+                        name in Bindings.hoist_target_names(t.target) for t in inner.targets
+                    ):
+                        return True
+                    if _binds_hoisted_name(inner, name):
+                        return True
+                    if isinstance(inner, (cst.Import, cst.ImportFrom)):
+                        bound: set[str] = set()
+                        Bindings.collect_alias_names(bound, inner)
+                        if name in bound:
+                            return True
+        return False
+
+    @staticmethod
+    def module_bindings(module: cst.Module) -> set[str]:
+        """The names module-level assignments/constants bind — the
+        extract-module split refuses when moved code reads one (the new module
+        would NameError; moving the binding would break the origin)."""
+        bound: set[str] = set()
+        for stmt in module.body:
+            if not (isinstance(stmt, cst.SimpleStatementLine) and len(stmt.body) == 1):
+                continue
+            inner = stmt.body[0]
+            if isinstance(inner, cst.Assign):
+                for t in inner.targets:
+                    bound |= Bindings.hoist_target_names(t.target)
+            elif isinstance(inner, cst.AnnAssign) and inner.target is not None:
+                bound |= Bindings.hoist_target_names(inner.target)
+        return bound
+
     def free_names(self) -> set[str]:
         """The names the scope READS from enclosing scopes: every Name in its
         tree minus the names bound anywhere inside it (parameters, locals,
@@ -149,3 +204,13 @@ class Bindings:
             # not `.value` (review finding: a crash on any `except ... as e:`)
             if isinstance(node.name, cst.AsName) and isinstance(node.name.name, cst.Name):
                 self.bound.add(node.name.name.value)
+
+def _binds_hoisted_name(stmt: cst.BaseSmallStatement, name: str) -> bool:
+    """The annotated assignment binds `name` (directly or through a target
+    tuple)."""
+    return (
+        isinstance(stmt, cst.AnnAssign)
+        and stmt.target is not None
+        and name in Bindings.hoist_target_names(stmt.target)
+    )
+
