@@ -175,9 +175,19 @@ impl ModuleShape {
     /// framework entry points only is a framework contract, not a finding.
     fn many_finding(&self, rel: &str) -> Option<Finding> {
         if self.classes_dominate() {
-            Some(self.finding("many-definitions", "warn", rel, self.classes_message(rel)))
+            Some(Self::finding(
+                "many-definitions",
+                "warn",
+                rel,
+                self.classes_message(rel),
+            ))
         } else if self.functions_are_a_group() {
-            Some(self.finding("many-definitions", "warn", rel, self.functions_message(rel, true)))
+            Some(Self::finding(
+                "many-definitions",
+                "warn",
+                rel,
+                self.functions_message(rel, true),
+            ))
         } else {
             None
         }
@@ -185,9 +195,19 @@ impl ModuleShape {
 
     fn several_finding(&self, rel: &str) -> Option<Finding> {
         if self.classes_dominate() {
-            Some(self.finding("several-definitions", "warn", rel, self.classes_message(rel)))
+            Some(Self::finding(
+                "several-definitions",
+                "warn",
+                rel,
+                self.classes_message(rel),
+            ))
         } else if self.functions_are_a_group() {
-            Some(self.finding("several-definitions", "warn", rel, self.functions_message(rel, false)))
+            Some(Self::finding(
+                "several-definitions",
+                "warn",
+                rel,
+                self.functions_message(rel, false),
+            ))
         } else {
             None
         }
@@ -379,7 +399,7 @@ impl ModuleShape {
         }
     }
 
-    fn finding(&self, kind: &str, severity: &str, rel: &str, message: String) -> Finding {
+    fn finding(kind: &str, severity: &str, rel: &str, message: String) -> Finding {
         Finding {
             logical_start: None,
             seam_members: Vec::new(),

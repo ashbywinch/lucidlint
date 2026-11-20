@@ -37,6 +37,29 @@ class Rewrite:
                 return cst.RemoveFromParent()
             return updated_node
 
+    def without_class(self, name: str) -> cst.Module:
+        """The module with the class of that name removed."""
+        return self.module.visit(Rewrite._RemoveClass(name))
+
+    class _RemoveClass(cst.CSTTransformer):
+        """Delete the class of that name — the husk and the chain both dissolve
+        a class once its callers are rewired."""
+
+        def __init__(self, name: str) -> None:
+            self.name: str = name
+
+        @override
+        def leave_ClassDef(self, original_node, updated_node):
+            if original_node.name.value == self.name:
+                return cst.RemoveFromParent()
+            return updated_node
+
+    @staticmethod
+    def renamed(node: cst.Name, old: str, new: str) -> cst.Name:
+        """The name with its binding replaced — a rename is one edit, whether the
+        agent asked for it (vague-name) or a hoist retargets an accumulator."""
+        return node.with_changes(value=new) if node.value == old else node
+
     @staticmethod
     def self_attr_target(name: str) -> list[cst.AssignTarget]:
         """The `self.<name>` assignment target a record constructor stores."""

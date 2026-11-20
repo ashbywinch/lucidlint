@@ -482,8 +482,8 @@ class FixCommand:
         fix failure — the apply already succeeded."""
         try:
             rust = self.services.rust_scan.scan(self.repo, self.args, Counter(), None)
-        except Exception:
-            return
+        except (OSError, RuntimeError):
+            return  # the scan gap is the gate's finding, not the apply's
         remaining = [
             f
             for fs in rust.by_rel.values()

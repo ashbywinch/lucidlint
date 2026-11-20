@@ -199,7 +199,9 @@ impl GlobalState {
         // the first constant only: a module with eight constants must not repeat
         // the same sentence eight times (#80).
         let is_first_constant = module_constants.first().is_some_and(|first| first == name);
-        if module_constants.len() >= 3 && is_first_constant && matches!(kind, GlobalValueKind::Constant) {
+        let nudge_rides_this_constant =
+            module_constants.len() >= 3 && is_first_constant && matches!(kind, GlobalValueKind::Constant);
+        if nudge_rides_this_constant {
             return format!(
                 "{message} If the module's {} constants are one concept, put them on one class — a new class, or the module's own class.",
                 module_constants.len()

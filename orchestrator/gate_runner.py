@@ -167,7 +167,7 @@ class GateRunner:
                 pass  # no cache yet — walk
         except KeyError:
             return FileHistory(Counter(), {})  # not a git self.repo — certain: silent
-        except Exception as e:
+        except Exception as e:  # lucidlint: ignore broad-except pygit2's error types vary by version; the walk degrades and the warning names the cause
             CONSOLE.warn(f"churn: {e}")  # unexpected — show the actual error
             return FileHistory(Counter(), {})
 
@@ -199,7 +199,7 @@ class GateRunner:
                     churn[path] += 1
                     if date and path not in last:
                         last[path] = date  # first-seen = newest in a newest-first walk
-        except Exception as e:
+        except Exception as e:  # lucidlint: ignore broad-except pygit2's diff API fails per version; the partial history is surfaced with the cause
             CONSOLE.warn(f"churn walk: {e}")  # unexpected — show the actual error
             return FileHistory(churn, last)  # partial/empty history, surfaced
 
@@ -299,16 +299,17 @@ class GateRunner:
             r = self._host.pygit2.Repository(str(self.repo))
             return GitHead(branch=r.head.shorthand or "", commit=str(r.head.target)[:7])
         # git-absent is a supported mode — the handler returns the empty head
-        except Exception:
+        except Exception:  # lucidlint: ignore broad-except pygit2's absence and its errors are one case here: no head, branch named empty
             return GitHead(branch="", commit="")
 
-    def _dedupe_merge(self, actions: list[Action]) -> list[Action]:
+    @staticmethod
+    def _dedupe_merge(actions: list[Action]) -> list[Action]:
         """Dedupe, rank, merge per-target kinds, then lifecycle notes."""
-        unique = self._dedupe(actions)
-        self._percentile_rank(unique)
-        unique = self._merge_targets(unique)
-        self._percentile_rank(unique)
-        self._lifecycle_notes(unique)
+        unique = GateRunner._dedupe(actions)
+        GateRunner._percentile_rank(unique)
+        unique = GateRunner._merge_targets(unique)
+        GateRunner._percentile_rank(unique)
+        GateRunner._lifecycle_notes(unique)
         return unique
 
     def _write_baseline(self, unique: list[Action], ignored_by_signal: Counter | None = None) -> int:
@@ -324,7 +325,8 @@ class GateRunner:
         print(f"lucidlint: baseline written — {len(keys)} action(s) locked to {self.args.baseline}")
         return 0
 
-    def _dedupe(self, actions: list[Action]) -> list[Action]:
+    @staticmethod
+    def _dedupe(actions: list[Action]) -> list[Action]:
         """Same kind+file+line+function+position fires once (graph and radon
         can both flag a function; record-shape's positions share a line)."""
         seen: dict[tuple, Action] = {}
@@ -334,7 +336,8 @@ class GateRunner:
                 seen[key] = a
         return list(seen.values())
 
-    def _percentile_rank(self, unique: list[Action]) -> None:
+    @staticmethod
+    def _percentile_rank(unique: list[Action]) -> None:
         """Rank raw risk 1-99 (percentile) so the list spreads."""
         if not unique:
             return
@@ -342,7 +345,8 @@ class GateRunner:
         for a in unique:
             a.priority = 99 if hi <= lo else max(1, round(1 + 98 * (a.raw - lo) / (hi - lo)))
 
-    def _merge_targets(self, unique: list[Action]) -> list[Action]:
+    @staticmethod
+    def _merge_targets(unique: list[Action]) -> list[Action]:
         """Per-target merge: complexity + large-function on the same function is one fix."""
         merged: dict[tuple, Action] = {}
         for a in sorted(unique, key=lambda a: (-a.raw, a.file, a.line)):
@@ -364,7 +368,8 @@ class GateRunner:
                         prev.note = (prev.note + " " + extra).strip()
         return list(merged.values())
 
-    def _lifecycle_notes(self, unique: list[Action]) -> None:
+    @staticmethod
+    def _lifecycle_notes(unique: list[Action]) -> None:
         """Facts only — low-churn scripts/tools. Delete-vs-refactor is the agent's call."""
         for a in unique:
             low_churn_script = a.file.startswith(("scripts/", "tools/")) and a.churn <= 2 and bool(a.last_modified)

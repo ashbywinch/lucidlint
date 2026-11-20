@@ -100,7 +100,8 @@ impl SpecialCase {
         let empty_check = c.ops.len() == 1
             && matches!(c.ops[0], ruff_python_ast::CmpOp::Eq)
             && Self::is_empty_literal(&c.comparators[0]);
-        if !(none_check || empty_check) || branch_guards(&i.body) {
+        let tests_for_absence = none_check || empty_check;
+        if !tests_for_absence || branch_guards(&i.body) {
             return None;
         }
         Some((n.id.to_string(), Source::line_of(source, i.range().start())))

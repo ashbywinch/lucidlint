@@ -177,6 +177,17 @@ impl PathExpression {
         }
     }
 
+    /// The value is long enough to name a domain thing and carries a letter —
+    /// a two-character fragment or a pure separator is not a noun.
+    fn is_noun_shaped(value: &str) -> bool {
+        value.len() >= 3 && value.chars().any(|c| c.is_ascii_alphabetic())
+    }
+
+    /// `.md`, `.py` — a bare extension names a file kind, not a domain noun.
+    fn is_bare_extension(value: &str) -> bool {
+        value.starts_with('.') && value.len() <= 6 && value[1..].chars().all(|c| c.is_ascii_alphanumeric())
+    }
+
     fn is_domain_literal(segment: &str) -> bool {
         let Some(value) = segment
             .strip_prefix('"')
@@ -186,10 +197,10 @@ impl PathExpression {
         else {
             return false;
         };
-        if value.len() < 3 || !value.chars().any(|c| c.is_ascii_alphabetic()) {
+        if !Self::is_noun_shaped(value) {
             return false;
         }
-        if value.starts_with('.') && value.len() <= 6 && value[1..].chars().all(|c| c.is_ascii_alphanumeric()) {
+        if Self::is_bare_extension(value) {
             return false; // a bare extension is not a domain noun
         }
         value

@@ -48,11 +48,11 @@ class Version:
             return bundled
         try:
             return metadata.version("lucidlint")
-        except Exception:
+        except metadata.PackageNotFoundError:
             try:
                 with (self.here / "pyproject.toml").open("rb") as f:
                     return str(tomllib.load(f)["project"]["version"])
-            except Exception:
+            except (OSError, tomllib.TOMLDecodeError, KeyError):
                 return "0.0.0.dev"
 
 

@@ -374,29 +374,29 @@ class MechanicalFixes:
 
         @override
         def visit_FunctionDef(self, node) -> None:
-            pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
-            if self._is_target_at_top(pos):
-                self.found, self.name = node, node.name.value
-            self.depth += 1
+            self._enter(node)
+
+        @override
+        def visit_ClassDef(self, node) -> None:
+            self._enter(node)
 
         @override
         def leave_FunctionDef(self, original_node) -> None:
             self.depth -= 1
 
-        def _is_target_at_top(self, pos) -> bool:
-            """The first top-level definition at the finding's line."""
-            return self.depth == 0 and self.found is None and pos.start.line == self.line
-
         @override
-        def visit_ClassDef(self, node) -> None:
+        def leave_ClassDef(self, original_node) -> None:
+            self.depth -= 1
+
+        def _enter(self, node) -> None:
             pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
             if self._is_target_at_top(pos):
                 self.found, self.name = node, node.name.value
             self.depth += 1
 
-        @override
-        def leave_ClassDef(self, original_node) -> None:
-            self.depth -= 1
+        def _is_target_at_top(self, pos) -> bool:
+            """The first top-level definition at the finding's line."""
+            return self.depth == 0 and self.found is None and pos.start.line == self.line
 
     class _KeywordArgs(cst.CSTTransformer):
         """Keyword the positional literal args of the flagged call on the target
@@ -718,7 +718,8 @@ class MechanicalFixes:
                 loop_count = 1
             return self._rewrite_plan(stmts, first_idx, loop_count)
 
-        def _chain_length(self, stmts, start: int) -> int:
+        @staticmethod
+        def _chain_length(stmts, start: int) -> int:
             n = 0
             for s in stmts[start:]:
                 if isinstance(s, cst.For):
@@ -789,7 +790,8 @@ class MechanicalFixes:
             new_stmt = init.with_changes(body=[new_small])
             return stmts, init_idx, (first_idx + loop_count) - init_idx, new_stmt
 
-        def _loop_plan(self, for_node: cst.For) -> MechanicalFixes._LoopPipelinePlan | None:
+        @staticmethod
+        def _loop_plan(for_node: cst.For) -> MechanicalFixes._LoopPipelinePlan | None:
             if for_node.orelse:
                 return None
             body = list(for_node.body.body)
@@ -850,9 +852,7 @@ class MechanicalFixes:
 
         @override
         def leave_Name(self, original_node, updated_node):
-            if updated_node.value == self.old:
-                return updated_node.with_changes(value=self.new)
-            return updated_node
+            return Rewrite.renamed(updated_node, self.old, self.new)
 
     class _StripDocstring(cst.CSTTransformer):
         """Delete the first body statement of the def at `line` when it is a
@@ -874,6 +874,8 @@ class MechanicalFixes:
                 return MechanicalFixes._strip_first_docstring(updated_node, original_node)
             return updated_node
 
+        # the class body can carry the docstring too — libcst dispatches the two
+        # definition kinds through separate hooks, so the body repeats
         @override
         def leave_ClassDef(self, original_node, updated_node):
             if self.done:
@@ -1059,7 +1061,7 @@ class MechanicalFixes:
 
         try:
             cst.parse_module(source).visit(_Names())
-        except Exception:
+        except cst.ParserSyntaxError:
             return base
         candidate = base
         i = 2
@@ -1149,8 +1151,8 @@ class MechanicalFixes:
         for p in SourceFiles(repo).py_files():
             try:
                 module = cst.parse_module(p.read_text(encoding="utf-8"))
-            except Exception:  # parse errors in other files are their own findings
-                continue
+            except (OSError, UnicodeDecodeError, cst.ParserSyntaxError):
+                continue  # an unreadable/unparsable sibling is its own finding
 
             probe = MechanicalFixes._NameCount(name)
             module.visit(probe)
@@ -1163,7 +1165,7 @@ class MechanicalFixes:
         `__init__` in one module — self/cls dropped."""
         try:
             module = cst.parse_module(source)
-        except Exception:
+        except cst.ParserSyntaxError:
             return None
         found = None
 

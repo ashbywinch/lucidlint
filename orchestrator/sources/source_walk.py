@@ -73,20 +73,16 @@ class SourceWalk:
         nested checkout (another worktree of this repo is a single opaque entry),
         so a sibling checkout's markdown is never enumerated. Empty when git or
         the repository is missing — nothing is ignored then."""
+        return self._git_md_paths(ignored=True)
+
+    def _git_md_paths(self, ignored: bool) -> tuple[str, ...]:
+        """One `git ls-files` answer over the repo's markdown: the ignored set, or
+        tracked-plus-untracked-not-ignored (the doc set git owns)."""
+        # ignored: the files git leaves out; otherwise: the files it owns
+        scope = ["--others", "--ignored"] if ignored else ["--cached", "--others"]
         try:
             proc = self._host.process.run(
-                [
-                    "git",
-                    "-C",
-                    str(self.repo),
-                    "ls-files",
-                    "--others",
-                    "--ignored",
-                    "--exclude-standard",
-                    "-z",
-                    "--",
-                    "*.md",
-                ],
+                ["git", "-C", str(self.repo), "ls-files", *scope, "--exclude-standard", "-z", "--", "*.md"],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -96,8 +92,8 @@ class SourceWalk:
         except (
             OSError,
             self._host.process.TimeoutExpired,
-        ) as e:  # lucidlint: ignore swallow git missing — nothing is ignored
-            CONSOLE.warn(f"git ls-files --ignored: {e}")
+        ) as e:  # lucidlint: ignore swallow git missing — the git answer is optional
+            CONSOLE.warn(f"git ls-files {'--ignored' if ignored else ''}: {e}".replace("  ", " "))
             return ()
         if proc.returncode != 0:
             return ()
@@ -111,33 +107,7 @@ class SourceWalk:
         not the shipped doc set and a nested checkout is one opaque entry to git,
         so neither is enumerated — and a vendored tree is ignored, which is what
         `--exclude-standard` answers."""
-        try:
-            proc = self._host.process.run(
-                [
-                    "git",
-                    "-C",
-                    str(self.repo),
-                    "ls-files",
-                    "--cached",
-                    "--others",
-                    "--exclude-standard",
-                    "-z",
-                    "--",
-                    "*.md",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except (
-            OSError,
-            self._host.process.TimeoutExpired,
-        ) as e:  # lucidlint: ignore swallow git missing — nothing harvested
-            CONSOLE.warn(f"git ls-files: {e}")
-            return ()
-        if proc.returncode != 0:
-            return ()
-        return self.md_rels(proc.stdout)
+        return self._git_md_paths(ignored=False)
 
     def gitignored_docs(self) -> tuple[str, ...]:
         """Repo-relative .md paths git ignores — private docs (review-log R3). The
@@ -263,7 +233,7 @@ class SourceWalk:
             return [SourceFile(repo / rel, rel) for rel in rels]
         except KeyError:
             return self.rglob_sources()  # not a git repo — certain: silent fallback
-        except Exception as e:
+        except Exception as e:  # lucidlint: ignore broad-except pygit2's error types vary by version; the walk falls back to rglob and says why
             CONSOLE.warn(f"file list: {e}")  # unexpected — show the actual error
             return self.rglob_sources()
 

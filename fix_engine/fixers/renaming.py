@@ -12,6 +12,7 @@ import libcst as cst
 from libcst.metadata import PositionProvider
 
 from fix_engine.module_outline import ModuleOutline
+from fix_engine.rewrite import Rewrite
 
 
 class Renaming:
@@ -65,6 +66,4 @@ class Renaming:
 
         @override
         def leave_Name(self, original_node, updated_node):
-            if updated_node.value == self.old:
-                return updated_node.with_changes(value=self.new)
-            return updated_node
+            return Rewrite.renamed(updated_node, self.old, self.new)

@@ -279,7 +279,8 @@ class DataClump:
                 and (a_val.attr.value, b_val.attr.value) == self.pair
             )
 
-        def _own_params(self, node: cst.FunctionDef) -> set[str]:
+        @staticmethod
+        def _own_params(node: cst.FunctionDef) -> set[str]:
             return {
                 p.name.value for p in [*node.params.posonly_params, *node.params.params, *node.params.kwonly_params]
             }

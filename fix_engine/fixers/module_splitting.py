@@ -482,8 +482,8 @@ class ModuleSplitting:
                     continue
                 try:
                     mod = cst.parse_module(path.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
+                except (OSError, UnicodeDecodeError, cst.ParserSyntaxError):
+                    continue  # an unreadable sibling is its own finding
                 importer_dir = path.relative_to(self.repo).as_posix().split("/")[:-1]
                 alias_map = ModuleSplitting._module_alias_map(mod, origin_path)
 
@@ -940,6 +940,14 @@ class ModuleSplitting:
         return len(parts) == 1 and parts[0] in alias_map and alias_map[parts[0]] == origin_path
 
     @staticmethod
+    def _parts_are_origin(parts: list[str], origin_path: list[str], alias_map: dict[str, list[str]]) -> bool:
+        """An import path names the origin itself, or an alias of it — the one
+        question both the retarget rewrite and the constant probe ask."""
+        if parts == origin_path:
+            return True
+        return ModuleSplitting._alias_points_to_origin(parts, origin_path, alias_map)
+
+    @staticmethod
     def _import_refers_to_origin(ifrom: cst.ImportFrom, importer_dir: list[str], origin_path: list[str]) -> bool:
         """Does this ImportFrom resolve to the origin module (absolute full path,
         relative dots resolving to the origin's directory)?"""
@@ -974,9 +982,7 @@ class ModuleSplitting:
             self.added: set[str] = set()
 
         def _base_is_origin(self, parts: list[str]) -> bool:
-            if parts == self.origin_path:
-                return True
-            return ModuleSplitting._alias_points_to_origin(parts, self.origin_path, self.alias_map)
+            return ModuleSplitting._parts_are_origin(parts, self.origin_path, self.alias_map)
 
         @override
         def leave_SimpleStatementLine(self, original_node, updated_node):
@@ -1053,8 +1059,8 @@ class ModuleSplitting:
         chains. None when the file is unchanged."""
         try:
             module = cst.parse_module(text)
-        except Exception:  # parse errors in other files are their own findings
-            return None
+        except cst.ParserSyntaxError:
+            return None  # the sibling's parse error is its own finding
         alias_map = ModuleSplitting._module_alias_map(module, origin_path)
         importer_dir = p_rel.split("/")[:-1]
         tx = ModuleSplitting._SplitImportRewrite(origin_path, targets, alias_map, importer_dir)
@@ -1106,9 +1112,7 @@ class ModuleSplitting:
 
         def _refers_to_origin(self, parts: list[str]) -> bool:
             """The import path is the origin module itself, or an alias of it."""
-            if parts == self.origin_path:
-                return True
-            return ModuleSplitting._alias_points_to_origin(parts, self.origin_path, self.alias_map)
+            return ModuleSplitting._parts_are_origin(parts, self.origin_path, self.alias_map)
 
         @override
         def visit_ImportFrom(self, node) -> None:
@@ -1139,8 +1143,8 @@ class ModuleSplitting:
                 continue
             try:
                 mod = cst.parse_module(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
+            except (OSError, UnicodeDecodeError, cst.ParserSyntaxError):
+                continue  # an unreadable sibling is its own finding
             importer_dir = path.relative_to(repo).as_posix().split("/")[:-1]
             for stmt in mod.body:
                 if not isinstance(stmt, cst.SimpleStatementLine):
@@ -1159,8 +1163,8 @@ class ModuleSplitting:
                 continue
             try:
                 mod = cst.parse_module(source)
-            except Exception:
-                continue
+            except (OSError, UnicodeDecodeError, cst.ParserSyntaxError):
+                continue  # an unreadable sibling is its own finding
             importer_dir = p_rel.split("/")[:-1]
             for stmt in mod.body:
                 if not isinstance(stmt, cst.SimpleStatementLine):

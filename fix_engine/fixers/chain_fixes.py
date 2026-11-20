@@ -16,6 +16,7 @@ from libcst.metadata import PositionProvider
 from fix_engine.bindings import Bindings
 from fix_engine.module_outline import ModuleOutline
 from fix_engine.module_source import ModuleSource
+from fix_engine.rewrite import Rewrite
 from fix_engine.source_files import SourceFiles
 
 # lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
@@ -242,14 +243,14 @@ class ChainFixes:
         ).code
         origin_new = self._drop_middle(origin_new, head, mid)
         if terminal.rel != self.request.rel:
-            d_new = ChainFixes._remove_class(ChainFixes._module_of(self.request.repo, terminal.rel), d_name)
+            d_new = Rewrite(ChainFixes._module_of(self.request.repo, terminal.rel)).without_class(d_name).code
             if ModuleOutline.is_empty(d_new):
                 self.request.deletes.append(terminal.rel)
             else:
                 self.request.extra_writes.append((terminal.rel, d_new))
         else:
             # D dissolves in the origin too (zero external refs by the gate)
-            origin_new = cst.parse_module(origin_new).visit(ChainFixes._RemoveClass(d_name)).code
+            origin_new = Rewrite(cst.parse_module(origin_new)).without_class(d_name).code
         return origin_new
 
     def _drop_middle(self, origin_new: str, head: ChainFixes._ChainHead, mid: ChainFixes._ChainMiddle) -> str:
@@ -540,20 +541,6 @@ class ChainFixes:
     @staticmethod
     def _remove_fn(module: cst.Module, name: str) -> str:
         return module.visit(ChainFixes._RemoveFn(name)).code
-
-    class _RemoveClass(cst.CSTTransformer):
-        def __init__(self, name: str) -> None:
-            self.name = name
-
-        @override
-        def leave_ClassDef(self, original_node, updated_node):
-            if updated_node.name.value == self.name:
-                return cst.RemoveFromParent()
-            return updated_node
-
-    @staticmethod
-    def _remove_class(module: cst.Module, name: str) -> str:
-        return module.visit(ChainFixes._RemoveClass(name)).code
 
     @staticmethod
     def _module_of(repo: Path, rel: str) -> cst.Module:
