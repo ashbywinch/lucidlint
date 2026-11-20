@@ -22,6 +22,7 @@ from fix_engine.rewrite import Rewrite
 # lucidlint: ignore-file record-shape a class per helper hop is ceremony
 
 
+
 class DataClump:
     """The parameter-object fix for one request: the clump's pair is threaded
     through a record class."""

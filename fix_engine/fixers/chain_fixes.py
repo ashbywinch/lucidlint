@@ -22,6 +22,7 @@ from fix_engine.source_files import SourceFiles
 # lucidlint: ignore-file record-shape a class per helper hop is ceremony
 
 
+
 class ChainFixes:
     """The collapse-chain fix for one request: rewire or promote the terminal,
     never blind inline."""

@@ -15,15 +15,14 @@ from fix_engine.bindings import Bindings
 from fix_engine.module_outline import ModuleOutline
 from fix_engine.rewrite import Rewrite
 
-# lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
-# lucidlint: ignore-file record-shape a class per helper hop is ceremony
 
-# the __init__ plan: the field initializers in order + the docstring statement
-_InitPlan = tuple[
-    list[tuple[str, cst.BaseExpression]],
-    cst.BaseStatement | None,
-    list[tuple[str, cst.Annotation | None, cst.BaseExpression | None]],
-]
+class _InitPlan(NamedTuple):
+    """What a class's __init__ does, in order: the field initializers, the
+    docstring statement, and the parameters those initializers need."""
+
+    fields: list[tuple[str, cst.BaseExpression]]
+    docstring: cst.BaseStatement | None
+    params: list[tuple[str, cst.Annotation | None, cst.BaseExpression | None]]
 
 
 class Partition:
@@ -157,7 +156,7 @@ class Partition:
                 "the class's __init__ does more than assign self fields — a split would reorder or "
                 "retarget a statement; split by hand",
             )
-        init_fields, init_docstring, init_params = parsed
+        init_fields, init_docstring, init_params = parsed.fields, parsed.docstring, parsed.params
         fielded = [(method, Partition._self_field_reads(method)) for method in methods if method is not init]
         fieldless = [method.name.value for method, fields in fielded if not fields]
         if fieldless:
@@ -243,7 +242,7 @@ class Partition:
         None when the body does anything else — a split would have to reorder or
         retarget that statement."""
         if init is None:
-            return [], None, []
+            return _InitPlan([], None, [])
         params = init.params
         if Partition._has_irregular_params(params):
             return None
@@ -263,7 +262,7 @@ class Partition:
                 return None
             assert isinstance(small, cst.Assign) and isinstance(target, cst.Attribute)
             assigns.append((target.attr.value, small.value))
-        return assigns, docstring, init_params
+        return _InitPlan(assigns, docstring, init_params)
 
     @staticmethod
     def _init_stmt(field: str, value: cst.BaseExpression) -> cst.BaseStatement:

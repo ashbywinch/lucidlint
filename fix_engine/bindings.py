@@ -19,6 +19,7 @@ from fix_engine.module_outline import ModuleOutline
 # lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
 # lucidlint: ignore-file record-shape a class per helper hop is ceremony
 
+
 StoredNames = dict[str, set[str]]
 """Each function's body-stored names — what a receiver rename asks before it
 rewrites a load: a name stored anywhere in the body is a local, not the param."""
