@@ -26,6 +26,23 @@ houses 353 / album 431 identical after every commit.
 
 ## What is left — and why each removal needs a decision
 
+**1a. The loop family is filed upstream.** The `sequential loops` and
+`mutates only out` messages prescribe rewrites that Rust's own guidance
+rejects: Effective Rust item 9 says to keep a large or multifunctional body
+explicit and never force a loop into an iterator transform; chaining two
+passes changes evaluation order (the create-then-join footgun); and separate
+passes over an immutable slice are free because iterators are lazy and LLVM
+fuses them. A worklist body that mutates the stack it pops from is a
+traversal, not a fold — "the per-item step" is not a function of the item.
+Filed as <https://github.com/ashbywinch/lucidlint/issues/109> with the counts,
+the citations, and a third item: the message advertises `— fix: loop-pipeline`
+on 17 findings the fixer refuses (`setdefault(…).add(…)` group-bys). The
+readable structures the message should name: one accumulator =
+`map`/`filter_map` + `collect` or `fold`; several outputs from one pass = a
+named accumulator struct + `fold`, or `itertools::multiunzip` /
+`partition_map`; disjoint passes over a slice = leave them separate;
+traversal = the worklist loop, named as the traversal.
+
 **1. `loop-pipeline` ×298 (277 Rust, 21 Python).** The 96 Rust collection
 builds are done; what remains is the shapes where a rewrite is a design call:
 
