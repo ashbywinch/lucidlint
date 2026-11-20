@@ -88,8 +88,6 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
             None
         })
         .collect();
-    for f in results.into_iter().flatten() {
-        out.push(f);
-    }
+    out.extend(results.into_iter().flatten());
     out
 }

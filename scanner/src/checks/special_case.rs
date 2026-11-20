@@ -43,11 +43,12 @@ impl SpecialCase {
     fn special_case_scope(stmts: &[Stmt], source: &str, out: &mut Vec<(String, usize, usize)>) {
         let mut counts: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
         Self::count_scope_checks(stmts, &mut counts, source);
-        for (name, (n, line)) in &counts {
-            if *n >= ABSENCE_OCCURRENCES_MIN {
-                out.push((name.clone(), *n, *line));
-            }
-        }
+        out.extend(
+            counts
+                .iter()
+                .filter(|(_, (n, _))| *n >= ABSENCE_OCCURRENCES_MIN)
+                .map(|(name, (n, line))| (name.clone(), *n, *line)),
+        );
         Self::for_each_nested_scope(stmts, &mut |body| Self::special_case_scope(body, source, out));
     }
 

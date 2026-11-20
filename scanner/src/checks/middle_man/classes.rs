@@ -111,11 +111,7 @@ impl ModuleClasses {
             if let Some(shape) = c.declares(member) {
                 out.push(shape);
             }
-            for b in &c.bases {
-                if let Some(base) = self.classes.get(b) {
-                    queue.push(base);
-                }
-            }
+            queue.extend(c.bases.iter().filter_map(|b| self.classes.get(b)));
         }
         out
     }

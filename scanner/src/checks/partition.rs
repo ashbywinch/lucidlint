@@ -36,9 +36,7 @@ impl Partition {
             let Stmt::FunctionDef(f) = m else { continue };
             let mut fields = HashSet::new();
             let mut queue: Vec<Q> = f.body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
-            for d in &f.decorator_list {
-                queue.push(Q::N(AnyNodeRef::from(&d.expression)));
-            }
+            queue.extend(f.decorator_list.iter().map(|d| Q::N(AnyNodeRef::from(&d.expression))));
             let mut qi = 0usize;
             while qi < queue.len() {
                 if let Q::N(n) = queue[qi] {
@@ -92,9 +90,7 @@ impl Partition {
             return out;
         }
         if k == 1 {
-            for n in names {
-                out.push(vec![n.clone()]);
-            }
+            out.extend(names.iter().map(|n| vec![n.clone()]));
             return out;
         }
         for i in 0..names.len() {

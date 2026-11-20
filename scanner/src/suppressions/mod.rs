@@ -376,11 +376,13 @@ impl Suppressions {
                 }
             }
         }
-        for (i, f) in findings.into_iter().enumerate() {
-            if !exempted[i] {
-                out.push(f);
-            }
-        }
+        out.extend(
+            findings
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| !exempted[*i])
+                .map(|(_, f)| f),
+        );
         let ctx = StaleCtx {
             supps: &supps,
             used_line: &used_line,

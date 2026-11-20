@@ -85,9 +85,11 @@ impl ModuleGraph {
                     module_map.insert(key, file.clone());
                     module_files.push(file.clone());
                     if let Some(decls) = mod_decls.get(&file) {
-                        for (name, _) in decls {
-                            stack.push((format!("{child_dir}/{name}"), format!("{path}::{name}")));
-                        }
+                        stack.extend(
+                            decls
+                                .iter()
+                                .map(|(name, _)| (format!("{child_dir}/{name}"), format!("{path}::{name}"))),
+                        );
                     }
                 }
             }

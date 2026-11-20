@@ -37,13 +37,10 @@ impl AssemblyClass {
         for s in body {
             match s {
                 Stmt::FunctionDef(f) => fns.push((f, Source::line_of(state.source, f.name.range().start()))),
-                Stmt::ClassDef(c) => {
-                    for m in &c.body {
-                        if let Stmt::FunctionDef(f) = m {
-                            fns.push((f, Source::line_of(state.source, f.name.range().start())));
-                        }
-                    }
-                }
+                Stmt::ClassDef(c) => fns.extend(c.body.iter().filter_map(|m| match m {
+                    Stmt::FunctionDef(f) => Some((f, Source::line_of(state.source, f.name.range().start()))),
+                    _ => None,
+                })),
                 _ => {}
             }
         }
@@ -51,9 +48,7 @@ impl AssemblyClass {
             let mut results: HashSet<String> = HashSet::new();
             let mut calls: Vec<(String, Vec<String>)> = Vec::new();
             let mut stack: Vec<&Stmt> = Vec::new();
-            for b in &f.body {
-                stack.push(b);
-            }
+            stack.extend(f.body.iter());
             while let Some(s) = stack.pop() {
                 if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
                     continue;

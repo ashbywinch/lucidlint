@@ -83,14 +83,10 @@ impl ComplexityVisitor {
     /// All blocks (functions, classes, methods) — radon's `blocks`.
     pub fn blocks(&self) -> Vec<Block> {
         let mut out = Vec::new();
-        for f in &self.functions {
-            out.push(Block::Function(f.clone()));
-        }
+        out.extend(self.functions.iter().map(|f| Block::Function(f.clone())));
         for c in &self.classes {
             out.push(Block::Class(c.clone()));
-            for m in &c.methods {
-                out.push(Block::Function(m.clone()));
-            }
+            out.extend(c.methods.iter().map(|m| Block::Function(m.clone())));
         }
         out
     }

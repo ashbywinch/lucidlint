@@ -184,11 +184,7 @@ impl LspState {
         let root_s = root.to_string_lossy().to_string();
         let by_file = crate::Pipeline::repo_wide_merge(&scans, &root_s);
         if let Some(fs) = by_file.get(rel) {
-            for f in fs {
-                if let Some(d) = Self::repo_wide_diag(f, rel, cfg) {
-                    diags.push(d);
-                }
-            }
+            diags.extend(fs.iter().filter_map(|f| Self::repo_wide_diag(f, rel, cfg)));
         }
     }
 }
@@ -280,13 +276,16 @@ impl LspState {
 
     fn diagnostics_for(scan: &FileScan, source: &str, filter: Option<(&LucidConfig, &str)>) -> Vec<serde_json::Value> {
         let mut out = Vec::new();
-        for f in scan.findings.iter().filter(|f| {
-            f.kind != "duplicate"
-                && f.kind != "unused"
-                && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored(&f.kind, rel))
-        }) {
-            out.push(Self::finding_diag(f, source));
-        }
+        out.extend(
+            scan.findings
+                .iter()
+                .filter(|f| {
+                    f.kind != "duplicate"
+                        && f.kind != "unused"
+                        && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored(&f.kind, rel))
+                })
+                .map(|f| Self::finding_diag(f, source)),
+        );
         for e in &scan.cc {
             if e.cc >= COMPLEXITY_GATE && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored("complexity", rel)) {
                 let line = e.line.saturating_sub(1);

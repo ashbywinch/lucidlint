@@ -181,9 +181,7 @@ impl MagicNumber {
             }
             match s {
                 Stmt::FunctionDef(f) => {
-                    for b in &f.body {
-                        sq.push(b);
-                    }
+                    sq.extend(f.body.iter());
                 }
                 _ => push_stmt_children(s, &mut sq),
             }
