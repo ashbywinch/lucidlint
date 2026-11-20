@@ -81,9 +81,13 @@ impl LatentState {
         for s in body {
             let Stmt::FunctionDef(f) = s else { continue };
             let mut params = Vec::new();
-            for a in f.parameters.posonlyargs.iter().chain(&f.parameters.args) {
-                params.push(Self::param_annotation_key(a, &bindings, state.source));
-            }
+            params.extend(
+                f.parameters
+                    .posonlyargs
+                    .iter()
+                    .chain(&f.parameters.args)
+                    .map(|a| Self::param_annotation_key(a, &bindings, state.source)),
+            );
             funcs.push((f, params));
         }
         let mut pairs: std::collections::HashMap<PairKey, Vec<&StmtFunctionDef>> = std::collections::HashMap::new();

@@ -286,25 +286,30 @@ impl LspState {
                 })
                 .map(|f| Self::finding_diag(f, source)),
         );
-        for e in &scan.cc {
-            if e.cc >= COMPLEXITY_GATE && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored("complexity", rel)) {
-                let line = e.line.saturating_sub(1);
-                let line_len = source.lines().nth(line).map(str::len).unwrap_or(0);
-                out.push(serde_json::json!({
-                    "range": {
-                        "start": {"line": line, "character": 0},
-                        "end": {"line": line, "character": line_len},
-                    },
-                    "severity": 1,
-                    "source": "lucidlint",
-                    "message": crate::fix_render::FixRender::full_fix_command(
-                        &e.file,
-                        e.line,
-                        &crate::fix_render::FixRender::complexity_message(e.cc, e.shape, &e.shape_detail),
-                    ),
-                }));
-            }
-        }
+        out.extend(
+            scan.cc
+                .iter()
+                .filter(|e| {
+                    e.cc >= COMPLEXITY_GATE && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored("complexity", rel))
+                })
+                .map(|e| {
+                    let line = e.line.saturating_sub(1);
+                    let line_len = source.lines().nth(line).map(str::len).unwrap_or(0);
+                    serde_json::json!({
+                        "range": {
+                            "start": {"line": line, "character": 0},
+                            "end": {"line": line, "character": line_len},
+                        },
+                        "severity": 1,
+                        "source": "lucidlint",
+                        "message": crate::fix_render::FixRender::full_fix_command(
+                            &e.file,
+                            e.line,
+                            &crate::fix_render::FixRender::complexity_message(e.cc, e.shape, &e.shape_detail),
+                        ),
+                    })
+                }),
+        );
         out
     }
 

@@ -94,9 +94,7 @@ impl Partition {
             return out;
         }
         for i in 0..names.len() {
-            for j in (i + 1)..names.len() {
-                out.push(vec![names[i].clone(), names[j].clone()]);
-            }
+            out.extend(((i + 1)..names.len()).map(|j| vec![names[i].clone(), names[j].clone()]));
         }
         out
     }

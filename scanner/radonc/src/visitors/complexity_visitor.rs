@@ -124,21 +124,20 @@ impl ComplexityVisitor {
                     let col = 0;
                     // methods
                     let mut methods = Vec::new();
-                    for body_stmt in &c.body {
-                        if let Stmt::FunctionDef(m) = body_stmt {
-                            methods.push(Function {
-                                name: m.name.to_string(),
-                                lineno: self.line_of(m.range.start().to_usize()),
-                                col_offset: 0,
-                                endline: self.line_of(m.range.end().to_usize()),
-                                is_method: true,
-                                classname: Some(c.name.to_string()),
-                                closures: Vec::new(),
-                                inner_classes: Vec::new(),
-                                complexity: CountVisitor::function_cc(m, self.no_assert),
-                            });
-                        }
-                    }
+                    methods.extend(c.body.iter().filter_map(|body_stmt| match body_stmt {
+                        Stmt::FunctionDef(m) => Some(Function {
+                            name: m.name.to_string(),
+                            lineno: self.line_of(m.range.start().to_usize()),
+                            col_offset: 0,
+                            endline: self.line_of(m.range.end().to_usize()),
+                            is_method: true,
+                            classname: Some(c.name.to_string()),
+                            closures: Vec::new(),
+                            inner_classes: Vec::new(),
+                            complexity: CountVisitor::function_cc(m, self.no_assert),
+                        }),
+                        _ => None,
+                    }));
                     self.classes.push(Class {
                         name,
                         lineno,

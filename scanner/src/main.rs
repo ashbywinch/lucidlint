@@ -1224,10 +1224,11 @@ fn main() {
         }
     }
     // complexity findings from the scan's own CC array (the gate threshold)
-    let mut contract_complexity: Vec<serde_json::Value> = Vec::new();
-    for e in &all_cc {
-        if e.cc >= COMPLEXITY_GATE {
-            contract_complexity.push(serde_json::json!({
+    let contract_complexity: Vec<serde_json::Value> = all_cc
+        .iter()
+        .filter(|e| e.cc >= COMPLEXITY_GATE)
+        .map(|e| {
+            serde_json::json!({
                 "file": e.file,
                 "line": e.line,
                 "function": e.function,
@@ -1240,9 +1241,9 @@ fn main() {
                 ),
                 "fix_kind": checks::FixRender::fix_kind_of_message(&crate::fix_render::FixRender::complexity_message(e.cc, e.shape, &e.shape_detail))
                     .unwrap_or("extract-method"),
-            }));
-        }
-    }
+            })
+        })
+        .collect();
     // the contract: schema_version + final action kinds
     // repo-wide families (duplicate/unused/docs/graph/abstraction) were
     // appended after the per-file suppression passes — filter them through
