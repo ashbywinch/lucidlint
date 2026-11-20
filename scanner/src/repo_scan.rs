@@ -74,6 +74,14 @@ impl<'a> RepoScan<'a> {
         Self::gather(scans, rels)
     }
 
+    /// The corpus over scans that already carry their repo-relative names —
+    /// the in-memory test corpora, whose paths have no root to strip.
+    #[cfg(test)]
+    pub(crate) fn of_names(scans: &'a [FileScan]) -> Self {
+        let rels = scans.iter().map(|scan| scan.file_name.clone()).collect();
+        Self::gather(scans, rels)
+    }
+
     /// The corpus over the given per-file rels.
     fn gather(scans: &'a [FileScan], rels: Vec<String>) -> Self {
         let skeletons = scans
@@ -170,10 +178,20 @@ impl<'a> RepoScan<'a> {
     /// the findings of the family it was written for.
     pub fn findings(&self) -> Vec<Finding> {
         let mut findings = Vec::new();
-        self.add(&mut findings, self.duplicates());
-        self.add(&mut findings, checks::DuplicateModule::findings(&self.modules));
+        self.reconcile(&mut findings);
+        findings
+    }
+
+    /// Append every repo-wide family to `findings`, each through the file's own
+    /// suppressions. The caller's vector may already hold the per-file findings:
+    /// a marker this pass consumes also clears the stale-suppression finding the
+    /// per-file pass left behind, because that verdict was made before this
+    /// family could see the finding it names.
+    pub fn reconcile(&self, findings: &mut Vec<Finding>) {
+        self.add(findings, self.duplicates());
+        self.add(findings, checks::DuplicateModule::findings(&self.modules));
         self.add(
-            &mut findings,
+            findings,
             checks::Forwarding::findings(
                 &self.forwarders.methods,
                 &self.forwarders.functions,
@@ -182,7 +200,7 @@ impl<'a> RepoScan<'a> {
             ),
         );
         self.add(
-            &mut findings,
+            findings,
             checks::Unused::unused_findings(
                 &self.definitions,
                 &self.references.production,
@@ -191,36 +209,51 @@ impl<'a> RepoScan<'a> {
             ),
         );
         self.add(
-            &mut findings,
+            findings,
             checks::Unused::unused_setter_findings(&self.setters, &self.references.production, &self.references.tests),
         );
         self.add(
-            &mut findings,
+            findings,
             checks::Scattered::scattered_instance_findings(&self.per_file(|scan| &scan.scattered), &self.class_names()),
         );
         self.add(
-            &mut findings,
+            findings,
             checks::PathExpression::findings(&self.per_file(|scan| &scan.path_expressions)),
         );
         self.add(
-            &mut findings,
+            findings,
             checks::ExpressionOccurrence::findings(&self.per_file(|scan| &scan.duplicate_expressions)),
         );
         self.add(
-            &mut findings,
+            findings,
             checks::ModuleShape::findings(&self.per_file(|scan| &scan.module_shape)),
         );
         self.add(
-            &mut findings,
+            findings,
             checks::OverAbstraction::abstraction_findings(&self.class_scans()),
         );
-        self.add(&mut findings, self.undeclared_members());
-        self.add(&mut findings, self.middle_man());
+        self.add(findings, self.undeclared_members());
+        self.add(findings, self.middle_man());
         self.add(
-            &mut findings,
+            findings,
             checks::SiblingValueClass::sibling_value_class_findings(&self.per_file(|scan| &scan.sibling_classes)),
         );
-        findings
+    }
+
+    /// The final pass: every finding the gate composed itself — the families
+    /// whose inputs the scans do not carry (graph, docs, churn, bulk), plus the
+    /// per-file findings — through its file's suppressions, dropping the stale
+    /// markers those comments left. The scan-derived families already passed
+    /// through [`RepoScan::reconcile`], one family at a time.
+    pub fn apply_suppressions(&self, findings: Vec<Finding>) -> Vec<Finding> {
+        let mut used_line: HashSet<(usize, String)> = HashSet::new();
+        let mut used_file: HashSet<String> = HashSet::new();
+        let mut kept = Vec::new();
+        for (file, family) in Self::grouped(findings) {
+            kept.extend(self.filter_file(&file, family, &mut used_line, &mut used_file));
+        }
+        Self::drop_used_stale(&mut kept, &used_line, &used_file);
+        kept
     }
 
     /// The `duplicate` rule's findings, compared within a language: a Python
@@ -245,25 +278,36 @@ impl<'a> RepoScan<'a> {
         // one group per file: innermost-peel capacity is computed over the whole
         // group, and pairs the per-file pass already spent are not spent again
         for (file, family) in Self::grouped(found) {
-            match self.suppressions.remaining.get(&file) {
-                Some(suppressions) => {
-                    let empty = HashSet::new();
-                    let spent = self.suppressions.spent.get(&file).unwrap_or(&empty);
-                    findings.extend(crate::suppressions::Suppressions::filter_repo_wide(
-                        family,
-                        suppressions,
-                        &mut used_line,
-                        &mut used_file,
-                        spent,
-                    ));
-                }
-                None => findings.extend(family),
-            }
+            findings.extend(self.filter_file(&file, family, &mut used_line, &mut used_file));
         }
+        // a suppression this family never used is stale — the ledger must show it
+        Self::drop_used_stale(findings, &used_line, &used_file);
+    }
+
+    /// One file's findings through that file's suppressions, recording every
+    /// marker the pass consumed; pairs the per-file pass spent are not spent
+    /// again.
+    fn filter_file(
+        &self,
+        file: &str,
+        family: Vec<Finding>,
+        used_line: &mut HashSet<(usize, String)>,
+        used_file: &mut HashSet<String>,
+    ) -> Vec<Finding> {
+        let Some(suppressions) = self.suppressions.remaining.get(file) else {
+            return family;
+        };
+        let empty = HashSet::new();
+        let spent = self.suppressions.spent.get(file).unwrap_or(&empty);
+        crate::suppressions::Suppressions::filter_repo_wide(family, suppressions, used_line, used_file, spent)
+    }
+
+    /// Drop the stale-suppression findings for markers the pass just consumed:
+    /// the finding they name was exempted, so the marker is not stale.
+    fn drop_used_stale(findings: &mut Vec<Finding>, used_line: &HashSet<(usize, String)>, used_file: &HashSet<String>) {
         if used_line.is_empty() && used_file.is_empty() {
             return;
         }
-        // a suppression this family never used is stale — the ledger must show it
         findings.retain(|finding| {
             if finding.kind != "stale-suppression" {
                 return true;
@@ -381,5 +425,36 @@ mod tests {
             .collect();
         assert_eq!(over.len(), 1, "{found:?}");
         assert_eq!(over[0].file, "a.py");
+    }
+
+    #[test]
+    fn reconcile_clears_the_stale_marker_the_per_file_pass_left() {
+        // the per-file pass cannot see a repo-wide finding, so an `ignore
+        // unused` marker starts life as stale; the corpus consumes it and the
+        // verdict must go — the marker is the reason the finding is silent
+        let plain = scan("prod.py", "def placeholder():\n    return 1\n");
+        assert!(
+            RepoScan::of_names(&[plain])
+                .findings()
+                .iter()
+                .any(|finding| finding.kind == "unused"),
+            "the fixture must be an unused definition, or the test proves nothing"
+        );
+        let scans = vec![scan(
+            "prod.py",
+            include_str!("../../tests/fixtures/rust/reconcile_clears_the_stale_marker_the_per_file_pass_left__01.py"),
+        )];
+        let corpus = RepoScan::of_names(&scans);
+        let mut findings: Vec<Finding> = scans.iter().flat_map(|one| one.findings.clone()).collect();
+        assert!(findings.iter().any(|finding| finding.kind == "stale-suppression"));
+        corpus.reconcile(&mut findings);
+        assert!(
+            !findings.iter().any(|finding| finding.kind == "unused"),
+            "the marker suppresses the finding: {findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|finding| finding.kind == "stale-suppression"),
+            "{findings:?}"
+        );
     }
 }
