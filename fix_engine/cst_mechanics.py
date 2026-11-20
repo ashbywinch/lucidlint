@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import builtins
 from pathlib import Path
-from typing import TypeGuard, override
+from typing import NamedTuple, TypeGuard, override
 
 import libcst as cst
 from libcst.metadata import CodeRange, PositionProvider
@@ -37,6 +37,14 @@ _REPO_SKIP_DIRS = frozenset(
         ".eggs",
     }
 )
+
+
+class _ParsedModule(NamedTuple):
+    """A parsed module and the metadata wrapper whose tree it is — the pair
+    every transform needs, named so the positions are not rememberable."""
+
+    module: cst.Module
+    wrapper: cst.MetadataWrapper
 
 
 class CstMechanics:
@@ -249,3 +257,144 @@ class CstMechanics:
             pos = CstMechanics._as_range(self.get_metadata(PositionProvider, node))
             if pos.start.line <= self.line <= pos.end.line:
                 self.found = node
+
+    @staticmethod
+    def _wrapped_module(source: str) -> _ParsedModule:
+        """Parse into a metadata wrapper's copy — every node MUST come from the
+        wrapper's tree or ParentNodeProvider lookups miss (the fixers hold nodes
+        across transforms; identity must stay within one tree)."""
+        wrapper = cst.MetadataWrapper(cst.parse_module(source))
+        return _ParsedModule(module=wrapper.module, wrapper=wrapper)
+
+    class _FindFnLine(cst.CSTVisitor):
+        """Locate the first FunctionDef whose def line equals the target — its
+        node comes from the wrapper's (metadata-resolvable) tree."""
+
+        METADATA_DEPENDENCIES = (PositionProvider,)
+
+        def __init__(self, line: int) -> None:
+            self.line: int = line
+            self.found: cst.FunctionDef | None = None
+
+        @override
+        def visit_FunctionDef(self, node) -> None:
+            if (
+                self.found is None
+                and CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line == self.line
+            ):
+                self.found = node
+
+    @staticmethod
+    def _module_contains(module: cst.Module, fn: cst.FunctionDef | None) -> bool:
+        """Is the function still a direct child of the module?"""
+        return fn is not None and any(s is fn for s in module.body)
+
+    class _FreeNames(cst.CSTVisitor):
+        """The names a function READS from enclosing scopes: every Name node in
+        the tree minus the names bound anywhere inside it (parameters, locals,
+        for/comprehension/with targets, nested def names). A name bound inside
+        cannot be a reference to a module-level binding, so the extract-module
+        module-binding check must exclude it (review finding: a moved function
+        with a parameter named like a module constant was falsely refused)."""
+
+        def __init__(self) -> None:
+            self.names: set[str] = set()
+            self.bound: set[str] = set()
+
+        def _add_params(self, params) -> None:
+            for p in params:
+                if p.name is not None:
+                    self.bound.add(p.name.value)
+
+        @override
+        def visit_FunctionDef(self, node) -> None:
+            self.bound.add(node.name.value)
+            self._add_params(node.params.posonly_params)
+            self._add_params(node.params.params)
+            self._add_params(node.params.kwonly_params)
+            # a bare `*` keyword-only separator is ParamStar — no name; the
+            # guard must check the NODE type before touching `.name` (review
+            # finding: the isinstance on `.name` crashed first)
+            if isinstance(node.params.star_arg, cst.Param):
+                self.bound.add(node.params.star_arg.name.value)
+            if isinstance(node.params.star_kwarg, cst.Param):
+                self.bound.add(node.params.star_kwarg.name.value)
+
+        @override
+        def visit_Lambda(self, node) -> None:
+            self._add_params(node.params.posonly_params)
+            self._add_params(node.params.params)
+            self._add_params(node.params.kwonly_params)
+
+        @override
+        def visit_Name(self, node) -> None:
+            self.names.add(node.value)
+
+        @override
+        def visit_Assign(self, node) -> None:
+            for t in node.targets:
+                self.bound.update(CstMechanics._hoist_target_names(t.target))
+
+        @override
+        def visit_AnnAssign(self, node) -> None:
+            if node.target:
+                self.bound.update(CstMechanics._hoist_target_names(node.target))
+
+        @override
+        def visit_For(self, node) -> None:
+            self.bound.update(CstMechanics._hoist_target_names(node.target))
+
+        @override
+        def visit_CompFor(self, node) -> None:
+            self.bound.update(CstMechanics._hoist_target_names(node.target))
+
+        @override
+        def visit_With(self, node) -> None:
+            for item in node.items:
+                if item.asname is not None:
+                    self.bound.update(CstMechanics._hoist_target_names(item.asname.name))
+
+        @override
+        def visit_ExceptHandler(self, node) -> None:
+            # libcst's ExceptHandler.name is an AsName — the alias is `.name`,
+            # not `.value` (review finding: a crash on any `except ... as e:`)
+            if isinstance(node.name, cst.AsName) and isinstance(node.name.name, cst.Name):
+                self.bound.add(node.name.name.value)
+
+    @staticmethod
+    def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
+        """The origin's module-level imports binding a referenced name — what the
+        new module needs (libcst wraps imports in SimpleStatementLine)."""
+        moved: list = []
+        for stmt in module.body:
+            if not isinstance(stmt, cst.SimpleStatementLine):
+                continue
+            # a line can hold several imports (`import os; import sys`) — emit
+            # each matching import as its own statement, or the new module
+            # misses a name the moved def needs and NameErrors (review bot)
+            for inner in stmt.body:
+                if isinstance(inner, cst.Import):
+                    for alias in inner.names:
+                        bound = (
+                            CstMechanics._hoist_target_names(alias.asname.name)
+                            if alias.asname is not None
+                            else {CstMechanics._import_base_name(alias.name)}
+                        )
+                        if bound & referenced:
+                            moved.append(cst.SimpleStatementLine(body=[inner]))
+                            break
+                elif isinstance(inner, cst.ImportFrom):
+                    if isinstance(inner.names, cst.ImportStar):
+                        continue  # `from x import *` binds no importable name
+                    for alias in inner.names:
+                        if not isinstance(alias.name, cst.Name):
+                            continue
+                        bound = (
+                            CstMechanics._hoist_target_names(alias.asname.name)
+                            if alias.asname is not None
+                            else {alias.name.value}
+                        )
+                        if bound & referenced:
+                            moved.append(cst.SimpleStatementLine(body=[inner]))
+                            break
+        return moved

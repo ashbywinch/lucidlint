@@ -34,6 +34,7 @@ class MethodExtraction:
         state.module_globals = MethodExtraction._module_level_names(module)
         state.fn_writes = set().union(*(w for w in state.writes.values())) if state.writes else set()
         return module, wrapper, state
+
     def extract_method_proposal(self):
         source, line = self.request._loaded_source(), self.request.line
         name = self.request.opts.name
@@ -91,6 +92,7 @@ class MethodExtraction:
         )
         seam_text = source.splitlines()[first_span[0] - 1] if source else ""
         return inserted, f"line {first_span[0]}: {seam_text.strip()}"
+
     def fix_extract_method(self) -> str | None:
         """Extract Function (applied): the best self-contained seam of the
         function at `line` becomes a new function named `name`. The seam is
@@ -100,6 +102,7 @@ class MethodExtraction:
         (see _extraction_is_private), so a public-looking name is underscored."""
         new_source, _ = self.extract_method_proposal()
         return new_source
+
     class _Analyse(cst.CSTVisitor):
         """Collects the target function's body statement data — flattened so
         seams can descend into compound statements (a big loop's inner chunks
@@ -208,6 +211,7 @@ class MethodExtraction:
                     self.state.first_use[sid][node.value] = "write"
             if ctx == cst.metadata.ExpressionContext.STORE:
                 self.state.writes[sid].add(node.value)
+
     class _DecisionCount(cst.CSTVisitor):
         """Counts the radon-style decisions in one statement: ifs + elifs, and/or
         BooleanOperations, loops, asserts, match arms, comprehension clauses —
@@ -274,6 +278,7 @@ class MethodExtraction:
         @override
         def visit_ExceptHandler(self, node) -> None:
             self.n += 1  # radon counts each except handler
+
     class _ExtractMethodRewrite(cst.CSTTransformer):
         """Replace the target block with a call to the new function. Works at any
         nesting depth: removed statements vanish via `on_leave`, and the call is
@@ -307,6 +312,7 @@ class MethodExtraction:
                     body.insert(idx, call)
                     return updated_node.with_changes(body=suite.with_changes(body=body))
             return updated_node
+
     class _FnBodyState:
         """The extract-method analysis state: the target function's body
         statements with per-statement spans, first-use contexts, writes, and
@@ -459,6 +465,7 @@ class MethodExtraction:
             (*_, free_vars), flat_indices = best
             block_sids = [self.flat[k][0] for k in flat_indices]
             return list(block_sids), free_vars
+
     class _InsertExtractedFn(cst.CSTTransformer):
         """Insert the extracted function after its source function, in the same
         container (module or class body)."""
@@ -495,6 +502,7 @@ class MethodExtraction:
             return updated_node.with_changes(
                 body=updated_node.body.with_changes(body=self._maybe_insert(list(updated_node.body.body), 1))
             )
+
     @staticmethod
     def _chain_operands(node) -> int:
         """The number of operands in a chained and/or tree — radon's
@@ -502,6 +510,7 @@ class MethodExtraction:
         if isinstance(node, cst.BooleanOperation) and isinstance(node.operator, (cst.And, cst.Or)):
             return MethodExtraction._chain_operands(node.left) + MethodExtraction._chain_operands(node.right)
         return 1
+
     @staticmethod
     def _for_target_names(node) -> set[str]:
         """The names a for-loop's target binds (single name, tuple/starred
@@ -510,6 +519,7 @@ class MethodExtraction:
         if not isinstance(node, cst.For):
             return set()
         return MethodExtraction._target_bound_names(node.target)
+
     @staticmethod
     def _is_nested_target(wrapper: cst.MetadataWrapper, fn_node) -> bool:
         """Is the target function nested inside another function? The extracted
@@ -520,11 +530,13 @@ class MethodExtraction:
         while parent is not None and not isinstance(parent, (cst.Module, cst.ClassDef, cst.FunctionDef)):
             parent = parent_resolver[parent]
         return isinstance(parent, cst.FunctionDef)
+
     @staticmethod
     def _is_rebound_read(ctx: str, same_container: bool, name: str, re_bound: set[str]) -> bool:
         """A read of a name the loop re-binds each pass — not a dependency on the
         code after the loop."""
         return ctx == "read" and same_container and name in re_bound
+
     @staticmethod
     def _min_seam_decisions(state) -> int:
         """The seam must take enough decisions that the ORIGINAL lands under the
@@ -535,6 +547,7 @@ class MethodExtraction:
         fn_sid = id(state.fn_node)
         total = sum(state.decisions[sid] for sid, container, _ in state.flat if container == fn_sid)
         return max(0, total - 14) if total > 14 else 0
+
     @staticmethod
     def _module_level_names(module: cst.Module) -> set[str]:
         """The names bound at module scope: imports (and their aliases),
@@ -556,11 +569,13 @@ class MethodExtraction:
         for line_stmt in module.body:
             MethodExtraction.collect_stmt_names(add_target, line_stmt, names)
         return names
+
     @staticmethod
     def _stmt_decision_count(stmt) -> int:
         probe = MethodExtraction._DecisionCount()
         stmt.visit(probe)
         return probe.n
+
     @staticmethod
     def _target_bound_names(t) -> set[str]:
         """Recursively collect the names an assignment target binds."""
@@ -574,9 +589,11 @@ class MethodExtraction:
                 out |= MethodExtraction._target_bound_names(el.value)
             return out
         return set()
+
     @staticmethod
     def _wildcard(pattern) -> bool:
         return isinstance(pattern, cst.MatchAs) and pattern.pattern is None and pattern.name is None
+
     @staticmethod
     def collect_stmt_names(add_target, line_stmt, names):
         stmts = line_stmt.body if isinstance(line_stmt, cst.SimpleStatementLine) else [line_stmt]
@@ -597,4 +614,3 @@ class MethodExtraction:
                     add_target(t)
             elif isinstance(stmt, (cst.FunctionDef, cst.ClassDef)):
                 names.add(stmt.name.value)
-

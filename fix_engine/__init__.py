@@ -99,11 +99,6 @@ def _non_receiver_param_names(params: Sequence[cst.Param]) -> list[str]:
     return [p.name.value for p in params if p.name.value not in ("self", "cls")]
 
 
-def _module_contains(module: cst.Module, fn: cst.FunctionDef | None) -> bool:
-    """Is the function still a direct child of the module?"""
-    return fn is not None and any(s is fn for s in module.body)
-
-
 def _module_parts(rel: str) -> list[str]:
     """A module's import path: its directory parts plus the stem."""
     return rel.split("/")[:-1] + [rel.rsplit("/", 1)[-1][:-3]]
@@ -362,7 +357,7 @@ class _FixRequest:
         has other callers, on *args/**kwargs passthrough, on a
         `from mod import F` re-export, or when N has other callers — never
         blind inlining."""
-        module, wrapper = _wrapped_module(self._loaded_source())
+        module, wrapper = CstMechanics._wrapped_module(self._loaded_source())
         head = _chain_head(wrapper, self.line)
         if head is None:
             return None  # stale, or the method is not a pure forwarder (R28)
@@ -527,7 +522,7 @@ class _FixRequest:
         the split back to flat."""
         if not self.rel.endswith(".py") or self.rel.endswith("__init__.py"):
             return None  # the scanner never flags __init__ — nothing to split
-        module, wrapper = _wrapped_module(self._loaded_source())
+        module, wrapper = CstMechanics._wrapped_module(self._loaded_source())
         origin = _split_origin(self.rel)
         subjects = _split_subjects(module.body, origin.stem)
         if not subjects:
@@ -585,7 +580,7 @@ class _FixRequest:
         # binding — counting it would falsely refuse safe splits (review finding)
         referenced: set[str] = set()
         for name in move:
-            free = _FreeNames()
+            free = CstMechanics._FreeNames()
             top_defs[name].visit(free)
             referenced |= free.names - free.bound
         if referenced & (set(top_defs) - move):
@@ -595,7 +590,9 @@ class _FixRequest:
         # them would break the origin's remaining code (review finding)
         if referenced & _module_bindings(module):
             return None
-        new_module = cst.Module(body=[*_moved_imports(module, referenced), *(top_defs[n] for n in opts.params)])
+        new_module = cst.Module(
+            body=[*CstMechanics._moved_imports(module, referenced), *(top_defs[n] for n in opts.params)]
+        )
         return _ModuleProposal(
             origin=cst.Module(body=_origin_after_move(module, move, opts, self.rel)).code,
             module=new_module.code,
@@ -626,10 +623,10 @@ class _FixRequest:
         variables (minus the selector) so the dispatch call is uniform."""
         module = cst.parse_module(source)
         wrapper = cst.MetadataWrapper(module)
-        finder = _FindFnLine(line)
+        finder = CstMechanics._FindFnLine(line)
         wrapper.visit(finder)
         fn = finder.found
-        if fn is None or not _module_contains(wrapper.module, fn):
+        if fn is None or not CstMechanics._module_contains(wrapper.module, fn):
             return None
         body = list(fn.body.body)
         shaped = _dispatch_chain_shape(fn, body)
@@ -657,10 +654,10 @@ class _FixRequest:
         single `acc.append(<value>)` with no else."""
         module = cst.parse_module(source)
         wrapper = cst.MetadataWrapper(module)
-        finder = _FindFnLine(line)
+        finder = CstMechanics._FindFnLine(line)
         wrapper.visit(finder)
         fn = finder.found
-        if fn is None or not _module_contains(wrapper.module, fn):
+        if fn is None or not CstMechanics._module_contains(wrapper.module, fn):
             return None
         body = list(fn.body.body)
         shaped = _rule_battery_shape(fn, body)
@@ -1270,44 +1267,6 @@ class _RemoveHuskClass(cst.CSTTransformer):
         return updated_node
 
 
-def _moved_imports(module: cst.Module, referenced: set[str]) -> list:
-    """The origin's module-level imports binding a referenced name — what the
-    new module needs (libcst wraps imports in SimpleStatementLine)."""
-    moved: list = []
-    for stmt in module.body:
-        if not isinstance(stmt, cst.SimpleStatementLine):
-            continue
-        # a line can hold several imports (`import os; import sys`) — emit
-        # each matching import as its own statement, or the new module
-        # misses a name the moved def needs and NameErrors (review bot)
-        for inner in stmt.body:
-            if isinstance(inner, cst.Import):
-                for alias in inner.names:
-                    bound = (
-                        CstMechanics._hoist_target_names(alias.asname.name)
-                        if alias.asname is not None
-                        else {CstMechanics._import_base_name(alias.name)}
-                    )
-                    if bound & referenced:
-                        moved.append(cst.SimpleStatementLine(body=[inner]))
-                        break
-            elif isinstance(inner, cst.ImportFrom):
-                if isinstance(inner.names, cst.ImportStar):
-                    continue  # `from x import *` binds no importable name
-                for alias in inner.names:
-                    if not isinstance(alias.name, cst.Name):
-                        continue
-                    bound = (
-                        CstMechanics._hoist_target_names(alias.asname.name)
-                        if alias.asname is not None
-                        else {alias.name.value}
-                    )
-                    if bound & referenced:
-                        moved.append(cst.SimpleStatementLine(body=[inner]))
-                        break
-    return moved
-
-
 # the orchestrator
 # lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
 def _origin_after_move(module: cst.Module, move: set[str], opts, rel: str) -> list:
@@ -1337,14 +1296,6 @@ def _origin_after_move(module: cst.Module, move: set[str], opts, rel: str) -> li
             insert_at = i + 1
     remaining.insert(insert_at, reexport)
     return remaining
-
-
-def _wrapped_module(source: str) -> tuple[cst.Module, cst.MetadataWrapper]:
-    """Parse into a metadata wrapper's copy — every node MUST come from the
-    wrapper's tree or ParentNodeProvider lookups miss (the fixers hold nodes
-    across transforms; identity must stay within one tree)."""
-    wrapper = cst.MetadataWrapper(cst.parse_module(source))
-    return wrapper.module, wrapper
 
 
 class _MethodAtLine(cst.CSTVisitor):
@@ -1684,7 +1635,7 @@ def _snake_name(name: str) -> str:
 def _class_free_names(cls: cst.ClassDef) -> set[str]:
     """The names a class READS from the enclosing module: every Name in its
     subtree minus the names bound inside it and minus its own name."""
-    probe = _FreeNames()
+    probe = CstMechanics._FreeNames()
     cls.visit(probe)
     return probe.names - probe.bound - {cls.name.value}
 
@@ -1693,7 +1644,7 @@ def _free_names_of(stmt) -> set[str]:
     """The names one module-level statement reads from the module scope
     (bindings inside it excluded) — the residual's references to moved
     classes and constants."""
-    probe = _FreeNames()
+    probe = CstMechanics._FreeNames()
     stmt.visit(probe)
     return probe.names - probe.bound
 
@@ -2411,7 +2362,7 @@ def _split_class_source(
     residual member; a from-`.Class` import for a sibling subject) + the
     class itself with its constants and references rewritten."""
     free = _class_free_names(cls) - ctx.moved - CstMechanics.BUILTINS
-    imports = _moved_imports(module, free)  # verbatim copies for import-bound names
+    imports = CstMechanics._moved_imports(module, free)  # verbatim copies for import-bound names
     constructed: list = []
     for n in sorted(free):
         if n in ctx.subjects and n != cls.name.value:
@@ -2792,98 +2743,6 @@ def _module_bindings(module: cst.Module) -> set[str]:
         elif isinstance(inner, cst.AnnAssign) and inner.target is not None:
             bound |= CstMechanics._hoist_target_names(inner.target)
     return bound
-
-
-class _FreeNames(cst.CSTVisitor):
-    """The names a function READS from enclosing scopes: every Name node in
-    the tree minus the names bound anywhere inside it (parameters, locals,
-    for/comprehension/with targets, nested def names). A name bound inside
-    cannot be a reference to a module-level binding, so the extract-module
-    module-binding check must exclude it (review finding: a moved function
-    with a parameter named like a module constant was falsely refused)."""
-
-    def __init__(self) -> None:
-        self.names: set[str] = set()
-        self.bound: set[str] = set()
-
-    def _add_params(self, params) -> None:
-        for p in params:
-            if p.name is not None:
-                self.bound.add(p.name.value)
-
-    @override
-    def visit_FunctionDef(self, node) -> None:
-        self.bound.add(node.name.value)
-        self._add_params(node.params.posonly_params)
-        self._add_params(node.params.params)
-        self._add_params(node.params.kwonly_params)
-        # a bare `*` keyword-only separator is ParamStar — no name; the
-        # guard must check the NODE type before touching `.name` (review
-        # finding: the isinstance on `.name` crashed first)
-        if isinstance(node.params.star_arg, cst.Param):
-            self.bound.add(node.params.star_arg.name.value)
-        if isinstance(node.params.star_kwarg, cst.Param):
-            self.bound.add(node.params.star_kwarg.name.value)
-
-    @override
-    def visit_Lambda(self, node) -> None:
-        self._add_params(node.params.posonly_params)
-        self._add_params(node.params.params)
-        self._add_params(node.params.kwonly_params)
-
-    @override
-    def visit_Name(self, node) -> None:
-        self.names.add(node.value)
-
-    @override
-    def visit_Assign(self, node) -> None:
-        for t in node.targets:
-            self.bound.update(CstMechanics._hoist_target_names(t.target))
-
-    @override
-    def visit_AnnAssign(self, node) -> None:
-        if node.target:
-            self.bound.update(CstMechanics._hoist_target_names(node.target))
-
-    @override
-    def visit_For(self, node) -> None:
-        self.bound.update(CstMechanics._hoist_target_names(node.target))
-
-    @override
-    def visit_CompFor(self, node) -> None:
-        self.bound.update(CstMechanics._hoist_target_names(node.target))
-
-    @override
-    def visit_With(self, node) -> None:
-        for item in node.items:
-            if item.asname is not None:
-                self.bound.update(CstMechanics._hoist_target_names(item.asname.name))
-
-    @override
-    def visit_ExceptHandler(self, node) -> None:
-        # libcst's ExceptHandler.name is an AsName — the alias is `.name`,
-        # not `.value` (review finding: a crash on any `except ... as e:`)
-        if isinstance(node.name, cst.AsName) and isinstance(node.name.name, cst.Name):
-            self.bound.add(node.name.name.value)
-
-
-class _FindFnLine(cst.CSTVisitor):
-    """Locate the first FunctionDef whose def line equals the target — its
-    node comes from the wrapper's (metadata-resolvable) tree."""
-
-    METADATA_DEPENDENCIES = (PositionProvider,)
-
-    def __init__(self, line: int) -> None:
-        self.line: int = line
-        self.found: cst.FunctionDef | None = None
-
-    @override
-    def visit_FunctionDef(self, node) -> None:
-        if (
-            self.found is None
-            and CstMechanics._as_range(self.get_metadata(PositionProvider, node)).start.line == self.line
-        ):
-            self.found = node
 
 
 # --------------------------------------------------------------------------- dispatch-registry
