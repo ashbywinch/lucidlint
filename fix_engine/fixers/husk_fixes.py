@@ -6,7 +6,7 @@ members, and its libcst visitors are nested classes.
 
 from __future__ import annotations
 
-from typing import override
+from typing import Any, override
 
 import libcst as cst
 from libcst.metadata import PositionProvider
@@ -21,7 +21,7 @@ class HuskFixes:
     husk, never inline."""
 
     def __init__(self, request) -> None:
-        self.request = request
+        self.request: Any = request
 
     # lucidlint: ignore closures the nested visitors are one-purpose probes; hoisting names nothing owned
     def run(self) -> str | None:

@@ -22,7 +22,7 @@ class FeatureEnvy:
     """The feature envy fix for one request."""
 
     def __init__(self, request: Any) -> None:
-        self.request = request
+        self.request: Any = request
 
     class _Collaborator(NamedTuple):
         """One `graph = self.graph` alias: the local name and the owner field

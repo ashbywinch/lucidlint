@@ -48,13 +48,13 @@ class CoverageGate:
     the run owes the caller — the rows, the failures, the exit status."""
 
     def __init__(self, root: ET.Element, subjects: list[Subject], output: Path | None):
-        self.root = root
-        self.subjects = subjects
-        self.output = output
+        self.root: ET.Element = root
+        self.subjects: list[Subject] = subjects
+        self.output: Path | None = output
         self.rows: list[str] = []
         self.failures: list[str] = []
-        self.covered_total = 0
-        self.valid_total = 0
+        self.covered_total: int = 0
+        self.valid_total: int = 0
 
     @staticmethod
     def percent(fraction: float) -> float:

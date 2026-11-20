@@ -9,7 +9,7 @@ from __future__ import annotations
 import keyword
 import re
 from pathlib import Path
-from typing import NamedTuple, override
+from typing import Any, NamedTuple, override
 
 import libcst as cst
 from libcst.metadata import ExpressionContextProvider, ParentNodeProvider, PositionProvider
@@ -34,7 +34,7 @@ class DataClump:
         fns: tuple[cst.FunctionDef, ...]
 
     def __init__(self, request) -> None:
-        self.request = request
+        self.request: Any = request
 
     def run(self) -> str | None:
         """Thread the clump's shared pair through one parameter object: the class

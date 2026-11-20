@@ -19,7 +19,7 @@ class Rewrite:
     """One module under edit, and the edits shared by every fixer."""
 
     def __init__(self, module: cst.Module) -> None:
-        self.module = module
+        self.module: cst.Module = module
 
     def without(self, targets) -> cst.Module:
         """The module with exactly the given nodes removed (identity)."""

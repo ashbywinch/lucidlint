@@ -18,8 +18,8 @@ class ModuleOutline:
     """One parsed module, queried by position."""
 
     def __init__(self, wrapper: cst.MetadataWrapper) -> None:
-        self.wrapper = wrapper
-        self.module = wrapper.module
+        self.wrapper: cst.MetadataWrapper = wrapper
+        self.module: cst.Module = wrapper.module
 
     def _find(self, probe):
         """Run one probe visitor over the tree and return what it found."""

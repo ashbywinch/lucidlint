@@ -18,7 +18,7 @@ class MagicLiteral:
     """The magic literal fix for one request."""
 
     def __init__(self, request: Any) -> None:
-        self.request = request
+        self.request: Any = request
 
     def run(self) -> str | None:
         source, line = self.request.loaded_source(), self.request.line

@@ -75,7 +75,7 @@ class MechanicalFixes:
         if_test: cst.BaseExpression | None  # the one-filter test or None
 
     def __init__(self, request: Any) -> None:
-        self.request = request
+        self.request: Any = request
 
     def run(self) -> str | None:
         kind, source, line, opts = (

@@ -66,8 +66,8 @@ class RustScan:
         # the graph contract is another service's work; the scan asks for the
         # export path rather than reaching for a process-wide registry. A scan
         # with no collaborator runs without the graph families.
-        self._host = host
-        self.graph = graph
+        self._host: Host = host
+        self.graph: Any = graph
         self._cache: dict[tuple[Path, tuple[str, ...]], RustFindings | None] = {}
         self._binary_cache: dict[Path, Path | None] = {}
         self._pending_gitignored: tuple[str, ...] = ()

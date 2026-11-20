@@ -41,10 +41,10 @@ class Baseline:
     KEY_PARTS = 4
 
     def __init__(self, path: Path | None = None) -> None:
-        self.path = path
+        self.path: Path | None = path
         self.keys: set[str] = set()
         self.ignored: dict[str, int] = {}
-        self.legacy = 0
+        self.legacy: int = 0
         self._read()
 
     def _read(self) -> None:

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import NamedTuple, override
+from typing import Any, NamedTuple, override
 
 import libcst as cst
 from libcst.metadata import PositionProvider
@@ -81,7 +81,7 @@ class ChainFixes:
         name: str
 
     def __init__(self, request) -> None:
-        self.request = request
+        self.request: Any = request
 
     def run(self) -> str | None:
         """Collapse a forwarding chain (#30): method M (class C) whose body is

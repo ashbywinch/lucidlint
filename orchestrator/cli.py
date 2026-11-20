@@ -23,10 +23,10 @@ class Cli:
     its state, so the run reads them instead of re-parsing."""
 
     def __init__(self, args: argparse.Namespace, host: Host | None = None) -> None:
-        self.args = args
-        self.repo = args.repo.resolve()
-        self.host = host or Host.default()
-        self.services = Services(self.host)
+        self.args: argparse.Namespace = args
+        self.repo: Path = args.repo.resolve()
+        self.host: Host = host or Host.default()
+        self.services: Services = Services(self.host)
 
     @staticmethod
     def parse_args() -> argparse.Namespace:

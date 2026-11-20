@@ -41,8 +41,8 @@ class SourceWalk:
     """The source files and documentation set of one repo."""
 
     def __init__(self, repo: Path, host: Host) -> None:
-        self.repo = repo
-        self._host = host
+        self.repo: Path = repo
+        self._host: Host = host
 
     @staticmethod
     def excluded_part(part: str) -> bool:

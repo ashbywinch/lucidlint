@@ -6,7 +6,7 @@ and the apply writes both files.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import libcst as cst
 
@@ -26,7 +26,7 @@ class ModuleExtraction:
         module: str
 
     def __init__(self, request) -> None:
-        self.request = request
+        self.request: Any = request
 
     def proposal(self) -> ModuleExtraction._ModuleProposal | None:
         source = self.request.loaded_source()

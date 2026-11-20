@@ -6,7 +6,7 @@ violations whose condition holds.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import libcst as cst
 
@@ -49,7 +49,7 @@ class RuleTable:
     """One request's rule table fix. The request is the fixer's state."""
 
     def __init__(self, request) -> None:
-        self.request = request
+        self.request: Any = request
 
     def fix_rule_table(self) -> str | None:
         source, line = self.request.loaded_source(), self.request.line

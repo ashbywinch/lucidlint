@@ -38,7 +38,7 @@ class RecordFixes:
         keys: list[str]
 
     def __init__(self, request: Any) -> None:
-        self.request = request
+        self.request: Any = request
 
     def tuple_record(self) -> str | None:
         """The anonymous tuple record becomes a class: the build sites

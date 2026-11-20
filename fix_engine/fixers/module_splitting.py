@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import NamedTuple, cast, override
+from typing import Any, NamedTuple, cast, override
 
 import libcst as cst
 from libcst.metadata import ParentNodeProvider
@@ -81,7 +81,7 @@ class ModuleSplitting:
         decline: str | None = None
 
     def __init__(self, request) -> None:
-        self.request = request
+        self.request: Any = request
 
     def run(self) -> str | None:
         """Split a multi-class module (#31): the misplaced public classes move

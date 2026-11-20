@@ -12,5 +12,5 @@ class Services:
     """The one pair of collaborating services a run needs, wired once."""
 
     def __init__(self, host: Host) -> None:
-        self.graph = GraphContract(host)
-        self.rust_scan = RustScan(host, self.graph)
+        self.graph: GraphContract = GraphContract(host)
+        self.rust_scan: RustScan = RustScan(host, self.graph)

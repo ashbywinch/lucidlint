@@ -7,7 +7,7 @@ members, and its libcst visitors are nested classes.
 from __future__ import annotations
 
 import keyword
-from typing import NamedTuple, override
+from typing import Any, NamedTuple, override
 
 import libcst as cst
 from libcst.metadata import ParentNodeProvider, PositionProvider
@@ -37,7 +37,7 @@ class WideTuple:
         elements: tuple[cst.BaseExpression, ...] | None
 
     def __init__(self, request) -> None:
-        self.request = request
+        self.request: Any = request
 
     def run(self) -> str | None:
         """Introduce the record class for the flagged fixed-arity tuple: the

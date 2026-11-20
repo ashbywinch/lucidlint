@@ -44,7 +44,7 @@ class RuleGenerator:
     artifacts it renders from it."""
 
     def __init__(self, catalog: "rule_metadata.RuleCatalog"):
-        self.catalog = catalog
+        self.catalog: rule_metadata.RuleCatalog = catalog
 
     def rules_md(self) -> str:
         """The marked region: every display group's section + table."""

@@ -17,7 +17,7 @@ class Imports:
     """One module's module-level imports, as sources for a moved definition."""
 
     def __init__(self, module: cst.Module) -> None:
-        self.module = module
+        self.module: cst.Module = module
 
     def needed(self, referenced: set[str]) -> list:
         """The origin's module-level imports binding a referenced name — what the

@@ -8,7 +8,7 @@ construction, so a public-looking name is underscored.
 
 from __future__ import annotations
 
-from typing import override
+from typing import Any, override
 
 import libcst as cst
 from libcst.metadata import ExpressionContextProvider, ParentNodeProvider, PositionProvider
@@ -27,7 +27,7 @@ class MethodExtraction:
     _CC_GATE_DECISIONS = 14
 
     def __init__(self, request) -> None:
-        self.request = request
+        self.request: Any = request
 
     def _fn_seam_analysis(self):
         """Analyze the function at `line`: its body statements with per-statement
