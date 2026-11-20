@@ -41,16 +41,14 @@ impl<'a, 'b> FunctionWalk<'a, 'b> {
             return;
         }
         let fn_name = f.name.to_string();
-        let mut param_names = Vec::new();
-        for p in f
+        let mut param_names: Vec<String> = f
             .parameters
             .posonlyargs
             .iter()
             .chain(&f.parameters.args)
             .chain(&f.parameters.kwonlyargs)
-        {
-            param_names.push(p.parameter.name.to_string());
-        }
+            .map(|p| p.parameter.name.to_string())
+            .collect();
         if let Some(v) = &f.parameters.vararg {
             param_names.push(v.name.to_string());
         }

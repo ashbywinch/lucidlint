@@ -308,15 +308,9 @@ impl UnnamedCondition {
         let Some(operands) = Self::bool_operands(expr) else {
             return Self::operand_nouns(expr);
         };
-        let mut nouns: Vec<String> = Vec::new();
-        for op in operands {
-            for n in Self::operand_nouns(op) {
-                if !nouns.contains(&n) {
-                    nouns.push(n);
-                }
-            }
-        }
+        let mut nouns: Vec<String> = operands.into_iter().flat_map(Self::operand_nouns).collect();
         nouns.sort();
+        nouns.dedup();
         nouns
     }
 

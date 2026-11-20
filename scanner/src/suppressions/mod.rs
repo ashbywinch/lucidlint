@@ -164,12 +164,13 @@ impl Suppressions {
     pub fn finding_window(f: &crate::Finding) -> Vec<usize> {
         let logical = f.logical_line();
         let mut lines: Vec<usize> = Vec::with_capacity(WINDOW_CAPACITY);
-        for l in [f.line, f.line.saturating_sub(1), logical, logical.saturating_sub(1)] {
-            if l >= 1 && !lines.contains(&l) {
-                lines.push(l);
-            }
-        }
+        lines.extend(
+            [f.line, f.line.saturating_sub(1), logical, logical.saturating_sub(1)]
+                .into_iter()
+                .filter(|&line| line >= 1),
+        );
         lines.sort_unstable();
+        lines.dedup();
         lines.reverse();
         lines
     }
@@ -284,15 +285,12 @@ impl Suppressions {
     /// windows: a def's signature findings share the def line even when their own
     /// lines differ.
     fn marker_inventory(members: &[usize], findings: &[crate::Finding], supps: &Suppressions) -> Vec<(usize, String)> {
-        let mut window: Vec<usize> = Vec::new();
-        for &i in members {
-            for ln in Self::finding_window(&findings[i]) {
-                if !window.contains(&ln) {
-                    window.push(ln);
-                }
-            }
-        }
+        let mut window: Vec<usize> = members
+            .iter()
+            .flat_map(|&i| Self::finding_window(&findings[i]))
+            .collect();
         window.sort_unstable();
+        window.dedup();
         window.reverse();
         let mut pairs: Vec<(usize, String)> = Vec::new();
         for ln in window {

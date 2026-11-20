@@ -43,15 +43,12 @@ impl RsDecision {
     /// The distinct nouns a condition is about — a field/method receiver, a
     /// one-segment path, a free call's first argument.
     pub(super) fn rs_condition_nouns(expr: &Expr) -> Vec<String> {
-        let mut nouns: Vec<String> = Vec::new();
-        for op in Self::rs_bool_operands(expr) {
-            for n in Self::rs_operand_nouns(op) {
-                if !nouns.contains(&n) {
-                    nouns.push(n);
-                }
-            }
-        }
+        let mut nouns: Vec<String> = Self::rs_bool_operands(expr)
+            .into_iter()
+            .flat_map(Self::rs_operand_nouns)
+            .collect();
         nouns.sort();
+        nouns.dedup();
         nouns
     }
 
