@@ -48,7 +48,9 @@ mod state;
 mod suppressions;
 use checks::Q;
 use checks::*;
-use file_scan::{ClassInfo, FileScan, ImportInfo, SelfAssign, UndeclScan};
+use file_scan::{
+    ClassInfo, FileScan, ImportInfo, SelfAssign, SpentMap, SpentRow, SuppressionRow, SuppressionsMap, UndeclScan,
+};
 use finding::{Finding, FnCc, FnScope};
 use paths::{Paths, SCAN_SKIP_DIRS};
 use source::Source;
@@ -159,6 +161,20 @@ impl FileScan {
     /// `rel`); the repo-wide merge keys everything by it.
     pub fn rel_of(&self, root_s: &str) -> String {
         Paths::rel_of(&self.file_name, root_s)
+    }
+
+    /// This file's definition rows for the repo-wide merge: plain defs then
+    /// class defs, each tagged with the file's rel and whether it is a class.
+    pub fn definition_rows<'a>(&'a self, rel: &'a str) -> impl Iterator<Item = (String, String, usize, bool)> + 'a {
+        let plain = self
+            .defs
+            .iter()
+            .map(move |(name, line)| (rel.to_string(), name.clone(), *line, false));
+        let classes = self
+            .class_defs
+            .iter()
+            .map(move |(name, line)| (rel.to_string(), name.clone(), *line, true));
+        plain.chain(classes)
     }
 }
 
@@ -458,63 +474,84 @@ impl Pipeline {
     /// part of a repo-wide scan is the per-file scan, so the LSP reuses cached
     /// scans and re-runs only this pure in-memory aggregation on save.
     fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collections::HashMap<String, Vec<Finding>> {
-        let mut skeletons = Vec::new();
-        let mut definitions: Vec<(String, String, usize, bool)> = Vec::new();
-        let mut setters: Vec<(String, String, usize)> = Vec::new();
-        let mut prod_refs = HashSet::new();
-        let mut test_refs = HashSet::new();
-        let mut strings = Vec::new();
-        let mut supps_by_rel: std::collections::HashMap<String, crate::suppressions::Suppressions> =
-            std::collections::HashMap::new();
-        let mut supps_spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
-            std::collections::HashMap::new();
-        for scan in scans {
-            let rel = scan.rel_of(root_s);
-            let is_test = Paths::is_test_path(&rel);
-            skeletons.extend(scan.skeletons.iter().map(|s| SkeletonFn {
-                rel: rel.clone(),
-                name: s.name.clone(),
-                line: s.line,
-                end_line: s.end_line,
-                skeleton: s.skeleton.clone(),
-            }));
-            definitions.extend(
-                scan.defs
-                    .iter()
-                    .map(|(name, line)| (rel.clone(), name.clone(), *line, false)),
-            );
-            definitions.extend(
-                scan.class_defs
-                    .iter()
-                    .map(|(name, line)| (rel.clone(), name.clone(), *line, true)),
-            );
-            setters.extend(
+        // one chain per collection: each output states its own provenance, and
+        // the per-scan rel travels in the closure that builds the row
+        let rel_of = |scan: &FileScan| scan.rel_of(root_s);
+        let is_test = |scan: &FileScan| Paths::is_test_path(&scan.rel_of(root_s));
+        let skeletons: Vec<SkeletonFn> = scans
+            .iter()
+            .flat_map(|scan| {
+                let rel = rel_of(scan);
+                scan.skeletons.iter().map(move |s| SkeletonFn {
+                    rel: rel.clone(),
+                    name: s.name.clone(),
+                    line: s.line,
+                    end_line: s.end_line,
+                    skeleton: s.skeleton.clone(),
+                })
+            })
+            .collect();
+        let definitions: Vec<(String, String, usize, bool)> = scans
+            .iter()
+            .flat_map(|scan| {
+                let rel = rel_of(scan);
+                scan.definition_rows(&rel).collect::<Vec<_>>()
+            })
+            .collect();
+        let setters: Vec<(String, String, usize)> = scans
+            .iter()
+            .flat_map(|scan| {
+                let rel = rel_of(scan);
                 scan.setters
                     .iter()
-                    .map(|(name, line)| (rel.clone(), name.clone(), *line)),
-            );
-            if is_test {
-                test_refs.extend(scan.refs.iter().cloned());
-            } else {
-                prod_refs.extend(scan.refs.iter().cloned());
-                strings.extend(scan.strings.iter().cloned());
-            }
-            prod_refs.extend(scan.decorated.iter().cloned());
-            supps_by_rel.insert(rel.clone(), scan.supps.clone());
-            supps_spent_by_rel.insert(rel.clone(), scan.supps_spent.clone());
-        }
-        let mut module_entities = Vec::new();
-        let mut heads = Vec::new();
-        let mut fns = Vec::new();
-        let mut repo_methods = Vec::new();
-        let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
-        for scan in scans {
-            module_entities.extend(scan.skeleton_modules.iter().cloned());
-            heads.extend(scan.forwarder_methods.iter().cloned());
-            fns.extend(scan.forwarder_fns.iter().cloned());
-            repo_methods.extend(scan.repo_methods.iter().cloned());
-            imports_by_rel.insert(scan.rel_of(root_s), scan.imports.clone());
-        }
+                    .map(move |(name, line)| (rel.clone(), name.clone(), *line))
+            })
+            .collect();
+        let test_refs: HashSet<String> = scans
+            .iter()
+            .filter(|scan| is_test(scan))
+            .flat_map(|scan| scan.refs.iter().cloned())
+            .collect();
+        let prod_refs: HashSet<String> = scans
+            .iter()
+            .filter(|scan| !is_test(scan))
+            .flat_map(|scan| scan.refs.iter().cloned())
+            .chain(scans.iter().flat_map(|scan| scan.decorated.iter().cloned()))
+            .collect();
+        let strings: Vec<String> = scans
+            .iter()
+            .filter(|scan| !is_test(scan))
+            .flat_map(|scan| scan.strings.iter().cloned())
+            .collect();
+        // two maps keyed by the same rel: one (key, value) pair per map, unzipped
+        let supps_rows: Vec<(SuppressionRow, SpentRow)> = scans
+            .iter()
+            .map(|scan| {
+                let rel = rel_of(scan);
+                ((rel.clone(), scan.supps.clone()), (rel, scan.supps_spent.clone()))
+            })
+            .collect();
+        let (supps_keys, supps_values): (Vec<SuppressionRow>, Vec<SpentRow>) = supps_rows.into_iter().unzip();
+        let supps_by_rel: SuppressionsMap = supps_keys.into_iter().collect();
+        let supps_spent_by_rel: SpentMap = supps_values.into_iter().collect();
+        let module_entities: Vec<_> = scans
+            .iter()
+            .flat_map(|scan| scan.skeleton_modules.iter().cloned())
+            .collect();
+        let heads: Vec<_> = scans
+            .iter()
+            .flat_map(|scan| scan.forwarder_methods.iter().cloned())
+            .collect();
+        let fns: Vec<_> = scans
+            .iter()
+            .flat_map(|scan| scan.forwarder_fns.iter().cloned())
+            .collect();
+        let repo_methods: Vec<_> = scans
+            .iter()
+            .flat_map(|scan| scan.repo_methods.iter().cloned())
+            .collect();
+        let imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> =
+            scans.iter().map(|scan| (rel_of(scan), scan.imports.clone())).collect();
         let mut additions: Vec<Finding> = Vec::new();
         additions.extend(checks::duplicate_findings(&skeletons));
         additions.extend(checks::DuplicateModule::findings(&module_entities));

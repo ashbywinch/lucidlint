@@ -50,6 +50,14 @@ pub struct UndeclScan {
     pub self_assigns: Vec<SelfAssign>,
 }
 
+/// The repo-wide merge's two suppression maps, keyed by the file's rel: what
+/// each file spent, and what remains. One name for the pair a scan yields.
+pub type SuppressionsMap = std::collections::HashMap<String, crate::suppressions::Suppressions>;
+pub type Spent = std::collections::HashSet<(usize, String)>;
+pub type SuppressionRow = (String, crate::suppressions::Suppressions);
+pub type SpentRow = (String, Spent);
+pub type SpentMap = std::collections::HashMap<String, Spent>;
+
 #[derive(Clone, Default)]
 pub struct FileScan {
     pub file_name: String,
