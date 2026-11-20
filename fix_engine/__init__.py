@@ -29,6 +29,7 @@ from libcst.metadata import ExpressionContextProvider, ParentNodeProvider, Posit
 from fix_engine import records as _records
 from fix_engine.bindings import Bindings, StoredNames
 from fix_engine.fix_options import FixOptions
+from fix_engine.fixers.chain_fixes import ChainFixes
 from fix_engine.fixers.class_extraction import ClassExtraction
 from fix_engine.fixers.data_clump import DataClump
 from fix_engine.fixers.dispatch_registry import DispatchRegistry
@@ -50,13 +51,7 @@ from fix_engine.rewrite import Rewrite
 from fix_engine.source_files import SourceFiles
 from fix_engine.strewing_group import StrewingGroup
 
-_ChainHead = _records._ChainHead
-_ChainMiddle = _records._ChainMiddle
-_ChainTerminal = _records._ChainTerminal
-_ForwardTarget = _records._ForwardTarget
-_ModuleFn = _records._ModuleFn
 _ModuleProposal = _records._ModuleProposal
-_ModuleRef = _records._ModuleRef
 _SplitCtx = _records._SplitCtx
 _SplitLayout = _records._SplitLayout
 _SplitOutcome = _records._SplitOutcome
@@ -98,11 +93,6 @@ _stmt_decision_count = MethodExtraction._stmt_decision_count
 _target_bound_names = MethodExtraction._target_bound_names
 _wildcard = MethodExtraction._wildcard
 collect_stmt_names = MethodExtraction.collect_stmt_names
-
-
-def _non_receiver_param_names(params: Sequence[cst.Param]) -> list[str]:
-    """The parameter names a moved method carries, without `self`/`cls`."""
-    return [p.name.value for p in params if p.name.value not in ("self", "cls")]
 
 
 def _module_parts(rel: str) -> list[str]:
@@ -244,167 +234,9 @@ class _FixRequest:
         """Dissolve the delegating husk: rewire its callers, delete the husk."""
         return HuskFixes(self).run()
 
-    # lucidlint: ignore latent-class the chain facts thread through module helpers — _FixRequest is the boundary
     def fix_collapse_chain(self) -> str | None:
-        """Collapse a forwarding chain (#30): method M (class C) whose body is
-        exactly `return F(<all params>)`, module fn F whose body is exactly
-        `return N(<all F params>)`, N a method on ANOTHER class D (or a
-        module fn at depth >= 2). REWIRE M to reach D.N directly and delete F
-        when D is real (has state or non-forwarding members); PROMOTE N to a
-        sibling method of M when D has no identity and dissolves. REFUSES
-        when the modules are independent (the deliberate boundary), when F
-        has other callers, on *args/**kwargs passthrough, on a
-        `from mod import F` re-export, or when N has other callers — never
-        blind inlining."""
-        module, wrapper = ModuleSource.parse(self._loaded_source())
-        head = _chain_head(wrapper, self.line)
-        if head is None:
-            return None  # stale, or the method is not a pure forwarder (R28)
-        mid = _chain_middle(self.repo, head)
-        if mid is None:
-            return None  # F is missing or does not forward its own params
-        refusal = self._chain_refusal(head, mid)
-        if refusal is not None:
-            self.decline = refusal
-            return None
-        if mid.callee.is_name:
-            return self._collapse_to_module_fn(module, head, mid)
-        return self._collapse_to_method(module, head, mid)
-
-    def _chain_refusal(self, head: _ChainHead, mid: _ChainMiddle) -> str | None:
-        """The refusals every chain shape shares: F's only caller is the head,
-        no *args/**kwargs passthrough, and no `from mod import F` re-export to
-        retarget."""
-        f_name = head.callee.name
-        if _call_sites(_ModuleRef(self.repo, f_name)) != 1:
-            return f"'{f_name}' has more than one caller — collapse by hand"
-        if any("*" in p for p in head.params) or any("*" in p for p in mid.params):
-            return "the chain passes *args/**kwargs — collapse by hand"
-        if _reexported(_ModuleRef(self.repo, f_name)):
-            return f"'from ... import {f_name}' re-exports the forwarder — collapse by hand"
-        return None
-
-    def _collapse_to_module_fn(self, module: cst.Module, head: _ChainHead, mid: _ChainMiddle) -> str | None:
-        """M -> F -> G (a module function): M calls G with its own params and F
-        is deleted. None when the two modules are otherwise independent — the
-        chain is then the deliberate boundary between them."""
-        if not _depends_on(self.repo, self.rel, mid.rel):
-            self.decline = "the chain is the only coupling between the modules — a boundary; leave it"
-            return None
-        body = cst.SimpleStatementLine(
-            body=[
-                cst.Return(
-                    cst.Call(
-                        func=cst.Name(mid.callee.name),
-                        args=[cst.Arg(cst.Name(p)) for p in head.params],
-                    )
-                )
-            ]
-        )
-        origin_new = _replace_method_body(module, head.method, body, self.line).code
-        # F may live in the origin itself — deleting it from a FRESH parse
-        # would overwrite the rewire just applied above
-        return self._drop_middle(origin_new, head, mid)
-
-    def _method_terminal(self, head: _ChainHead, mid: _ChainMiddle) -> _ChainTerminal | None:
-        """The unique D.N the chain reaches through F. None when the method is
-        not unique in the repo, or when the modules are independent."""
-        attr_method = mid.callee.attr_method
-        if attr_method is None:
-            return None
-        recv, n_name = attr_method
-        arg_params = [p for p in mid.params if p != recv]
-        matches = [
-            (d_rel, d_cls, d_method)
-            for d_rel, d_cls, d_method in _methods_named(_ModuleRef(self.repo, n_name))
-            if d_cls.name.value != head.class_name and _non_receiver_param_names(d_method.params.params) == arg_params
-        ]
-        if len(matches) != 1:
-            return None  # ambiguous — no structural certainty
-        d_rel, d_cls, d_method = matches[0]
-        if not _depends_on(self.repo, self.rel, d_rel):
-            self.decline = "the chain is the only coupling between the modules — a boundary; leave it"
-            return None
-        if _call_sites(_ModuleRef(self.repo, n_name)) > 1:
-            self.decline = f"'{n_name}' has other callers beyond the chain — collapse by hand"
-            return None
-        return _ChainTerminal(recv, n_name, d_rel, d_cls, d_method)
-
-    def _collapse_to_method(self, module: cst.Module, head: _ChainHead, mid: _ChainMiddle) -> str | None:
-        """M -> F -> D.N: rewire when D has identity, promote N onto C when D
-        dissolves. D's identity decides, not the caller's preference."""
-        terminal = self._method_terminal(head, mid)
-        if terminal is None:
-            return None
-        if _class_has_identity(terminal.cls):
-            return self._rewire_method_terminal(module, head, mid, terminal)
-        return self._promote_method_terminal(module, head, mid, terminal)
-
-    def _rewire_method_terminal(
-        self, module: cst.Module, head: _ChainHead, mid: _ChainMiddle, terminal: _ChainTerminal
-    ) -> str:
-        """D keeps its identity: M reaches D.N directly and F is deleted."""
-        args = [p for p in head.params if p != terminal.recv]
-        body = cst.SimpleStatementLine(
-            body=[
-                cst.Return(
-                    cst.Call(
-                        func=cst.Attribute(value=cst.Name(terminal.recv), attr=cst.Name(terminal.name)),
-                        args=[cst.Arg(cst.Name(p)) for p in args],
-                    )
-                )
-            ]
-        )
-        origin_new = _replace_method_body(module, head.method, body, self.line).code
-        return self._drop_middle(origin_new, head, mid)
-
-    def _promote_method_terminal(
-        self, module: cst.Module, head: _ChainHead, mid: _ChainMiddle, terminal: _ChainTerminal
-    ) -> str | None:
-        """D has no identity: N becomes a sibling method of M on C, D dissolves."""
-        d_name = terminal.cls.name.value
-        if not _zero_external_refs(self.repo, d_name):
-            self.decline = f"'{d_name}' still has external references — dissolve D by hand"
-            return None
-        if _method_uses_self(terminal.method):
-            self.decline = f"'{terminal.name}' touches its own instance state — promote by hand"
-            return None
-        promoted = terminal.method.with_changes(name=cst.Name(terminal.name))
-        new_class = head.class_node.with_changes(
-            body=head.class_node.body.with_changes(body=[*head.class_node.body.body, promoted])
-        )
-        origin_new = _replace_class_body(module, self.line, new_class).code
-        args = [p for p in head.params if p != terminal.recv]
-        m_body = cst.SimpleStatementLine(
-            body=[
-                cst.Return(
-                    cst.Call(
-                        func=cst.Attribute(value=cst.Name("self"), attr=cst.Name(terminal.name)),
-                        args=[cst.Arg(cst.Name(p)) for p in args],
-                    )
-                )
-            ]
-        )
-        origin_new = _replace_method_body(cst.parse_module(origin_new), head.method, m_body, self.line).code
-        origin_new = self._drop_middle(origin_new, head, mid)
-        if terminal.rel != self.rel:
-            d_new = _remove_class(_module_of(self.repo, terminal.rel), d_name)
-            if _module_empty(d_new):
-                self.deletes.append(terminal.rel)
-            else:
-                self.extra_writes.append((terminal.rel, d_new))
-        else:
-            # D dissolves in the origin too (zero external refs by the gate)
-            origin_new = cst.parse_module(origin_new).visit(_RemoveClass(d_name)).code
-        return origin_new
-
-    def _drop_middle(self, origin_new: str, head: _ChainHead, mid: _ChainMiddle) -> str:
-        """Delete F once the head no longer calls it: in the origin when F
-        lives there, otherwise as a separate write."""
-        if mid.rel == self.rel:
-            return cst.parse_module(origin_new).visit(_RemoveFn(head.callee.name)).code
-        self.extra_writes.append((mid.rel, _remove_fn(mid.module, head.callee.name)))
-        return origin_new
+        """Collapse the forwarding chain: rewire or promote the terminal."""
+        return ChainFixes(self).run()
 
     # lucidlint: ignore latent-class the nested visitors are one-purpose probe walks — hoisting names nothing owned
     def fix_split_module(self) -> str | None:
@@ -756,308 +588,11 @@ def _origin_after_move(module: cst.Module, move: set[str], opts, rel: str) -> li
     return remaining
 
 
-class _MethodAtLine(cst.CSTVisitor):
-    """The class + method whose def sits on one line — a chain's head probe."""
-
-    METADATA_DEPENDENCIES = (PositionProvider,)
-
-    def __init__(self, target_line: int) -> None:
-        self.target_line = target_line
-        self.owner: tuple[str, cst.ClassDef, cst.FunctionDef] | None = None
-
-    @override
-    def visit_ClassDef(self, node: cst.ClassDef) -> None:
-        for stmt in node.body.body:
-            if not isinstance(stmt, cst.FunctionDef):
-                continue
-            pos = ModuleOutline.span(self.get_metadata(PositionProvider, stmt))
-            if pos.start.line == self.target_line:
-                self.owner = (node.name.value, node, stmt)
-                return
-
-
-def _chain_head(wrapper: cst.MetadataWrapper, line: int) -> _ChainHead | None:
-    """The forwarding chain's head at `line`: a method whose body is exactly
-    one call into a module function, passing its own parameters through. None
-    when the line is not that shape (stale, or not a forwarder)."""
-    probe = _MethodAtLine(line)
-    wrapper.visit(probe)
-    if probe.owner is None:
-        return None
-    class_name, class_node, method = probe.owner
-    params = _non_receiver_param_names(method.params.params)
-    callee, args = _pure_forward_of(method)
-    if _breaks_forwarding_chain(callee, args, params):
-        return None
-    assert callee is not None
-    return _ChainHead(class_name, class_node, method, params, callee)
-
-
-def _chain_middle(repo: Path, head: _ChainHead) -> _ChainMiddle | None:
-    """The module function F the head calls, resolved repo-wide; None when F is
-    missing or does not forward its own parameters on."""
-    found = _find_module_fn(_ModuleRef(repo, head.callee.name))
-    if found is None:
-        return None
-    params = [p.name.value for p in found.node.params.params]
-    callee, args = _pure_forward_of(found.node)
-    if callee is None:
-        return None
-    # a method callee absorbs the receiver param (`store.load(key)` passes only
-    # `key`); a module-fn callee takes all params
-    expected = [p for p in params if p != callee.attr_method[0]] if callee.attr_method is not None else params
-    if args != expected:
-        return None
-    return _ChainMiddle(found.rel, found.module, params, callee)
-
-
-def _pure_forward_of(fn: cst.FunctionDef) -> tuple[_ForwardTarget | None, list[str]]:
-    """The forwarder call + arg names when `fn`'s body is exactly
-    `return <callee>(<arg names>)` — the #30 re-derivation of the pure
-    forwarder shape (pinned by the scanner's own rule tests)."""
-    if not isinstance(fn.body, cst.IndentedBlock) or len(fn.body.body) != 1:
-        return None, []
-    line = fn.body.body[0]
-    if not isinstance(line, cst.SimpleStatementLine) or len(line.body) != 1:
-        return None, []
-    ret = line.body[0]
-    if not isinstance(ret, cst.Return) or not isinstance(ret.value, cst.Call):
-        return None, []
-    call = ret.value
-    argnames = []
-    for a in call.args:
-        if not isinstance(a.value, cst.Name):
-            return None, []
-        argnames.append(a.value.value)
-    if isinstance(call.func, cst.Name):
-        return _ForwardTarget(is_name=True, name=call.func.value), argnames
-    if isinstance(call.func, cst.Attribute) and isinstance(call.func.value, cst.Name):
-        return _ForwardTarget(is_name=False, attr_method=(call.func.value.value, call.func.attr.value)), argnames
-    return None, []
-
-
 # the orchestrator
 # lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
-def _module_fn_node(module: cst.Module, name: str) -> cst.FunctionDef | None:
-    for stmt in module.body:
-        if isinstance(stmt, cst.FunctionDef) and stmt.name.value == name:
-            return stmt
-    return None
-
-
-def _find_module_fn(ref: _ModuleRef) -> _ModuleFn | None:
-    """One module-level function by name, resolved across the repo — the
-    lookup returns the file, the module, and the node together."""
-    for path in SourceFiles(ref.repo).py_files():
-        module = cst.parse_module(path.read_text(encoding="utf-8"))
-        node = _module_fn_node(module, ref.name)
-        if node is not None:
-            return _ModuleFn(path.relative_to(ref.repo).as_posix(), module, node)
-    return None
-
-
-def _call_sites(ref: _ModuleRef) -> int:
-    total = 0
-    for path in SourceFiles(ref.repo).py_files():
-        mod = cst.parse_module(path.read_text(encoding="utf-8"))
-
-        class _Count(cst.CSTVisitor):
-            def __init__(self):
-                self.n = 0
-
-            @override
-            def visit_Call(self, node):
-                if isinstance(node.func, cst.Name) and node.func.value == ref.name:
-                    self.n += 1
-
-        c = _Count()
-        mod.visit(c)
-        total += c.n
-    return total
-
-
-def _reexported(ref: _ModuleRef) -> bool:
-    for path in SourceFiles(ref.repo).py_files():
-        mod = cst.parse_module(path.read_text(encoding="utf-8"))
-        for stmt in mod.body:
-            if isinstance(stmt, cst.SimpleStatementLine):
-                for inner in stmt.body:
-                    if not isinstance(inner, cst.ImportFrom) or isinstance(inner.names, cst.ImportStar):
-                        continue
-                    for alias in inner.names:
-                        if isinstance(alias.name, cst.Name) and alias.name.value == ref.name:
-                            return True
-    return False
-
-
 # the orchestrator
 # lucidlint: ignore data-clump the shared params are the scan layer's operations on one file — the class boundary is
-def _depends_on(repo: Path, rel: str, d_rel: str) -> bool:
-    if rel == d_rel:
-        return True
-    mod = cst.parse_module((repo / rel).read_text(encoding="utf-8"))
-    target_stem = Path(d_rel).stem
-    for stmt in mod.body:
-        if not isinstance(stmt, cst.SimpleStatementLine):
-            continue
-        for inner in stmt.body:
-            if isinstance(inner, cst.ImportFrom) and inner.module is not None:
-                mod_name = (
-                    inner.module
-                    if isinstance(inner.module, str)
-                    else (inner.module.value if hasattr(inner.module, "value") else "")
-                )
-                if str(mod_name).split(".")[-1] == target_stem:
-                    return True
-    return False
-
-
-def _methods_named(ref: _ModuleRef) -> list[tuple[str, cst.ClassDef, cst.FunctionDef]]:
-    out: list[tuple[str, cst.ClassDef, cst.FunctionDef]] = []
-    for path in SourceFiles(ref.repo).py_files():
-        mod = cst.parse_module(path.read_text(encoding="utf-8"))
-        for stmt in mod.body:
-            if not isinstance(stmt, cst.ClassDef):
-                continue
-            for mem in stmt.body.body:
-                if isinstance(mem, cst.FunctionDef) and mem.name.value == ref.name:
-                    out.append((path.relative_to(ref.repo).as_posix(), stmt, mem))
-    return out
-
-
-def _class_has_identity(cls: cst.ClassDef) -> bool:
-    writes_self = False
-
-    class _Scan(cst.CSTVisitor):
-        @override
-        def visit_Assign(self, node):
-            nonlocal writes_self
-            for t in node.targets:
-                if ModuleOutline.is_self_attribute(t.target):
-                    writes_self = True
-
-        @override
-        def visit_AnnAssign(self, node):
-            nonlocal writes_self
-            if ModuleOutline.is_self_attribute(node.target):
-                writes_self = True
-
-    cls.visit(_Scan())
-    for stmt in cls.body.body:
-        if isinstance(stmt, cst.AnnAssign):
-            return True  # declared class-level field
-        if isinstance(stmt, cst.FunctionDef) and _pure_forward_of(stmt)[0] is None:
-            return True  # a non-forwarding member — D is real
-    return writes_self
-
-
-def _method_uses_self(method: cst.FunctionDef) -> bool:
-    uses = False
-
-    class _Scan(cst.CSTVisitor):
-        @override
-        def visit_Attribute(self, node):
-            nonlocal uses
-            if isinstance(node.value, cst.Name) and node.value.value == "self":
-                uses = True
-
-    method.visit(_Scan())
-    return uses
-
-
-def _zero_external_refs(repo: Path, class_name: str) -> bool:
-    total = 0
-    for path in SourceFiles(repo).py_files():
-        mod = cst.parse_module(path.read_text(encoding="utf-8"))
-        for node in Bindings.module_name_nodes(mod):
-            if node.value == class_name:
-                total += 1
-    return total <= 1  # only the definition itself
-
-
-class _MethodBodyRewriteByLine(cst.CSTTransformer):
-    METADATA_DEPENDENCIES = (PositionProvider,)
-
-    def __init__(self, line: int, name: str, body: list) -> None:
-        self.line = line
-        self.name = name
-        self.body = body
-
-    @override
-    def leave_FunctionDef(self, original_node, updated_node):
-        if updated_node.name.value == self.name:
-            pos = ModuleOutline.span(self.get_metadata(PositionProvider, original_node))
-            if pos.start.line == self.line:
-                return updated_node.with_changes(body=updated_node.body.with_changes(body=self.body))
-        return updated_node
-
-
 # lucidlint: ignore data-clump the (module, positions, line) triple is the analyzer's input record
-def _replace_method_body(
-    module: cst.Module, method: cst.FunctionDef, body: cst.SimpleStatementLine, line: int | None = None
-) -> cst.Module:
-    if line is None:
-        line = ModuleOutline.span(cst.MetadataWrapper(module).resolve(PositionProvider)[method]).start.line
-    return cst.MetadataWrapper(module).visit(_MethodBodyRewriteByLine(line, method.name.value, [body]))
-
-
-class _ReplaceClassByLine(cst.CSTTransformer):
-    METADATA_DEPENDENCIES = (PositionProvider,)
-
-    def __init__(self, line: int, new_class: cst.ClassDef) -> None:
-        self.line = line
-        self.new_class = new_class
-        self.done = False
-
-    @override
-    def leave_ClassDef(self, original_node, updated_node):
-        if self.done:
-            return updated_node
-        pos = ModuleOutline.span(self.get_metadata(PositionProvider, original_node))
-        if pos.start.line == self.line:
-            self.done = True
-            return self.new_class
-        return updated_node
-
-
-def _replace_class_body(module: cst.Module, line: int, new_class: cst.ClassDef) -> cst.Module:
-    return cst.MetadataWrapper(module).visit(_ReplaceClassByLine(line, new_class))
-
-
-class _RemoveFn(cst.CSTTransformer):
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    @override
-    def leave_FunctionDef(self, original_node, updated_node):
-        if updated_node.name.value == self.name and not updated_node.decorators:
-            return cst.RemoveFromParent()
-        return updated_node
-
-
-def _remove_fn(module: cst.Module, name: str) -> str:
-    return module.visit(_RemoveFn(name)).code
-
-
-class _RemoveClass(cst.CSTTransformer):
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    @override
-    def leave_ClassDef(self, original_node, updated_node):
-        if updated_node.name.value == self.name:
-            return cst.RemoveFromParent()
-        return updated_node
-
-
-def _remove_class(module: cst.Module, name: str) -> str:
-    return module.visit(_RemoveClass(name)).code
-
-
-def _module_of(repo: Path, rel: str) -> cst.Module:
-    return cst.parse_module((repo / rel).read_text(encoding="utf-8"))
-
-
 # --------------------------------------------------------------------------- split-module (#31) helpers
 
 
@@ -1423,15 +958,32 @@ class _ModuleSplit:
                 class_refs[id(stmt)] = names
             else:
                 residual_refs |= names
-        external = {
-            name
-            for name in self.const_names
-            if _const_imported_elsewhere(_ModuleRef(self.repo, name), self.origin.rel, self.module)
-        }
+        external = {name for name in self.const_names if self._const_imported_elsewhere(name)}
         return {
             id(subject): _consts_moving_into(self.const_stmts, class_refs, residual_refs, external, subject)
             for subject in self.subjects
         }
+
+    def _const_imported_elsewhere(self, name: str) -> bool:
+        """Is the constant imported or attribute-read from another file? A moved
+        constant must be sole-owned by its class (BQ6) — an external reader would
+        break."""
+        origin_path = _module_parts(self.origin.rel)
+        for path in SourceFiles(self.repo).py_files():
+            if path.relative_to(self.repo).as_posix() == self.origin.rel:
+                continue
+            try:
+                mod = cst.parse_module(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            importer_dir = path.relative_to(self.repo).as_posix().split("/")[:-1]
+            alias_map = _module_alias_map(mod, origin_path)
+
+            probe = _ConstImportScan(importer_dir, alias_map, origin_path, name)
+            mod.visit(probe)
+            if probe.hit:
+                return True
+        return False
 
     def _residual_subject_refs(self) -> set[str]:
         """The moved classes the residual statements need — the origin imports
@@ -1716,7 +1268,7 @@ class _ModuleSplit:
             return _SplitOutcome("", writes, [rel])
         final_sources = {path: source for path, source in rewritten.items()}
         final_sources.update({target: src for target, src in writes})
-        if _module_empty(origin_source) and not _origin_imported_anywhere(
+        if ModuleOutline.is_empty(origin_source) and not _origin_imported_anywhere(
             self.repo, final_sources, rel, self.origin.origin_path
         ):
             return _SplitOutcome("", writes, [rel])
@@ -2000,28 +1552,6 @@ def _add_module_imports(module: cst.Module, dotted_paths: set[str]) -> cst.Modul
     return module.with_changes(body=_insert_header_imports(list(module.body), lines))
 
 
-def _const_imported_elsewhere(ref: _ModuleRef, rel: str, module: cst.Module) -> bool:
-    """Is the constant imported or attribute-read from another file? A moved
-    constant must be sole-owned by its class (BQ6) — an external reader would
-    break."""
-    origin_path = _module_parts(rel)
-    for path in SourceFiles(ref.repo).py_files():
-        if path.relative_to(ref.repo).as_posix() == rel:
-            continue
-        try:
-            mod = cst.parse_module(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        importer_dir = path.relative_to(ref.repo).as_posix().split("/")[:-1]
-        alias_map = _module_alias_map(mod, origin_path)
-
-        probe = _ConstImportScan(importer_dir, alias_map, origin_path, ref.name)
-        mod.visit(probe)
-        if probe.hit:
-            return True
-    return False
-
-
 class _ConstImportScan(cst.CSTVisitor):
     """One file's external readers of a constant: `from <origin> import C`
     (or a star import) and `<origin>.C` attribute chains."""
@@ -2140,11 +1670,6 @@ def _graph_cycle(nodes: list[str], edges: dict[str, set[str]]) -> list[str] | No
     return None
 
 
-def _module_empty(new_source: str) -> bool:
-    mod = cst.parse_module(new_source)
-    return all(not isinstance(s, (cst.FunctionDef, cst.ClassDef, cst.SimpleStatementLine)) for s in mod.body)
-
-
 # --------------------------------------------------------------------------- dispatch-registry
 
 
@@ -2171,12 +1696,6 @@ def _is_import_line(stmt: cst.BaseStatement) -> bool:
         and len(stmt.body) == 1
         and isinstance(stmt.body[0], (cst.Import, cst.ImportFrom))
     )
-
-
-def _breaks_forwarding_chain(callee, args: list, params: list) -> bool:
-    """The call does not forward every parameter to a plain name — the chain's
-    middle edge is broken."""
-    return callee is None or args != params or not callee.is_name
 
 
 def _is_single_name_assign(stmt: cst.BaseSmallStatement) -> bool:
