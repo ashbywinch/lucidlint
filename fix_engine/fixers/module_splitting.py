@@ -119,7 +119,7 @@ class ModuleSplitting:
     @staticmethod
     def _module_parts(rel: str) -> list[str]:
         """A module's import path: its directory parts plus the stem."""
-        return rel.split("/")[:-1] + [rel.rsplit("/", 1)[-1][:-3]]
+        return rel.split("/")[:-1] + [rel.rsplit("/", 1)[-1].removesuffix(".py")]
 
     @staticmethod
     def _class_matches_stem(name: str, stem: str) -> bool:

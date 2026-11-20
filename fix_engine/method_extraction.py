@@ -22,6 +22,10 @@ class MethodExtraction:
     """One request's extract-method fix: the seam analysis, the proposal, and
     the apply. The request is the fixer's state."""
 
+    # the complexity gate: 15 decision points is the fail bar, so 14 decisions
+    # remain the most the original may keep above the extraction
+    _CC_GATE_DECISIONS = 14
+
     def __init__(self, request) -> None:
         self.request = request
 
@@ -548,7 +552,9 @@ class MethodExtraction:
         summing every flat entry would double-count loop bodies."""
         fn_sid = id(state.fn_node)
         total = sum(state.decisions[sid] for sid, container, _ in state.flat if container == fn_sid)
-        return max(0, total - 14) if total > 14 else 0
+        # the CC gate is 15 decision points; the ORIGINAL keeps the rest
+        gate = MethodExtraction._CC_GATE_DECISIONS
+        return max(0, total - gate) if total > gate else 0
 
     @staticmethod
     def _module_level_names(module: cst.Module) -> set[str]:

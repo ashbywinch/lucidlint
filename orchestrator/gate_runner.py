@@ -36,6 +36,12 @@ from orchestrator.sources.git_head import GitHead
 # the domain's
 # lucidlint: ignore process-class _GateRunner is the CLI's one pipeline object — its state is real and the name is
 class GateRunner:
+    # a churn window is measured in days; git's clock is seconds
+    _SECONDS_PER_DAY = 86400
+    # the priority column spreads raw risk over a 1-99 band so the list reads apart
+    _PERCENTILE_LOW = 1
+    _PERCENTILE_HIGH = 99
+
     """The repo-scan gate flow. The pipeline state (history, coverage,
     actions, baselines) lives on the runner instead of threading through
     main() as parameters — the shape the assembly-class rule flags as a
@@ -156,7 +162,7 @@ class GateRunner:
         try:
             r = self._host.pygit2.Repository(str(self.repo))
             head = str(r.head.target)
-            cutoff = int(time.time()) - FileHistory.MAX_AGE_DAYS * 86400
+            cutoff = int(time.time()) - FileHistory.MAX_AGE_DAYS * GateRunner._SECONDS_PER_DAY
             cutoff_day = time.strftime("%Y-%m-%d", time.localtime(cutoff))
             cache_key = f"churn-{head}-{FileHistory.MAX_COMMITS}-{cutoff_day}.json"
             cache_path = self.repo / ".lucidlint-cache" / cache_key
@@ -175,7 +181,7 @@ class GateRunner:
         last: dict[str, str] = {}
         try:
             r = self._host.pygit2.Repository(str(self.repo))
-            cutoff = int(time.time()) - FileHistory.MAX_AGE_DAYS * 86400
+            cutoff = int(time.time()) - FileHistory.MAX_AGE_DAYS * GateRunner._SECONDS_PER_DAY
             for seen, commit in enumerate(r.walk(r.head.target, self._host.pygit2.enums.SortMode.TIME)):
                 if seen >= FileHistory.MAX_COMMITS or commit.commit_time < cutoff:
                     break
@@ -342,8 +348,16 @@ class GateRunner:
         if not unique:
             return
         lo, hi = min(a.raw for a in unique), max(a.raw for a in unique)
+        band = GateRunner._PERCENTILE_HIGH - GateRunner._PERCENTILE_LOW
         for a in unique:
-            a.priority = 99 if hi <= lo else max(1, round(1 + 98 * (a.raw - lo) / (hi - lo)))
+            a.priority = (
+                GateRunner._PERCENTILE_HIGH
+                if hi <= lo
+                else max(
+                    GateRunner._PERCENTILE_LOW,
+                    round(GateRunner._PERCENTILE_LOW + band * (a.raw - lo) / (hi - lo)),
+                )
+            )
 
     @staticmethod
     def _merge_targets(unique: list[Action]) -> list[Action]:

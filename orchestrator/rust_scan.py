@@ -25,6 +25,8 @@ from orchestrator.rust_finding import RustFinding
 from orchestrator.rust_findings import RustFindings
 from orchestrator.scan_flags import ScanFlags
 from orchestrator.scan_inputs import INPUTS
+
+
 from orchestrator.sources.coverage_input import CoverageInput
 from orchestrator.sources.coverage_request import CoverageRequest
 from orchestrator.sources.file_history import FileHistory
@@ -33,6 +35,11 @@ from orchestrator.sources.source_walk import SourceWalk, gitignored_docs
 
 
 class RustScan:
+    # the scan core's contract version the orchestrator can read (schema 4)
+    _CONTRACT_SCHEMA = 4
+    # how many unmappable file names one diagnostic shows before counting the rest
+    _UNMAPPED_SHOWN = 5
+
     """The Rust scan core — the required finding engine.
 
     One binary invocation per repo per run (or per file in --file / LSP mode);
@@ -141,9 +148,10 @@ class RustScan:
                 proc = self._host.process.run(cmd, capture_output=True, text=True, timeout=300, cwd=str(repo))
                 if proc.returncode == 0:
                     data = json.loads(proc.stdout)
-                    if data.get("schema_version") != 4:
+                    if data.get("schema_version") != RustScan._CONTRACT_SCHEMA:
                         raise RuntimeError(
-                            f"scanner contract schema {data.get('schema_version')} — expected 4; "
+                            f"scanner contract schema {data.get('schema_version')} — "
+                            f"expected {RustScan._CONTRACT_SCHEMA}; "
                             "rebuild the binary (make scanner-check)"
                         )
                     header = str(data.get("header", ""))
@@ -328,8 +336,12 @@ class RustScan:
         for single-package layouts (the inferred root lost the package segment);
         a finding file that cannot be mapped is a root-resolution mismatch, not a
         clean run."""
-        shown = ", ".join(sorted(values)[:5])
-        more = "" if len(values) <= 5 else f" (+{len(values) - 5} more)"
+        shown = ", ".join(sorted(values)[: RustScan._UNMAPPED_SHOWN])
+        more = (
+            ""
+            if len(values) <= RustScan._UNMAPPED_SHOWN
+            else f" (+{len(values) - RustScan._UNMAPPED_SHOWN} more)"
+        )
         return (
             f"dropped findings for {len(values)} file(s) outside the scan set: {shown}{more} — "
             "a finding file that cannot be mapped back is a root-resolution mismatch, not a clean run"

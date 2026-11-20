@@ -18,6 +18,10 @@ from fix_engine.rewrite import Rewrite
 
 
 class WideTuple:
+    # a tuple needs this many positions before a record names anything: a pair
+    # reads fine positionally
+    _MIN_RECORD_ARITY = 3
+
     """The wide-tuple fix for one request: the annotation and its build sites
     become a named record class."""
 
@@ -92,7 +96,7 @@ class WideTuple:
             if not isinstance(node.target, cst.Name):
                 return
             arity = WideTuple._fixed_tuple_arity(node.annotation.annotation)
-            if arity is None or arity < 3:
+            if arity is None or arity < WideTuple._MIN_RECORD_ARITY:
                 return
             elements = None
             if WideTuple._is_arity_tuple(node.value, arity):
@@ -108,13 +112,13 @@ class WideTuple:
                 if param.annotation is None:
                     continue
                 arity = WideTuple._fixed_tuple_arity(param.annotation.annotation)
-                if arity is not None and arity >= 3:
+                if arity is not None and arity >= WideTuple._MIN_RECORD_ARITY:
                     self.sites.append(
                         WideTuple._Site("param", param.name.value, arity, param.annotation.annotation, None)
                     )
             if node.returns is not None:
                 arity = WideTuple._fixed_tuple_arity(node.returns.annotation)
-                if arity is not None and arity >= 3:
+                if arity is not None and arity >= WideTuple._MIN_RECORD_ARITY:
                     self.sites.append(WideTuple._Site("return", node.name.value, arity, node.returns.annotation, None))
 
     @staticmethod

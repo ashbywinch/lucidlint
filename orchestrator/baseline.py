@@ -32,6 +32,10 @@ class Baseline:
     """The acknowledged actions of one run's baseline file (best-effort: an
     absent or unreadable file acknowledges nothing)."""
 
+    # a baseline key is kind:file:line:function — four fields, the third numeric
+    _KEY_PARTS = 4
+    _KEY_LINE_INDEX = 2
+
     # pre-round files stored other shapes — line-less keys, action dicts —
     # which cannot map to a current key identity
     KEY_PARTS = 4
@@ -64,8 +68,8 @@ class Baseline:
         (kind:file:line:function with a numeric line)."""
         if not isinstance(entry, str):
             return False
-        parts = entry.split(":", 3)
-        return len(parts) == 4 and parts[2].isdigit()
+        parts = entry.split(":", Baseline._KEY_PARTS - 1)
+        return len(parts) == Baseline._KEY_PARTS and parts[Baseline._KEY_LINE_INDEX].isdigit()
 
     @staticmethod
     def file_state(path: Path | None) -> _BaselineState:

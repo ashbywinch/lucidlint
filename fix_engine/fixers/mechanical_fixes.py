@@ -25,6 +25,9 @@ class MechanicalFixes:
     """The mechanical fix families for one request: the deletes, keyword
     arguments, the member annotation, and the three loop rewrites."""
 
+    # the duplicate-block rule's window: three consecutive statements repeated
+    _DUP_BLOCK = 3
+
     _HOIST_MUTATORS = {
         "append",
         "add",
@@ -173,15 +176,17 @@ class MechanicalFixes:
             return None
         flat: list = []
         MechanicalFixes._flatten_stmts(list(finder.fn.body.body), flat)
-        if len(flat) < 6:
-            return None
+        window = MechanicalFixes._DUP_BLOCK
+        if len(flat) < 2 * window:
+            return None  # two blocks cannot fit
         targets: list | None = None
-        for i in range(len(flat) - 5):
-            for j in range(i + 3, len(flat) - 2):
-                if all(flat[i + k].deep_equals(flat[j + k]) for k in range(3)):
+        # i starts the first copy, j the second; both windows must fit the list
+        for i in range(len(flat) - (2 * window - 1)):
+            for j in range(i + window, len(flat) - (window - 1)):
+                if all(flat[i + k].deep_equals(flat[j + k]) for k in range(window)):
                     pos = wrapper.resolve(PositionProvider)[flat[j]]
                     if pos.start.line == line:
-                        targets = flat[j : j + 3]
+                        targets = flat[j : j + window]
                         break
             if targets is not None:
                 break
