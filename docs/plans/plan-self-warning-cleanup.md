@@ -1,4 +1,4 @@
-# Plan — the self-warning cleanup: 587 → 308, and what is left
+# Plan — the self-warning cleanup: 587 → 292, and what is left
 
 The tool's own gate passes (`GATE: PASS`, 0 fails) with warnings, because
 every rule that fires here is a judgement signal rather than a gate. This
@@ -97,8 +97,8 @@ to say "this rule is guidance here" once, instead of per site.
 
 ## Where it stopped
 
-308 warnings, 0 fails. Every one of them is now a decision rather than a
-mechanic:
+At the end of the cleanup round: 308 warnings, 0 fails. Every one of them was
+a decision rather than a mechanic:
 
 | what | count | the decision |
 |---|---|---|
@@ -116,24 +116,78 @@ Nothing above can be removed without someone saying what the code should say
 instead — a helper name, a merged pass, a struct, a suppression, a folder.
 That is the tool doing its job: the remaining findings are judgement.
 
-## The repo-wide merge, after the refactor
+The repo-wide audit round below took the total to **292** (282
+`loop-pipeline`, 5 `standard`, 2 `duplicate-block`, 1 `bulk-suppression`, 1
+`detached-method`, 1 `flat-folder`): it deleted the gate's duplicate gather,
+and the loops that lived in it. No remaining finding changed meaning.
 
-`Pipeline::repo_wide_merge` (the LSP path) is now one line:
+## The repo-wide merge, and the audit that closed it
+
+`Pipeline::repo_wide_merge` (the LSP path) is one line:
 `RepoScan::of(scans, root_s).by_file()`. `scanner/src/repo_scan.rs` owns the
 corpus — the pools each repo-wide rule reads (`skeletons`, `definitions`,
 `setters`, `references`, `suppressions`, `modules`, `forwarders`), each a
 named field with a doc comment saying what the rule uses it for — and
-`by_file` asks each rule once, one line each, then applies that file's
-suppressions. The definition and setter rows are records (`Definition`,
-`Setter`) rather than `(rel, name, line, is_class)` tuples, so `unused` reads
-`definition.is_class` instead of counting positions. `main.rs` lost 331 lines
-to the change; the CLI's own gather is untouched.
+`reconcile` asks each rule once, then applies that file's suppressions. The
+definition and setter rows are records (`Definition`, `Setter`) rather than
+`(rel, name, line, is_class)` tuples, so `unused` reads `definition.is_class`
+instead of counting positions.
 
-**A divergence this surfaced, left as a decision.** The CLI gate has never run
-the `undeclared-attribute` family: only the LSP merge did. Consolidating the
-CLI path onto `RepoScan` made the gate report the family for the first time —
-+73 findings on houses and +270 on album (all of them real undeclared
-members), which is a behaviour change, not a refactor. It is excluded from
-the gate path for now (`RepoScan::gate_findings` was dropped; the CLI keeps
-its own gather), and the fix is one line in `main` once the owner agrees to
-the new findings. Filed as a decision, not a finding.
+### Why the gate and the editor disagreed
+
+The corpus started as the LSP's path; `fn main()` kept its own gather. That
+made **five** copies of "which repo-wide families exist", none derived from
+another:
+
+| # | where | what it held |
+|---|---|---|
+| 1 | `RepoScan::findings` | 14 scan-derived kinds |
+| 2 | `fn main()` | 12 of them, plus flat-folder and the families whose inputs only the gate has |
+| 3 | `scan_corpus` (tests) | its own copy (12 kinds), with a different reconcile order |
+| 4 | `drop_repo_wide_stale_artifacts` | 4 kinds (the LSP's per-buffer stale filter) |
+| 5 | `rule_metadata.py` → `rules_gen.rs` | every kind's metadata, with no "where it runs" axis |
+
+The move that broke it was `1c18dda`: `undeclared-attribute` went from a
+per-file rule (every path got it for free) to a repo-wide family (each caller
+must opt in). That commit updated the LSP merge and the test helper; `fn
+main()` was six thousand lines away and kept the old list. Nothing could
+fail: the registry only checks that every kind is *emitted somewhere*, and it
+was (by `repo_scan.rs`), and no test asked whether the gate ran every family.
+The gate skipped a documented **fail** rule for eleven weeks.
+
+The fix removes the choice instead of testing it. `fn main()` owns no family
+list: `RepoScan::reconcile` appends every scan-derived family to the gate's
+findings, clearing the stale marker the per-file pass left for a marker it
+consumes; `RepoScan::apply_suppressions` is the one final pass over the
+families the gate composes itself; the test corpus is the same two calls.
+Five lists became two — the corpus, and the external-input families whose
+data only the gate has. `drop_repo_wide_stale_artifacts` reads
+`RepoScan::FAMILIES`, with a test pinning it against the rule registry and a
+test proving a deferred family's marker is not called stale in a buffer scan.
+
+The earlier attempt to reuse the corpus produced 6 extra stale findings on
+houses and 2 on album: `findings()` returned a finished set, so a marker the
+corpus consumed had already been reported stale by the per-file pass and
+nothing cleared that verdict. `reconcile` takes the caller's findings, so the
+verdict is cleared where the marker is consumed.
+
+### The audit table
+
+| family / step | gate | corpus | verdict |
+|---|---|---|---|
+| `duplicate` (Python/Rust pools), `duplicate-module`, `forwarding-chain`, `unused`, `unused-setter`, `scattered-instance`, `shared-path`, `duplicate-expression`, `several-definitions`, `many-definitions`, `middle-man`, `sibling-value-class` | yes | yes | aligned; the gate now takes them from the corpus |
+| `over-abstraction` | yes | **was no** | moved into the corpus — its input is each file's classes/imports, which the corpus already holds. No gate finding changes (0 on houses, album and here); the editor gains the diagnostic. |
+| `undeclared-attribute` | **was no** | yes | restored, as agreed: fail severity. Houses 353 → 420 (+67), album 431 → 699 (+268) — every addition this family, nothing removed. lucidlint's own 55 members were declared first (`2aaa338`), so the gate stays green. |
+| `flat-folder` | yes | no | gate-only by input: it counts the file inventory (modules + docs) under `--include-tests`, not scan data; the LSP's walk is `.py`-only. |
+| final cumulative suppression pass | yes | per-family, plus `apply_suppressions` for the gate's own families | intentional: the corpus reconciles one family at a time (a marker's peel capacity is the family's), and `reconcile` clears the per-file stale marker it consumes. `apply_suppressions` is the door for the families the gate composes itself (flat-folder, graph, docs, churn, bulk). On houses and album no marker names one of those, so disabling it changes nothing there — verified; it is the rule for the next repo that has one. |
+| `bulk-suppression` | yes | no | report family over the suppression census; the LSP renders no report. |
+| Rust mod-graph cycles | yes | no | needs `RustScan.mod_decls/uses`, which `FileScan` does not carry; the LSP's repo walk is Python-only. |
+| graph families (`high-risk`, cycles, `layer-mix`, `folder-mix`, `cohesion`) | yes | no | need the orchestrator's versioned graph contract. |
+| docs integrity | yes (`--docs`) | no | needs the docs root and the gitignored list. |
+| `hotspot`, `churn-untested` | yes (`--churn`, `--coverage`) | no | need git churn and the coverage snapshot. |
+| `complexity` | yes | no | per-file cc; the LSP emits its own complexity diagnostic. |
+
+Verification after every step: `make check`, the Python and Rust suites,
+`make self-check` (`GATE: PASS`, 292 warnings, 0 fails), and a
+`(file, kind, line)` plus `(file, kind, message)` finding-set comparison
+against the snapshot taken before the change.
