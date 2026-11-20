@@ -92,3 +92,14 @@ class FileHistory:
     def tracked_churn_path(path: str) -> bool:
         """A source/doc path the churn scan counts."""
         return path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/"))
+
+    @staticmethod
+    def changed_paths(diff) -> set[str]:
+        """The tracked paths one commit's diff touched (no diff = no paths)."""
+        changed: set[str] = set()
+        for patch in diff or ():
+            delta = patch.delta if patch is not None else None
+            path = delta.new_file.path if delta is not None else ""
+            if FileHistory.tracked_churn_path(path):
+                changed.add(path)
+        return changed

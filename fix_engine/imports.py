@@ -30,28 +30,27 @@ class Imports:
             # each matching import as its own statement, or the new module
             # misses a name the moved def needs and NameErrors (review bot)
             for inner in stmt.body:
-                if isinstance(inner, cst.Import):
-                    for alias in inner.names:
-                        bound = (
-                            Bindings.hoist_target_names(alias.asname.name)
-                            if alias.asname is not None
-                            else {Bindings.import_base_name(alias.name)}
-                        )
-                        if bound & referenced:
-                            moved.append(cst.SimpleStatementLine(body=[inner]))
-                            break
-                elif isinstance(inner, cst.ImportFrom):
-                    if isinstance(inner.names, cst.ImportStar):
-                        continue  # `from x import *` binds no importable name
-                    for alias in inner.names:
-                        if not isinstance(alias.name, cst.Name):
-                            continue
-                        bound = (
-                            Bindings.hoist_target_names(alias.asname.name)
-                            if alias.asname is not None
-                            else {alias.name.value}
-                        )
-                        if bound & referenced:
-                            moved.append(cst.SimpleStatementLine(body=[inner]))
-                            break
+                if isinstance(inner, cst.ImportFrom) and isinstance(inner.names, cst.ImportStar):
+                    continue  # `from x import *` binds no importable name
+                if not isinstance(inner, (cst.Import, cst.ImportFrom)):
+                    continue
+                if Imports._binds_referenced(inner, referenced):
+                    moved.append(cst.SimpleStatementLine(body=[inner]))
         return moved
+
+    @staticmethod
+    def _binds_referenced(importer: cst.Import | cst.ImportFrom, referenced: set[str]) -> bool:
+        """Does any alias of this import statement bind a referenced name?"""
+        if isinstance(importer.names, cst.ImportStar):
+            return False
+        return any(Imports._alias_bound(alias, importer) & referenced for alias in importer.names)
+
+    @staticmethod
+    def _alias_bound(alias: cst.ImportAlias, importer) -> set[str]:
+        """The names one import alias binds: its asname, else `a.b.c`'s base for
+        `import`, else the imported name for `from ... import`."""
+        if alias.asname is not None:
+            return Bindings.hoist_target_names(alias.asname.name)
+        if isinstance(importer, cst.Import):
+            return {Bindings.import_base_name(alias.name)}
+        return {alias.name.value} if isinstance(alias.name, cst.Name) else set()

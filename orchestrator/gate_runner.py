@@ -186,21 +186,13 @@ class GateRunner:
                 if seen >= FileHistory.MAX_COMMITS or commit.commit_time < cutoff:
                     break
                 date = str(commit.commit_time)
-                changed = set()
-                if commit.parents:
-                    diff = commit.tree.diff_to_tree(commit.parents[0].tree)
-                    for patch in diff:
-                        delta = patch.delta if patch is not None else None
-                        path = delta.new_file.path if delta is not None else ""
-                        if FileHistory.tracked_churn_path(path):
-                            changed.add(path)
-                else:
-                    # initial commit — diff against the empty tree gives every file
-                    for patch in commit.tree.diff_to_tree():
-                        delta = patch.delta if patch is not None else None
-                        path = delta.new_file.path if delta is not None else ""
-                        if FileHistory.tracked_churn_path(path):
-                            changed.add(path)
+                # the initial commit diffs against the empty tree, which gives every file
+                diff = (
+                    commit.tree.diff_to_tree(commit.parents[0].tree)
+                    if commit.parents
+                    else commit.tree.diff_to_tree()
+                )
+                changed = FileHistory.changed_paths(diff)
                 for path in changed:
                     churn[path] += 1
                     if date and path not in last:

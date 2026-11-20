@@ -27,6 +27,17 @@ class MechanicalFixes:
 
     # the duplicate-block rule's window: three consecutive statements repeated
     _DUP_BLOCK = 3
+    # a member's initial value names its type by the literal's node kind
+    _LITERAL_TYPES = (
+        (cst.Integer, "int"),
+        (cst.Float, "float"),
+        (cst.SimpleString, "str"),
+        (cst.ConcatenatedString, "str"),
+        (cst.List, "list"),
+        (cst.Dict, "dict"),
+        (cst.Set, "set"),
+        (cst.Tuple, "tuple"),
+    )
 
     _HOIST_MUTATORS = {
         "append",
@@ -107,11 +118,7 @@ class MechanicalFixes:
             xform = MechanicalFixes._LoopsIntoComprehensions(
                 line, sequence=(kind == "loop-sequence"), fresh_name=MechanicalFixes._fresh_loop_name(source)
             )
-            out = cst.MetadataWrapper(cst.parse_module(source)).visit(xform).code
-            if xform.decline:
-                self.request.decline = xform.decline
-                return None
-            return out if xform.applied else None
+            return self._apply_transformer(source, xform)
         if kind == "loop-hoist":
             if not opts.name:
                 self.request.decline = (
@@ -125,12 +132,17 @@ class MechanicalFixes:
                 helper_local=MechanicalFixes._fresh_loop_name(source, base="val"),
                 element=MechanicalFixes._fresh_loop_name(source, base="part"),
             )
-            out = cst.MetadataWrapper(cst.parse_module(source)).visit(xform).code
-            if xform.decline:
-                self.request.decline = xform.decline
-                return None
-            return out if xform.applied else None
+            return self._apply_transformer(source, xform)
         return None
+
+    def _apply_transformer(self, source: str, xform) -> str | None:
+        """Run one fixer's transformer over the source: its decline is recorded
+        on the request, and an unapplied transform is a stale finding (None)."""
+        out = cst.MetadataWrapper(cst.parse_module(source)).visit(xform).code
+        if xform.decline:
+            self.request.decline = xform.decline
+            return None
+        return out if xform.applied else None
 
     def fix_duplicate_def(self) -> str | None:
         source, line = self.request.loaded_source(), self.request.line
@@ -825,16 +837,14 @@ class MechanicalFixes:
             if plan.flatten is not None:
                 inner = cst.CompFor(target=cst.Name(self.fresh), iter=plan.flatten, inner_for_in=comp_for)
                 return cst.ListComp(elt=cst.Name(self.fresh), for_in=inner)
+            needs_a_key = plan.collection == "dict" and plan.key is None
+            if plan.element is None or needs_a_key:
+                return None  # a comprehension needs its element (and a dict its key)
             if plan.collection == "set":
-                if plan.element is None:
-                    return None
                 return cst.SetComp(elt=plan.element, for_in=comp_for)
             if plan.collection == "dict":
-                if plan.element is None or plan.key is None:
-                    return None
+                assert plan.key is not None
                 return cst.DictComp(key=plan.key, value=plan.element, for_in=comp_for)
-            if plan.element is None:
-                return None
             return cst.ListComp(elt=plan.element, for_in=comp_for)
 
     class _NameCount(cst.CSTVisitor):
@@ -1005,18 +1015,8 @@ class MechanicalFixes:
                     # its suite in an Else — flatten either into its statements
                     nested = [s.orelse] if isinstance(s.orelse, cst.If) else list(s.orelse.body.body)
                     MechanicalFixes._flatten_stmts(nested, out)
-            elif isinstance(s, (cst.For, cst.While)):
-                MechanicalFixes._flatten_stmts(list(s.body.body), out)
-                if s.orelse is not None:
-                    MechanicalFixes._flatten_stmts(list(s.orelse.body.body), out)
-            elif isinstance(s, cst.Try):
-                MechanicalFixes._flatten_stmts(list(s.body.body), out)
-                for h in s.handlers:
-                    MechanicalFixes._flatten_stmts(list(h.body.body), out)
-                if s.orelse is not None:
-                    MechanicalFixes._flatten_stmts(list(s.orelse.body.body), out)
-            elif isinstance(s, cst.With):
-                MechanicalFixes._flatten_stmts(list(s.body.body), out)
+            elif isinstance(s, (cst.For, cst.While, cst.Try, cst.With)):
+                MechanicalFixes._flatten_compound(s, out)
             elif isinstance(s, cst.Match):
                 for case in s.cases:
                     MechanicalFixes._flatten_stmts(list(case.body.body), out)
@@ -1038,6 +1038,17 @@ class MechanicalFixes:
         if collection == "dict":
             return isinstance(value, cst.Dict) and not value.elements
         return MechanicalFixes._is_empty_set_call(value)
+
+    @staticmethod
+    def _flatten_compound(stmt, out: list) -> None:
+        """A compound statement's blocks in source order: its own body, then a
+        Try's handlers, then its else."""
+        MechanicalFixes._flatten_stmts(list(stmt.body.body), out)
+        for handler in getattr(stmt, "handlers", []):
+            MechanicalFixes._flatten_stmts(list(handler.body.body), out)
+        orelse = getattr(stmt, "orelse", None)
+        if orelse is not None:
+            MechanicalFixes._flatten_stmts(list(orelse.body.body), out)
 
     @staticmethod
     def _for_index_at_line(metadata: cst.CSTTransformer, stmts: list[cst.BaseStatement], line: int) -> int | None:
@@ -1082,20 +1093,11 @@ class MechanicalFixes:
         type cannot be named safely (leave the member unannotated)."""
         if isinstance(value, cst.Name):
             return param_types.get(value.value)
-        if isinstance(value, cst.Integer):
-            return "int"
-        if isinstance(value, cst.Float):
-            return "float"
-        if isinstance(value, (cst.SimpleString, cst.ConcatenatedString)):
-            return "str"
-        if isinstance(value, cst.List):
-            return "list"
-        if isinstance(value, cst.Dict):
-            return "dict"
-        if isinstance(value, cst.Set):
-            return "set"
-        if isinstance(value, cst.Tuple):
-            return "tuple"
+        literal = next(
+            (named for kind, named in MechanicalFixes._LITERAL_TYPES if isinstance(value, kind)), None
+        )
+        if literal is not None:
+            return literal
         if isinstance(value, cst.Call) and isinstance(value.func, cst.Name):
             return value.func.value  # cst.FunctionDef(...) -> FunctionDef
         return None
