@@ -38,6 +38,8 @@ from fix_engine.fixers.record_fixes import RecordFixes
 from fix_engine.fixers.renaming import Renaming
 from fix_engine.fixers.rule_table import RuleTable
 from fix_engine.method_extraction import MethodExtraction
+from fix_engine.module_source import ModuleSource
+from fix_engine.source_files import SourceFiles
 from fix_engine.strewing_group import StrewingGroup
 
 _ChainHead = _records._ChainHead
@@ -68,7 +70,8 @@ _is_keyword_name = CstMechanics._is_keyword_name
 _is_self_attribute = CstMechanics._is_self_attribute
 _import_base_name = CstMechanics._import_base_name
 _is_docstring_stmt = CstMechanics._is_docstring_stmt
-_py_files = CstMechanics._py_files
+
+_py_files = SourceFiles.py_files
 _record_class_def = CstMechanics._record_class_def
 _self_attr_target = CstMechanics._self_attr_target
 _hoist_target_names = CstMechanics._hoist_target_names
@@ -320,7 +323,7 @@ class _FixRequest:
         husk = cls.name.value
         # repo-wide analysis: every file's references must be rewireable
         # (direct `Husk().m(...)` calls or a `h = Husk()` + `h.m(...)` pattern)
-        files = CstMechanics._py_files(self.repo)
+        files = SourceFiles(self.repo).py_files()
         new_sources: dict[str, str] = {}
         for path in files:
             rel = path.relative_to(self.repo).as_posix()
@@ -359,7 +362,7 @@ class _FixRequest:
         has other callers, on *args/**kwargs passthrough, on a
         `from mod import F` re-export, or when N has other callers — never
         blind inlining."""
-        module, wrapper = CstMechanics._wrapped_module(self._loaded_source())
+        module, wrapper = ModuleSource.parse(self._loaded_source())
         head = _chain_head(wrapper, self.line)
         if head is None:
             return None  # stale, or the method is not a pure forwarder (R28)
@@ -524,7 +527,7 @@ class _FixRequest:
         the split back to flat."""
         if not self.rel.endswith(".py") or self.rel.endswith("__init__.py"):
             return None  # the scanner never flags __init__ — nothing to split
-        module, wrapper = CstMechanics._wrapped_module(self._loaded_source())
+        module, wrapper = ModuleSource.parse(self._loaded_source())
         origin = _split_origin(self.rel)
         subjects = _split_subjects(module.body, origin.stem)
         if not subjects:
@@ -1343,7 +1346,7 @@ def _module_fn_node(module: cst.Module, name: str) -> cst.FunctionDef | None:
 def _find_module_fn(ref: _ModuleRef) -> _ModuleFn | None:
     """One module-level function by name, resolved across the repo — the
     lookup returns the file, the module, and the node together."""
-    for path in CstMechanics._py_files(ref.repo):
+    for path in SourceFiles(ref.repo).py_files():
         module = cst.parse_module(path.read_text(encoding="utf-8"))
         node = _module_fn_node(module, ref.name)
         if node is not None:
@@ -1353,7 +1356,7 @@ def _find_module_fn(ref: _ModuleRef) -> _ModuleFn | None:
 
 def _call_sites(ref: _ModuleRef) -> int:
     total = 0
-    for path in CstMechanics._py_files(ref.repo):
+    for path in SourceFiles(ref.repo).py_files():
         mod = cst.parse_module(path.read_text(encoding="utf-8"))
 
         class _Count(cst.CSTVisitor):
@@ -1372,7 +1375,7 @@ def _call_sites(ref: _ModuleRef) -> int:
 
 
 def _reexported(ref: _ModuleRef) -> bool:
-    for path in CstMechanics._py_files(ref.repo):
+    for path in SourceFiles(ref.repo).py_files():
         mod = cst.parse_module(path.read_text(encoding="utf-8"))
         for stmt in mod.body:
             if isinstance(stmt, cst.SimpleStatementLine):
@@ -1409,7 +1412,7 @@ def _depends_on(repo: Path, rel: str, d_rel: str) -> bool:
 
 def _methods_named(ref: _ModuleRef) -> list[tuple[str, cst.ClassDef, cst.FunctionDef]]:
     out: list[tuple[str, cst.ClassDef, cst.FunctionDef]] = []
-    for path in CstMechanics._py_files(ref.repo):
+    for path in SourceFiles(ref.repo).py_files():
         mod = cst.parse_module(path.read_text(encoding="utf-8"))
         for stmt in mod.body:
             if not isinstance(stmt, cst.ClassDef):
@@ -1462,7 +1465,7 @@ def _method_uses_self(method: cst.FunctionDef) -> bool:
 
 def _zero_external_refs(repo: Path, class_name: str) -> bool:
     total = 0
-    for path in CstMechanics._py_files(repo):
+    for path in SourceFiles(repo).py_files():
         mod = cst.parse_module(path.read_text(encoding="utf-8"))
         for node in _module_name_nodes(mod):
             if node.value == class_name:
@@ -2210,7 +2213,7 @@ class _ModuleSplit:
         if whole_pkg:
             return origin_source, {}
         rewritten: dict[str, str] = {}
-        for path in CstMechanics._py_files(self.repo):
+        for path in SourceFiles(self.repo).py_files():
             rel = path.relative_to(self.repo).as_posix()
             text = origin_source if rel == self.origin.rel else path.read_text(encoding="utf-8")
             new = _split_rewrite_source(text, rel, self.origin.origin_path, targets)
@@ -2541,7 +2544,7 @@ def _const_imported_elsewhere(ref: _ModuleRef, rel: str, module: cst.Module) -> 
     constant must be sole-owned by its class (BQ6) — an external reader would
     break."""
     origin_path = _module_parts(rel)
-    for path in CstMechanics._py_files(ref.repo):
+    for path in SourceFiles(ref.repo).py_files():
         if path.relative_to(ref.repo).as_posix() == rel:
             continue
         try:
@@ -2605,7 +2608,7 @@ def _module_star_imported(repo: Path, rel: str, module: cst.Module) -> bool:
     """Does any other file `from <origin> import *`? The flat rewrite cannot
     retarget a star import — the moved classes would silently vanish from it."""
     origin_path = _module_parts(rel)
-    for path in CstMechanics._py_files(repo):
+    for path in SourceFiles(repo).py_files():
         if path.relative_to(repo).as_posix() == rel:
             continue
         try:

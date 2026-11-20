@@ -10,41 +10,10 @@ instead of restating it per family.
 from __future__ import annotations
 
 import builtins
-from pathlib import Path
-from typing import NamedTuple, TypeGuard, override
+from typing import TypeGuard, override
 
 import libcst as cst
 from libcst.metadata import CodeRange, PositionProvider
-
-_REPO_SKIP_DIRS = frozenset(
-    {
-        ".git",
-        ".venv",
-        "venv",
-        "node_modules",
-        "__pycache__",
-        ".lucidlint-cache",
-        ".ruff_cache",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".pyrefly-cache",
-        "htmlcov",
-        "dist",
-        "build",
-        "target",
-        ".code-review-graph",
-        ".tox",
-        ".eggs",
-    }
-)
-
-
-class _ParsedModule(NamedTuple):
-    """A parsed module and the metadata wrapper whose tree it is — the pair
-    every transform needs, named so the positions are not rememberable."""
-
-    module: cst.Module
-    wrapper: cst.MetadataWrapper
 
 
 class CstMechanics:
@@ -200,24 +169,6 @@ class CstMechanics:
 
         return True
 
-    @staticmethod
-    def _py_files(repo: Path) -> list[Path]:
-        """Every .py file under the repo, skipping venvs/caches/build output."""
-        out: list[Path] = []
-        stack = [repo]
-        while stack:
-            d = stack.pop()
-            try:
-                entries = list(d.iterdir())
-            except OSError:
-                continue
-            for p in entries:
-                if p.is_dir():
-                    if p.name not in _REPO_SKIP_DIRS:
-                        stack.append(p)
-                elif p.suffix == ".py":
-                    out.append(p)
-        return sorted(out)
 
     class _RemoveNodes(cst.CSTTransformer):
         """Remove exactly the given nodes from the tree (identity)."""
@@ -258,13 +209,6 @@ class CstMechanics:
             if pos.start.line <= self.line <= pos.end.line:
                 self.found = node
 
-    @staticmethod
-    def _wrapped_module(source: str) -> _ParsedModule:
-        """Parse into a metadata wrapper's copy — every node MUST come from the
-        wrapper's tree or ParentNodeProvider lookups miss (the fixers hold nodes
-        across transforms; identity must stay within one tree)."""
-        wrapper = cst.MetadataWrapper(cst.parse_module(source))
-        return _ParsedModule(module=wrapper.module, wrapper=wrapper)
 
     class _FindFnLine(cst.CSTVisitor):
         """Locate the first FunctionDef whose def line equals the target — its

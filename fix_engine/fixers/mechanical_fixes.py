@@ -16,6 +16,7 @@ import libcst.matchers as m
 from libcst.metadata import CodePosition, ParentNodeProvider, PositionProvider
 
 from fix_engine.cst_mechanics import CstMechanics
+from fix_engine.source_files import SourceFiles
 
 
 class MechanicalFixes:
@@ -1139,7 +1140,7 @@ class MechanicalFixes:
         duplicate-def safety check: a delete is only offered when the shadowing
         def is provably unreferenced (the two def sites are the only hits)."""
         total = 0
-        for p in CstMechanics._py_files(repo):
+        for p in SourceFiles(repo).py_files():
             try:
                 module = cst.parse_module(p.read_text(encoding="utf-8"))
             except Exception:  # parse errors in other files are their own findings
