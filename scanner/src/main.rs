@@ -471,24 +471,28 @@ impl Pipeline {
         for scan in scans {
             let rel = scan.rel_of(root_s);
             let is_test = Paths::is_test_path(&rel);
-            for s in &scan.skeletons {
-                skeletons.push(SkeletonFn {
-                    rel: rel.clone(),
-                    name: s.name.clone(),
-                    line: s.line,
-                    end_line: s.end_line,
-                    skeleton: s.skeleton.clone(),
-                });
-            }
-            for (name, line) in &scan.defs {
-                definitions.push((rel.clone(), name.clone(), *line, false));
-            }
-            for (name, line) in &scan.class_defs {
-                definitions.push((rel.clone(), name.clone(), *line, true));
-            }
-            for (name, line) in &scan.setters {
-                setters.push((rel.clone(), name.clone(), *line));
-            }
+            skeletons.extend(scan.skeletons.iter().map(|s| SkeletonFn {
+                rel: rel.clone(),
+                name: s.name.clone(),
+                line: s.line,
+                end_line: s.end_line,
+                skeleton: s.skeleton.clone(),
+            }));
+            definitions.extend(
+                scan.defs
+                    .iter()
+                    .map(|(name, line)| (rel.clone(), name.clone(), *line, false)),
+            );
+            definitions.extend(
+                scan.class_defs
+                    .iter()
+                    .map(|(name, line)| (rel.clone(), name.clone(), *line, true)),
+            );
+            setters.extend(
+                scan.setters
+                    .iter()
+                    .map(|(name, line)| (rel.clone(), name.clone(), *line)),
+            );
             if is_test {
                 test_refs.extend(scan.refs.iter().cloned());
             } else {
@@ -948,25 +952,28 @@ fn main() {
     for scan in &scans {
         let rel = Paths::rel_of(&scan.file_name, &root);
         let is_test = Paths::is_test_path(&rel);
-        for s in &scan.skeletons {
-            skeletons.push(SkeletonFn {
-                rel: rel.clone(),
-                name: s.name.clone(),
-                line: s.line,
-                end_line: s.end_line,
-                skeleton: s.skeleton.clone(),
-            });
-        }
-
-        for (name, line) in &scan.defs {
-            definitions.push((rel.clone(), name.clone(), *line, false));
-        }
-        for (name, line) in &scan.class_defs {
-            definitions.push((rel.clone(), name.clone(), *line, true));
-        }
-        for (name, line) in &scan.setters {
-            setters.push((rel.clone(), name.clone(), *line));
-        }
+        skeletons.extend(scan.skeletons.iter().map(|s| SkeletonFn {
+            rel: rel.clone(),
+            name: s.name.clone(),
+            line: s.line,
+            end_line: s.end_line,
+            skeleton: s.skeleton.clone(),
+        }));
+        definitions.extend(
+            scan.defs
+                .iter()
+                .map(|(name, line)| (rel.clone(), name.clone(), *line, false)),
+        );
+        definitions.extend(
+            scan.class_defs
+                .iter()
+                .map(|(name, line)| (rel.clone(), name.clone(), *line, true)),
+        );
+        setters.extend(
+            scan.setters
+                .iter()
+                .map(|(name, line)| (rel.clone(), name.clone(), *line)),
+        );
         if is_test {
             test_refs.extend(scan.refs.iter().cloned());
         } else {

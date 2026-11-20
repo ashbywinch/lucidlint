@@ -382,15 +382,16 @@ impl ExpressionOccurrence {
             Expr::Lambda(l) => {
                 let mut params = Vec::new();
                 if let Some(p) = &l.parameters {
-                    for a in p.posonlyargs.iter().chain(&p.args) {
-                        params.push(a.parameter.name.to_string());
-                    }
+                    params.extend(
+                        p.posonlyargs
+                            .iter()
+                            .chain(&p.args)
+                            .map(|a| a.parameter.name.to_string()),
+                    );
                     if let Some(v) = &p.vararg {
                         params.push(format!("*{}", v.name));
                     }
-                    for a in &p.kwonlyargs {
-                        params.push(a.parameter.name.to_string());
-                    }
+                    params.extend(p.kwonlyargs.iter().map(|a| a.parameter.name.to_string()));
                     if let Some(k) = &p.kwarg {
                         params.push(format!("**{}", k.name));
                     }
@@ -478,9 +479,11 @@ impl ExpressionOccurrence {
                 Self::expression_key(&gen.target, source, false, false),
                 Self::expression_key(&gen.iter, source, false, false)
             ));
-            for cond in &gen.ifs {
-                parts.push(format!("if {}", Self::expression_key(cond, source, false, false)));
-            }
+            parts.extend(
+                gen.ifs
+                    .iter()
+                    .map(|cond| format!("if {}", Self::expression_key(cond, source, false, false))),
+            );
         }
         format!("comp({})", parts.join(" "))
     }

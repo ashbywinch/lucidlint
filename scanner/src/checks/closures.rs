@@ -143,9 +143,7 @@ impl Closures {
     /// scopes) WRITE to one of *candidates*?
     fn scope_mutates(body: &[Stmt], candidates: &HashSet<&str>, through_attributes: bool) -> bool {
         let mut stack: Vec<&Stmt> = Vec::new();
-        for s in body {
-            stack.push(s);
-        }
+        stack.extend(body.iter());
         while let Some(s) = stack.pop() {
             if Self::stmt_writes(s, candidates, through_attributes) {
                 return true;
@@ -261,9 +259,7 @@ impl Closures {
         let mut fns = Vec::new();
         let mut bound: HashSet<String> = HashSet::new();
         let mut stack: Vec<&Stmt> = Vec::new();
-        for s in body {
-            stack.push(s);
-        }
+        stack.extend(body.iter());
         while let Some(s) = stack.pop() {
             match s {
                 Stmt::FunctionDef(f) => {

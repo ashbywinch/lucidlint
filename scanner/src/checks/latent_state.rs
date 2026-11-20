@@ -190,9 +190,7 @@ impl LatentState {
         }
 
         let mut stack: Vec<&Stmt> = Vec::new();
-        for s in body {
-            stack.push(s);
-        }
+        stack.extend(body.iter());
         while let Some(s) = stack.pop() {
             if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
                 continue;
@@ -208,9 +206,7 @@ impl LatentState {
     /// Feature envy reads THESE — the collaborator the method reaches into.
     fn collaborator_aliases(body: &[Stmt], out: &mut HashSet<String>) {
         let mut stack: Vec<&Stmt> = Vec::new();
-        for s in body {
-            stack.push(s);
-        }
+        stack.extend(body.iter());
         while let Some(s) = stack.pop() {
             if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
                 continue;
@@ -232,9 +228,7 @@ impl LatentState {
     /// ...) — elements the function iterates are its own inputs.
     fn loop_target_names(body: &[Stmt], out: &mut HashSet<String>) {
         let mut stack: Vec<&Stmt> = Vec::new();
-        for s in body {
-            stack.push(s);
-        }
+        stack.extend(body.iter());
         while let Some(s) = stack.pop() {
             if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
                 continue;
@@ -248,14 +242,10 @@ impl LatentState {
                             out.insert(n.id.to_string());
                         }
                         Expr::Tuple(tp) => {
-                            for el in &tp.elts {
-                                tstack.push(el);
-                            }
+                            tstack.extend(tp.elts.iter());
                         }
                         Expr::List(l) => {
-                            for el in &l.elts {
-                                tstack.push(el);
-                            }
+                            tstack.extend(l.elts.iter());
                         }
                         Expr::Starred(st) => tstack.push(&st.value),
                         _ => {}
@@ -358,20 +348,14 @@ impl LatentState {
                 let Stmt::FunctionDef(f) = m else { continue };
                 let is_init = f.name.as_str() == "__init__";
                 let mut stack: Vec<&Stmt> = Vec::new();
-                for b in &f.body {
-                    stack.push(b);
-                }
+                stack.extend(f.body.iter());
                 while let Some(st) = stack.pop() {
                     if matches!(st, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
                         continue;
                     }
                     let mut targets: Vec<&Expr> = Vec::new();
                     match st {
-                        Stmt::Assign(a) => {
-                            for t in &a.targets {
-                                targets.push(t);
-                            }
-                        }
+                        Stmt::Assign(a) => targets.extend(a.targets.iter()),
                         Stmt::AnnAssign(a) => targets.push(a.target.as_ref()),
                         Stmt::AugAssign(a) => targets.push(&a.target),
                         _ => {}
