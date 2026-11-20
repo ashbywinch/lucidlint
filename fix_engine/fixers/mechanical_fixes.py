@@ -923,33 +923,61 @@ class MechanicalFixes:
             acc=aug.target.value, collection="list", element=None, key=None, flatten=aug.value, if_test=None
         )
 
+    # the compound kinds whose bodies bind names, and the reader for each
+    _BLOCK_BINDERS = (
+        (cst.For, "_for_binds"),
+        (cst.While, "_loop_binds"),
+        (cst.If, "_loop_binds"),
+        (cst.Try, "_try_binds"),
+        (cst.With, "_with_binds"),
+        (cst.Match, "_match_binds"),
+    )
+
     @staticmethod
     def _bind_children(stmt, bound: set[str]) -> None:
         """The names a compound statement binds across its child blocks."""
+        reader = next(
+            (getattr(MechanicalFixes, name) for kind, name in MechanicalFixes._BLOCK_BINDERS if type(stmt) is kind),
+            None,
+        )
+        if reader is None:
+            return
+        for child in reader(stmt, bound):
+            MechanicalFixes._bind_names(child, bound)
+
+    @staticmethod
+    def _for_binds(stmt, bound: set[str]) -> list:
+        bound.update(Bindings.expr_names(stmt.target))
+        return MechanicalFixes._loop_binds(stmt, bound)
+
+    @staticmethod
+    def _loop_binds(stmt, bound: set[str]) -> list:
+        return MechanicalFixes._stmt_seq(stmt.body) + MechanicalFixes._stmt_seq(stmt.orelse)
+
+    @staticmethod
+    def _try_binds(stmt, bound: set[str]) -> list:
+        seqs = (
+            MechanicalFixes._stmt_seq(stmt.body)
+            + MechanicalFixes._stmt_seq(stmt.orelse)
+            + MechanicalFixes._stmt_seq(stmt.finalbody)
+        )
+        for handler in stmt.handlers:
+            seqs += MechanicalFixes._stmt_seq(handler.body)
+        return seqs
+
+    @staticmethod
+    def _with_binds(stmt, bound: set[str]) -> list:
+        for item in stmt.items:
+            if item.asname is not None:
+                bound.update(Bindings.expr_names(item.asname.name))
+        return MechanicalFixes._stmt_seq(stmt.body)
+
+    @staticmethod
+    def _match_binds(stmt, bound: set[str]) -> list:
         seqs: list = []
-        if isinstance(stmt, cst.For):
-            bound.update(Bindings.expr_names(stmt.target))
-            seqs = MechanicalFixes._stmt_seq(stmt.body) + MechanicalFixes._stmt_seq(stmt.orelse)
-        elif isinstance(stmt, (cst.While, cst.If)):
-            seqs = MechanicalFixes._stmt_seq(stmt.body) + MechanicalFixes._stmt_seq(stmt.orelse)
-        elif isinstance(stmt, cst.Try):
-            seqs = (
-                MechanicalFixes._stmt_seq(stmt.body)
-                + MechanicalFixes._stmt_seq(stmt.orelse)
-                + MechanicalFixes._stmt_seq(stmt.finalbody)
-            )
-            for h in stmt.handlers:
-                seqs += MechanicalFixes._stmt_seq(h.body)
-        elif isinstance(stmt, cst.With):
-            for item in stmt.items:
-                if item.asname is not None:
-                    bound.update(Bindings.expr_names(item.asname.name))
-            seqs = MechanicalFixes._stmt_seq(stmt.body)
-        elif isinstance(stmt, cst.Match):
-            for case in stmt.cases:
-                seqs += MechanicalFixes._stmt_seq(case.body)
-        for b in seqs:
-            MechanicalFixes._bind_names(b, bound)
+        for case in stmt.cases:
+            seqs += MechanicalFixes._stmt_seq(case.body)
+        return seqs
 
     @staticmethod
     def _bind_names(stmt, bound: set[str]) -> None:

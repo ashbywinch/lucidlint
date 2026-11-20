@@ -601,23 +601,48 @@ class MethodExtraction:
     def _wildcard(pattern) -> bool:
         return isinstance(pattern, cst.MatchAs) and pattern.pattern is None and pattern.name is None
 
+    # the statement kinds that bind a name, and the handler that reads it — a
+    # lookup by node kind instead of an isinstance ladder
+    _NAME_BINDERS = (
+        (cst.Import, "_binds_import"),
+        (cst.ImportFrom, "_binds_import_from"),
+        (cst.Assign, "_binds_assign"),
+        (cst.AnnAssign, "_binds_assign"),
+        (cst.FunctionDef, "_binds_def"),
+        (cst.ClassDef, "_binds_def"),
+    )
+
     @staticmethod
     def collect_stmt_names(add_target, line_stmt, names):
         stmts = line_stmt.body if isinstance(line_stmt, cst.SimpleStatementLine) else [line_stmt]
         for stmt in stmts:
-            if isinstance(stmt, cst.Import):
-                Bindings.collect_alias_names(names, stmt)
-            elif isinstance(stmt, cst.ImportFrom):
-                if isinstance(stmt.names, cst.ImportStar):
-                    continue  # `from x import *` binds no importable name
-                for a in stmt.names:
-                    if a.asname is not None:
-                        names.update(Bindings.hoist_target_names(a.asname.name))
-                    elif isinstance(a.name, cst.Name) and a.name.value != "*":
-                        names.add(a.name.value)
-            elif isinstance(stmt, (cst.Assign, cst.AnnAssign)):
-                targets = stmt.targets if isinstance(stmt, cst.Assign) else [stmt.target]
-                for t in targets:
-                    add_target(t)
-            elif isinstance(stmt, (cst.FunctionDef, cst.ClassDef)):
-                names.add(stmt.name.value)
+            handler = next(
+                (getattr(MethodExtraction, name) for kind, name in MethodExtraction._NAME_BINDERS if type(stmt) is kind),
+                None,
+            )
+            if handler is not None:
+                handler(stmt, names, add_target)
+
+    @staticmethod
+    def _binds_import(stmt, names, add_target) -> None:
+        Bindings.collect_alias_names(names, stmt)
+
+    @staticmethod
+    def _binds_import_from(stmt, names, add_target) -> None:
+        if isinstance(stmt.names, cst.ImportStar):
+            return  # `from x import *` binds no importable name
+        for alias in stmt.names:
+            if alias.asname is not None:
+                names.update(Bindings.hoist_target_names(alias.asname.name))
+            elif isinstance(alias.name, cst.Name) and alias.name.value != "*":
+                names.add(alias.name.value)
+
+    @staticmethod
+    def _binds_assign(stmt, names, add_target) -> None:
+        targets = stmt.targets if isinstance(stmt, cst.Assign) else [stmt.target]
+        for target in targets:
+            add_target(target)
+
+    @staticmethod
+    def _binds_def(stmt, names, add_target) -> None:
+        names.add(stmt.name.value)
