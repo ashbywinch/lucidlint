@@ -13,8 +13,8 @@ from typing import Any, NamedTuple, override
 import libcst as cst
 from libcst.metadata import PositionProvider
 
-from fix_engine.cst_mechanics import CstMechanics
 from fix_engine.module_outline import ModuleOutline
+from fix_engine.rewrite import Rewrite
 
 
 class RecordFixes:
@@ -69,7 +69,7 @@ class RecordFixes:
         transformed = wrapper.visit(RecordFixes._RecordToClass(self.request.rel, record_dicts, class_name, field_names))
         # the class def plus an EmptyLine — byte-identical to the old
         # Expr(SimpleStatementLine) wrap, which codegen'd a trailing newline
-        new_body: list = [CstMechanics._record_class_def(class_name, field_names), cst.EmptyLine()]
+        new_body: list = [Rewrite.record_class_def(class_name, field_names), cst.EmptyLine()]
         new_body.extend(transformed.body)
         return cst.Module(body=new_body).code
 
@@ -113,7 +113,7 @@ class RecordFixes:
         rewritten = wrapper.visit(
             RecordFixes._DictToClass(self.request.line, self.request.col, class_name, key_map, frozenset(bind_names))
         )
-        new_body: list = [CstMechanics._record_class_def(class_name, list(key_map.values())), cst.EmptyLine()]
+        new_body: list = [Rewrite.record_class_def(class_name, list(key_map.values())), cst.EmptyLine()]
         new_body.extend(rewritten.body)
         return cst.Module(body=new_body).code
 

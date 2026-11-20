@@ -16,8 +16,8 @@ import libcst.matchers as m
 from libcst.metadata import CodePosition, ParentNodeProvider, PositionProvider
 
 from fix_engine.bindings import Bindings
-from fix_engine.cst_mechanics import CstMechanics
 from fix_engine.module_outline import ModuleOutline
+from fix_engine.rewrite import Rewrite
 from fix_engine.source_files import SourceFiles
 
 
@@ -141,7 +141,7 @@ class MechanicalFixes:
             return None
         if MechanicalFixes._name_occurrences(self.request.repo, probe.name) > 2:
             return None  # something references the name — a delete would break it
-        return wrapper.module.visit(CstMechanics._RemoveNodes([probe.found])).code
+        return Rewrite(wrapper.module).without([probe.found]).code
 
     def fix_restating_docstring(self) -> str | None:
         source, line = self.request._loaded_source(), self.request.line
@@ -198,7 +198,7 @@ class MechanicalFixes:
                 block_stmts = list(parent.body)
                 if block_stmts and all(s in target_set for s in block_stmts):
                     return None
-        return wrapper.module.visit(CstMechanics._RemoveNodes(targets)).code
+        return Rewrite(wrapper.module).without(targets).code
 
     def _member_param_types(self, line: int) -> dict[str, str]:
         """The enclosing def's param name -> annotation map, for the member
@@ -489,7 +489,7 @@ class MechanicalFixes:
 
         def __init__(self, line: int, name: str, helper_local: str = "val", element: str = "part") -> None:
             self.line = line
-            if CstMechanics._extraction_is_private() and not name.startswith("_"):
+            if Rewrite.extraction_is_private() and not name.startswith("_"):
                 name = "_" + name
             self.name = name
             self.helper_local = helper_local

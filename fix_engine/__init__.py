@@ -28,7 +28,6 @@ from libcst.metadata import ExpressionContextProvider, ParentNodeProvider, Posit
 
 from fix_engine import records as _records
 from fix_engine.bindings import Bindings
-from fix_engine.cst_mechanics import CstMechanics
 from fix_engine.fix_options import FixOptions
 from fix_engine.fixers.dispatch_registry import DispatchRegistry
 from fix_engine.fixers.feature_envy import FeatureEnvy
@@ -38,9 +37,11 @@ from fix_engine.fixers.parameter_objects import ParameterObjects
 from fix_engine.fixers.record_fixes import RecordFixes
 from fix_engine.fixers.renaming import Renaming
 from fix_engine.fixers.rule_table import RuleTable
+from fix_engine.imports import Imports
 from fix_engine.method_extraction import MethodExtraction
 from fix_engine.module_outline import ModuleOutline
 from fix_engine.module_source import ModuleSource
+from fix_engine.rewrite import Rewrite
 from fix_engine.source_files import SourceFiles
 from fix_engine.strewing_group import StrewingGroup
 
@@ -75,11 +76,11 @@ _import_base_name = Bindings.import_base_name
 _is_docstring_stmt = ModuleOutline.is_docstring_stmt
 
 _py_files = SourceFiles.py_files
-_record_class_def = CstMechanics._record_class_def
-_self_attr_target = CstMechanics._self_attr_target
+_record_class_def = Rewrite.record_class_def
+_self_attr_target = Rewrite.self_attr_target
 _hoist_target_names = Bindings.hoist_target_names
-_extraction_is_private = CstMechanics._extraction_is_private
-_RemoveNodes = CstMechanics._RemoveNodes
+_extraction_is_private = Rewrite.extraction_is_private
+_RemoveNodes = Rewrite._RemoveNodes
 
 # the method-extraction mechanics stay reachable from the package root (the tests
 # and the scanner-side helpers import them there)
@@ -595,7 +596,7 @@ class _FixRequest:
         if referenced & Bindings.module_bindings(module):
             return None
         new_module = cst.Module(
-            body=[*CstMechanics._moved_imports(module, referenced), *(top_defs[n] for n in opts.params)]
+            body=[*Imports(module).needed(referenced), *(top_defs[n] for n in opts.params)]
         )
         return _ModuleProposal(
             origin=cst.Module(body=_origin_after_move(module, move, opts, self.rel)).code,
@@ -1197,7 +1198,7 @@ def _rewire_husk_sites(module: cst.Module, husk: str, method_fns: dict[str, str]
     drop_probe = _HuskProbe()
     rewired.visit(drop_probe)
     if drop_probe.statements:
-        rewired = rewired.visit(CstMechanics._RemoveNodes(drop_probe.statements))
+        rewired = Rewrite(rewired).without(drop_probe.statements)
     # the husk class itself is deleted by the caller — scan leftovers on the
     # tree WITHOUT it (the class's own subtree must not count as a reference)
     scanned = rewired.visit(_RemoveHuskClass(husk))
@@ -2276,7 +2277,7 @@ def _split_class_source(
     residual member; a from-`.Class` import for a sibling subject) + the
     class itself with its constants and references rewritten."""
     free = _class_free_names(cls) - ctx.moved - Bindings.BUILTINS
-    imports = CstMechanics._moved_imports(module, free)  # verbatim copies for import-bound names
+    imports = Imports(module).needed(free)  # verbatim copies for import-bound names
     constructed: list = []
     for n in sorted(free):
         if n in ctx.subjects and n != cls.name.value:
@@ -2897,7 +2898,7 @@ def _wide_tuple_fix(req: _FixRequest) -> str | None:
         return None
     fields = _record_field_names(site.elements, site.arity)
     transformed = wrapper.visit(_WideTupleToRecord(_annotation_text(site.annotation), site.arity, class_name))
-    body: list = [CstMechanics._record_class_def(class_name, fields), cst.EmptyLine(), *transformed.body]
+    body: list = [Rewrite.record_class_def(class_name, fields), cst.EmptyLine(), *transformed.body]
     return cst.Module(body=body).code
 
 
@@ -3230,7 +3231,7 @@ def _data_clump_fix(req: _FixRequest) -> str | None:
     if transformer.decline:
         req.decline = transformer.decline
         return None
-    body: list = [CstMechanics._record_class_def(class_name, [pair_a, pair_b]), cst.EmptyLine(), *transformed.body]
+    body: list = [Rewrite.record_class_def(class_name, [pair_a, pair_b]), cst.EmptyLine(), *transformed.body]
     return cst.Module(body=body).code
 
 
@@ -3388,7 +3389,7 @@ def _init_stmt(field: str, value: cst.BaseExpression) -> cst.BaseStatement:
     return cst.SimpleStatementLine(
         body=[
             cst.Assign(
-                targets=CstMechanics._self_attr_target(field),
+                targets=Rewrite.self_attr_target(field),
                 value=value,
             )
         ]

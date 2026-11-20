@@ -14,8 +14,8 @@ import libcst as cst
 from libcst.metadata import ExpressionContextProvider, ParentNodeProvider, PositionProvider
 
 from fix_engine.bindings import Bindings
-from fix_engine.cst_mechanics import CstMechanics
 from fix_engine.module_outline import ModuleOutline
+from fix_engine.rewrite import Rewrite
 
 
 class MethodExtraction:
@@ -52,7 +52,7 @@ class MethodExtraction:
         cannot have external callers, so it takes the underscore)."""
         if name is None:
             name = "_extracted"
-        elif CstMechanics._extraction_is_private() and not name.startswith("_"):
+        elif Rewrite.extraction_is_private() and not name.startswith("_"):
             name = "_" + name
         module, wrapper, state = self._fn_seam_analysis()
         if state.fn_node is None or len(state.flat) < 2:
