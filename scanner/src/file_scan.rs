@@ -50,12 +50,30 @@ pub struct UndeclScan {
     pub self_assigns: Vec<SelfAssign>,
 }
 
+/// One definition site in the repo — the `unused` rule's subject: where it is,
+/// what it is called, and whether it is a class (the scattered-instance rule
+/// resolves against class names).
+#[derive(Clone, Debug)]
+pub struct Definition {
+    pub rel: String,
+    pub name: String,
+    pub line: usize,
+    pub is_class: bool,
+}
+
+/// One setter the repo defines — the `unused` rule's second subject: a method
+/// that only assigns members.
+#[derive(Clone, Debug)]
+pub struct Setter {
+    pub rel: String,
+    pub name: String,
+    pub line: usize,
+}
+
 /// The repo-wide merge's two suppression maps, keyed by the file's rel: what
-/// each file spent, and what remains. One name for the pair a scan yields.
+/// each file spent, and what remains.
 pub type SuppressionsMap = std::collections::HashMap<String, crate::suppressions::Suppressions>;
 pub type Spent = std::collections::HashSet<(usize, String)>;
-pub type SuppressionRow = (String, crate::suppressions::Suppressions);
-pub type SpentRow = (String, Spent);
 pub type SpentMap = std::collections::HashMap<String, Spent>;
 
 #[derive(Clone, Default)]

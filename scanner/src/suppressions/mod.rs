@@ -51,6 +51,33 @@ pub struct PreUsedSuppressions {
 }
 
 impl Suppressions {
+    /// The signal a stale-suppression message names — `ignore <sig>` (line form)
+    /// or `ignore-file <sig>` (file form). Used to match a surviving stale
+    /// finding against the markers this pass actually consumed.
+    ///
+    /// Two identifiers per finding, don't conflate them:
+    ///
+    /// - `kind` — display kind, `final_kind` output (named buckets; families
+    ///   without one collapse to "standard", the message explains the rest).
+    /// - `signal` — the raw family kind; THIS is what suppressions match on
+    ///   (`lucidlint: ignore <signal>`, config `ignore = [<signal>]`,
+    ///   RULE_GROUPS membership, baseline identity).
+    pub fn signal_of_stale(message: &str) -> String {
+        let marker = if message.contains("ignore-file ") {
+            "ignore-file "
+        } else {
+            "ignore "
+        };
+        let Some(start) = message.find(marker) else {
+            return String::new();
+        };
+        message[start + marker.len()..]
+            .split(|c: char| c.is_whitespace() || c == '\'' || c == '>')
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
+
     /// Parse `lucidlint: ignore <signal> <why>` / `ignore-file` comments.
     /// `comments` are (line, full comment text incl. the marker) — each language
     /// layer extracts them its own way (ruff tokens for Python, a string-aware

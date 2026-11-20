@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use ruff_python_ast::{Expr, Stmt};
 use ruff_text_size::Ranged;
 
+use crate::file_scan::{Definition, Setter};
 use crate::finding::Finding;
 use crate::source::Source;
 use crate::ScanState;
@@ -49,12 +50,12 @@ impl Unused {
     /// names the imminent-caller escape so an agent mid-refactor is not wrongly
     /// told to delete.
     pub fn unused_setter_findings(
-        setters: &[(String, String, usize)],
+        setters: &[Setter],
         prod_refs: &HashSet<String>,
         test_refs: &HashSet<String>,
     ) -> Vec<Finding> {
         let mut out = Vec::new();
-        for (rel, name, line) in setters {
+        for Setter { rel, name, line } in setters {
             if prod_refs.contains(name) {
                 continue; // referenced by production — live
             }
@@ -91,13 +92,19 @@ impl Unused {
     /// flag — the #28 dead-class arm: a never-referenced class is as dead as a
     /// never-referenced function.
     pub fn unused_findings(
-        definitions: &[(String, String, usize, bool)], // (rel, name, line, is_class)
+        definitions: &[Definition],
         prod_refs: &HashSet<String>,
         test_refs: &HashSet<String>,
         strings: &[String],
     ) -> Vec<Finding> {
         let mut out = Vec::new();
-        for (rel, name, line, is_class) in definitions {
+        for definition in definitions {
+            let Definition {
+                rel,
+                name,
+                line,
+                is_class,
+            } = definition;
             let what = if *is_class { "class" } else { "function" };
             if Self::is_live_name(name, prod_refs, strings) {
                 continue;

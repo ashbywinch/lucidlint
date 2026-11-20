@@ -38,6 +38,7 @@ mod magic;
 mod naming;
 mod paths;
 mod python_shape;
+mod repo_scan;
 mod report;
 mod rules_gen;
 mod rustloops;
@@ -48,9 +49,7 @@ mod state;
 mod suppressions;
 use checks::Q;
 use checks::*;
-use file_scan::{
-    ClassInfo, FileScan, ImportInfo, SelfAssign, SpentMap, SpentRow, SuppressionRow, SuppressionsMap, UndeclScan,
-};
+use file_scan::{ClassInfo, Definition, FileScan, ImportInfo, SelfAssign, Setter, UndeclScan};
 use finding::{Finding, FnCc, FnScope};
 use paths::{Paths, SCAN_SKIP_DIRS};
 use source::Source;
@@ -163,18 +162,43 @@ impl FileScan {
         Paths::rel_of(&self.file_name, root_s)
     }
 
-    /// This file's definition rows for the repo-wide merge: plain defs then
-    /// class defs, each tagged with the file's rel and whether it is a class.
-    pub fn definition_rows<'a>(&'a self, rel: &'a str) -> impl Iterator<Item = (String, String, usize, bool)> + 'a {
-        let plain = self
-            .defs
-            .iter()
-            .map(move |(name, line)| (rel.to_string(), name.clone(), *line, false));
-        let classes = self
-            .class_defs
-            .iter()
-            .map(move |(name, line)| (rel.to_string(), name.clone(), *line, true));
+    /// This file's function and class definitions, as the repo-wide `unused`
+    /// rule reads them.
+    pub fn definition_rows<'a>(&'a self, rel: &'a str) -> impl Iterator<Item = Definition> + 'a {
+        let plain = self.defs.iter().map(move |(name, line)| Definition {
+            rel: rel.to_string(),
+            name: name.clone(),
+            line: *line,
+            is_class: false,
+        });
+        let classes = self.class_defs.iter().map(move |(name, line)| Definition {
+            rel: rel.to_string(),
+            name: name.clone(),
+            line: *line,
+            is_class: true,
+        });
         plain.chain(classes)
+    }
+
+    /// This file's setter methods, as the repo-wide `unused` rule reads them.
+    pub fn setter_rows<'a>(&'a self, rel: &'a str) -> impl Iterator<Item = Setter> + 'a {
+        self.setters.iter().map(move |(name, line)| Setter {
+            rel: rel.to_string(),
+            name: name.clone(),
+            line: *line,
+        })
+    }
+
+    /// This file's function shapes, tagged with the file they came from — the
+    /// `duplicate` rule's pool.
+    pub fn skeleton_rows<'a>(&'a self, rel: &'a str) -> impl Iterator<Item = SkeletonFn> + 'a {
+        self.skeletons.iter().map(move |shape| SkeletonFn {
+            rel: rel.to_string(),
+            name: shape.name.clone(),
+            line: shape.line,
+            end_line: shape.end_line,
+            skeleton: shape.skeleton.clone(),
+        })
     }
 }
 
@@ -212,7 +236,7 @@ impl Pipeline {
         findings.retain(|f| {
             f.kind != "stale-suppression"
                 || !matches!(
-                    Self::sig_of_stale(&f.message).as_str(),
+                    crate::suppressions::Suppressions::signal_of_stale(&f.message).as_str(),
                     "unused" | "unused-setter" | "duplicate" | "undeclared-attribute"
                 )
         });
@@ -474,171 +498,7 @@ impl Pipeline {
     /// part of a repo-wide scan is the per-file scan, so the LSP reuses cached
     /// scans and re-runs only this pure in-memory aggregation on save.
     fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collections::HashMap<String, Vec<Finding>> {
-        // one chain per collection: each output states its own provenance, and
-        // the per-scan rel travels in the closure that builds the row
-        let rel_of = |scan: &FileScan| scan.rel_of(root_s);
-        let is_test = |scan: &FileScan| Paths::is_test_path(&scan.rel_of(root_s));
-        let skeletons: Vec<SkeletonFn> = scans
-            .iter()
-            .flat_map(|scan| {
-                let rel = rel_of(scan);
-                scan.skeletons.iter().map(move |s| SkeletonFn {
-                    rel: rel.clone(),
-                    name: s.name.clone(),
-                    line: s.line,
-                    end_line: s.end_line,
-                    skeleton: s.skeleton.clone(),
-                })
-            })
-            .collect();
-        let definitions: Vec<(String, String, usize, bool)> = scans
-            .iter()
-            .flat_map(|scan| {
-                let rel = rel_of(scan);
-                scan.definition_rows(&rel).collect::<Vec<_>>()
-            })
-            .collect();
-        let setters: Vec<(String, String, usize)> = scans
-            .iter()
-            .flat_map(|scan| {
-                let rel = rel_of(scan);
-                scan.setters
-                    .iter()
-                    .map(move |(name, line)| (rel.clone(), name.clone(), *line))
-            })
-            .collect();
-        let test_refs: HashSet<String> = scans
-            .iter()
-            .filter(|scan| is_test(scan))
-            .flat_map(|scan| scan.refs.iter().cloned())
-            .collect();
-        let prod_refs: HashSet<String> = scans
-            .iter()
-            .filter(|scan| !is_test(scan))
-            .flat_map(|scan| scan.refs.iter().cloned())
-            .chain(scans.iter().flat_map(|scan| scan.decorated.iter().cloned()))
-            .collect();
-        let strings: Vec<String> = scans
-            .iter()
-            .filter(|scan| !is_test(scan))
-            .flat_map(|scan| scan.strings.iter().cloned())
-            .collect();
-        // two maps keyed by the same rel: one (key, value) pair per map, unzipped
-        let supps_rows: Vec<(SuppressionRow, SpentRow)> = scans
-            .iter()
-            .map(|scan| {
-                let rel = rel_of(scan);
-                ((rel.clone(), scan.supps.clone()), (rel, scan.supps_spent.clone()))
-            })
-            .collect();
-        let (supps_keys, supps_values): (Vec<SuppressionRow>, Vec<SpentRow>) = supps_rows.into_iter().unzip();
-        let supps_by_rel: SuppressionsMap = supps_keys.into_iter().collect();
-        let supps_spent_by_rel: SpentMap = supps_values.into_iter().collect();
-        let module_entities: Vec<_> = scans
-            .iter()
-            .flat_map(|scan| scan.skeleton_modules.iter().cloned())
-            .collect();
-        let heads: Vec<_> = scans
-            .iter()
-            .flat_map(|scan| scan.forwarder_methods.iter().cloned())
-            .collect();
-        let fns: Vec<_> = scans
-            .iter()
-            .flat_map(|scan| scan.forwarder_fns.iter().cloned())
-            .collect();
-        let repo_methods: Vec<_> = scans
-            .iter()
-            .flat_map(|scan| scan.repo_methods.iter().cloned())
-            .collect();
-        let imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> =
-            scans.iter().map(|scan| (rel_of(scan), scan.imports.clone())).collect();
-        let mut additions: Vec<Finding> = Vec::new();
-        additions.extend(checks::duplicate_findings(&skeletons));
-        additions.extend(checks::DuplicateModule::findings(&module_entities));
-        additions.extend(checks::Forwarding::findings(
-            &heads,
-            &fns,
-            &repo_methods,
-            &imports_by_rel,
-        ));
-        let mut repo_wide_unused = checks::Unused::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
-        repo_wide_unused.extend(checks::Unused::unused_setter_findings(&setters, &prod_refs, &test_refs));
-        Self::reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
-        let class_names: HashSet<String> = definitions
-            .iter()
-            .filter(|(_, _, _, is_class)| *is_class)
-            .map(|(_, name, _, _)| name.clone())
-            .collect();
-        let scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> =
-            scans.iter().map(|s| (s.rel_of(root_s), s.scattered.clone())).collect();
-        Self::reconcile_repo_wide(
-            &mut additions,
-            checks::Scattered::scattered_instance_findings(&scattered_scans, &class_names),
-            &supps_by_rel,
-            &supps_spent_by_rel,
-        );
-        let path_scans: Vec<(String, Vec<checks::PathExpression>)> = scans
-            .iter()
-            .map(|s| (s.rel_of(root_s), s.path_expressions.clone()))
-            .collect();
-        Self::reconcile_repo_wide(
-            &mut additions,
-            checks::PathExpression::findings(&path_scans),
-            &supps_by_rel,
-            &supps_spent_by_rel,
-        );
-        let duplicate_expr_scans: Vec<(String, Vec<checks::ExpressionOccurrence>)> = scans
-            .iter()
-            .map(|s| (s.rel_of(root_s), s.duplicate_expressions.clone()))
-            .collect();
-        Self::reconcile_repo_wide(
-            &mut additions,
-            checks::ExpressionOccurrence::findings(&duplicate_expr_scans),
-            &supps_by_rel,
-            &supps_spent_by_rel,
-        );
-        let module_shapes: Vec<(String, checks::ModuleShape)> = scans
-            .iter()
-            .map(|s| (s.rel_of(root_s), s.module_shape.clone()))
-            .collect();
-        Self::reconcile_repo_wide(
-            &mut additions,
-            checks::ModuleShape::findings(&module_shapes),
-            &supps_by_rel,
-            &supps_spent_by_rel,
-        );
-        let undecl_scans: Vec<UndeclScan> = scans
-            .iter()
-            .map(|s| UndeclScan {
-                rel: s.rel_of(root_s),
-                classes: s.classes.clone(),
-                imports: s.imports.clone(),
-                self_assigns: s.self_assigns.clone(),
-            })
-            .collect();
-        let undeclared = checks::LatentState::undeclared(&undecl_scans);
-        Self::reconcile_repo_wide(&mut additions, undeclared, &supps_by_rel, &supps_spent_by_rel);
-        Self::reconcile_repo_wide(
-            &mut additions,
-            Self::middle_man_repo_wide(scans, root_s),
-            &supps_by_rel,
-            &supps_spent_by_rel,
-        );
-        let sibling_scans: Vec<(String, Vec<checks::SiblingClass>)> = scans
-            .iter()
-            .map(|s| (s.rel_of(root_s), s.sibling_classes.clone()))
-            .collect();
-        Self::reconcile_repo_wide(
-            &mut additions,
-            checks::SiblingValueClass::sibling_value_class_findings(&sibling_scans),
-            &supps_by_rel,
-            &supps_spent_by_rel,
-        );
-        let mut by_file: std::collections::HashMap<String, Vec<Finding>> = std::collections::HashMap::new();
-        for f in additions {
-            by_file.entry(f.file.clone()).or_default().push(f);
-        }
-        by_file
+        crate::repo_scan::RepoScan::of(scans, root_s).by_file()
     }
 
     /// The Rust layer's scan into the shared FileScan shape. The Python-specific
@@ -677,43 +537,6 @@ impl Pipeline {
             supps_spent: rs.supps_spent.clone(),
         }
     }
-    /// The finding model's final action kind — the JSON contract carries it so
-    /// the Python orchestrator consumes findings without further mapping.
-    ///
-    /// Two identifiers per finding, don't conflate them:
-    ///
-    /// - `kind` — display kind, `final_kind` output (named buckets; families
-    ///   without one collapse to "standard", the message explains the rest).
-    /// - `signal` — the raw family kind; THIS is what suppressions match on
-    ///   (`lucidlint: ignore <signal>`, config `ignore = [<signal>]`,
-    ///   RULE_GROUPS membership, baseline identity).
-    ///
-    /// FAMILY_KINDS, STANDARD_KINDS, `final_kind`, and `rule_groups` are
-    /// GENERATED from the rule catalog (rule_metadata.py) by `make rules` — see
-    /// rules_gen.rs. Registering a rule is ONE edit in the catalog; everything
-    /// here follows from it and the drift gate pins the generated file.
-    fn sig_of_stale(msg: &str) -> String {
-        // line form: "suppression '// lucidlint: ignore <sig>' at line N no longer fires"
-        let line_marker = "ignore ";
-        if let Some(i) = msg.find(line_marker) {
-            return msg[i + line_marker.len()..]
-                .split(|c: char| c.is_whitespace() || c == '\'' || c == '>')
-                .next()
-                .unwrap_or("")
-                .to_string();
-        }
-        // file form: "file suppression '... ignore-file <sig>' no longer fires"
-        let file_marker = "ignore-file ";
-        if let Some(i) = msg.find(file_marker) {
-            return msg[i + file_marker.len()..]
-                .split(|c: char| c.is_whitespace() || c == '\'')
-                .next()
-                .unwrap_or("")
-                .to_string();
-        }
-        String::new()
-    }
-
     /// Repo-wide findings (unused, duplicate) are computed after the per-file
     /// suppression pass, so an `# lucidlint: ignore <sig>` comment for one was
     /// never consumed and got flagged stale — and the finding stayed. Re-honor
@@ -759,7 +582,7 @@ impl Pipeline {
             if g.kind != "stale-suppression" {
                 return true;
             }
-            let sig = Self::sig_of_stale(&g.message);
+            let sig = crate::suppressions::Suppressions::signal_of_stale(&g.message);
             !used_file.contains(&sig) && !used_line.contains(&(g.line, sig))
         });
     }
@@ -981,8 +804,8 @@ fn main() {
     // (Python reference scan; Rust's dead code is rustc's, so Rust scans
     // carry no defs/refs and never fire the unused family)
     let mut skeletons = Vec::new();
-    let mut definitions: Vec<(String, String, usize, bool)> = Vec::new();
-    let mut setters: Vec<(String, String, usize)> = Vec::new();
+    let mut definitions: Vec<Definition> = Vec::new();
+    let mut setters: Vec<Setter> = Vec::new();
     let mut prod_refs = HashSet::new();
     let mut test_refs = HashSet::new();
     let mut strings = Vec::new();
@@ -996,21 +819,23 @@ fn main() {
             end_line: s.end_line,
             skeleton: s.skeleton.clone(),
         }));
-        definitions.extend(
-            scan.defs
-                .iter()
-                .map(|(name, line)| (rel.clone(), name.clone(), *line, false)),
-        );
-        definitions.extend(
-            scan.class_defs
-                .iter()
-                .map(|(name, line)| (rel.clone(), name.clone(), *line, true)),
-        );
-        setters.extend(
-            scan.setters
-                .iter()
-                .map(|(name, line)| (rel.clone(), name.clone(), *line)),
-        );
+        definitions.extend(scan.defs.iter().map(|(name, line)| Definition {
+            rel: rel.clone(),
+            name: name.clone(),
+            line: *line,
+            is_class: false,
+        }));
+        definitions.extend(scan.class_defs.iter().map(|(name, line)| Definition {
+            rel: rel.clone(),
+            name: name.clone(),
+            line: *line,
+            is_class: true,
+        }));
+        setters.extend(scan.setters.iter().map(|(name, line)| Setter {
+            rel: rel.clone(),
+            name: name.clone(),
+            line: *line,
+        }));
         if is_test {
             test_refs.extend(scan.refs.iter().cloned());
         } else {
@@ -1101,8 +926,8 @@ fn main() {
     Pipeline::reconcile_repo_wide(&mut all_findings, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
     let class_names: HashSet<String> = definitions
         .iter()
-        .filter(|(_, _, _, is_class)| *is_class)
-        .map(|(_, name, _, _)| name.clone())
+        .filter(|definition| definition.is_class)
+        .map(|definition| definition.name.clone())
         .collect();
     let scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> = scans
         .iter()
@@ -1328,7 +1153,7 @@ fn main() {
             if f.kind != "stale-suppression" {
                 return true;
             }
-            let sig = Pipeline::sig_of_stale(&f.message);
+            let sig = crate::suppressions::Suppressions::signal_of_stale(&f.message);
             let used = used_ln.contains(&(f.line, sig.clone())) || used_fl.contains(&sig);
             !used
         })
@@ -4059,8 +3884,8 @@ mod tests {
     /// Corpus-level scan: names map to sources; returns merged findings.
     fn scan_corpus(files: &[(&str, &str)]) -> Vec<Finding> {
         let mut skeletons = Vec::new();
-        let mut definitions = Vec::new();
-        let mut setters: Vec<(String, String, usize)> = Vec::new();
+        let mut definitions: Vec<Definition> = Vec::new();
+        let mut setters: Vec<Setter> = Vec::new();
         let mut prod_refs = HashSet::new();
         let mut test_refs = HashSet::new();
         let mut strings = Vec::new();
@@ -4111,13 +3936,27 @@ mod tests {
             mm_candidates.extend(scan.middle_man_candidates.iter().cloned());
             imports_by_rel.insert(name.to_string(), scan.imports.clone());
             for (fn_name, line) in &scan.defs {
-                definitions.push((rel.clone(), fn_name.clone(), *line, false));
+                definitions.push(Definition {
+                    rel: rel.clone(),
+                    name: fn_name.clone(),
+                    line: *line,
+                    is_class: false,
+                });
             }
             for (cls_name, line) in &scan.class_defs {
-                definitions.push((rel.clone(), cls_name.clone(), *line, true));
+                definitions.push(Definition {
+                    rel: rel.clone(),
+                    name: cls_name.clone(),
+                    line: *line,
+                    is_class: true,
+                });
             }
             for (name, line) in &scan.setters {
-                setters.push((rel.clone(), name.clone(), *line));
+                setters.push(Setter {
+                    rel: rel.clone(),
+                    name: name.clone(),
+                    line: *line,
+                });
             }
             undecl_scans.push(UndeclScan {
                 rel: rel.clone(),
@@ -4139,8 +3978,8 @@ mod tests {
         Pipeline::reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel, &spent_by_rel);
         let class_names: HashSet<String> = definitions
             .iter()
-            .filter(|(_, _, _, is_class)| *is_class)
-            .map(|(_, name, _, _)| name.clone())
+            .filter(|definition| definition.is_class)
+            .map(|definition| definition.name.clone())
             .collect();
         Pipeline::reconcile_repo_wide(
             &mut all,
@@ -4207,7 +4046,7 @@ mod tests {
                 if f.kind != "stale-suppression" {
                     return true;
                 }
-                let sig = Pipeline::sig_of_stale(&f.message);
+                let sig = crate::suppressions::Suppressions::signal_of_stale(&f.message);
                 !used_ln.contains(&(f.line, sig.clone())) && !used_fl.contains(&sig)
             })
             .collect();
