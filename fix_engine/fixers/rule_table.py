@@ -98,18 +98,26 @@ class RuleTable:
     def _append_value(branch, acc: str):
         """The value of a single `acc.append(<value>)` statement, or None when
         the branch is not exactly that."""
-        if not isinstance(branch, cst.IndentedBlock) or len(branch.body) != 1:
+        app_stmt = RuleTable._only_statement(branch)
+        if app_stmt is None:
             return None
-        app = branch.body[0]
-        if not isinstance(app, cst.SimpleStatementLine) or len(app.body) != 1:
-            return None
-        app_stmt = app.body[0]
         if not isinstance(app_stmt, cst.Expr) or not isinstance(app_stmt.value, cst.Call):
             return None
         call = app_stmt.value
         if not RuleTable._is_accumulator_append(call, acc) or len(call.args) != 1:
             return None
         return call.args[0].value
+
+    @staticmethod
+    def _only_statement(branch):
+        """The single small statement of an indented block, or None when the
+        branch is not exactly one statement."""
+        if not isinstance(branch, cst.IndentedBlock) or len(branch.body) != 1:
+            return None
+        line = branch.body[0]
+        if not isinstance(line, cst.SimpleStatementLine) or len(line.body) != 1:
+            return None
+        return line.body[0]
 
     @staticmethod
     def _is_accumulator_append(call: cst.Call, acc: str) -> bool:

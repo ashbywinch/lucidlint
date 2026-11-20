@@ -224,29 +224,20 @@ class ModuleSplitting:
         parent = parents.get(node)
         if parent is None:
             return "skip"
-        if isinstance(parent, cst.AssignTarget):
+        # the node is a BINDING, not a reference: an assignment/loop target, a
+        # parameter or def name, an import alias, or a keyword/attribute name
+        binds_only = (cst.AssignTarget, cst.AsName, cst.ImportAlias)
+        targets = (cst.AnnAssign, cst.For, cst.CompFor, cst.NamedExpr)
+        names = (cst.Param, cst.ClassDef, cst.FunctionDef)
+        if isinstance(parent, binds_only):
             return "skip"
-        if isinstance(parent, cst.AnnAssign) and parent.target is node:
+        if isinstance(parent, targets) and parent.target is node:
             return "skip"
-        if isinstance(parent, cst.Param) and parent.name is node:
-            return "skip"
-        if isinstance(parent, cst.For) and parent.target is node:
-            return "skip"
-        if isinstance(parent, cst.CompFor) and parent.target is node:
-            return "skip"
-        if isinstance(parent, cst.AsName):
-            return "skip"
-        if isinstance(parent, cst.ImportAlias):
-            return "skip"
-        if isinstance(parent, cst.NamedExpr) and parent.target is node:
+        if isinstance(parent, names) and parent.name is node:
             return "skip"
         if isinstance(parent, cst.Arg) and parent.keyword is node:
             return "skip"
         if isinstance(parent, cst.Attribute) and parent.attr is node:
-            return "skip"
-        if isinstance(parent, cst.ClassDef) and parent.name is node:
-            return "skip"
-        if isinstance(parent, cst.FunctionDef) and parent.name is node:
             return "skip"
         cur = parent
         while cur is not None:

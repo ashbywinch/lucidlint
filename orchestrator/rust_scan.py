@@ -158,11 +158,9 @@ class RustScan:
                     suppression_census = {str(k): int(v) for k, v in (data.get("suppressions") or {}).items()}
                     rels_set = set(rels)
                     unmapped: set[str] = set()
-                    for f in data.get("findings", []) + data.get("complexity", []):
-                        rel = self._rust_finding_rel(f.get("file", ""), repo, rels_set)
-                        if rel is None:
-                            unmapped.add(str(f.get("file", "")))
-                            continue
+                    for f, rel in RustScan._mapped(
+                        data.get("findings", []) + data.get("complexity", []), repo, rels_set, unmapped
+                    ):
                         result.setdefault(rel, []).append(
                             RustFinding(
                                 kind=f.get("kind", "standard"),
@@ -178,11 +176,7 @@ class RustScan:
                                 fix_kind=str(f.get("fix_kind", "") or ""),
                             )
                         )
-                    for e in data.get("cc", []):
-                        rel = self._rust_finding_rel(e.get("file", ""), repo, rels_set)
-                        if rel is None:
-                            unmapped.add(str(e.get("file", "")))
-                            continue
+                    for e, rel in RustScan._mapped(data.get("cc", []), repo, rels_set, unmapped):
                         cc_result.setdefault(rel, []).append(
                             (e.get("function", ""), int(e.get("line", 0)), int(e.get("cc", 0)))
                         )
@@ -295,6 +289,19 @@ class RustScan:
             elif root.is_file():
                 newest = max(newest, root.stat().st_mtime)
         return newest > binary.stat().st_mtime
+
+    @staticmethod
+    def _mapped(findings, repo: Path, rels: set[str], unmapped: set[str]):
+        """The wire findings whose file maps into the scan set, paired with the
+        repo-relative path — the unmappable ones are collected for the one
+        diagnostic."""
+        for finding in findings:
+            raw = str(finding.get("file", ""))
+            rel = RustScan._rust_finding_rel(raw, repo, rels)
+            if rel is None:
+                unmapped.add(raw)
+                continue
+            yield finding, rel
 
     @staticmethod
     def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
