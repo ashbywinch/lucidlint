@@ -210,6 +210,10 @@ impl<'a> RepoScan<'a> {
             &mut findings,
             checks::ModuleShape::findings(&self.per_file(|scan| &scan.module_shape)),
         );
+        self.add(
+            &mut findings,
+            checks::OverAbstraction::abstraction_findings(&self.class_scans()),
+        );
         self.add(&mut findings, self.undeclared_members());
         self.add(&mut findings, self.middle_man());
         self.add(
@@ -298,6 +302,16 @@ impl<'a> RepoScan<'a> {
             .collect()
     }
 
+    /// The `over-abstraction` rule's per-file input: each file's classes and
+    /// imports — the index an abstract class's subclasses resolve against.
+    fn class_scans(&self) -> Vec<(String, Vec<crate::ClassInfo>, Vec<ImportInfo>)> {
+        self.scans
+            .iter()
+            .zip(&self.rels)
+            .map(|(scan, rel)| (rel.clone(), scan.classes.clone(), scan.imports.clone()))
+            .collect()
+    }
+
     /// The `undeclared-attribute` rule's per-file input: the classes, imports,
     /// and `self.x = …` sites one file declares.
     fn undeclared_members(&self) -> Vec<Finding> {
@@ -338,5 +352,34 @@ impl<'a> RepoScan<'a> {
             .into_iter()
             .filter(|finding| !already.contains(&(finding.file.clone(), finding.line)))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scan(name: &str, src: &str) -> FileScan {
+        crate::Pipeline::scan_source(src, name)
+    }
+
+    #[test]
+    fn over_abstraction_is_a_corpus_family() {
+        let base = scan(
+            "a.py",
+            include_str!("../../tests/fixtures/rust/abstraction_single_concrete_is_found__01.py"),
+        );
+        let concrete = scan(
+            "b.py",
+            include_str!("../../tests/fixtures/rust/abstraction_single_concrete_is_found__02.py"),
+        );
+        let scans = vec![base, concrete];
+        let found = RepoScan::of(&scans, "repo").findings();
+        let over: Vec<&Finding> = found
+            .iter()
+            .filter(|finding| finding.kind == "over-abstraction")
+            .collect();
+        assert_eq!(over.len(), 1, "{found:?}");
+        assert_eq!(over[0].file, "a.py");
     }
 }
