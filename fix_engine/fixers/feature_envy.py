@@ -10,7 +10,7 @@ from typing import Any, NamedTuple, override
 
 import libcst as cst
 
-from fix_engine.cst_mechanics import CstMechanics
+from fix_engine.bindings import Bindings
 from fix_engine.module_outline import ModuleOutline
 
 
@@ -248,26 +248,26 @@ class FeatureEnvy:
             @override
             def visit_Assign(self, node) -> None:
                 for t in node.targets:
-                    bound.update(CstMechanics._hoist_target_names(t.target))
+                    bound.update(Bindings.hoist_target_names(t.target))
 
             @override
             def visit_AnnAssign(self, node) -> None:
                 if node.target:
-                    bound.update(CstMechanics._hoist_target_names(node.target))
+                    bound.update(Bindings.hoist_target_names(node.target))
 
             @override
             def visit_For(self, node) -> None:
-                bound.update(CstMechanics._hoist_target_names(node.target))
+                bound.update(Bindings.hoist_target_names(node.target))
 
             @override
             def visit_CompFor(self, node) -> None:
-                bound.update(CstMechanics._hoist_target_names(node.target))
+                bound.update(Bindings.hoist_target_names(node.target))
 
             @override
             def visit_With(self, node) -> None:
                 for item in node.items:
                     if item.asname is not None:
-                        bound.update(CstMechanics._hoist_target_names(item.asname.name))
+                        bound.update(Bindings.hoist_target_names(item.asname.name))
 
         stmt.visit(_V())
         return FeatureEnvy._StmtReads(reads - bound - attr_names, bound, has_self)

@@ -13,6 +13,7 @@ from typing import override
 import libcst as cst
 from libcst.metadata import ExpressionContextProvider, ParentNodeProvider, PositionProvider
 
+from fix_engine.bindings import Bindings
 from fix_engine.cst_mechanics import CstMechanics
 from fix_engine.module_outline import ModuleOutline
 
@@ -606,7 +607,7 @@ class MethodExtraction:
                     continue  # `from x import *` binds no importable name
                 for a in stmt.names:
                     if a.asname is not None:
-                        names.update(CstMechanics._hoist_target_names(a.asname.name))
+                        names.update(Bindings.hoist_target_names(a.asname.name))
                     elif isinstance(a.name, cst.Name) and a.name.value != "*":
                         names.add(a.name.value)
             elif isinstance(stmt, (cst.Assign, cst.AnnAssign)):

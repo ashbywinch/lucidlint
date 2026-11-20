@@ -15,6 +15,7 @@ import libcst as cst
 import libcst.matchers as m
 from libcst.metadata import CodePosition, ParentNodeProvider, PositionProvider
 
+from fix_engine.bindings import Bindings
 from fix_engine.cst_mechanics import CstMechanics
 from fix_engine.module_outline import ModuleOutline
 from fix_engine.source_files import SourceFiles
@@ -959,12 +960,12 @@ class MechanicalFixes:
     def _bind_small(small, bound: set[str]) -> None:
         """The names one small statement binds."""
         if isinstance(small, cst.AnnAssign):
-            bound.update(CstMechanics._hoist_target_names(small.target))
+            bound.update(Bindings.hoist_target_names(small.target))
         elif isinstance(small, cst.Assign):
             for t in small.targets:
-                bound.update(CstMechanics._hoist_target_names(t))
+                bound.update(Bindings.hoist_target_names(t))
         elif isinstance(small, cst.AugAssign):
-            bound.update(CstMechanics._hoist_target_names(small.target))
+            bound.update(Bindings.hoist_target_names(small.target))
 
     @staticmethod
     def _call_mutation_plan(node: cst.Expr) -> MechanicalFixes._LoopPipelinePlan | None:

@@ -27,6 +27,7 @@ import libcst as cst
 from libcst.metadata import ExpressionContextProvider, ParentNodeProvider, PositionProvider
 
 from fix_engine import records as _records
+from fix_engine.bindings import Bindings
 from fix_engine.cst_mechanics import CstMechanics
 from fix_engine.fix_options import FixOptions
 from fix_engine.fixers.dispatch_registry import DispatchRegistry
@@ -75,7 +76,7 @@ _is_docstring_stmt = ModuleOutline.is_docstring_stmt
 _py_files = SourceFiles.py_files
 _record_class_def = CstMechanics._record_class_def
 _self_attr_target = CstMechanics._self_attr_target
-_hoist_target_names = CstMechanics._hoist_target_names
+_hoist_target_names = Bindings.hoist_target_names
 _extraction_is_private = CstMechanics._extraction_is_private
 _RemoveNodes = CstMechanics._RemoveNodes
 
@@ -584,9 +585,7 @@ class _FixRequest:
         # binding — counting it would falsely refuse safe splits (review finding)
         referenced: set[str] = set()
         for name in move:
-            free = CstMechanics._FreeNames()
-            top_defs[name].visit(free)
-            referenced |= free.names - free.bound
+            referenced |= Bindings(top_defs[name]).free_names()
         if referenced & (set(top_defs) - move):
             return None  # the moved code needs an origin def — cycle risk
         # module-level assignments/constants the moved code reads would be
@@ -1590,18 +1589,14 @@ def _snake_name(name: str) -> str:
 def _class_free_names(cls: cst.ClassDef) -> set[str]:
     """The names a class READS from the enclosing module: every Name in its
     subtree minus the names bound inside it and minus its own name."""
-    probe = CstMechanics._FreeNames()
-    cls.visit(probe)
-    return probe.names - probe.bound - {cls.name.value}
+    return Bindings(cls).free_names() - {cls.name.value}
 
 
 def _free_names_of(stmt) -> set[str]:
     """The names one module-level statement reads from the module scope
     (bindings inside it excluded) — the residual's references to moved
     classes and constants."""
-    probe = CstMechanics._FreeNames()
-    stmt.visit(probe)
-    return probe.names - probe.bound
+    return Bindings(stmt).free_names()
 
 
 def _class_attr_names(cls: cst.ClassDef) -> set[str]:
@@ -1679,7 +1674,7 @@ def _class_body_binds(cls: cst.ClassDef, name: str) -> bool:
         elif isinstance(stmt, cst.SimpleStatementLine):
             for inner in stmt.body:
                 if isinstance(inner, cst.Assign) and any(
-                    name in CstMechanics._hoist_target_names(t.target) for t in inner.targets
+                    name in Bindings.hoist_target_names(t.target) for t in inner.targets
                 ):
                     return True
                 if _binds_hoisted_name(inner, name):
@@ -2694,9 +2689,9 @@ def _module_bindings(module: cst.Module) -> set[str]:
         inner = stmt.body[0]
         if isinstance(inner, cst.Assign):
             for t in inner.targets:
-                bound |= CstMechanics._hoist_target_names(t.target)
+                bound |= Bindings.hoist_target_names(t.target)
         elif isinstance(inner, cst.AnnAssign) and inner.target is not None:
-            bound |= CstMechanics._hoist_target_names(inner.target)
+            bound |= Bindings.hoist_target_names(inner.target)
     return bound
 
 
@@ -3606,7 +3601,7 @@ def _binds_hoisted_name(stmt: cst.BaseSmallStatement, name: str) -> bool:
     return (
         isinstance(stmt, cst.AnnAssign)
         and stmt.target is not None
-        and name in CstMechanics._hoist_target_names(stmt.target)
+        and name in Bindings.hoist_target_names(stmt.target)
     )
 
 

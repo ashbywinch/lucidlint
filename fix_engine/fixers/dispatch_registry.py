@@ -9,7 +9,7 @@ from typing import NamedTuple, override
 
 import libcst as cst
 
-from fix_engine.cst_mechanics import CstMechanics
+from fix_engine.bindings import Bindings
 from fix_engine.module_outline import ModuleOutline
 
 _AMBIENT = frozenset(
@@ -172,26 +172,26 @@ class DispatchRegistry:
         @override
         def visit_Assign(self, node: cst.Assign) -> None:
             for t in node.targets:
-                self.bound.update(CstMechanics._hoist_target_names(t.target))
+                self.bound.update(Bindings.hoist_target_names(t.target))
 
         @override
         def visit_AnnAssign(self, node: cst.AnnAssign) -> None:
             if node.target:
-                self.bound.update(CstMechanics._hoist_target_names(node.target))
+                self.bound.update(Bindings.hoist_target_names(node.target))
 
         @override
         def visit_For(self, node: cst.For) -> None:
-            self.bound.update(CstMechanics._hoist_target_names(node.target))
+            self.bound.update(Bindings.hoist_target_names(node.target))
 
         @override
         def visit_CompFor(self, node: cst.CompFor) -> None:
-            self.bound.update(CstMechanics._hoist_target_names(node.target))
+            self.bound.update(Bindings.hoist_target_names(node.target))
 
         @override
         def visit_With(self, node: cst.With) -> None:
             for item in node.items:
                 if item.asname is not None:
-                    self.bound.update(CstMechanics._hoist_target_names(item.asname.name))
+                    self.bound.update(Bindings.hoist_target_names(item.asname.name))
 
     @staticmethod
     def _arm_single_expression(arm_body: list):
