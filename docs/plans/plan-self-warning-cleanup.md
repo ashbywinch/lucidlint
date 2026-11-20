@@ -1,4 +1,4 @@
-# Plan — the self-warning cleanup: 587 → 508, and what is left
+# Plan — the self-warning cleanup: 587 → 309, and what is left
 
 The tool's own gate passes (`GATE: PASS`, 0 fails) with warnings, because
 every rule that fires here is a judgement signal rather than a gate. This
@@ -18,24 +18,31 @@ changed, and houses 353 / album 431 keep identical finding sets.
 | `magic-number` (Rust) | 98 | 0 | every threshold is a named `const` on the module that owns it (rank ladder, closure bars, decision counts, Dice floors, graph cuts, the complexity gate) |
 | `loop-pipeline` (Python) | 24 | 21 | the five real collection builds became comprehensions |
 | `duplicate-block` | 14 | 3 | transformer runs, compound flatten, literal types, diff walk, alias binding, field lookup, site note, branch question each have one home |
+| `loop-pipeline` (Rust) | 376 | 277 | the collection builds chain (`extend(...map(...))`, `filter_map`), which also cleared the sequential-loop findings those loops carried |
+| `conditional-polymorphism` | 3 | 0 | the two `isinstance` ladders read as kind tables (name binders, block binders) |
 
 Verification: `make check`, 318 tests, `make self-check` (`GATE: PASS`),
 houses 353 / album 431 identical after every commit.
 
 ## What is left — and why each removal needs a decision
 
-**1. `loop-pipeline` ×376 in the Rust scanner** (96 "builds a collection",
-129 "mutates only out", 96 "sequential loops share state", plus 55 smaller
-judgement shapes; the top files are `main.rs` 29, `latent_state.rs` 19,
-`suppressions/mod.rs` 18, `expr_walk.rs` 17, `tuple_record.rs` 16). The core
-is a hand-written AST walker (`syn`/`ruff` visitors); loops that mutate one
-accumulator are the domain's shape there. The two measurable sub-families:
-the 96 collection builds convert one-for-one to `extend(...map(...))`; the 96
-"sequential loops" are *pairs* of loops that would need merging into one pass,
-which is where the behaviour risk sits. Options: (a) accept — the scanner is a
-parser, not a report generator; (b) rewrite the 96 builds first (safe, ~1
-session) and judge the sequences after; (c) scope the rule for `scanner/` in
-config with a why.
+**1. `loop-pipeline` ×298 (277 Rust, 21 Python).** The 96 Rust collection
+builds are done; what remains is the shapes where a rewrite is a design call:
+
+| shape | count | what clearing it costs |
+|---|---|---|
+| "mutates only out" | 128 | hoist the per-item step into a named helper (a domain noun per site) and fold — 128 naming decisions in the scanner |
+| "sequential loops share state" | 79 | merge two passes into one (folding one into the other's body) — the behaviour risk sits here |
+| "mutates several accumulators" | 55 | one pass feeding several collections; the rule's advice is "make it a struct", i.e. a new type per site |
+| Python collection builds | 21 | `setdefault(k, []).append(v)` group-bys and `|=` folds — no comprehension expresses them (the tool's own fixer declines) |
+| Rust collection builds | 15 | the last few (nested walks with `continue` guards) |
+
+The top files are `main.rs` 21, `suppressions/mod.rs` 17, `record_shape.rs` 11,
+`sibling.rs` 10, `latent_state.rs` 9. Options: (a) accept — the scanner is a
+hand-written AST visitor, not a report generator, and 55 of the sites are the
+one-pass-over-scans idiom that a struct would only rename; (b) work the 128
+hoists (each adds a named helper to the rule that owns it — real, ~2 sessions);
+(c) scope the rule for `scanner/` in config with a why.
 
 **2. `magic-number` — done.** Every Rust threshold is a named `const` on the
 module that owns it, so the kind is empty.
