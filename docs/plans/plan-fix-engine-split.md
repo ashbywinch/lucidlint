@@ -127,6 +127,17 @@ three delegates). The package root is at 209 definitions; behaviour is
 unchanged (houses 353 / album 431 identical, 318 tests, `GATE: PASS`). The
 remaining order is unchanged; the mechanical family is next.
 
+**Update (2026-11-20).** The host shim is gone (constructor injection at the
+composition root; `lucidlint.py` publishes `main` only). The engine is at 120
+definitions: mechanical, record, the four small fixers, the shared
+cross-family mechanics (parse+wrap, function-line/free-name visitors,
+membership probe, moved-imports builder — now in `CstMechanics`), the dispatch
+registry and the rule table are out. Remaining: class extraction/strewing, the
+three shape arms, husk, chain, module split, module extract, the request hub,
+and the few helpers those still share. `_STRUCTURAL_FIXERS` is the next
+untangling: map `wide-tuple` / `data-clump` / `partition` straight to their own
+fixers so strewing's closure stops including them.
+
 **Mechanical family — tried and reverted (2026-11-19).** The move itself works
 (38 definitions, tests green, root 209 → 178), but it produced six findings
 that are design decisions, not mechanical fixes. The next pass starts here:
