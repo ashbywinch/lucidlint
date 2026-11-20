@@ -15,6 +15,7 @@ changed, and houses 353 / album 431 keep identical finding sets.
 | `broad-except` | 14 | 4 | narrowed to the errors handled; four pygit2 boundaries keep a why stating the blast radius |
 | `standard` (duplicate-function) | 12 | 5 | shared bodies extracted; class delete and name rewrite became `Rewrite`'s edits |
 | `magic-number` (Python) | 31 | 0 | every bar is a named class attribute (percentile band, churn seconds, record arity, block window, preview budget, bit width, saturation bars) |
+| `magic-number` (Rust) | 98 | 0 | every threshold is a named `const` on the module that owns it (rank ladder, closure bars, decision counts, Dice floors, graph cuts, the complexity gate) |
 | `loop-pipeline` (Python) | 24 | 21 | the five real collection builds became comprehensions |
 | `duplicate-block` | 14 | 3 | transformer runs, compound flatten, literal types, diff walk, alias binding, field lookup, site note, branch question each have one home |
 
@@ -23,20 +24,21 @@ houses 353 / album 431 identical after every commit.
 
 ## What is left — and why each removal needs a decision
 
-**1. `loop-pipeline` ×376 in the Rust scanner.** The core is a hand-written
-AST walker (`syn`/`ruff` visitors); loops that mutate one accumulator are the
-domain's shape there, and the tool's own messages split into "builds a
-collection" (120) and judgement shapes ("mutates only out", 129; "sequential
-loops share state", 96). Options: (a) accept — the scanner is a parser, not a
-report generator; (b) rewrite incrementally into iterator pipelines (days, and
-every rewrite is a behaviour risk in the engine the gate trusts); (c) scope
-the rule for `scanner/` in config with a why.
+**1. `loop-pipeline` ×376 in the Rust scanner** (96 "builds a collection",
+129 "mutates only out", 96 "sequential loops share state", plus 55 smaller
+judgement shapes; the top files are `main.rs` 29, `latent_state.rs` 19,
+`suppressions/mod.rs` 18, `expr_walk.rs` 17, `tuple_record.rs` 16). The core
+is a hand-written AST walker (`syn`/`ruff` visitors); loops that mutate one
+accumulator are the domain's shape there. The two measurable sub-families:
+the 96 collection builds convert one-for-one to `extend(...map(...))`; the 96
+"sequential loops" are *pairs* of loops that would need merging into one pass,
+which is where the behaviour risk sits. Options: (a) accept — the scanner is a
+parser, not a report generator; (b) rewrite the 96 builds first (safe, ~1
+session) and judge the sequences after; (c) scope the rule for `scanner/` in
+config with a why.
 
-**2. `magic-number` ×98 in the Rust scanner** (40 of them the threshold `3`).
-Naming them is mechanical but large: each name states one rule's bar
-(`MIN_STRewING_FNS`, `GROUP_NAMES_SHOWN`, …). No design question, about two
-sessions of work; worth doing only if the loop decision keeps the scanner in
-scope.
+**2. `magic-number` — done.** Every Rust threshold is a named `const` on the
+module that owns it, so the kind is empty.
 
 **3. `flat-folder` ×1.** `scanner/src/checks` holds 41 modules. A split into
 domain subfolders (`latent/`, `duplicate/`, `state/`, …) is mechanical but
