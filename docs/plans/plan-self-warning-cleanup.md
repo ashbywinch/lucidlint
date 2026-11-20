@@ -1,4 +1,4 @@
-# Plan — the self-warning cleanup: 587 → 309, and what is left
+# Plan — the self-warning cleanup: 587 → 308, and what is left
 
 The tool's own gate passes (`GATE: PASS`, 0 fails) with warnings, because
 every rule that fires here is a judgement signal rather than a gate. This
@@ -17,7 +17,7 @@ changed, and houses 353 / album 431 keep identical finding sets.
 | `magic-number` (Python) | 31 | 0 | every bar is a named class attribute (percentile band, churn seconds, record arity, block window, preview budget, bit width, saturation bars) |
 | `magic-number` (Rust) | 98 | 0 | every threshold is a named `const` on the module that owns it (rank ladder, closure bars, decision counts, Dice floors, graph cuts, the complexity gate) |
 | `loop-pipeline` (Python) | 24 | 21 | the five real collection builds became comprehensions |
-| `duplicate-block` | 14 | 3 | transformer runs, compound flatten, literal types, diff walk, alias binding, field lookup, site note, branch question each have one home |
+| `duplicate-block` | 14 | 2 | transformer runs, compound flatten, literal types, diff walk, alias binding, field lookup, site note, branch question each have one home |
 | `loop-pipeline` (Rust) | 376 | 277 | the collection builds chain (`extend(...map(...))`, `filter_map`), which also cleared the sequential-loop findings those loops carried |
 | `conditional-polymorphism` | 3 | 0 | the two `isinstance` ladders read as kind tables (name binders, block binders) |
 
@@ -77,3 +77,24 @@ a smell:
 bulk-suppression message says repeated identical whys are policy: a config
 `ignore` (or `[lucidlint.guidance]` text) for a signal is the sanctioned way
 to say "this rule is guidance here" once, instead of per site.
+
+## Where it stopped
+
+308 warnings, 0 fails. Every one of them is now a decision rather than a
+mechanic:
+
+| what | count | the decision |
+|---|---|---|
+| loop hoists ("mutates only out") | 42 | name the per-item step for each rule that owns one |
+| loop sequences ("N sequential loops") | 79 | merge two passes into one, or accept the two-pass read |
+| one pass over several accumulators | 55 | make a struct per site (the rule's advice) or accept the pass |
+| collection builds left | 36 (15 Rust, 21 Python) | the guarded/nested walks; the Python ones are group-bys no comprehension expresses |
+| `standard` | 5 | 3 libcst protocol hook pairs (extraction trips `middle-man`) and 2 Rust passes with different concerns |
+| `duplicate-block` | 2 | the loop-plan guard shape and the rules-codegen emit pattern |
+| `bulk-suppression` | 1 | policy: 11 deliberate `swallow` whys |
+| `detached-method` | 1 | an empty `syn` trait override that must ignore its receiver |
+| `flat-folder` | 1 | name the subsets of `scanner/src/checks` (41 files) |
+
+Nothing above can be removed without someone saying what the code should say
+instead — a helper name, a merged pass, a struct, a suppression, a folder.
+That is the tool doing its job: the remaining findings are judgement.
