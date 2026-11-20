@@ -11,6 +11,11 @@ use crate::source::Source;
 use crate::ScanState;
 
 /// `partition`: the rule object. Its methods read one class's field use; the evidence and the message live together.
+/// The method count and span that make a class a field-disjoint partition in
+/// waiting.
+const PARTITION_METHODS_MIN: usize = 6;
+const PARTITION_SPAN_MIN: usize = 150;
+
 pub struct Partition;
 
 impl Partition {
@@ -18,11 +23,11 @@ impl Partition {
     /// field-disjoint groups after removing at most 2 connectors.
     fn partition_for_class(source: &str, cls: &StmtClassDef) -> Option<(Vec<String>, Vec<Vec<String>>)> {
         let methods: Vec<&Stmt> = cls.body.iter().filter(|s| matches!(s, Stmt::FunctionDef(_))).collect();
-        if methods.len() < 6 {
+        if methods.len() < PARTITION_METHODS_MIN {
             return None;
         }
         let span = Source::line_of(source, cls.range().end()) - Source::line_of(source, cls.name.range().start());
-        if span < 150 {
+        if span < PARTITION_SPAN_MIN {
             return None;
         }
         // method name -> set of self.<attr> fields accessed anywhere in the body

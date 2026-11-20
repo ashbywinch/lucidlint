@@ -22,6 +22,10 @@ use stale::StaleCtx;
 /// One line-level suppression and the (signal, why) parsed from it.
 /// Line suppressions exempt a finding on that line or the line before;
 /// file suppressions exempt the signal anywhere in the file (with a why).
+/// The marker window is two anchors, each with its own line and the line above;
+/// the capacity hint says so without a bare 4.
+const WINDOW_CAPACITY: usize = 4;
+
 #[derive(Clone, Default)]
 pub struct Suppressions {
     pub line: HashMap<usize, Vec<(String, String)>>,
@@ -132,7 +136,7 @@ impl Suppressions {
     /// source line sits.
     pub fn finding_window(f: &crate::Finding) -> Vec<usize> {
         let logical = f.logical_line();
-        let mut lines: Vec<usize> = Vec::with_capacity(4);
+        let mut lines: Vec<usize> = Vec::with_capacity(WINDOW_CAPACITY);
         for l in [f.line, f.line.saturating_sub(1), logical, logical.saturating_sub(1)] {
             if l >= 1 && !lines.contains(&l) {
                 lines.push(l);

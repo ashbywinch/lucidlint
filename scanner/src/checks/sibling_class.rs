@@ -6,6 +6,11 @@ use crate::finding::Finding;
 /// the duplicate machinery), the `self.<x>` attributes it reads, and the
 /// annotation names in its signature (a pair that mentions the other class is
 /// composition, not duplication).
+/// The Dice similarity that makes two accessors siblings, and how many the
+/// message shows.
+const SIBLING_DICE_MIN: f64 = 0.9;
+const ACCESSORS_SHOWN: usize = 3;
+
 #[derive(Clone)]
 pub struct SiblingMethod {
     pub name: String,
@@ -98,7 +103,7 @@ impl SiblingClass {
                     .methods
                     .iter()
                     .filter(reads_only_shared)
-                    .any(|n| crate::skeleton::Similarity::dice_similarity(&m.skeleton, &n.skeleton) >= 0.9)
+                    .any(|n| crate::skeleton::Similarity::dice_similarity(&m.skeleton, &n.skeleton) >= SIBLING_DICE_MIN)
             })
             .map(|m| m.name.as_str())
             .collect()
@@ -116,7 +121,12 @@ impl SiblingClass {
         if accessors.len() < 2 {
             return None;
         }
-        let shown = accessors.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+        let shown = accessors
+            .iter()
+            .take(ACCESSORS_SHOWN)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
         Some(Finding {
             logical_start: None,
             seam_members: Vec::new(),

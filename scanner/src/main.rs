@@ -53,6 +53,16 @@ use finding::{Finding, FnCc, FnScope};
 use paths::{Paths, SCAN_SKIP_DIRS};
 use source::Source;
 
+/// The gate's own bars: a large function's span, the bulk-suppression site
+/// count, the graph families' cuts (high-risk floor, cohesion span, the top
+/// fraction for hotspot and churn-untested), and the complexity gate.
+const LARGE_FUNCTION_LINES: usize = 120;
+const BULK_SUPPRESSION_SITES: usize = 10;
+const HIGH_RISK_MIN: f64 = 0.8;
+const COHESION_SPAN: usize = 150;
+const TOP_FRACTION: f64 = 0.1;
+const COMPLEXITY_GATE: u32 = 15;
+
 impl Finding {
     /// The finding's logical line: its own line when no construct spans
     /// several source lines, else the construct's first source line.
@@ -235,7 +245,7 @@ impl Pipeline {
         // the action layer's test-only filter, unless --include-tests is passed.
         for (fn_name, start, end) in &state.fn_spans {
             let span = end.saturating_sub(*start) + 1;
-            if span <= 120 {
+            if span <= LARGE_FUNCTION_LINES {
                 continue;
             }
             state.findings.push(Finding {
@@ -643,16 +653,18 @@ impl Pipeline {
     /// here follows from it and the drift gate pins the generated file.
     fn sig_of_stale(msg: &str) -> String {
         // line form: "suppression '// lucidlint: ignore <sig>' at line N no longer fires"
-        if let Some(i) = msg.find("ignore ") {
-            return msg[i + 7..]
+        let line_marker = "ignore ";
+        if let Some(i) = msg.find(line_marker) {
+            return msg[i + line_marker.len()..]
                 .split(|c: char| c.is_whitespace() || c == '\'' || c == '>')
                 .next()
                 .unwrap_or("")
                 .to_string();
         }
         // file form: "file suppression '... ignore-file <sig>' no longer fires"
-        if let Some(i) = msg.find("ignore-file ") {
-            return msg[i + 12..]
+        let file_marker = "ignore-file ";
+        if let Some(i) = msg.find(file_marker) {
+            return msg[i + file_marker.len()..]
                 .split(|c: char| c.is_whitespace() || c == '\'')
                 .next()
                 .unwrap_or("")
@@ -981,7 +993,8 @@ fn main() {
         .map(|s| (Paths::rel_of(&s.file_name, &root), s.supps_spent.clone()))
         .collect();
     let suppression_census = Pipeline::suppression_counts(scans.iter().map(|s| &s.supps));
-    let bulk_suppressions = Pipeline::bulk_suppression_findings(&suppression_census, &supps_by_rel, 10);
+    let bulk_suppressions =
+        Pipeline::bulk_suppression_findings(&suppression_census, &supps_by_rel, BULK_SUPPRESSION_SITES);
     let mut module_entities = Vec::new();
     let mut heads = Vec::new();
     let mut fns = Vec::new();
@@ -1151,11 +1164,16 @@ fn main() {
     let rels: Vec<String> = paths.iter().map(|p| Paths::rel_of(p, &root)).collect();
     if let Some(c) = &contract {
         let repo_root = Path::new(&root);
-        all_findings.extend(graph_families::HighRisk::findings(repo_root, c, 0.8, include_tests));
+        all_findings.extend(graph_families::HighRisk::findings(
+            repo_root,
+            c,
+            HIGH_RISK_MIN,
+            include_tests,
+        ));
         all_findings.extend(graph_families::Cycles::findings(repo_root, c));
         all_findings.extend(graph_families::LayerMix::findings(repo_root, c, &rels));
         all_findings.extend(graph_families::FolderMix::findings(repo_root, c));
-        all_findings.extend(graph_families::Cohesion::findings(repo_root, c, 150));
+        all_findings.extend(graph_families::Cohesion::findings(repo_root, c, COHESION_SPAN));
     }
     if let Some(d) = &docs_root {
         let gitignored: std::collections::HashSet<String> = gitignored_json
@@ -1176,7 +1194,12 @@ fn main() {
                     let slot = cc_any.entry(rel).or_insert(0);
                     *slot = (*slot).max(e.cc);
                 }
-                all_findings.extend(graph_families::Hotspot::findings(&churn, &cc_any, 0.1, 15));
+                all_findings.extend(graph_families::Hotspot::findings(
+                    &churn,
+                    &cc_any,
+                    TOP_FRACTION,
+                    COMPLEXITY_GATE,
+                ));
                 // churn-untested: the repo's OWN coverage snapshot decides
                 // (coverage.xml / .coverage, R6) — never the graph's TESTED_BY
                 // approximation, which misses body imports and cannot speak
@@ -1185,14 +1208,18 @@ fn main() {
                     .as_deref()
                     .and_then(|p| std::fs::read_to_string(p).ok())
                     .and_then(|s| serde_json::from_str::<graph_families::CoverageSnapshot>(&s).ok());
-                all_findings.extend(graph_families::ChurnUntested::findings(&churn, coverage.as_ref(), 0.1));
+                all_findings.extend(graph_families::ChurnUntested::findings(
+                    &churn,
+                    coverage.as_ref(),
+                    TOP_FRACTION,
+                ));
             }
         }
     }
     // complexity findings from the scan's own CC array (the gate threshold)
     let mut contract_complexity: Vec<serde_json::Value> = Vec::new();
     for e in &all_cc {
-        if e.cc >= 15 {
+        if e.cc >= COMPLEXITY_GATE {
             contract_complexity.push(serde_json::json!({
                 "file": e.file,
                 "line": e.line,

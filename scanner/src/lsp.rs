@@ -21,6 +21,9 @@ use std::path::{Path, PathBuf};
 /// the loaded repo config (the LSP must apply the SAME silencing rules as
 /// the gate — a config-ignored finding shown by the LSP while the gate hides
 /// it is exactly what broke the agent's trust in the LSP).
+/// The complexity gate: 15 decision points is the fail bar.
+const COMPLEXITY_GATE: u32 = 15;
+
 pub struct LspState {
     pub documents: HashMap<String, String>,
     root: Option<PathBuf>,
@@ -285,7 +288,7 @@ impl LspState {
             out.push(Self::finding_diag(f, source));
         }
         for e in &scan.cc {
-            if e.cc >= 15 && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored("complexity", rel)) {
+            if e.cc >= COMPLEXITY_GATE && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored("complexity", rel)) {
                 let line = e.line.saturating_sub(1);
                 let line_len = source.lines().nth(line).map(str::len).unwrap_or(0);
                 out.push(serde_json::json!({

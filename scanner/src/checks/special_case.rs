@@ -11,6 +11,9 @@ use crate::ScanState;
 use super::latent_visitor::branch_guards;
 
 /// `special-case`: the rule object. Its methods read one scope's repeated checks.
+/// The occurrence count that makes an absence test a repeated special case.
+const ABSENCE_OCCURRENCES_MIN: usize = 3;
+
 pub struct SpecialCase;
 
 impl SpecialCase {
@@ -41,7 +44,7 @@ impl SpecialCase {
         let mut counts: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
         Self::count_scope_checks(stmts, &mut counts, source);
         for (name, (n, line)) in &counts {
-            if *n >= 3 {
+            if *n >= ABSENCE_OCCURRENCES_MIN {
                 out.push((name.clone(), *n, *line));
             }
         }

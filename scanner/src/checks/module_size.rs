@@ -85,6 +85,9 @@ const SCRIPT_DIRS: &[&str] = &["scripts", "tools", "bin"];
 /// The language the module is written in — the advice differs (a Python class
 /// lives in a file, a Rust type in a module; a package has `__init__.py`, a
 /// directory module does not).
+/// How many offending names the message shows before counting the rest.
+const NAMES_SHOWN: usize = 3;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Language {
     #[default]
@@ -495,7 +498,7 @@ impl ModuleShape {
     fn group_list(groups: &[(String, usize)]) -> String {
         let shown: Vec<String> = groups
             .iter()
-            .take(3)
+            .take(NAMES_SHOWN)
             .map(|(name, count)| format!("{name} ({count})"))
             .collect();
         let list = shown.join(", ");
@@ -507,7 +510,7 @@ impl ModuleShape {
     }
 
     fn name_list(names: &[&str]) -> String {
-        let shown: Vec<&str> = names.iter().take(3).copied().collect();
+        let shown: Vec<&str> = names.iter().take(NAMES_SHOWN).copied().collect();
         let list = shown.join(", ");
         match names.len().saturating_sub(shown.len()) {
             0 => list,

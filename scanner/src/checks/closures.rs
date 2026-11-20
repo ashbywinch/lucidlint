@@ -15,6 +15,13 @@ use crate::source::Source;
 use crate::ScanState;
 
 /// `closures`: the rule object. Its methods read one function's nested definitions and captured state.
+/// The CC bar at which a function with nested definitions is a closure
+/// candidate (the scan's complexity gate).
+const CC_CANDIDATE: u32 = 15;
+
+/// The span (in lines) at which a nested-def function is a closure candidate.
+const SPAN_CANDIDATE: u32 = 60;
+
 pub struct Closures;
 
 /// Method calls that mutate the receiver in place — the writes that turn a
@@ -328,6 +335,6 @@ impl Closures {
 
     /// Big enough, or mutating shared state, to be a closures candidate.
     fn is_closures_candidate(cc: u32, span: u32, mutated: &[String]) -> bool {
-        cc >= 15 || span >= 60 || !mutated.is_empty()
+        cc >= CC_CANDIDATE || span >= SPAN_CANDIDATE || !mutated.is_empty()
     }
 }

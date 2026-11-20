@@ -25,6 +25,13 @@ pub(super) type PairKey = (ParamKey, ParamKey);
 
 /// The latent-state families: data clumps, feature envy, quiet member
 /// assignment and duplicate fields — one rule over the object's state.
+/// The def count that makes a parameter pair a clump, the read count that makes
+/// a method read its own state more than its neighbour's, and the margin the
+/// self-read must clear.
+const PAIR_GROUP_MIN: usize = 3;
+const READS_MIN: usize = 4;
+const SELF_READ_MARGIN: usize = 3;
+
 pub struct LatentState;
 
 impl LatentState {
@@ -100,7 +107,7 @@ impl LatentState {
         let mut by_anchor: std::collections::HashMap<(usize, String), AnchorClump> = std::collections::HashMap::new();
         let mut reported: HashSet<PairKey> = HashSet::new();
         for ((a, b), fs) in &pairs {
-            if fs.len() < 3 || !reported.insert((a.clone(), b.clone())) {
+            if fs.len() < PAIR_GROUP_MIN || !reported.insert((a.clone(), b.clone())) {
                 continue;
             }
             let line = Source::line_of(state.source, fs[0].name.range().start());
@@ -283,8 +290,8 @@ impl LatentState {
                     && !self.params.contains(self.receiver)
                     && !self.loop_targets.contains(self.receiver)
                     && self.collaborators.contains(self.receiver)
-                    && self.reads >= 4
-                    && self.reads >= self.self_reads + 3
+                    && self.reads >= READS_MIN
+                    && self.reads >= self.self_reads + SELF_READ_MARGIN
             }
         }
 

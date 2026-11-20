@@ -4,6 +4,13 @@
 use crate::finding::Finding;
 
 /// `flat-folder`: the rule object. Its methods read one directory's names; the evidence and the message live together.
+/// The share of a folder's names that must repeat before its contents are one
+/// family, the uses that make a name a shared token, and how many names the
+/// message shows.
+const NAME_SHARE: f64 = 0.6;
+const TOKEN_USES_MIN: usize = 3;
+const TOKENS_SHOWN: usize = 3;
+
 pub struct FlatFolder;
 
 /// A directory whose browsable files (modules + docs) cross the threshold —
@@ -119,15 +126,15 @@ impl FlatFolder {
                 *per_token.entry(token).or_default() += 1;
             }
         }
-        let limit = (names.len() as f64 * 0.6).max(3.0) as usize;
+        let limit = (names.len() as f64 * NAME_SHARE).max(TOKEN_USES_MIN as f64) as usize;
         let mut candidates: Vec<(String, usize)> = per_token
             .into_iter()
-            .filter(|(token, n)| *n >= 3 && *n < limit && !is_family(token))
+            .filter(|(token, n)| *n >= TOKEN_USES_MIN && *n < limit && !is_family(token))
             .collect();
         candidates.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         candidates
             .iter()
-            .take(3)
+            .take(TOKENS_SHOWN)
             .map(|(token, n)| format!("{token} ({n})"))
             .collect::<Vec<_>>()
             .join(", ")

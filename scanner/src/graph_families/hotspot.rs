@@ -6,6 +6,9 @@ use crate::finding::Finding;
 
 pub(crate) struct Hotspot;
 
+/// The smallest cut-off a top-fraction ranking may pick.
+const MIN_CUTOFF: f64 = 1.0;
+
 impl Hotspot {
     /// Hotspot: files that change often AND are complex (churn + max CC).
     pub fn findings(
@@ -14,7 +17,7 @@ impl Hotspot {
         top_frac: f64,
         min_cc: u32,
     ) -> Vec<Finding> {
-        let cutoff = ((churn.len() as f64) * top_frac).max(1.0) as usize;
+        let cutoff = ((churn.len() as f64) * top_frac).max(MIN_CUTOFF) as usize;
         let mut entries: Vec<(&String, &usize)> = churn.iter().collect();
         entries.sort_by_key(|(f, c)| (*c, (*f).clone()));
         entries.reverse();

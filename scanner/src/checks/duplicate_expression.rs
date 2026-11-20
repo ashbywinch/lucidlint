@@ -18,6 +18,11 @@ use super::shared_path::PathExpression;
 
 /// One substantive expression's occurrence: the canonical shape, the source
 /// text for the message, and the extent for the parent/child dedup.
+/// How much of a repeated expression the message quotes, and how many files it
+/// names before counting the rest.
+const PREVIEW_CHARS: usize = 120;
+const FILES_SHOWN: usize = 3;
+
 #[derive(Clone)]
 pub struct ExpressionOccurrence {
     pub key: String,
@@ -530,12 +535,12 @@ impl ExpressionOccurrence {
     fn duplicate_expression_finding(occs: &[ExprOccurrenceRef]) -> Finding {
         let first = &occs[0];
         let count = occs.len();
-        let text = Self::truncate_text(&first.occ.text, 120);
+        let text = Self::truncate_text(&first.occ.text, PREVIEW_CHARS);
         let mut files: Vec<&str> = occs.iter().map(|o| o.rel).collect();
         files.sort_unstable();
         files.dedup();
         let file_word = if files.len() == 1 { "file" } else { "files" };
-        let where_text = if files.len() <= 3 {
+        let where_text = if files.len() <= FILES_SHOWN {
             files.join(", ")
         } else {
             format!("{}, {}, and {} more", files[0], files[1], files.len() - 2)

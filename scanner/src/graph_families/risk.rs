@@ -12,6 +12,9 @@ use super::node::GNode;
 
 pub(crate) struct HighRisk;
 
+/// The highest-risk entries the list carries.
+const LIST_MAX: usize = 50;
+
 impl HighRisk {
     /// High-risk nodes — `_high_risk_actions` (risk recomputed, order/limit kept).
     pub fn findings(repo: &Path, contract: &GraphContract, max_risk: f64, include_tests: bool) -> Vec<Finding> {
@@ -45,7 +48,7 @@ impl HighRisk {
             scored.push((n, risk, caller_count, tested));
         }
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(50);
+        scored.truncate(LIST_MAX);
         let mut out = Vec::new();
         for (n, risk, caller_count, _tested) in scored {
             let line = n.line_start.unwrap_or(1) as usize;

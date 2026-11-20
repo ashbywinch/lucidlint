@@ -11,6 +11,9 @@ use crate::ScanState;
 /// Guard Clauses: a chain of if-in-if ("arrow code") — the body of an if is
 /// exactly another if. Depth >= 3 levels. The fix (invert to early returns)
 /// is control-flow surgery; the finding names the refactoring.
+/// The branch count that makes repeated guard clauses worth a named decision.
+const BRANCHES_MIN: usize = 3;
+
 pub fn guard_clause_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
     fn chain_len(s: &Stmt) -> usize {
         if let Stmt::If(i) = s {
@@ -24,7 +27,7 @@ pub fn guard_clause_findings(state: &mut ScanState, body: &[Stmt], source: &str)
         for s in stmts {
             if let Stmt::If(i) = s {
                 let len = chain_len(s);
-                if len >= 3 {
+                if len >= BRANCHES_MIN {
                     let line = Source::line_of(source, s.range().start());
                     state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                             file: state.file.to_string(),

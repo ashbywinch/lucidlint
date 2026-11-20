@@ -11,6 +11,9 @@ use super::types::{receiver_name, static_type_ident};
 use super::RustScan;
 
 /// The Rust module shape: what the file is, and whether its parts belong together.
+/// How many item groups the message shows.
+const GROUPS_SHOWN: usize = 3;
+
 pub struct MixedModule;
 
 /// `mixed-module` (#107): how many groups a module's top-level definitions fall
@@ -335,7 +338,7 @@ impl MixedModule {
             let list = shape
                 .groups
                 .iter()
-                .take(3)
+                .take(GROUPS_SHOWN)
                 .map(|g| match g.len() {
                     1 => g[0].clone(),
                     2 => format!("{} and {}", g[0], g[1]),

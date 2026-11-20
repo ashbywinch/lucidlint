@@ -17,6 +17,10 @@ use crate::source::Source;
 use crate::ScanState;
 
 /// `closure-cluster`: the rule object. Its methods read one method's nested closures.
+/// A method with no parameters whose body spans this many lines is the
+/// degenerate cluster shape (the whole method is the cluster).
+const DEGENERATE_SPAN_LINES: usize = 150;
+
 pub struct ClosureCluster;
 
 impl ClosureCluster {
@@ -154,7 +158,7 @@ impl ClosureCluster {
                 let empty_params = method_params.iter().all(|p| p == "self" || p == "cls") || method_params.is_empty();
                 let span = Source::line_of(source, method.range().end())
                     .saturating_sub(Source::line_of(source, method.range().start()));
-                let degenerate = empty_params && span >= 150;
+                let degenerate = empty_params && span >= DEGENERATE_SPAN_LINES;
                 if cluster_comps.len() < 2 && !degenerate {
                     continue;
                 }

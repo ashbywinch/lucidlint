@@ -14,6 +14,9 @@ use crate::ScanState;
 use super::super::push_stmt_children;
 
 /// The assembly-class rule: the module functions and the threading they share.
+/// The result-call count that makes a class an assembly of parts.
+const RESULT_CALLS_MIN: usize = 3;
+
 pub struct AssemblyClass;
 
 impl AssemblyClass {
@@ -90,7 +93,7 @@ impl AssemblyClass {
                 }
                 push_stmt_children(s, &mut stack);
             }
-            if calls.len() < 2 || results.len() < 3 {
+            if calls.len() < 2 || results.len() < RESULT_CALLS_MIN {
                 continue;
             }
             // chain: one call's argument is another call's result

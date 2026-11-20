@@ -14,6 +14,9 @@ use super::super::{all_exprs, push_stmt_children, stmt_exprs};
 
 /// The tuple-record rule and the shape readers it needs: the dict's arity, the
 /// chain's member name, a constant index, and the reads that count.
+/// The positional-read count that makes a tuple a record in waiting.
+const POSITIONAL_READS_MIN: usize = 3;
+
 pub struct TupleRecord;
 
 impl TupleRecord {
@@ -106,7 +109,7 @@ impl TupleRecord {
         }
         for (name, (arity, line)) in &records {
             let reads = counts.get(name).copied().unwrap_or(0);
-            if reads >= 3 {
+            if reads >= POSITIONAL_READS_MIN {
                 state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                 file: state.file.to_string(),
                                 line: *line,
