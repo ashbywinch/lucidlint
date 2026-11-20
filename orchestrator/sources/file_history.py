@@ -13,13 +13,12 @@ from collections import Counter
 from dataclasses import dataclass
 
 
-# the weight an unlisted family takes: neutral, half of the scale
-_NEUTRAL_WEIGHT = 0.5
-
-
 @dataclass
 class FileHistory:
     """Per-file change counts and last-touched dates from git history."""
+
+    # the weight an unlisted family takes: neutral, half of the scale
+    _NEUTRAL_WEIGHT = 0.5
 
     churn: Counter[str]
     last_modified: dict[str, str]
@@ -75,7 +74,7 @@ class FileHistory:
             ("high-risk", min(metric, 1.0)),
         )
         # an unknown family takes the neutral weight
-        norm = next((weight for family, weight in table if family == kind), _NEUTRAL_WEIGHT)
+        norm = next((weight for family, weight in table if family == kind), FileHistory._NEUTRAL_WEIGHT)
         score = norm * math.sqrt(1 + min(churn / churn_cap, churn_boost_cap))
         if kind == "high-risk" and callers:
             score *= 1 + min(callers / caller_cap, caller_boost_cap)
