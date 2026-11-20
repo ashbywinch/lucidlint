@@ -22,7 +22,6 @@ from fix_engine.rewrite import Rewrite
 # lucidlint: ignore-file record-shape a class per helper hop is ceremony
 
 
-
 class DataClump:
     """The parameter-object fix for one request: the clump's pair is threaded
     through a record class."""
@@ -72,7 +71,9 @@ class DataClump:
                 return None
             args = DataClump._plain_args(fn)
             if pair_a not in args or pair_b not in args:
-                self.request.decline = f"'{fn.name.value}' does not carry the pair in its plain parameters — thread it by hand"
+                self.request.decline = (
+                    f"'{fn.name.value}' does not carry the pair in its plain parameters — thread it by hand"
+                )
                 return None
             index[fn.name.value] = (args.index(pair_a), args.index(pair_b))
         class_name = self.request.opts.name or Rewrite.pascal_case(f"{pair_a}_{pair_b}")
@@ -86,7 +87,9 @@ class DataClump:
         if Bindings.binds_name(module, class_name):
             self.request.decline = f"'{class_name}' is already bound in {self.request.rel} — pass another --name"
             return None
-        culprit = DataClump._imported_elsewhere(self.request.repo, self.request.rel, {fn.name.value for fn in clump.fns})
+        culprit = DataClump._imported_elsewhere(
+            self.request.repo, self.request.rel, {fn.name.value for fn in clump.fns}
+        )
         if culprit:
             self.request.decline = (
                 f"'{culprit}' imports a clump function — its call site is outside this module; thread the pair by hand"
@@ -277,7 +280,9 @@ class DataClump:
             )
 
         def _own_params(self, node: cst.FunctionDef) -> set[str]:
-            return {p.name.value for p in [*node.params.posonly_params, *node.params.params, *node.params.kwonly_params]}
+            return {
+                p.name.value for p in [*node.params.posonly_params, *node.params.params, *node.params.kwonly_params]
+            }
 
         @override
         def visit_FunctionDef(self, node) -> None:
@@ -342,7 +347,8 @@ class DataClump:
             b_arg = pos_args[idx_b] if idx_b < len(pos_args) else keywords.get(self.pair[1])
             if a_arg is None or b_arg is None:
                 self.decline = (
-                    f"the call to '{fn}' does not pass both '{self.pair[0]}' and '{self.pair[1]}' — thread the pair by hand"
+                    f"the call to '{fn}' does not pass both '{self.pair[0]}' and '{self.pair[1]}' — "
+                    "thread the pair by hand"
                 )
                 return updated_node
             a_val, b_val = a_arg.value, b_arg.value

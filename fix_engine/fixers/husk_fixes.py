@@ -143,7 +143,7 @@ class HuskFixes:
                 return None
         return ret.value.func.value
 
-    # lucidlint: ignore closures the nested visitors are one-purpose probe walks — hoisting names nothing the domain owns
+    # lucidlint: ignore closures the nested visitors are one-purpose probe walks — hoisting names nothing owned
     @staticmethod
     def _rewire_husk_sites(module: cst.Module, husk: str, method_fns: dict[str, str]) -> str | None:
         """Rewrite a file's rewireable husk sites (`Husk().m(x)` / `h.m(x)` ->

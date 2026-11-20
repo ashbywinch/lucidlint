@@ -59,9 +59,7 @@ class Rewrite:
         ]
         init = cst.FunctionDef(
             name=cst.Name("__init__"),
-            params=cst.Parameters(
-                params=[cst.Param(cst.Name("self"))] + [cst.Param(cst.Name(f)) for f in field_names]
-            ),
+            params=cst.Parameters(params=[cst.Param(cst.Name("self"))] + [cst.Param(cst.Name(f)) for f in field_names]),
             body=cst.IndentedBlock(body=body),
         )
         return cst.ClassDef(

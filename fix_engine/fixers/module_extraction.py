@@ -61,9 +61,7 @@ class ModuleExtraction:
         # them would break the origin's remaining code (review finding)
         if referenced & Bindings.module_bindings(module):
             return None
-        new_module = cst.Module(
-            body=[*Imports(module).needed(referenced), *(top_defs[n] for n in opts.params)]
-        )
+        new_module = cst.Module(body=[*Imports(module).needed(referenced), *(top_defs[n] for n in opts.params)])
         return ModuleExtraction._ModuleProposal(
             origin=cst.Module(body=ModuleExtraction._origin_after_move(module, move, opts, self.request.rel)).code,
             module=new_module.code,
@@ -112,7 +110,6 @@ class ModuleExtraction:
                 insert_at = i + 1
         remaining.insert(insert_at, reexport)
         return remaining
-
 
     @staticmethod
     def _is_import_line(stmt: cst.BaseStatement) -> bool:

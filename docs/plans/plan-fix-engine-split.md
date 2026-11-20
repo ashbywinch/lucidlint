@@ -194,6 +194,75 @@ root is at 147 definitions. `_Collaborator` and `_StmtReads` moved into
 `_LoopPipelinePlan`. Verification: 318 tests, `GATE: PASS` (592 actions, 0
 fails), houses 353 / album 431 identical.
 
+## Landed: the split is done (2026-11-20)
+
+The ladder report is empty. `lucidlint.py --repo .` reports **587** actions,
+none of them `several-definitions`, `many-definitions`, `static-husk`,
+`private-import`, `record-shape`, `latent-class` or `stale-suppression`.
+`fix_engine/__init__.py` holds no definition at all: it is the public surface
+(the kind tables, the request, the shared mechanics and the method-extraction
+helpers re-exported for consumers and the tests).
+
+| step | class | module |
+|---|---|---|
+| shared | `Imports`, `Rewrite` | `imports.py`, `rewrite.py` (`cst_mechanics.py` deleted) |
+| 6 | `WideTuple`, `DataClump`, `Partition` | `fixers/wide_tuple.py`, `data_clump.py`, `partition.py` |
+| 7 | `ClassExtraction` | `fixers/class_extraction.py` |
+| 9 | `HuskFixes`, `ChainFixes` | `fixers/husk_fixes.py`, `chain_fixes.py` |
+| 10 | `ModuleSplitting`, `ModuleExtraction` | `fixers/module_splitting.py`, `module_extraction.py` |
+| 12 | `_FixRequest` | `request.py` |
+
+Decisions the move forced, each a finding the code raised once its neighbours
+left:
+
+- **`CstMechanics` was two nouns.** The imports a moved name needs became
+  `Imports(module).needed(names)`; the edits every fixer makes (remove the
+  flagged nodes, synthesize the record class, name an extraction) became
+  `Rewrite(module).without(...)` plus its statics. Both hold the module they
+  work on, so neither is a static husk.
+- **`records.py` is gone.** A fixer module may not import a private record
+  (that is `private-import`) and may not import the package root (that is the
+  import cycle). Every record a fixer alone used therefore lives beside it —
+  nested in its class (`ChainFixes._ChainHead`, `ModuleSplitting._SplitLayout`,
+  `WideTuple._Site`, `DataClump._Clump`, `Partition._PartitionPlan`, …) — and
+  the one shared record, `_ModuleRef`, became `ChainFixes`'s own when the
+  split's constant probe turned into a method.
+- **The shared layer grew three members**, each because two families asked the
+  same question: `Bindings.binds_name` (the three shape arms' "is this class
+  name taken?"), `Bindings.stores_by_function` with `StoredNames` (strewing and
+  data-clump's shadow test), `Rewrite.pascal_case` (the three arms' derived
+  class name), and `ModuleOutline.is_empty` (the chain's and the split's
+  "did the removal leave a file worth keeping?").
+- **`_InitPlan` is a named record**, not a bare three-tuple: partition's only
+  `record-shape` finding, fixed rather than suppressed — that also kept the
+  record-shape census under its bulk-suppression threshold.
+- **The re-export whys moved with their code.** `record-shape` now sits on
+  `bindings.py`, `data_clump.py`, `chain_fixes.py` and `module_splitting.py`
+  (the libcst wire shorthands those modules carry), `global-state` on
+  `request.py` (the kind tables) and on `__init__.py` (the re-export aliases).
+  No why was added whose code does not fire; the four that stopped firing
+  (root's `data-clump`, `complexity`, `misplaced-method`, `closures` leftovers)
+  were deleted.
+- **`extract-class` keeps its shape fallback.** The kind table now routes
+  `wide-tuple` / `data-clump` / `partition` to their own fixers, but an
+  `extract-class` directive on a shape anchor still tries the three arms in
+  turn (the wire record carries only kind/file/line) — that dispatch stayed in
+  the request, where dispatch belongs.
+
+**One artefact worth knowing.** `ModuleSplitting._Split.member_sources` is no
+longer reported by the loop family: its two build loops were two
+`loop-pipeline` findings at the root and are gone at the new site (the file's
+other three loops — `_consts_moving_into`, `components`, `refuse_cycles` —
+still fire). The cause is the nesting the move gave it: the same method inside
+a *top-level* class reports both loops, inside a class nested one level deeper
+it reports neither. No code changed; the count drops by two (402 → 400 in the
+self-scan).
+
+Verification of the final tree: `make check` (ruff + pyrefly, baseline lock
+clean), `make test` (318), `make self-check` (`GATE: PASS`), `make wheel-check`,
+`make bundle-check`, and houses **353** / album **431** with identical sorted
+`(file, kind, line)` sets.
+
 ## Verification, after every step
 
 1. `make check` (ruff + pyrefly; run `make typecheck-update-baseline` only
@@ -241,10 +310,10 @@ fails), houses 353 / album 431 identical.
 
 ## Acceptance
 
-- [ ] `lucidlint.py --repo .` reports zero `several-definitions` and
+- [x] `lucidlint.py --repo .` reports zero `several-definitions` and
       `many-definitions` findings, and `GATE: PASS` with 0 fails.
-- [ ] `make check`, `make test`, `make self-check`, `make wheel-check`,
+- [x] `make check`, `make test`, `make self-check`, `make wheel-check`,
       `make bundle-check` green.
-- [ ] Houses 353 / album 431, identical finding sets.
-- [ ] No suppression added; every moved why still covers its code.
-- [ ] One commit per family, each naming the class it created.
+- [x] Houses 353 / album 431, identical finding sets.
+- [x] No suppression added; every moved why still covers its code.
+- [x] One commit per family, each naming the class it created.

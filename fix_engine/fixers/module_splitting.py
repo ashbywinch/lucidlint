@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import NamedTuple, cast, override
 
 import libcst as cst
-from libcst.metadata import ParentNodeProvider, PositionProvider
+from libcst.metadata import ParentNodeProvider
 
 from fix_engine.bindings import Bindings
 from fix_engine.imports import Imports
@@ -23,7 +23,6 @@ from fix_engine.source_files import SourceFiles
 
 # lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
 # lucidlint: ignore-file record-shape a class per helper hop is ceremony
-
 
 
 class ModuleSplitting:
@@ -107,7 +106,9 @@ class ModuleSplitting:
         if refusal is not None:
             self.request.decline = refusal
             return None
-        outcome = ModuleSplitting._Split(self.request.repo, origin, module, subjects).execute(wrapper, self.request.opts.name)
+        outcome = ModuleSplitting._Split(self.request.repo, origin, module, subjects).execute(
+            wrapper, self.request.opts.name
+        )
         if outcome.decline is not None:
             self.request.decline = outcome.decline
             return None
@@ -127,7 +128,6 @@ class ModuleSplitting:
         n = name.lower()
         return n == stem or n == stem.replace("_", "")
 
-
     @staticmethod
     def _snake_name(name: str) -> str:
         """CamelCase -> snake_case, acronym-aware (`APIKey` -> api_key, not
@@ -136,13 +136,11 @@ class ModuleSplitting:
         s = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", s)
         return s.lower()
 
-
     @staticmethod
     def _class_free_names(cls: cst.ClassDef) -> set[str]:
         """The names a class READS from the enclosing module: every Name in its
         subtree minus the names bound inside it and minus its own name."""
         return Bindings(cls).free_names() - {cls.name.value}
-
 
     @staticmethod
     def _free_names_of(stmt) -> set[str]:
@@ -150,7 +148,6 @@ class ModuleSplitting:
         (bindings inside it excluded) — the residual's references to moved
         classes and constants."""
         return Bindings(stmt).free_names()
-
 
     @staticmethod
     def _class_attr_names(cls: cst.ClassDef) -> set[str]:
@@ -169,7 +166,6 @@ class ModuleSplitting:
                     names.add(inner.target.value)
         return names
 
-
     @staticmethod
     def _stmt_is_plain_assign(stmt) -> bool:
         """An import / pass / plain-name assignment (a constant) — the module
@@ -185,7 +181,6 @@ class ModuleSplitting:
                 continue
             return False
         return True
-
 
     @staticmethod
     def _module_constants(top: Sequence) -> list[tuple[str, cst.SimpleStatementLine]]:
@@ -203,7 +198,6 @@ class ModuleSplitting:
                 out.append((inner.target.value, stmt))
         return out
 
-
     @staticmethod
     def _const_value(stmt: cst.SimpleStatementLine) -> cst.BaseExpression:
         inner = stmt.body[0]
@@ -213,14 +207,12 @@ class ModuleSplitting:
             return inner.value
         return cst.Name("")
 
-
     @staticmethod
     def _module_has_relative_imports(module: cst.Module) -> bool:
         return any(
             isinstance(s, cst.SimpleStatementLine) and any(isinstance(i, cst.ImportFrom) and i.relative for i in s.body)
             for s in module.body
         )
-
 
     @staticmethod
     def _name_ref_kind(wrapper: cst.MetadataWrapper, node: cst.Name) -> str:
@@ -267,7 +259,6 @@ class ModuleSplitting:
             cur = parents.get(cur)
         return "immediate"
 
-
     @staticmethod
     def _exec_time_names(wrapper: cst.MetadataWrapper, node) -> set[str]:
         """The names `node` reads at evaluation time (function bodies deferred) —
@@ -286,7 +277,6 @@ class ModuleSplitting:
         probe = _ExecNames()
         node.visit(probe)
         return probe.names
-
 
     @staticmethod
     def _consts_moving_into(
@@ -340,7 +330,6 @@ class ModuleSplitting:
             return set()  # nothing the class directly reads — ownerless constants stay
         return candidates
 
-
     class _RewriteMovedConstRefs(cst.CSTTransformer):
         """Method-body references to a constant that moved into the class become
         `Cls.CONST` (a bare name does not resolve through the method scope);
@@ -364,7 +353,6 @@ class ModuleSplitting:
                 return updated_node
             return cst.Attribute(value=cst.Name(self.cls_name), attr=updated_node)
 
-
     @staticmethod
     def _class_with_moved_consts(
         wrapper: cst.MetadataWrapper, cls: cst.ClassDef, moved: set[str], cls_name: str
@@ -381,7 +369,6 @@ class ModuleSplitting:
         cls2 = cls.with_changes(body=cls.body.with_changes(body=new_body))
         return cast(cst.ClassDef, cls2.visit(ModuleSplitting._RewriteMovedConstRefs(wrapper, moved, cls_name)))
 
-
     @staticmethod
     def _split_origin(rel: str) -> ModuleSplitting._SplitOrigin:
         """The module's location facts, derived once from its repo-relative path."""
@@ -392,7 +379,6 @@ class ModuleSplitting:
             segments=directory.split("/") if directory else [],
             stem=rel.rsplit("/", 1)[-1].removesuffix(".py"),
         )
-
 
     @staticmethod
     def _split_subjects(top: Sequence, stem: str) -> list[cst.ClassDef]:
@@ -405,7 +391,6 @@ class ModuleSplitting:
             and not stmt.name.value.startswith("_")
             and not ModuleSplitting._class_matches_stem(stmt.name.value, stem)
         ]
-
 
     @staticmethod
     def _refuse_split_reordering(top: Sequence, subjects: list[cst.ClassDef]) -> str | None:
@@ -423,7 +408,6 @@ class ModuleSplitting:
             return "module-level executable statements between classes would be reordered by the split — split by hand"
         return None
 
-
     @staticmethod
     def _union_find(parent: dict[int, int], node: int) -> int:
         """One union-find root lookup — the clustering's only shared state."""
@@ -432,7 +416,6 @@ class ModuleSplitting:
             node = parent[node]
         return node
 
-
     class _Split:
         """One module split (#31), as the operation it is: the module's misplaced
         classes, the constants that move with them, the residual that stays, and
@@ -440,7 +423,9 @@ class ModuleSplitting:
         plan the constant moves, cluster, name the layout, refuse the unsafe
         shapes, build the sources — so the phases read in order."""
 
-        def __init__(self, repo: Path, origin: ModuleSplitting._SplitOrigin, module: cst.Module, subjects: list[cst.ClassDef]) -> None:
+        def __init__(
+            self, repo: Path, origin: ModuleSplitting._SplitOrigin, module: cst.Module, subjects: list[cst.ClassDef]
+        ) -> None:
             self.repo = repo
             self.origin = origin
             self.module = module
@@ -453,7 +438,8 @@ class ModuleSplitting:
             self.residual = [
                 stmt
                 for stmt in module.body
-                if id(stmt) not in {id(s) for s in subjects} and id(stmt) not in {id(s) for _name, s in self.const_stmts}
+                if id(stmt) not in {id(s) for s in subjects}
+                and id(stmt) not in {id(s) for _name, s in self.const_stmts}
             ]
             self.residual_def_names = {
                 stmt.name.value for stmt in self.residual if isinstance(stmt, (cst.FunctionDef, cst.ClassDef))
@@ -480,7 +466,9 @@ class ModuleSplitting:
                     residual_refs |= names
             external = {name for name in self.const_names if self._const_imported_elsewhere(name)}
             return {
-                id(subject): ModuleSplitting._consts_moving_into(self.const_stmts, class_refs, residual_refs, external, subject)
+                id(subject): ModuleSplitting._consts_moving_into(
+                    self.const_stmts, class_refs, residual_refs, external, subject
+                )
                 for subject in self.subjects
             }
 
@@ -528,7 +516,9 @@ class ModuleSplitting:
             for i, first in enumerate(self.subjects):
                 for second in self.subjects[i + 1 :]:
                     if ModuleSplitting._functions_collide(first, second, self.free_of, self.attrs_of):
-                        parent[ModuleSplitting._union_find(parent, id(first))] = ModuleSplitting._union_find(parent, id(second))
+                        parent[ModuleSplitting._union_find(parent, id(first))] = ModuleSplitting._union_find(
+                            parent, id(second)
+                        )
             class_index = {id(stmt): i for i, stmt in enumerate(self.module.body)}
             components: dict[int, list[cst.ClassDef]] = {}
             for subject in self.subjects:
@@ -554,7 +544,8 @@ class ModuleSplitting:
                         any_package=False,
                         snake={},
                         decline=(
-                            "the cohesive sub-cluster needs a package name — name the package with a domain noun (--name)"
+                            "the cohesive sub-cluster needs a package name — name the package "
+                            "with a domain noun (--name)"
                         ),
                     )
             any_package = any(name is not None for _component, name in members)
@@ -572,7 +563,9 @@ class ModuleSplitting:
                 and len(layout.members[0][0]) == len(self.subjects)
             )
 
-        def refuse_package(self, layout: ModuleSplitting._SplitLayout, wrapper: cst.MetadataWrapper, whole_pkg: bool) -> str | None:
+        def refuse_package(
+            self, layout: ModuleSplitting._SplitLayout, wrapper: cst.MetadataWrapper, whole_pkg: bool
+        ) -> str | None:
             """The package-layout refusals: no module-level constant may survive
             (BQ6), and no residual code may evaluate a moved class at import time
             (the __init__ evaluates before its re-exports)."""
@@ -651,7 +644,9 @@ class ModuleSplitting:
             ]
             if bad:
                 return (
-                    "the split would create an import cycle between '" + bad[0] + "' and the origin module — split by hand"
+                    "the split would create an import cycle between '"
+                    + bad[0]
+                    + "' and the origin module — split by hand"
                 )
             if ModuleSplitting._module_star_imported(self.repo, self.origin.rel, self.module):
                 return "a file does 'from ... import *' on the origin — the split cannot retarget it — split by hand"
@@ -671,7 +666,9 @@ class ModuleSplitting:
             filename = f"{layout.snake[subject.name.value]}.py"
             return f"{self.origin.directory}/{filename}" if self.origin.directory else filename
 
-        def member_sources(self, layout: ModuleSplitting._SplitLayout, wrapper: cst.MetadataWrapper) -> list[tuple[str, str]]:
+        def member_sources(
+            self, layout: ModuleSplitting._SplitLayout, wrapper: cst.MetadataWrapper
+        ) -> list[tuple[str, str]]:
             """The produced files for the moved classes: flat siblings, or a
             package's __init__ (residual + re-exports) and one file per class."""
             writes: list[tuple[str, str]] = []
@@ -692,7 +689,9 @@ class ModuleSplitting:
                 else:
                     package_dir = f"{self.origin.directory}/{name}" if self.origin.directory else name
                     init_body = list(self.residual) + [
-                        cst.SimpleStatementLine(body=[ModuleSplitting._from_import_node([c.name.value], [c.name.value], 1)])
+                        cst.SimpleStatementLine(
+                            body=[ModuleSplitting._from_import_node([c.name.value], [c.name.value], 1)]
+                        )
                         for c in component
                     ]
                     writes.append((f"{package_dir}/__init__.py", cst.Module(body=init_body).code))
@@ -732,7 +731,9 @@ class ModuleSplitting:
             moved_def_ids = {id(stmt) for name, stmt in self.const_stmts if name in self.moved_all}
             kept = [stmt for stmt in self.module.body if id(stmt) not in subject_ids and id(stmt) not in moved_def_ids]
             additions = [
-                cst.SimpleStatementLine(body=[ModuleSplitting._from_import_node(targets[name], [name], 1 if self.origin.in_package else 0)])
+                cst.SimpleStatementLine(
+                    body=[ModuleSplitting._from_import_node(targets[name], [name], 1 if self.origin.in_package else 0)]
+                )
                 for name in sorted(self.residual_subject_refs)
             ]
             return cst.Module(body=ModuleSplitting._insert_header_imports(kept, additions)).code
@@ -770,7 +771,9 @@ class ModuleSplitting:
             for target, src in [(rel, origin_source)] + writes:
                 try:
                     cst.parse_module(src)
-                except Exception:  # lucidlint: ignore broad-except the split is cst output; a parse failure means refuse
+                except (
+                    Exception
+                ):  # lucidlint: ignore broad-except the split is cst output; a parse failure means refuse
                     return ModuleSplitting._SplitOutcome(
                         None,
                         [],
@@ -819,9 +822,10 @@ class ModuleSplitting:
             writes.extend((rel, src) for rel, src in rewritten.items() if rel != self.origin.rel)
             return self.finalize(origin_source, writes, rewritten, whole_pkg)
 
-
     @staticmethod
-    def _from_import_node(module_comps: list[str], names: list[str] | list[cst.ImportAlias], dots: int) -> cst.ImportFrom:
+    def _from_import_node(
+        module_comps: list[str], names: list[str] | list[cst.ImportAlias], dots: int
+    ) -> cst.ImportFrom:
         """`from <module> import <names>` with `dots` relative dots; module
         components are a dotted Name/Attribute chain when present."""
         module: cst.BaseExpression | None = None
@@ -839,7 +843,6 @@ class ModuleSplitting:
             lpar=None,
             rpar=None,
         )
-
 
     @staticmethod
     def _split_class_source(
@@ -860,7 +863,9 @@ class ModuleSplitting:
                 if ctx.package is None:
                     # unreachable via the cohesion edges (a reference would merge
                     # the components) — emit the sibling-file form anyway
-                    constructed.append(ModuleSplitting._from_import_node([ModuleSplitting._snake_name(n)], [n], ctx.origin_dots))
+                    constructed.append(
+                        ModuleSplitting._from_import_node([ModuleSplitting._snake_name(n)], [n], ctx.origin_dots)
+                    )
                 else:
                     constructed.append(ModuleSplitting._from_import_node([n], [n], ctx.member_dots))
             elif n in ctx.residual_def_names:
@@ -879,7 +884,6 @@ class ModuleSplitting:
         cls_node = ModuleSplitting._class_with_moved_consts(wrapper, cls, ctx.moved, cls.name.value)
         return cst.Module(body=body + [cls_node]).code
 
-
     @staticmethod
     def _dotted_expr(parts: list[str]) -> cst.Name | cst.Attribute:
         if len(parts) == 1:
@@ -888,7 +892,6 @@ class ModuleSplitting:
         for part in parts[1:]:
             expr = cst.Attribute(value=expr, attr=cst.Name(part))
         return expr
-
 
     @staticmethod
     def _resolve_dotted(expr) -> list[str] | None:
@@ -901,7 +904,6 @@ class ModuleSplitting:
             parts.append(cur.value)
             return list(reversed(parts))
         return None
-
 
     @staticmethod
     def _module_alias_map(module: cst.Module, origin_path: list[str]) -> dict[str, list[str]]:
@@ -924,12 +926,10 @@ class ModuleSplitting:
                     out[str(bound)] = list(parts)
         return out
 
-
     @staticmethod
     def _alias_points_to_origin(parts: list[str], origin_path: list[str], alias_map: dict[str, list[str]]) -> bool:
         """A one-component import path that names the origin through an alias."""
         return len(parts) == 1 and parts[0] in alias_map and alias_map[parts[0]] == origin_path
-
 
     @staticmethod
     def _import_refers_to_origin(ifrom: cst.ImportFrom, importer_dir: list[str], origin_path: list[str]) -> bool:
@@ -945,7 +945,6 @@ class ModuleSplitting:
                 return False
             return importer_dir[:prefix] + comps == origin_path
         return comps == origin_path
-
 
     class _SplitImportRewrite(cst.CSTTransformer):
         """The FLAT/sub-package repo-wide rewrite: `from prod_mod import Cls`
@@ -1027,14 +1026,12 @@ class ModuleSplitting:
             self.added.add(".".join(full))
             return updated_node.with_changes(value=ModuleSplitting._dotted_expr(full))
 
-
     @staticmethod
     def _insert_header_imports(body: list, additions: list) -> list:
         """Insert the added imports after any module docstring — imports must sit
         before the statements that reference the names they bind."""
         i = 1 if body and ModuleOutline.is_docstring_stmt(body[0]) else 0
         return body[:i] + additions + body[i:]
-
 
     @staticmethod
     def _split_rewrite_source(
@@ -1069,18 +1066,18 @@ class ModuleSplitting:
                 new = ModuleSplitting._add_module_imports(cst.parse_module(new), tx.added - existing).code
         return new if new != text else None
 
-
     @staticmethod
     def _add_module_imports(module: cst.Module, dotted_paths: set[str]) -> cst.Module:
         """`import <dotted>` statements for the retargeted attribute-chain bases,
         inserted after the docstring — `prod_mod.User` became `user.User`, which
         needs the module binding."""
         lines = [
-            cst.SimpleStatementLine(body=[cst.Import(names=[cst.ImportAlias(name=ModuleSplitting._dotted_expr(p.split(".")))])])
+            cst.SimpleStatementLine(
+                body=[cst.Import(names=[cst.ImportAlias(name=ModuleSplitting._dotted_expr(p.split(".")))])]
+            )
             for p in sorted(dotted_paths)
         ]
         return module.with_changes(body=ModuleSplitting._insert_header_imports(list(module.body), lines))
-
 
     class _ConstImportScan(cst.CSTVisitor):
         """One file's external readers of a constant: `from <origin> import C`
@@ -1124,7 +1121,6 @@ class ModuleSplitting:
             if self._refers_to_origin(parts):
                 self.hit = True
 
-
     @staticmethod
     def _module_star_imported(repo: Path, rel: str, module: cst.Module) -> bool:
         """Does any other file `from <origin> import *`? The flat rewrite cannot
@@ -1145,7 +1141,6 @@ class ModuleSplitting:
                     if ModuleSplitting._is_star_import_from_origin(inner, importer_dir, origin_path):
                         return True
         return False
-
 
     @staticmethod
     def _origin_imported_anywhere(repo: Path, sources: dict[str, str], rel: str, origin_path: list[str]) -> bool:
@@ -1172,7 +1167,6 @@ class ModuleSplitting:
                             if parts == origin_path:
                                 return True
         return False
-
 
     @staticmethod
     def _graph_cycle(nodes: list[str], edges: dict[str, set[str]]) -> list[str] | None:
@@ -1202,12 +1196,10 @@ class ModuleSplitting:
                     return r
         return None
 
-
     @staticmethod
     def _is_single_name_assign(stmt: cst.BaseSmallStatement) -> bool:
         """`name = value` with exactly one plain-name target."""
         return isinstance(stmt, cst.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0].target, cst.Name)
-
 
     @staticmethod
     def _split_target_exists(repo: Path, target: str, rel: str, rewritten) -> bool:
@@ -1215,16 +1207,16 @@ class ModuleSplitting:
         a file this fix already rewrote."""
         return target != rel and target not in rewritten and (repo / target).exists()
 
-
     @staticmethod
-    def _is_star_import_from_origin(imp: cst.BaseSmallStatement, importer_dir: list[str], origin_path: list[str]) -> bool:
+    def _is_star_import_from_origin(
+        imp: cst.BaseSmallStatement, importer_dir: list[str], origin_path: list[str]
+    ) -> bool:
         """A `from ... import *` that pulls in the module being split."""
         return (
             isinstance(imp, cst.ImportFrom)
             and isinstance(imp.names, cst.ImportStar)
             and ModuleSplitting._import_refers_to_origin(imp, importer_dir, origin_path)
         )
-
 
     @staticmethod
     def _functions_collide(first, second, free_of: dict, attrs_of: dict) -> bool:

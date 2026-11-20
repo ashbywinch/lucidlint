@@ -78,6 +78,7 @@ _AMBIENT = frozenset(
     }
 )
 
+
 class _DispatchArm(NamedTuple):
     """One parsed chain arm: the selector, its literal, and the body."""
 

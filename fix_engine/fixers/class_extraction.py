@@ -49,9 +49,7 @@ class ClassExtraction:
         receivers = {m.name.value: (m.params.params[0].name.value if m.params.params else None) for m in methods}
         mod2 = cst.parse_module(call_rewritten)
         wrap2 = cst.MetadataWrapper(mod2)
-        renamed = wrap2.visit(
-            ClassExtraction._ReceiverToSelf(receivers, Bindings.stores_by_function(wrap2))
-        )
+        renamed = wrap2.visit(ClassExtraction._ReceiverToSelf(receivers, Bindings.stores_by_function(wrap2)))
         new_methods = []
         for method in ClassExtraction._collect_defs(renamed, set(fns)):
             params = method.params.params
@@ -71,11 +69,7 @@ class ClassExtraction:
             bases=[],
             body=cst.IndentedBlock(body=list(new_methods)),
         )
-        return (
-            cst.parse_module(deleted)
-            .visit(ClassExtraction._InsertClass(class_name, classdef, new_methods))
-            .code
-        )
+        return cst.parse_module(deleted).visit(ClassExtraction._InsertClass(class_name, classdef, new_methods)).code
 
     class _MoveIntoClass(cst.CSTTransformer):
         """Delete the strewing free functions from module scope; rewrite
@@ -218,9 +212,8 @@ class ClassExtraction:
                 if node.name.value == "__init__":
                     return
                 pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
-                if pos.start.line == anchor_line:
-                    if node.params.params:
-                        anchor_ann = ClassExtraction._annotation_base(node.params.params[0])
+                if pos.start.line == anchor_line and node.params.params:
+                    anchor_ann = ClassExtraction._annotation_base(node.params.params[0])
 
         wrapper.visit(_Scan())
         if anchor_ann is None or anchor_ann not in local_classes:

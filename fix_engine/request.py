@@ -51,7 +51,6 @@ MECHANICAL_KINDS = {
 }
 
 
-
 _STRUCTURAL_FIXERS = {
     "extract-method": "fix_extract_method",
     "extract-class": "fix_extract_class",
@@ -77,7 +76,6 @@ _STRUCTURAL_FIXERS = {
 }
 
 
-
 _NAME_REQUIRED_KINDS = {
     "magic-number",
     "vague-name",
@@ -88,7 +86,6 @@ _NAME_REQUIRED_KINDS = {
     "extract-module",
     "loop-hoist",
 }
-
 
 
 STRUCTURAL_KINDS = {
@@ -133,7 +130,6 @@ STRUCTURAL_KINDS = {
 }
 
 
-
 PREVIEW_KINDS = {
     "extract-method",
     "extract-class",
@@ -150,13 +146,11 @@ PREVIEW_KINDS = {
 }
 
 
-
 KIND_ALIASES = {
     "latent-class": "extract-class",
     "complexity": "extract-method",
     "large-function": "extract-method",
 }
-
 
 
 @dataclass

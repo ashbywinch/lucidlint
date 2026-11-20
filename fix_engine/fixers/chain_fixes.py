@@ -22,7 +22,6 @@ from fix_engine.source_files import SourceFiles
 # lucidlint: ignore-file record-shape a class per helper hop is ceremony
 
 
-
 class ChainFixes:
     """The collapse-chain fix for one request: rewire or promote the terminal,
     never blind inline."""
@@ -122,7 +121,9 @@ class ChainFixes:
             return f"'from ... import {f_name}' re-exports the forwarder — collapse by hand"
         return None
 
-    def _collapse_to_module_fn(self, module: cst.Module, head: ChainFixes._ChainHead, mid: ChainFixes._ChainMiddle) -> str | None:
+    def _collapse_to_module_fn(
+        self, module: cst.Module, head: ChainFixes._ChainHead, mid: ChainFixes._ChainMiddle
+    ) -> str | None:
         """M -> F -> G (a module function): M calls G with its own params and F
         is deleted. None when the two modules are otherwise independent — the
         chain is then the deliberate boundary between them."""
@@ -144,7 +145,9 @@ class ChainFixes:
         # would overwrite the rewire just applied above
         return self._drop_middle(origin_new, head, mid)
 
-    def _method_terminal(self, head: ChainFixes._ChainHead, mid: ChainFixes._ChainMiddle) -> ChainFixes._ChainTerminal | None:
+    def _method_terminal(
+        self, head: ChainFixes._ChainHead, mid: ChainFixes._ChainMiddle
+    ) -> ChainFixes._ChainTerminal | None:
         """The unique D.N the chain reaches through F. None when the method is
         not unique in the repo, or when the modules are independent."""
         attr_method = mid.callee.attr_method
@@ -155,7 +158,8 @@ class ChainFixes:
         matches = [
             (d_rel, d_cls, d_method)
             for d_rel, d_cls, d_method in ChainFixes._methods_named(ChainFixes._ModuleRef(self.request.repo, n_name))
-            if d_cls.name.value != head.class_name and ChainFixes._non_receiver_param_names(d_method.params.params) == arg_params
+            if d_cls.name.value != head.class_name
+            and ChainFixes._non_receiver_param_names(d_method.params.params) == arg_params
         ]
         if len(matches) != 1:
             return None  # ambiguous — no structural certainty
@@ -168,7 +172,9 @@ class ChainFixes:
             return None
         return ChainFixes._ChainTerminal(recv, n_name, d_rel, d_cls, d_method)
 
-    def _collapse_to_method(self, module: cst.Module, head: ChainFixes._ChainHead, mid: ChainFixes._ChainMiddle) -> str | None:
+    def _collapse_to_method(
+        self, module: cst.Module, head: ChainFixes._ChainHead, mid: ChainFixes._ChainMiddle
+    ) -> str | None:
         """M -> F -> D.N: rewire when D has identity, promote N onto C when D
         dissolves. D's identity decides, not the caller's preference."""
         terminal = self._method_terminal(head, mid)
@@ -179,7 +185,11 @@ class ChainFixes:
         return self._promote_method_terminal(module, head, mid, terminal)
 
     def _rewire_method_terminal(
-        self, module: cst.Module, head: ChainFixes._ChainHead, mid: ChainFixes._ChainMiddle, terminal: ChainFixes._ChainTerminal
+        self,
+        module: cst.Module,
+        head: ChainFixes._ChainHead,
+        mid: ChainFixes._ChainMiddle,
+        terminal: ChainFixes._ChainTerminal,
     ) -> str:
         """D keeps its identity: M reaches D.N directly and F is deleted."""
         args = [p for p in head.params if p != terminal.recv]
@@ -197,7 +207,11 @@ class ChainFixes:
         return self._drop_middle(origin_new, head, mid)
 
     def _promote_method_terminal(
-        self, module: cst.Module, head: ChainFixes._ChainHead, mid: ChainFixes._ChainMiddle, terminal: ChainFixes._ChainTerminal
+        self,
+        module: cst.Module,
+        head: ChainFixes._ChainHead,
+        mid: ChainFixes._ChainMiddle,
+        terminal: ChainFixes._ChainTerminal,
     ) -> str | None:
         """D has no identity: N becomes a sibling method of M on C, D dissolves."""
         d_name = terminal.cls.name.value
@@ -223,7 +237,9 @@ class ChainFixes:
                 )
             ]
         )
-        origin_new = ChainFixes._replace_method_body(cst.parse_module(origin_new), head.method, m_body, self.request.line).code
+        origin_new = ChainFixes._replace_method_body(
+            cst.parse_module(origin_new), head.method, m_body, self.request.line
+        ).code
         origin_new = self._drop_middle(origin_new, head, mid)
         if terminal.rel != self.request.rel:
             d_new = ChainFixes._remove_class(ChainFixes._module_of(self.request.repo, terminal.rel), d_name)
@@ -249,7 +265,6 @@ class ChainFixes:
         """The parameter names a moved method carries, without `self`/`cls`."""
         return [p.name.value for p in params if p.name.value not in ("self", "cls")]
 
-
     class _MethodAtLine(cst.CSTVisitor):
         """The class + method whose def sits on one line — a chain's head probe."""
 
@@ -269,7 +284,6 @@ class ChainFixes:
                     self.owner = (node.name.value, node, stmt)
                     return
 
-
     @staticmethod
     def _chain_head(wrapper: cst.MetadataWrapper, line: int) -> ChainFixes._ChainHead | None:
         """The forwarding chain's head at `line`: a method whose body is exactly
@@ -286,7 +300,6 @@ class ChainFixes:
             return None
         assert callee is not None
         return ChainFixes._ChainHead(class_name, class_node, method, params, callee)
-
 
     @staticmethod
     def _chain_middle(repo: Path, head: ChainFixes._ChainHead) -> ChainFixes._ChainMiddle | None:
@@ -305,7 +318,6 @@ class ChainFixes:
         if args != expected:
             return None
         return ChainFixes._ChainMiddle(found.rel, found.module, params, callee)
-
 
     @staticmethod
     def _pure_forward_of(fn: cst.FunctionDef) -> tuple[ChainFixes._ForwardTarget | None, list[str]]:
@@ -329,9 +341,10 @@ class ChainFixes:
         if isinstance(call.func, cst.Name):
             return ChainFixes._ForwardTarget(is_name=True, name=call.func.value), argnames
         if isinstance(call.func, cst.Attribute) and isinstance(call.func.value, cst.Name):
-            return ChainFixes._ForwardTarget(is_name=False, attr_method=(call.func.value.value, call.func.attr.value)), argnames
+            return ChainFixes._ForwardTarget(
+                is_name=False, attr_method=(call.func.value.value, call.func.attr.value)
+            ), argnames
         return None, []
-
 
     @staticmethod
     def _module_fn_node(module: cst.Module, name: str) -> cst.FunctionDef | None:
@@ -339,7 +352,6 @@ class ChainFixes:
             if isinstance(stmt, cst.FunctionDef) and stmt.name.value == name:
                 return stmt
         return None
-
 
     @staticmethod
     def _find_module_fn(ref: ChainFixes._ModuleRef) -> ChainFixes._ModuleFn | None:
@@ -351,7 +363,6 @@ class ChainFixes:
             if node is not None:
                 return ChainFixes._ModuleFn(path.relative_to(ref.repo).as_posix(), module, node)
         return None
-
 
     @staticmethod
     def _call_sites(ref: ChainFixes._ModuleRef) -> int:
@@ -373,7 +384,6 @@ class ChainFixes:
             total += c.n
         return total
 
-
     @staticmethod
     def _reexported(ref: ChainFixes._ModuleRef) -> bool:
         for path in SourceFiles(ref.repo).py_files():
@@ -387,7 +397,6 @@ class ChainFixes:
                             if isinstance(alias.name, cst.Name) and alias.name.value == ref.name:
                                 return True
         return False
-
 
     @staticmethod
     def _depends_on(repo: Path, rel: str, d_rel: str) -> bool:
@@ -409,7 +418,6 @@ class ChainFixes:
                         return True
         return False
 
-
     @staticmethod
     def _methods_named(ref: ChainFixes._ModuleRef) -> list[tuple[str, cst.ClassDef, cst.FunctionDef]]:
         out: list[tuple[str, cst.ClassDef, cst.FunctionDef]] = []
@@ -422,7 +430,6 @@ class ChainFixes:
                     if isinstance(mem, cst.FunctionDef) and mem.name.value == ref.name:
                         out.append((path.relative_to(ref.repo).as_posix(), stmt, mem))
         return out
-
 
     @staticmethod
     def _class_has_identity(cls: cst.ClassDef) -> bool:
@@ -450,7 +457,6 @@ class ChainFixes:
                 return True  # a non-forwarding member — D is real
         return writes_self
 
-
     @staticmethod
     def _method_uses_self(method: cst.FunctionDef) -> bool:
         uses = False
@@ -465,7 +471,6 @@ class ChainFixes:
         method.visit(_Scan())
         return uses
 
-
     @staticmethod
     def _zero_external_refs(repo: Path, class_name: str) -> bool:
         total = 0
@@ -475,7 +480,6 @@ class ChainFixes:
                 if node.value == class_name:
                     total += 1
         return total <= 1  # only the definition itself
-
 
     class _MethodBodyRewriteByLine(cst.CSTTransformer):
         METADATA_DEPENDENCIES = (PositionProvider,)
@@ -493,7 +497,6 @@ class ChainFixes:
                     return updated_node.with_changes(body=updated_node.body.with_changes(body=self.body))
             return updated_node
 
-
     @staticmethod
     def _replace_method_body(
         module: cst.Module, method: cst.FunctionDef, body: cst.SimpleStatementLine, line: int | None = None
@@ -501,7 +504,6 @@ class ChainFixes:
         if line is None:
             line = ModuleOutline.span(cst.MetadataWrapper(module).resolve(PositionProvider)[method]).start.line
         return cst.MetadataWrapper(module).visit(ChainFixes._MethodBodyRewriteByLine(line, method.name.value, [body]))
-
 
     class _ReplaceClassByLine(cst.CSTTransformer):
         METADATA_DEPENDENCIES = (PositionProvider,)
@@ -521,11 +523,9 @@ class ChainFixes:
                 return self.new_class
             return updated_node
 
-
     @staticmethod
     def _replace_class_body(module: cst.Module, line: int, new_class: cst.ClassDef) -> cst.Module:
         return cst.MetadataWrapper(module).visit(ChainFixes._ReplaceClassByLine(line, new_class))
-
 
     class _RemoveFn(cst.CSTTransformer):
         def __init__(self, name: str) -> None:
@@ -537,11 +537,9 @@ class ChainFixes:
                 return cst.RemoveFromParent()
             return updated_node
 
-
     @staticmethod
     def _remove_fn(module: cst.Module, name: str) -> str:
         return module.visit(ChainFixes._RemoveFn(name)).code
-
 
     class _RemoveClass(cst.CSTTransformer):
         def __init__(self, name: str) -> None:
@@ -553,16 +551,13 @@ class ChainFixes:
                 return cst.RemoveFromParent()
             return updated_node
 
-
     @staticmethod
     def _remove_class(module: cst.Module, name: str) -> str:
         return module.visit(ChainFixes._RemoveClass(name)).code
 
-
     @staticmethod
     def _module_of(repo: Path, rel: str) -> cst.Module:
         return cst.parse_module((repo / rel).read_text(encoding="utf-8"))
-
 
     @staticmethod
     def _breaks_forwarding_chain(callee, args: list, params: list) -> bool:

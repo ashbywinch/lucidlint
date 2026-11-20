@@ -76,9 +76,7 @@ class ModuleOutline:
         class, no statement, only comments and blank lines? The emptied file a
         split deletes."""
         module = cst.parse_module(source)
-        return all(
-            not isinstance(s, (cst.FunctionDef, cst.ClassDef, cst.SimpleStatementLine)) for s in module.body
-        )
+        return all(not isinstance(s, (cst.FunctionDef, cst.ClassDef, cst.SimpleStatementLine)) for s in module.body)
 
     @staticmethod
     def is_docstring_stmt(

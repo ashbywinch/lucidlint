@@ -32,7 +32,6 @@ class Bindings:
         self.scope = scope
 
     @staticmethod
-    @staticmethod
     def import_base_name(name: cst.Attribute | cst.Name) -> str:
         """The first component of a dotted module path: `a.b.c` binds `a`."""
         base: cst.BaseExpression = name
@@ -48,11 +47,9 @@ class Bindings:
     BUILTINS = frozenset(dir(builtins))
 
     @staticmethod
-    @staticmethod
     def expr_names(e) -> set[str]:
         return {n.value for n in ModuleOutline.iter_nodes([e]) if isinstance(n, cst.Name)}
 
-    @staticmethod
     @staticmethod
     def collect_alias_names(names, stmt):
         for a in stmt.names:
@@ -64,6 +61,7 @@ class Bindings:
     @staticmethod
     def module_name_nodes(module: cst.Module) -> list[cst.Name]:
         """Every Name node at module level (a visitor probe)."""
+
         class _AllNames(cst.CSTVisitor):
             def __init__(self):
                 self.names: list[cst.Name] = []
@@ -203,9 +201,7 @@ class Bindings:
         def _is_body_store(self, ctx) -> bool:
             """A name stored by the function body — not a parameter (the
             signature) and not outside any function."""
-            return (
-                ctx == cst.metadata.ExpressionContext.STORE and self._current is not None and not self._in_param
-            )
+            return ctx == cst.metadata.ExpressionContext.STORE and self._current is not None and not self._in_param
 
         @override
         def visit_Name(self, node) -> None:
@@ -217,7 +213,6 @@ class Bindings:
                 assert self._current is not None
                 self.per_fn[self._current].add(node.value)
 
-    @staticmethod
     @staticmethod
     def hoist_target_names(t) -> set[str]:
         """The names a binding TARGET binds — Name/Tuple/List/Starred (a
@@ -307,12 +302,10 @@ class Bindings:
             if isinstance(node.name, cst.AsName) and isinstance(node.name.name, cst.Name):
                 self.bound.add(node.name.name.value)
 
+
 def _binds_hoisted_name(stmt: cst.BaseSmallStatement, name: str) -> bool:
     """The annotated assignment binds `name` (directly or through a target
     tuple)."""
     return (
-        isinstance(stmt, cst.AnnAssign)
-        and stmt.target is not None
-        and name in Bindings.hoist_target_names(stmt.target)
+        isinstance(stmt, cst.AnnAssign) and stmt.target is not None and name in Bindings.hoist_target_names(stmt.target)
     )
-

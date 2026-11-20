@@ -18,11 +18,11 @@ seam analysis (`method_extraction`) — and one fixer class per module under
 
 from __future__ import annotations
 
-from libcst.metadata import PositionProvider
+from libcst.metadata import PositionProvider as PositionProvider
 
 from fix_engine import request as _request
 from fix_engine.bindings import Bindings
-from fix_engine.fix_options import FixOptions
+from fix_engine.fix_options import FixOptions as FixOptions
 from fix_engine.method_extraction import MethodExtraction
 from fix_engine.module_outline import ModuleOutline
 from fix_engine.rewrite import Rewrite

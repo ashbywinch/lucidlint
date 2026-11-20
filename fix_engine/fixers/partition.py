@@ -119,7 +119,9 @@ class Partition:
             head: list[cst.BaseStatement] = []
             if i == 0 and class_docstring is not None:
                 head.append(class_docstring)
-            group_cls = Partition._group_class(class_names[i], cls, list(group.methods), Partition._GroupInit(init_stmts, init_params), head)
+            group_cls = Partition._group_class(
+                class_names[i], cls, list(group.methods), Partition._GroupInit(init_stmts, init_params), head
+            )
             if i:
                 group_cls = group_cls.with_changes(leading_lines=[cst.EmptyLine()])
             replacements.append(group_cls)
@@ -141,7 +143,8 @@ class Partition:
         if extra:
             return Partition._PartitionAttempt(
                 None,
-                "the class carries statements besides a docstring — they cannot be attributed to one group; split by hand",
+                "the class carries statements besides a docstring — they cannot be attributed "
+                "to one group; split by hand",
             )
         if len(methods) < 6:
             return Partition._PartitionAttempt(

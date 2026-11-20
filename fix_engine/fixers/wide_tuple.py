@@ -69,7 +69,9 @@ class WideTuple:
             self.request.decline = f"'{class_name}' is already bound in {self.request.rel} — pass another --name"
             return None
         fields = WideTuple._record_field_names(site.elements, site.arity)
-        transformed = wrapper.visit(WideTuple._WideTupleToRecord(WideTuple._annotation_text(site.annotation), site.arity, class_name))
+        transformed = wrapper.visit(
+            WideTuple._WideTupleToRecord(WideTuple._annotation_text(site.annotation), site.arity, class_name)
+        )
         body: list = [Rewrite.record_class_def(class_name, fields), cst.EmptyLine(), *transformed.body]
         return cst.Module(body=body).code
 
@@ -107,7 +109,9 @@ class WideTuple:
                     continue
                 arity = WideTuple._fixed_tuple_arity(param.annotation.annotation)
                 if arity is not None and arity >= 3:
-                    self.sites.append(WideTuple._Site("param", param.name.value, arity, param.annotation.annotation, None))
+                    self.sites.append(
+                        WideTuple._Site("param", param.name.value, arity, param.annotation.annotation, None)
+                    )
             if node.returns is not None:
                 arity = WideTuple._fixed_tuple_arity(node.returns.annotation)
                 if arity is not None and arity >= 3:
@@ -235,7 +239,9 @@ class WideTuple:
     def _is_tuple_subscript(node: cst.BaseExpression | None) -> bool:
         """`tuple[...]` / `Tuple[...]` — the annotation that hides a record."""
         return (
-            isinstance(node, cst.Subscript) and isinstance(node.value, cst.Name) and node.value.value in ("tuple", "Tuple")
+            isinstance(node, cst.Subscript)
+            and isinstance(node.value, cst.Name)
+            and node.value.value in ("tuple", "Tuple")
         )
 
     @staticmethod
