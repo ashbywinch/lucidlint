@@ -111,56 +111,6 @@ class _SplitCtx(NamedTuple):
     member_dots: int  # relative dots for `from .<Class> import <Class>`
 
 
-class _WideTupleSite(NamedTuple):
-    """One fixed-arity tuple annotation on the anchor line: where it lives,
-    the annotated name, its arity, and the build site's element expressions
-    (None when the annotation has no matching tuple literal)."""
-
-    where: str
-    var: str
-    arity: int
-    annotation: cst.BaseExpression
-    elements: tuple[cst.BaseExpression, ...] | None
-
-
-class _Clump(NamedTuple):
-    """The recovered clump: the shared pair (in the anchor's signature order)
-    and the module-level defs carrying it, in source order."""
-
-    pair: tuple[str, str]
-    fns: tuple[cst.FunctionDef, ...]
-
-
-class _PartitionGroup(NamedTuple):
-    """One field-disjoint method group: its methods in source order and the
-    fields only they touch."""
-
-    methods: tuple[cst.FunctionDef, ...]
-    fields: tuple[str, ...]
-
-
-class _GroupInit(NamedTuple):
-    """One group's synthesized __init__: the field assignments it keeps and
-    the parameters those assignments need (name, annotation, default)."""
-
-    statements: list[cst.BaseStatement]
-    params: list[cst.Param]
-
-
-class _PartitionPlan(NamedTuple):
-    groups: tuple[_PartitionGroup, ...]
-    init_fields: tuple[tuple[str, cst.BaseExpression], ...]
-    init_docstring: cst.BaseStatement | None
-    init_params: tuple[tuple[str, cst.Annotation | None, cst.BaseExpression | None], ...]
-
-
-class _PartitionAttempt(NamedTuple):
-    """The plan, or the specific reason it cannot be computed."""
-
-    plan: _PartitionPlan | None
-    decline: str
-
-
 class _ModuleRef(NamedTuple):
     """One module-level name in its repo: the thing the split and husk lookups
     ask about, as one parameter instead of a (repo, name) pair everywhere."""

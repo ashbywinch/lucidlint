@@ -9,6 +9,7 @@ restating it per family.
 
 from __future__ import annotations
 
+import re
 from typing import override
 
 import libcst as cst
@@ -67,6 +68,12 @@ class Rewrite:
             name=cst.Name(class_name),
             body=cst.IndentedBlock(body=[init]),
         )
+
+    @staticmethod
+    def pascal_case(text: str) -> str:
+        """`folder_fingerprint` -> `FolderFingerprint` (the name a generated
+        class takes from the phrase that describes it)."""
+        return "".join(part[:1].upper() + part[1:] for part in re.split(r"[^0-9A-Za-z]+", text) if part)
 
     @staticmethod
     def extraction_is_private() -> bool:

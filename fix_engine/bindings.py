@@ -12,8 +12,16 @@ import builtins
 from typing import override
 
 import libcst as cst
+from libcst.metadata import ExpressionContextProvider
 
 from fix_engine.module_outline import ModuleOutline
+
+# lucidlint: ignore-file record-shape the libcst layer's tuple/dict shorthands ARE its wire records —
+# lucidlint: ignore-file record-shape a class per helper hop is ceremony
+
+StoredNames = dict[str, set[str]]
+"""Each function's body-stored names — what a receiver rename asks before it
+rewrites a load: a name stored anywhere in the body is a local, not the param."""
 
 
 class Bindings:
@@ -114,6 +122,99 @@ class Bindings:
         probe = Bindings._FreeNames()
         self.scope.visit(probe)
         return probe.names - probe.bound
+
+    @staticmethod
+    def binds_name(module: cst.Module, name: str) -> bool:
+        """Does the module already bind `name` (class, def, or assignment
+        target)? A generated class of that name would shadow or duplicate it."""
+        finder = Bindings._BindsName(name)
+        module.visit(finder)
+        return finder.found
+
+    @staticmethod
+    def stores_by_function(wrapper: cst.MetadataWrapper) -> StoredNames:
+        """The names each function assigns anywhere in its body — those are
+        locals, never the receiver (a shadowing `state = state.line` must not
+        have its loads renamed to `self`). One pass over the whole module,
+        tracking the current function."""
+        probe = Bindings._Stores()
+        wrapper.visit(probe)
+        return probe.per_fn
+
+    class _BindsName(cst.CSTVisitor):
+        """Does the module bind the name as a class, a def, or an assignment
+        target?"""
+
+        def __init__(self, name: str) -> None:
+            self.name: str = name
+            self.found: bool = False
+
+        @override
+        def visit_ClassDef(self, node) -> None:
+            if node.name.value == self.name:
+                self.found = True
+
+        @override
+        def visit_FunctionDef(self, node) -> None:
+            if node.name.value == self.name:
+                self.found = True
+
+        @override
+        def visit_Assign(self, node) -> None:
+            for target in node.targets:
+                if isinstance(target.target, cst.Name) and target.target.value == self.name:
+                    self.found = True
+
+    class _Stores(cst.CSTVisitor):
+        """The names each function stores in its body, attributed to the
+        innermost enclosing def (a nested def must not clobber the outer one)."""
+
+        METADATA_DEPENDENCIES = (ExpressionContextProvider,)
+
+        def __init__(self) -> None:
+            self.per_fn: StoredNames = {}
+            self._current: str | None = None
+            self._in_param: bool = False
+            self._fn_stack: list[str | None] = []
+
+        @override
+        def visit_FunctionDef(self, node) -> None:
+            # remember the enclosing fn so leave_FunctionDef can restore it —
+            # a nested def must not clobber the strewing fn's attribution
+            self._fn_stack.append(self._current)
+            self._current = node.name.value
+            self.per_fn.setdefault(self._current, set())
+
+        @override
+        def leave_FunctionDef(self, original_node) -> None:
+            self._current = self._fn_stack.pop()
+
+        @override
+        def visit_Param(self, node) -> None:
+            # parameter names are STORE-context Names — they are the signature,
+            # not body locals; skip them
+            self._in_param = True
+
+        @override
+        def leave_Param(self, original_node) -> None:
+            self._in_param = False
+
+        def _is_body_store(self, ctx) -> bool:
+            """A name stored by the function body — not a parameter (the
+            signature) and not outside any function."""
+            return (
+                ctx == cst.metadata.ExpressionContext.STORE and self._current is not None and not self._in_param
+            )
+
+        @override
+        def visit_Name(self, node) -> None:
+            try:
+                ctx = self.get_metadata(ExpressionContextProvider, node)
+            except KeyError:
+                return  # attribute names (obj.state) are not refs
+            if self._is_body_store(ctx):
+                assert self._current is not None
+                self.per_fn[self._current].add(node.value)
 
     @staticmethod
     @staticmethod
