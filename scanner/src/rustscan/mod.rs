@@ -960,6 +960,49 @@ mod tests {
     }
 
     #[test]
+    fn loop_hoist_sees_a_chained_receiver_write() {
+        // issue #113: `map.entry(k).or_default().push(v)` writes `map` through
+        // a method-call chain. With a second map write the loop is
+        // multi-output, not a one-output hoist.
+        let src = "fn split(xs: &[(u32, u32)], line: &mut std::collections::HashMap<u32, Vec<u32>>, file: &mut std::collections::HashMap<u32, u32>) {\n    for (k, v) in xs {\n        line.entry(*k).or_default().push(*v);\n        file.insert(*k, *v);\n        let a = *v + 1;\n        let b = a * 2;\n    }\n}\n";
+        let fs = scan(src);
+        assert!(has_kind(&fs, "mutating-loop"), "{fs:?}");
+        assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
+        // only the chained map: one output and a long body is a hoist
+        let only = "fn fill(xs: &[(u32, u32)], line: &mut std::collections::HashMap<u32, Vec<u32>>) {\n    for (k, v) in xs {\n        line.entry(*k).or_default().push(*v);\n        let a = *v + 1;\n        let b = a * 2;\n        let c = b + 1;\n    }\n}\n";
+        let fs = scan(only);
+        assert!(has_kind(&fs, "loop-hoist"), "{fs:?}");
+        assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
+    }
+
+    #[test]
+    fn loop_sequence_ignores_sibling_branches() {
+        // issue #114: loops in if/else arms never run together
+        let src = "fn f(flag: bool, xs: &[u32], ys: &[u32]) -> u32 {\n    let mut a = 0;\n    if flag {\n        for x in xs { a += *x; }\n    } else {\n        for y in ys { a += *y; }\n    }\n    a\n}\n";
+        let fs = scan(src);
+        assert!(!has_kind(&fs, "loop-sequence"), "{fs:?}");
+        // two loops in one block still are a sequence
+        let seq = "fn f(xs: &[u32], ys: &[u32]) -> u32 {\n    let mut a = 0;\n    for x in xs { a += *x; }\n    for y in ys { a += *y; }\n    a\n}\n";
+        let fs = scan(seq);
+        assert!(has_kind(&fs, "loop-sequence"), "{fs:?}");
+    }
+
+    #[test]
+    fn loop_growing_cursor_walk_is_a_traversal() {
+        // issue #115: `while i < queue.len()` with the body growing `queue`
+        // is a worklist traversal, not a one-output hoist
+        let src = "fn walk(roots: &[u32]) -> Vec<u32> {\n    let mut queue: Vec<u32> = roots.to_vec();\n    let mut i = 0;\n    while i < queue.len() {\n        let x = queue[i];\n        let y = x + 1;\n        let z = y * 2;\n        queue.push(z);\n        i += 1;\n    }\n    queue\n}\n";
+        let fs = scan(src);
+        assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
+        assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
+        assert!(!has_kind(&fs, "loop-pipeline"), "{fs:?}");
+        // the same cursor without growth is not a traversal
+        let sum = "fn sum(xs: &[u32]) -> u32 {\n    let mut total = 0;\n    let mut i = 0;\n    while i < xs.len() {\n        let a = xs[i];\n        let b = a + 1;\n        let c = b * 2;\n        total += c;\n        i += 1;\n    }\n    total\n}\n";
+        let fs = scan(sum);
+        assert!(has_kind(&fs, "mutating-loop"), "{fs:?}");
+    }
+
+    #[test]
     fn loop_pipeline_idiomatic_combinator_passes() {
         let fs = scan(&fixture("loop_pipeline_rs_ok.rs"));
         assert!(!has_kind(&fs, "loop-pipeline"), "{fs:?}");

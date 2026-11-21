@@ -33,9 +33,13 @@
 
 use crate::rustscan;
 
+mod branches;
+mod facts;
 mod walk;
 
-use walk::{LoopWalk, PipelineBuild};
+use branches::{BranchKind, Branches};
+use facts::PipelineBuild;
+use walk::LoopWalk;
 
 /// The minimum flattened body statement count for a single-mutation loop to
 /// carry the hoist advice — the body clearly computes more than it adds.
@@ -132,9 +136,58 @@ impl RustLoops {
             syn::Expr::Reference(r) => Self::expr_base_path(&r.expr, out),
             syn::Expr::Paren(p) => Self::expr_base_path(&p.expr, out),
             syn::Expr::Unary(u) => Self::expr_base_path(&u.expr, out),
+            // a chained receiver writes its base: `m.entry(k).or_default()
+            // .push(v)` writes `m`, exactly as `m.push(v)` does. A temporary
+            // receiver (`build().push(v)`) has no base path and stays uncounted.
+            syn::Expr::MethodCall(m) => Self::expr_base_path(&m.receiver, out),
             _ => {}
         }
     }
+
+    /// A `&mut <name>` argument: the callee may write the name, so the loop
+    /// cannot claim the state is untouched. A `&mut` borrow of a temporary
+    /// (`&mut vec![..]`) has no name and says nothing about the loop's state.
+    fn mut_ref_name(e: &syn::Expr) -> Option<String> {
+        let syn::Expr::Reference(r) = e else {
+            return None;
+        };
+        r.mutability?;
+        let syn::Expr::Path(p) = r.expr.as_ref() else {
+            return None;
+        };
+        (p.path.segments.len() == 1).then(|| p.path.segments[0].ident.to_string())
+    }
+
+    fn record_mut_ref(e: &syn::Expr, out: &mut Vec<String>) {
+        if let Some(name) = Self::mut_ref_name(e) {
+            if name != "self" && !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+
+    /// The name a UFCS mutating call writes — `Vec::pop(&mut stack)`, the free
+    /// spelling of `stack.pop()`. The last path segment must be a mutating
+    /// method and the first argument `&mut <name>`; a shared borrow removes
+    /// nothing.
+    fn ufcs_mutated(c: &syn::ExprCall) -> Option<String> {
+        let syn::Expr::Path(p) = c.func.as_ref() else {
+            return None;
+        };
+        let last = p.path.segments.last()?;
+        if !MUTATING_METHODS.contains(&last.ident.to_string().as_str()) {
+            return None;
+        }
+        let syn::Expr::Reference(r) = c.args.first()? else {
+            return None;
+        };
+        r.mutability?;
+        let syn::Expr::Path(rp) = r.expr.as_ref() else {
+            return None;
+        };
+        (rp.path.segments.len() == 1).then(|| rp.path.segments[0].ident.to_string())
+    }
+
     pub(crate) fn single_push(stmt: &syn::Stmt) -> Option<String> {
         let syn::Stmt::Expr(e, Some(_)) = stmt else {
             return None;
@@ -190,59 +243,6 @@ impl RustLoops {
     pub(crate) fn body_is_pipeline(stmts: &[syn::Stmt]) -> bool {
         Self::pipeline_build(stmts).is_some()
     }
-    /// The control-flow children of a statement — nested item scopes excluded.
-    fn stmt_children(s: &syn::Stmt) -> Vec<&syn::Stmt> {
-        match s {
-            syn::Stmt::Expr(e, _) => match e {
-                syn::Expr::If(i) => {
-                    let mut out: Vec<&syn::Stmt> = i.then_branch.stmts.iter().collect();
-                    if let Some((_, els)) = &i.else_branch {
-                        if let syn::Expr::Block(b) = els.as_ref() {
-                            out.extend(b.block.stmts.iter());
-                        }
-                    }
-                    out
-                }
-                syn::Expr::Match(m) => {
-                    let mut out = Vec::new();
-                    for arm in &m.arms {
-                        Self::arm_body_stmts(&arm.body, &mut out);
-                    }
-                    out
-                }
-                syn::Expr::Block(b) => b.block.stmts.iter().collect(),
-                syn::Expr::ForLoop(f) => f.body.stmts.iter().collect(),
-                syn::Expr::While(w) => w.body.stmts.iter().collect(),
-                syn::Expr::Loop(l) => l.body.stmts.iter().collect(),
-                syn::Expr::Unsafe(u) => u.block.stmts.iter().collect(),
-                _ => Vec::new(),
-            },
-            _ => Vec::new(),
-        }
-    }
-
-    /// The statement lists a match arm's body contributes — a block body walks
-    /// directly; a nested if/match expression contributes its own children.
-    fn arm_body_stmts<'s>(body: &'s syn::Expr, out: &mut Vec<&'s syn::Stmt>) {
-        match body {
-            syn::Expr::Block(b) => out.extend(b.block.stmts.iter()),
-            syn::Expr::If(i) => {
-                out.extend(i.then_branch.stmts.iter());
-                if let Some((_, els)) = &i.else_branch {
-                    if let syn::Expr::Block(b) = els.as_ref() {
-                        out.extend(b.block.stmts.iter());
-                    }
-                }
-            }
-            syn::Expr::Match(m) => {
-                for arm in &m.arms {
-                    Self::arm_body_stmts(&arm.body, out);
-                }
-            }
-            _ => {}
-        }
-    }
-
     /// The flattened statement count of a loop body — every control-flow child
     /// counts, nested items are not the body's business.
     fn body_stmt_count(stmts: &[syn::Stmt]) -> usize {
@@ -252,8 +252,8 @@ impl RustLoops {
                     continue;
                 }
                 *n += 1;
-                for child in RustLoops::stmt_children(s) {
-                    walk(std::slice::from_ref(child), n);
+                for branch in Branches::of(s) {
+                    walk(branch.stmts, n);
                 }
             }
         }
@@ -263,76 +263,41 @@ impl RustLoops {
     }
 
     /// The names one statement WRITES — rebinds, compound-assigns, indexed and
-    /// field stores (via their base path), and mutating receiver calls. `let`
+    /// field stores (via their base path), mutating receiver calls (including a
+    /// chained receiver), and the UFCS spelling of a mutating call. `let`
     /// bindings are new names, not writes; nested items are new scopes.
     fn stmt_writes(stmt: &syn::Stmt, out: &mut Vec<String>) {
-        let syn::Stmt::Expr(e, _) = stmt else {
-            return;
-        };
-        match e {
-            syn::Expr::Assign(a) => Self::expr_base_path(&a.left, out),
-            syn::Expr::Binary(b) if rustscan::is_compound_op(&b.op) => {
-                Self::expr_base_path(&b.left, out);
-            }
-            syn::Expr::MethodCall(m) => {
-                if MUTATING_METHODS.contains(&m.method.to_string().as_str()) {
-                    if let syn::Expr::Path(p) = m.receiver.as_ref() {
-                        if p.path.segments.len() == 1 {
-                            let name = p.path.segments[0].ident.to_string();
-                            if name != "self" && !out.contains(&name) {
-                                out.push(name);
-                            }
+        if let syn::Stmt::Expr(e, _) = stmt {
+            match e {
+                syn::Expr::Assign(a) => Self::expr_base_path(&a.left, out),
+                syn::Expr::Binary(b) if rustscan::is_compound_op(&b.op) => {
+                    Self::expr_base_path(&b.left, out);
+                }
+                syn::Expr::MethodCall(m) => {
+                    if MUTATING_METHODS.contains(&m.method.to_string().as_str()) {
+                        Self::expr_base_path(&m.receiver, out);
+                    }
+                    for arg in &m.args {
+                        Self::record_mut_ref(arg, out);
+                    }
+                }
+                syn::Expr::Call(c) => {
+                    if let Some(name) = Self::ufcs_mutated(c) {
+                        if name != "self" && !out.contains(&name) {
+                            out.push(name);
                         }
                     }
-                }
-            }
-            syn::Expr::If(i) => {
-                for s in &i.then_branch.stmts {
-                    Self::stmt_writes(s, out);
-                }
-                if let Some((_, els)) = &i.else_branch {
-                    if let syn::Expr::Block(b) = els.as_ref() {
-                        for s in &b.block.stmts {
-                            Self::stmt_writes(s, out);
-                        }
+                    for arg in &c.args {
+                        Self::record_mut_ref(arg, out);
                     }
                 }
+                _ => {}
             }
-            syn::Expr::Match(m) => {
-                for arm in &m.arms {
-                    let mut kids = Vec::new();
-                    Self::arm_body_stmts(&arm.body, &mut kids);
-                    for s in kids {
-                        Self::stmt_writes(s, out);
-                    }
-                }
+        }
+        for branch in Branches::of(stmt) {
+            for s in branch.stmts {
+                Self::stmt_writes(s, out);
             }
-            syn::Expr::Block(b) => {
-                for s in &b.block.stmts {
-                    Self::stmt_writes(s, out);
-                }
-            }
-            syn::Expr::Unsafe(u) => {
-                for s in &u.block.stmts {
-                    Self::stmt_writes(s, out);
-                }
-            }
-            syn::Expr::ForLoop(f) => {
-                for s in &f.body.stmts {
-                    Self::stmt_writes(s, out);
-                }
-            }
-            syn::Expr::While(w) => {
-                for s in &w.body.stmts {
-                    Self::stmt_writes(s, out);
-                }
-            }
-            syn::Expr::Loop(l) => {
-                for s in &l.body.stmts {
-                    Self::stmt_writes(s, out);
-                }
-            }
-            _ => {}
         }
     }
 
@@ -343,50 +308,16 @@ impl RustLoops {
     /// outlives a pass.
     fn bind_fn_stmts(stmts: &[syn::Stmt], out: &mut std::collections::HashSet<String>) {
         for s in stmts {
-            match s {
-                syn::Stmt::Local(l) => {
-                    let mut v = Vec::new();
-                    Self::pat_idents(&l.pat, &mut v);
-                    out.extend(v);
-                }
-                syn::Stmt::Expr(e, _) => match e {
-                    syn::Expr::ForLoop(_) | syn::Expr::While(_) | syn::Expr::Loop(_) => {}
-                    syn::Expr::If(i) => {
-                        Self::bind_fn_stmts(&i.then_branch.stmts, out);
-                        if let Some((_, els)) = &i.else_branch {
-                            Self::bind_fn_expr(els, out);
-                        }
-                    }
-                    syn::Expr::Match(m) => {
-                        for arm in &m.arms {
-                            Self::bind_fn_expr(&arm.body, out);
-                        }
-                    }
-                    syn::Expr::Block(b) => Self::bind_fn_stmts(&b.block.stmts, out),
-                    syn::Expr::Unsafe(u) => Self::bind_fn_stmts(&u.block.stmts, out),
-                    _ => {}
-                },
-                _ => {}
+            if let syn::Stmt::Local(l) = s {
+                let mut v = Vec::new();
+                Self::pat_idents(&l.pat, &mut v);
+                out.extend(v);
             }
-        }
-    }
-
-    fn bind_fn_expr(e: &syn::Expr, out: &mut std::collections::HashSet<String>) {
-        match e {
-            syn::Expr::If(i) => {
-                Self::bind_fn_stmts(&i.then_branch.stmts, out);
-                if let Some((_, els)) = &i.else_branch {
-                    Self::bind_fn_expr(els, out);
+            for branch in Branches::of(s) {
+                if branch.kind != BranchKind::LoopBody {
+                    Self::bind_fn_stmts(branch.stmts, out);
                 }
             }
-            syn::Expr::Match(m) => {
-                for arm in &m.arms {
-                    Self::bind_fn_expr(&arm.body, out);
-                }
-            }
-            syn::Expr::Block(b) => Self::bind_fn_stmts(&b.block.stmts, out),
-            syn::Expr::Unsafe(u) => Self::bind_fn_stmts(&u.block.stmts, out),
-            _ => {}
         }
     }
 

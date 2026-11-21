@@ -1,15 +1,27 @@
-//! The per-function loop walk: the state one function's loops are judged on.
+//! The per-function loop walk: the facts one function's loops are judged on,
+//! and the verdicts those facts support.
 
 use crate::rustscan;
 use syn::spanned::Spanned;
 
-use super::{RustLoops, HOIST_MIN_STMTS};
+use super::branches::Branches;
+use super::facts::{LoopFacts, LoopKind, LoopShape, PipelineBuild};
+use super::RustLoops;
 
-/// One outermost loop's shape, for the sequence judgement.
+/// One outermost loop's place in a statement list, for the sequence judgement.
+/// `path` is the branch path from the function block: two loops are a sequence
+/// only when they share it — they run in order in the same block.
 struct SeqLoop {
-    line: usize,
-    mutated: Vec<String>,
-    reads: Vec<String>,
+    path: Vec<usize>,
+    facts: LoopFacts,
+}
+
+/// One statement list's sequence finding, before it is emitted.
+struct SequenceVerdict {
+    count: usize,
+    lines: Vec<String>,
+    names: Vec<String>,
+    top: bool,
 }
 
 /// The per-function loop pass — a flat struct holds the walk's state, so
@@ -20,57 +32,6 @@ pub(super) struct LoopWalk<'a, 'b> {
     fn_name: String,
     fn_line: usize,
     seq: Vec<SeqLoop>,
-}
-
-/// How a pipeline-shaped body collects its value.
-pub(crate) enum PipelineBuild {
-    /// `acc.push(item)` — one item joined per pass.
-    Push(String),
-    /// `acc[i] = v` — the position is the data.
-    Indexed(String),
-}
-
-/// What a loop IS — the one classification each verdict is read from.
-enum LoopShape {
-    /// The condition consumes a worklist: the loop is the traversal, and its
-    /// writes are the walk's state, not outputs. No stateful recipe applies,
-    /// whether or not the body feeds the same collection (#109).
-    Traversal,
-    /// A `for` body that only builds a collection.
-    Pipeline(PipelineBuild),
-    /// Two or more surviving mutations.
-    Stateful(Vec<String>),
-    /// One surviving mutation and a body long enough to hoist.
-    Hoist { name: String, statements: usize },
-    /// Nothing the family can name.
-    Quiet,
-}
-
-/// Classify one loop. The traversal check comes first and is not conditioned
-/// on the body writing the drained name: a walk that only reads the worklist
-/// and accumulates a result elsewhere is still the traversal.
-fn shape(is_for: bool, body: &[syn::Stmt], mutated: Vec<String>, worklist: &[String]) -> LoopShape {
-    if !worklist.is_empty() {
-        return LoopShape::Traversal;
-    }
-    if is_for {
-        if let Some(build) = RustLoops::pipeline_build(body) {
-            return LoopShape::Pipeline(build);
-        }
-    }
-    if mutated.len() >= 2 {
-        return LoopShape::Stateful(mutated);
-    }
-    if mutated.len() == 1 {
-        let statements = RustLoops::body_stmt_count(body);
-        if statements >= HOIST_MIN_STMTS {
-            return LoopShape::Hoist {
-                name: mutated[0].clone(),
-                statements,
-            };
-        }
-    }
-    LoopShape::Quiet
 }
 
 /// Removing methods — their receiver LOSES an element. A loop condition that
@@ -137,59 +98,6 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
         drains.names
     }
 
-    fn judge(&mut self, line: usize, body: &[syn::Stmt], is_for: bool, mutated: Vec<String>, worklist: &[String]) {
-        match shape(is_for, body, mutated, worklist) {
-            LoopShape::Traversal | LoopShape::Quiet => {}
-            LoopShape::Pipeline(build) => {
-                // tier 1 (coding-standards.md: never offer a fix that cannot
-                // apply): the directive appears ONLY when the fixer would
-                // apply at this line — same contract, same refusal reasons.
-                let fixable = crate::fix::LoopPipeline::fixable(self.state.source, self.state.file, line);
-                let directive = if fixable { " — fix: loop-pipeline" } else { "" };
-                let message = match build {
-                    PipelineBuild::Push(acc) => format!(
-                        "the loop's body only pushes to `{acc}` — Replace Loop with Pipeline: `.map(..).collect()` (`.filter(..)` for the guarded push) when the loop creates `{acc}`; `.extend(..)` when `{acc}` already held items{directive}"
-                    ),
-                    PipelineBuild::Indexed(acc) => format!(
-                        "the loop's body only writes one position of `{acc}` per pass — Replace Loop with Pipeline: `.map(..).collect()` over the indices (`.filter(..)` for the guarded store) builds the value{directive}"
-                    ),
-                };
-                self.state
-                    .finding("loop-pipeline", "warn", line, &self.fn_name, message);
-            }
-            LoopShape::Stateful(names) => {
-                self.state.finding(
-                    "mutating-loop",
-                    "warn",
-                    line,
-                    &self.fn_name,
-                    format!(
-                        "loop mutates {} — Replace Loop with Pipeline: {} pieces of state survive the loop and the changes are invisible at the call site; compute each output from the input instead",
-                        names.join(", "),
-                        names.len(),
-                    ),
-                );
-            }
-            LoopShape::Hoist { name, statements } => {
-                // tier 1 (coding-standards.md: never offer a fix that cannot
-                // apply): the directive appears ONLY when the hoister would
-                // apply at this line (placeholder name — the name is never
-                // the refusal reason).
-                let fixable = crate::fix::LoopHoist::fixable_at(self.state.source, self.state.file, line);
-                let message = if fixable {
-                    format!(
-                        "loop body is {statements} statements yet mutates only {name} — hoist the per-item step into a named helper that returns the value (a domain noun for one item's contribution), then combine or fold — fix: loop-hoist --fix-name <Name>",
-                    )
-                } else {
-                    format!(
-                        "loop body is {statements} statements yet mutates only {name} — hoist the per-item step into a named helper that returns the value (a domain noun for one item's contribution), then combine or fold",
-                    )
-                };
-                self.state.finding("loop-hoist", "warn", line, &self.fn_name, message);
-            }
-        }
-    }
-
     /// The body's writes that are fn-scope survivors, minus the loop's own
     /// pattern bindings (an iteration variable is not loop-mutated state).
     fn surviving_mutations(&self, body: &[syn::Stmt], own: &[String]) -> Vec<String> {
@@ -203,10 +111,155 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
             .collect()
     }
 
+    /// The facts one loop site is judged on. The body, pattern and
+    /// iterable/condition are the site's; the survivor set is the function's.
+    fn facts_for(
+        &self,
+        line: usize,
+        kind: LoopKind,
+        body: &[syn::Stmt],
+        pattern: Option<&syn::Pat>,
+        iterable: Option<&syn::Expr>,
+    ) -> LoopFacts {
+        let mut own = Vec::new();
+        if let Some(p) = pattern {
+            RustLoops::pat_idents(p, &mut own);
+        }
+        let mutated = self.surviving_mutations(body, &own);
+        let reads = iterable
+            .map(|e| {
+                rustscan::RustShape::expr_idents(e)
+                    .into_iter()
+                    .filter(|r| self.survivors.contains(r) && !own.contains(r))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let worklist = match (kind, iterable) {
+            (LoopKind::While, Some(cond)) => self.condition_drains(cond),
+            _ => Vec::new(),
+        };
+        let build = if kind == LoopKind::For {
+            RustLoops::pipeline_build(body)
+        } else {
+            None
+        };
+        let grows = match (kind, iterable) {
+            (LoopKind::While, Some(cond)) => Self::cursor_grows(cond, &mutated),
+            _ => false,
+        };
+        LoopFacts {
+            line,
+            kind,
+            mutated,
+            reads,
+            worklist,
+            build,
+            statements: RustLoops::body_stmt_count(body),
+            grows,
+        }
+    }
+
+    /// A `while i < coll.len()` whose body writes `i` and `coll` is a cursor
+    /// over a growing worklist — the same traversal as a pop-drain, spelled
+    /// with an index. `coll` is in `mutated` because a `&mut coll` argument
+    /// or a mutating method call counts as a write.
+    fn cursor_grows(cond: &syn::Expr, mutated: &[String]) -> bool {
+        let Some((_cursor, collection)) = Self::cursor_over(cond) else {
+            return false;
+        };
+        mutated.contains(&collection)
+    }
+
+    /// The `(cursor, collection)` of `i < coll.len()` / `i <= coll.len()`.
+    fn cursor_over(cond: &syn::Expr) -> Option<(String, String)> {
+        let syn::Expr::Binary(b) = cond else {
+            return None;
+        };
+        if !matches!(b.op, syn::BinOp::Lt(_) | syn::BinOp::Le(_)) {
+            return None;
+        }
+        let cursor = Self::path_name(&b.left)?;
+        let syn::Expr::MethodCall(m) = b.right.as_ref() else {
+            return None;
+        };
+        if m.method != "len" {
+            return None;
+        }
+        let collection = Self::path_name(&m.receiver)?;
+        Some((cursor, collection))
+    }
+
+    fn path_name(e: &syn::Expr) -> Option<String> {
+        let syn::Expr::Path(p) = e else {
+            return None;
+        };
+        (p.path.segments.len() == 1).then(|| p.path.segments[0].ident.to_string())
+    }
+
+    fn judge(&mut self, facts: &LoopFacts) {
+        match facts.shape() {
+            LoopShape::Traversal | LoopShape::Quiet => {}
+            LoopShape::Pipeline(build) => {
+                // tier 1 (coding-standards.md: never offer a fix that cannot
+                // apply): the directive appears ONLY when the fixer would
+                // apply at this line — same contract, same refusal reasons.
+                let fixable = crate::fix::LoopPipeline::fixable(self.state.source, self.state.file, facts.line);
+                let directive = if fixable { " — fix: loop-pipeline" } else { "" };
+                let message = match build {
+                    PipelineBuild::Push(acc) => format!(
+                        "the loop's body only pushes to `{acc}` — Replace Loop with Pipeline: `.map(..).collect()` (`.filter(..)` for the guarded push) when the loop creates `{acc}`; `.extend(..)` when `{acc}` already held items{directive}"
+                    ),
+                    PipelineBuild::Indexed(acc) => format!(
+                        "the loop's body only writes one position of `{acc}` per pass — Replace Loop with Pipeline: `.map(..).collect()` over the indices (`.filter(..)` for the guarded store) builds the value{directive}"
+                    ),
+                };
+                self.state
+                    .finding("loop-pipeline", "warn", facts.line, &self.fn_name, message);
+            }
+            LoopShape::Stateful(names) => {
+                self.state.finding(
+                    "mutating-loop",
+                    "warn",
+                    facts.line,
+                    &self.fn_name,
+                    format!(
+                        "loop mutates {} — Replace Loop with Pipeline: {} pieces of state survive the loop and the changes are invisible at the call site; compute each output from the input instead",
+                        names.join(", "),
+                        names.len(),
+                    ),
+                );
+            }
+            LoopShape::Hoist { name, statements } => {
+                // tier 1 (coding-standards.md: never offer a fix that cannot
+                // apply): the directive appears ONLY when the hoister would
+                // apply at this line (placeholder name — the name is never
+                // the refusal reason).
+                let fixable = crate::fix::LoopHoist::fixable_at(self.state.source, self.state.file, facts.line);
+                let message = if fixable {
+                    format!(
+                        "loop body is {statements} statements yet mutates only {name} — hoist the per-item step into a named helper that returns the value (a domain noun for one item's contribution), then combine or fold — fix: loop-hoist --fix-name <Name>",
+                    )
+                } else {
+                    format!(
+                        "loop body is {statements} statements yet mutates only {name} — hoist the per-item step into a named helper that returns the value (a domain noun for one item's contribution), then combine or fold",
+                    )
+                };
+                self.state
+                    .finding("loop-hoist", "warn", facts.line, &self.fn_name, message);
+            }
+        }
+    }
+
+    fn child_path(path: &[usize], index: usize) -> Vec<usize> {
+        let mut child = path.to_vec();
+        child.push(index);
+        child
+    }
+
     /// Pipeline/mutating per loop at any depth; the OUTERMOST loops are
     /// collected for the sequence judgement. Closures and nested items are
     /// new scopes — their loops belong to them, not to this function.
-    fn walk_stmts(&mut self, stmts: &[syn::Stmt], in_loop: bool) {
+    fn walk_stmts(&mut self, stmts: &[syn::Stmt], path: &[usize], in_loop: bool) {
         for s in stmts {
             let syn::Stmt::Expr(e, _) = s else {
                 continue;
@@ -214,184 +267,185 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
             let line = s.span().start().line;
             match e {
                 syn::Expr::ForLoop(f) => {
-                    let mut own = Vec::new();
-                    RustLoops::pat_idents(&f.pat, &mut own);
-                    let mutated = self.surviving_mutations(&f.body.stmts, &own);
-                    let reads: Vec<String> = rustscan::RustShape::expr_idents(&f.expr)
-                        .into_iter()
-                        .filter(|r| self.survivors.contains(r) && !own.contains(r))
-                        .collect();
-                    self.judge(line, &f.body.stmts, true, mutated.clone(), &[]);
-                    if !in_loop {
-                        self.seq.push(SeqLoop { line, reads, mutated });
-                    }
-                    self.walk_stmts(&f.body.stmts, true);
-                }
-                syn::Expr::While(w) => {
-                    let mutated = self.surviving_mutations(&w.body.stmts, &[]);
-                    let reads: Vec<String> = rustscan::RustShape::expr_idents(&w.cond)
-                        .into_iter()
-                        .filter(|r| self.survivors.contains(r))
-                        .collect();
-                    let worklist = self.condition_drains(&w.cond);
-                    self.judge(line, &w.body.stmts, false, mutated.clone(), &worklist);
-                    if !in_loop {
-                        self.seq.push(SeqLoop { line, reads, mutated });
-                    }
-                    self.walk_stmts(&w.body.stmts, true);
-                }
-                syn::Expr::Loop(l) => {
-                    let mutated = self.surviving_mutations(&l.body.stmts, &[]);
-                    self.judge(line, &l.body.stmts, false, mutated.clone(), &[]);
+                    let facts = self.facts_for(line, LoopKind::For, &f.body.stmts, Some(&f.pat), Some(&f.expr));
+                    self.judge(&facts);
                     if !in_loop {
                         self.seq.push(SeqLoop {
-                            line,
-                            reads: Vec::new(),
-                            mutated,
+                            path: path.to_vec(),
+                            facts,
                         });
                     }
-                    self.walk_stmts(&l.body.stmts, true);
+                    self.walk_stmts(&f.body.stmts, &Self::child_path(path, 0), true);
                 }
-                syn::Expr::If(i) => {
-                    self.walk_stmts(&i.then_branch.stmts, in_loop);
-                    if let Some((_, els)) = &i.else_branch {
-                        self.walk_expr(els, in_loop);
+                syn::Expr::While(w) => {
+                    let facts = self.facts_for(line, LoopKind::While, &w.body.stmts, None, Some(&w.cond));
+                    self.judge(&facts);
+                    if !in_loop {
+                        self.seq.push(SeqLoop {
+                            path: path.to_vec(),
+                            facts,
+                        });
                     }
+                    self.walk_stmts(&w.body.stmts, &Self::child_path(path, 0), true);
+                }
+                syn::Expr::Loop(l) => {
+                    let facts = self.facts_for(line, LoopKind::Loop, &l.body.stmts, None, None);
+                    self.judge(&facts);
+                    if !in_loop {
+                        self.seq.push(SeqLoop {
+                            path: path.to_vec(),
+                            facts,
+                        });
+                    }
+                    self.walk_stmts(&l.body.stmts, &Self::child_path(path, 0), true);
                 }
                 syn::Expr::Match(m) => {
-                    for arm in &m.arms {
-                        self.walk_expr(&arm.body, in_loop);
+                    // expression arm bodies can BE loops; walk each arm's
+                    // expression so those sites are judged where they are
+                    for (i, arm) in m.arms.iter().enumerate() {
+                        self.walk_expr(&arm.body, &Self::child_path(path, i), in_loop);
                     }
                 }
-                syn::Expr::Block(b) => {
-                    self.walk_stmts(&b.block.stmts, in_loop);
+                _ => {
+                    for (i, branch) in Branches::of(s).into_iter().enumerate() {
+                        self.walk_stmts(branch.stmts, &Self::child_path(path, i), in_loop);
+                    }
                 }
-                syn::Expr::Unsafe(u) => {
-                    self.walk_stmts(&u.block.stmts, in_loop);
-                }
-                _ => {}
             }
         }
     }
 
-    fn walk_expr(&mut self, e: &syn::Expr, in_loop: bool) {
+    fn walk_expr(&mut self, e: &syn::Expr, path: &[usize], in_loop: bool) {
+        let line = e.span().start().line;
         match e {
+            syn::Expr::ForLoop(f) => {
+                let facts = self.facts_for(line, LoopKind::For, &f.body.stmts, Some(&f.pat), Some(&f.expr));
+                self.judge(&facts);
+                self.walk_stmts(&f.body.stmts, &Self::child_path(path, 0), true);
+            }
+            syn::Expr::While(w) => {
+                let facts = self.facts_for(line, LoopKind::While, &w.body.stmts, None, Some(&w.cond));
+                self.judge(&facts);
+                self.walk_stmts(&w.body.stmts, &Self::child_path(path, 0), true);
+            }
+            syn::Expr::Loop(l) => {
+                let facts = self.facts_for(line, LoopKind::Loop, &l.body.stmts, None, None);
+                self.judge(&facts);
+                self.walk_stmts(&l.body.stmts, &Self::child_path(path, 0), true);
+            }
             syn::Expr::If(i) => {
-                self.walk_stmts(&i.then_branch.stmts, in_loop);
+                self.walk_stmts(&i.then_branch.stmts, &Self::child_path(path, 0), in_loop);
                 if let Some((_, els)) = &i.else_branch {
-                    self.walk_expr(els, in_loop);
+                    self.walk_expr(els, &Self::child_path(path, 1), in_loop);
                 }
             }
             syn::Expr::Match(m) => {
-                for arm in &m.arms {
-                    self.walk_expr(&arm.body, in_loop);
+                for (i, arm) in m.arms.iter().enumerate() {
+                    self.walk_expr(&arm.body, &Self::child_path(path, i), in_loop);
                 }
             }
             syn::Expr::Block(b) => {
-                self.walk_stmts(&b.block.stmts, in_loop);
+                self.walk_stmts(&b.block.stmts, &Self::child_path(path, 0), in_loop);
             }
             syn::Expr::Unsafe(u) => {
-                self.walk_stmts(&u.block.stmts, in_loop);
-            }
-            syn::Expr::ForLoop(f) => {
-                let line = e.span().start().line;
-                let mut own = Vec::new();
-                RustLoops::pat_idents(&f.pat, &mut own);
-                let mutated = self.surviving_mutations(&f.body.stmts, &own);
-                self.judge(line, &f.body.stmts, true, mutated, &[]);
-                self.walk_stmts(&f.body.stmts, true);
-            }
-            syn::Expr::While(w) => {
-                let line = e.span().start().line;
-                let mutated = self.surviving_mutations(&w.body.stmts, &[]);
-                let worklist = self.condition_drains(&w.cond);
-                self.judge(line, &w.body.stmts, false, mutated, &worklist);
-                self.walk_stmts(&w.body.stmts, true);
-            }
-            syn::Expr::Loop(l) => {
-                let line = e.span().start().line;
-                let mutated = self.surviving_mutations(&l.body.stmts, &[]);
-                self.judge(line, &l.body.stmts, false, mutated, &[]);
-                self.walk_stmts(&l.body.stmts, true);
+                self.walk_stmts(&u.block.stmts, &Self::child_path(path, 0), in_loop);
             }
             _ => {}
         }
     }
 
-    /// The sequence verdict: loops SHARE a mutated name, or a later loop
-    /// READS what an earlier one wrote -> the sequence IS a pipeline of
-    /// passes over shared state; independent passes -> one named step per
-    /// loop.
-    fn emit_sequence(&mut self) {
-        if self.seq.len() < 2 {
-            return;
+    /// The sequence verdicts, one per statement list that holds two or more
+    /// loops: loops SHARE a mutated name, or a later loop READS what an
+    /// earlier one wrote -> the sequence IS a pipeline of passes over shared
+    /// state; independent passes -> one named step per loop. Loops in sibling
+    /// branches never run together and are separate groups.
+    fn sequence_verdicts(&self) -> Vec<SequenceVerdict> {
+        use std::collections::BTreeMap;
+
+        let mut groups: BTreeMap<Vec<usize>, Vec<&SeqLoop>> = BTreeMap::new();
+        for seq in &self.seq {
+            groups.entry(seq.path.clone()).or_default().push(seq);
         }
-        let mut shared: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (i, a) in self.seq.iter().enumerate() {
-            for b in self.seq.iter().skip(i + 1) {
-                for m in &a.mutated {
-                    if b.mutated.contains(m) {
-                        shared.insert(m.clone());
+        groups
+            .into_iter()
+            .filter(|(_, group)| group.len() >= 2)
+            .map(|(path, group)| {
+                let mut shared: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for (i, a) in group.iter().enumerate() {
+                    for b in group.iter().skip(i + 1) {
+                        for m in &a.facts.mutated {
+                            if b.facts.mutated.contains(m) {
+                                shared.insert(m.clone());
+                            }
+                        }
                     }
                 }
-            }
-        }
-        let mut fed: Vec<String> = Vec::new();
-        for (i, a) in self.seq.iter().enumerate() {
-            let earlier: std::collections::HashSet<&str> = self
-                .seq
-                .iter()
-                .take(i)
-                .flat_map(|s| s.mutated.iter().map(|m| m.as_str()))
-                .collect();
-            for r in &a.reads {
-                if earlier.contains(r.as_str()) && !fed.contains(r) {
-                    fed.push(r.clone());
+                let mut fed: Vec<String> = Vec::new();
+                for (i, a) in group.iter().enumerate() {
+                    let earlier: std::collections::HashSet<&str> = group
+                        .iter()
+                        .take(i)
+                        .flat_map(|s| s.facts.mutated.iter().map(|m| m.as_str()))
+                        .collect();
+                    for r in &a.facts.reads {
+                        if earlier.contains(r.as_str()) && !fed.contains(r) {
+                            fed.push(r.clone());
+                        }
+                    }
                 }
-            }
-        }
-        let lines: Vec<String> = self.seq.iter().map(|l| l.line.to_string()).collect();
-        if !shared.is_empty() || !fed.is_empty() {
-            let mut names: Vec<String> = shared.into_iter().chain(fed.iter().cloned()).collect();
-            names.sort();
-            names.dedup();
+                let mut names: Vec<String> = shared.into_iter().chain(fed.iter().cloned()).collect();
+                names.sort();
+                names.dedup();
+                SequenceVerdict {
+                    count: group.len(),
+                    lines: group.iter().map(|s| s.facts.line.to_string()).collect(),
+                    names,
+                    top: path.is_empty(),
+                }
+            })
+            .collect()
+    }
+
+    /// Emit one finding per sequence group. The finding anchors at the
+    /// function line because the fixer rewrites the function's top-level
+    /// chain; only that group advertises the directive (tier 1).
+    fn emit_sequence(&mut self) {
+        for verdict in self.sequence_verdicts() {
             let line = self.fn_line;
             let name = self.fn_name.clone();
-            // tier 1 (coding-standards.md: never offer a fix that cannot
-            // apply): the directive appears ONLY when the sequencer would
-            // apply at this fn — same contract.
-            let directive = if crate::fix::loop_sequence_fixable(self.state.source, self.state.file, line) {
-                " — fix: loop-sequence"
+            let directive =
+                if verdict.top && crate::fix::loop_sequence_fixable(self.state.source, self.state.file, line) {
+                    " — fix: loop-sequence"
+                } else {
+                    ""
+                };
+            if !verdict.names.is_empty() {
+                self.state.finding(
+                    "loop-sequence",
+                    "warn",
+                    line,
+                    &name,
+                    format!(
+                        "{} sequential loops at lines {} share or feed the same state ({}) — the sequence IS a pipeline of passes over shared state: combine the passes or extract each into a named step{}",
+                        verdict.count,
+                        verdict.lines.join(", "),
+                        verdict.names.join(", "),
+                        directive,
+                    ),
+                );
             } else {
-                ""
-            };
-            self.state.finding(
-                "loop-sequence",
-                "warn",
-                line,
-                &name,
-                format!(
-                    "{} sequential loops at lines {} share or feed the same state ({}) — the sequence IS a pipeline of passes over shared state: combine the passes or extract each into a named step{}",
-                    self.seq.len(),
-                    lines.join(", "),
-                    names.join(", "),
-                    directive,
-                ),
-            );
-        } else {
-            let line = self.fn_line;
-            let name = self.fn_name.clone();
-            self.state.finding(
-                "loop-sequence",
-                "warn",
-                line,
-                &name,
-                format!(
-                    "{} sequential loops at lines {} change the function's state independently — extract each loop into a named step (one named pass per loop), so the function reads as a sequence of steps",
-                    self.seq.len(),
-                    lines.join(", "),
-                ),
-            );
+                self.state.finding(
+                    "loop-sequence",
+                    "warn",
+                    line,
+                    &name,
+                    format!(
+                        "{} sequential loops at lines {} change the function's state independently — extract each loop into a named step (one named pass per loop), so the function reads as a sequence of steps",
+                        verdict.count,
+                        verdict.lines.join(", "),
+                    ),
+                );
+            }
         }
     }
 }
@@ -418,7 +472,7 @@ impl LoopWalk<'_, '_> {
         // the borrow of `survivors` ends with the walk — copy the stmts' span
         // view first so the walker holds no alias into the fn body map
         let stmts: Vec<syn::Stmt> = block.stmts.clone();
-        ctx.walk_stmts(&stmts, false);
+        ctx.walk_stmts(&stmts, &[], false);
         ctx.emit_sequence();
     }
 }
