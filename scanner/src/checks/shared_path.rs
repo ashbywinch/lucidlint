@@ -13,6 +13,12 @@ use crate::{finding::Finding, source::Source, ScanState};
 /// family. `segments` is the path's shape — names, quoted literals, `<Path>`
 /// for a constructor, `<f>...` for an f-string — so two modules that build
 /// the same path with different variable names still match.
+/// A domain noun is at least this long, a bare extension is at most this long,
+/// and a path is shared when this many modules use it.
+const NOUN_MIN_LEN: usize = 3;
+const EXTENSION_MAX_LEN: usize = 6;
+const SHARED_USES_MIN: usize = 3;
+
 #[derive(Clone)]
 pub struct PathExpression {
     pub line: usize,
@@ -177,6 +183,19 @@ impl PathExpression {
         }
     }
 
+    /// The value is long enough to name a domain thing and carries a letter —
+    /// a two-character fragment or a pure separator is not a noun.
+    fn is_noun_shaped(value: &str) -> bool {
+        value.len() >= NOUN_MIN_LEN && value.chars().any(|c| c.is_ascii_alphabetic())
+    }
+
+    /// `.md`, `.py` — a bare extension names a file kind, not a domain noun.
+    fn is_bare_extension(value: &str) -> bool {
+        value.starts_with('.')
+            && value.len() <= EXTENSION_MAX_LEN
+            && value[1..].chars().all(|c| c.is_ascii_alphanumeric())
+    }
+
     fn is_domain_literal(segment: &str) -> bool {
         let Some(value) = segment
             .strip_prefix('"')
@@ -186,10 +205,10 @@ impl PathExpression {
         else {
             return false;
         };
-        if value.len() < 3 || !value.chars().any(|c| c.is_ascii_alphabetic()) {
+        if !Self::is_noun_shaped(value) {
             return false;
         }
-        if value.starts_with('.') && value.len() <= 6 && value[1..].chars().all(|c| c.is_ascii_alphanumeric()) {
+        if Self::is_bare_extension(value) {
             return false; // a bare extension is not a domain noun
         }
         value
@@ -296,7 +315,7 @@ impl PathExpression {
             .into_iter()
             .filter(|(run, group)| {
                 if run.len() == 1 {
-                    group.uses >= 3 && group.modules.len() >= 2
+                    group.uses >= SHARED_USES_MIN && group.modules.len() >= 2
                 } else {
                     group.modules.len() >= 2
                 }

@@ -23,10 +23,10 @@ class Cli:
     its state, so the run reads them instead of re-parsing."""
 
     def __init__(self, args: argparse.Namespace, host: Host | None = None) -> None:
-        self.args = args
-        self.repo = args.repo.resolve()
-        self.host = host or Host.default()
-        self.services = Services(self.host)
+        self.args: argparse.Namespace = args
+        self.repo: Path = args.repo.resolve()
+        self.host: Host = host or Host.default()
+        self.services: Services = Services(self.host)
 
     @staticmethod
     def parse_args() -> argparse.Namespace:
@@ -78,42 +78,46 @@ class Cli:
             "fix",
             help="apply a deterministic fix for one finding (the finding's message carries the exact command)",
         )
-        fix.add_argument(
-            "--kind",
-            type=str,
-            default=None,
-            help="the fix family (from the finding message: magic-number, extract-method, stale-suppression, ...)",
+        Cli._text_option(
+            fix,
+            "kind",
+            "the fix family (from the finding message: magic-number, extract-method, stale-suppression, ...)",
         )
-        fix.add_argument("--file", type=str, default=None, help="repo-relative file for the finding")
+        Cli._text_option(fix, "file", "repo-relative file for the finding")
         fix.add_argument("--line", type=int, default=0, help="line of the finding (omitted when the file has one)")
-        fix.add_argument(
-            "--name",
-            type=str,
-            default=None,
-            help=(
-                "the semantic name the tool cannot invent: a constant for magic-number, "
-                "the extracted method/class name"
-            ),
+        Cli._text_option(
+            fix,
+            "name",
+            "the semantic name the tool cannot invent: a constant for magic-number, "
+            "the extracted method/class name",
         )
-        fix.add_argument(
-            "--callee",
-            type=str,
-            default=None,
-            help="the callee whose --params these are, when the finding's message names it "
+        Cli._text_option(
+            fix,
+            "callee",
+            "the callee whose --params these are, when the finding's message names it "
             "(binds the fix on lines with nested calls)",
         )
-        fix.add_argument(
-            "--params",
-            type=str,
-            default=None,
-            help="comma-separated callee parameter names for positional-literals (external callees)",
+        Cli._text_option(
+            fix,
+            "params",
+            "comma-separated callee parameter names for positional-literals (external callees)",
         )
-        fix.add_argument(
-            "--confirm",
-            action="store_true",
-            help="explicitly apply a previewed structural fix (the name IS the commitment for extract-method)",
+        Cli._switch(
+            fix,
+            "confirm",
+            "explicitly apply a previewed structural fix (the name IS the commitment for extract-method)",
         )
         return p.parse_args()
+
+    @staticmethod
+    def _text_option(parser: argparse.ArgumentParser, name: str, help_text: str) -> None:
+        """A `--<name> <text>` option with no default."""
+        parser.add_argument(f"--{name}", type=str, default=None, help=help_text)
+
+    @staticmethod
+    def _switch(parser: argparse.ArgumentParser, name: str, help_text: str) -> None:
+        """A `--<name>` boolean switch."""
+        parser.add_argument(f"--{name}", action="store_true", help=help_text)
 
     def run(self) -> int:
         """Dispatch the one command the arguments name."""

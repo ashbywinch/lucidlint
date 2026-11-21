@@ -25,6 +25,8 @@ from orchestrator.rust_finding import RustFinding
 from orchestrator.rust_findings import RustFindings
 from orchestrator.scan_flags import ScanFlags
 from orchestrator.scan_inputs import INPUTS
+
+
 from orchestrator.sources.coverage_input import CoverageInput
 from orchestrator.sources.coverage_request import CoverageRequest
 from orchestrator.sources.file_history import FileHistory
@@ -33,6 +35,11 @@ from orchestrator.sources.source_walk import SourceWalk, gitignored_docs
 
 
 class RustScan:
+    # the scan core's contract version the orchestrator can read (schema 4)
+    _CONTRACT_SCHEMA = 4
+    # how many unmappable file names one diagnostic shows before counting the rest
+    _UNMAPPED_SHOWN = 5
+
     """The Rust scan core — the required finding engine.
 
     One binary invocation per repo per run (or per file in --file / LSP mode);
@@ -59,8 +66,8 @@ class RustScan:
         # the graph contract is another service's work; the scan asks for the
         # export path rather than reaching for a process-wide registry. A scan
         # with no collaborator runs without the graph families.
-        self._host = host
-        self.graph = graph
+        self._host: Host = host
+        self.graph: Any = graph
         self._cache: dict[tuple[Path, tuple[str, ...]], RustFindings | None] = {}
         self._binary_cache: dict[Path, Path | None] = {}
         self._pending_gitignored: tuple[str, ...] = ()
@@ -141,20 +148,19 @@ class RustScan:
                 proc = self._host.process.run(cmd, capture_output=True, text=True, timeout=300, cwd=str(repo))
                 if proc.returncode == 0:
                     data = json.loads(proc.stdout)
-                    if data.get("schema_version") != 4:
+                    if data.get("schema_version") != RustScan._CONTRACT_SCHEMA:
                         raise RuntimeError(
-                            f"scanner contract schema {data.get('schema_version')} — expected 4; "
+                            f"scanner contract schema {data.get('schema_version')} — "
+                            f"expected {RustScan._CONTRACT_SCHEMA}; "
                             "rebuild the binary (make scanner-check)"
                         )
                     header = str(data.get("header", ""))
                     suppression_census = {str(k): int(v) for k, v in (data.get("suppressions") or {}).items()}
                     rels_set = set(rels)
                     unmapped: set[str] = set()
-                    for f in data.get("findings", []) + data.get("complexity", []):
-                        rel = self._rust_finding_rel(f.get("file", ""), repo, rels_set)
-                        if rel is None:
-                            unmapped.add(str(f.get("file", "")))
-                            continue
+                    for f, rel in RustScan._mapped(
+                        data.get("findings", []) + data.get("complexity", []), repo, rels_set, unmapped
+                    ):
                         result.setdefault(rel, []).append(
                             RustFinding(
                                 kind=f.get("kind", "standard"),
@@ -170,11 +176,7 @@ class RustScan:
                                 fix_kind=str(f.get("fix_kind", "") or ""),
                             )
                         )
-                    for e in data.get("cc", []):
-                        rel = self._rust_finding_rel(e.get("file", ""), repo, rels_set)
-                        if rel is None:
-                            unmapped.add(str(e.get("file", "")))
-                            continue
+                    for e, rel in RustScan._mapped(data.get("cc", []), repo, rels_set, unmapped):
                         cc_result.setdefault(rel, []).append(
                             (e.get("function", ""), int(e.get("line", 0)), int(e.get("cc", 0)))
                         )
@@ -289,6 +291,19 @@ class RustScan:
         return newest > binary.stat().st_mtime
 
     @staticmethod
+    def _mapped(findings, repo: Path, rels: set[str], unmapped: set[str]):
+        """The wire findings whose file maps into the scan set, paired with the
+        repo-relative path — the unmappable ones are collected for the one
+        diagnostic."""
+        for finding in findings:
+            raw = str(finding.get("file", ""))
+            rel = RustScan._rust_finding_rel(raw, repo, rels)
+            if rel is None:
+                unmapped.add(raw)
+                continue
+            yield finding, rel
+
+    @staticmethod
     def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
         """The binary reports per-file findings with the path as passed and the
         repo-wide ones (duplicate/unused) with the repo-relative path — normalize.
@@ -328,8 +343,12 @@ class RustScan:
         for single-package layouts (the inferred root lost the package segment);
         a finding file that cannot be mapped is a root-resolution mismatch, not a
         clean run."""
-        shown = ", ".join(sorted(values)[:5])
-        more = "" if len(values) <= 5 else f" (+{len(values) - 5} more)"
+        shown = ", ".join(sorted(values)[: RustScan._UNMAPPED_SHOWN])
+        more = (
+            ""
+            if len(values) <= RustScan._UNMAPPED_SHOWN
+            else f" (+{len(values) - RustScan._UNMAPPED_SHOWN} more)"
+        )
         return (
             f"dropped findings for {len(values)} file(s) outside the scan set: {shown}{more} — "
             "a finding file that cannot be mapped back is a root-resolution mismatch, not a clean run"

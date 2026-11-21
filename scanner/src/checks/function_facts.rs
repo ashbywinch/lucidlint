@@ -15,18 +15,14 @@ impl FunctionFacts {
         let mut count = 0;
         let mut stack: Vec<&Stmt> = Vec::new();
         if let Stmt::FunctionDef(f) = fn_stmt {
-            for s in &f.body {
-                stack.push(s);
-            }
+            stack.extend(f.body.iter());
         }
         while let Some(s) = stack.pop() {
             if let Stmt::FunctionDef(f) = s {
                 count += 1;
                 // descend into nested function bodies too — Python's ast.walk
                 // counts functions at any depth
-                for b in &f.body {
-                    stack.push(b);
-                }
+                stack.extend(f.body.iter());
             }
             push_stmt_children(s, &mut stack);
             for e in stmt_exprs(s) {
@@ -148,12 +144,14 @@ impl FunctionFacts {
     /// vararg, kwarg) in order.
     pub(super) fn fn_param_names(f: &StmtFunctionDef) -> Vec<String> {
         let mut out = Vec::new();
-        for p in f.parameters.posonlyargs.iter().chain(&f.parameters.args) {
-            out.push(p.parameter.name.to_string());
-        }
-        for p in &f.parameters.kwonlyargs {
-            out.push(p.parameter.name.to_string());
-        }
+        out.extend(
+            f.parameters
+                .posonlyargs
+                .iter()
+                .chain(&f.parameters.args)
+                .chain(&f.parameters.kwonlyargs)
+                .map(|p| p.parameter.name.to_string()),
+        );
         if let Some(v) = &f.parameters.vararg {
             out.push(v.name.to_string());
         }

@@ -288,11 +288,11 @@ impl RecordShape {
         let mut wrapped = Vec::new();
         Self::ann_unwrap(a, &mut wrapped);
         let mut found: Vec<String> = Vec::new();
-        for part in &wrapped {
-            if let Some(record) = Self::map_value_class_one(part, bindings) {
-                found.push(record);
-            }
-        }
+        found.extend(
+            wrapped
+                .iter()
+                .filter_map(|part| Self::map_value_class_one(part, bindings)),
+        );
         if found.len() == 1 {
             Some(found.remove(0))
         } else {
@@ -953,9 +953,7 @@ impl RecordShape {
                     for e in stmt_exprs(&fd_stmt) {
                         Self::record_literal_scan(e, source, &bindings, &mut found);
                     }
-                    for b in &f.body {
-                        sq.push(b);
-                    }
+                    sq.extend(f.body.iter());
                 }
                 _ => {
                     for e in stmt_exprs(sq[si]) {
@@ -969,12 +967,7 @@ impl RecordShape {
         // dedupe on (line, col): the dict() call-form and a nested literal can
         // share a range — one finding per record node
         let mut seen: HashSet<(usize, usize)> = HashSet::new();
-        let mut unique: Vec<RecordHit> = Vec::new();
-        for h in found {
-            if seen.insert((h.line, h.col)) {
-                unique.push(h);
-            }
-        }
+        let unique: Vec<RecordHit> = found.into_iter().filter(|h| seen.insert((h.line, h.col))).collect();
         for h in unique {
             // Issue #42: a literal inside a to_dict/to_json method whose keys are
             // the enclosing class's own declared fields rebuilds a shape the class

@@ -10,6 +10,11 @@ use super::graph_paths::GraphPaths;
 
 pub(crate) struct FolderMix;
 
+/// How many names the message shows, and the file count that makes a folder a
+/// mix.
+const NAMES_SHOWN: usize = 3;
+const FILES_MIN: usize = 5;
+
 impl FolderMix {
     /// Folder grab bags — `_folder_mix_actions` / `_folder_mix_for_dir`.
     pub fn findings(repo: &Path, contract: &GraphContract) -> Vec<Finding> {
@@ -73,7 +78,7 @@ impl FolderMix {
             }
             let groups = big
                 .iter()
-                .take(3)
+                .take(NAMES_SHOWN)
                 .map(|(cid, fns)| {
                     let name = contract
                         .communities
@@ -109,6 +114,6 @@ impl FolderMix {
     /// The file is a directory-level scan target with enough files to spread
     /// across folders.
     fn is_spread_target(files: &[(String, i64)], rel: &str) -> bool {
-        files.len() >= 5 && !rel.starts_with("tests") && !rel.is_empty() && rel != "."
+        files.len() >= FILES_MIN && !rel.starts_with("tests") && !rel.is_empty() && rel != "."
     }
 }

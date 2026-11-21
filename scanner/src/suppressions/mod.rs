@@ -22,6 +22,10 @@ use stale::StaleCtx;
 /// One line-level suppression and the (signal, why) parsed from it.
 /// Line suppressions exempt a finding on that line or the line before;
 /// file suppressions exempt the signal anywhere in the file (with a why).
+/// The marker window is two anchors, each with its own line and the line above;
+/// the capacity hint says so without a bare 4.
+const WINDOW_CAPACITY: usize = 4;
+
 #[derive(Clone, Default)]
 pub struct Suppressions {
     pub line: HashMap<usize, Vec<(String, String)>>,
@@ -47,6 +51,33 @@ pub struct PreUsedSuppressions {
 }
 
 impl Suppressions {
+    /// The signal a stale-suppression message names — `ignore <sig>` (line form)
+    /// or `ignore-file <sig>` (file form). Used to match a surviving stale
+    /// finding against the markers this pass actually consumed.
+    ///
+    /// Two identifiers per finding, don't conflate them:
+    ///
+    /// - `kind` — display kind, `final_kind` output (named buckets; families
+    ///   without one collapse to "standard", the message explains the rest).
+    /// - `signal` — the raw family kind; THIS is what suppressions match on
+    ///   (`lucidlint: ignore <signal>`, config `ignore = [<signal>]`,
+    ///   RULE_GROUPS membership, baseline identity).
+    pub fn signal_of_stale(message: &str) -> String {
+        let marker = if message.contains("ignore-file ") {
+            "ignore-file "
+        } else {
+            "ignore "
+        };
+        let Some(start) = message.find(marker) else {
+            return String::new();
+        };
+        message[start + marker.len()..]
+            .split(|c: char| c.is_whitespace() || c == '\'' || c == '>')
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
+
     /// Parse `lucidlint: ignore <signal> <why>` / `ignore-file` comments.
     /// `comments` are (line, full comment text incl. the marker) — each language
     /// layer extracts them its own way (ruff tokens for Python, a string-aware
@@ -132,13 +163,14 @@ impl Suppressions {
     /// source line sits.
     pub fn finding_window(f: &crate::Finding) -> Vec<usize> {
         let logical = f.logical_line();
-        let mut lines: Vec<usize> = Vec::with_capacity(4);
-        for l in [f.line, f.line.saturating_sub(1), logical, logical.saturating_sub(1)] {
-            if l >= 1 && !lines.contains(&l) {
-                lines.push(l);
-            }
-        }
+        let mut lines: Vec<usize> = Vec::with_capacity(WINDOW_CAPACITY);
+        lines.extend(
+            [f.line, f.line.saturating_sub(1), logical, logical.saturating_sub(1)]
+                .into_iter()
+                .filter(|&line| line >= 1),
+        );
         lines.sort_unstable();
+        lines.dedup();
         lines.reverse();
         lines
     }
@@ -253,15 +285,12 @@ impl Suppressions {
     /// windows: a def's signature findings share the def line even when their own
     /// lines differ.
     fn marker_inventory(members: &[usize], findings: &[crate::Finding], supps: &Suppressions) -> Vec<(usize, String)> {
-        let mut window: Vec<usize> = Vec::new();
-        for &i in members {
-            for ln in Self::finding_window(&findings[i]) {
-                if !window.contains(&ln) {
-                    window.push(ln);
-                }
-            }
-        }
+        let mut window: Vec<usize> = members
+            .iter()
+            .flat_map(|&i| Self::finding_window(&findings[i]))
+            .collect();
         window.sort_unstable();
+        window.dedup();
         window.reverse();
         let mut pairs: Vec<(usize, String)> = Vec::new();
         for ln in window {
@@ -372,11 +401,13 @@ impl Suppressions {
                 }
             }
         }
-        for (i, f) in findings.into_iter().enumerate() {
-            if !exempted[i] {
-                out.push(f);
-            }
-        }
+        out.extend(
+            findings
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| !exempted[*i])
+                .map(|(_, f)| f),
+        );
         let ctx = StaleCtx {
             supps: &supps,
             used_line: &used_line,

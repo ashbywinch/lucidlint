@@ -9,6 +9,11 @@ use crate::source::Source;
 use crate::ScanState;
 
 /// The wide-tuple rule: the annotation walk and the finding it emits.
+/// The arity at which a tuple annotation is an unnamed record, and the arity
+/// the message prefers when the shape is ambiguous.
+const WIDE_ARITY_MIN: usize = 3;
+const WIDE_ARITY_PREFERRED: usize = 4;
+
 pub struct WideTuple;
 
 impl WideTuple {
@@ -105,7 +110,7 @@ impl WideTuple {
             return None;
         }
         let n = t.elts.len();
-        (n >= 3).then_some(n)
+        (n >= WIDE_ARITY_MIN).then_some(n)
     }
 
     /// A tuple annotation with 3+ fixed elements — a parameter, return, or
@@ -124,7 +129,7 @@ impl WideTuple {
         // 4+ elements fail; exactly 3 warns (the RGB gray zone). Two pushes so
         // the kind/severity literal pair stays adjacent — `make rules`' drift
         // detector reads the pair from the construction.
-        if n >= 4 {
+        if n >= WIDE_ARITY_PREFERRED {
             state.findings.push(Finding {
                 logical_start: None,
                 seam_members: Vec::new(),

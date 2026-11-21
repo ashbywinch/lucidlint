@@ -8,6 +8,7 @@ date IS the commit epoch.
 from __future__ import annotations
 
 import datetime
+import math
 from collections import Counter
 from dataclasses import dataclass
 
@@ -15,6 +16,9 @@ from dataclasses import dataclass
 @dataclass
 class FileHistory:
     """Per-file change counts and last-touched dates from git history."""
+
+    # the weight an unlisted family takes: neutral, half of the scale
+    _NEUTRAL_WEIGHT = 0.5
 
     churn: Counter[str]
     last_modified: dict[str, str]
@@ -43,6 +47,18 @@ class FileHistory:
         # whole-number family keeps its fixed 0.5-0.7 weight), so this is an
         # ordered lookup: first match wins, and an unknown family takes the
         # neutral weight
+        # each metric saturates at its own fail bar; the churn and caller
+        # boosts are capped so no single fact dominates the score
+        saturation = {
+            "complexity": 40,
+            "large-function": 200,
+            "hub-file": 400,
+            "hotspot": 40,
+        }
+        churn_cap = 30
+        caller_cap = 5
+        churn_boost_cap = 1.5
+        caller_boost_cap = 1.0
         table = (
             ("latent-class", 0.7),
             ("standard", 0.6),
@@ -51,16 +67,17 @@ class FileHistory:
             ("layer-mix", 0.5),
             ("vague-name", 0.7),
             ("record-shape", 0.7),
-            ("complexity", min(metric / 40, 1.0)),
-            ("large-function", min(metric / 200, 1.0)),
-            ("hub-file", min(metric / 400, 1.0)),
-            ("hotspot", min(metric / 40, 1.0)),
+            ("complexity", min(metric / saturation["complexity"], 1.0)),
+            ("large-function", min(metric / saturation["large-function"], 1.0)),
+            ("hub-file", min(metric / saturation["hub-file"], 1.0)),
+            ("hotspot", min(metric / saturation["hotspot"], 1.0)),
             ("high-risk", min(metric, 1.0)),
         )
-        norm = next((weight for family, weight in table if family == kind), 0.5)
-        score = norm * ((1 + min(churn / 30, 1.5)) ** 0.5)
+        # an unknown family takes the neutral weight
+        norm = next((weight for family, weight in table if family == kind), FileHistory._NEUTRAL_WEIGHT)
+        score = norm * math.sqrt(1 + min(churn / churn_cap, churn_boost_cap))
         if kind == "high-risk" and callers:
-            score *= 1 + min(callers / 5, 1.0)
+            score *= 1 + min(callers / caller_cap, caller_boost_cap)
         return score
 
     @staticmethod
@@ -75,3 +92,14 @@ class FileHistory:
     def tracked_churn_path(path: str) -> bool:
         """A source/doc path the churn scan counts."""
         return path.endswith((".py", ".rs", ".md")) and not path.startswith((".venv/", "node_modules/"))
+
+    @staticmethod
+    def changed_paths(diff) -> set[str]:
+        """The tracked paths one commit's diff touched (no diff = no paths)."""
+        changed: set[str] = set()
+        for patch in diff or ():
+            delta = patch.delta if patch is not None else None
+            path = delta.new_file.path if delta is not None else ""
+            if FileHistory.tracked_churn_path(path):
+                changed.add(path)
+        return changed

@@ -14,6 +14,9 @@ use super::declaration::ParamShape;
 /// One single-statement delegation, with everything the verdict needs and
 /// nothing borrowed from the file it came from: the repo-wide pass reads these
 /// after every file has been scanned.
+/// The length above which a `__name__` is a dunder worth naming (not `__x`).
+const DUNDER_NAME_MIN: usize = 4;
+
 #[derive(Clone)]
 pub struct MiddleManCandidate {
     pub(crate) rel: String,
@@ -156,7 +159,7 @@ impl MiddleManCandidate {
     /// the method IS the operator's contract, not a forwarding layer. Delegation
     /// inside it is the implementation, not a removable seam.
     pub(crate) fn is_dunder(name: &str) -> bool {
-        name.len() > 4 && name.starts_with("__") && name.ends_with("__")
+        name.len() > DUNDER_NAME_MIN && name.starts_with("__") && name.ends_with("__")
     }
 
     /// The finding this candidate produces — its own coordinates and message.

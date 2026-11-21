@@ -14,6 +14,9 @@ use super::super::{all_exprs, push_stmt_children, stmt_exprs};
 
 /// The tuple-record rule and the shape readers it needs: the dict's arity, the
 /// chain's member name, a constant index, and the reads that count.
+/// The positional-read count that makes a tuple a record in waiting.
+const POSITIONAL_READS_MIN: usize = 3;
+
 pub struct TupleRecord;
 
 impl TupleRecord {
@@ -23,14 +26,10 @@ impl TupleRecord {
         // build sites at ANY scope (build()'s locals are records too) — walk
         // control flow only, not nested defs (a def owns its own bindings)
         let mut stack: Vec<&Stmt> = Vec::new();
-        for s in body {
-            stack.push(s);
-        }
+        stack.extend(body.iter());
         while let Some(s) = stack.pop() {
             if let Stmt::FunctionDef(f) = s {
-                for b in &f.body {
-                    stack.push(b);
-                }
+                stack.extend(f.body.iter());
                 continue; // ClassDef descent is push_stmt_children's job
             }
             if let Stmt::Assign(a) = s {
@@ -53,22 +52,16 @@ impl TupleRecord {
         for s in body {
             let Stmt::FunctionDef(f) = s else { continue };
             let mut params = Vec::new();
-            for a in &f.parameters.args {
-                params.push(a.parameter.name.to_string());
-            }
+            params.extend(f.parameters.args.iter().map(|a| a.parameter.name.to_string()));
             module_params.insert(f.name.to_string(), params);
         }
         let mut aliases: HashMap<String, String> = HashMap::new();
         {
             let mut stack: Vec<&Stmt> = Vec::new();
-            for s in body {
-                stack.push(s);
-            }
+            stack.extend(body.iter());
             while let Some(s) = stack.pop() {
                 if let Stmt::FunctionDef(f) = s {
-                    for b in &f.body {
-                        stack.push(b);
-                    }
+                    stack.extend(f.body.iter());
                     continue;
                 }
                 for e in stmt_exprs(s) {
@@ -106,7 +99,7 @@ impl TupleRecord {
         }
         for (name, (arity, line)) in &records {
             let reads = counts.get(name).copied().unwrap_or(0);
-            if reads >= 3 {
+            if reads >= POSITIONAL_READS_MIN {
                 state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                 file: state.file.to_string(),
                                 line: *line,
@@ -193,14 +186,10 @@ impl TupleRecord {
             }
         }
         let mut stack: Vec<&Stmt> = Vec::new();
-        for s in body {
-            stack.push(s);
-        }
+        stack.extend(body.iter());
         while let Some(s) = stack.pop() {
             if let Stmt::FunctionDef(f) = s {
-                for b in &f.body {
-                    stack.push(b);
-                }
+                stack.extend(f.body.iter());
                 continue; // ClassDef descent is push_stmt_children's job
             }
             // pattern 1: NAME[KEY][K] with a constant index — including the
@@ -246,9 +235,7 @@ impl TupleRecord {
                                     if tp.elts.iter().any(|el| matches!(el, Expr::Tuple(_))) {
                                         has_nested = true;
                                     }
-                                    for el in &tp.elts {
-                                        tstack.push(el);
-                                    }
+                                    tstack.extend(tp.elts.iter());
                                 }
                             }
                             if has_nested {

@@ -16,10 +16,13 @@ from fix_engine.module_outline import ModuleOutline
 
 
 class ParameterObjects:
+    # the scanner's long-param-list bar: MORE than this many parameters
+    _PARAM_LIMIT = 5
+
     """The parameter object fix for one request."""
 
     def __init__(self, request: Any) -> None:
-        self.request = request
+        self.request: Any = request
 
     def run(self) -> str | None:
         source, line = self.request.loaded_source(), self.request.line
@@ -45,7 +48,7 @@ class ParameterObjects:
         total = len(all_params)
         if ParameterObjects._is_receiver_param(all_params):
             total -= 1
-        if total <= 5:
+        if total <= ParameterObjects._PARAM_LIMIT:
             return None  # not the long-param-list shape (threshold is > 5)
         params = [p for p in all_params if p.name is not None and p.name.value not in ("self", "cls")]
         param_names = [p.name.value for p in params]

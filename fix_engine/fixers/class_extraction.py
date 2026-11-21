@@ -6,7 +6,7 @@ members, and its libcst visitors are nested classes.
 
 from __future__ import annotations
 
-from typing import override
+from typing import Any, override
 
 import libcst as cst
 from libcst.metadata import ExpressionContextProvider, ParentNodeProvider, PositionProvider
@@ -21,7 +21,7 @@ class ClassExtraction:
     class named after their shared receiver."""
 
     def __init__(self, request) -> None:
-        self.request = request
+        self.request: Any = request
 
     def run(self) -> str | None:
         """Move the strewing group into a class named `name` (default: the shared

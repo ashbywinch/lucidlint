@@ -22,6 +22,11 @@ use crate::skeleton::{BigramInterner, Similarity, SkeletonFn};
 /// and differing sets can still score >= 0.9. The set hash is neither
 /// necessary nor sufficient, so it is not a valid collision test
 /// (2026-08-17 review-log: set-vs-multiset 100%-similar false positive).
+/// The length bucket size for pair comparison, and the Dice similarity at
+/// which two skeletons are the same function.
+const LENGTH_BUCKET_DIVISOR: usize = 5;
+const DICE_MIN: f64 = 0.9;
+
 pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
     use std::collections::HashMap;
     let mut out = Vec::new();
@@ -37,7 +42,7 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
         .map(|i| {
             let fr = &fns[i];
             let l = fr.skeleton.len();
-            let tol = (l / 5).max(2);
+            let tol = (l / LENGTH_BUCKET_DIVISOR).max(2);
             let lo = l.saturating_sub(tol);
             let hi = l + tol;
             let mut best: Option<(usize, f64)> = None;
@@ -46,7 +51,7 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
                 let start = bucket.partition_point(|&j| j <= i);
                 for &j in &bucket[start..] {
                     let sim = Similarity::dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j));
-                    if sim >= 0.9 {
+                    if sim >= DICE_MIN {
                         // a function nested inside another always resembles it:
                         // the span contains the other's — containment, not
                         // copy-paste (houses: `_fetch` inside `api_fetch`)
@@ -83,8 +88,6 @@ pub fn duplicate_findings(fns: &[SkeletonFn]) -> Vec<Finding> {
             None
         })
         .collect();
-    for f in results.into_iter().flatten() {
-        out.push(f);
-    }
+    out.extend(results.into_iter().flatten());
     out
 }

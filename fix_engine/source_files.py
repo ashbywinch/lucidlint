@@ -35,7 +35,7 @@ class SourceFiles:
     """One repo's `.py` files (vendored and generated trees skipped)."""
 
     def __init__(self, repo: Path) -> None:
-        self.repo = repo
+        self.repo: Path = repo
 
     def py_files(self) -> list[Path]:
         """Every .py file under the repo, skipping venvs/caches/build output."""

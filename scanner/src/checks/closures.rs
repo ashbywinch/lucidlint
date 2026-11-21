@@ -15,6 +15,13 @@ use crate::source::Source;
 use crate::ScanState;
 
 /// `closures`: the rule object. Its methods read one function's nested definitions and captured state.
+/// The CC bar at which a function with nested definitions is a closure
+/// candidate (the scan's complexity gate).
+const CC_CANDIDATE: u32 = 15;
+
+/// The span (in lines) at which a nested-def function is a closure candidate.
+const SPAN_CANDIDATE: u32 = 60;
+
 pub struct Closures;
 
 /// Method calls that mutate the receiver in place — the writes that turn a
@@ -136,9 +143,7 @@ impl Closures {
     /// scopes) WRITE to one of *candidates*?
     fn scope_mutates(body: &[Stmt], candidates: &HashSet<&str>, through_attributes: bool) -> bool {
         let mut stack: Vec<&Stmt> = Vec::new();
-        for s in body {
-            stack.push(s);
-        }
+        stack.extend(body.iter());
         while let Some(s) = stack.pop() {
             if Self::stmt_writes(s, candidates, through_attributes) {
                 return true;
@@ -254,9 +259,7 @@ impl Closures {
         let mut fns = Vec::new();
         let mut bound: HashSet<String> = HashSet::new();
         let mut stack: Vec<&Stmt> = Vec::new();
-        for s in body {
-            stack.push(s);
-        }
+        stack.extend(body.iter());
         while let Some(s) = stack.pop() {
             match s {
                 Stmt::FunctionDef(f) => {
@@ -328,6 +331,6 @@ impl Closures {
 
     /// Big enough, or mutating shared state, to be a closures candidate.
     fn is_closures_candidate(cc: u32, span: u32, mutated: &[String]) -> bool {
-        cc >= 15 || span >= 60 || !mutated.is_empty()
+        cc >= CC_CANDIDATE || span >= SPAN_CANDIDATE || !mutated.is_empty()
     }
 }

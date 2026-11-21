@@ -214,7 +214,8 @@ class FixRegistry:
     def kinds(self) -> list[str]:
         return sorted(self.required)
 
-    def judgement_marked(self, kind: str) -> bool:
+    @staticmethod
+    def judgement_marked(kind: str) -> bool:
         """H5: judge-true by DECISION, not by a required input — the kinds
         in JUDGEMENT_KINDS render JUDGEMENT although they demand no name."""
         return kind in JUDGEMENT_KINDS

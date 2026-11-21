@@ -281,13 +281,9 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
         }
         let lines: Vec<String> = self.seq.iter().map(|l| l.line.to_string()).collect();
         if !shared.is_empty() || !fed.is_empty() {
-            let mut names: Vec<String> = shared.into_iter().collect();
-            for f in &fed {
-                if !names.contains(f) {
-                    names.push(f.clone());
-                }
-            }
+            let mut names: Vec<String> = shared.into_iter().chain(fed.iter().cloned()).collect();
             names.sort();
+            names.dedup();
             let line = self.fn_line;
             let name = self.fn_name.clone();
             // tier 1 (coding-standards.md: never offer a fix that cannot

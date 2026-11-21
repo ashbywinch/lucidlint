@@ -85,6 +85,9 @@ const SCRIPT_DIRS: &[&str] = &["scripts", "tools", "bin"];
 /// The language the module is written in — the advice differs (a Python class
 /// lives in a file, a Rust type in a module; a package has `__init__.py`, a
 /// directory module does not).
+/// How many offending names the message shows before counting the rest.
+const NAMES_SHOWN: usize = 3;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Language {
     #[default]
@@ -175,9 +178,19 @@ impl ModuleShape {
     /// framework entry points only is a framework contract, not a finding.
     fn many_finding(&self, rel: &str) -> Option<Finding> {
         if self.classes_dominate() {
-            Some(self.finding("many-definitions", "warn", rel, self.classes_message(rel)))
+            Some(Self::finding(
+                "many-definitions",
+                "warn",
+                rel,
+                self.classes_message(rel),
+            ))
         } else if self.functions_are_a_group() {
-            Some(self.finding("many-definitions", "warn", rel, self.functions_message(rel, true)))
+            Some(Self::finding(
+                "many-definitions",
+                "warn",
+                rel,
+                self.functions_message(rel, true),
+            ))
         } else {
             None
         }
@@ -185,9 +198,19 @@ impl ModuleShape {
 
     fn several_finding(&self, rel: &str) -> Option<Finding> {
         if self.classes_dominate() {
-            Some(self.finding("several-definitions", "warn", rel, self.classes_message(rel)))
+            Some(Self::finding(
+                "several-definitions",
+                "warn",
+                rel,
+                self.classes_message(rel),
+            ))
         } else if self.functions_are_a_group() {
-            Some(self.finding("several-definitions", "warn", rel, self.functions_message(rel, false)))
+            Some(Self::finding(
+                "several-definitions",
+                "warn",
+                rel,
+                self.functions_message(rel, false),
+            ))
         } else {
             None
         }
@@ -379,7 +402,7 @@ impl ModuleShape {
         }
     }
 
-    fn finding(&self, kind: &str, severity: &str, rel: &str, message: String) -> Finding {
+    fn finding(kind: &str, severity: &str, rel: &str, message: String) -> Finding {
         Finding {
             logical_start: None,
             seam_members: Vec::new(),
@@ -475,7 +498,7 @@ impl ModuleShape {
     fn group_list(groups: &[(String, usize)]) -> String {
         let shown: Vec<String> = groups
             .iter()
-            .take(3)
+            .take(NAMES_SHOWN)
             .map(|(name, count)| format!("{name} ({count})"))
             .collect();
         let list = shown.join(", ");
@@ -487,7 +510,7 @@ impl ModuleShape {
     }
 
     fn name_list(names: &[&str]) -> String {
-        let shown: Vec<&str> = names.iter().take(3).copied().collect();
+        let shown: Vec<&str> = names.iter().take(NAMES_SHOWN).copied().collect();
         let list = shown.join(", ");
         match names.len().saturating_sub(shown.len()) {
             0 => list,

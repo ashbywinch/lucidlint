@@ -31,6 +31,13 @@ from orchestrator.version import VERSION
 class RenderCtx:
     """The shared render context — one object instead of a 9-parameter tail."""
 
+    # the config-ignored ledger lists this many families before counting the rest
+    _LEDGER_TOP_FAMILIES = 4
+    # a fact is worth a clause at these magnitudes (the scanner's own bars)
+    _COMPLEX_FACTS_AT = 15
+    _CHURN_FACTS_AT = 10
+    _CALLERS_FACTS_AT = 10
+
     repo: Path
     args: argparse.Namespace
     branch: str
@@ -79,7 +86,7 @@ class RenderCtx:
         if not self.ignored_by_signal:
             return ""
         total = sum(self.ignored_by_signal.values())
-        top_items = self.ignored_by_signal.most_common(4)
+        top_items = self.ignored_by_signal.most_common(RenderCtx._LEDGER_TOP_FAMILIES)
         top = ", ".join(f"{sig}={n}" for sig, n in top_items)
         # the listed families must reconcile with the total beside them — a
         # truncated list that sums short reads as a miscount (album round:
@@ -265,11 +272,11 @@ class RenderCtx:
         skips its clause. The subject is "This function" — "This code" only
         when the finding anchors no function."""
         facts = []
-        if a.metric >= 15:
+        if a.metric >= RenderCtx._COMPLEX_FACTS_AT:
             facts.append(f"is complex ({int(a.metric)} decision points)")
-        if a.churn >= 10:
+        if a.churn >= RenderCtx._CHURN_FACTS_AT:
             facts.append(f"changed often ({a.churn} changes)")
-        if len(a.callers) >= 10:
+        if len(a.callers) >= RenderCtx._CALLERS_FACTS_AT:
             facts.append(f"has {len(a.callers)} callers")
         if not facts:
             return None

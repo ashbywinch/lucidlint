@@ -25,6 +25,13 @@ pub(super) type PairKey = (ParamKey, ParamKey);
 
 /// The latent-state families: data clumps, feature envy, quiet member
 /// assignment and duplicate fields — one rule over the object's state.
+/// The def count that makes a parameter pair a clump, the read count that makes
+/// a method read its own state more than its neighbour's, and the margin the
+/// self-read must clear.
+const PAIR_GROUP_MIN: usize = 3;
+const READS_MIN: usize = 4;
+const SELF_READ_MARGIN: usize = 3;
+
 pub struct LatentState;
 
 impl LatentState {
@@ -74,9 +81,13 @@ impl LatentState {
         for s in body {
             let Stmt::FunctionDef(f) = s else { continue };
             let mut params = Vec::new();
-            for a in f.parameters.posonlyargs.iter().chain(&f.parameters.args) {
-                params.push(Self::param_annotation_key(a, &bindings, state.source));
-            }
+            params.extend(
+                f.parameters
+                    .posonlyargs
+                    .iter()
+                    .chain(&f.parameters.args)
+                    .map(|a| Self::param_annotation_key(a, &bindings, state.source)),
+            );
             funcs.push((f, params));
         }
         let mut pairs: std::collections::HashMap<PairKey, Vec<&StmtFunctionDef>> = std::collections::HashMap::new();
@@ -100,7 +111,7 @@ impl LatentState {
         let mut by_anchor: std::collections::HashMap<(usize, String), AnchorClump> = std::collections::HashMap::new();
         let mut reported: HashSet<PairKey> = HashSet::new();
         for ((a, b), fs) in &pairs {
-            if fs.len() < 3 || !reported.insert((a.clone(), b.clone())) {
+            if fs.len() < PAIR_GROUP_MIN || !reported.insert((a.clone(), b.clone())) {
                 continue;
             }
             let line = Source::line_of(state.source, fs[0].name.range().start());
@@ -183,9 +194,7 @@ impl LatentState {
         }
 
         let mut stack: Vec<&Stmt> = Vec::new();
-        for s in body {
-            stack.push(s);
-        }
+        stack.extend(body.iter());
         while let Some(s) = stack.pop() {
             if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
                 continue;
@@ -201,9 +210,7 @@ impl LatentState {
     /// Feature envy reads THESE — the collaborator the method reaches into.
     fn collaborator_aliases(body: &[Stmt], out: &mut HashSet<String>) {
         let mut stack: Vec<&Stmt> = Vec::new();
-        for s in body {
-            stack.push(s);
-        }
+        stack.extend(body.iter());
         while let Some(s) = stack.pop() {
             if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
                 continue;
@@ -225,9 +232,7 @@ impl LatentState {
     /// ...) — elements the function iterates are its own inputs.
     fn loop_target_names(body: &[Stmt], out: &mut HashSet<String>) {
         let mut stack: Vec<&Stmt> = Vec::new();
-        for s in body {
-            stack.push(s);
-        }
+        stack.extend(body.iter());
         while let Some(s) = stack.pop() {
             if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
                 continue;
@@ -241,14 +246,10 @@ impl LatentState {
                             out.insert(n.id.to_string());
                         }
                         Expr::Tuple(tp) => {
-                            for el in &tp.elts {
-                                tstack.push(el);
-                            }
+                            tstack.extend(tp.elts.iter());
                         }
                         Expr::List(l) => {
-                            for el in &l.elts {
-                                tstack.push(el);
-                            }
+                            tstack.extend(l.elts.iter());
                         }
                         Expr::Starred(st) => tstack.push(&st.value),
                         _ => {}
@@ -283,8 +284,8 @@ impl LatentState {
                     && !self.params.contains(self.receiver)
                     && !self.loop_targets.contains(self.receiver)
                     && self.collaborators.contains(self.receiver)
-                    && self.reads >= 4
-                    && self.reads >= self.self_reads + 3
+                    && self.reads >= READS_MIN
+                    && self.reads >= self.self_reads + SELF_READ_MARGIN
             }
         }
 
@@ -351,20 +352,14 @@ impl LatentState {
                 let Stmt::FunctionDef(f) = m else { continue };
                 let is_init = f.name.as_str() == "__init__";
                 let mut stack: Vec<&Stmt> = Vec::new();
-                for b in &f.body {
-                    stack.push(b);
-                }
+                stack.extend(f.body.iter());
                 while let Some(st) = stack.pop() {
                     if matches!(st, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
                         continue;
                     }
                     let mut targets: Vec<&Expr> = Vec::new();
                     match st {
-                        Stmt::Assign(a) => {
-                            for t in &a.targets {
-                                targets.push(t);
-                            }
-                        }
+                        Stmt::Assign(a) => targets.extend(a.targets.iter()),
                         Stmt::AnnAssign(a) => targets.push(a.target.as_ref()),
                         Stmt::AugAssign(a) => targets.push(&a.target),
                         _ => {}

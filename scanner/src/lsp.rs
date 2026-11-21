@@ -21,6 +21,9 @@ use std::path::{Path, PathBuf};
 /// the loaded repo config (the LSP must apply the SAME silencing rules as
 /// the gate — a config-ignored finding shown by the LSP while the gate hides
 /// it is exactly what broke the agent's trust in the LSP).
+/// The complexity gate: 15 decision points is the fail bar.
+const COMPLEXITY_GATE: u32 = 15;
+
 pub struct LspState {
     pub documents: HashMap<String, String>,
     root: Option<PathBuf>,
@@ -181,11 +184,7 @@ impl LspState {
         let root_s = root.to_string_lossy().to_string();
         let by_file = crate::Pipeline::repo_wide_merge(&scans, &root_s);
         if let Some(fs) = by_file.get(rel) {
-            for f in fs {
-                if let Some(d) = Self::repo_wide_diag(f, rel, cfg) {
-                    diags.push(d);
-                }
-            }
+            diags.extend(fs.iter().filter_map(|f| Self::repo_wide_diag(f, rel, cfg)));
         }
     }
 }
@@ -277,32 +276,40 @@ impl LspState {
 
     fn diagnostics_for(scan: &FileScan, source: &str, filter: Option<(&LucidConfig, &str)>) -> Vec<serde_json::Value> {
         let mut out = Vec::new();
-        for f in scan.findings.iter().filter(|f| {
-            f.kind != "duplicate"
-                && f.kind != "unused"
-                && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored(&f.kind, rel))
-        }) {
-            out.push(Self::finding_diag(f, source));
-        }
-        for e in &scan.cc {
-            if e.cc >= 15 && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored("complexity", rel)) {
-                let line = e.line.saturating_sub(1);
-                let line_len = source.lines().nth(line).map(str::len).unwrap_or(0);
-                out.push(serde_json::json!({
-                    "range": {
-                        "start": {"line": line, "character": 0},
-                        "end": {"line": line, "character": line_len},
-                    },
-                    "severity": 1,
-                    "source": "lucidlint",
-                    "message": crate::fix_render::FixRender::full_fix_command(
-                        &e.file,
-                        e.line,
-                        &crate::fix_render::FixRender::complexity_message(e.cc, e.shape, &e.shape_detail),
-                    ),
-                }));
-            }
-        }
+        out.extend(
+            scan.findings
+                .iter()
+                .filter(|f| {
+                    f.kind != "duplicate"
+                        && f.kind != "unused"
+                        && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored(&f.kind, rel))
+                })
+                .map(|f| Self::finding_diag(f, source)),
+        );
+        out.extend(
+            scan.cc
+                .iter()
+                .filter(|e| {
+                    e.cc >= COMPLEXITY_GATE && !filter.is_some_and(|(cfg, rel)| cfg.is_ignored("complexity", rel))
+                })
+                .map(|e| {
+                    let line = e.line.saturating_sub(1);
+                    let line_len = source.lines().nth(line).map(str::len).unwrap_or(0);
+                    serde_json::json!({
+                        "range": {
+                            "start": {"line": line, "character": 0},
+                            "end": {"line": line, "character": line_len},
+                        },
+                        "severity": 1,
+                        "source": "lucidlint",
+                        "message": crate::fix_render::FixRender::full_fix_command(
+                            &e.file,
+                            e.line,
+                            &crate::fix_render::FixRender::complexity_message(e.cc, e.shape, &e.shape_detail),
+                        ),
+                    })
+                }),
+        );
         out
     }
 
@@ -851,6 +858,20 @@ mod tests {
     }
 
     // temp dir — same sanctioned real-FS seam as tests/test_lsp.py
+    #[test]
+    fn per_buffer_scan_does_not_call_a_deferred_family_stale() {
+        // a marker for any family the corpus answers on save is not stale
+        // here: the per-buffer scan cannot see the finding it names, so the
+        // verdict is the absence of a scan, not the absence of a finding
+        let src = "# lucidlint: ignore scattered-instance the corpus answers this family on save\nx = 1\n";
+        let scan = LspState::scan_buffer("file:///tmp/buf.py", src);
+        assert!(
+            !scan.findings.iter().any(|finding| finding.kind == "stale-suppression"),
+            "{:?}",
+            scan.findings
+        );
+    }
+
     #[test]
     fn didsave_publishes_repo_wide_unused_for_saved_file() {
         // review-log §10: a function that is dead REPO-WIDE never showed in

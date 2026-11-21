@@ -1,6 +1,9 @@
 //! The Rust comment layer: which bytes of a `.rs` file are comments, read
 //! without a parser so a file that does not parse still yields its directives.
 
+/// A char literal's own length in bytes: quote, one character, quote.
+const CHAR_LITERAL_LEN: usize = 3;
+
 /// The Rust comment layer: which bytes of a `.rs` file are comments, read without a parser.
 pub struct RsComments;
 
@@ -109,7 +112,10 @@ impl RsComments {
     /// treating it as a literal would swallow to the next apostrophe and lose every
     /// comment in between.
     fn is_char_literal(bytes: &[u8], at: usize) -> bool {
-        bytes.get(at + 2) == Some(&b'\'') || (bytes.get(at + 1) == Some(&b'\\') && bytes.get(at + 3) == Some(&b'\''))
+        // a char literal is three bytes (`'x'`), or four with an escape (`'\n'`)
+        let closing = at + CHAR_LITERAL_LEN - 1;
+        bytes.get(closing) == Some(&b'\'')
+            || (bytes.get(at + 1) == Some(&b'\\') && bytes.get(closing + 1) == Some(&b'\''))
     }
 
     // --------------------------------------------------------------------------- duplicate skeletons

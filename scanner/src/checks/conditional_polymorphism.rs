@@ -39,6 +39,9 @@ pub(crate) fn dispatch_key(e: &Expr) -> Option<String> {
 
 /// Replace Conditional with Polymorphism: an if/elif chain of >= 4 arms whose
 /// tests all dispatch on the same value — the type-tag conditional.
+/// The arm count at which an if/elif chain is a dispatch table in waiting.
+const DISPATCH_ARMS_MIN: usize = 4;
+
 pub fn conditional_polymorphism_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
     fn walk(state: &mut ScanState, stmts: &[Stmt], source: &str) {
         for s in stmts {
@@ -47,7 +50,7 @@ pub fn conditional_polymorphism_findings(state: &mut ScanState, body: &[Stmt], s
                     .chain(i.elif_else_clauses.iter().filter_map(|c| c.test.as_ref()))
                     .collect();
                 let chain_line = Source::line_of(source, s.range().start());
-                if arms.len() >= 4 && !state.claimed_dispatch.contains(&chain_line) {
+                if arms.len() >= DISPATCH_ARMS_MIN && !state.claimed_dispatch.contains(&chain_line) {
                     let keys: Vec<Option<String>> = arms.iter().map(|t| dispatch_key(t)).collect();
                     if keys.iter().all(|k| k.is_some()) && keys.windows(2).all(|w| w[0] == w[1]) {
                         let line = chain_line;

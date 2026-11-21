@@ -62,7 +62,7 @@ class GraphContract:
     CONTRACT_VERSION = 1
 
     def __init__(self, host: Host) -> None:
-        self._host = host
+        self._host: Host = host
         self._cache: dict[Path, Path | None] = {}
 
     def contract(self, repo: Path) -> Path | None:

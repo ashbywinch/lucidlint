@@ -8,7 +8,7 @@ construction, so a public-looking name is underscored.
 
 from __future__ import annotations
 
-from typing import override
+from typing import Any, override
 
 import libcst as cst
 from libcst.metadata import ExpressionContextProvider, ParentNodeProvider, PositionProvider
@@ -22,8 +22,12 @@ class MethodExtraction:
     """One request's extract-method fix: the seam analysis, the proposal, and
     the apply. The request is the fixer's state."""
 
+    # the complexity gate: 15 decision points is the fail bar, so 14 decisions
+    # remain the most the original may keep above the extraction
+    _CC_GATE_DECISIONS = 14
+
     def __init__(self, request) -> None:
-        self.request = request
+        self.request: Any = request
 
     def _fn_seam_analysis(self):
         """Analyze the function at `line`: its body statements with per-statement
@@ -384,18 +388,17 @@ class MethodExtraction:
             """The statement's subtree ids in SOURCE ORDER — first-use analysis
             must see a write before a later read or it fabricates free variables
             (the phantom-param bug)."""
-            out = [sid]
-            for child in self.container_sids.get(sid, []):
-                out.extend(self._subtree_sids(child))
-            return out
+            return [sid] + [
+                inner for child in self.container_sids.get(sid, []) for inner in self._subtree_sids(child)
+            ]
 
         def _window_sids(self, i: int, j: int) -> list[int]:
             """The window's statement ids plus all descendant ids (a compound's
             body) in SOURCE ORDER, so the free/out-var math sees the whole
             subtree with writes before reads."""
-            sids: list[int] = []
-            for k in range(i, j + 1):
-                sids.extend(self._subtree_sids(self.flat[k][0]))
+            sids: list[int] = [
+                inner for k in range(i, j + 1) for inner in self._subtree_sids(self.flat[k][0])
+            ]
             return sids
 
         def _window_has_outvars(self, i: int, j: int, writes_all: set[str]) -> bool:
@@ -548,7 +551,9 @@ class MethodExtraction:
         summing every flat entry would double-count loop bodies."""
         fn_sid = id(state.fn_node)
         total = sum(state.decisions[sid] for sid, container, _ in state.flat if container == fn_sid)
-        return max(0, total - 14) if total > 14 else 0
+        # the CC gate is 15 decision points; the ORIGINAL keeps the rest
+        gate = MethodExtraction._CC_GATE_DECISIONS
+        return max(0, total - gate) if total > gate else 0
 
     @staticmethod
     def _module_level_names(module: cst.Module) -> set[str]:
@@ -596,23 +601,48 @@ class MethodExtraction:
     def _wildcard(pattern) -> bool:
         return isinstance(pattern, cst.MatchAs) and pattern.pattern is None and pattern.name is None
 
+    # the statement kinds that bind a name, and the handler that reads it — a
+    # lookup by node kind instead of an isinstance ladder
+    _NAME_BINDERS = (
+        (cst.Import, "_binds_import"),
+        (cst.ImportFrom, "_binds_import_from"),
+        (cst.Assign, "_binds_assign"),
+        (cst.AnnAssign, "_binds_assign"),
+        (cst.FunctionDef, "_binds_def"),
+        (cst.ClassDef, "_binds_def"),
+    )
+
     @staticmethod
     def collect_stmt_names(add_target, line_stmt, names):
         stmts = line_stmt.body if isinstance(line_stmt, cst.SimpleStatementLine) else [line_stmt]
         for stmt in stmts:
-            if isinstance(stmt, cst.Import):
-                Bindings.collect_alias_names(names, stmt)
-            elif isinstance(stmt, cst.ImportFrom):
-                if isinstance(stmt.names, cst.ImportStar):
-                    continue  # `from x import *` binds no importable name
-                for a in stmt.names:
-                    if a.asname is not None:
-                        names.update(Bindings.hoist_target_names(a.asname.name))
-                    elif isinstance(a.name, cst.Name) and a.name.value != "*":
-                        names.add(a.name.value)
-            elif isinstance(stmt, (cst.Assign, cst.AnnAssign)):
-                targets = stmt.targets if isinstance(stmt, cst.Assign) else [stmt.target]
-                for t in targets:
-                    add_target(t)
-            elif isinstance(stmt, (cst.FunctionDef, cst.ClassDef)):
-                names.add(stmt.name.value)
+            handler = next(
+                (getattr(MethodExtraction, name) for kind, name in MethodExtraction._NAME_BINDERS if type(stmt) is kind),
+                None,
+            )
+            if handler is not None:
+                handler(stmt, names, add_target)
+
+    @staticmethod
+    def _binds_import(stmt, names, add_target) -> None:
+        Bindings.collect_alias_names(names, stmt)
+
+    @staticmethod
+    def _binds_import_from(stmt, names, add_target) -> None:
+        if isinstance(stmt.names, cst.ImportStar):
+            return  # `from x import *` binds no importable name
+        for alias in stmt.names:
+            if alias.asname is not None:
+                names.update(Bindings.hoist_target_names(alias.asname.name))
+            elif isinstance(alias.name, cst.Name) and alias.name.value != "*":
+                names.add(alias.name.value)
+
+    @staticmethod
+    def _binds_assign(stmt, names, add_target) -> None:
+        targets = stmt.targets if isinstance(stmt, cst.Assign) else [stmt.target]
+        for target in targets:
+            add_target(target)
+
+    @staticmethod
+    def _binds_def(stmt, names, add_target) -> None:
+        names.add(stmt.name.value)

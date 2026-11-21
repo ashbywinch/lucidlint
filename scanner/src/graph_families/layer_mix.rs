@@ -11,6 +11,11 @@ use super::node::GNode;
 
 pub(crate) struct LayerMix;
 
+/// The function count that makes a layer boundary real, and how many names the
+/// message shows.
+const FNS_MIN: usize = 6;
+const NAMES_SHOWN: usize = 3;
+
 impl LayerMix {
     /// File mixes layers — `_layer_mix_actions` / `_layer_mix_for_file`.
     pub fn findings(repo: &Path, contract: &GraphContract, files: &[String]) -> Vec<Finding> {
@@ -27,7 +32,7 @@ impl LayerMix {
                 .iter()
                 .filter(|n| n.file_path == abs && matches!(n.kind.as_str(), "Function" | "Method"))
                 .collect();
-            if fns.len() < 6 {
+            if fns.len() < FNS_MIN {
                 continue;
             }
             let mut layers: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -45,7 +50,7 @@ impl LayerMix {
             }
             let groups = big
                 .iter()
-                .take(3)
+                .take(NAMES_SHOWN)
                 .map(|(m, names)| format!("{m} ({})", names.iter().take(4).cloned().collect::<Vec<_>>().join(", ")))
                 .collect::<Vec<_>>()
                 .join(", ");

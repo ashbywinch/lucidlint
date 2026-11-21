@@ -8,6 +8,13 @@ use ruff_python_ast::{Expr, Stmt};
 use crate::{finding::Finding, source::Source, ScanState};
 
 /// `restating-docstring`: the rule object. Its methods read one docstring; the evidence and the message live together.
+/// The word length that counts as content ("the", "and" are not), the word
+/// count that makes a docstring worth comparing, and the share of the body
+/// tokens it must cover before it merely restates the code.
+const WORD_LEN_MIN: usize = 3;
+const WORDS_MIN: usize = 5;
+const COVERAGE_MIN: f64 = 0.9;
+
 pub struct Docstring;
 
 /// Docstring content words that add nothing the body does not already say
@@ -26,7 +33,7 @@ const DOCSTRING_STOPWORDS: &[&str] = &[
 impl Docstring {
     fn docstring_content_words(doc: &str) -> Vec<String> {
         doc.split(|c: char| !c.is_alphanumeric())
-            .filter(|w| w.len() >= 3 && !DOCSTRING_STOPWORDS.contains(w))
+            .filter(|w| w.len() >= WORD_LEN_MIN && !DOCSTRING_STOPWORDS.contains(w))
             .map(|w| w.to_lowercase())
             .collect()
     }
@@ -83,12 +90,12 @@ impl Docstring {
             };
             let doc = lit.value.to_str();
             let words = Self::docstring_content_words(doc);
-            if words.len() < 5 {
+            if words.len() < WORDS_MIN {
                 continue; // short docstrings carry the name; not noise
             }
             let tokens = Self::body_tokens(&body[1..]);
             let covered = words.iter().filter(|w| tokens.contains(w.as_str())).count();
-            if covered as f64 / words.len() as f64 >= 0.9 {
+            if covered as f64 / words.len() as f64 >= COVERAGE_MIN {
                 let line = Source::stmt_line(state.source, s);
                 state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                 file: state.file.to_string(),

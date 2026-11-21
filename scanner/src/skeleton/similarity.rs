@@ -4,6 +4,11 @@
 use ruff_python_ast::{Expr, Stmt, StmtFunctionDef};
 
 /// The similarity rules — the size gate, the Dice score and its interned form.
+/// The skeleton length below which a comparison is noise, and the Dice pair
+/// weight (two shared items over the total).
+const SKELETON_LEN_MIN: usize = 12;
+const DICE_PAIR_WEIGHT: f64 = 2.0;
+
 pub struct Similarity;
 
 impl Similarity {
@@ -12,7 +17,7 @@ impl Similarity {
     /// Pure; each layer supplies its own statement count (docstring filtering
     /// is Python-shaped).
     pub fn is_duplicate_size(skeleton_len: usize, non_doc_stmts: usize) -> bool {
-        non_doc_stmts >= 2 && skeleton_len >= 12
+        non_doc_stmts >= 2 && skeleton_len >= SKELETON_LEN_MIN
     }
     /// Dice coefficient over bigram sets — the language-neutral similarity.
     /// MULTISET semantics (pinned by `duplicate_dice_contract_no_set_hash_shortcut`):
@@ -46,7 +51,7 @@ impl Similarity {
         }
         let total_a: usize = ab.values().sum();
         let total_b: usize = bb.values().sum();
-        (2.0 * common as f64) / (total_a + total_b) as f64
+        (DICE_PAIR_WEIGHT * common as f64) / (total_a + total_b) as f64
     }
     /// `_is_duplicate_candidate`: at least two real statements (one-line
     /// accessors are not copy-paste) and a 12+ token skeleton; `__init__`
@@ -60,7 +65,7 @@ impl Similarity {
             .iter()
             .filter(|s| !matches!(s, Stmt::Expr(e) if matches!(e.value.as_ref(), Expr::StringLiteral(_))))
             .collect();
-        stmts.len() >= 2 && skeleton_len >= 12
+        stmts.len() >= 2 && skeleton_len >= SKELETON_LEN_MIN
     }
     /// Dice over SORTED bigram lists — multiset intersection via a two-pointer
     /// merge (counts equal runs). Matches `dice_similarity`'s multiset contract
@@ -91,6 +96,6 @@ impl Similarity {
                 j += 1;
             }
         }
-        (2.0 * common as f64) / (a.len() + b.len()) as f64
+        (DICE_PAIR_WEIGHT * common as f64) / (a.len() + b.len()) as f64
     }
 }

@@ -69,6 +69,9 @@ pub(super) fn parse_dispatch_arms(
     Ok((sel, arms, lits, idx))
 }
 
+/// The arm count at which an if/elif chain is a dispatch table.
+const DISPATCH_ARMS_MIN: usize = 3;
+
 pub fn fix_dispatch_registry(source: &str, line: usize) -> Result<String, String> {
     let file = syn::parse_file(source).map_err(|_| "the file does not parse".to_string())?;
     let target = file
@@ -85,7 +88,7 @@ pub fn fix_dispatch_registry(source: &str, line: usize) -> Result<String, String
         .position(|s| matches!(s, Stmt::Expr(e, _) if matches!(e, Expr::If(_))))
         .ok_or_else(|| "the function has no if statements to convert".to_string())?;
     let (sel, arms, _lits, idx) = parse_dispatch_arms(stmts, first_if, source)?;
-    if arms.len() < 3 {
+    if arms.len() < DISPATCH_ARMS_MIN {
         return Err("fewer than 3 dispatch arms — a registry is not worth it".to_string());
     }
     if !RuleTable::param_is_str(&target.sig, &sel) {

@@ -71,8 +71,8 @@ class PyreflyLock:
     baseline, and the both-direction comparison between them."""
 
     def __init__(self, baseline: Path, extra_args: list[str]):
-        self.baseline = baseline
-        self.extra_args = extra_args
+        self.baseline: Path = baseline
+        self.extra_args: list[str] = extra_args
 
     @staticmethod
     def binary() -> str:

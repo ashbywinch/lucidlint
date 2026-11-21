@@ -18,7 +18,7 @@ class MagicLiteral:
     """The magic literal fix for one request."""
 
     def __init__(self, request: Any) -> None:
-        self.request = request
+        self.request: Any = request
 
     def run(self) -> str | None:
         source, line = self.request.loaded_source(), self.request.line
@@ -170,17 +170,19 @@ class MagicLiteral:
 
         @override
         def leave_Integer(self, original_node, updated_node):
-            if self._match(original_node):
-                self.replaced = True
-                return cst.Name(self.name)
-            return updated_node
+            if not self._match(original_node):
+                return updated_node
+            self.replaced = True
+            return cst.Name(self.name)
 
+        # libcst's protocol has no shared `leave_BaseNumber`: the two literal
+        # kinds each get their own hook with the same one-line body
         @override
         def leave_Float(self, original_node, updated_node):
-            if self._match(original_node):
-                self.replaced = True
-                return cst.Name(self.name)
-            return updated_node
+            if not self._match(original_node):
+                return updated_node
+            self.replaced = True
+            return cst.Name(self.name)
 
     @staticmethod
     def _is_docstring_only_body(class_body: list) -> bool:

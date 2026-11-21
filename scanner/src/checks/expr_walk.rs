@@ -14,64 +14,38 @@ use ruff_python_ast::{Expr, Stmt};
 pub(crate) fn push_stmt_children<'a>(s: &'a Stmt, stack: &mut Vec<&'a Stmt>) {
     match s {
         Stmt::If(i) => {
-            for b in &i.body {
-                stack.push(b);
-            }
+            stack.extend(i.body.iter());
             for cl in &i.elif_else_clauses {
-                for b in &cl.body {
-                    stack.push(b);
-                }
+                stack.extend(cl.body.iter());
             }
         }
         Stmt::For(f) => {
-            for b in &f.body {
-                stack.push(b);
-            }
-            for b in &f.orelse {
-                stack.push(b);
-            }
+            stack.extend(f.body.iter());
+            stack.extend(f.orelse.iter());
         }
         Stmt::While(w) => {
-            for b in &w.body {
-                stack.push(b);
-            }
-            for b in &w.orelse {
-                stack.push(b);
-            }
+            stack.extend(w.body.iter());
+            stack.extend(w.orelse.iter());
         }
         Stmt::With(w) => {
-            for b in &w.body {
-                stack.push(b);
-            }
+            stack.extend(w.body.iter());
         }
         Stmt::Try(t) => {
-            for b in &t.body {
-                stack.push(b);
-            }
+            stack.extend(t.body.iter());
             for h in &t.handlers {
                 let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
-                for b in &eh.body {
-                    stack.push(b);
-                }
+                stack.extend(eh.body.iter());
             }
-            for b in &t.orelse {
-                stack.push(b);
-            }
-            for b in &t.finalbody {
-                stack.push(b);
-            }
+            stack.extend(t.orelse.iter());
+            stack.extend(t.finalbody.iter());
         }
         Stmt::Match(m) => {
             for case in &m.cases {
-                for b in &case.body {
-                    stack.push(b);
-                }
+                stack.extend(case.body.iter());
             }
         }
         Stmt::ClassDef(c) => {
-            for b in &c.body {
-                stack.push(b);
-            }
+            stack.extend(c.body.iter());
         }
         _ => {}
     }

@@ -11,6 +11,9 @@ use crate::ScanState;
 use super::latent_visitor::branch_guards;
 
 /// `special-case`: the rule object. Its methods read one scope's repeated checks.
+/// The occurrence count that makes an absence test a repeated special case.
+const ABSENCE_OCCURRENCES_MIN: usize = 3;
+
 pub struct SpecialCase;
 
 impl SpecialCase {
@@ -40,11 +43,12 @@ impl SpecialCase {
     fn special_case_scope(stmts: &[Stmt], source: &str, out: &mut Vec<(String, usize, usize)>) {
         let mut counts: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
         Self::count_scope_checks(stmts, &mut counts, source);
-        for (name, (n, line)) in &counts {
-            if *n >= 3 {
-                out.push((name.clone(), *n, *line));
-            }
-        }
+        out.extend(
+            counts
+                .iter()
+                .filter(|(_, (n, _))| *n >= ABSENCE_OCCURRENCES_MIN)
+                .map(|(name, (n, line))| (name.clone(), *n, *line)),
+        );
         Self::for_each_nested_scope(stmts, &mut |body| Self::special_case_scope(body, source, out));
     }
 
@@ -100,7 +104,8 @@ impl SpecialCase {
         let empty_check = c.ops.len() == 1
             && matches!(c.ops[0], ruff_python_ast::CmpOp::Eq)
             && Self::is_empty_literal(&c.comparators[0]);
-        if !(none_check || empty_check) || branch_guards(&i.body) {
+        let tests_for_absence = none_check || empty_check;
+        if !tests_for_absence || branch_guards(&i.body) {
             return None;
         }
         Some((n.id.to_string(), Source::line_of(source, i.range().start())))

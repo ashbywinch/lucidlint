@@ -21,6 +21,13 @@ use super::sibling::SiblingValueClass;
 /// values (calls, names, collections).
 /// The duplicate-module rule: the skeleton of one module and the partner that
 /// matches it.
+/// The body size that makes a module worth comparing, the skeleton length that
+/// makes it substantial, the pair bucket size, and the Dice bar.
+const BODY_STATEMENTS_MIN: usize = 3;
+const SKELETON_LEN_MIN: usize = 12;
+const LENGTH_BUCKET_DIVISOR: usize = 5;
+const DICE_MIN: f64 = 0.9;
+
 pub struct DuplicateModule;
 
 impl DuplicateModule {
@@ -172,7 +179,7 @@ impl DuplicateModule {
         if Self::is_skipped_module(state, rel) {
             return;
         }
-        if body.len() < 3 {
+        if body.len() < BODY_STATEMENTS_MIN {
             return; // the file >=3-statement floor
         }
         let classes: Vec<&StmtClassDef> = body
@@ -198,7 +205,7 @@ impl DuplicateModule {
             .iter()
             .filter(|s| !matches!(s, Stmt::Import(_) | Stmt::ImportFrom(_)))
             .count();
-        let module_qualifies = non_import >= 2 && module_skel.len() >= 12;
+        let module_qualifies = non_import >= 2 && module_skel.len() >= SKELETON_LEN_MIN;
         if module_qualifies {
             state.skeleton_modules.push(SkeletonModule {
                 rel: rel.to_string(),
@@ -223,7 +230,7 @@ impl DuplicateModule {
             let consts = Self::constant_tokens(&c.body);
             let mut members: Vec<String> = class_methods(c).iter().map(|f| f.name.to_string()).collect();
             members.sort();
-            if skel.len() < 12 {
+            if skel.len() < SKELETON_LEN_MIN {
                 continue;
             }
             let line = Source::line_of(state.source, c.name.range().start());
@@ -296,7 +303,7 @@ impl DuplicateModule {
     ) -> Option<usize> {
         let e = &entities[i];
         let l = e.skeleton.len();
-        let tol = (l / 5).max(2);
+        let tol = (l / LENGTH_BUCKET_DIVISOR).max(2);
         let lo = l.saturating_sub(tol);
         let hi = l + tol;
         for &len in len_keys.iter().filter(|&&k| k >= lo && k <= hi) {
@@ -322,7 +329,7 @@ impl DuplicateModule {
                 if Self::consts_differ(e, later) {
                     continue;
                 }
-                if Similarity::dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j)) >= 0.9 {
+                if Similarity::dice_from_bigrams(interner.bigrams_of(i), interner.bigrams_of(j)) >= DICE_MIN {
                     return Some(j);
                 }
             }

@@ -4,6 +4,10 @@
 /// The vague role-suffix names hiding load-bearing code — one table for both
 /// languages; the case differs (Python `Manager`, Rust `Manager` — same
 /// UpperCamel role nouns appear in both).
+/// The span and method counts at which a vague suffix names a real abstraction.
+const VAGUE_SPAN_LINES: usize = 120;
+const VAGUE_METHODS: usize = 6;
+
 pub const VAGUE_SUFFIXES: [&str; 8] = [
     "Manager",
     "Orchestrator",
@@ -19,7 +23,7 @@ pub const VAGUE_SUFFIXES: [&str; 8] = [
 /// weight (large span or several methods); a thin class is the name itself
 /// communicating. Pure — each language layer feeds its own (span, methods).
 pub fn vague_role_is_loaded(name: &str, span_lines: usize, methods: usize) -> bool {
-    VAGUE_SUFFIXES.iter().any(|s| name.ends_with(s)) && (span_lines >= 120 || methods >= 6)
+    VAGUE_SUFFIXES.iter().any(|s| name.ends_with(s)) && (span_lines >= VAGUE_SPAN_LINES || methods >= VAGUE_METHODS)
 }
 
 /// The matching vague role suffix of a name (for the finding message).

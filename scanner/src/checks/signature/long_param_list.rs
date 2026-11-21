@@ -11,6 +11,9 @@ use crate::ScanState;
 use super::stub_body::StubBody;
 
 /// The long-parameter-list rule.
+/// The parameter count above which a signature is a long-param-list finding.
+const LONG_PARAMS_MIN: usize = 5;
+
 pub struct LongParamList;
 
 impl LongParamList {
@@ -25,7 +28,7 @@ impl LongParamList {
                 n -= 1;
             }
         }
-        if n > 5 && !StubBody::is_trivial(&f.body) {
+        if n > LONG_PARAMS_MIN && !StubBody::is_trivial(&f.body) {
             state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
             file: state.file.to_string(),
             line: Source::line_of(source, f.name.range().start()),

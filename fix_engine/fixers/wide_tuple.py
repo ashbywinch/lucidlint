@@ -7,7 +7,7 @@ members, and its libcst visitors are nested classes.
 from __future__ import annotations
 
 import keyword
-from typing import NamedTuple, override
+from typing import Any, NamedTuple, override
 
 import libcst as cst
 from libcst.metadata import ParentNodeProvider, PositionProvider
@@ -18,6 +18,10 @@ from fix_engine.rewrite import Rewrite
 
 
 class WideTuple:
+    # a tuple needs this many positions before a record names anything: a pair
+    # reads fine positionally
+    _MIN_RECORD_ARITY = 3
+
     """The wide-tuple fix for one request: the annotation and its build sites
     become a named record class."""
 
@@ -33,7 +37,7 @@ class WideTuple:
         elements: tuple[cst.BaseExpression, ...] | None
 
     def __init__(self, request) -> None:
-        self.request = request
+        self.request: Any = request
 
     def run(self) -> str | None:
         """Introduce the record class for the flagged fixed-arity tuple: the
@@ -92,7 +96,7 @@ class WideTuple:
             if not isinstance(node.target, cst.Name):
                 return
             arity = WideTuple._fixed_tuple_arity(node.annotation.annotation)
-            if arity is None or arity < 3:
+            if arity is None or arity < WideTuple._MIN_RECORD_ARITY:
                 return
             elements = None
             if WideTuple._is_arity_tuple(node.value, arity):
@@ -105,17 +109,17 @@ class WideTuple:
             if ModuleOutline.span(self.get_metadata(PositionProvider, node)).start.line != self.line:
                 return
             for param in [*node.params.posonly_params, *node.params.params, *node.params.kwonly_params]:
-                if param.annotation is None:
-                    continue
-                arity = WideTuple._fixed_tuple_arity(param.annotation.annotation)
-                if arity is not None and arity >= 3:
-                    self.sites.append(
-                        WideTuple._Site("param", param.name.value, arity, param.annotation.annotation, None)
-                    )
+                if param.annotation is not None:
+                    self._note_site("param", param.name.value, param.annotation.annotation)
             if node.returns is not None:
-                arity = WideTuple._fixed_tuple_arity(node.returns.annotation)
-                if arity is not None and arity >= 3:
-                    self.sites.append(WideTuple._Site("return", node.name.value, arity, node.returns.annotation, None))
+                self._note_site("return", node.name.value, node.returns.annotation)
+
+        def _note_site(self, where: str, var: str, annotation: cst.BaseExpression) -> None:
+            """Record the site when the annotation names a record's worth of
+            positions — the parameter and the return path ask the same question."""
+            arity = WideTuple._fixed_tuple_arity(annotation)
+            if arity is not None and arity >= WideTuple._MIN_RECORD_ARITY:
+                self.sites.append(WideTuple._Site(where, var, arity, annotation, None))
 
     @staticmethod
     def _fixed_tuple_arity(node: cst.BaseExpression | None) -> int | None:

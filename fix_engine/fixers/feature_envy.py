@@ -15,10 +15,14 @@ from fix_engine.module_outline import ModuleOutline
 
 
 class FeatureEnvy:
+    # a move is only worth it when the method reads the envied object's fields
+    # this many times — below that, the call is a passing reference
+    _MIN_ENVIED_READS = 4
+
     """The feature envy fix for one request."""
 
     def __init__(self, request: Any) -> None:
-        self.request = request
+        self.request: Any = request
 
     class _Collaborator(NamedTuple):
         """One `graph = self.graph` alias: the local name and the owner field
@@ -58,7 +62,7 @@ class FeatureEnvy:
         if not aliases:
             return None
         alias, attr = max(aliases, key=lambda a: FeatureEnvy._alias_field_reads(method, a.alias))
-        if FeatureEnvy._alias_field_reads(method, alias) < 4:
+        if FeatureEnvy._alias_field_reads(method, alias) < FeatureEnvy._MIN_ENVIED_READS:
             return None
         envied = FeatureEnvy._find_envied_class(owner, attr)
         if envied is None:
@@ -88,9 +92,7 @@ class FeatureEnvy:
             reads, _, _ = FeatureEnvy._stmt_analysis(stmt)
             remaining_reads |= reads
         outputs = [n for n in derived_order if n in remaining_reads]
-        new_body: list = []
-        for stmt in movable:
-            new_body.append(FeatureEnvy._rewrite_receiver_to_self(stmt, alias))
+        new_body: list = [FeatureEnvy._rewrite_receiver_to_self(stmt, alias) for stmt in movable]
         ret = cst.Return(value=cst.Tuple(elements=[cst.Element(cst.Name(n)) for n in outputs]) if outputs else None)
         new_body.append(cst.SimpleStatementLine(body=[ret]))
         new_method = cst.FunctionDef(

@@ -9,6 +9,9 @@ use ruff_python_ast::{Expr, Stmt, StmtIf};
 /// Mirrors fix_engine's _BoundNames (Assign/AnnAssign/For/With targets and
 /// walrus/import bindings): a name bound in one dispatch arm and READ in a
 /// sibling cannot be a uniform handler parameter.
+/// The nested-item count that makes a helper body a pipeline.
+const NESTED_ITEMS_MIN: usize = 3;
+
 struct DispatchArmNames<'a> {
     bound: HashSet<&'a str>,
     read: HashSet<&'a str>,
@@ -72,7 +75,7 @@ impl FnShape {
             }
             n += 1;
         }
-        if n < 3 {
+        if n < NESTED_ITEMS_MIN {
             return None;
         }
         Some(acc)
@@ -165,7 +168,7 @@ impl FnShape {
             }
             n += 1;
         }
-        if n < 3 {
+        if n < NESTED_ITEMS_MIN {
             return None;
         }
         // the no-match path: a single trailing `return <default>`

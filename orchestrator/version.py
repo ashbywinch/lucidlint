@@ -26,7 +26,7 @@ class Version:
         # the artifact root: the entry module sits beside this package, so the
         # package's parent is the bundle root, the checkout root, or the
         # site-packages that holds the distribution
-        self.here = here or artifact_root()
+        self.here: Path = here or artifact_root()
 
     def from_bundle(self) -> str | None:
         """The version.txt a release bundle ships (the tag, written with a
@@ -48,11 +48,11 @@ class Version:
             return bundled
         try:
             return metadata.version("lucidlint")
-        except Exception:
+        except metadata.PackageNotFoundError:
             try:
                 with (self.here / "pyproject.toml").open("rb") as f:
                     return str(tomllib.load(f)["project"]["version"])
-            except Exception:
+            except (OSError, tomllib.TOMLDecodeError, KeyError):
                 return "0.0.0.dev"
 
 

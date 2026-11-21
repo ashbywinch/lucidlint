@@ -15,6 +15,9 @@ use std::path::Path;
 pub use crate::rules_gen::rule_groups;
 
 /// The repo's `lucidlint.json` read as one object: rules, ignores and per-path overrides.
+/// A character range in a glob pattern is three characters: `a-z`.
+const CHAR_RANGE_LEN: usize = 3;
+
 pub struct Config;
 
 /// The repo's silencing config — global and per-path ignored signals.
@@ -194,7 +197,7 @@ impl Config {
                         any = true;
                     }
                 }
-                i += 3;
+                i += CHAR_RANGE_LEN;
             } else {
                 if t.first() == Some(&p[i]) {
                     any = true;

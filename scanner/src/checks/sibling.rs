@@ -257,13 +257,11 @@ impl SiblingValueClass {
         let mut out = Vec::new();
         for (_, classes) in per_dir {
             for i in 0..classes.len() {
-                for j in (i + 1)..classes.len() {
+                out.extend(((i + 1)..classes.len()).filter_map(|j| {
                     let (_, a) = classes[i];
                     let (rel_b, b) = classes[j];
-                    if let Some(f) = a.duplicate_of(rel_b, b) {
-                        out.push(f);
-                    }
-                }
+                    a.duplicate_of(rel_b, b)
+                }));
             }
         }
         out
