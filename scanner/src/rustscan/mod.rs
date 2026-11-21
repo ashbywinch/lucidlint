@@ -937,6 +937,16 @@ mod tests {
     }
 
     #[test]
+    fn loop_worklist_drain_with_a_separate_result_stays_silent() {
+        // a drain whose body only accumulates a result is still the traversal:
+        // the hoist recipe's "then combine or fold" describes neither shape
+        let src = "fn collect(stack: &mut Vec<u32>) -> Vec<u32> {\n    let mut out = Vec::new();\n    while let Some(x) = stack.pop() {\n        let a = x * 2;\n        let b = a + 1;\n        let c = b - 1;\n        let d = c * 2;\n        out.push(d);\n    }\n    out\n}\n";
+        let fs = scan(src);
+        assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
+        assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
+    }
+
+    #[test]
     fn loop_worklist_drain_reads_the_ufcs_spelling_too() {
         // `Vec::pop(&mut stack)` is the same drain written as a free call —
         // the removed-from name is the first argument

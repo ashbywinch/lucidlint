@@ -275,6 +275,9 @@ impl LoopFamily {
     /// the SAME kind the loop mutates. Anything else (prior contents, a
     /// different name, another statement in between) refuses in
     /// `fix_engine._rewrite_plan` — the rewrite cannot preserve prior contents.
+    /// The `stmts` list holds statements only: comments and blank lines are
+    /// trivia, so the entry before the loop is the previous STATEMENT however
+    /// many lines separate them.
     fn init_is_empty(prev: Option<&Stmt>, acc: &str, kind: &str) -> bool {
         fn empty_kind(e: &Expr) -> Option<&'static str> {
             match e {

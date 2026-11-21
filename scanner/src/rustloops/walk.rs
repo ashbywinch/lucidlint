@@ -24,10 +24,13 @@ pub(super) struct LoopWalk<'a, 'b> {
 
 impl<'a, 'b> LoopWalk<'a, 'b> {
     fn judge(&mut self, line: usize, body: &[syn::Stmt], is_for: bool, mutated: Vec<String>, drains: &[String]) {
-        if drains.iter().any(|d| mutated.contains(d)) {
-            // the loop consumes the worklist its body feeds — the writes are
-            // the walk's own state, so no output can be computed from the
-            // input and no per-item step exists to hoist; silence is the signal
+        if !drains.is_empty() {
+            // the loop consumes a worklist in its CONDITION — it is the
+            // traversal, and its writes are the walk's state, not outputs.
+            // This holds whether or not the body feeds the same collection:
+            // a drain that only reads the worklist and accumulates a result
+            // elsewhere is still a traversal, and "hoist the per-item step,
+            // then combine or fold" describes neither shape (#109).
             return;
         }
         let build = if is_for { RustLoops::pipeline_build(body) } else { None };
