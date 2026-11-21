@@ -6,8 +6,6 @@
 //! A wire payload is still a record: serialisation is no excuse for skipping
 //! the class — write a serialiser method on the class if the boundary needs
 //! one.
-// lucidlint: ignore-file large-function the family walker stays one mapping so every
-// record position is handled in one place — the alternative is six partial walkers
 
 use std::collections::HashSet;
 
@@ -129,8 +127,16 @@ struct ExportEdge {
     fields: HashSet<String>,
 }
 /// The record-shape family: the signature and literal shapes that leave a
-/// record unnamed, and the one walk that reports them.
-pub struct RecordShape;
+/// record unnamed, and the module facts they are judged against. The rule
+/// object owns its module's facts, so the per-function step is a method
+/// instead of a five-parameter call.
+pub struct RecordShape {
+    has_ingestion: bool,
+    from_dict_classes: HashSet<String>,
+    classes: HashSet<String>,
+    export_edges: Vec<ExportEdge>,
+    bindings: TypeBindings,
+}
 
 impl RecordShape {
     /// `_name_of`: the bare name of an annotation (typing.Any -> Any).
@@ -758,188 +764,190 @@ impl RecordShape {
             && !Self::param_is_mutated(&function.body, arg)
     }
 
-    /// The record-shape family: signature findings + record dict literals,
-    /// walking the module in ast.walk BFS order (nested functions included).
+    /// The record-shape family: the signature and literal arms, each a named
+    /// phase over one module.
     pub fn findings(state: &mut ScanState, body: &[Stmt], source: &str) {
+        let rule = RecordShape {
+            has_ingestion: Self::module_has_from_dict_class(body),
+            from_dict_classes: Self::module_from_dict_class_names(body),
+            classes: body
+                .iter()
+                .filter_map(|s| match s {
+                    Stmt::ClassDef(c) => Some(c.name.to_string()),
+                    _ => None,
+                })
+                .collect(),
+            export_edges: Self::module_export_edges(body, source),
+            bindings: Self::module_type_bindings(body),
+        };
+        rule.judge_signatures(state, body, source);
+        let hits = Self::record_literals(body, source, &rule.bindings);
+        Self::emit_record_literals(state, hits, &rule.export_edges);
+    }
+
+    /// The signature arm: walk the module skeleton in BFS order, asking the
+    /// per-function step about every def. The traversal owns the queue; the
+    /// judgment lives in `judge_function`.
+    fn judge_signatures(&self, state: &mut ScanState, body: &[Stmt], source: &str) {
         let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
         let mut qi = 0usize;
-        // F1: the module-level ingestion fact — one scan per module, applied to
-        // every wire-named function in it.
-        let module_has_ingestion = Self::module_has_from_dict_class(body);
-        // G2: the module's from_dict classes — a union-typed parameter blending
-        // one of them with the wire dict gets the union message.
-        let from_dict_classes = Self::module_from_dict_class_names(body);
-        // Issue #46: the module's OWN class names — a map parameter whose value
-        // class this module declares is exempt when the function only reads it.
-        let module_classes: HashSet<String> = body
-            .iter()
-            .filter_map(|s| match s {
-                Stmt::ClassDef(c) => Some(c.name.to_string()),
-                _ => None,
-            })
-            .collect();
-        // Issue #42: the module's export edges — the F1 mirror on the export side.
-        let export_edges = Self::module_export_edges(body, source);
-        // P1: the module's type bindings — the dict value element's resolution
-        // table (module classes, import aliases, known constructors).
-        let bindings = Self::module_type_bindings(body);
         while qi < queue.len() {
             if let Q::N(n) = queue[qi] {
                 if let AnyNodeRef::StmtFunctionDef(f) = n {
-                    let def_line = Source::line_of(source, f.name.range().start());
-                    // Issue #42: this function IS an export edge (a to_dict/to_json
-                    // method whose enclosing class declares fields) — the class
-                    // names the returned shape, so the return annotation has
-                    // nothing left to ask for. The literal arm filters per literal,
-                    // on field coverage.
-                    let export_edge = export_edges.iter().any(|e| e.name_start == f.name.range().start());
-                    let mut params: Vec<(&str, Option<&Expr>, usize)> = Vec::new();
-                    for pwd in f
-                        .parameters
-                        .posonlyargs
-                        .iter()
-                        .chain(&f.parameters.args)
-                        .chain(&f.parameters.kwonlyargs)
-                    {
-                        // H2: the finding anchors at the ANNOTATED PARAMETER's
-                        // own line (its range start), not the def line — a
-                        // multi-line signature's params report on their lines.
-                        let param_line = Source::line_of(source, pwd.parameter.range().start());
-                        params.push((
-                            pwd.parameter.name.as_str(),
-                            pwd.parameter.annotation.as_deref(),
-                            param_line,
-                        ));
-                    }
-                    if let Some(v) = &f.parameters.vararg {
-                        params.push((
-                            v.name.as_str(),
-                            v.annotation.as_deref(),
-                            Source::line_of(source, v.range().start()),
-                        ));
-                    }
-                    if let Some(k) = &f.parameters.kwarg {
-                        params.push((
-                            k.name.as_str(),
-                            k.annotation.as_deref(),
-                            Source::line_of(source, k.range().start()),
-                        ));
-                    }
-                    // P1 sub-family classification: a dict that ARRIVES at a
-                    // from_dict/from_json function's parse boundary is built
-                    // nowhere ad hoc — the A1 "call sites build it ad hoc"
-                    // premise is false there. Emit the wire message; every other
-                    // function keeps the internal-ad-hoc text.
-                    let wire =
-                        f.name.to_lowercase().contains("from_dict") || f.name.to_lowercase().contains("from_json");
-                    // F1: a wire function whose module carries a from_dict class
-                    // already sits at a typed parse boundary — no record-shape
-                    // finding at all (the wire message's advice is a step taken).
-                    if !(wire && module_has_ingestion) {
-                        for (arg, ann, param_line) in params {
-                            if let Some(a) = ann {
-                                if !Self::annotation_is_record(a, &bindings) {
-                                    continue;
-                                }
-                                // G2: a union-typed parameter whose record member
-                                // is a module class with from_dict — the union
-                                // hides which shape a caller passes; direct the
-                                // ingestion at entry.
-                                let message = if let Some(record) = Self::union_record_class(a, &from_dict_classes) {
-                                    format!("{arg} accepts the wire dict alongside the {record} class; the union hides which shape a caller passes. Ingest the wire at entry with {record}.from_dict and drop the dict from the union.")
-                                } else if wire {
-                                    format!("{arg} is the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.")
-                                } else if let Some(record) = Self::map_value_class(a, &bindings) {
-                                    // H1/P1: the collection is the unnamed shape —
-                                    // the message names the MAP, never the value
-                                    // (the annotation already names the value's
-                                    // class). Issue #46: a READ-ONLY parameter whose
-                                    // value class this module declares is the one
-                                    // shape with no missing noun — it comes in named
-                                    // and nothing is built here — so it is exempt;
-                                    // a map the function mutates keeps the finding.
-                                    // The shape must be SPELLED OUT: an alias
-                                    // (`Sources = dict[str, X]`) or a union
-                                    // (`dict[str, X] | None`) hides it behind a name,
-                                    // which is what the rule exists to make explicit
-                                    // (record_raw_dict_alias_does_not_exempt,
-                                    // record_optional_named_type_map).
-                                    if Self::is_unspelled_record_map(a, f, record.as_str(), &module_classes, arg) {
-                                        continue;
-                                    }
-                                    format!("{arg} is a map whose values are {record}. {COLLECTION_MESSAGE_TAIL}")
-                                } else {
-                                    match Self::signature_record_shape(a, &bindings) {
-                                    SignatureRecordShape::FixedTuple => format!("{arg} is a fixed-size tuple; its positions are an unnamed record, so call sites pass positionally and a position change is silent. Type {arg} with a class whose fields name the positions; create that class if none exists."),
-                                    SignatureRecordShape::List => format!("{arg} is a list whose items are unnamed records; each item's shape has no name at the call site. Type each item with a class whose fields name the shape; create that class if none exists."),
-                                    SignatureRecordShape::Dict => format!("{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists."),
-                                }
-                                };
-                                state.findings.push(Finding {
-                                    logical_start: None,
-                                    seam_members: Vec::new(),
-                                    col: 0,
-                                    file: state.file.to_string(),
-                                    line: param_line,
-                                    function: f.name.to_string(),
-                                    kind: "record-shape".into(),
-                                    severity: "fail".into(),
-                                    message,
-                                });
-                            }
-                        }
-                        if let Some(r) = &f.returns {
-                            if !export_edge && Self::annotation_is_record(r.as_ref(), &bindings) {
-                                // H2: a return finding anchors at the return
-                                // annotation's position; the def line only when
-                                // that cannot be resolved.
-                                let ret_line = {
-                                    let l = Source::line_of(source, r.range().start());
-                                    if l == 0 {
-                                        def_line
-                                    } else {
-                                        l
-                                    }
-                                };
-                                let message = if wire {
-                                    format!("{fname} returns the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.", fname = f.name.as_str())
-                                } else if let Some(record) = Self::map_value_class(r.as_ref(), &bindings) {
-                                    // P1: a return whose dict value element is a
-                                    // named type renders the collection message —
-                                    // the map is the unnamed shape, exactly as in
-                                    // the parameter arm.
-                                    format!(
-                                        "{fname} returns a map whose values are {record}. {COLLECTION_MESSAGE_TAIL}",
-                                        fname = f.name.as_str()
-                                    )
-                                } else {
-                                    match Self::signature_record_shape(r.as_ref(), &bindings) {
-                                    SignatureRecordShape::FixedTuple => format!("{fname} returns a fixed-size tuple; its positions are an unnamed record, so a position change is silent at the call site. Type the return with a class whose fields name the positions; create that class if none exists.", fname = f.name.as_str()),
-                                    SignatureRecordShape::List => format!("{fname} returns a list whose items are unnamed records; each item's shape has no name at the call site. Type each item with a class whose fields name the shape; create that class if none exists.", fname = f.name.as_str()),
-                                    SignatureRecordShape::Dict => format!("{fname} returns a dict that holds the fields of a record; the shape has no name at the call site. Type the return with the class that models the shape; create that class if none exists.", fname = f.name.as_str()),
-                                }
-                                };
-                                state.findings.push(Finding {
-                                    logical_start: None,
-                                    seam_members: Vec::new(),
-                                    col: 0,
-                                    file: state.file.to_string(),
-                                    line: ret_line,
-                                    function: f.name.to_string(),
-                                    kind: "record-shape".into(),
-                                    severity: "fail".into(),
-                                    message,
-                                });
-                            }
-                        }
-                    }
+                    self.judge_function(state, f, source);
                 }
                 skel_children(n, &mut queue);
             }
             qi += 1;
         }
-        // record dict literals ANYWHERE — shape, not position, defines a record
-        // (uniform descent; the record-position carve-out hid call-site wires)
+    }
+
+    /// The signature's parameters in source order — positional, then vararg and
+    /// kwarg — each with its annotation and the line the finding anchors at.
+    /// H2: the anchor is the ANNOTATED PARAMETER's own line (its range start),
+    /// not the def line, so a multi-line signature reports on its lines.
+    fn signature_params<'a>(f: &'a StmtFunctionDef, source: &str) -> Vec<(&'a str, Option<&'a Expr>, usize)> {
+        f.parameters
+            .posonlyargs
+            .iter()
+            .chain(&f.parameters.args)
+            .chain(&f.parameters.kwonlyargs)
+            .map(|pwd| &pwd.parameter)
+            .chain(f.parameters.vararg.iter().map(|p| p.as_ref()))
+            .chain(f.parameters.kwarg.iter().map(|p| p.as_ref()))
+            .map(|p| {
+                (
+                    p.name.as_str(),
+                    p.annotation.as_deref(),
+                    Source::line_of(source, p.range().start()),
+                )
+            })
+            .collect()
+    }
+
+    /// One function def's signature facts: the parameters and return that leave
+    /// a record unnamed, each anchored at the annotation's own line.
+    fn judge_function(&self, state: &mut ScanState, f: &StmtFunctionDef, source: &str) {
+        let def_line = Source::line_of(source, f.name.range().start());
+        // Issue #42: this function IS an export edge (a to_dict/to_json
+        // method whose enclosing class declares fields) — the class
+        // names the returned shape, so the return annotation has
+        // nothing left to ask for. The literal arm filters per literal,
+        // on field coverage.
+        let export_edge = self.export_edges.iter().any(|e| e.name_start == f.name.range().start());
+        let params = Self::signature_params(f, source);
+        // P1 sub-family classification: a dict that ARRIVES at a
+        // from_dict/from_json function's parse boundary is built
+        // nowhere ad hoc — the A1 "call sites build it ad hoc"
+        // premise is false there. Emit the wire message; every other
+        // function keeps the internal-ad-hoc text.
+        let wire = f.name.to_lowercase().contains("from_dict") || f.name.to_lowercase().contains("from_json");
+        // F1: a wire function whose module carries a from_dict class
+        // already sits at a typed parse boundary — no record-shape
+        // finding at all (the wire message's advice is a step taken).
+        if !(wire && self.has_ingestion) {
+            for (arg, ann, param_line) in params {
+                if let Some(a) = ann {
+                    if !Self::annotation_is_record(a, &self.bindings) {
+                        continue;
+                    }
+                    // G2: a union-typed parameter whose record member
+                    // is a module class with from_dict — the union
+                    // hides which shape a caller passes; direct the
+                    // ingestion at entry.
+                    let message = if let Some(record) = Self::union_record_class(a, &self.from_dict_classes) {
+                        format!("{arg} accepts the wire dict alongside the {record} class; the union hides which shape a caller passes. Ingest the wire at entry with {record}.from_dict and drop the dict from the union.")
+                    } else if wire {
+                        format!("{arg} is the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.")
+                    } else if let Some(record) = Self::map_value_class(a, &self.bindings) {
+                        // H1/P1: the collection is the unnamed shape —
+                        // the message names the MAP, never the value
+                        // (the annotation already names the value's
+                        // class). Issue #46: a READ-ONLY parameter whose
+                        // value class this module declares is the one
+                        // shape with no missing noun — it comes in named
+                        // and nothing is built here — so it is exempt;
+                        // a map the function mutates keeps the finding.
+                        // The shape must be SPELLED OUT: an alias
+                        // (`Sources = dict[str, X]`) or a union
+                        // (`dict[str, X] | None`) hides it behind a name,
+                        // which is what the rule exists to make explicit
+                        // (record_raw_dict_alias_does_not_exempt,
+                        // record_optional_named_type_map).
+                        if Self::is_unspelled_record_map(a, f, record.as_str(), &self.classes, arg) {
+                            continue;
+                        }
+                        format!("{arg} is a map whose values are {record}. {COLLECTION_MESSAGE_TAIL}")
+                    } else {
+                        match Self::signature_record_shape(a, &self.bindings) {
+                        SignatureRecordShape::FixedTuple => format!("{arg} is a fixed-size tuple; its positions are an unnamed record, so call sites pass positionally and a position change is silent. Type {arg} with a class whose fields name the positions; create that class if none exists."),
+                        SignatureRecordShape::List => format!("{arg} is a list whose items are unnamed records; each item's shape has no name at the call site. Type each item with a class whose fields name the shape; create that class if none exists."),
+                        SignatureRecordShape::Dict => format!("{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists."),
+                    }
+                    };
+                    state.findings.push(Finding {
+                        logical_start: None,
+                        seam_members: Vec::new(),
+                        col: 0,
+                        file: state.file.to_string(),
+                        line: param_line,
+                        function: f.name.to_string(),
+                        kind: "record-shape".into(),
+                        severity: "fail".into(),
+                        message,
+                    });
+                }
+            }
+            if let Some(r) = &f.returns {
+                if !export_edge && Self::annotation_is_record(r.as_ref(), &self.bindings) {
+                    // H2: a return finding anchors at the return
+                    // annotation's position; the def line only when
+                    // that cannot be resolved.
+                    let ret_line = {
+                        let l = Source::line_of(source, r.range().start());
+                        if l == 0 {
+                            def_line
+                        } else {
+                            l
+                        }
+                    };
+                    let message = if wire {
+                        format!("{fname} returns the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.", fname = f.name.as_str())
+                    } else if let Some(record) = Self::map_value_class(r.as_ref(), &self.bindings) {
+                        // P1: a return whose dict value element is a
+                        // named type renders the collection message —
+                        // the map is the unnamed shape, exactly as in
+                        // the parameter arm.
+                        format!(
+                            "{fname} returns a map whose values are {record}. {COLLECTION_MESSAGE_TAIL}",
+                            fname = f.name.as_str()
+                        )
+                    } else {
+                        match Self::signature_record_shape(r.as_ref(), &self.bindings) {
+                        SignatureRecordShape::FixedTuple => format!("{fname} returns a fixed-size tuple; its positions are an unnamed record, so a position change is silent at the call site. Type the return with a class whose fields name the positions; create that class if none exists.", fname = f.name.as_str()),
+                        SignatureRecordShape::List => format!("{fname} returns a list whose items are unnamed records; each item's shape has no name at the call site. Type each item with a class whose fields name the shape; create that class if none exists.", fname = f.name.as_str()),
+                        SignatureRecordShape::Dict => format!("{fname} returns a dict that holds the fields of a record; the shape has no name at the call site. Type the return with the class that models the shape; create that class if none exists.", fname = f.name.as_str()),
+                    }
+                    };
+                    state.findings.push(Finding {
+                        logical_start: None,
+                        seam_members: Vec::new(),
+                        col: 0,
+                        file: state.file.to_string(),
+                        line: ret_line,
+                        function: f.name.to_string(),
+                        kind: "record-shape".into(),
+                        severity: "fail".into(),
+                        message,
+                    });
+                }
+            }
+        }
+    }
+
+    /// The literal arm: every dict literal anywhere in the module, in statement
+    /// order. Dedupe is the emit step's job.
+    fn record_literals(body: &[Stmt], source: &str, bindings: &TypeBindings) -> Vec<RecordHit> {
         let mut found: Vec<RecordHit> = Vec::new();
         // descend EVERY node (function bodies included) — each Expr feeds the
         // scan, which recurses internally through containers
@@ -951,19 +959,25 @@ impl RecordShape {
                 Stmt::FunctionDef(f) => {
                     let fd_stmt = Stmt::FunctionDef(f.clone());
                     for e in stmt_exprs(&fd_stmt) {
-                        Self::record_literal_scan(e, source, &bindings, &mut found);
+                        Self::record_literal_scan(e, source, bindings, &mut found);
                     }
                     sq.extend(f.body.iter());
                 }
                 _ => {
                     for e in stmt_exprs(sq[si]) {
-                        Self::record_literal_scan(e, source, &bindings, &mut found);
+                        Self::record_literal_scan(e, source, bindings, &mut found);
                     }
                     push_stmt_children(sq[si], &mut sq);
                 }
             }
             si += 1;
         }
+        found
+    }
+
+    /// The literal emit step: one finding per unique (line, col), skipping a
+    /// literal that rebuilds an export edge's declared fields.
+    fn emit_record_literals(state: &mut ScanState, found: Vec<RecordHit>, export_edges: &[ExportEdge]) {
         // dedupe on (line, col): the dict() call-form and a nested literal can
         // share a range — one finding per record node
         let mut seen: HashSet<(usize, usize)> = HashSet::new();
