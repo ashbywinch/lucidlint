@@ -15,7 +15,9 @@ import re
 from pathlib import Path
 
 import fix_engine
-import lucidlint as ch
+import lucidlint
+from orchestrator.host import Host
+from orchestrator.services import Services
 
 SCANNER_SRC = Path(__file__).resolve().parent.parent / "scanner" / "src"
 TAIL = re.compile(r"— fix: ([a-z-]+)")
@@ -26,7 +28,14 @@ def rust_fixable_from_dispatch() -> set[str]:
     match arms so the orchestrator's constant and the dispatcher cannot
     drift apart."""
     src = (SCANNER_SRC / "main.rs").read_text()
-    return {m.replace("_", "-") for m in re.findall(r"fix::fix_([a-z_]+)\(", src)}
+    snake = {m.replace("_", "-") for m in re.findall(r"fix::fix_([a-z_]+)\(", src)}
+    # the class-based fixers (LoopPipeline::fix, LoopHoist::fix) — the same
+    # dispatcher routes, named by the type that owns the rewrite
+    camel = {
+        re.sub(r"(?<!^)(?=[A-Z])", "-", m).lower()
+        for m in re.findall(r"fix::([A-Za-z]+)::fix\(", src)
+    }
+    return snake | camel
 
 
 def tails_of(src: str) -> list[str]:
@@ -40,8 +49,8 @@ def tails_of(src: str) -> list[str]:
 
 def test_python_finding_tails_name_python_fixable_kinds():
     offenders = []
-    for rs in sorted(SCANNER_SRC.glob("*.rs")):
-        if rs.name == "rustscan.rs":  # findings about .rs files: guarded below
+    for rs in sorted(SCANNER_SRC.rglob("*.rs")):
+        if "rustscan" in rs.parts:  # findings about .rs files: guarded below
             continue
         for kind in tails_of(rs.read_text()):
             if kind not in fix_engine.FIXABLE_KINDS:
@@ -50,7 +59,10 @@ def test_python_finding_tails_name_python_fixable_kinds():
 
 
 def test_rust_finding_tails_name_rust_fixable_kinds():
-    src = (SCANNER_SRC / "rustscan.rs").read_text() + (SCANNER_SRC / "rustloops.rs").read_text()
+    rustscan = sorted((SCANNER_SRC / "rustscan").rglob("*.rs"))
+    src = "".join(p.read_text() for p in rustscan) + "".join(
+        p.read_text() for p in sorted((SCANNER_SRC / "rustloops").rglob("*.rs"))
+    )
     fixable = rust_fixable_from_dispatch()
     offenders = [k for k in tails_of(src) if k not in fixable]
     assert offenders == [], f"fix directives with no Rust fixer: {offenders}"
@@ -116,7 +128,7 @@ def test_fix_refuses_engine_less_kind_on_rust_file(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
     target = repo / "houses" / "lib.rs"
     target.write_text("fn main() {}\n")
-    binary = ch.SERVICES.rust_scan.binary(repo)
+    binary = Services(Host.default()).rust_scan.binary(repo)
     assert binary is not None
     spec = json.dumps({"kind": "boolean-arg", "file": str(target), "line": 1, "name": ""})
     proc = subprocess.run([str(binary), "--fix", spec], capture_output=True, text=True, cwd=str(repo))
@@ -146,6 +158,6 @@ def run_fix(repo, *extra):
     saved = sys.argv
     sys.argv = ["lucidlint.py", "--repo", str(repo), *extra]
     try:
-        return ch.main()
+        return lucidlint.main()
     finally:
         sys.argv = saved

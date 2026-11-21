@@ -55,10 +55,10 @@ requires = ["setuptools>=77.0", "wheel>=0.40"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["lucidlint", "fix_engine", "rule_metadata"]
+py-modules = ["lucidlint", "rule_metadata"]
 
 [tool.setuptools.packages.find]
-include = ["lucidlint_bin*"]
+include = ["lucidlint_bin*", "orchestrator*", "fix_engine*"]
 
 [tool.setuptools.package-data]
 lucidlint_bin = ["bin/*"]
@@ -93,7 +93,7 @@ addopts = "--ignore=tests/fixtures/rust"
 # are py-modules in the wheel and the tests import them in-process. scripts/
 # is dev tooling, not shipped; the scan core and the radon-parity crate have
 # their own Rust coverage in `make coverage`.
-source = ["lucidlint", "fix_engine", "rule_metadata"]
+source = ["lucidlint", "orchestrator", "fix_engine", "rule_metadata"]
 omit = ["*/__main__.py"]
 
 [tool.pyrefly]

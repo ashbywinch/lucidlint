@@ -52,7 +52,7 @@ GROUP_INFO = {
     ),
     "graph": (
         "Group 5: Hotspot & risk",
-        "`hub-file`, `high-risk` and `over-abstraction` require the optional "
+        "`high-risk` and `over-abstraction` require the optional "
         "`code-review-graph` tool (installed separately or via `pip install "
         "code-review-graph`); `hotspot` uses git churn plus the scan's own CC, "
         "and `churn-untested` uses git churn plus the repo's coverage snapshot. "
@@ -360,6 +360,25 @@ CATALOG = RuleCatalog([
          "a reader cannot hold the whole job: extract each domain step into a "
          "named function.",
          fix="extract-method"),
+    Rule("several-definitions", "warn", "architecture", "Both",
+         "A module holding 3–10 top-level definitions — Python functions and "
+         "classes (constants are data); Rust types, groups of functions that "
+         "take one type (a class equivalent), and functions left with no "
+         "receiver. A module holds one concern, and a concern is a class (in "
+         "Rust, a type with its impl). The message writes both cases: if the "
+         "definitions are one concern, they become that class's fields and "
+         "methods; if they are several, the module is split until each concern "
+         "has its module and its class. All but one class being a method-less "
+         "value record is one concern plus its records, and is exempt; a "
+         "decorated function is a framework entry point, not a definition the "
+         "module owns. The upper rung is `many-definitions`."),
+    Rule("many-definitions", "warn", "architecture", "Both",
+         "A module holding more than 10 top-level definitions — Python "
+         "functions and classes; Rust types, groups of functions that take one "
+         "type (a class equivalent), and functions left with no receiver. Past "
+         "ten, the module is a grab bag of concerns: split it by concern, one "
+         "module per concern, each holding the class it is about. The second "
+         "rung of the `several-definitions` ladder, in both languages."),
     Rule("closures", "fail", "architecture", "Both",
          "A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line "
          "span) — the nested structure is a class waiting to be extracted.",
@@ -372,7 +391,9 @@ CATALOG = RuleCatalog([
          fix="extract-class"),
     Rule("strewing", "fail", "architecture", "Both",
          "≥3 free functions sharing the same leading parameter — they share "
-         "data, they're a class.",
+         "data, so the class exists without its methods: in Python, extract the "
+         "class (or the struct that already names it); in Rust, give the "
+         "struct an impl and move the functions onto it.",
          display_name="strewing → latent-class", display_group="latent-class",
          fix="extract-class"),
     Rule("misplaced-method", "fail", "architecture", "Python",
@@ -471,6 +492,17 @@ CATALOG = RuleCatalog([
          "Dice similarity ≥ 0.9 (structural skeleton bigrams) — copy-paste; "
          "extract the shared logic.",
          display_group="standard"),
+    Rule("mixed-module", "warn", "architecture", "Rust",
+         "A Rust module whose top-level definitions fall into parts that never "
+         "reference each other, by one of two arms: ≥ 3 groups of items that "
+         "reference each other (each group is a connected component of the item "
+         "graph, so one group is one concept however many items it holds), or a "
+         "module of ≥ 20 definitions whose items fall into ≥ 6 disconnected "
+         "parts (several small groups plus stand-alone items — the grab bag no "
+         "single family size reveals). Impl blocks belong to their type, "
+         "`use`/`mod` are boundaries rather than items, and test items are "
+         "skipped. Move each group into its own module, named after what its "
+         "members are about."),
     Rule("duplicate-module", "fail", "architecture", "Both",
          "Two modules or classes with the same structural skeleton (>= 0.9 "
          "Dice) and the same declared fields — plus, for two classes, "
@@ -730,12 +762,6 @@ CATALOG = RuleCatalog([
          display_name="loop-hoist → loop-pipeline", display_group="loop-pipeline",
          fix="loop-hoist"),
     # ---- graph-based (require code-review-graph)
-    Rule("hub-file", "fail", "graph", "Graph",
-         "A module that ≥15 other modules import or call into — the change "
-         "blast radius. The count is distinct dependent files (tests "
-         "excluded); a change here reaches every one of them, so narrow the "
-         "interface it exposes to a domain noun, or split it by the dependent "
-         "groups."),
     Rule("high-risk", "fail", "graph", "Graph",
          "A function with >10 callers, no test coverage, and/or a "
          "security-related name (`auth`, `login`, `token`, `sql`...)."),

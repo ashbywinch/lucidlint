@@ -73,11 +73,7 @@ fn test_visitor_simple() {
         // wrap as a function so decisions land inside one function like radon's
         let wrapped = format!("def f():\n    {}", code.replace('\n', "\n    ").trim_end());
         let visitor = ComplexityVisitor::from_code(wrapped.as_str());
-        assert_eq!(
-            visitor.functions[0].complexity, expected,
-            "code:\n{}",
-            wrapped
-        );
+        assert_eq!(visitor.functions[0].complexity, expected, "code:\n{}", wrapped);
     }
 }
 
@@ -89,10 +85,22 @@ fn test_visitor_linenos_are_source_lines() {
     let code = "# comment\nx = 1\n\ndef f(a):\n    return a\n\nclass C:\n    def m(self):\n        return 1\n";
     let v = ComplexityVisitor::from_code(code);
     let blocks = v.blocks();
-    let f = blocks.iter().find(|b| match b { Block::Function(f) => f.name == "f", _ => false }).unwrap();
+    let f = blocks
+        .iter()
+        .find(|b| match b {
+            Block::Function(f) => f.name == "f",
+            _ => false,
+        })
+        .unwrap();
     let Block::Function(fb) = f else { unreachable!() };
     assert_eq!(fb.lineno, 4, "f starts on line 4 (bytes 10, not 4)");
-    let m = blocks.iter().find(|b| match b { Block::Function(f) => f.name == "m", _ => false }).unwrap();
+    let m = blocks
+        .iter()
+        .find(|b| match b {
+            Block::Function(f) => f.name == "m",
+            _ => false,
+        })
+        .unwrap();
     let Block::Function(mb) = m else { unreachable!() };
     assert_eq!(mb.lineno, 8, "method m starts on line 8");
     let c = blocks.iter().find(|b| matches!(b, Block::Class(_))).unwrap();

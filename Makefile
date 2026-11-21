@@ -128,7 +128,8 @@ wheel-check: wheel
 bundle-check: scanner-check
 	@tmp=$$(mktemp -d); \
 	mkdir -p $$tmp/bundle/bin; \
-	cp lucidlint.py rule_metadata.py fix_engine.py release/Makefile $$tmp/bundle/; \
+	cp lucidlint.py rule_metadata.py release/Makefile $$tmp/bundle/; \
+	cp -r fix_engine orchestrator $$tmp/bundle/; \
 	cp scanner/target/release/lucidlint $$tmp/bundle/bin/; \
 	printf '%s\n' dev > $$tmp/bundle/version.txt; \
 	test "$$($(PYTHON) $$tmp/bundle/lucidlint.py --version)" = "lucidlint dev" || { echo "${RED}bundle reports the wrong version${NC}"; exit 1; }; \

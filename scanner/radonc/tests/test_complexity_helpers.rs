@@ -4,8 +4,7 @@
 //! radon parity table); this file pins the helper layer the scanner calls.
 
 use radonc::complexity::{
-    add_inner_blocks, alpha, average_complexity, cc_visit, cc_visit_ast, lines, score,
-    sorted_results, Order,
+    add_inner_blocks, alpha, average_complexity, cc_visit, cc_visit_ast, lines, score, sorted_results, Order,
 };
 use radonc::visitors::{get_complexity, Block, Class, Function};
 

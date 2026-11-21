@@ -32,7 +32,6 @@ Usage:
   scripts/pyrefly-lock.py check [--baseline FILE] [--pyrefly-config TOML]
   scripts/pyrefly-lock.py update-baseline [--baseline FILE] [--pyrefly-config TOML]
 """
-# lucidlint: ignore-file global-state the lock script's constants are its configuration
 
 from __future__ import annotations
 
@@ -67,64 +66,107 @@ class Diagnostic(TypedDict, total=False):
     concise_description: str
 
 
-def _pyrefly_binary() -> str:
-    """Prefer the project venv's pyrefly, else PATH (uv tool installs)."""
-    venv = Path(".venv/bin/pyrefly")
-    if venv.is_file():
-        return str(venv)
-    return "pyrefly"
+class PyreflyLock:
+    """The lock run: the diagnostics pyrefly reports now, the committed
+    baseline, and the both-direction comparison between them."""
 
+    def __init__(self, baseline: Path, extra_args: list[str]):
+        self.baseline = baseline
+        self.extra_args = extra_args
 
-# Extra args passed to every pyrefly invocation.
-# A tuple: the tool's own gate flags module-level mutable lists, and the
-# invariant holds — these args never change after import.
-PYREFLY_BASE_ARGS = (_pyrefly_binary(), "check", "--output-format", "json")
+    @staticmethod
+    def binary() -> str:
+        """Prefer the project venv's pyrefly, else PATH (uv tool installs)."""
+        venv = Path(".venv/bin/pyrefly")
+        if venv.is_file():
+            return str(venv)
+        return "pyrefly"
 
+    @staticmethod
+    def error_key(e: Diagnostic) -> DiagnosticKey:
+        """(path, line, column, name) — None-safe, so unlocated diagnostics
+        compare and sort stably instead of crashing or collapsing."""
+        return DiagnosticKey(
+            e.get("path") or "", e.get("line") or 0, e.get("column") or 0, e.get("name") or ""
+        )
 
-def error_key(e: Diagnostic) -> DiagnosticKey:
-    """(path, line, column, name) — None-safe, so unlocated diagnostics
-    compare and sort stably instead of crashing or collapsing."""
-    return DiagnosticKey(
-        e.get("path") or "", e.get("line") or 0, e.get("column") or 0, e.get("name") or ""
-    )
+    def current_errors(self) -> list[Diagnostic]:
+        """Run pyrefly (no baseline) and return the full error list.
 
+        Diagnostics under tests/fixtures are filtered out: the fixtures are
+        intentionally non-compliant test input (standalone snippets, even
+        syntactically broken) and pyrefly has no config-level exclude — the
+        exclusion lives here, in the gate we own (AGENTS.md: ruff and pyrefly
+        both exclude tests/fixtures).
+        """
+        base_args = (self.binary(), "check", "--output-format", "json")
+        proc = subprocess.run(
+            (*base_args, *self.extra_args),
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode not in (0, 1):
+            # pyrefly exits 1 when errors exist (expected); anything else is a
+            # real failure (config, crash) — surface it.
+            sys.stderr.write(proc.stderr or proc.stdout)
+            sys.exit(proc.returncode)
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            sys.stderr.write(f"pyrefly returned non-JSON output:\n{proc.stdout}\n{proc.stderr}\n")
+            sys.exit(2)
+        build_parts = ("build/", "dist/", ".egg-info/")
+        return [
+            e for e in data.get("errors", [])
+            if "tests/fixtures" not in (e.get("path") or "")
+            and not any(p in (e.get("path") or "") for p in build_parts)
+        ]
 
-def current_errors(extra_args: list[str]) -> list[Diagnostic]:
-    """Run pyrefly (no baseline) and return the full error list.
+    def load_baseline(self) -> list[Diagnostic]:
+        if not self.baseline.is_file():
+            return []
+        return json.loads(self.baseline.read_text()).get("errors", [])
 
-    Diagnostics under tests/fixtures are filtered out: the fixtures are
-    intentionally non-compliant test input (standalone snippets, even
-    syntactically broken) and pyrefly has no config-level exclude — the
-    exclusion lives here, in the gate we own (AGENTS.md: ruff and pyrefly
-    both exclude tests/fixtures).
-    """
-    proc = subprocess.run(
-        (*PYREFLY_BASE_ARGS, *extra_args),
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode not in (0, 1):
-        # pyrefly exits 1 when errors exist (expected); anything else is a
-        # real failure (config, crash) — surface it.
-        sys.stderr.write(proc.stderr or proc.stdout)
-        sys.exit(proc.returncode)
-    try:
-        data = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        sys.stderr.write(f"pyrefly returned non-JSON output:\n{proc.stdout}\n{proc.stderr}\n")
-        sys.exit(2)
-    build_parts = ("build/", "dist/", ".egg-info/")
-    return [
-        e for e in data.get("errors", [])
-        if "tests/fixtures" not in (e.get("path") or "")
-        and not any(p in (e.get("path") or "") for p in build_parts)
-    ]
+    def update(self) -> int:
+        """Write the baseline from the current errors. Sorted by the same key the
+        diff uses — (path, line, column, name) with identical defaults — so the
+        committed file is canonical with respect to the comparison."""
+        errors = self.current_errors()
+        ordered = sorted(errors, key=self.error_key)
+        self.baseline.write_text(json.dumps({"errors": ordered}, indent=1) + "\n")
+        print(f"pyrefly-lock: wrote baseline with {len(ordered)} errors to {self.baseline}")
+        return 0
 
+    def check(self) -> int:
+        """Both directions must match: no new error, no stale baseline entry."""
+        current = {self.error_key(e): e for e in self.current_errors()}
+        baseline = {self.error_key(e): e for e in self.load_baseline()}
+        new_keys = current.keys() - baseline.keys()
+        stale_keys = baseline.keys() - current.keys()
 
-def load_baseline(path: Path) -> list[Diagnostic]:
-    if not path.is_file():
-        return []
-    return json.loads(path.read_text()).get("errors", [])
+        if new_keys:
+            print(f"pyrefly-lock: {len(new_keys)} NEW error(s) not in the baseline:")
+            for key in sorted(new_keys):
+                e = current[key]
+                print(f"  {e.get('path')}:{e.get('line')}:{e.get('column')} "
+                      f"[{e.get('name')}] {e.get('concise_description', '')}")
+            print("  Fix: fix the code, or run: scripts/pyrefly-lock.py update-baseline")
+
+        if stale_keys:
+            plural = "y" if len(stale_keys) == 1 else "ies"
+            print(f"pyrefly-lock: {len(stale_keys)} STALE baseline entr{plural} "
+                  f"(error no longer produced — the code changed without refreshing the baseline):")
+            for key in sorted(stale_keys):
+                e = baseline[key]
+                print(f"  {e.get('path')}:{e.get('line')}:{e.get('column')} [{e.get('name')}]")
+            print("  Fix: run: scripts/pyrefly-lock.py update-baseline && commit the refresh")
+
+        if new_keys or stale_keys:
+            return 1
+
+        n = len(baseline)
+        print(f"pyrefly-lock: clean — {n} baselined error{'s' if n != 1 else ''} match the current code.")
+        return 0
 
 
 def main() -> int:
@@ -138,47 +180,10 @@ def main() -> int:
     args = parser.parse_args()
 
     extra = ["-c", str(args.pyrefly_config)] if args.pyrefly_config else []
-
-    errors = current_errors(extra)
-    current = {error_key(e): e for e in errors}
-    baseline = {error_key(e): e for e in load_baseline(args.baseline)}
-
+    lock = PyreflyLock(args.baseline, extra)
     if args.cmd == "update-baseline":
-        # Sort by the same key the diff uses — (path, line, column, name)
-        # with identical defaults — so the committed file is canonical
-        # with respect to the comparison.
-        ordered = sorted(errors, key=error_key)
-        args.baseline.write_text(json.dumps({"errors": ordered}, indent=1) + "\n")
-        print(f"pyrefly-lock: wrote baseline with {len(ordered)} errors to {args.baseline}")
-        return 0
-
-    # check: both directions must match.
-    new_keys = current.keys() - baseline.keys()
-    stale_keys = baseline.keys() - current.keys()
-
-    if new_keys:
-        print(f"pyrefly-lock: {len(new_keys)} NEW error(s) not in the baseline:")
-        for k in sorted(new_keys):
-            e = current[k]
-            print(f"  {e.get('path')}:{e.get('line')}:{e.get('column')} "
-                  f"[{e.get('name')}] {e.get('concise_description', '')}")
-        print("  Fix: fix the code, or run: scripts/pyrefly-lock.py update-baseline")
-
-    if stale_keys:
-        plural = "y" if len(stale_keys) == 1 else "ies"
-        print(f"pyrefly-lock: {len(stale_keys)} STALE baseline entr{plural} "
-              f"(error no longer produced — the code changed without refreshing the baseline):")
-        for k in sorted(stale_keys):
-            e = baseline[k]
-            print(f"  {e.get('path')}:{e.get('line')}:{e.get('column')} [{e.get('name')}]")
-        print("  Fix: run: scripts/pyrefly-lock.py update-baseline && commit the refresh")
-
-    if new_keys or stale_keys:
-        return 1
-
-    n = len(baseline)
-    print(f"pyrefly-lock: clean — {n} baselined error{'s' if n != 1 else ''} match the current code.")
-    return 0
+        return lock.update()
+    return lock.check()
 
 
 if __name__ == "__main__":

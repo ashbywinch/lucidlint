@@ -18,7 +18,7 @@ Usage:
 
 # lucidlint: ignore-file record-shape this script SERIALIZES the Cobertura wire
 # format — the attribute maps are ElementTree's, not domain records; the two
-# tuples below ARE named (_Report, _ClassCoverage), the XML stays XML.
+# records below ARE named (Report, ClassCoverage), the XML stays XML.
 
 import argparse
 import sys
@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 
-class _Report(NamedTuple):
+class Report(NamedTuple):
     """One Cobertura input: the package name it gets, its file, and the
     repo-relative prefix its class filenames take."""
 
@@ -37,7 +37,7 @@ class _Report(NamedTuple):
     prefix: str
 
 
-class _ClassCoverage(NamedTuple):
+class ClassCoverage(NamedTuple):
     """One merged class element and the line counts its package and the root
     add up — the element plus the two numbers, named."""
 
@@ -46,86 +46,95 @@ class _ClassCoverage(NamedTuple):
     valid: int
 
 
-def _rate(covered: int, valid: int) -> str:
-    """Cobertura stores rates as fractions with four decimals."""
-    return f"{(covered / valid) if valid else 0.0:.4f}"
+class CoberturaMerge:
+    """The merge itself: one package per input report, in the order given, each
+    class prefixed and its rates re-derived from the line records."""
 
+    def __init__(self, reports: list[Report]):
+        self.reports = reports
+        self.covered_total = 0
+        self.valid_total = 0
 
-def _set_rates(element: ET.Element, covered: int, valid: int) -> None:
-    """The three rate attributes every Cobertura element carries."""
-    element.set("line-rate", _rate(covered, valid))
-    element.set("branch-rate", "0")
-    element.set("complexity", "0")
+    @staticmethod
+    def rate(covered: int, valid: int) -> str:
+        """Cobertura stores rates as fractions with four decimals."""
+        return f"{(covered / valid) if valid else 0.0:.4f}"
 
+    def set_rates(self, element: ET.Element, covered: int, valid: int) -> None:
+        """The three rate attributes every Cobertura element carries."""
+        element.set("line-rate", self.rate(covered, valid))
+        element.set("branch-rate", "0")
+        element.set("complexity", "0")
 
-def _line_hits(source: ET.Element) -> dict[int, int]:
-    """Hits per line NUMBER. A Cobertura file from llvm-cov carries one record
-    per INSTANTIATION of a line (a generic or macro-expanded line appears more
-    than once); coverage is per line, so the records collapse to the highest
-    hit count — counting records instead of lines inflates both totals and
-    understates the rate."""
-    hits: dict[int, int] = {}
-    for line in source.findall("lines/line"):
-        number = line.get("number") or ""
-        if not number.isdigit() or int(number) == 0:
-            continue  # a missing number or line 0 is not a source line — malformed record
-        count = int(line.get("hits", "0") or 0)
-        hits[int(number)] = max(hits.get(int(number), 0), count)
-    return hits
+    @staticmethod
+    def line_hits(source: ET.Element) -> dict[int, int]:
+        """Hits per line NUMBER. A Cobertura file from llvm-cov carries one record
+        per INSTANTIATION of a line (a generic or macro-expanded line appears more
+        than once); coverage is per line, so the records collapse to the highest
+        hit count — counting records instead of lines inflates both totals and
+        understates the rate."""
+        hits: dict[int, int] = {}
+        for line in source.findall("lines/line"):
+            number = line.get("number") or ""
+            if not number.isdigit() or int(number) == 0:
+                continue  # a missing number or line 0 is not a source line — malformed record
+            count = int(line.get("hits", "0") or 0)
+            hits[int(number)] = max(hits.get(int(number), 0), count)
+        return hits
 
+    def class_element(self, source: ET.Element, prefix: str) -> ClassCoverage:
+        """A class element with the prefixed filename and one line record per
+        number, plus its covered/valid line counts."""
+        hits = self.line_hits(source)
+        covered = sum(1 for count in hits.values() if count > 0)
+        filename = prefix + (source.get("filename") or "")
+        merged = ET.Element(
+            "class",
+            {
+                "name": source.get("name") or Path(filename).name,
+                "filename": filename,
+                "line-rate": self.rate(covered, len(hits)),
+                "branch-rate": "0",
+                "complexity": "0",
+            },
+        )
+        merged_lines = ET.SubElement(merged, "lines")
+        for number in sorted(hits):
+            ET.SubElement(merged_lines, "line", {"number": str(number), "hits": str(hits[number])})
+        return ClassCoverage(merged, covered, len(hits))
 
-def _class_element(source: ET.Element, prefix: str) -> _ClassCoverage:
-    """A class element with the prefixed filename and one line record per
-    number, plus its covered/valid line counts."""
-    hits = _line_hits(source)
-    covered = sum(1 for count in hits.values() if count > 0)
-    filename = prefix + (source.get("filename") or "")
-    merged = ET.Element(
-        "class",
-        {
-            "name": source.get("name") or Path(filename).name,
-            "filename": filename,
-            "line-rate": _rate(covered, len(hits)),
-            "branch-rate": "0",
-            "complexity": "0",
-        },
-    )
-    merged_lines = ET.SubElement(merged, "lines")
-    for number in sorted(hits):
-        ET.SubElement(merged_lines, "line", {"number": str(number), "hits": str(hits[number])})
-    return _ClassCoverage(merged, covered, len(hits))
-
-
-def merge(reports: list[_Report]) -> ET.Element:
-    """The merged Cobertura root: one package per subject, in the order given."""
-    root = ET.Element("coverage", {"version": "merged", "timestamp": str(int(time.time()))})
-    packages = ET.SubElement(root, "packages")
-    total_covered = 0
-    total_valid = 0
-    for report in reports:
+    def add_package(self, packages: ET.Element, report: Report) -> None:
+        """One input's package: its merged classes, its rates, its totals."""
         source = ET.parse(report.path).getroot()
         package = ET.SubElement(packages, "package", {"name": report.name})
         classes = ET.SubElement(package, "classes")
         package_covered = 0
         package_valid = 0
         for source_class in source.iter("class"):
-            merged = _class_element(source_class, report.prefix)
+            merged = self.class_element(source_class, report.prefix)
             if merged.valid == 0:
                 continue  # a class with no line records adds no coverage data
             package_covered += merged.covered
             package_valid += merged.valid
             classes.append(merged.element)
-        _set_rates(package, package_covered, package_valid)
-        total_covered += package_covered
-        total_valid += package_valid
-    sources = ET.SubElement(root, "sources")
-    ET.SubElement(sources, "source").text = "."
-    _set_rates(root, total_covered, total_valid)
-    root.set("lines-covered", str(total_covered))
-    root.set("lines-valid", str(total_valid))
-    root.set("branches-covered", "0")
-    root.set("branches-valid", "0")
-    return root
+        self.set_rates(package, package_covered, package_valid)
+        self.covered_total += package_covered
+        self.valid_total += package_valid
+
+    def merged(self) -> ET.Element:
+        """The merged Cobertura root: one package per subject, then the totals."""
+        root = ET.Element("coverage", {"version": "merged", "timestamp": str(int(time.time()))})
+        packages = ET.SubElement(root, "packages")
+        for report in self.reports:
+            self.add_package(packages, report)
+        sources = ET.SubElement(root, "sources")
+        ET.SubElement(sources, "source").text = "."
+        self.set_rates(root, self.covered_total, self.valid_total)
+        root.set("lines-covered", str(self.covered_total))
+        root.set("lines-valid", str(self.valid_total))
+        root.set("branches-covered", "0")
+        root.set("branches-valid", "0")
+        return root
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -142,15 +151,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-o", "--output", required=True, type=Path, help="the merged XML path")
     args = parser.parse_args(argv)
 
-    reports: list[_Report] = []
+    reports: list[Report] = []
     for name, path, prefix in args.report:
         report = Path(path)
         if not report.is_file():
             print(f"merge-coverage: no report at {report}", file=sys.stderr)
             return 2
-        reports.append(_Report(name, report, prefix))
+        reports.append(Report(name, report, prefix))
 
-    merged = merge(reports)
+    merged = CoberturaMerge(reports).merged()
     try:
         ET.indent(merged)
         ET.ElementTree(merged).write(args.output, encoding="utf-8", xml_declaration=True)

@@ -28,68 +28,152 @@ from pathlib import Path
 from typing import NamedTuple
 
 
-def percent(fraction: float) -> float:
-    """A coverage fraction as the percentage the bars are stated in."""
-    return fraction * 100  # lucidlint: ignore magic-number 100 is the definition of percent
-
-
-class _Lines(NamedTuple):
+class Lines(NamedTuple):
     """One report element's line accounting: covered out of valid."""
 
     covered: int
     valid: int
 
 
-def line_rate(cls: ET.Element) -> _Lines:
-    """Covered/valid lines for one class, counted per line NUMBER.
+class Subject(NamedTuple):
+    """One package and the two bars its coverage is held to, in percent."""
 
-    llvm-cov emits one record per instantiation of a line (a generic or
-    macro-expanded line appears more than once); coverage is per line, so the
-    records collapse to the highest hit count. A record without a numeric
-    `number`, or line 0, is malformed and adds no data."""
-    hits: dict[str, int] = {}
-    for line in cls.findall("lines/line"):
-        number = line.get("number") or ""
-        if not number.isdigit() or int(number) == 0:
-            continue  # a missing number or line 0 is not a source line — malformed record
-        count = int(line.get("hits", "0") or 0)
-        hits[number] = max(hits.get(number, 0), count)
-    return _Lines(sum(1 for count in hits.values() if count > 0), len(hits))
+    package: str
+    minimum: float
+    target: float
 
 
-def package_rate(root: ET.Element, package: str) -> _Lines | None:
-    """The package's lines, or None when the report does not name it — a
-    subject missing from the report is a measurement gap, not 0%."""
-    covered = 0
-    valid = 0
-    found = False
-    for element in root.findall("packages/package"):
-        if element.get("name") != package:
-            continue
-        found = True
-        for cls in element.findall("classes/class"):
-            lines = line_rate(cls)
-            covered += lines.covered
-            valid += lines.valid
-    return _Lines(covered, valid) if found else None
+class CoverageGate:
+    """The gate run: the merged report, the subjects with their bars, and what
+    the run owes the caller — the rows, the failures, the exit status."""
 
+    def __init__(self, root: ET.Element, subjects: list[Subject], output: Path | None):
+        self.root = root
+        self.subjects = subjects
+        self.output = output
+        self.rows: list[str] = []
+        self.failures: list[str] = []
+        self.covered_total = 0
+        self.valid_total = 0
 
-def status(measured: float, minimum: float, target: float) -> str:
-    """The row's word: the two bars name different promises."""
-    if measured < minimum:
-        return "below minimum"
-    if measured < target:
-        return "below target"
-    return "target met"
+    @staticmethod
+    def percent(fraction: float) -> float:
+        """A coverage fraction as the percentage the bars are stated in."""
+        return fraction * 100  # lucidlint: ignore magic-number 100 is the definition of percent
 
+    @staticmethod
+    def line_rate(cls: ET.Element) -> Lines:
+        """Covered/valid lines for one class, counted per line NUMBER.
 
-def _row(name: str, covered: int, valid: int, minimum: float, target: float) -> str:
-    measured = percent(covered / valid) if valid else 0.0
-    verdict = status(measured, minimum, target)
-    return (
-        f"| {name} | {covered}/{valid} | {measured:.1f}% | "
-        f"{minimum:.0f}% | {target:.0f}% | {verdict} |"
-    )
+        llvm-cov emits one record per instantiation of a line (a generic or
+        macro-expanded line appears more than once); coverage is per line, so the
+        records collapse to the highest hit count. A record without a numeric
+        `number`, or line 0, is malformed and adds no data."""
+        hits: dict[str, int] = {}
+        for line in cls.findall("lines/line"):
+            number = line.get("number") or ""
+            if not number.isdigit() or int(number) == 0:
+                continue  # a missing number or line 0 is not a source line — malformed record
+            count = int(line.get("hits", "0") or 0)
+            hits[number] = max(hits.get(number, 0), count)
+        return Lines(sum(1 for count in hits.values() if count > 0), len(hits))
+
+    def package_rate(self, package: str) -> Lines | None:
+        """The package's lines, or None when the report does not name it — a
+        subject missing from the report is a measurement gap, not 0%."""
+        covered = 0
+        valid = 0
+        found = False
+        for element in self.root.findall("packages/package"):
+            if element.get("name") != package:
+                continue
+            found = True
+            for cls in element.findall("classes/class"):
+                lines = self.line_rate(cls)
+                covered += lines.covered
+                valid += lines.valid
+        return Lines(covered, valid) if found else None
+
+    @staticmethod
+    def status(measured: float, minimum: float, target: float) -> str:
+        """The row's word: the two bars name different promises."""
+        if measured < minimum:
+            return "below minimum"
+        if measured < target:
+            return "below target"
+        return "target met"
+
+    def row(self, subject: Subject, covered: int, valid: int, measured: float) -> str:
+        verdict = self.status(measured, subject.minimum, subject.target)
+        return (
+            f"| {subject.package} | {covered}/{valid} | {measured:.1f}% | "
+            f"{subject.minimum:.0f}% | {subject.target:.0f}% | {verdict} |"
+        )
+
+    def measure(self, subject: Subject) -> Lines | None:
+        """Measure one subject, or None when the report cannot answer for it
+        (the diagnostic is printed here — the caller only sees the gap)."""
+        rate = self.package_rate(subject.package)
+        if rate is None:
+            print(
+                f"coverage-gate: {subject.package} is missing from the report — "
+                "the merged report has no measurement for it",
+                file=sys.stderr,
+            )
+            return None
+        if rate.valid == 0:
+            print(
+                f"coverage-gate: {subject.package} measures no line at all — "
+                "the coverage run produced nothing (a broken report, not 0%)",
+                file=sys.stderr,
+            )
+            return None
+        return rate
+
+    def run(self) -> int:
+        for subject in self.subjects:
+            rate = self.measure(subject)
+            if rate is None:
+                return 2
+            covered, valid = rate.covered, rate.valid
+            self.covered_total += covered
+            self.valid_total += valid
+            measured = self.percent(covered / valid)
+            verdict = self.status(measured, subject.minimum, subject.target)
+            print(
+                f"coverage-gate: {subject.package} {measured:.1f}% "
+                f"(minimum {subject.minimum:.0f}%, target {subject.target:.0f}%) — {verdict}"
+            )
+            if verdict != "target met":
+                self.failures.append(f"{subject.package} {measured:.1f}% < target {subject.target:.0f}%")
+            self.rows.append(self.row(subject, covered, valid, measured))
+
+        if self.output is not None:
+            try:
+                self.output.write_text(self.table() + "\n", encoding="utf-8")
+            except OSError as exc:
+                print(f"coverage-gate: cannot write {self.output}: {exc}", file=sys.stderr)
+                return 2
+        if self.failures:
+            print(
+                "coverage-gate: below target — " + "; ".join(self.failures)
+                + ". Add the missing tests, or move the bar deliberately with its new measurement.",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+
+    def table(self) -> str:
+        """The sticky-comment markdown: one row per subject, then the total."""
+        total = self.percent(self.covered_total / self.valid_total) if self.valid_total else 0.0
+        return "\n".join(
+            [
+                "| Subject | Lines | Coverage | Minimum | Target | Status |",
+                "|---|---|---|---|---|---|",
+                *self.rows,
+                f"| **total** | **{self.covered_total}/{self.valid_total}** | **{total:.1f}%** | — | — | — |",
+            ]
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -115,64 +199,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"coverage-gate: {args.report} is not parseable: {exc}", file=sys.stderr)
         return 2
 
-    rows: list[str] = []
-    failures: list[str] = []
-    covered_total = 0
-    valid_total = 0
-    for package, minimum_text, target_text in args.subject:
-        minimum = float(minimum_text)
-        target = float(target_text)
-        rate = package_rate(root, package)
-        if rate is None:
-            print(
-                f"coverage-gate: {package} is missing from {args.report} — "
-                "the merged report has no measurement for it",
-                file=sys.stderr,
-            )
-            return 2
-        covered, valid = rate.covered, rate.valid
-        if valid == 0:
-            print(
-                f"coverage-gate: {package} measures no line at all — "
-                "the coverage run produced nothing (a broken report, not 0%)",
-                file=sys.stderr,
-            )
-            return 2
-        covered_total += covered
-        valid_total += valid
-        measured = percent(covered / valid)
-        verdict = status(measured, minimum, target)
-        print(
-            f"coverage-gate: {package} {measured:.1f}% "
-            f"(minimum {minimum:.0f}%, target {target:.0f}%) — {verdict}"
-        )
-        if verdict != "target met":
-            failures.append(f"{package} {measured:.1f}% < target {target:.0f}%")
-        rows.append(_row(package, covered, valid, minimum, target))
-
-    total = percent(covered_total / valid_total) if valid_total else 0.0
-    table = "\n".join(
-        [
-            "| Subject | Lines | Coverage | Minimum | Target | Status |",
-            "|---|---|---|---|---|---|",
-            *rows,
-            f"| **total** | **{covered_total}/{valid_total}** | **{total:.1f}%** | — | — | — |",
-        ]
-    )
-    if args.output is not None:
-        try:
-            args.output.write_text(table + "\n", encoding="utf-8")
-        except OSError as exc:
-            print(f"coverage-gate: cannot write {args.output}: {exc}", file=sys.stderr)
-            return 2
-    if failures:
-        print(
-            "coverage-gate: below target — " + "; ".join(failures)
-            + ". Add the missing tests, or move the bar deliberately with its new measurement.",
-            file=sys.stderr,
-        )
-        return 1
-    return 0
+    subjects = [Subject(package, float(minimum), float(target)) for package, minimum, target in args.subject]
+    return CoverageGate(root, subjects, args.output).run()
 
 
 if __name__ == "__main__":

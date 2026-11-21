@@ -96,33 +96,13 @@ class Action:
     message: str
 
 
-def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
-    except OSError as exc:
-        raise SystemExit(f"deploy-check: cannot run {cmd[0]}: {exc}") from exc
+@dataclass(frozen=True)
+class Scan:
+    """One scan of the generated project: the finished process, and its findings
+    when the output was the JSON contract (None when the command itself failed)."""
 
-
-def parse_actions(stdout: str) -> list[Action] | None:
-    try:
-        raw = json.loads(stdout)["actions"]
-    except (ValueError, KeyError, TypeError):
-        return None
-    return [
-        Action(
-            kind=a["kind"],
-            severity=a["severity"],
-            file=a["file"],
-            line=a["line"],
-            message=a["message"],
-        )
-        for a in raw
-    ]
-
-
-def fail(msg: str) -> int:
-    print(f"deploy-check: {msg}", file=sys.stderr)
-    return 1
+    process: subprocess.CompletedProcess[str]
+    actions: list[Action] | None
 
 
 class _DeployCheck:
@@ -134,26 +114,61 @@ class _DeployCheck:
         self.cmd: list[str] = cmd
         self.project: Path = project
 
+    @staticmethod
+    def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        """Run one command, or stop: an unrunnable command is a broken install,
+        not a finding."""
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+        except OSError as exc:
+            raise SystemExit(f"deploy-check: cannot run {cmd[0]}: {exc}") from exc
+
+    def scan(self) -> Scan:
+        """The scan of the generated project, with its findings when the output
+        is the JSON contract."""
+        process = self.run(self.cmd + ["--repo", str(self.project), "--json"], cwd=self.project)
+        try:
+            raw = json.loads(process.stdout)["actions"]
+        except (ValueError, KeyError, TypeError):
+            return Scan(process=process, actions=None)
+        return Scan(
+            process=process,
+            actions=[
+                Action(
+                    kind=a["kind"],
+                    severity=a["severity"],
+                    file=a["file"],
+                    line=a["line"],
+                    message=a["message"],
+                )
+                for a in raw
+            ],
+        )
+
+    @staticmethod
+    def fail(msg: str) -> int:
+        print(f"deploy-check: {msg}", file=sys.stderr)
+        return 1
+
     def find_step(self) -> int:
-        scan = run(self.cmd + ["--repo", str(self.project), "--json"], cwd=self.project)
-        actions = parse_actions(scan.stdout)
+        scan = self.scan()
+        actions = scan.actions
         if actions is None:
             # the command itself failed (bad path, missing interpreter,
             # traceback) — its stderr IS the diagnosis, not the JSON
-            err = (scan.stderr or scan.stdout).strip().splitlines()
-            detail = err[0][:200] if err else f"exit {scan.returncode} with no output"
-            return fail(f"the scan output was not the findings JSON contract ({detail})")
+            err = (scan.process.stderr or scan.process.stdout).strip().splitlines()
+            detail = err[0][:200] if err else f"exit {scan.process.returncode} with no output"
+            return self.fail(f"the scan output was not the findings JSON contract ({detail})")
         kinds = {a.kind for a in actions if a.severity == "fail"}
         missing = [k for k in EXPECTED_FAIL_KINDS if k not in kinds]
-        if scan.returncode == 0 or missing:
-            return fail(f"the scan missed expected fail findings: {missing or 'none found'}")
+        if scan.process.returncode == 0 or missing:
+            return self.fail(f"the scan missed expected fail findings: {missing or 'none found'}")
         return 0
 
     def fix_step(self) -> int:
-        scan = run(self.cmd + ["--repo", str(self.project), "--json"], cwd=self.project)
-        actions = parse_actions(scan.stdout)
+        actions = self.scan().actions
         if actions is None:
-            return fail("the scan output was not the findings JSON contract")
+            return self.fail("the scan output was not the findings JSON contract")
         for a in actions:
             m = re.search(r"fix: (lucidlint fix --kind \S+ --file \S+ --line \d+)", a.message)
             if not m:
@@ -161,19 +176,19 @@ class _DeployCheck:
             cmd = self.cmd + m.group(1).split()[1:]
             if a.kind == "magic-number":
                 cmd += ["--name", CONST_NAME]
-            fixed = run(cmd, cwd=self.project)
+            fixed = self.run(cmd, cwd=self.project)
             if fixed.returncode != 0:
-                return fail(f"fix {a.kind} failed: {(fixed.stderr or fixed.stdout).strip()}")
+                return self.fail(f"fix {a.kind} failed: {(fixed.stderr or fixed.stdout).strip()}")
         return 0
 
     def verify_step(self) -> int:
-        rescan = run(self.cmd + ["--repo", str(self.project), "--json"], cwd=self.project)
-        actions = parse_actions(rescan.stdout)
+        rescan = self.scan()
+        actions = rescan.actions
         if actions is None:
-            return fail("the re-scan output was not the findings JSON contract")
+            return self.fail("the re-scan output was not the findings JSON contract")
         remaining = [a.kind for a in actions if a.severity == "fail"]
-        if rescan.returncode != 0 or remaining:
-            return fail(f"findings remained after fixes: {remaining or 'unknown'}")
+        if rescan.process.returncode != 0 or remaining:
+            return self.fail(f"findings remained after fixes: {remaining or 'unknown'}")
         print("deploy-check: scan found the expected findings, every fix applied, re-scan clean")
         return 0
 
@@ -197,13 +212,11 @@ def main() -> int:
         (project / rel).write_text(content)
 
     check = _DeployCheck(cmd, project)
-    status = check.find_step()
-    if status:
-        return status
-    status = check.fix_step()
-    if status:
-        return status
-    return check.verify_step()
+    for step in (check.find_step, check.fix_step, check.verify_step):
+        status = step()
+        if status:
+            return status
+    return 0
 
 
 if __name__ == "__main__":

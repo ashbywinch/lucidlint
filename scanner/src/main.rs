@@ -17,62 +17,41 @@
 // lucidlint: ignore-file large-function scan_source_impl is the CLI's one-pass pipeline — extracting
 // helpers would thread six collections through a parameter object for no reader gain
 use rayon::prelude::*;
-use ruff_python_ast::visitor::source_order::{walk_expr, walk_stmt, SourceOrderVisitor};
-use ruff_python_ast::{AnyNodeRef, Expr, ModModule, Stmt, StmtIf};
+use ruff_python_ast::visitor::source_order::SourceOrderVisitor;
+use ruff_python_ast::{AnyNodeRef, ModModule};
 use ruff_python_parser::{parse_module, Parsed};
 use ruff_text_size::Ranged;
-use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 mod checks;
-mod common;
 mod config;
 mod docs;
+mod file_scan;
+mod finding;
 mod fix;
+mod fix_render;
+mod forwarding;
 mod graph_families;
 mod lsp;
+mod magic;
+mod naming;
+mod paths;
+mod python_shape;
+mod report;
 mod rules_gen;
 mod rustloops;
 mod rustscan;
+mod skeleton;
+mod source;
+mod state;
+mod suppressions;
 use checks::Q;
 use checks::*;
-
-/// One open function scope: its decision count and the names it returns
-/// (for the swallow analysis).
-pub struct FnScope {
-    /// Names this function returns (for the swallow analysis).
-    pub returned: HashSet<String>,
-}
-
-#[derive(Serialize, Clone, Debug)]
-pub struct Finding {
-    file: String,
-    line: usize,
-    /// 1-based column of the finding's anchor node; 0 = line-level (schema 3).
-    /// Populated only where disambiguation needs it (magic-number,
-    /// positional-literals, record-shape literals).
-    #[serde(default)]
-    col: usize,
-    function: String,
-    kind: String,
-    severity: String,
-    message: String,
-    /// The clump identity for seam grouping (#34): the shared parameter-pair
-    /// names (data-clump), the disjoint method-group members (partition),
-    /// the functions sharing a leading parameter (strewing). Always emitted
-    /// (empty on non-carriers — BQ4); never scraped from message prose.
-    pub seam_members: Vec<String>,
-
-    /// The first source line of the LOGICAL line holding this finding — the
-    /// `def`/`async def` line for a signature finding, the enclosing
-    /// statement's first source line for a wrapped call or split literal.
-    /// One line of code can span several source lines, and a marker binds on
-    /// the logical line too (Phase 4a). `None` = the finding's own line, the
-    /// usual case; internal only (never serialized — the JSON stays schema 4).
-    #[serde(skip)]
-    logical_start: Option<usize>,
-}
+use file_scan::{ClassInfo, FileScan, ImportInfo, SelfAssign, UndeclScan};
+use finding::{Finding, FnCc, FnScope};
+use paths::{Paths, SCAN_SKIP_DIRS};
+use source::Source;
 
 impl Finding {
     /// The finding's logical line: its own line when no construct spans
@@ -80,20 +59,6 @@ impl Finding {
     pub(crate) fn logical_line(&self) -> usize {
         self.logical_start.unwrap_or(self.line)
     }
-}
-
-/// One function's cyclomatic complexity — radon-equivalent counting.
-#[derive(Serialize, Clone)]
-pub struct FnCc {
-    file: String,
-    function: String,
-    line: usize,
-    cc: u32,
-    /// The body's SHAPE for the complexity message routing: "dispatch",
-    /// "rules", or "plain" (see python_fn_shape / rust_fn_shape).
-    pub shape: &'static str,
-    /// The dispatch selector or rule-battery accumulator name.
-    pub shape_detail: String,
 }
 
 #[derive(Default)]
@@ -115,7 +80,7 @@ struct ScanState<'a> {
     claimed_dispatch: std::collections::HashSet<usize>,
     /// Parent chain for the magic-number position check — exprs plus the
     /// non-expr layers (stmt, keyword) that break the direct-parent link.
-    parent_stack: Vec<ParentEntry<'a>>,
+    parent_stack: Vec<state::ParentEntry<'a>>,
     /// Module-level function definitions (name, line) — non-test files.
     defs: Vec<(String, usize)>,
     /// Every function/method span (name, first line, last line) — the
@@ -179,1183 +144,101 @@ struct ScanState<'a> {
 // The last line start per `line_of`/`col_of` source — a thread-local cache
 // keyed by (ptr, len): `line_of` used to scan from offset 0 for every call,
 // so a scan with F findings and C comments cost O((F+C) * file_len) — a
-// 2000-line file of function defs paid ~10ms of line scans per 1000 defs.
-// The index is rebuilt once per distinct source (O(n)), then binary search.
-thread_local! {
-    static LINE_STARTS: std::cell::RefCell<(usize, usize, Vec<usize>)> =
-        const { std::cell::RefCell::new((0, 0, Vec::new())) };
-}
-
-/// 1-based line of an offset.
-/// The LINE_STARTS cache is keyed by (ptr, len) — a fresh String can reuse
-/// the previous file's buffer address at the same length, so the key alone
-/// is unsafe; force a rebuild for every scan (review bot).
-fn reset_line_starts() {
-    LINE_STARTS.with(|c| {
-        let mut c = c.borrow_mut();
-        c.0 = 0;
-        c.1 = 0;
-        c.2.clear();
-    });
-}
-
-fn line_of(source: &str, offset: ruff_text_size::TextSize) -> usize {
-    LINE_STARTS.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.0 != source.as_ptr() as usize || c.1 != source.len() {
-            c.0 = source.as_ptr() as usize;
-            c.1 = source.len();
-            c.2.clear();
-            c.2.push(0);
-            for (i, b) in source.bytes().enumerate() {
-                if b == b'\n' {
-                    c.2.push(i + 1);
-                }
-            }
-        }
-        c.2.partition_point(|&s| s <= offset.to_usize())
-    })
-}
-
-/// 1-based column of an offset — the schema-3 disambiguation coordinate.
-fn col_of(source: &str, offset: ruff_text_size::TextSize) -> usize {
-    LINE_STARTS.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.0 != source.as_ptr() as usize || c.1 != source.len() {
-            c.0 = source.as_ptr() as usize;
-            c.1 = source.len();
-            c.2.clear();
-            c.2.push(0);
-            for (i, b) in source.bytes().enumerate() {
-                if b == b'\n' {
-                    c.2.push(i + 1);
-                }
-            }
-        }
-        let off = offset.to_usize();
-        off - c.2[c.2.partition_point(|&s| s <= off) - 1] + 1
-    })
-}
-
-/// The parent expr's KIND for the magic-number position rule — the variant
-/// discriminant, never the node: holding a cloned `Expr` per visited node
-/// deep-cloned every subtree (the scan's biggest allocation; a keystroke on
-/// a 2000-line file cloned the whole AST twice over).
-#[derive(Copy, Clone, PartialEq)]
-enum ParentExprKind {
-    BinOp,
-    Compare,
-    UnaryOp,
-    Subscript,
-    Call,
-    Other,
-}
-
-fn parent_kind(e: &Expr) -> ParentExprKind {
-    match e {
-        Expr::BinOp(_) => ParentExprKind::BinOp,
-        Expr::Compare(_) => ParentExprKind::Compare,
-        Expr::UnaryOp(_) => ParentExprKind::UnaryOp,
-        Expr::Subscript(_) => ParentExprKind::Subscript,
-        Expr::Call(_) => ParentExprKind::Call,
-        _ => ParentExprKind::Other,
-    }
-}
-
-enum ParentEntry<'a> {
-    Expr(ParentExprKind),
-    /// A positional argument of a call — the callee's name (P2: the
-    /// unit-constructor exemption).
-    CallArg {
-        callee: &'a str,
-    },
-    /// A keyword argument of a call — callee + the keyword's name (P2: a
-    /// unit-naming keyword — timedelta(minutes=20) — states the unit).
-    CallKw {
-        callee: &'a str,
-        kw: &'a str,
-    },
-    Stmt,
-}
-
-impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
-    // lucidlint: ignore large-function the ruff visitor dispatches statement kinds in CPython's visit order
-    fn visit_stmt(&mut self, stmt: &'a Stmt) {
-        // module scope = no open function scope and no class nesting (the
-        // FunctionDef arm walks bodies manually, so parent_stack is not the
-        // reliable signal here)
-        let module_level = self.fn_stack.is_empty() && self.in_class == 0;
-        match stmt {
-            Stmt::FunctionDef(f) => {
-                let module_level = self.fn_stack.is_empty() && self.in_class == 0;
-                checks::collect_duplicate_expressions(self, f);
-                if module_level {
-                    checks::collect_path_expressions(self, f);
-                }
-                let was_fn = self.current_fn.take();
-                self.current_fn = Some((f.name.to_string(), line_of(self.source, f.range.start())));
-                self.fn_spans.push((
-                    f.name.to_string(),
-                    line_of(self.source, f.range.start()),
-                    line_of(self.source, f.range.end()),
-                ));
-
-                self.fn_stack.push(FnScope {
-                    returned: returned_names(&f.body),
-                });
-                self.unreachable_check(&f.body);
-                shadow_findings(self, stmt);
-                let source = self.source;
-                long_param_list_findings(self, f, source);
-                // signature exprs feed the reference scan (ast.walk covers
-                // decorators, parameter annotations/defaults, and returns)
-                for d in &f.decorator_list {
-                    self.visit_expr(&d.expression);
-                }
-                for pwd in f
-                    .parameters
-                    .posonlyargs
-                    .iter()
-                    .chain(&f.parameters.args)
-                    .chain(&f.parameters.kwonlyargs)
-                {
-                    if let Some(a) = &pwd.parameter.annotation {
-                        self.visit_expr(a.as_ref());
-                    }
-                    if let Some(d) = &pwd.default {
-                        self.visit_expr(d.as_ref());
-                    }
-                }
-                for p in [&f.parameters.vararg, &f.parameters.kwarg].into_iter().flatten() {
-                    if let Some(a) = &p.annotation {
-                        self.visit_expr(a.as_ref());
-                    }
-                }
-                if let Some(r) = &f.returns {
-                    self.visit_expr(r.as_ref());
-                }
-                for s in &f.body {
-                    self.visit_stmt(s);
-                }
-                // the push/pop invariant is per-function; a missing scope is a
-                // walker bug, not a crash — bail out of this function's checks
-                let Some(_scope) = self.fn_stack.pop() else {
-                    return;
-                };
-                // The radon-equivalent CC comes from the radonc crate (its rules
-                // match radon 6.0.1 exactly; the visitor still tracks decisions
-                // for the closures/latent-class gate).
-                let cc = radonc::function_cc(f) as u32;
-                // repo-wide collections: module-level defs + duplicate
-                // candidates (the def line is the NAME's line — ruff's
-                // FunctionDef range starts at the decorator)
-                let def_line = line_of(self.source, f.name.range().start());
-                if module_level && !self.is_test {
-                    self.defs.push((f.name.to_string(), def_line));
-                    if !f.decorator_list.is_empty() {
-                        self.decorated.insert(f.name.to_string());
-                    }
-                }
-                let span = (line_of(self.source, f.range().end()) - line_of(self.source, f.range().start())) as u32;
-                // the Python gate reads cc from radon's fn_map, which only
-                // holds module-level functions — methods/nested get cc = 0
-                let gate_cc = if module_level { cc } else { 0 };
-                closure_findings(self, stmt, gate_cc, span);
-                // a method that never touches its receiver does not belong in
-                // the class (the inverse of record-shape/strewing)
-                if self.in_class > 0 {
-                    detached_method_findings(self, f, source);
-                }
-                if module_level {
-                    // the def line (name range), not the decorator — radon's
-                    // fn.lineno; the parity test's decorated-line offset
-                    // normalization existed because of this difference
-                    let (shape, shape_detail) = python_fn_shape(&f.body);
-                    self.cc.push(FnCc {
-                        file: self.file.to_string(),
-                        function: f.name.to_string(),
-                        line: def_line,
-                        cc,
-                        shape,
-                        shape_detail,
-                    });
-                }
-                self.current_fn = was_fn;
-                return;
-            }
-            Stmt::ClassDef(cls) => {
-                self.in_class += 1;
-                // class bodies: no decisions, but walked (imports/exprs inside
-                // still get visited with their function attribution)
-                if module_level && !self.is_test {
-                    let def_line = line_of(self.source, cls.name.range().start());
-                    self.class_defs.push((cls.name.to_string(), def_line));
-                }
-                walk_stmt(self, stmt);
-                self.in_class -= 1;
-                return;
-            }
-            Stmt::Expr(e) => self.noop_check(&e.value),
-            Stmt::Import(imp) => {
-                self.import_checks(stmt);
-                for a in &imp.names {
-                    self.refs.insert(a.name.to_string());
-                }
-            }
-            Stmt::ImportFrom(imp) => {
-                self.import_checks(stmt);
-                for a in &imp.names {
-                    self.refs.insert(a.name.to_string());
-                }
-            }
-            Stmt::Try(_) => except_findings(self, stmt),
-            Stmt::Global(_) => {
-                let module_level = false; // globals inside a function
-                global_state_findings(self, stmt, module_level);
-            }
-            Stmt::Assign(_) => {
-                global_state_findings(self, stmt, module_level);
-                shadow_findings(self, stmt);
-            }
-            Stmt::AugAssign(_) | Stmt::AnnAssign(_) | Stmt::Delete(_) => {
-                global_state_findings(self, stmt, module_level);
-            }
-            _ => {}
-        }
-        // CC (cyclomatic complexity) comes from the radonc crate — the scan
-        // walk itself no longer counts decisions.
-        self.parent_stack.push(ParentEntry::Stmt);
-        walk_stmt(self, stmt);
-        self.parent_stack.pop();
-    }
-
-    fn visit_expr(&mut self, expr: &'a Expr) {
-        match expr {
-            Expr::Name(n) => {
-                self.refs.insert(n.id.to_string());
-            }
-            Expr::Attribute(a) => {
-                // attribute names count as references (obj.set_x(v) uses set_x)
-                self.refs.insert(a.attr.to_string());
-            }
-            Expr::StringLiteral(s) if !self.is_test => {
-                self.strings.push(s.value.to_str().to_string());
-            }
-            _ => {}
-        }
-        // Calls are walked manually so keyword values get a Keyword parent —
-        // the generic walk would hand them the Call as parent, and the magic
-        // position rule must match Python's (status_code=403 is NOT a finding).
-        if let Expr::Call(call) = expr {
-            let source = self.source;
-            boolean_arg_findings(self, call, source);
-            positional_literals_findings(self, call, source);
-            // debug-artifact (Python half): breakpoint() left in production —
-            // the dbg!/unwrap analog (Rust half lives in rustscan.rs)
-            if !self.is_test
-                && matches!(
-                    call.func.as_ref(),
-                    Expr::Name(n) if n.id.as_str() == "breakpoint"
-                )
-            {
-                let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-                self.findings.push(Finding {
-                    logical_start: None,
-                    seam_members: Vec::new(),
-                    file: self.file.to_string(),
-                    line: line_of(source, call.range().start()),
-                    col: 0,
-                    function: fn_name,
-                    kind: "debug-artifact".into(),
-                    severity: "fail".into(),
-                    message: "breakpoint() left in production code — remove it".into(),
-                });
-            }
-            let callee: &'a str = match call.func.as_ref() {
-                Expr::Name(n) => n.id.as_str(),
-                Expr::Attribute(a) => a.attr.as_str(),
-                _ => "",
-            };
-            self.parent_stack.push(ParentEntry::Expr(parent_kind(expr)));
-            self.visit_expr(&call.func);
-            for arg in &call.arguments.args {
-                self.parent_stack.push(ParentEntry::CallArg { callee });
-                self.visit_expr(arg);
-                self.parent_stack.pop();
-            }
-            for kw in &call.arguments.keywords {
-                let name: &'a str = kw.arg.as_ref().map(|n| n.id.as_str()).unwrap_or("");
-                self.parent_stack.push(ParentEntry::CallKw { callee, kw: name });
-                self.visit_expr(&kw.value);
-                self.parent_stack.pop();
-            }
-            self.parent_stack.pop();
-            return;
-        }
-        // magic numbers (a warn finding — distinct from the CC that radonc owns).
-        // Magic fires ANYWHERE expressions are walked — class bodies and
-        // methods included (radon/reference parity): the fixer's constant
-        // becomes a CLASS ATTRIBUTE of the enclosing class, so a class-body
-        // finding is the rule's primary case (third-pass 4).
-        if let Expr::NumberLiteral(n) = expr {
-            self.magic_check(n);
-        }
-        self.parent_stack.push(ParentEntry::Expr(parent_kind(expr)));
-        walk_expr(self, expr);
-        self.parent_stack.pop();
-    }
-}
-
-/// Classify a Python function body's shape for the complexity message: a
-/// dispatch chain (>= 3 top-level ifs comparing the SAME selector to string
-/// literals) or a rule battery (>= 3 top-level ifs appending to the SAME
-/// list) get shape-specific lucid guidance; anything else is "plain". The
-/// scan sees the body once — the message must not re-parse (review: run_tool
-/// is a dispatch chain, _deterministic_violations a rule battery).
-fn python_fn_shape(body: &[Stmt]) -> (&'static str, String) {
-    // the OFFER must equal the FIX: a shape is only "dispatch"/"rules" when
-    // the fix's own shape checks pass — otherwise the directive would offer
-    // something that refuses (the fix-engine v1 boundaries are strict)
-    if let Some(sel) = dispatch_chain_shape(body) {
-        return ("dispatch", sel);
-    }
-    if let Some(acc) = rule_battery_shape(body) {
-        return ("rules", acc);
-    }
-    ("plain", String::new())
-}
-
-/// One dispatch arm's selector when the test is `sel == "lit"`.
-fn dispatch_arm_selector(i: &StmtIf) -> Option<(&str, &str)> {
-    let Expr::Compare(c) = i.test.as_ref() else { return None };
-    if c.ops.len() != 1 || !matches!(c.ops[0], ruff_python_ast::CmpOp::Eq) {
-        return None;
-    }
-    let Expr::Name(n) = c.left.as_ref() else { return None };
-    let Expr::StringLiteral(_) = &c.comparators[0] else {
-        return None;
-    };
-    Some((n.id.as_str(), "lit"))
-}
-
-/// The names BOUND (assigned) in a statement run — arm-local bindings.
-/// Mirrors fix_engine's _BoundNames (Assign/AnnAssign/For/With targets and
-/// walrus/import bindings): a name bound in one dispatch arm and READ in a
-/// sibling cannot be a uniform handler parameter.
-struct DispatchArmNames<'a> {
-    bound: HashSet<&'a str>,
-    read: HashSet<&'a str>,
-}
-
-fn collect_dispatch_arm_names(body: &[Stmt]) -> DispatchArmNames<'_> {
-    use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
-    struct Collect<'a> {
-        bound: HashSet<&'a str>,
-        read: HashSet<&'a str>,
-    }
-    impl<'a> SourceOrderVisitor<'a> for Collect<'a> {
-        fn visit_expr(&mut self, e: &'a Expr) {
-            match e {
-                Expr::Name(n) => {
-                    self.read.insert(n.id.as_str());
-                }
-                Expr::Named(n) => {
-                    if let Expr::Name(t) = n.target.as_ref() {
-                        self.bound.insert(t.id.as_str());
-                    }
-                }
-                _ => {}
-            }
-            ruff_python_ast::visitor::source_order::walk_expr(self, e);
-        }
-        fn visit_stmt(&mut self, s: &'a Stmt) {
-            match s {
-                Stmt::Assign(a) => {
-                    for t in &a.targets {
-                        if let Expr::Name(t) = t {
-                            self.bound.insert(t.id.as_str());
-                        }
-                    }
-                }
-                Stmt::AnnAssign(a) => {
-                    if let Expr::Name(n) = a.target.as_ref() {
-                        self.bound.insert(n.id.as_str());
-                    }
-                }
-                Stmt::AugAssign(a) => {
-                    if let Expr::Name(n) = a.target.as_ref() {
-                        self.bound.insert(n.id.as_str());
-                    }
-                }
-                Stmt::For(f) => {
-                    if let Expr::Name(n) = f.target.as_ref() {
-                        self.bound.insert(n.id.as_str());
-                    }
-                }
-                Stmt::With(w) => {
-                    for item in &w.items {
-                        if let Some(v) = &item.optional_vars {
-                            if let Expr::Name(n) = v.as_ref() {
-                                self.bound.insert(n.id.as_str());
-                            }
-                        }
-                    }
-                }
-                Stmt::Import(imp) => {
-                    for a in &imp.names {
-                        self.bound.insert(a.name.as_str());
-                    }
-                }
-                Stmt::ImportFrom(imp) => {
-                    for a in &imp.names {
-                        self.bound.insert(a.name.as_str());
-                    }
-                }
-                _ => {}
-            }
-            // comprehension targets bind arm-locally (mirrors fix_engine's
-            // visit_CompFor)
-            for gen in stmt_comprehension_generators(s) {
-                if let Expr::Name(n) = &gen.target {
-                    self.bound.insert(n.id.as_str());
-                }
-            }
-            walk_stmt(self, s);
-        }
-    }
-    let mut c = Collect {
-        bound: HashSet::new(),
-        read: HashSet::new(),
-    };
-    for s in body {
-        walk_stmt(&mut c, s);
-    }
-    DispatchArmNames {
-        bound: c.bound,
-        read: c.read,
-    }
-}
-
-/// The comprehension generators of a statement's expressions — their targets
-/// bind arm-locally (mirrors fix_engine's visit_CompFor).
-fn stmt_comprehension_generators(s: &Stmt) -> Vec<&ruff_python_ast::Comprehension> {
-    fn collect_expr<'a>(e: &'a Expr, out: &mut Vec<&'a ruff_python_ast::Comprehension>) {
-        match e {
-            Expr::ListComp(c) => {
-                out.extend(c.generators.iter());
-                collect_expr(&c.elt, out);
-            }
-            Expr::SetComp(c) => {
-                out.extend(c.generators.iter());
-                collect_expr(&c.elt, out);
-            }
-            Expr::DictComp(c) => {
-                out.extend(c.generators.iter());
-                if let Some(k) = &c.key {
-                    collect_expr(k, out);
-                }
-                collect_expr(&c.value, out);
-            }
-            Expr::Generator(g) => {
-                out.extend(g.generators.iter());
-                collect_expr(&g.elt, out);
-            }
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    match s {
-        Stmt::Assign(a) => collect_expr(a.value.as_ref(), &mut out),
-        Stmt::AnnAssign(a) => {
-            if let Some(v) = &a.value {
-                collect_expr(v.as_ref(), &mut out);
-            }
-        }
-        Stmt::Expr(e) => collect_expr(e.value.as_ref(), &mut out),
-        Stmt::Return(r) => {
-            if let Some(v) = &r.value {
-                collect_expr(v.as_ref(), &mut out);
-            }
-        }
-        Stmt::If(i) => {
-            for b in &i.body {
-                out.extend(stmt_comprehension_generators(b));
-            }
-        }
-        _ => {}
-    }
-    out
-}
-
-/// The FIXABLE dispatch shape: a preamble, >= 3 contiguous `if <sel> ==
-/// "lit": <body>` arms over ONE selector, then exactly one trailing
-/// `return <default>`. This mirrors fix_engine's _dispatch_chain_shape — the
-/// offer is only made when the fix applies. Arms whose body reads a name
-/// BOUND IN A SIBLING ARM are refused (the named-handler rewrite cannot
-/// preserve them — see _dispatch_named_mode).
-fn dispatch_chain_shape(body: &[Stmt]) -> Option<String> {
-    let first_if = body.iter().position(|s| matches!(s, Stmt::If(_)))?;
-    let mut selector: Option<&str> = None;
-    let mut n = 0usize;
-    for stmt in &body[first_if..] {
-        let Stmt::If(i) = stmt else { break };
-        let (sel, _lit) = dispatch_arm_selector(i)?;
-        if !i.elif_else_clauses.is_empty() {
-            return None; // an arm with elif/else is not the fixable shape
-        }
-        match selector {
-            None => selector = Some(sel),
-            Some(s) if s == sel => {}
-            _ => return None,
-        }
-        n += 1;
-    }
-    if n < 3 {
-        return None;
-    }
-    // the no-match path: a single trailing `return <default>`
-    let tail = &body[first_if + n..];
-    if tail.len() != 1 || !matches!(tail[0], Stmt::Return(_)) {
-        return None;
-    }
-    // sibling-bound reads: an arm reading a name another arm binds cannot be
-    // rewritten to uniform module-level handlers (the value does not exist
-    // at the call site) — parity with the fix's refusal
-    let arms: Vec<&[Stmt]> = body[first_if..first_if + n]
-        .iter()
-        .filter_map(|s| match s {
-            Stmt::If(i) => Some(i.body.as_slice()),
-            _ => None,
-        })
-        .collect();
-    let names: Vec<DispatchArmNames> = arms.iter().map(|b| collect_dispatch_arm_names(b)).collect();
-    for (i, arm) in names.iter().enumerate() {
-        for (j, other) in names.iter().enumerate() {
-            if i != j && arm.read.intersection(&other.bound).next().is_some() {
-                return None;
-            }
-        }
-    }
-    selector.map(str::to_string)
-}
-
-/// The `acc = []` opener (plain or annotated) — (acc name, index).
-fn empty_list_init(body: &[Stmt]) -> Option<(String, usize)> {
-    for (i, stmt) in body.iter().enumerate() {
-        match stmt {
-            Stmt::Assign(a) => {
-                if is_empty_list_assignment(a) {
-                    let Expr::Name(n) = &a.targets[0] else { unreachable!() };
-                    return Some((n.id.to_string(), i));
-                }
-            }
-            Stmt::AnnAssign(a) => match (a.value.as_deref(), a.target.as_ref()) {
-                (Some(Expr::List(l)), Expr::Name(n)) if l.elts.is_empty() => {
-                    return Some((n.id.to_string(), i));
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Is the statement exactly one `acc.append(<value>)` call?
-fn is_single_append(stmts: &[Stmt], acc: &str) -> bool {
-    if stmts.len() != 1 {
-        return false;
-    }
-    let Stmt::Expr(e) = &stmts[0] else { return false };
-    let Expr::Call(call) = e.value.as_ref() else {
-        return false;
-    };
-    let Expr::Attribute(a) = call.func.as_ref() else {
-        return false;
-    };
-    a.attr.as_str() == "append"
-        && matches!(a.value.as_ref(), Expr::Name(n) if n.id.as_str() == acc)
-        && call.arguments.args.len() == 1
-}
-
-/// The FIXABLE rule-battery shape: an `acc = []` opener, then >= 3
-/// CONTIGUOUS `if <cond>: acc.append(<v>)` checks (no else, one append
-/// each). Mirrors fix_engine's _rule_battery_shape — the offer equals the
-/// fix.
-fn rule_battery_shape(body: &[Stmt]) -> Option<String> {
-    let (acc, init_idx) = empty_list_init(body)?;
-    let mut n = 0usize;
-    for stmt in &body[init_idx + 1..] {
-        let Stmt::If(i) = stmt else { break };
-        if !i.elif_else_clauses.is_empty() || !is_single_append(&i.body, &acc) {
-            return None;
-        }
-        n += 1;
-    }
-    if n < 3 {
-        return None;
-    }
-    Some(acc)
-}
-
-impl<'a> ScanState<'a> {
-    /// Magic numbers: int/float literals outside (0, 1, 2) whose parent is an
-    /// operation — mirrors the Python implementation's position rule.
-    /// Exempt (B8): octal/hex/binary spellings (0o600 is intent-bearing, and
-    /// the old code rendered it as "384"), plain subscript indexes, len()
-    /// length guards, module-level named-constant RHS values, and >= 3
-    /// same-kind data-table siblings in one collection literal.
-    fn magic_check(&mut self, n: &ruff_python_ast::ExprNumberLiteral) {
-        // B8: an 0x/0o/0b spelling states its meaning in the literal itself
-        let text = &self.source[n.range()];
-        if text.len() >= 2 {
-            let prefix = &text[..2];
-            if checks::is_radix_prefix(prefix) {
-                return;
-            }
-        }
-        let value = match &n.value {
-            ruff_python_ast::Number::Int(i) => i.to_string(),
-            ruff_python_ast::Number::Float(f) => f.to_string(),
-            ruff_python_ast::Number::Complex { .. } => return,
-        };
-        if matches!(value.as_str(), "0" | "1" | "2") {
-            return;
-        }
-        let parent_is_op = matches!(
-            self.parent_stack.last(),
-            Some(ParentEntry::Expr(k)) if matches!(
-                k,
-                ParentExprKind::BinOp
-                    | ParentExprKind::Compare
-                    | ParentExprKind::UnaryOp
-                    | ParentExprKind::Call
-            )
-        ) || matches!(self.parent_stack.last(), Some(ParentEntry::CallArg { .. }));
-        if !parent_is_op {
-            return; // a bare subscript index is a position code, not domain magic
-        }
-        let at = n.range().start().to_usize();
-        if self.magic_table_exempts.contains(&at)
-            || self.magic_const_rhs_exempts.contains(&at)
-            || self.magic_len_guard_exempts.contains(&at)
-            || self.magic_unit_named_exempts.contains(&at)
-        {
-            return;
-        }
-        // P2: the nearest enclosing call's callee is a unit constructor
-        // (Quantity, timedelta, TimeDelta, Distance) or its keyword names a
-        // unit (timedelta(minutes=20)) — the unit is stated at the site, so
-        // the literal is named there.
-        let nearest_call = self.parent_stack.iter().rev().find_map(|e| match e {
-            ParentEntry::CallArg { callee } => Some((*callee, "")),
-            ParentEntry::CallKw { callee, kw } => Some((*callee, *kw)),
-            _ => None,
-        });
-        if let Some((callee, kw)) = nearest_call {
-            let unit_ctor = matches!(callee, "Quantity" | "timedelta" | "TimeDelta" | "Distance");
-            let unit_kw = !kw.is_empty() && checks::name_states_unit(kw);
-            if unit_ctor || unit_kw {
-                return;
-            }
-        }
-        let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-        let in_fn = if fn_name.is_empty() {
-            String::new()
-        } else {
-            format!(" in {fn_name}")
-        };
-        // P2: both mechanisms are named as glossed examples; the family is
-        // the reader's judgment, so the same message renders at every firing
-        // site and the suggestion NEVER names a unit or claims which applies.
-        let message = format!("magic number {value}{in_fn} — nothing states what it means or why this magnitude. Write it as a named constant where the computation uses it, and state what it means and why this size in the name or in one comment beside it. If the value carries units, express it in a type that understands them — Python's timedelta for durations, or a Quantity from the pint units library for physical measures. Collection-literal data tables (>= 3 same-kind numeric siblings) are exempt. — fix: magic-number --fix-name <CONST>");
-        self.findings.push(Finding {
-            logical_start: None,
-            seam_members: Vec::new(),
-            file: self.file.to_string(),
-            line: line_of(self.source, n.range.start()),
-            col: col_of(self.source, n.range.start()),
-            function: fn_name,
-            kind: "magic-number".into(),
-            severity: "warn".into(),
-            message,
-        });
-    }
-
-    /// No-op statements: expression statements that discard their value.
-    fn noop_check(&mut self, v: &'a Expr) {
-        let harmless = matches!(
-            v,
-            Expr::Call(_)
-                | Expr::Await(_)
-                | Expr::Yield(_)
-                | Expr::YieldFrom(_)
-                | Expr::StringLiteral(_)
-                | Expr::BytesLiteral(_)
-                | Expr::NumberLiteral(_)
-                | Expr::BooleanLiteral(_)
-                | Expr::NoneLiteral(_)
-                | Expr::EllipsisLiteral(_)
-                | Expr::Lambda(_)
-                | Expr::Named(_)
-        );
-        if !harmless {
-            let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-            self.findings.push(Finding {
-                logical_start: None,
-                seam_members: Vec::new(),
-                file: self.file.to_string(),
-                line: line_of(self.source, v.range().start()),
-                col: 0,
-                function: fn_name,
-                kind: "noop-statement".into(),
-                severity: "fail".into(),
-                message: "expression statement discards its value — dead statement — fix: noop-statement".into(),
-            });
-        }
-    }
-
-    /// Inline imports (imports inside any function) and private-symbol
-    /// imports (`from pkg import _x`, `from pkg._sub import x`,
-    /// `import pkg._internal`).
-    fn import_checks(&mut self, stmt: &'a Stmt) {
-        let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-        if !self.fn_stack.is_empty() {
-            let line = stmt_line(self.source, stmt);
-            self.findings.push(Finding {
-                logical_start: None,
-                seam_members: Vec::new(),
-                col: 0,
-                file: self.file.to_string(),
-                line,
-                function: fn_name.clone(),
-                kind: "inline-import".into(),
-                severity: "fail".into(),
-                message: format!("import inside function body at line {line} — move it to module top"),
-            });
-        }
-        match stmt {
-            Stmt::ImportFrom(im) => {
-                if im.module.as_ref().map(|m| m.as_str()) == Some("__future__") {
-                    return;
-                }
-                let private_module = im
-                    .module
-                    .as_ref()
-                    .map(|m| m.as_str().split('.').any(|seg| seg.starts_with('_')))
-                    .unwrap_or(false);
-                for alias in &im.names {
-                    let name = alias.name.as_str();
-                    if name.starts_with('_') || private_module {
-                        let target = if name.starts_with('_') {
-                            name.to_string()
-                        } else {
-                            format!("{}.{}", im.module.as_ref().map(|m| m.as_str()).unwrap_or(""), name)
-                        };
-                        self.findings.push(Finding {
-                            logical_start: None,
-                            seam_members: Vec::new(),
-                            file: self.file.to_string(),
-                            line: stmt_line(self.source, stmt),
-                            col: 0,
-                            function: fn_name.clone(),
-                            kind: "private-import".into(),
-                            severity: "fail".into(),
-                            message: format!("imports private symbol '{target}' — never import underscore symbols"),
-                        });
-                    }
-                }
-            }
-            Stmt::Import(im) => {
-                for alias in &im.names {
-                    let name = alias.name.as_str();
-                    if name.split('.').any(|seg| seg.starts_with('_')) {
-                        self.findings.push(Finding {
-                            logical_start: None,
-                            seam_members: Vec::new(),
-                            file: self.file.to_string(),
-                            line: stmt_line(self.source, stmt),
-                            col: 0,
-                            function: fn_name.clone(),
-                            kind: "private-import".into(),
-                            severity: "fail".into(),
-                            message: format!("imports private path '{name}' — never import underscore symbols"),
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Statements after an unconditional return/raise/continue/break are dead
-    /// code — one finding per statement list, exactly like the Python tool.
-    fn unreachable_check(&mut self, body: &'a [Stmt]) {
-        let mut lists: Vec<&'a [Stmt]> = vec![body];
-        for s in body {
-            collect_stmt_lists(s, &mut lists);
-        }
-        let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
-        for list in lists {
-            for (i, stmt) in list.iter().enumerate() {
-                let exits = matches!(
-                    stmt,
-                    Stmt::Return(_) | Stmt::Raise(_) | Stmt::Continue(_) | Stmt::Break(_)
-                );
-                if exits {
-                    if let Some(dead) = list.get(i + 1) {
-                        let line = stmt_line(self.source, dead);
-                        self.findings.push(Finding {
-                            logical_start: None,
-                            seam_members: Vec::new(),
-                            col: 0,
-                            file: self.file.to_string(),
-                            line,
-                            function: fn_name.clone(),
-                            kind: "unreachable".into(),
-                            severity: "fail".into(),
-                            message: format!(
-                                "unreachable statement at line {line} — dead code is deleted — fix: unreachable"
-                            ),
-                        });
-                    }
-                    break;
-                }
-            }
-        }
-    }
-}
-
-/// All statement lists inside a function, excluding nested function bodies —
-/// the Python `_statement_lists` equivalent.
-fn collect_stmt_lists<'a>(stmt: &'a Stmt, out: &mut Vec<&'a [Stmt]>) {
-    match stmt {
-        Stmt::FunctionDef(_) => {}
-        Stmt::ClassDef(c) => {
-            out.push(&c.body);
-            for s in &c.body {
-                collect_stmt_lists(s, out);
-            }
-        }
-        Stmt::If(i) => {
-            out.push(&i.body);
-            for s in &i.body {
-                collect_stmt_lists(s, out);
-            }
-            for cl in &i.elif_else_clauses {
-                out.push(&cl.body);
-                for s in &cl.body {
-                    collect_stmt_lists(s, out);
-                }
-            }
-        }
-        Stmt::For(f) => {
-            out.push(&f.body);
-            for s in &f.body {
-                collect_stmt_lists(s, out);
-            }
-            out.push(&f.orelse);
-            for s in &f.orelse {
-                collect_stmt_lists(s, out);
-            }
-        }
-        Stmt::While(w) => {
-            out.push(&w.body);
-            for s in &w.body {
-                collect_stmt_lists(s, out);
-            }
-            out.push(&w.orelse);
-            for s in &w.orelse {
-                collect_stmt_lists(s, out);
-            }
-        }
-        Stmt::With(w) => {
-            out.push(&w.body);
-            for s in &w.body {
-                collect_stmt_lists(s, out);
-            }
-        }
-        Stmt::Try(t) => {
-            out.push(&t.body);
-            for s in &t.body {
-                collect_stmt_lists(s, out);
-            }
-            for h in &t.handlers {
-                let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
-                out.push(&eh.body);
-                for s in &eh.body {
-                    collect_stmt_lists(s, out);
-                }
-            }
-            out.push(&t.orelse);
-            for s in &t.orelse {
-                collect_stmt_lists(s, out);
-            }
-            out.push(&t.finalbody);
-            for s in &t.finalbody {
-                collect_stmt_lists(s, out);
-            }
-        }
-        Stmt::Match(m) => {
-            for case in &m.cases {
-                out.push(&case.body);
-                for s in &case.body {
-                    collect_stmt_lists(s, out);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn stmt_line(source: &str, stmt: &Stmt) -> usize {
-    let off = match stmt {
-        Stmt::FunctionDef(f) => f.range.start(),
-        Stmt::ClassDef(c) => c.range.start(),
-        Stmt::Return(r) => r.range.start(),
-        Stmt::Delete(d) => d.range.start(),
-        Stmt::TypeAlias(t) => t.range.start(),
-        Stmt::Assign(a) => a.range.start(),
-        Stmt::AugAssign(a) => a.range.start(),
-        Stmt::AnnAssign(a) => a.range.start(),
-        Stmt::For(f) => f.range.start(),
-        Stmt::While(w) => w.range.start(),
-        Stmt::If(i) => i.range.start(),
-        Stmt::With(w) => w.range.start(),
-        Stmt::Match(m) => m.range.start(),
-        Stmt::Raise(r) => r.range.start(),
-        Stmt::Try(t) => t.range.start(),
-        Stmt::Assert(a) => a.range.start(),
-        Stmt::Import(i) => i.range.start(),
-        Stmt::ImportFrom(i) => i.range.start(),
-        Stmt::Global(g) => g.range.start(),
-        Stmt::Nonlocal(n) => n.range.start(),
-        Stmt::Expr(e) => e.range.start(),
-        Stmt::Pass(p) => p.range.start(),
-        Stmt::Break(b) => b.range.start(),
-        Stmt::Continue(c) => c.range.start(),
-        Stmt::IpyEscapeCommand(s) => s.range.start(),
-    };
-    line_of(source, off)
-}
-
-/// One file's scan output, including the repo-wide collections.
-/// One top-level class: name, def line, abstract flag, and base references
-/// ("Name:Id" for a plain base, "Attr:Alias:attr" for alias.attr).
-#[derive(Clone)]
-pub struct ClassInfo {
-    pub name: String,
-    pub line: usize,
-    pub abstract_: bool,
-    pub bases: Vec<String>,
-    /// Declared members (class-body annotations, __slots__, annotated
-    /// __init__ self-assigns) — undeclared-attribute's declaration table.
-    pub declared: Vec<String>,
-}
-
-/// One import alias: local name -> (module, imported name).
-#[derive(Clone)]
-pub struct ImportInfo {
-    pub alias: String,
-    pub module: String,
-    pub imported: String,
-}
-
-/// One `self.<attr> = ...` site inside a top-level class — undeclared-
-/// attribute's raw material: the repo-wide merge decides which are quiet
-/// assignments (per-file scans cannot resolve base classes).
-#[derive(Clone)]
-pub struct SelfAssign {
-    pub class: String,
-    pub attr: String,
-    pub line: usize,
-    pub function: String,
-    pub is_init: bool,
-}
-
-/// One file's undeclared-attribute inputs: its rel, classes (declared
-/// members + bases), imports, and self-assignment sites — the per-scan
-/// slice the repo-wide pass resolves.
-#[derive(Clone, Default)]
-pub struct UndeclScan {
-    pub rel: String,
-    pub classes: Vec<ClassInfo>,
-    pub imports: Vec<ImportInfo>,
-    pub self_assigns: Vec<SelfAssign>,
-}
-
-#[derive(Clone, Default)]
-pub struct FileScan {
-    pub file_name: String,
-    pub findings: Vec<Finding>,
-    pub cc: Vec<FnCc>,
-    pub errors: usize,
-    pub defs: Vec<(String, usize)>,
-    pub class_defs: Vec<(String, usize)>,
-    pub scattered: Vec<checks::ScatteredInstance>,
-    /// The file's substantive expressions (#104 duplicate-expression).
-    pub duplicate_expressions: Vec<checks::ExpressionOccurrence>,
-    /// The file's module-level path expressions (#60 shared-path).
-    pub path_expressions: Vec<checks::PathExpression>,
-    pub setters: Vec<(String, usize)>,
-    pub refs: HashSet<String>,
-    pub strings: Vec<String>,
-    pub skeletons: Vec<SkeletonFn>,
-    pub skeleton_modules: Vec<SkeletonModule>,
-    pub decorated: HashSet<String>,
-    pub classes: Vec<ClassInfo>,
-    pub imports: Vec<ImportInfo>,
-    pub self_assigns: Vec<SelfAssign>,
-    /// The file's parsed `lucidlint: ignore` suppressions — the repo-wide
-    /// families (duplicate/unused/docs/graph) are filtered through them at
-    /// the end of the scan (per-file families apply theirs during the scan).
-    pub supps: common::Suppressions,
-    /// (line, signal) pairs the per-file pass consumed — stage-2 repo-wide
-    /// re-honoring must not spend them again (innermost-peel capacity).
-    pub supps_spent: HashSet<(usize, String)>,
-    pub forwarder_fns: Vec<checks::ForwarderFn>,
-    pub forwarder_methods: Vec<checks::ForwarderMethod>,
-    pub repo_methods: Vec<checks::RepoMethod>,
-    pub middle_man_classes: Vec<checks::MiddleManClass>,
-    pub middle_man_candidates: Vec<checks::MiddleManCandidate>,
-    /// The file's class shapes for the repo-wide sibling pass (#61).
-    pub sibling_classes: Vec<checks::SiblingClass>,
-}
-
 impl FileScan {
     /// The repo-relative path — the scan's identity (the orchestrator's
     /// `rel`); the repo-wide merge keys everything by it.
     pub fn rel_of(&self, root_s: &str) -> String {
-        rel_of(&self.file_name, root_s)
+        Paths::rel_of(&self.file_name, root_s)
     }
 }
 
-pub(crate) fn is_test_path(name: &str) -> bool {
-    name.contains("/test") || name.starts_with("test")
-}
+pub use rules_gen::{final_kind, FAMILY_KINDS, STANDARD_KINDS};
 
-/// The full scan (CLI): per-file families + repo-wide collections.
-fn scan_source(source: &str, name: &str) -> FileScan {
-    let repo_wide = true;
-    scan_source_impl(source, name, repo_wide)
-}
+/// The scan pipeline — the composition root's one pass over a file or repo.
+pub struct Pipeline;
 
-/// The LSP scan: per-file families only — the duplicate-candidate BFS and
-/// its per-function skeleton walks are pure waste for a single buffer.
-/// Dispatches on the buffer's extension: .rs -> the Rust layer, else Python.
-pub fn scan_source_lsp(source: &str, name: &str) -> FileScan {
-    if name.ends_with(".rs") {
+impl Pipeline {
+    /// The full scan (CLI): per-file families + repo-wide collections.
+    fn scan_source(source: &str, name: &str) -> FileScan {
+        let repo_wide = true;
+        Self::scan(source, name, repo_wide)
+    }
+
+    /// The LSP scan: per-file families only — the duplicate-candidate BFS and
+    /// its per-function skeleton walks are pure waste for a single buffer.
+    /// Dispatches on the buffer's extension: .rs -> the Rust layer, else Python.
+    fn scan_source_lsp(source: &str, name: &str) -> FileScan {
+        if name.ends_with(".rs") {
+            let repo_wide = false; // LSP per-buffer scans are single-file
+            let rs = rustscan::RustScan::scan(source, name, repo_wide);
+            return Self::rustscan_to_filescan_ref(&rs, name);
+        }
         let repo_wide = false; // LSP per-buffer scans are single-file
-        let rs = rustscan::scan_source(source, name, repo_wide);
-        return rustscan_to_filescan_ref(&rs, name);
+        Self::scan(source, name, repo_wide)
     }
-    let repo_wide = false; // LSP per-buffer scans are single-file
-    scan_source_impl(source, name, repo_wide)
-}
 
-/// The module-level post-passes — structural families + the advisory
-/// refactorings — kept out of scan_source_impl (which was crossing the
-/// large-function line).
-fn module_post_passes(state: &mut ScanState, body: &[Stmt], name: &str, source: &str, repo_wide: bool) {
-    class_module_findings(state, body, name);
-    vague_name_findings(state, body);
-    strewing_findings(state, body);
-    misplaced_method_findings(state, body);
-    tuple_record_findings(state, body);
-    wide_tuple_findings(state, body);
-    assembly_class_findings(state, body);
-    data_clump_findings(state, body);
-    feature_envy_findings(state, body);
-    collect_self_assigns(state, body);
-    static_husk_findings(state, body);
-    delegating_husk_findings(state, body);
-    process_class_findings(state, body);
-    closure_cluster_findings(state, body, source);
-    duplicate_field_findings(state, body);
-    record_shape_findings(state, body, source);
-    partition_findings(state, body, source);
-    // review-log rules: shadowing hazards + duplicated work (all per-file)
-    duplicate_def_findings(state, body);
-    restating_docstring_findings(state, body);
-    duplicate_block_findings(state, body);
-    // advisory refactorings (warn): detection-only, the fix names the Fowler
-    // refactoring for the agent (or a future fix)
-    guard_clause_findings(state, body, source);
-    latent_visitor_findings(state, body, source); // claims chains first — polymorphism skips them
-    conditional_polymorphism_findings(state, body, source);
-    special_case_findings(state, body, source);
-    collect_scattered_instances(state, body);
-    unnamed_condition_findings(state, body, source);
-    unnamed_classification_findings(state, body, source);
-    collect_middle_man(state, body, source, repo_wide);
-    collect_setters(state, body);
-    loop_pipeline_findings(state, body, source);
-    collect_skeleton_modules(state, body, name);
-    collect_forwarders(state, body);
-}
+    /// Per-buffer scans never run the repo-wide families (unused, unused-setter,
+    /// duplicate) — their findings are evaluated only in repo_wide_merge — so
+    /// their markers cannot bind here and a stale finding for one is a false
+    /// fail artifact. The gate path keeps stale reporting: its merge consumes
+    /// those markers and drops exactly the stale findings that survive it.
+    fn drop_repo_wide_stale_artifacts(findings: &mut Vec<Finding>) {
+        findings.retain(|f| {
+            f.kind != "stale-suppression"
+                || !matches!(
+                    Self::sig_of_stale(&f.message).as_str(),
+                    "unused" | "unused-setter" | "duplicate" | "undeclared-attribute"
+                )
+        });
+    }
 
-/// Per-buffer scans never run the repo-wide families (unused, unused-setter,
-/// duplicate) — their findings are evaluated only in repo_wide_merge — so
-/// their markers cannot bind here and a stale finding for one is a false
-/// fail artifact. The gate path keeps stale reporting: its merge consumes
-/// those markers and drops exactly the stale findings that survive it.
-fn drop_repo_wide_stale_artifacts(findings: &mut Vec<Finding>) {
-    findings.retain(|f| {
-        f.kind != "stale-suppression"
-            || !matches!(
-                sig_of_stale(&f.message).as_str(),
-                "unused" | "unused-setter" | "duplicate" | "undeclared-attribute"
-            )
-    });
-}
-
-fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
-    reset_line_starts();
-    let parsed: Parsed<ModModule> = match parse_module(source) {
-        Ok(p) => p,
-        Err(_) => {
-            return FileScan {
-                file_name: name.to_string(),
-                errors: 1,
-                ..Default::default()
-            };
+    fn scan(source: &str, name: &str, repo_wide: bool) -> FileScan {
+        Source::reset_line_starts();
+        let parsed: Parsed<ModModule> = match parse_module(source) {
+            Ok(p) => p,
+            Err(_) => {
+                return FileScan {
+                    file_name: name.to_string(),
+                    errors: 1,
+                    ..Default::default()
+                };
+            }
+        };
+        let errors = parsed.errors().len();
+        let body = parsed.syntax().body.clone(); // ThinVec<Stmt> — derefs to &[Stmt]
+        let mut state = ScanState {
+            file: name,
+            source,
+            logical_starts: checks::Suppressions::logical_line_starts(source, parsed.tokens()),
+            magic_table_exempts: checks::MagicNumber::magic_table_exempt_offsets(&body),
+            magic_const_rhs_exempts: checks::MagicNumber::magic_const_rhs_offsets(&body),
+            magic_len_guard_exempts: checks::MagicNumber::magic_len_guard_offsets(&body),
+            magic_unit_named_exempts: checks::NamingUnits::magic_unit_named_offsets(&body),
+            is_test: Paths::is_test_path(name),
+            module_constants: checks::GlobalState::module_constant_names(&body),
+            ..Default::default()
+        };
+        for stmt in &body {
+            state.visit_stmt(stmt);
         }
-    };
-    let errors = parsed.errors().len();
-    let body = parsed.syntax().body.clone(); // ThinVec<Stmt> — derefs to &[Stmt]
-    let mut state = ScanState {
-        file: name,
-        source,
-        logical_starts: checks::logical_line_starts(source, parsed.tokens()),
-        magic_table_exempts: checks::magic_table_exempt_offsets(&body),
-        magic_const_rhs_exempts: checks::magic_const_rhs_offsets(&body),
-        magic_len_guard_exempts: checks::magic_len_guard_offsets(&body),
-        magic_unit_named_exempts: checks::magic_unit_named_offsets(&body),
-        is_test: is_test_path(name),
-        module_constants: checks::module_constant_names(&body),
-        ..Default::default()
-    };
-    for stmt in &body {
-        state.visit_stmt(stmt);
-    }
-    module_post_passes(&mut state, &body, name, source, repo_wide);
-    if state.is_test {
-        // the rules that live in tests — scanned for alone or with --include-tests
-        monkeypatch_findings(&mut state, &body, source);
-        skipif_findings(&mut state, &body, source);
-        fakefs_findings(&mut state, &body, source);
-        no_assert_test_findings(&mut state, &body, source);
-    }
-    // large-function: the span is a fact of THIS file's AST, computed here so
-    // the LSP and a graph-less CI run see it too (the graph contract only
-    // adds evidence about other files). Test files keep it out of the gate via
-    // the action layer's test-only filter, unless --include-tests is passed.
-    for (fn_name, start, end) in &state.fn_spans {
-        let span = end.saturating_sub(*start) + 1;
-        if span <= 120 {
-            continue;
+        state.module_post_passes(&body, name, source, repo_wide);
+        if state.is_test {
+            // the rules that live in tests — scanned for alone or with --include-tests
+            Monkeypatch::findings(&mut state, &body, source);
+            skipif_findings(&mut state, &body, source);
+            fakefs_findings(&mut state, &body, source);
+            no_assert_test_findings(&mut state, &body, source);
         }
-        state.findings.push(Finding {
+        // large-function: the span is a fact of THIS file's AST, computed here so
+        // the LSP and a graph-less CI run see it too (the graph contract only
+        // adds evidence about other files). Test files keep it out of the gate via
+        // the action layer's test-only filter, unless --include-tests is passed.
+        for (fn_name, start, end) in &state.fn_spans {
+            let span = end.saturating_sub(*start) + 1;
+            if span <= 120 {
+                continue;
+            }
+            state.findings.push(Finding {
             logical_start: None,
             seam_members: Vec::new(),
             col: 0,
@@ -1368,620 +251,516 @@ fn scan_source_impl(source: &str, name: &str, repo_wide: bool) -> FileScan {
                 "'{fn_name}' spans {span} lines (>= 120) — the steps it performs are not named, so a reader cannot hold the whole job: extract each domain step into a named function"
             ),
         });
-    }
-    // duplicate candidates in ast.walk BFS order — module-level functions
-    // (any depth) come before class methods regardless of source line;
-    // skipped for a single buffer (repo-wide families need the whole repo)
-    if repo_wide && !state.is_test {
-        let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
-        let mut qi = 0usize;
-        while qi < queue.len() {
-            if let Q::N(n) = queue[qi] {
-                if let AnyNodeRef::StmtFunctionDef(f) = n {
-                    let skel = fn_skeleton(f);
-                    if is_duplicate_candidate(f, skel.len()) {
-                        let def_line = line_of(source, f.name.range().start());
-                        state.skeletons.push(SkeletonFn {
-                            rel: name.to_string(),
-                            name: f.name.to_string(),
-                            line: def_line,
-                            end_line: line_of(source, f.range().end()),
-                            skeleton: skel,
-                        });
+        }
+        // duplicate candidates in ast.walk BFS order — module-level functions
+        // (any depth) come before class methods regardless of source line;
+        // skipped for a single buffer (repo-wide families need the whole repo)
+        if repo_wide && !state.is_test {
+            let mut queue: Vec<Q> = body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
+            let mut qi = 0usize;
+            while qi < queue.len() {
+                if let Q::N(n) = queue[qi] {
+                    if let AnyNodeRef::StmtFunctionDef(f) = n {
+                        let skel = fn_skeleton(f);
+                        if Similarity::is_duplicate_candidate(f, skel.len()) {
+                            let def_line = Source::line_of(source, f.name.range().start());
+                            state.skeletons.push(SkeletonFn {
+                                rel: name.to_string(),
+                                name: f.name.to_string(),
+                                line: def_line,
+                                end_line: Source::line_of(source, f.range().end()),
+                                skeleton: skel,
+                            });
+                        }
                     }
+                    skel_children(n, &mut queue);
                 }
-                skel_children(n, &mut queue);
-            }
-            qi += 1;
-        }
-    }
-    // Phase 4a: label every emitted finding with its logical line — the first
-    // source line of the construct it sits in (a multi-line `def`/`async def`,
-    // a wrapped call, a split literal). The binder then admits a marker on the
-    // logical line or the line before it in addition to the finding's own line
-    // pair. Single-line constructs keep `None` (the finding's own line).
-    {
-        let starts = &state.logical_starts;
-        for f in &mut state.findings {
-            let line = f.line;
-            if f.logical_start.is_none() {
-                f.logical_start = starts.get(line).copied().filter(|&start| start < line);
+                qi += 1;
             }
         }
-    }
-    let tokens = parsed.tokens();
-    let supps = checks::parse_suppressions(source, tokens);
-    // complexity findings are generated from the cc array after this pass —
-    // honor complexity suppressions here so both paths agree (radon parity:
-    // a fn whose complexity is suppressed must not resurface via cc)
-    let mut pre_used = common::PreUsedSuppressions::default();
-    if !state.cc.is_empty() {
-        state.cc.retain(|e| {
-            // record what the retention's own decision honors — the SAME
-            // widened window and family-aware matching that suppressed()
-            // uses (a suppression used by the cc path must not be re-flagged
-            // stale by apply_suppressions_impl)
-            for ln in common::window_lines(e.line) {
-                if let Some(entries) = supps.line.get(&ln) {
-                    for (sig, why) in entries {
-                        if common::signal_matches(sig, "complexity") && !why.is_empty() {
-                            pre_used.lines.insert((ln, sig.clone()));
+        // Phase 4a: label every emitted finding with its logical line — the first
+        // source line of the construct it sits in (a multi-line `def`/`async def`,
+        // a wrapped call, a split literal). The binder then admits a marker on the
+        // logical line or the line before it in addition to the finding's own line
+        // pair. Single-line constructs keep `None` (the finding's own line).
+        {
+            let starts = &state.logical_starts;
+            for f in &mut state.findings {
+                let line = f.line;
+                if f.logical_start.is_none() {
+                    f.logical_start = starts.get(line).copied().filter(|&start| start < line);
+                }
+            }
+        }
+        let tokens = parsed.tokens();
+        let supps = checks::Suppressions::parse_suppressions(source, tokens);
+        // complexity findings are generated from the cc array after this pass —
+        // honor complexity suppressions here so both paths agree (radon parity:
+        // a fn whose complexity is suppressed must not resurface via cc)
+        let mut pre_used = crate::suppressions::PreUsedSuppressions::default();
+        if !state.cc.is_empty() {
+            state.cc.retain(|e| {
+                // record what the retention's own decision honors — the SAME
+                // widened window and family-aware matching that suppressed()
+                // uses (a suppression used by the cc path must not be re-flagged
+                // stale by apply_suppressions_impl)
+                for ln in crate::suppressions::Suppressions::window_lines(e.line) {
+                    if let Some(entries) = supps.line.get(&ln) {
+                        for (sig, why) in entries {
+                            if crate::suppressions::Suppressions::signal_matches(sig, "complexity") && !why.is_empty() {
+                                pre_used.lines.insert((ln, sig.clone()));
+                            }
                         }
                     }
                 }
-            }
-            let line_suppressed = common::suppressed("complexity", e.line, &supps);
-            let file_suppressed = supps.file.get("complexity").is_some_and(|w| !w.is_empty());
-            if file_suppressed {
-                pre_used.files.insert("complexity".into());
-            }
-            !line_suppressed && !file_suppressed
-        });
-    }
-    let mut supps_spent = HashSet::new();
-    // G4: the exemption-kind labels among the file's still-present
-    // magic-number candidates — threaded into the stale message so it names
-    // exactly the exemptions that apply (never unit/constant/table for
-    // indices).
-    let magic_exempt_labels = checks::magic_exemption_labels(
-        &body,
-        source,
-        &state.magic_table_exempts,
-        &state.magic_const_rhs_exempts,
-        &state.magic_len_guard_exempts,
-        &state.magic_unit_named_exempts,
-    );
-    let mut books = crate::common::SuppressionBooks {
-        pre_used: &pre_used,
-        spent: &mut supps_spent,
-    };
-    let findings =
-        checks::apply_suppressions_impl(state.findings, source, name, tokens, &mut books, &magic_exempt_labels);
-    let mut all = type_ignore_findings(source, name, tokens);
-    all.extend(noqa_findings(source, name, tokens));
-    all.extend(findings);
-    if !repo_wide {
-        drop_repo_wide_stale_artifacts(&mut all);
-    }
-    let classes = collect_classes(&body, source);
-    let imports = collect_imports(&body, source);
-    let sibling_classes = checks::collect_sibling_classes(&body, source);
-    FileScan {
-        file_name: name.to_string(),
-        findings: all,
-        cc: state.cc,
-        errors,
-        defs: state.defs,
-        class_defs: state.class_defs,
-        scattered: state.scattered,
-        duplicate_expressions: state.duplicate_expressions,
-        path_expressions: state.path_expressions,
-        setters: state.setters,
-        refs: state.refs,
-        strings: state.strings,
-        decorated: state.decorated,
-        skeletons: state.skeletons,
-        classes,
-        imports,
-        self_assigns: state.self_assigns,
-        supps,
-        supps_spent,
-        skeleton_modules: state.skeleton_modules,
-        forwarder_fns: state.forwarder_fns,
-        forwarder_methods: state.forwarder_methods,
-        repo_methods: state.repo_methods,
-        middle_man_classes: state.middle_man_classes,
-        middle_man_candidates: state.middle_man_candidates,
-        sibling_classes,
-    }
-}
-
-pub(crate) fn scan_file(path: &Path) -> FileScan {
-    let source = std::fs::read_to_string(path).unwrap_or_default();
-    let name = path.to_str().unwrap_or("<file>").to_string();
-    if name.ends_with(".rs") {
-        let repo_wide = true;
-        let rs = rustscan::scan_source(&source, &name, repo_wide);
-        return rustscan_to_filescan_ref(&rs, &name);
-    }
-    let mut scan = scan_source(&source, &name);
-    scan.file_name = name;
-    scan
-}
-
-/// Directories a repo-wide scan never enters (venvs, caches, build output —
-/// the orchestrator's git-ls-files equivalent without git).
-/// The repo-wide merge for the LSP's save path: every Python file under
-/// `root` scanned with the repo-wide flag, then the families that need the
-/// whole repo (duplicate, unused — reconciled through each file's
-/// suppressions, review-log B3). Returns the ADDITIONS per repo-relative
-/// file; the per-file findings travel via the buffer scan so nothing is
-/// double-reported. Lives here (the composition root) so lsp stays a
-/// standalone scan-core module (layers test).
-const SCAN_SKIP_DIRS: &[&str] = &[
-    ".git",
-    ".venv",
-    "venv",
-    "node_modules",
-    "__pycache__",
-    ".lucidlint-cache",
-    ".ruff_cache",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".pyrefly-cache",
-    "htmlcov",
-    "dist",
-    "build",
-    "target",
-    ".code-review-graph",
-    ".tox",
-    ".eggs",
-];
-
-/// Every Python file under `root` (the scan walk; `SCAN_SKIP_DIRS` prunes
-/// venvs/caches/build output). Shared by the full gate scan and the LSP's
-/// incremental save path — the LSP stats these paths instead of re-scanning.
-pub(crate) fn repo_files(root: &Path) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !SCAN_SKIP_DIRS.contains(&name) {
-                    stack.push(p);
+                let line_suppressed = crate::suppressions::Suppressions::suppressed("complexity", e.line, &supps);
+                let file_suppressed = supps.file.get("complexity").is_some_and(|w| !w.is_empty());
+                if file_suppressed {
+                    pre_used.files.insert("complexity".into());
                 }
-            } else if p.extension().is_some_and(|x| x == "py") {
-                paths.push(p);
-            }
-        }
-    }
-    paths.sort();
-    paths
-}
-
-/// The repo-wide middle-man family (#44) over a set of scans: the index is the
-/// union of every file's classes — one class per file is the house convention,
-/// so the target of a delegation usually lives in another file and a
-/// file-local index would read almost every real target as outside the
-/// codebase. A candidate a single-buffer scan already reported (same file and
-/// line) is not reported a second time.
-fn middle_man_repo_wide(scans: &[FileScan], root_s: &str) -> Vec<Finding> {
-    let mut classes: Vec<checks::MiddleManClass> = Vec::new();
-    let mut candidates: Vec<checks::MiddleManCandidate> = Vec::new();
-    let mut already: HashSet<(String, usize)> = HashSet::new();
-    for scan in scans {
-        let rel = scan.rel_of(root_s);
-        classes.extend(scan.middle_man_classes.iter().cloned());
-        candidates.extend(scan.middle_man_candidates.iter().cloned());
-        for f in &scan.findings {
-            if f.kind == "middle-man" {
-                already.insert((rel.clone(), f.line));
-            }
-        }
-    }
-    checks::middle_man_findings(&candidates, &classes)
-        .into_iter()
-        .filter(|f| !already.contains(&(f.file.clone(), f.line)))
-        .collect()
-}
-
-/// The repo-wide merge (duplicate + unused + unused-setter, reconciled
-/// through each file's suppressions) over a set of scans — the expensive
-/// part of a repo-wide scan is the per-file scan, so the LSP reuses cached
-/// scans and re-runs only this pure in-memory aggregation on save.
-pub(crate) fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collections::HashMap<String, Vec<Finding>> {
-    let mut skeletons = Vec::new();
-    let mut definitions: Vec<(String, String, usize, bool)> = Vec::new();
-    let mut setters: Vec<(String, String, usize)> = Vec::new();
-    let mut prod_refs = HashSet::new();
-    let mut test_refs = HashSet::new();
-    let mut strings = Vec::new();
-    let mut supps_by_rel: std::collections::HashMap<String, common::Suppressions> = std::collections::HashMap::new();
-    let mut supps_spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
-        std::collections::HashMap::new();
-    for scan in scans {
-        let rel = scan.rel_of(root_s);
-        let is_test = is_test_path(&rel);
-        for s in &scan.skeletons {
-            skeletons.push(SkeletonFn {
-                rel: rel.clone(),
-                name: s.name.clone(),
-                line: s.line,
-                end_line: s.end_line,
-                skeleton: s.skeleton.clone(),
+                !line_suppressed && !file_suppressed
             });
         }
-        for (name, line) in &scan.defs {
-            definitions.push((rel.clone(), name.clone(), *line, false));
+        let mut supps_spent = HashSet::new();
+        // G4: the exemption-kind labels among the file's still-present
+        // magic-number candidates — threaded into the stale message so it names
+        // exactly the exemptions that apply (never unit/constant/table for
+        // indices).
+        let magic_exempt_labels = checks::MagicNumber::magic_exemption_labels(
+            &body,
+            source,
+            &state.magic_table_exempts,
+            &state.magic_const_rhs_exempts,
+            &state.magic_len_guard_exempts,
+            &state.magic_unit_named_exempts,
+        );
+        let mut books = crate::suppressions::SuppressionBooks {
+            pre_used: &pre_used,
+            spent: &mut supps_spent,
+        };
+        let findings =
+            checks::Suppressions::apply_source(state.findings, source, name, tokens, &mut books, &magic_exempt_labels);
+        let mut all = type_ignore_findings(source, name, tokens);
+        all.extend(noqa_findings(source, name, tokens));
+        all.extend(findings);
+        if !repo_wide {
+            Self::drop_repo_wide_stale_artifacts(&mut all);
         }
-        for (name, line) in &scan.class_defs {
-            definitions.push((rel.clone(), name.clone(), *line, true));
+        let classes = OverAbstraction::collect_classes(&body, source);
+        let imports = OverAbstraction::collect_imports(&body, source);
+        let sibling_classes = checks::SiblingValueClass::collect_sibling_classes(&body, source);
+        FileScan {
+            file_name: name.to_string(),
+            findings: all,
+            cc: state.cc,
+            errors,
+            defs: state.defs,
+            class_defs: state.class_defs,
+            scattered: state.scattered,
+            duplicate_expressions: state.duplicate_expressions,
+            path_expressions: state.path_expressions,
+            module_shape: checks::ModuleShape::python(source, &body),
+            setters: state.setters,
+            refs: state.refs,
+            strings: state.strings,
+            decorated: state.decorated,
+            skeletons: state.skeletons,
+            classes,
+            imports,
+            self_assigns: state.self_assigns,
+            supps,
+            supps_spent,
+            skeleton_modules: state.skeleton_modules,
+            forwarder_fns: state.forwarder_fns,
+            forwarder_methods: state.forwarder_methods,
+            repo_methods: state.repo_methods,
+            middle_man_classes: state.middle_man_classes,
+            middle_man_candidates: state.middle_man_candidates,
+            sibling_classes,
         }
-        for (name, line) in &scan.setters {
-            setters.push((rel.clone(), name.clone(), *line));
+    }
+
+    fn scan_file(path: &Path) -> FileScan {
+        let source = std::fs::read_to_string(path).unwrap_or_default();
+        let name = path.to_str().unwrap_or("<file>").to_string();
+        if name.ends_with(".rs") {
+            let repo_wide = true;
+            let rs = rustscan::RustScan::scan(&source, &name, repo_wide);
+            return Self::rustscan_to_filescan_ref(&rs, &name);
         }
-        if is_test {
-            test_refs.extend(scan.refs.iter().cloned());
-        } else {
-            prod_refs.extend(scan.refs.iter().cloned());
-            strings.extend(scan.strings.iter().cloned());
+        let mut scan = Self::scan_source(&source, &name);
+        scan.file_name = name;
+        scan
+    }
+
+    /// Every Python file under `root` (the scan walk; `SCAN_SKIP_DIRS` prunes
+    /// venvs/caches/build output). Shared by the full gate scan and the LSP's
+    /// incremental save path — the LSP stats these paths instead of re-scanning.
+    fn repo_files(root: &Path) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if !SCAN_SKIP_DIRS.contains(&name) {
+                        stack.push(p);
+                    }
+                } else if p.extension().is_some_and(|x| x == "py") {
+                    paths.push(p);
+                }
+            }
         }
-        prod_refs.extend(scan.decorated.iter().cloned());
-        supps_by_rel.insert(rel.clone(), scan.supps.clone());
-        supps_spent_by_rel.insert(rel.clone(), scan.supps_spent.clone());
+        paths.sort();
+        paths
     }
-    let mut module_entities = Vec::new();
-    let mut heads = Vec::new();
-    let mut fns = Vec::new();
-    let mut repo_methods = Vec::new();
-    let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
-    for scan in scans {
-        module_entities.extend(scan.skeleton_modules.iter().cloned());
-        heads.extend(scan.forwarder_methods.iter().cloned());
-        fns.extend(scan.forwarder_fns.iter().cloned());
-        repo_methods.extend(scan.repo_methods.iter().cloned());
-        imports_by_rel.insert(scan.rel_of(root_s), scan.imports.clone());
-    }
-    let mut additions: Vec<Finding> = Vec::new();
-    additions.extend(checks::duplicate_findings(&skeletons));
-    additions.extend(checks::duplicate_module_findings(&module_entities));
-    additions.extend(checks::forwarding_chain_findings(
-        &heads,
-        &fns,
-        &repo_methods,
-        &imports_by_rel,
-    ));
-    let mut repo_wide_unused = checks::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
-    repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
-    reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
-    let class_names: HashSet<String> = definitions
-        .iter()
-        .filter(|(_, _, _, is_class)| *is_class)
-        .map(|(_, name, _, _)| name.clone())
-        .collect();
-    let scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> =
-        scans.iter().map(|s| (s.rel_of(root_s), s.scattered.clone())).collect();
-    reconcile_repo_wide(
-        &mut additions,
-        checks::scattered_instance_findings(&scattered_scans, &class_names),
-        &supps_by_rel,
-        &supps_spent_by_rel,
-    );
-    let path_scans: Vec<(String, Vec<checks::PathExpression>)> = scans
-        .iter()
-        .map(|s| (s.rel_of(root_s), s.path_expressions.clone()))
-        .collect();
-    reconcile_repo_wide(
-        &mut additions,
-        checks::shared_path_findings(&path_scans),
-        &supps_by_rel,
-        &supps_spent_by_rel,
-    );
-    let duplicate_expr_scans: Vec<(String, Vec<checks::ExpressionOccurrence>)> = scans
-        .iter()
-        .map(|s| (s.rel_of(root_s), s.duplicate_expressions.clone()))
-        .collect();
-    reconcile_repo_wide(
-        &mut additions,
-        checks::duplicate_expression_findings(&duplicate_expr_scans),
-        &supps_by_rel,
-        &supps_spent_by_rel,
-    );
-    let undecl_scans: Vec<UndeclScan> = scans
-        .iter()
-        .map(|s| UndeclScan {
-            rel: s.rel_of(root_s),
-            classes: s.classes.clone(),
-            imports: s.imports.clone(),
-            self_assigns: s.self_assigns.clone(),
-        })
-        .collect();
-    let undeclared = checks::undeclared_findings(&undecl_scans);
-    reconcile_repo_wide(&mut additions, undeclared, &supps_by_rel, &supps_spent_by_rel);
-    reconcile_repo_wide(
-        &mut additions,
-        middle_man_repo_wide(scans, root_s),
-        &supps_by_rel,
-        &supps_spent_by_rel,
-    );
-    let sibling_scans: Vec<(String, Vec<checks::SiblingClass>)> = scans
-        .iter()
-        .map(|s| (s.rel_of(root_s), s.sibling_classes.clone()))
-        .collect();
-    reconcile_repo_wide(
-        &mut additions,
-        checks::sibling_value_class_findings(&sibling_scans),
-        &supps_by_rel,
-        &supps_spent_by_rel,
-    );
-    let mut by_file: std::collections::HashMap<String, Vec<Finding>> = std::collections::HashMap::new();
-    for f in additions {
-        by_file.entry(f.file.clone()).or_default().push(f);
-    }
-    by_file
-}
 
-/// The Rust layer's scan into the shared FileScan shape. The Python-specific
-/// collections (defs/refs/strings/decorated/classes/imports) stay empty:
-/// `unused` is rustc dead_code's job and the graph families need the Rust
-/// exporter — the rustscan data (mod/use/structs) travels via `RustScan`.
-fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
-    let supps = rs.supps.clone();
-    FileScan {
-        file_name: name.to_string(),
-        findings: rs.findings.clone(),
-        cc: rs.cc.clone(),
-        errors: rs.errors,
-        defs: Vec::new(),
-        class_defs: Vec::new(),
-        scattered: Vec::new(),
-        duplicate_expressions: Vec::new(),
-        path_expressions: Vec::new(),
-        setters: Vec::new(),
-        refs: HashSet::new(),
-        strings: Vec::new(),
-        decorated: HashSet::new(),
-        skeletons: rs.skeletons.clone(),
-        skeleton_modules: Vec::new(),
-        forwarder_fns: Vec::new(),
-        forwarder_methods: Vec::new(),
-        repo_methods: Vec::new(),
-        middle_man_classes: Vec::new(),
-        middle_man_candidates: Vec::new(),
-        sibling_classes: Vec::new(),
-        classes: Vec::new(),
-        imports: Vec::new(),
-        self_assigns: Vec::new(),
-        supps,
-        supps_spent: rs.supps_spent.clone(),
+    /// The repo-wide middle-man family (#44) over a set of scans: the index is the
+    /// union of every file's classes — one class per file is the house convention,
+    /// so the target of a delegation usually lives in another file and a
+    /// file-local index would read almost every real target as outside the
+    /// codebase. A candidate a single-buffer scan already reported (same file and
+    /// line) is not reported a second time.
+    fn middle_man_repo_wide(scans: &[FileScan], root_s: &str) -> Vec<Finding> {
+        let mut classes: Vec<checks::MiddleManClass> = Vec::new();
+        let mut candidates: Vec<checks::MiddleManCandidate> = Vec::new();
+        let mut already: HashSet<(String, usize)> = HashSet::new();
+        for scan in scans {
+            let rel = scan.rel_of(root_s);
+            classes.extend(scan.middle_man_classes.iter().cloned());
+            candidates.extend(scan.middle_man_candidates.iter().cloned());
+            for f in &scan.findings {
+                if f.kind == "middle-man" {
+                    already.insert((rel.clone(), f.line));
+                }
+            }
+        }
+        checks::MiddleMan::findings(&candidates, &classes)
+            .into_iter()
+            .filter(|f| !already.contains(&(f.file.clone(), f.line)))
+            .collect()
     }
-}
-/// The finding model's final action kind — the JSON contract carries it so
-/// the Python orchestrator consumes findings without further mapping.
-///
-/// Two identifiers per finding, don't conflate them:
-///
-/// - `kind` — display kind, `final_kind` output (named buckets; families
-///   without one collapse to "standard", the message explains the rest).
-/// - `signal` — the raw family kind; THIS is what suppressions match on
-///   (`lucidlint: ignore <signal>`, config `ignore = [<signal>]`,
-///   RULE_GROUPS membership, baseline identity).
-///
-/// FAMILY_KINDS, STANDARD_KINDS, `final_kind`, and `rule_groups` are
-/// GENERATED from the rule catalog (rule_metadata.py) by `make rules` — see
-/// rules_gen.rs. Registering a rule is ONE edit in the catalog; everything
-/// here follows from it and the drift gate pins the generated file.
-pub use rules_gen::{final_kind, FAMILY_KINDS, STANDARD_KINDS};
 
-/// Longest common prefix of the passed paths — the repo root for a
-/// full-repo run; the file itself in per-file mode.
-///
-/// The char-level prefix can stop mid-component (tests/ vs tools/ share a
-/// trailing 't'), so it backs off to the last path separator — rels are
-/// always clean directory boundaries.
-fn repo_root(paths: &[String]) -> String {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    repo_root_impl(paths, &cwd)
-}
-
-/// The scan root: the explicit `--root` the orchestrator passes, else the
-/// inferred one. Explicit wins so the caller's contract does not depend on
-/// the file layout it happens to pass.
-fn scan_root(paths: &[String], root_override: Option<&str>) -> String {
-    match root_override {
-        Some(r) => r.to_string(),
-        None => repo_root(paths),
-    }
-}
-
-/// The longest common prefix of the passed paths, backed off to the last
-/// path separator. Paths are resolved against `cwd` FIRST: the orchestrator
-/// passes REPO-RELATIVE paths (the binary runs with the repo as its cwd),
-/// and the raw common prefix of `tests/a.py` + `tools/b.py` is `"t"` — which
-/// backed off to `""` and silently broke every graph-family rel resolution
-/// (repo_rel on the graph's ABSOLUTE node paths stripped nothing), so
-/// large-function/hub-file/high-risk/layer-mix/folder-mix never fired
-/// through the orchestrator. Joining the cwd makes the root the absolute
-/// repo path for relative inputs and leaves absolute inputs unchanged.
-fn repo_root_impl(paths: &[String], cwd: &Path) -> String {
-    if paths.is_empty() {
-        return String::new();
-    }
-    // A relative input is defined relative to the cwd, and the orchestrator
-    // passes REPO-RELATIVE paths with its cwd AT the repo root — so the cwd IS
-    // the scan root whenever ANY input is relative. The common prefix cannot
-    // know that: it loses a package segment shared by every file (pkg/a.py +
-    // pkg/b.py -> .../pkg), which silently breaks every repo-wide rel mapping
-    // — duplicate, unused, duplicate-module, forwarding-chain and the graph
-    // families all vanished for the common src/ or lib/ layout. Pure absolute
-    // input (an external caller, the LSP) keeps the prefix logic; a mixed
-    // caller is anchored at the cwd because that is what its relative half
-    // means.
-    if paths.iter().any(|p| !Path::new(p).is_absolute()) {
-        return cwd.to_string_lossy().to_string();
-    }
-    let abs: Vec<String> = paths
-        .iter()
-        .map(|p| {
-            let pb = Path::new(p);
-            if pb.is_absolute() {
-                p.clone()
+    /// The repo-wide merge (duplicate + unused + unused-setter, reconciled
+    /// through each file's suppressions) over a set of scans — the expensive
+    /// part of a repo-wide scan is the per-file scan, so the LSP reuses cached
+    /// scans and re-runs only this pure in-memory aggregation on save.
+    fn repo_wide_merge(scans: &[FileScan], root_s: &str) -> std::collections::HashMap<String, Vec<Finding>> {
+        let mut skeletons = Vec::new();
+        let mut definitions: Vec<(String, String, usize, bool)> = Vec::new();
+        let mut setters: Vec<(String, String, usize)> = Vec::new();
+        let mut prod_refs = HashSet::new();
+        let mut test_refs = HashSet::new();
+        let mut strings = Vec::new();
+        let mut supps_by_rel: std::collections::HashMap<String, crate::suppressions::Suppressions> =
+            std::collections::HashMap::new();
+        let mut supps_spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
+            std::collections::HashMap::new();
+        for scan in scans {
+            let rel = scan.rel_of(root_s);
+            let is_test = Paths::is_test_path(&rel);
+            for s in &scan.skeletons {
+                skeletons.push(SkeletonFn {
+                    rel: rel.clone(),
+                    name: s.name.clone(),
+                    line: s.line,
+                    end_line: s.end_line,
+                    skeleton: s.skeleton.clone(),
+                });
+            }
+            for (name, line) in &scan.defs {
+                definitions.push((rel.clone(), name.clone(), *line, false));
+            }
+            for (name, line) in &scan.class_defs {
+                definitions.push((rel.clone(), name.clone(), *line, true));
+            }
+            for (name, line) in &scan.setters {
+                setters.push((rel.clone(), name.clone(), *line));
+            }
+            if is_test {
+                test_refs.extend(scan.refs.iter().cloned());
             } else {
-                cwd.join(pb).to_string_lossy().to_string()
+                prod_refs.extend(scan.refs.iter().cloned());
+                strings.extend(scan.strings.iter().cloned());
             }
-        })
-        .collect();
-    let mut prefix = abs[0].clone();
-    for p in &abs[1..] {
-        while !p.starts_with(&prefix) {
-            prefix.truncate(prefix.len().saturating_sub(1));
+            prod_refs.extend(scan.decorated.iter().cloned());
+            supps_by_rel.insert(rel.clone(), scan.supps.clone());
+            supps_spent_by_rel.insert(rel.clone(), scan.supps_spent.clone());
+        }
+        let mut module_entities = Vec::new();
+        let mut heads = Vec::new();
+        let mut fns = Vec::new();
+        let mut repo_methods = Vec::new();
+        let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
+        for scan in scans {
+            module_entities.extend(scan.skeleton_modules.iter().cloned());
+            heads.extend(scan.forwarder_methods.iter().cloned());
+            fns.extend(scan.forwarder_fns.iter().cloned());
+            repo_methods.extend(scan.repo_methods.iter().cloned());
+            imports_by_rel.insert(scan.rel_of(root_s), scan.imports.clone());
+        }
+        let mut additions: Vec<Finding> = Vec::new();
+        additions.extend(checks::duplicate_findings(&skeletons));
+        additions.extend(checks::DuplicateModule::findings(&module_entities));
+        additions.extend(checks::Forwarding::findings(
+            &heads,
+            &fns,
+            &repo_methods,
+            &imports_by_rel,
+        ));
+        let mut repo_wide_unused = checks::Unused::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+        repo_wide_unused.extend(checks::Unused::unused_setter_findings(&setters, &prod_refs, &test_refs));
+        Self::reconcile_repo_wide(&mut additions, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
+        let class_names: HashSet<String> = definitions
+            .iter()
+            .filter(|(_, _, _, is_class)| *is_class)
+            .map(|(_, name, _, _)| name.clone())
+            .collect();
+        let scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> =
+            scans.iter().map(|s| (s.rel_of(root_s), s.scattered.clone())).collect();
+        Self::reconcile_repo_wide(
+            &mut additions,
+            checks::Scattered::scattered_instance_findings(&scattered_scans, &class_names),
+            &supps_by_rel,
+            &supps_spent_by_rel,
+        );
+        let path_scans: Vec<(String, Vec<checks::PathExpression>)> = scans
+            .iter()
+            .map(|s| (s.rel_of(root_s), s.path_expressions.clone()))
+            .collect();
+        Self::reconcile_repo_wide(
+            &mut additions,
+            checks::PathExpression::findings(&path_scans),
+            &supps_by_rel,
+            &supps_spent_by_rel,
+        );
+        let duplicate_expr_scans: Vec<(String, Vec<checks::ExpressionOccurrence>)> = scans
+            .iter()
+            .map(|s| (s.rel_of(root_s), s.duplicate_expressions.clone()))
+            .collect();
+        Self::reconcile_repo_wide(
+            &mut additions,
+            checks::ExpressionOccurrence::findings(&duplicate_expr_scans),
+            &supps_by_rel,
+            &supps_spent_by_rel,
+        );
+        let module_shapes: Vec<(String, checks::ModuleShape)> = scans
+            .iter()
+            .map(|s| (s.rel_of(root_s), s.module_shape.clone()))
+            .collect();
+        Self::reconcile_repo_wide(
+            &mut additions,
+            checks::ModuleShape::findings(&module_shapes),
+            &supps_by_rel,
+            &supps_spent_by_rel,
+        );
+        let undecl_scans: Vec<UndeclScan> = scans
+            .iter()
+            .map(|s| UndeclScan {
+                rel: s.rel_of(root_s),
+                classes: s.classes.clone(),
+                imports: s.imports.clone(),
+                self_assigns: s.self_assigns.clone(),
+            })
+            .collect();
+        let undeclared = checks::LatentState::undeclared(&undecl_scans);
+        Self::reconcile_repo_wide(&mut additions, undeclared, &supps_by_rel, &supps_spent_by_rel);
+        Self::reconcile_repo_wide(
+            &mut additions,
+            Self::middle_man_repo_wide(scans, root_s),
+            &supps_by_rel,
+            &supps_spent_by_rel,
+        );
+        let sibling_scans: Vec<(String, Vec<checks::SiblingClass>)> = scans
+            .iter()
+            .map(|s| (s.rel_of(root_s), s.sibling_classes.clone()))
+            .collect();
+        Self::reconcile_repo_wide(
+            &mut additions,
+            checks::SiblingValueClass::sibling_value_class_findings(&sibling_scans),
+            &supps_by_rel,
+            &supps_spent_by_rel,
+        );
+        let mut by_file: std::collections::HashMap<String, Vec<Finding>> = std::collections::HashMap::new();
+        for f in additions {
+            by_file.entry(f.file.clone()).or_default().push(f);
+        }
+        by_file
+    }
+
+    /// The Rust layer's scan into the shared FileScan shape. The Python-specific
+    /// collections (defs/refs/strings/decorated/classes/imports) stay empty:
+    /// `unused` is rustc dead_code's job and the graph families need the Rust
+    /// exporter — the rustscan data (mod/use/structs) travels via `RustScan`.
+    fn rustscan_to_filescan_ref(rs: &rustscan::RustScan, name: &str) -> FileScan {
+        let supps = rs.supps.clone();
+        FileScan {
+            file_name: name.to_string(),
+            findings: rs.findings.clone(),
+            cc: rs.cc.clone(),
+            errors: rs.errors,
+            defs: Vec::new(),
+            class_defs: Vec::new(),
+            scattered: Vec::new(),
+            duplicate_expressions: Vec::new(),
+            path_expressions: Vec::new(),
+            module_shape: rs.module_shape.clone(),
+            setters: Vec::new(),
+            refs: HashSet::new(),
+            strings: Vec::new(),
+            decorated: HashSet::new(),
+            skeletons: rs.skeletons.clone(),
+            skeleton_modules: Vec::new(),
+            forwarder_fns: Vec::new(),
+            forwarder_methods: Vec::new(),
+            repo_methods: Vec::new(),
+            middle_man_classes: Vec::new(),
+            middle_man_candidates: Vec::new(),
+            sibling_classes: Vec::new(),
+            classes: Vec::new(),
+            imports: Vec::new(),
+            self_assigns: Vec::new(),
+            supps,
+            supps_spent: rs.supps_spent.clone(),
         }
     }
-    match prefix.rfind('/') {
-        Some(idx) => prefix.truncate(idx),
-        None => prefix.clear(),
+    /// The finding model's final action kind — the JSON contract carries it so
+    /// the Python orchestrator consumes findings without further mapping.
+    ///
+    /// Two identifiers per finding, don't conflate them:
+    ///
+    /// - `kind` — display kind, `final_kind` output (named buckets; families
+    ///   without one collapse to "standard", the message explains the rest).
+    /// - `signal` — the raw family kind; THIS is what suppressions match on
+    ///   (`lucidlint: ignore <signal>`, config `ignore = [<signal>]`,
+    ///   RULE_GROUPS membership, baseline identity).
+    ///
+    /// FAMILY_KINDS, STANDARD_KINDS, `final_kind`, and `rule_groups` are
+    /// GENERATED from the rule catalog (rule_metadata.py) by `make rules` — see
+    /// rules_gen.rs. Registering a rule is ONE edit in the catalog; everything
+    /// here follows from it and the drift gate pins the generated file.
+    fn sig_of_stale(msg: &str) -> String {
+        // line form: "suppression '// lucidlint: ignore <sig>' at line N no longer fires"
+        if let Some(i) = msg.find("ignore ") {
+            return msg[i + 7..]
+                .split(|c: char| c.is_whitespace() || c == '\'' || c == '>')
+                .next()
+                .unwrap_or("")
+                .to_string();
+        }
+        // file form: "file suppression '... ignore-file <sig>' no longer fires"
+        if let Some(i) = msg.find("ignore-file ") {
+            return msg[i + 12..]
+                .split(|c: char| c.is_whitespace() || c == '\'')
+                .next()
+                .unwrap_or("")
+                .to_string();
+        }
+        String::new()
     }
-    prefix
-}
-fn sig_of_stale(msg: &str) -> String {
-    // line form: "suppression '// lucidlint: ignore <sig>' at line N no longer fires"
-    if let Some(i) = msg.find("ignore ") {
-        return msg[i + 7..]
-            .split(|c: char| c.is_whitespace() || c == '\'' || c == '>')
-            .next()
-            .unwrap_or("")
-            .to_string();
-    }
-    // file form: "file suppression '... ignore-file <sig>' no longer fires"
-    if let Some(i) = msg.find("ignore-file ") {
-        return msg[i + 12..]
-            .split(|c: char| c.is_whitespace() || c == '\'')
-            .next()
-            .unwrap_or("")
-            .to_string();
-    }
-    String::new()
-}
 
-/// Repo-wide findings (unused, duplicate) are computed after the per-file
-/// suppression pass, so an `# lucidlint: ignore <sig>` comment for one was
-/// never consumed and got flagged stale — and the finding stayed. Re-honor
-/// the file's suppressions for those repo-wide findings (family-aware, widened
-/// window) and drop the stale-suppression findings the consumed comments
-/// caused (review-log B3). The survivors are appended to `all` in place.
-pub(crate) fn reconcile_repo_wide(
-    all: &mut Vec<Finding>,
-    repo_wide: Vec<Finding>,
-    supps_by_rel: &std::collections::HashMap<String, common::Suppressions>,
-    supps_spent_by_rel: &std::collections::HashMap<String, std::collections::HashSet<(usize, String)>>,
-) {
-    let mut used_line: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
-    let mut used_file: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // batch each file's findings so innermost-peel capacity is computed
-    // over the whole group — and pairs the per-file pass already spent are
-    // not spent again here
-    let mut by_file: std::collections::BTreeMap<String, Vec<Finding>> = Default::default();
-    for f in repo_wide {
-        by_file.entry(f.file.clone()).or_default().push(f);
-    }
-    for (file, fs) in by_file {
-        match supps_by_rel.get(&file) {
-            Some(supps) => {
-                let empty = std::collections::HashSet::new();
-                let spent = supps_spent_by_rel.get(&file).unwrap_or(&empty);
-                let kept = common::filter_repo_wide(fs, supps, &mut used_line, &mut used_file, spent);
-                all.extend(kept);
+    /// Repo-wide findings (unused, duplicate) are computed after the per-file
+    /// suppression pass, so an `# lucidlint: ignore <sig>` comment for one was
+    /// never consumed and got flagged stale — and the finding stayed. Re-honor
+    /// the file's suppressions for those repo-wide findings (family-aware, widened
+    /// window) and drop the stale-suppression findings the consumed comments
+    /// caused (review-log B3). The survivors are appended to `all` in place.
+    fn reconcile_repo_wide(
+        all: &mut Vec<Finding>,
+        repo_wide: Vec<Finding>,
+        supps_by_rel: &std::collections::HashMap<String, crate::suppressions::Suppressions>,
+        supps_spent_by_rel: &std::collections::HashMap<String, std::collections::HashSet<(usize, String)>>,
+    ) {
+        let mut used_line: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+        let mut used_file: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // batch each file's findings so innermost-peel capacity is computed
+        // over the whole group — and pairs the per-file pass already spent are
+        // not spent again here
+        let mut by_file: std::collections::BTreeMap<String, Vec<Finding>> = Default::default();
+        for f in repo_wide {
+            by_file.entry(f.file.clone()).or_default().push(f);
+        }
+        for (file, fs) in by_file {
+            match supps_by_rel.get(&file) {
+                Some(supps) => {
+                    let empty = std::collections::HashSet::new();
+                    let spent = supps_spent_by_rel.get(&file).unwrap_or(&empty);
+                    let kept = crate::suppressions::Suppressions::filter_repo_wide(
+                        fs,
+                        supps,
+                        &mut used_line,
+                        &mut used_file,
+                        spent,
+                    );
+                    all.extend(kept);
+                }
+                None => all.extend(fs),
             }
-            None => all.extend(fs),
         }
-    }
-    if used_line.is_empty() && used_file.is_empty() {
-        return;
-    }
-    all.retain(|g| {
-        if g.kind != "stale-suppression" {
-            return true;
+        if used_line.is_empty() && used_file.is_empty() {
+            return;
         }
-        let sig = sig_of_stale(&g.message);
-        !used_file.contains(&sig) && !used_line.contains(&(g.line, sig))
-    });
-}
-
-pub(crate) fn rel_of(path: &str, root: &str) -> String {
-    // a relative path is resolved against the cwd (the binary runs with the
-    // repo as its cwd) — stripping the root then yields the true rel instead
-    // of falling back to the bare file name (which left per-file rels to be
-    // re-resolved by the orchestrator's cwd-dependent guess)
-    let abs = if Path::new(path).is_absolute() {
-        path.to_string()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_default()
-            .join(path)
-            .to_string_lossy()
-            .to_string()
-    };
-    if let Some(rel) = abs.strip_prefix(root).and_then(|r| r.strip_prefix('/')) {
-        return rel.to_string();
+        all.retain(|g| {
+            if g.kind != "stale-suppression" {
+                return true;
+            }
+            let sig = Self::sig_of_stale(&g.message);
+            !used_file.contains(&sig) && !used_line.contains(&(g.line, sig))
+        });
     }
-    std::path::Path::new(path)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string())
-}
 
-/// Suppression census: how many `lucidlint: ignore` sites each signal has
-/// across the scanned set (line-level AND file-level). The census feeds the
-/// report's `suppressions` field and the bulk-suppression warning - repeated
-/// identical whys are a policy decision, not per-site judgment.
-fn suppression_counts<'a>(
-    supps_list: impl IntoIterator<Item = &'a common::Suppressions>,
-) -> std::collections::HashMap<String, usize> {
-    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for supps in supps_list {
-        for entries in supps.line.values() {
-            for (sig, _) in entries {
+    /// Suppression census: how many `lucidlint: ignore` sites each signal has
+    /// across the scanned set (line-level AND file-level). The census feeds the
+    /// report's `suppressions` field and the bulk-suppression warning - repeated
+    /// identical whys are a policy decision, not per-site judgment.
+    fn suppression_counts<'a>(
+        supps_list: impl IntoIterator<Item = &'a crate::suppressions::Suppressions>,
+    ) -> std::collections::HashMap<String, usize> {
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for supps in supps_list {
+            for entries in supps.line.values() {
+                for (sig, _) in entries {
+                    *counts.entry(sig.clone()).or_insert(0) += 1;
+                }
+            }
+            for sig in supps.file.keys() {
                 *counts.entry(sig.clone()).or_insert(0) += 1;
             }
         }
-        for sig in supps.file.keys() {
-            *counts.entry(sig.clone()).or_insert(0) += 1;
-        }
+        counts
     }
-    counts
-}
 
-/// One warn finding per signal suppressed at >= threshold sites, attached to
-/// the file carrying the most of them. Visibility, not enforcement: the
-/// pattern itself (mass per-site suppression) is what a reviewer must see.
-fn bulk_suppression_findings(
-    counts: &std::collections::HashMap<String, usize>,
-    supps_by_rel: &std::collections::HashMap<String, common::Suppressions>,
-    threshold: usize,
-) -> Vec<Finding> {
-    let mut out = Vec::new();
-    for (kind, n) in counts {
-        if *n < threshold {
-            continue;
-        }
-        let mut top: Option<(&String, usize)> = None;
-        for (rel, supps) in supps_by_rel {
-            let sites = supps.line.values().flatten().filter(|(sig, _)| sig == kind).count()
-                + supps.file.keys().filter(|k| k.as_str() == kind).count();
-            if sites > 0 && top.is_none_or(|(_, c)| sites > c) {
-                top = Some((rel, sites));
+    /// One warn finding per signal suppressed at >= threshold sites, attached to
+    /// the file carrying the most of them. Visibility, not enforcement: the
+    /// pattern itself (mass per-site suppression) is what a reviewer must see.
+    fn bulk_suppression_findings(
+        counts: &std::collections::HashMap<String, usize>,
+        supps_by_rel: &std::collections::HashMap<String, crate::suppressions::Suppressions>,
+        threshold: usize,
+    ) -> Vec<Finding> {
+        let mut out = Vec::new();
+        for (kind, n) in counts {
+            if *n < threshold {
+                continue;
             }
-        }
-        out.push(Finding { logical_start: None, seam_members: Vec::new(), file: top.map(|(r, _)| r.clone()).unwrap_or_default(), line: 1, col: 0, function: String::new(), kind: "bulk-suppression".into(), severity: "warn".into(), message: format!(
+            let mut top: Option<(&String, usize)> = None;
+            for (rel, supps) in supps_by_rel {
+                let sites = supps.line.values().flatten().filter(|(sig, _)| sig == kind).count()
+                    + supps.file.keys().filter(|k| k.as_str() == kind).count();
+                if sites > 0 && top.is_none_or(|(_, c)| sites > c) {
+                    top = Some((rel, sites));
+                }
+            }
+            out.push(Finding { logical_start: None, seam_members: Vec::new(), file: top.map(|(r, _)| r.clone()).unwrap_or_default(), line: 1, col: 0, function: String::new(), kind: "bulk-suppression".into(), severity: "warn".into(), message: format!(
             "{kind} suppressed at {n} sites - repeated identical whys are POLICY, not per-site judgment: \
         move the rule into [lucidlint.guidance] config guidance or a documented config ignore, or fix the recurring cause"
         ) });
+        }
+        out.sort_by(|a, b| a.kind.cmp(&b.kind));
+        out
     }
-    out.sort_by(|a, b| a.kind.cmp(&b.kind));
-    out
 }
 
 // lucidlint: ignore large-function the CLI orchestrates every repo-wide family in one flow — extracting helpers would thread six collections
@@ -1996,7 +775,7 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("--lsp") {
         // stdio JSON-RPC language server — in-process scans, no spawns
-        lsp::run();
+        lsp::LspState::run();
         return;
     }
     if args.first().map(String::as_str) == Some("--fix") {
@@ -2032,13 +811,13 @@ fn main() {
                     let result = if kind == "dispatch-registry" {
                         fix::fix_dispatch_registry(&src, line)
                     } else if kind == "rule-table" {
-                        fix::fix_rule_table(&src, line)
+                        fix::RuleTable::fix_rule_table(&src, line)
                     } else if kind == "loop-pipeline" {
-                        fix::fix_loop_pipeline(&src, line)
+                        fix::LoopPipeline::fix(&src, line)
                     } else if kind == "loop-sequence" {
                         fix::fix_loop_sequence(&src, line)
                     } else if kind == "loop-hoist" {
-                        fix::fix_loop_hoist(&src, line, name)
+                        fix::LoopHoist::fix(&src, line, name)
                     } else {
                         fix::fix_extract_method(&src, line, name)
                     };
@@ -2118,7 +897,7 @@ fn main() {
         }
         i += 1;
     }
-    let root = scan_root(&paths, root_override.as_deref());
+    let root = Paths::scan_root(&paths, root_override.as_deref());
     let mut scans = Vec::new();
     // per-file scans are independent — parse in parallel (rayon), then the
     // repo-wide passes consume the scans in ORDER (duplicate first-seen,
@@ -2129,12 +908,12 @@ fn main() {
             if path.ends_with(".rs") {
                 let source = std::fs::read_to_string(path).unwrap_or_default();
                 let repo_wide = true;
-                let rs = rustscan::scan_source(&source, path, repo_wide);
+                let rs = rustscan::RustScan::scan(&source, path, repo_wide);
                 let rel = path.clone();
-                let fs = rustscan_to_filescan_ref(&rs, &rel);
+                let fs = Pipeline::rustscan_to_filescan_ref(&rs, &rel);
                 (Some(rs), fs)
             } else {
-                (None, scan_file(Path::new(path)))
+                (None, Pipeline::scan_file(Path::new(path)))
             }
         })
         .collect();
@@ -2155,8 +934,8 @@ fn main() {
     let mut test_refs = HashSet::new();
     let mut strings = Vec::new();
     for scan in &scans {
-        let rel = rel_of(&scan.file_name, &root);
-        let is_test = is_test_path(&rel);
+        let rel = Paths::rel_of(&scan.file_name, &root);
+        let is_test = Paths::is_test_path(&rel);
         for s in &scan.skeletons {
             skeletons.push(SkeletonFn {
                 rel: rel.clone(),
@@ -2191,18 +970,18 @@ fn main() {
     // class/import collection before the scans are consumed)
     let class_scans: Vec<(String, Vec<ClassInfo>, Vec<ImportInfo>)> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.classes.clone(), s.imports.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.classes.clone(), s.imports.clone()))
         .collect();
-    let supps_by_rel: std::collections::HashMap<String, common::Suppressions> = scans
+    let supps_by_rel: std::collections::HashMap<String, crate::suppressions::Suppressions> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.supps.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.supps.clone()))
         .collect();
     let supps_spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.supps_spent.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.supps_spent.clone()))
         .collect();
-    let suppression_census = suppression_counts(scans.iter().map(|s| &s.supps));
-    let bulk_suppressions = bulk_suppression_findings(&suppression_census, &supps_by_rel, 10);
+    let suppression_census = Pipeline::suppression_counts(scans.iter().map(|s| &s.supps));
+    let bulk_suppressions = Pipeline::bulk_suppression_findings(&suppression_census, &supps_by_rel, 10);
     let mut module_entities = Vec::new();
     let mut heads = Vec::new();
     let mut fns = Vec::new();
@@ -2216,7 +995,7 @@ fn main() {
         heads.extend(scan.forwarder_methods.iter().cloned());
         fns.extend(scan.forwarder_fns.iter().cloned());
         repo_methods.extend(scan.repo_methods.iter().cloned());
-        imports_by_rel.insert(rel_of(&scan.file_name, &root), scan.imports.clone());
+        imports_by_rel.insert(Paths::rel_of(&scan.file_name, &root), scan.imports.clone());
     }
     all_findings.extend(bulk_suppressions);
     // per-language duplicate pools: a Python fn and a Rust fn with the same
@@ -2232,16 +1011,16 @@ fn main() {
     }
     all_findings.extend(duplicate_findings(&py_skeletons));
     all_findings.extend(duplicate_findings(&rs_skeletons));
-    all_findings.extend(checks::duplicate_module_findings(&module_entities));
+    all_findings.extend(checks::DuplicateModule::findings(&module_entities));
     // flat-folder: what a reader browses per directory — modules + docs,
     // counted from the scan set and the docs root (no graph needed)
     let mut module_rels: Vec<String> = Vec::new();
     let mut doc_rels: Vec<String> = Vec::new();
     for p in &paths {
-        let rel = rel_of(p, &root);
+        let rel = Paths::rel_of(p, &root);
         // count what the scan browses: production code unless the caller asked
         // for tests, and never upstream's vendored tree
-        if is_out_of_scan(include_tests, &rel) {
+        if Paths::is_out_of_scan(include_tests, &rel) {
             continue;
         }
         if p.ends_with(".md") {
@@ -2250,8 +1029,8 @@ fn main() {
             module_rels.push(rel);
         }
     }
-    all_findings.extend(checks::flat_folder_findings(&module_rels, &doc_rels));
-    all_findings.extend(checks::forwarding_chain_findings(
+    all_findings.extend(checks::FlatFolder::findings(&module_rels, &doc_rels));
+    all_findings.extend(checks::Forwarding::findings(
         &heads,
         &fns,
         &repo_methods,
@@ -2260,9 +1039,9 @@ fn main() {
     // unused is a repo-wide family computed AFTER the per-file suppression
     // pass — reconcile it through those suppressions so an `ignore unused <why>`
     // comment suppresses the finding and is not reported stale (review-log B3)
-    let mut repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
-    repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
-    reconcile_repo_wide(&mut all_findings, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
+    let mut repo_wide_unused = Unused::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+    repo_wide_unused.extend(checks::Unused::unused_setter_findings(&setters, &prod_refs, &test_refs));
+    Pipeline::reconcile_repo_wide(&mut all_findings, repo_wide_unused, &supps_by_rel, &supps_spent_by_rel);
     let class_names: HashSet<String> = definitions
         .iter()
         .filter(|(_, _, _, is_class)| *is_class)
@@ -2270,47 +1049,58 @@ fn main() {
         .collect();
     let scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.scattered.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.scattered.clone()))
         .collect();
-    reconcile_repo_wide(
+    Pipeline::reconcile_repo_wide(
         &mut all_findings,
-        checks::scattered_instance_findings(&scattered_scans, &class_names),
+        checks::Scattered::scattered_instance_findings(&scattered_scans, &class_names),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
     let path_scans: Vec<(String, Vec<checks::PathExpression>)> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.path_expressions.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.path_expressions.clone()))
         .collect();
-    reconcile_repo_wide(
+    Pipeline::reconcile_repo_wide(
         &mut all_findings,
-        checks::shared_path_findings(&path_scans),
+        checks::PathExpression::findings(&path_scans),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
     let duplicate_expr_scans: Vec<(String, Vec<checks::ExpressionOccurrence>)> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.duplicate_expressions.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.duplicate_expressions.clone()))
         .collect();
-    reconcile_repo_wide(
+    Pipeline::reconcile_repo_wide(
         &mut all_findings,
-        checks::duplicate_expression_findings(&duplicate_expr_scans),
+        checks::ExpressionOccurrence::findings(&duplicate_expr_scans),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
-    reconcile_repo_wide(
+    // large-module: the file's own shape, measured where the parser held it
+    let module_shapes: Vec<(String, checks::ModuleShape)> = scans
+        .iter()
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.module_shape.clone()))
+        .collect();
+    Pipeline::reconcile_repo_wide(
         &mut all_findings,
-        middle_man_repo_wide(&scans, &root),
+        checks::ModuleShape::findings(&module_shapes),
+        &supps_by_rel,
+        &supps_spent_by_rel,
+    );
+    Pipeline::reconcile_repo_wide(
+        &mut all_findings,
+        Pipeline::middle_man_repo_wide(&scans, &root),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
     let sibling_scans: Vec<(String, Vec<checks::SiblingClass>)> = scans
         .iter()
-        .map(|s| (rel_of(&s.file_name, &root), s.sibling_classes.clone()))
+        .map(|s| (Paths::rel_of(&s.file_name, &root), s.sibling_classes.clone()))
         .collect();
-    reconcile_repo_wide(
+    Pipeline::reconcile_repo_wide(
         &mut all_findings,
-        checks::sibling_value_class_findings(&sibling_scans),
+        checks::SiblingValueClass::sibling_value_class_findings(&sibling_scans),
         &supps_by_rel,
         &supps_spent_by_rel,
     );
@@ -2320,16 +1110,16 @@ fn main() {
         let mut mod_decls: std::collections::HashMap<String, Vec<(String, bool)>> = std::collections::HashMap::new();
         let mut uses: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
         for rs in &rust_scans {
-            let rel = rel_of(&rs.file_name(), &root);
+            let rel = Paths::rel_of(&rs.file_name(), &root);
             mod_decls.insert(rel.clone(), rs.mod_decls.clone());
             uses.insert(rel, rs.uses.clone());
         }
-        let rels: Vec<String> = paths.iter().map(|p| rel_of(p, &root)).collect();
-        let graph = rustscan::module_graph(&rels, &mod_decls, &uses);
+        let rels: Vec<String> = paths.iter().map(|p| Paths::rel_of(p, &root)).collect();
+        let graph = rustscan::ModuleGraph::module_graph(&rels, &mod_decls, &uses);
         // the module graph keys are rels to the binary's computed root — the
         // orchestrator's scan set is repo-relative, so re-anchor the findings
         // to absolute paths (resolution-neutral, like the per-file findings)
-        let mut cycle_findings = graph_families::cycle_findings_for(&graph);
+        let mut cycle_findings = graph_families::Cycles::findings_for(&graph);
         for f in &mut cycle_findings {
             if !f.file.starts_with('/') {
                 f.file = format!("{}/{}", root, f.file);
@@ -2358,21 +1148,14 @@ fn main() {
     } else {
         None
     };
-    let rels: Vec<String> = paths.iter().map(|p| rel_of(p, &root)).collect();
+    let rels: Vec<String> = paths.iter().map(|p| Paths::rel_of(p, &root)).collect();
     if let Some(c) = &contract {
         let repo_root = Path::new(&root);
-        all_findings.extend(graph_families::hub_file_findings(
-            repo_root,
-            c,
-            &rels,
-            15,
-            include_tests,
-        ));
-        all_findings.extend(graph_families::high_risk_findings(repo_root, c, 0.8, include_tests));
-        all_findings.extend(graph_families::cycle_findings(repo_root, c));
-        all_findings.extend(graph_families::layer_mix_findings(repo_root, c, &rels));
-        all_findings.extend(graph_families::folder_mix_findings(repo_root, c));
-        all_findings.extend(graph_families::module_cohesion_findings(repo_root, c, 150));
+        all_findings.extend(graph_families::HighRisk::findings(repo_root, c, 0.8, include_tests));
+        all_findings.extend(graph_families::Cycles::findings(repo_root, c));
+        all_findings.extend(graph_families::LayerMix::findings(repo_root, c, &rels));
+        all_findings.extend(graph_families::FolderMix::findings(repo_root, c));
+        all_findings.extend(graph_families::Cohesion::findings(repo_root, c, 150));
     }
     if let Some(d) = &docs_root {
         let gitignored: std::collections::HashSet<String> = gitignored_json
@@ -2380,26 +1163,20 @@ fn main() {
             .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
             .map(|v| v.into_iter().collect())
             .unwrap_or_default();
-        all_findings.extend(docs::docs_findings(Path::new(d), &gitignored));
+        all_findings.extend(docs::Docs::docs_findings(Path::new(d), &gitignored));
     }
-    all_findings.extend(abstraction_findings(&class_scans));
+    all_findings.extend(OverAbstraction::abstraction_findings(&class_scans));
     if let Some(p) = &churn_path {
         if let Ok(s) = std::fs::read_to_string(p) {
             if let Ok(churn) = serde_json::from_str::<std::collections::HashMap<String, usize>>(&s) {
                 // max CC per file from the scan itself — recompute without the graph
                 let mut cc_any: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
                 for e in &all_cc {
-                    let rel = rel_of(&e.file, &root);
+                    let rel = Paths::rel_of(&e.file, &root);
                     let slot = cc_any.entry(rel).or_insert(0);
                     *slot = (*slot).max(e.cc);
                 }
-                all_findings.extend(graph_families::hotspot_findings(
-                    &churn,
-                    &cc_any,
-                    0.1,
-                    15,
-                    &std::collections::HashMap::new(),
-                ));
+                all_findings.extend(graph_families::Hotspot::findings(&churn, &cc_any, 0.1, 15));
                 // churn-untested: the repo's OWN coverage snapshot decides
                 // (coverage.xml / .coverage, R6) — never the graph's TESTED_BY
                 // approximation, which misses body imports and cannot speak
@@ -2408,7 +1185,7 @@ fn main() {
                     .as_deref()
                     .and_then(|p| std::fs::read_to_string(p).ok())
                     .and_then(|s| serde_json::from_str::<graph_families::CoverageSnapshot>(&s).ok());
-                all_findings.extend(graph_families::churn_untested_findings(&churn, coverage.as_ref(), 0.1));
+                all_findings.extend(graph_families::ChurnUntested::findings(&churn, coverage.as_ref(), 0.1));
             }
         }
     }
@@ -2422,12 +1199,12 @@ fn main() {
                 "function": e.function,
                 "kind": "complexity",
                 "severity": "fail",
-                "message": common::full_fix_command(
+                "message": crate::fix_render::FixRender::full_fix_command(
                     &e.file,
                     e.line,
-                    &common::complexity_message(e.cc, e.shape, &e.shape_detail),
+                    &crate::fix_render::FixRender::complexity_message(e.cc, e.shape, &e.shape_detail),
                 ),
-                "fix_kind": checks::fix_kind_of_message(&common::complexity_message(e.cc, e.shape, &e.shape_detail))
+                "fix_kind": checks::FixRender::fix_kind_of_message(&crate::fix_render::FixRender::complexity_message(e.cc, e.shape, &e.shape_detail))
                     .unwrap_or("extract-method"),
             }));
         }
@@ -2458,7 +1235,13 @@ fn main() {
             Some(supps) => {
                 let empty = std::collections::HashSet::new();
                 let spent = supps_spent_by_rel.get(&file).unwrap_or(&empty);
-                retained.extend(common::filter_repo_wide(fs, supps, &mut used_ln, &mut used_fl, spent));
+                retained.extend(crate::suppressions::Suppressions::filter_repo_wide(
+                    fs,
+                    supps,
+                    &mut used_ln,
+                    &mut used_fl,
+                    spent,
+                ));
             }
             None => {
                 let mut fs = fs;
@@ -2473,7 +1256,7 @@ fn main() {
             if f.kind != "stale-suppression" {
                 return true;
             }
-            let sig = sig_of_stale(&f.message);
+            let sig = Pipeline::sig_of_stale(&f.message);
             let used = used_ln.contains(&(f.line, sig.clone())) || used_fl.contains(&sig);
             !used
         })
@@ -2491,15 +1274,15 @@ fn main() {
                 "kind": final_kind(&f.kind),
                 "signal": f.kind,
                 "severity": f.severity,
-                "message": common::full_fix_command(&f.file, f.line, &f.message),
+                "message": crate::fix_render::FixRender::full_fix_command(&f.file, f.line, &f.message),
                 "seam_members": f.seam_members,
-                "fix_kind": fix_kind_of_message(&f.message).unwrap_or_else(|| kind_fix_default(&f.kind)),
+                "fix_kind": FixRender::fix_kind_of_message(&f.message).unwrap_or_else(|| FixRender::kind_fix_default(&f.kind)),
             })
         })
         .collect();
     let out = serde_json::json!({
         "schema_version": 4,
-        "header": common::REPORT_HEADER,
+        "header": crate::report::REPORT_HEADER,
         "suppressions": suppression_census,
         "files": paths.len(),
         "parse_errors": total_errors,
@@ -2520,22 +1303,14 @@ const RUST_FIX_KINDS: &[&str] = &[
     "loop-hoist",
 ];
 
-/// `x = []` — an empty list bound to one name, the list-literal rewrite target.
-fn is_empty_list_assignment(assign: &ruff_python_ast::StmtAssign) -> bool {
-    matches!(assign.value.as_ref(), Expr::List(l) if l.elts.is_empty())
-        && assign.targets.len() == 1
-        && matches!(assign.targets[0], Expr::Name(_))
-}
-
-/// The path is outside this scan: test code (unless tests are included) or
-/// vendored.
-fn is_out_of_scan(include_tests: bool, rel: &str) -> bool {
-    (!include_tests && is_test_path(rel)) || checks::is_vendored(rel)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::python_shape::FnShape;
+    use ruff_python_ast::Stmt;
+
+    use crate::paths::Paths;
 
     #[test]
     fn full_fix_command_never_fabricates_name_from_prose() {
@@ -2544,20 +1319,20 @@ mod tests {
         // the prose "--fix-name <name>" slot started a token with a
         // semicolon and produced "--name apply" for every plain-shape
         // complexity finding)
-        let msg = common::complexity_message(16, "plain", "x");
-        let cmd = common::full_fix_command("src/a.py", 5, &msg);
+        let msg = crate::fix_render::FixRender::complexity_message(16, "plain", "x");
+        let cmd = crate::fix_render::FixRender::full_fix_command("src/a.py", 5, &msg);
         assert!(cmd.contains("--kind extract-method"), "{cmd}");
         assert!(!cmd.contains("--name"), "{cmd}");
         assert!(!cmd.contains("apply"), "{cmd}");
         // name-bearing directives keep their exact placeholder slot
-        let m2 = common::full_fix_command(
+        let m2 = crate::fix_render::FixRender::full_fix_command(
             "src/a.py",
             5,
             "magic number 3 \u{2014} name it as a constant \u{2014} fix: magic-number --fix-name <CONST>",
         );
         assert!(m2.contains("--name <CONST>"), "{m2}");
         // a prose token merely STARTING with --fix-name is ignored (exact match)
-        let m3 = common::full_fix_command(
+        let m3 = crate::fix_render::FixRender::full_fix_command(
             "src/a.py",
             5,
             "x \u{2014} fix: extract-method (preview; --fix-name; prose)",
@@ -2569,10 +1344,10 @@ mod tests {
         // the orchestrator passes REPO-RELATIVE paths with the binary's cwd
         // at the repo root: the raw common prefix of tests/a.py + tools/b.py
         // is "t" — which used to back off to "" and silently broke every
-        // graph-family rel resolution (large-function/hub-file/high-risk/
+        // graph-family rel resolution (large-function/high-risk/
         // layer-mix/folder-mix never fired through the orchestrator)
         let cwd = Path::new("/work/repo");
-        let root = repo_root_impl(
+        let root = Paths::repo_root_impl(
             &[
                 "tests/a.py".to_string(),
                 "tests/b.py".to_string(),
@@ -2593,9 +1368,9 @@ mod tests {
         // Relative inputs are resolved against the cwd FIRST, so the cwd IS
         // the scan root the caller passed them from.
         let cwd = Path::new("/work/repo");
-        let root = repo_root_impl(&["pkg/a.py".to_string(), "pkg/b.py".to_string()], cwd);
+        let root = Paths::repo_root_impl(&["pkg/a.py".to_string(), "pkg/b.py".to_string()], cwd);
         assert_eq!(root, "/work/repo");
-        let single = repo_root_impl(&["pkg/only.py".to_string()], cwd);
+        let single = Paths::repo_root_impl(&["pkg/only.py".to_string()], cwd);
         assert_eq!(single, "/work/repo");
     }
 
@@ -2604,7 +1379,7 @@ mod tests {
         // a relative half is defined relative to the cwd — the prefix of a
         // mixed pair cannot be trusted
         let cwd = Path::new("/work/repo");
-        let root = repo_root_impl(&["/elsewhere/core.py".to_string(), "pkg/a.py".to_string()], cwd);
+        let root = Paths::repo_root_impl(&["/elsewhere/core.py".to_string(), "pkg/a.py".to_string()], cwd);
         assert_eq!(root, "/work/repo");
     }
 
@@ -2613,14 +1388,14 @@ mod tests {
         // the orchestrator names the scan root; the file layout must not
         // decide it
         let paths = vec!["pkg/a.py".to_string(), "pkg/b.py".to_string()];
-        assert_eq!(scan_root(&paths, Some("/work/repo")), "/work/repo");
-        assert_eq!(scan_root(&paths, None), repo_root(&paths));
+        assert_eq!(Paths::scan_root(&paths, Some("/work/repo")), "/work/repo");
+        assert_eq!(Paths::scan_root(&paths, None), Paths::repo_root(&paths));
     }
 
     #[test]
     fn repo_root_absolute_paths_unchanged() {
         let cwd = Path::new("/work/repo");
-        let root = repo_root_impl(
+        let root = Paths::repo_root_impl(
             &[
                 "/home/u/proj/tests/a.py".to_string(),
                 "/home/u/proj/tools/b.py".to_string(),
@@ -2636,7 +1411,7 @@ mod tests {
         // the rewrite must carry them or the agent gets a command the fix
         let msg = "module x holds 2 domains — fix: extract-module --fix-name text --params tokenize,words";
 
-        let cmd = common::full_fix_command("tools/layout.py", 0, msg);
+        let cmd = crate::fix_render::FixRender::full_fix_command("tools/layout.py", 0, msg);
         assert!(cmd.contains("--kind extract-module"), "{cmd}");
         assert!(cmd.contains("--name text"), "{cmd}");
         assert!(cmd.contains("--params tokenize,words"), "{cmd}");
@@ -2662,7 +1437,7 @@ mod tests {
     }
 
     fn scan_cc(src: &str) -> (Vec<Finding>, Vec<FnCc>, usize) {
-        let scan = scan_source(src, "prod_mod.py");
+        let scan = Pipeline::scan_source(src, "prod_mod.py");
         (scan.findings, scan.cc, scan.errors)
     }
 
@@ -2880,21 +1655,24 @@ mod tests {
     fn duplicate_fast_path_matches_reference_dice() {
         // the sorted-index-bigram fast path must agree with the reference
         // multiset dice on the pinned repetition cases (2026-08-17 review-log)
-        use common::dice_similarity;
+        use crate::skeleton::Similarity;
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let rep = s(&["a", "b", "a", "b"]);
         let uniq = s(&["a", "b", "a"]);
-        let interner = checks::BigramInterner::new(&[&rep, &uniq]);
+        let interner = crate::skeleton::BigramInterner::new(&[&rep, &uniq]);
         let fa = interner.bigrams_of(0);
         let fb = interner.bigrams_of(1);
-        assert_eq!(checks::dice_from_bigrams(fa, fb), dice_similarity(&rep, &uniq));
-        assert_eq!(checks::dice_from_bigrams(fa, fa), 1.0);
+        assert_eq!(
+            crate::skeleton::Similarity::dice_from_bigrams(fa, fb),
+            Similarity::dice_similarity(&rep, &uniq)
+        );
+        assert_eq!(crate::skeleton::Similarity::dice_from_bigrams(fa, fa), 1.0);
         // empty skeletons: never a duplicate, matches the reference
         let e = Vec::<String>::new();
-        let interner2 = checks::BigramInterner::new(&[&e, &rep]);
+        let interner2 = crate::skeleton::BigramInterner::new(&[&e, &rep]);
         assert_eq!(
-            checks::dice_from_bigrams(interner2.bigrams_of(0), interner2.bigrams_of(1)),
-            dice_similarity(&e, &rep)
+            crate::skeleton::Similarity::dice_from_bigrams(interner2.bigrams_of(0), interner2.bigrams_of(1)),
+            Similarity::dice_similarity(&e, &rep)
         );
     }
 
@@ -2913,7 +1691,7 @@ mod tests {
         // starts; a multi-line string between comments must not lose count
         let src = "# one\nx = (\n    1 +\n    \"\"\"\nmulti\nline\n\"\"\"\n)\n# two\ny = 2  # three\n";
         let parsed = parse_module(src).unwrap();
-        let lines = checks::comment_lines(src, parsed.tokens());
+        let lines = crate::suppressions::Suppressions::comment_lines(src, parsed.tokens());
         let got: Vec<(usize, &str)> = lines.iter().map(|(l, t)| (*l, t.as_str())).collect();
         assert_eq!(got, vec![(1, "# one"), (9, "# two"), (10, "# three")], "{got:?}");
     }
@@ -3332,6 +2110,17 @@ mod tests {
         assert_eq!(sh.len(), 3);
     }
 
+    #[test]
+    fn shadow_bindings_include_loop_with_and_except_targets() {
+        // a for target, a with-as name and an except-as name are bindings too
+        let f = scan_src(
+            "def run(items):\n    for list in items:\n        pass\n    with open('x') as dict:\n        pass\n    try:\n        pass\n    except ValueError as type:\n        pass\n",
+        );
+        let sh: Vec<&Finding> = f.iter().filter(|x| x.kind == "builtin-shadow").collect();
+        assert_eq!(sh.len(), 3, "{f:?}");
+        assert!(sh.iter().all(|s| s.message.starts_with("variable '")), "{f:?}");
+    }
+
     // ------------------------------------------------------------- signature hygiene
     #[test]
     fn long_param_list_is_found() {
@@ -3465,7 +2254,7 @@ mod tests {
         let src = include_str!("../../tests/fixtures/rust/real_tfl_build_cost_groups_counts_two__01.py");
         let parsed = ruff_python_parser::parse_module(src).unwrap();
         let body = parsed.syntax().body.clone();
-        let inner = checks::inner_function_count(&body[0]);
+        let inner = checks::FunctionFacts::inner_function_count(&body[0]);
         assert_eq!(inner, 2, "real fn inner count: {inner}");
     }
 
@@ -3919,13 +2708,13 @@ mod tests {
         // cannot bind in a per-buffer scan — flagging them stale there was
         // a false fail artifact (the gate's repo-wide merge evaluates them).
         let src = include_str!("../../tests/fixtures/rust/per_buffer_scan_does_not_stale_repo_wide_markers__01.py");
-        let per_buffer = scan_source_impl(src, "prod_mod.py", false);
+        let per_buffer = Pipeline::scan(src, "prod_mod.py", false);
         assert!(
             !per_buffer.findings.iter().any(|f| f.kind == "stale-suppression"),
             "{:?}",
             per_buffer.findings
         );
-        let gate = scan_source_impl(src, "prod_mod.py", true);
+        let gate = Pipeline::scan(src, "prod_mod.py", true);
         assert!(
             gate.findings.iter().any(|f| f.kind == "stale-suppression"),
             "{:?}",
@@ -4464,7 +3253,7 @@ mod tests {
 ",
         )
         .unwrap();
-        let f = docs::docs_findings(&dir, &std::collections::HashSet::new());
+        let f = docs::Docs::docs_findings(&dir, &std::collections::HashSet::new());
         assert!(f.iter().any(|x| x.kind == "docs-link" && x.message.contains("nope.md")));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4473,13 +3262,13 @@ mod tests {
     fn abstraction_single_concrete_is_found() {
         let src_a = include_str!("../../tests/fixtures/rust/abstraction_single_concrete_is_found__01.py");
         let src_b = include_str!("../../tests/fixtures/rust/abstraction_single_concrete_is_found__02.py");
-        let scan_a = scan_source(src_a, "a.py");
-        let scan_b = scan_source(src_b, "b.py");
+        let scan_a = Pipeline::scan_source(src_a, "a.py");
+        let scan_b = Pipeline::scan_source(src_b, "b.py");
         let scans = vec![
             ("a.py".to_string(), scan_a.classes, scan_a.imports),
             ("b.py".to_string(), scan_b.classes, scan_b.imports),
         ];
-        let f = checks::abstraction_findings(&scans);
+        let f = checks::OverAbstraction::abstraction_findings(&scans);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].function, "Base");
     }
@@ -4488,13 +3277,13 @@ mod tests {
     fn abstraction_two_subclasses_passes() {
         let src_a = include_str!("../../tests/fixtures/rust/abstraction_two_subclasses_passes__01.py");
         let src_b = include_str!("../../tests/fixtures/rust/abstraction_two_subclasses_passes__02.py");
-        let scan_a = scan_source(src_a, "a.py");
-        let scan_b = scan_source(src_b, "b.py");
+        let scan_a = Pipeline::scan_source(src_a, "a.py");
+        let scan_b = Pipeline::scan_source(src_b, "b.py");
         let scans = vec![
             ("a.py".to_string(), scan_a.classes, scan_a.imports),
             ("b.py".to_string(), scan_b.classes, scan_b.imports),
         ];
-        let f = checks::abstraction_findings(&scans);
+        let f = checks::OverAbstraction::abstraction_findings(&scans);
         assert!(f.is_empty());
     }
 
@@ -4539,6 +3328,23 @@ mod tests {
             hits[0].message
         );
     }
+    #[test]
+    fn static_husk_fires_when_classmethods_never_touch_cls() {
+        // a classmethod that never reads `cls` holds no state, exactly as a
+        // staticmethod does
+        let f = scan_src(
+            "class Paths:\n    @classmethod\n    def join(cls, a, b):\n        return a + b\n\n    @classmethod\n    def split(cls, value):\n        return value.split('/')\n",
+        );
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "static-husk").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+    }
+
+    #[test]
+    fn static_husk_exempts_a_classmethod_that_uses_cls() {
+        let f = scan_src("class Registry:\n    @classmethod\n    def make(cls):\n        return cls()\n");
+        assert!(!f.iter().any(|x| x.kind == "static-husk"), "{f:?}");
+    }
+
     #[test]
     fn static_husk_exclusions_do_not_fire() {
         for (fx, src) in [
@@ -5188,7 +3994,7 @@ mod tests {
         let mut strings = Vec::new();
         let mut all = Vec::new();
         let mut undecl_scans: Vec<UndeclScan> = Vec::new();
-        let mut supps_by_rel: std::collections::HashMap<String, common::Suppressions> =
+        let mut supps_by_rel: std::collections::HashMap<String, crate::suppressions::Suppressions> =
             std::collections::HashMap::new();
         let mut spent_by_rel: std::collections::HashMap<String, std::collections::HashSet<(usize, String)>> =
             std::collections::HashMap::new();
@@ -5200,17 +4006,18 @@ mod tests {
         let mut scattered_scans: Vec<(String, Vec<checks::ScatteredInstance>)> = Vec::new();
         let mut path_scans: Vec<(String, Vec<checks::PathExpression>)> = Vec::new();
         let mut duplicate_expr_scans: Vec<(String, Vec<checks::ExpressionOccurrence>)> = Vec::new();
+        let mut module_shapes: Vec<(String, checks::ModuleShape)> = Vec::new();
         let mut mm_classes: Vec<checks::MiddleManClass> = Vec::new();
         let mut mm_candidates: Vec<checks::MiddleManCandidate> = Vec::new();
         let mut imports_by_rel: std::collections::HashMap<String, Vec<ImportInfo>> = std::collections::HashMap::new();
         for (name, src) in files {
-            let mut scan = scan_source(src, name);
+            let mut scan = Pipeline::scan_source(src, name);
             scan.file_name = name.to_string();
             supps_by_rel.insert(name.to_string(), std::mem::take(&mut scan.supps));
             spent_by_rel.insert(name.to_string(), std::mem::take(&mut scan.supps_spent));
             all.extend(scan.findings);
             let rel = name.to_string();
-            let is_test = is_test_path(&rel);
+            let is_test = Paths::is_test_path(&rel);
             for s in &scan.skeletons {
                 skeletons.push(SkeletonFn {
                     rel: rel.clone(),
@@ -5227,6 +4034,7 @@ mod tests {
             scattered_scans.push((rel.clone(), scan.scattered.clone()));
             path_scans.push((rel.clone(), scan.path_expressions.clone()));
             duplicate_expr_scans.push((rel.clone(), scan.duplicate_expressions.clone()));
+            module_shapes.push((rel.clone(), scan.module_shape.clone()));
             mm_classes.extend(scan.middle_man_classes.iter().cloned());
             mm_candidates.extend(scan.middle_man_candidates.iter().cloned());
             imports_by_rel.insert(name.to_string(), scan.imports.clone());
@@ -5254,45 +4062,51 @@ mod tests {
             prod_refs.extend(scan.decorated.iter().cloned());
         }
         all.extend(duplicate_findings(&skeletons));
-        let mut repo_wide_unused = unused_findings(&definitions, &prod_refs, &test_refs, &strings);
-        repo_wide_unused.extend(checks::unused_setter_findings(&setters, &prod_refs, &test_refs));
-        reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel, &spent_by_rel);
+        let mut repo_wide_unused = Unused::unused_findings(&definitions, &prod_refs, &test_refs, &strings);
+        repo_wide_unused.extend(checks::Unused::unused_setter_findings(&setters, &prod_refs, &test_refs));
+        Pipeline::reconcile_repo_wide(&mut all, repo_wide_unused, &supps_by_rel, &spent_by_rel);
         let class_names: HashSet<String> = definitions
             .iter()
             .filter(|(_, _, _, is_class)| *is_class)
             .map(|(_, name, _, _)| name.clone())
             .collect();
-        reconcile_repo_wide(
+        Pipeline::reconcile_repo_wide(
             &mut all,
-            checks::scattered_instance_findings(&scattered_scans, &class_names),
+            checks::Scattered::scattered_instance_findings(&scattered_scans, &class_names),
             &supps_by_rel,
             &spent_by_rel,
         );
-        reconcile_repo_wide(
+        Pipeline::reconcile_repo_wide(
             &mut all,
-            checks::shared_path_findings(&path_scans),
+            checks::PathExpression::findings(&path_scans),
             &supps_by_rel,
             &spent_by_rel,
         );
-        reconcile_repo_wide(
+        Pipeline::reconcile_repo_wide(
             &mut all,
-            checks::duplicate_expression_findings(&duplicate_expr_scans),
+            checks::ExpressionOccurrence::findings(&duplicate_expr_scans),
             &supps_by_rel,
             &spent_by_rel,
         );
-        let undeclared = undeclared_findings(&undecl_scans);
-        reconcile_repo_wide(&mut all, undeclared, &supps_by_rel, &spent_by_rel);
-        reconcile_repo_wide(
+        Pipeline::reconcile_repo_wide(
             &mut all,
-            checks::middle_man_findings(&mm_candidates, &mm_classes),
+            checks::ModuleShape::findings(&module_shapes),
+            &supps_by_rel,
+            &spent_by_rel,
+        );
+        let undeclared = LatentState::undeclared(&undecl_scans);
+        Pipeline::reconcile_repo_wide(&mut all, undeclared, &supps_by_rel, &spent_by_rel);
+        Pipeline::reconcile_repo_wide(
+            &mut all,
+            checks::MiddleMan::findings(&mm_candidates, &mm_classes),
             &supps_by_rel,
             &spent_by_rel,
         );
         // the suppression census + its bulk warning mirror main()'s report
-        all.extend(duplicate_module_findings(&module_entities));
-        let census = suppression_counts(supps_by_rel.values());
-        all.extend(forwarding_chain_findings(&heads, &fns, &repo_methods, &imports_by_rel));
-        all.extend(bulk_suppression_findings(&census, &supps_by_rel, 10));
+        all.extend(DuplicateModule::findings(&module_entities));
+        let census = Pipeline::suppression_counts(supps_by_rel.values());
+        all.extend(Forwarding::findings(&heads, &fns, &repo_methods, &imports_by_rel));
+        all.extend(Pipeline::bulk_suppression_findings(&census, &supps_by_rel, 10));
         // mirror the production finalize: repo-wide findings honor per-file
         // suppressions too (family-aware, widened window), and a suppression
         // the retain uses is not stale
@@ -5303,7 +4117,7 @@ mod tests {
             .into_iter()
             .filter(|f| match supps_by_rel.get(&f.file) {
                 Some(supps) => {
-                    let kept = common::filter_repo_wide(
+                    let kept = crate::suppressions::Suppressions::filter_repo_wide(
                         vec![f.clone()],
                         supps,
                         &mut used_ln,
@@ -5321,7 +4135,7 @@ mod tests {
                 if f.kind != "stale-suppression" {
                     return true;
                 }
-                let sig = sig_of_stale(&f.message);
+                let sig = Pipeline::sig_of_stale(&f.message);
                 !used_ln.contains(&(f.line, sig.clone())) && !used_fl.contains(&sig)
             })
             .collect();
@@ -5431,17 +4245,17 @@ mod tests {
         // score Dice < 0.9 — the set-hash shortcut reported these as 100%
         // similar (2026-08-17 review-log). There is no hash shortcut; the
         // pair must NOT be flagged.
-        use common::dice_similarity;
+        use crate::skeleton::Similarity;
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         // [a,b,a,b] has multiset bigrams (a,b),(b,a),(a,b) — the (a,b) repeats
         let rep = s(&["a", "b", "a", "b"]);
         // [a,b,a] has (a,b),(b,a) — same unique set, one fewer (a,b)
         let uniq = s(&["a", "b", "a"]);
-        let sim = dice_similarity(&rep, &uniq);
+        let sim = Similarity::dice_similarity(&rep, &uniq);
         // 2*2 / (3+2) = 0.8 < 0.9 — NOT a duplicate despite equal unique sets
         assert!(sim < 0.9, "dice must count bigram multiplicities: {sim}");
         // sanity: the exact multiset is 1.0
-        assert_eq!(dice_similarity(&rep, &s(&["a", "b", "a", "b"])), 1.0);
+        assert_eq!(Similarity::dice_similarity(&rep, &s(&["a", "b", "a", "b"])), 1.0);
     }
 
     #[test]
@@ -5501,9 +4315,9 @@ mod tests {
     fn dice_partial_similarity_below_threshold() {
         let a: Vec<String> = "A B C D E".split(' ').map(str::to_string).collect();
         let b: Vec<String> = "A B X Y Z".split(' ').map(str::to_string).collect();
-        assert!(common::dice_similarity(&a, &b) < 0.9);
+        assert!(crate::skeleton::Similarity::dice_similarity(&a, &b) < 0.9);
         let same: Vec<String> = "A B C D E".split(' ').map(str::to_string).collect();
-        assert_eq!(common::dice_similarity(&a, &same), 1.0);
+        assert_eq!(crate::skeleton::Similarity::dice_similarity(&a, &same), 1.0);
     }
 
     #[test]
@@ -5525,8 +4339,8 @@ mod tests {
         let src = include_str!("../../tests/fixtures/rust/sibling_value_class_shared_base_passes__01.py");
         let parsed = parse_module(src).expect("fixture parses");
         let body = parsed.syntax().body.clone();
-        let classes = checks::collect_sibling_classes(&body, src);
-        let f = checks::sibling_value_class_findings(&[("pkg/expr.py".to_string(), classes)]);
+        let classes = checks::SiblingValueClass::collect_sibling_classes(&body, src);
+        let f = checks::SiblingValueClass::sibling_value_class_findings(&[("pkg/expr.py".to_string(), classes)]);
         assert!(!f.iter().any(|x| x.kind == "sibling-value-class"), "{f:?}");
     }
 
@@ -5554,8 +4368,8 @@ mod tests {
         let src = include_str!("../../tests/fixtures/rust/sibling_value_class_shared_accessors_fires__01.py");
         let parsed = parse_module(src).expect("fixture parses");
         let body = parsed.syntax().body.clone();
-        let classes = checks::collect_sibling_classes(&body, src);
-        let f = checks::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
+        let classes = checks::SiblingValueClass::collect_sibling_classes(&body, src);
+        let f = checks::SiblingValueClass::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].kind, "sibling-value-class");
         assert_eq!(f[0].severity, "warn");
@@ -5572,8 +4386,8 @@ mod tests {
         let src = include_str!("../../tests/fixtures/rust/sibling_value_class_containment_passes__01.py");
         let parsed = parse_module(src).expect("fixture parses");
         let body = parsed.syntax().body.clone();
-        let classes = checks::collect_sibling_classes(&body, src);
-        let f = checks::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
+        let classes = checks::SiblingValueClass::collect_sibling_classes(&body, src);
+        let f = checks::SiblingValueClass::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
         assert!(!f.iter().any(|x| x.kind == "sibling-value-class"), "{f:?}");
     }
 
@@ -5585,8 +4399,8 @@ mod tests {
             include_str!("../../tests/fixtures/rust/sibling_value_class_forward_reference_containment_passes__01.py");
         let parsed = parse_module(src).expect("fixture parses");
         let body = parsed.syntax().body.clone();
-        let classes = checks::collect_sibling_classes(&body, src);
-        let f = checks::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
+        let classes = checks::SiblingValueClass::collect_sibling_classes(&body, src);
+        let f = checks::SiblingValueClass::sibling_value_class_findings(&[("pkg/values.py".to_string(), classes)]);
         assert!(!f.iter().any(|x| x.kind == "sibling-value-class"), "{f:?}");
     }
 
@@ -5600,9 +4414,12 @@ mod tests {
         for (rel, src) in [("pkg/a.py", a), ("pkg/b.py", b.as_str())] {
             let parsed = parse_module(src).expect("source parses");
             let body = parsed.syntax().body.clone();
-            classes.push((rel.to_string(), checks::collect_sibling_classes(&body, src)));
+            classes.push((
+                rel.to_string(),
+                checks::SiblingValueClass::collect_sibling_classes(&body, src),
+            ));
         }
-        let f = checks::sibling_value_class_findings(&classes);
+        let f = checks::SiblingValueClass::sibling_value_class_findings(&classes);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].file, "pkg/b.py");
     }
@@ -5613,7 +4430,7 @@ mod tests {
         // one folder (modules + docs) has no structure to browse
         let modules: Vec<String> = (0..18).map(|i| format!("pkg/m{i}.py")).collect();
         let docs: Vec<String> = (0..2).map(|i| format!("pkg/d{i}.md")).collect();
-        let f = checks::flat_folder_findings(&modules, &docs);
+        let f = checks::FlatFolder::findings(&modules, &docs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].kind, "flat-folder");
         assert_eq!(f[0].severity, "warn");
@@ -5625,13 +4442,13 @@ mod tests {
     #[test]
     fn flat_folder_stays_silent_below_twenty() {
         let modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
-        assert!(checks::flat_folder_findings(&modules, &[]).is_empty());
+        assert!(checks::FlatFolder::findings(&modules, &[]).is_empty());
     }
 
     #[test]
     fn flat_folder_counts_docs_and_skips_init() {
         let docs: Vec<String> = (0..21).map(|i| format!("docs/d{i}.md")).collect();
-        let f = checks::flat_folder_findings(&[], &docs);
+        let f = checks::FlatFolder::findings(&[], &docs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].file, "docs");
         // a docs pile has no modules to group: the action must match the shape
@@ -5644,7 +4461,7 @@ mod tests {
         // init is still a clean folder
         let mut modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
         modules.push("pkg/__init__.py".to_string());
-        assert!(checks::flat_folder_findings(&modules, &[]).is_empty());
+        assert!(checks::FlatFolder::findings(&modules, &[]).is_empty());
     }
 
     #[test]
@@ -5662,7 +4479,7 @@ mod tests {
         for i in 0..15 {
             modules.push(format!("pkg/thing_node_{i}.py"));
         }
-        let f = checks::flat_folder_findings(&modules, &[]);
+        let f = checks::FlatFolder::findings(&modules, &[]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].message.contains("coherent domain subsets"), "{}", f[0].message);
         assert!(f[0].message.contains("commute (6)"), "{}", f[0].message);
@@ -5681,7 +4498,7 @@ mod tests {
             .chain((0..5).map(|i| format!("bus/bus_route_{i}.py")))
             .chain((0..9).map(|i| format!("bus/thing_{i}.py")))
             .collect();
-        let f = checks::flat_folder_findings(&modules, &[]);
+        let f = checks::FlatFolder::findings(&modules, &[]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(!f[0].message.contains("bus ("), "{}", f[0].message);
         assert!(f[0].message.contains("stop (6)"), "{}", f[0].message);
@@ -5695,7 +4512,7 @@ mod tests {
             .chain((0..4).map(|i| format!("pkg/SchoolGate{i}.py")))
             .chain((0..10).map(|i| format!("pkg/ThingNode{i}.py")))
             .collect();
-        let f = checks::flat_folder_findings(&modules, &[]);
+        let f = checks::FlatFolder::findings(&modules, &[]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].message.contains("commute (6)"), "{}", f[0].message);
         assert!(f[0].message.contains("school (4)"), "{}", f[0].message);
@@ -5708,7 +4525,7 @@ mod tests {
             .map(|i| format!("houses/nodes/thing_node_{i}.py"))
             .chain((0..8).map(|i| format!("houses/nodes/commute_{i}.py")))
             .collect();
-        let f = checks::flat_folder_findings(&modules, &[]);
+        let f = checks::FlatFolder::findings(&modules, &[]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].message.contains("commute (8)"), "{}", f[0].message);
         assert!(!f[0].message.contains("node ("), "{}", f[0].message);
@@ -5720,7 +4537,7 @@ mod tests {
         // modules the reader opens
         let mut modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
         modules.push("__init__.py".to_string());
-        assert!(checks::flat_folder_findings(&modules, &[]).is_empty());
+        assert!(checks::FlatFolder::findings(&modules, &[]).is_empty());
     }
 
     #[test]
@@ -5729,7 +4546,7 @@ mod tests {
         // not two, and never summed across sibling folders
         let modules: Vec<String> = (0..19).map(|i| format!("pkg/m{i}.py")).collect();
         let docs: Vec<String> = (0..19).map(|i| format!("pkg/d{i}.md")).collect();
-        let f = checks::flat_folder_findings(&modules, &docs);
+        let f = checks::FlatFolder::findings(&modules, &docs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].message.contains("19 modules"), "{}", f[0].message);
         assert!(f[0].message.contains("19 docs"), "{}", f[0].message);
@@ -7127,6 +5944,406 @@ def two(work, batch):
         assert!(hits[0].message.contains("one"), "{}", hits[0].message);
     }
 
+    /// A synthetic module with `n` classes; `with_methods` of them carry a
+    /// method, the rest are records.
+    fn several_classes_source(n: usize, with_methods: usize) -> String {
+        let mut src = String::new();
+        for i in 0..n {
+            src.push_str(&format!("class Widget{i}:\n"));
+            if i < with_methods {
+                src.push_str(&format!("    def run_{i}(self, value):\n        return value + {i}\n"));
+            } else {
+                src.push_str(&format!("    size: int = {i}\n"));
+            }
+            src.push('\n');
+        }
+        src
+    }
+
+    /// A synthetic module with `n` free functions and `classes` classes.
+    fn definitions_source(n: usize, classes: usize) -> String {
+        let mut src = String::new();
+        for i in 0..classes {
+            src.push_str(&format!("class Holder{i}:\n    pass\n\n"));
+        }
+        for i in 0..n {
+            src.push_str(&format!("def step_{i}(value):\n    return value + {i}\n\n"));
+        }
+        src
+    }
+
+    #[test]
+    fn several_definitions_fires_at_three_and_names_the_classes() {
+        let src = several_classes_source(3, 3);
+        let f = scan_corpus(&[("pkg/widgets.py", &src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "{:?}",
+            hits.iter().map(|h| &h.message).collect::<Vec<_>>()
+        );
+        let msg = &hits[0].message;
+        assert!(
+            msg.contains("holds 3 top-level definitions, 3 of them classes"),
+            "{msg}"
+        );
+        assert!(msg.contains("Widget0") && msg.contains("Widget1"), "{msg}");
+        assert!(msg.contains("package"), "{msg}");
+        assert!(msg.contains("one file per class"), "{msg}");
+        assert!(msg.contains("re-exported from __init__.py"), "{msg}");
+        assert!(msg.contains("no methods may stay"), "{msg}");
+        assert_eq!(hits[0].file, "pkg/widgets.py");
+        assert_eq!(hits[0].line, 0);
+        assert!(!f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn several_definitions_passes_two_definitions() {
+        // a class and the record it returns is a pair, not a module
+        let src = several_classes_source(2, 2);
+        let f = scan_corpus(&[("pkg/widget.py", &src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        let two_functions = definitions_source(2, 0);
+        let f = scan_corpus(&[("pkg/steps.py", &two_functions)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn several_definitions_asks_for_classes_when_functions_dominate() {
+        let src = definitions_source(4, 1);
+        let f = scan_corpus(&[("pkg/steps.py", &src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        let msg = &hits[0].message;
+        assert!(
+            msg.contains("holds 5 top-level definitions, 4 of them functions"),
+            "{msg}"
+        );
+        assert!(msg.contains("owns no state"), "{msg}");
+        assert!(msg.contains("becomes its fields"), "{msg}");
+        assert!(msg.contains("the functions its methods"), "{msg}");
+        assert!(!msg.contains("package"), "{msg}");
+        assert!(!msg.contains("A script is not different"), "{msg}");
+    }
+
+    #[test]
+    fn several_definitions_passes_a_class_and_its_records() {
+        // three classes where all but one are records (no methods)
+        let src = several_classes_source(3, 1);
+        let f = scan_corpus(&[("pkg/widget.py", &src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        // all records is not this finding either
+        let records = several_classes_source(4, 0);
+        let f = scan_corpus(&[("pkg/records.py", &records)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn several_definitions_ignores_nested_classes_and_methods() {
+        // one top-level class holding nested ones: the nested classes belong
+        // to it, and its methods are the class's, not module definitions
+        let src = "class Outer:\n    class Inner:\n        pass\n\n    class Deeper:\n        pass\n\n    def a(self):\n        pass\n";
+        let f = scan_corpus(&[("pkg/outer.py", src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn several_definitions_answers_the_script_objection_under_a_nested_scripts_dir() {
+        // a script's steps build one program state wherever the script lives —
+        // `src/scripts/` is not a different kind of file
+        let src = definitions_source(4, 0);
+        let f = scan_corpus(&[("src/scripts/steps.py", &src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(
+            hits[0].message.contains("A script is not different"),
+            "{}",
+            hits[0].message
+        );
+    }
+
+    #[test]
+    fn many_definitions_passes_a_long_data_module() {
+        // 40 constants and a lookup table: values have no owner and no
+        // behaviour, so a data module is not a module full of concepts
+        let mut src = String::new();
+        for i in 0..40 {
+            src.push_str(&format!("LIMIT_{i} = {i}\n"));
+        }
+        src.push_str("TABLE = {\"a\": 1, \"b\": 2}\n");
+        let f = scan_corpus(&[("pkg/constants.py", &src)]);
+        assert!(
+            !f.iter()
+                .any(|x| x.kind == "many-definitions" || x.kind == "several-definitions"),
+            "{f:?}"
+        );
+    }
+
+    #[test]
+    fn several_definitions_passes_a_generated_module() {
+        let src = format!(
+            "# generated by tools/gen_models.py — do not edit\n{}",
+            several_classes_source(6, 6)
+        );
+        let f = scan_corpus(&[("pkg/models.py", &src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn a_rust_module_of_function_groups_is_not_told_it_holds_zero_types() {
+        // a receiver group plus free functions, and no types of its own. The
+        // types arm used to fire anyway and print "0 of them types ()" — the
+        // functions arm names the group instead.
+        let mut src = String::new();
+        for i in 0..9 {
+            src.push_str(&format!("pub fn over_expr_{i}(e: &Expr) -> u32 {{\n    {i}\n}}\n\n"));
+        }
+        for i in 0..4 {
+            src.push_str(&format!(
+                "pub fn free_{i}(text: &str) -> usize {{\n    text.len() + {i}\n}}\n\n"
+            ));
+        }
+        let rs = rustscan::RustScan::scan(&src, "crate/src/steps.rs", true);
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
+        let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        let msg = &hits[0].message;
+        assert!(!msg.contains("0 of them types"), "{msg}");
+        assert!(msg.contains("1 function group"), "{msg}");
+        assert!(msg.contains("The functions group by the type they take"), "{msg}");
+    }
+
+    #[test]
+    fn the_two_rungs_never_fire_together() {
+        // ten definitions is the top of the strict rung
+        let ten = definitions_source(10, 0);
+        let f = scan_corpus(&[("pkg/ten.py", &ten)]);
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
+        // eleven is the bottom of the loose rung
+        let eleven = definitions_source(11, 0);
+        let f = scan_corpus(&[("pkg/eleven.py", &eleven)]);
+        assert!(f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        let msg = &f.iter().find(|x| x.kind == "many-definitions").unwrap().message;
+        assert!(
+            msg.contains("holds 11 top-level definitions, 11 of them functions"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn many_definitions_keeps_the_class_advice_for_classes() {
+        let src = several_classes_source(11, 11);
+        let f = scan_corpus(&[("pkg/widgets.py", &src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("11 of them classes"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("package"), "{}", hits[0].message);
+    }
+
+    #[test]
+    fn functions_arm_answers_the_script_objection() {
+        // a script's functions build one program state: the message says so
+        let src = definitions_source(4, 0);
+        let f = scan_corpus(&[("scripts/gen.py", &src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(
+            hits[0].message.contains("A script is not different"),
+            "{}",
+            hits[0].message
+        );
+        // the same module outside scripts/tools/bin does not get the clause
+        let f = scan_corpus(&[("pkg/gen.py", &src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(
+            !hits[0].message.contains("A script is not different"),
+            "{}",
+            hits[0].message
+        );
+    }
+
+    #[test]
+    fn a_framework_contract_module_is_exempt() {
+        // every function carries a registration decorator: the framework is
+        // the caller, so the module holds no definitions the reader must name
+        let mut src = String::new();
+        for i in 0..31 {
+            src.push_str(&format!(
+                "@router.get(\"/v1/thing/{i}\")\nasync def get_thing_{i}(request):\n    return request + {i}\n\n"
+            ));
+        }
+        let f = scan_corpus(&[("pkg/routes.py", &src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        assert!(!f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
+        // a module that adds owned functions to its routes still reports them,
+        // and the message names the framework entry points it is not counting
+        src.push_str(&definitions_source(11, 0));
+        let f = scan_corpus(&[("pkg/routes.py", &src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(
+            hits[0].message.contains("11 top-level definitions"),
+            "{}",
+            hits[0].message
+        );
+        assert!(
+            hits[0]
+                .message
+                .contains("31 more functions registered with a framework"),
+            "{}",
+            hits[0].message
+        );
+    }
+
+    #[test]
+    fn rust_types_arm_asks_for_a_directory_of_modules() {
+        // 31 structs, no fns: the types arm, and the action is a module split
+        let mut src = String::new();
+        for i in 0..31 {
+            src.push_str(&format!("pub struct Widget{i} {{ size: u32 }}\n\nimpl Widget{i} {{\n    pub fn run(&self) -> u32 {{\n        self.size\n    }}\n}}\n\n"));
+        }
+        let rs = rustscan::RustScan::scan(&src, "crate/src/widgets.rs", true);
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/widgets.rs");
+        let f = checks::ModuleShape::findings(&[("crate/src/widgets.rs".to_string(), scan.module_shape.clone())]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        let msg = &hits[0].message;
+        assert!(msg.contains("31 of them types"), "{msg}");
+        assert!(msg.contains("directory of modules"), "{msg}");
+        assert!(msg.contains("one file per type"), "{msg}");
+        assert!(!msg.contains("__init__.py"), "{msg}");
+    }
+
+    #[test]
+    fn rust_functions_arm_splits_the_module_at_the_loose_rung() {
+        // 11+ free functions: the module is a grab-bag, so the action is the split
+        let mut src = String::new();
+        for i in 0..11 {
+            src.push_str(&format!(
+                "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
+            ));
+        }
+        let rs = rustscan::RustScan::scan(&src, "crate/src/steps.rs", true);
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
+        let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        let msg = &hits[0].message;
+        assert!(
+            msg.contains("holds 11 top-level definitions (11 free functions)"),
+            "{msg}"
+        );
+        assert!(msg.contains("split the module by concern"), "{msg}");
+        assert!(msg.contains("one module per family"), "{msg}");
+        assert!(msg.contains("`&mut` borrow would conflict"), "{msg}");
+        assert!(!msg.contains("directory of modules"), "{msg}");
+        assert!(!msg.contains("A script is not different"), "{msg}");
+    }
+
+    #[test]
+    fn rust_is_judged_at_the_same_rungs_as_python() {
+        // four free functions with no receiver: the strict rung fires for Rust
+        // too, and its advice is the Rust one (give the functions a type)
+        let mut src = String::new();
+        for i in 0..4 {
+            src.push_str(&format!(
+                "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
+            ));
+        }
+        let rs = rustscan::RustScan::scan(&src, "crate/src/steps.rs", true);
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
+        let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(
+            hits[0]
+                .message
+                .contains("give them the type they operate on as an impl"),
+            "{}",
+            hits[0].message
+        );
+        // and eleven free functions fire the loose rung, with the split advice
+        let mut wide = String::new();
+        for i in 0..11 {
+            wide.push_str(&format!(
+                "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
+            ));
+        }
+        let rs = rustscan::RustScan::scan(&wide, "crate/src/wide.rs", true);
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/wide.rs");
+        let f = checks::ModuleShape::findings(&[("crate/src/wide.rs".to_string(), scan.module_shape.clone())]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "many-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(
+            hits[0].message.contains("split the module by concern"),
+            "{}",
+            hits[0].message
+        );
+    }
+
+    #[test]
+    fn rust_type_and_its_functions_count_as_one_definition() {
+        // a struct and 12 functions taking it: one class equivalent, so the
+        // module holds one definition — not thirteen
+        let mut src = String::new();
+        for i in 0..12 {
+            src.push_str(&format!(
+                "pub fn step_{i}(state: &mut State) -> u32 {{\n    state.count + {i}\n}}\n\n"
+            ));
+        }
+        src.push_str("pub struct State {\n    pub count: u32,\n}\n");
+        let rs = rustscan::RustScan::scan(&src, "crate/src/steps.rs", true);
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/steps.rs");
+        assert_eq!(scan.module_shape.definitions(), 1, "{:?}", scan.module_shape);
+        let f = checks::ModuleShape::findings(&[("crate/src/steps.rs".to_string(), scan.module_shape.clone())]);
+        assert!(f.is_empty(), "{f:?}");
+        // the same functions with no receiver are 31 definitions, and report
+        let mut loose = String::new();
+        for i in 0..31 {
+            loose.push_str(&format!(
+                "pub fn step_{i}(value: u32) -> u32 {{\n    value + {i}\n}}\n\n"
+            ));
+        }
+        let rs = rustscan::RustScan::scan(&loose, "crate/src/loose.rs", true);
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/loose.rs");
+        assert_eq!(scan.module_shape.definitions(), 31);
+        let f = checks::ModuleShape::findings(&[("crate/src/loose.rs".to_string(), scan.module_shape.clone())]);
+        assert!(f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn rust_record_exception_spares_a_type_and_its_records() {
+        // one type with an impl plus two plain records: one concept, no finding
+        let mut src = String::new();
+        for i in 0..2 {
+            src.push_str(&format!("pub struct Row{i} {{ pub size: u32 }}\n\n"));
+        }
+        src.push_str("pub struct Table {\n    pub rows: u32,\n}\n\nimpl Table {\n    pub fn rows(&self) -> u32 {\n        self.rows\n    }\n}\n");
+        let rs = rustscan::RustScan::scan(&src, "crate/src/table.rs", true);
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/table.rs");
+        let f = checks::ModuleShape::findings(&[("crate/src/table.rs".to_string(), scan.module_shape.clone())]);
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn module_shape_reads_only_the_module_body() {
+        let src =
+            "class Widget:\n    def run(self):\n        pass\n\ndef step(value):\n    return value\n\nCONSTANT = 3\n";
+        let parsed = parse_module(src).unwrap();
+        let shape = checks::ModuleShape::python(src, &parsed.syntax().body);
+        assert_eq!(shape.definitions(), 2); // the class and the function; not the method or the constant
+        assert_eq!(shape.classes.len(), 1);
+        assert_eq!(shape.classes[0].name, "Widget");
+        assert_eq!(shape.classes[0].methods, 1);
+        assert_eq!(shape.functions, 1);
+        assert!(!shape.generated);
+    }
+
     #[test]
     fn conditional_polymorphism_dispatch_detected() {
         let src = include_str!("../../tests/fixtures/rust/conditional_polymorphism_dispatch_detected__01.py");
@@ -7182,25 +6399,25 @@ def two(work, batch):
         // ifs over the same selector is a dispatch chain; a battery of ifs
         // appending to the same list is a rules battery
         let dispatch = include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__01.py");
-        let (shape, detail) = python_fn_shape(&first_py_fn_body(dispatch));
+        let (shape, detail) = FnShape::python_fn_shape(&first_py_fn_body(dispatch));
         assert_eq!((shape, detail.as_str()), ("dispatch", "sel"));
         let rules = include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__02.py");
-        let (shape, detail) = python_fn_shape(&first_py_fn_body(rules));
+        let (shape, detail) = FnShape::python_fn_shape(&first_py_fn_body(rules));
         assert_eq!((shape, detail.as_str()), ("rules", "out"));
         let plain = include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__03.py");
-        let (shape, _) = python_fn_shape(&first_py_fn_body(plain));
+        let (shape, _) = FnShape::python_fn_shape(&first_py_fn_body(plain));
         assert_eq!(shape, "plain");
         // the OFFER equals the FIX: a battery the rule-table fix cannot
         // apply to (a check with a nested if — not a single append) is NOT
         // routed to rule-table; it is "plain" so the message offers
         // extract-method instead (no false directive)
         let unfixable = include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__04.py");
-        let (shape, _) = python_fn_shape(&first_py_fn_body(unfixable));
+        let (shape, _) = FnShape::python_fn_shape(&first_py_fn_body(unfixable));
         assert_eq!(shape, "plain", "an unhoistable battery must not be offered rule-table");
         // a dispatch with an elif is not the fixable shape
         let unfixable_d =
             include_str!("../../tests/fixtures/rust/python_fn_shape_classifies_dispatch_and_rules__05.py");
-        let (shape, _) = python_fn_shape(&first_py_fn_body(unfixable_d));
+        let (shape, _) = FnShape::python_fn_shape(&first_py_fn_body(unfixable_d));
         assert_eq!(shape, "plain", "an elif dispatch must not be offered dispatch-registry");
     }
 
@@ -7286,14 +6503,14 @@ def two(work, batch):
         // target in another file is invisible there: the rule stays silent
         // rather than guessing, and fires once the target is in the buffer
         let wrapper = "class Wrapper:\n    def __init__(self) -> None:\n        self._inner = Inner()\n\n    def render(self) -> str:\n        return self._inner.render()\n";
-        let alone = scan_source_impl(wrapper, "wrapper.py", false);
+        let alone = Pipeline::scan(wrapper, "wrapper.py", false);
         assert!(
             !alone.findings.iter().any(|f| f.kind == "middle-man"),
             "{:?}",
             alone.findings
         );
         let together = format!("class Inner:\n    def render(self) -> str:\n        return \"x\"\n\n\n{wrapper}");
-        let both = scan_source_impl(&together, "wrapper.py", false);
+        let both = Pipeline::scan(&together, "wrapper.py", false);
         assert!(
             both.findings.iter().any(|f| f.kind == "middle-man"),
             "{:?}",

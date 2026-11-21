@@ -4,6 +4,7 @@
 """Auto-fix engine tests: each mechanical transform is lossless (comments and
 formatting survive) and the re-scanned source no longer produces the finding."""
 
+import ast
 import json
 import re
 import sys
@@ -11,12 +12,16 @@ from pathlib import Path
 from typing import cast
 
 import libcst as cst
-from libcst.metadata import MetadataWrapper
+from libcst.metadata import MetadataWrapper, PositionProvider
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from test_lucidlint import make_repo, run_main
 
 import fix_engine
+from fix_engine.fixers.mechanical_fixes import MechanicalFixes
+from fix_engine.fixers.module_splitting import ModuleSplitting
+from fix_engine.fixers.parameter_objects import ParameterObjects
+from fix_engine.module_outline import ModuleOutline
 
 
 def test_tuple_record_becomes_a_class(tmp_path):
@@ -3206,7 +3211,7 @@ def test_flatten_stmts_walks_every_nested_block_kind():
         "        y2 = 5\n"
     )
     flat = []
-    fix_engine._flatten_stmts(module.body, flat)
+    MechanicalFixes._flatten_stmts(module.body, flat)
     kinds = [type(s) for s in flat]
     assert len(flat) > len(module.body)  # nested bodies are included
     for kind in (cst.If, cst.For, cst.While, cst.Try, cst.With, cst.Match):
@@ -3287,7 +3292,7 @@ def test_name_ref_kind_reads_the_execution_context():
 
 def test_infer_member_type_names_only_what_it_can_prove():
     def infer(text: str, param_types: dict[str, str] | None = None) -> str | None:
-        return fix_engine._infer_member_type(
+        return MechanicalFixes._infer_member_type(
             cst.parse_expression(text), param_types or {}
         )
 
@@ -3308,7 +3313,7 @@ def test_subscript_mutation_plan_maps_a_dict_store_only():
     def plan(text: str):
         statement = cst.parse_statement(text)
         assert isinstance(statement, cst.SimpleStatementLine)
-        return fix_engine._subscript_mutation_plan(cast(cst.Assign, statement.body[0]))
+        return MechanicalFixes._subscript_mutation_plan(cast(cst.Assign, statement.body[0]))
 
     mapped = plan("d[k] = v\n")
     assert mapped is not None
@@ -3328,15 +3333,15 @@ def test_exec_time_names_defer_function_bodies():
 
 
 def test_dataclass_import_is_recognised_and_prepended_once():
-    assert fix_engine._is_dataclass_import(cst.parse_statement("from dataclasses import dataclass\n"))
-    assert not fix_engine._is_dataclass_import(cst.parse_statement("from dataclasses import *\n"))
-    assert not fix_engine._is_dataclass_import(cst.parse_statement("import dataclasses\n"))
-    assert not fix_engine._is_dataclass_import(cst.parse_statement("from other import dataclass\n"))
-    assert not fix_engine._is_dataclass_import(cst.parse_statement("x = 1\n"))
+    assert ParameterObjects._is_dataclass_import(cst.parse_statement("from dataclasses import dataclass\n"))
+    assert not ParameterObjects._is_dataclass_import(cst.parse_statement("from dataclasses import *\n"))
+    assert not ParameterObjects._is_dataclass_import(cst.parse_statement("import dataclasses\n"))
+    assert not ParameterObjects._is_dataclass_import(cst.parse_statement("from other import dataclass\n"))
+    assert not ParameterObjects._is_dataclass_import(cst.parse_statement("x = 1\n"))
     missing = [cst.parse_statement("x = 1\n")]
-    once = fix_engine._ensure_dataclasses_import(list(missing))
-    assert fix_engine._is_dataclass_import(once[0])
-    assert fix_engine._ensure_dataclasses_import(list(once)) == once  # already present
+    once = ParameterObjects._ensure_dataclasses_import(list(missing))
+    assert ParameterObjects._is_dataclass_import(once[0])
+    assert ParameterObjects._ensure_dataclasses_import(list(once)) == once  # already present
 
 
 def test_loop_hoist_refuses_each_unsafe_loop_shape(tmp_path):
@@ -3523,7 +3528,7 @@ def test_collapse_chain_rewires_a_module_function_terminal(tmp_path):
 def test_bind_children_walks_every_compound_statement():
     def bound(src: str) -> set[str]:
         names: set[str] = set()
-        fix_engine._bind_children(cst.parse_statement(src), names)
+        MechanicalFixes._bind_children(cst.parse_statement(src), names)
         return names
 
     assert {"i", "a"} <= bound("for i in xs:\n    a = 1\n")
@@ -3673,3 +3678,59 @@ def test_target_bound_names_reads_names_tuple_list_and_starred():
     assert names("[a, (b, c)]") == {"a", "b", "c"}
     assert names("obj.attr") == set()  # an attribute store binds nothing
     assert names("items[0]") == set()  # a subscript store binds nothing
+
+
+def test_module_outline_locates_the_class_function_and_scope_at_a_line():
+    # every fixer resolves its anchor through this outline, so the four
+    # lookups are pinned together: the innermost class, the innermost
+    # function, the module-level def line, and module membership
+    source = 'class Owner:\n    def method(self):\n        value = 1\n\ndef free():\n    return 2\n'
+    module = cst.parse_module(source)
+    wrapper = MetadataWrapper(module)
+    outline = ModuleOutline(wrapper)
+
+    owner = outline.enclosing_class(1)
+    assert isinstance(owner, cst.ClassDef) and owner.name.value == "Owner"
+    method = outline.enclosing_function(2)
+    assert isinstance(method, cst.FunctionDef) and method.name.value == "method"
+    free = outline.function_at(5)
+    assert isinstance(free, cst.FunctionDef) and free.name.value == "free"
+
+    assert outline.contains(free)
+    assert not outline.contains(method)  # nested in Owner, not a module member
+    assert outline.enclosing_class(5) is None
+
+    positions = wrapper.resolve(PositionProvider)
+    assert outline.span(positions[free]).start.line == 5
+    assert ModuleOutline.resolve_node(free) is free
+
+
+def test_module_outline_reads_empty_files_and_docstrings():
+    assert ModuleOutline.is_empty("# only comments\n\n")
+    assert not ModuleOutline.is_empty("value = 1\n")
+    fn = cst.parse_module('def f():\n    """doc"""\n    return 1\n').body[0]
+    assert isinstance(fn, cst.FunctionDef)
+    assert ModuleOutline.is_docstring_stmt(fn.body.body[0])
+    assert not ModuleOutline.is_docstring_stmt(fn.body.body[1])
+
+
+def test_resolve_dotted_advances_the_attribute_chain():
+    # the chain must not stall on the first Attribute: `a.b.c` is three parts
+    assert ModuleSplitting._resolve_dotted(cst.parse_expression("a.b.c")) == ["a", "b", "c"]
+    assert ModuleSplitting._resolve_dotted(cst.parse_expression("a")) == ["a"]
+    assert ModuleSplitting._resolve_dotted(cst.parse_expression("f()")) is None
+
+
+def test_fixers_do_not_import_the_package_root():
+    # importing `fix_engine` from a fixer closes the request -> fixer ->
+    # request cycle; the package root is the consumer surface, never a fixer's
+    fixers = Path(__file__).resolve().parent.parent / "fix_engine" / "fixers"
+    offenders = []
+    for path in sorted(fixers.glob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "fix_engine":
+                offenders.append(path.name)
+            if isinstance(node, ast.Import) and any(alias.name == "fix_engine" for alias in node.names):
+                offenders.append(path.name)
+    assert not offenders, f"fixers import the package root (the cycle): {offenders}"
