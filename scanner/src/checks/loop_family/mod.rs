@@ -325,7 +325,11 @@ impl LoopFamily {
                 },
                 _ => None,
             },
-            Stmt::AugAssign(_) => Some("list"),
+            Stmt::AugAssign(a) => match a.op {
+                Operator::Add => Some("list"),
+                Operator::BitOr => Some("set"),
+                _ => None,
+            },
             Stmt::Assign(_) => Some("dict"),
             _ => None,
         }
