@@ -22,50 +22,84 @@ pub(super) struct LoopWalk<'a, 'b> {
     seq: Vec<SeqLoop>,
 }
 
-impl<'a, 'b> LoopWalk<'a, 'b> {
-    fn judge(&mut self, line: usize, body: &[syn::Stmt], is_for: bool, mutated: Vec<String>, drains: &[String]) {
-        if !drains.is_empty() {
-            // the loop consumes a worklist in its CONDITION — it is the
-            // traversal, and its writes are the walk's state, not outputs.
-            // This holds whether or not the body feeds the same collection:
-            // a drain that only reads the worklist and accumulates a result
-            // elsewhere is still a traversal, and "hoist the per-item step,
-            // then combine or fold" describes neither shape (#109).
-            return;
+/// What a loop IS — the one classification each verdict is read from.
+enum LoopShape {
+    /// The condition consumes a worklist: the loop is the traversal, and its
+    /// writes are the walk's state, not outputs. No stateful recipe applies,
+    /// whether or not the body feeds the same collection (#109).
+    Traversal,
+    /// A `for` body that only builds a collection.
+    Pipeline(PipelineBuild),
+    /// Two or more surviving mutations.
+    Stateful(Vec<String>),
+    /// One surviving mutation and a body long enough to hoist.
+    Hoist { name: String, statements: usize },
+    /// Nothing the family can name.
+    Quiet,
+}
+
+/// Classify one loop. The traversal check comes first and is not conditioned
+/// on the body writing the drained name: a walk that only reads the worklist
+/// and accumulates a result elsewhere is still the traversal.
+fn shape(is_for: bool, body: &[syn::Stmt], mutated: Vec<String>, worklist: &[String]) -> LoopShape {
+    if !worklist.is_empty() {
+        return LoopShape::Traversal;
+    }
+    if is_for {
+        if let Some(build) = RustLoops::pipeline_build(body) {
+            return LoopShape::Pipeline(build);
         }
-        let build = if is_for { RustLoops::pipeline_build(body) } else { None };
-        if let Some(build) = build {
-            // tier 1 (coding-standards.md: never offer a fix that cannot
-            // apply): the directive appears ONLY when the fixer would
-            // apply at this line — same contract, same refusal reasons.
-            let fixable = crate::fix::LoopPipeline::fixable(self.state.source, self.state.file, line);
-            let directive = if fixable { " — fix: loop-pipeline" } else { "" };
-            let message = match build {
-                PipelineBuild::Push(acc) => format!(
-                    "the loop's body only pushes to `{acc}` — Replace Loop with Pipeline: `.map(..).collect()` (`.filter(..)` for the guarded push) when the loop creates `{acc}`; `.extend(..)` when `{acc}` already held items{directive}"
-                ),
-                PipelineBuild::Indexed(acc) => format!(
-                    "the loop's body only writes one position of `{acc}` per pass — Replace Loop with Pipeline: `.map(..).collect()` over the indices (`.filter(..)` for the guarded store) builds the value{directive}"
-                ),
+    }
+    if mutated.len() >= 2 {
+        return LoopShape::Stateful(mutated);
+    }
+    if mutated.len() == 1 {
+        let statements = RustLoops::body_stmt_count(body);
+        if statements >= HOIST_MIN_STMTS {
+            return LoopShape::Hoist {
+                name: mutated[0].clone(),
+                statements,
             };
-            self.state
-                .finding("loop-pipeline", "warn", line, &self.fn_name, message);
-        } else if mutated.len() >= 2 {
-            self.state.finding(
-                "mutating-loop",
-                "warn",
-                line,
-                &self.fn_name,
-                format!(
-                    "loop mutates {} — Replace Loop with Pipeline: {} pieces of state survive the loop and the changes are invisible at the call site; compute each output from the input instead",
-                    mutated.join(", "),
-                    mutated.len(),
-                ),
-            );
-        } else if mutated.len() == 1 {
-            let n = RustLoops::body_stmt_count(body);
-            if n >= HOIST_MIN_STMTS {
-                let acc = &mutated[0];
+        }
+    }
+    LoopShape::Quiet
+}
+
+impl<'a, 'b> LoopWalk<'a, 'b> {
+    fn judge(&mut self, line: usize, body: &[syn::Stmt], is_for: bool, mutated: Vec<String>, worklist: &[String]) {
+        match shape(is_for, body, mutated, worklist) {
+            LoopShape::Traversal | LoopShape::Quiet => {}
+            LoopShape::Pipeline(build) => {
+                // tier 1 (coding-standards.md: never offer a fix that cannot
+                // apply): the directive appears ONLY when the fixer would
+                // apply at this line — same contract, same refusal reasons.
+                let fixable = crate::fix::LoopPipeline::fixable(self.state.source, self.state.file, line);
+                let directive = if fixable { " — fix: loop-pipeline" } else { "" };
+                let message = match build {
+                    PipelineBuild::Push(acc) => format!(
+                        "the loop's body only pushes to `{acc}` — Replace Loop with Pipeline: `.map(..).collect()` (`.filter(..)` for the guarded push) when the loop creates `{acc}`; `.extend(..)` when `{acc}` already held items{directive}"
+                    ),
+                    PipelineBuild::Indexed(acc) => format!(
+                        "the loop's body only writes one position of `{acc}` per pass — Replace Loop with Pipeline: `.map(..).collect()` over the indices (`.filter(..)` for the guarded store) builds the value{directive}"
+                    ),
+                };
+                self.state
+                    .finding("loop-pipeline", "warn", line, &self.fn_name, message);
+            }
+            LoopShape::Stateful(names) => {
+                self.state.finding(
+                    "mutating-loop",
+                    "warn",
+                    line,
+                    &self.fn_name,
+                    format!(
+                        "loop mutates {} — Replace Loop with Pipeline: {} pieces of state survive the loop and the changes are invisible at the call site; compute each output from the input instead",
+                        names.join(", "),
+                        names.len(),
+                    ),
+                );
+            }
+            LoopShape::Hoist { name, statements } => {
                 // tier 1 (coding-standards.md: never offer a fix that cannot
                 // apply): the directive appears ONLY when the hoister would
                 // apply at this line (placeholder name — the name is never
@@ -73,11 +107,11 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
                 let fixable = crate::fix::LoopHoist::fixable_at(self.state.source, self.state.file, line);
                 let message = if fixable {
                     format!(
-                        "loop body is {n} statements yet mutates only {acc} — hoist the per-item step into a named helper that returns the value (a domain noun for one item's contribution), then combine or fold — fix: loop-hoist --fix-name <Name>",
+                        "loop body is {statements} statements yet mutates only {name} — hoist the per-item step into a named helper that returns the value (a domain noun for one item's contribution), then combine or fold — fix: loop-hoist --fix-name <Name>",
                     )
                 } else {
                     format!(
-                        "loop body is {n} statements yet mutates only {acc} — hoist the per-item step into a named helper that returns the value (a domain noun for one item's contribution), then combine or fold",
+                        "loop body is {statements} statements yet mutates only {name} — hoist the per-item step into a named helper that returns the value (a domain noun for one item's contribution), then combine or fold",
                     )
                 };
                 self.state.finding("loop-hoist", "warn", line, &self.fn_name, message);
@@ -128,8 +162,8 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
                         .into_iter()
                         .filter(|r| self.survivors.contains(r))
                         .collect();
-                    let drains = condition_drains(&w.cond, self.survivors);
-                    self.judge(line, &w.body.stmts, false, mutated.clone(), &drains);
+                    let worklist = condition_drains(&w.cond, self.survivors);
+                    self.judge(line, &w.body.stmts, false, mutated.clone(), &worklist);
                     if !in_loop {
                         self.seq.push(SeqLoop { line, reads, mutated });
                     }
@@ -199,8 +233,8 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
             syn::Expr::While(w) => {
                 let line = e.span().start().line;
                 let mutated = self.surviving_mutations(&w.body.stmts, &[]);
-                let drains = condition_drains(&w.cond, self.survivors);
-                self.judge(line, &w.body.stmts, false, mutated, &drains);
+                let worklist = condition_drains(&w.cond, self.survivors);
+                self.judge(line, &w.body.stmts, false, mutated, &worklist);
                 self.walk_stmts(&w.body.stmts, true);
             }
             syn::Expr::Loop(l) => {

@@ -50,12 +50,11 @@ impl ModuleWalk {
                         .as_ref()
                         .is_none_or(|t| !module_bindings.get(t).copied().unwrap_or(false));
                     if fresh && LoopFamily::body_is_pipeline(&f.body) {
-                        let fixable = target.as_deref().is_some_and(|acc| {
-                            LoopFamily::collection_kind(&f.body).is_some_and(|kind| {
-                                LoopFamily::auto_fixable(&f.body)
-                                    && LoopFamily::init_is_empty(i.checked_sub(1).and_then(|p| stmts.get(p)), acc, kind)
-                            })
-                        });
+                        // the directive is a promise about the fix engine
+                        let previous = i.checked_sub(1).and_then(|p| stmts.get(p));
+                        let fixable = target
+                            .as_deref()
+                            .is_some_and(|acc| LoopFamily::directive_applies(previous, &f.body, acc));
                         let line = Source::line_of(source, f.range().start());
                         state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                     file: state.file.to_string(),

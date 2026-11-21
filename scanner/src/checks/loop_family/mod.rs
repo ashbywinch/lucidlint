@@ -308,6 +308,18 @@ impl LoopFamily {
         }
     }
 
+    /// Would the comprehension rewrite apply to this loop as written? The
+    /// directive is a promise about the fix engine, so the promise is decided
+    /// in one place: the plan's shape (`auto_fixable`), the accumulator kind
+    /// (`collection_kind`), and the accumulator's own empty collection of that
+    /// kind directly before the loop (`init_is_empty`). `stmts` holds
+    /// statements only: comments and blank lines are trivia, so `previous` is
+    /// the previous STATEMENT however many lines separate them.
+    fn directive_applies(previous: Option<&Stmt>, stmts: &[Stmt], acc: &str) -> bool {
+        Self::collection_kind(stmts)
+            .is_some_and(|kind| Self::auto_fixable(stmts) && Self::init_is_empty(previous, acc, kind))
+    }
+
     /// The collection kind a pipeline-shaped body mutates — the accumulator the
     /// comprehension rewrite initializes (`fix_engine._LoopPipelinePlan`).
     fn collection_kind(stmts: &[Stmt]) -> Option<&'static str> {

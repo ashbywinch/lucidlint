@@ -122,12 +122,11 @@ impl<'a, 'b> FunctionWalk<'a, 'b> {
                         // the directive is a promise about the fix engine:
                         // the same shape and the same adjacent empty init
                         // `_LoopsIntoComprehensions` requires, or no command
-                        let fixable = target.as_deref().is_some_and(|acc| {
-                            LoopFamily::collection_kind(&f.body).is_some_and(|kind| {
-                                LoopFamily::auto_fixable(&f.body)
-                                    && LoopFamily::init_is_empty(i.checked_sub(1).and_then(|p| stmts.get(p)), acc, kind)
-                            })
-                        });
+                        // the directive is a promise about the fix engine
+                        let previous = i.checked_sub(1).and_then(|p| stmts.get(p));
+                        let fixable = target
+                            .as_deref()
+                            .is_some_and(|acc| LoopFamily::directive_applies(previous, &f.body, acc));
                         let message = if fixable {
                             "loop builds a collection — Replace Loop with Pipeline: use a comprehension — fix: loop-pipeline"
                         } else {
