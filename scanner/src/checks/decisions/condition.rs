@@ -16,6 +16,9 @@ use super::facts::{AnswerShape, ConditionScope, DecisionFacts};
 /// Where a condition sits: the source text, the enclosing scope, and the
 /// module's imported aliases (a name the file imports is vocabulary, not a
 /// decision noun).
+/// The operand count at which a boolean chain is a named decision.
+const OPERANDS_MIN: usize = 3;
+
 #[derive(Clone, Copy)]
 struct ConditionContext<'a> {
     source: &'a str,
@@ -138,7 +141,7 @@ impl UnnamedCondition {
         let Some(operands) = Self::bool_operands(expr) else {
             return;
         };
-        if operands.len() < 3 {
+        if operands.len() < OPERANDS_MIN {
             return; // two facts joined is a condition, not an unnamed decision
         }
         if placement == Returned::Value && ctx.scope.answer == AnswerShape::SingleAnswer {
@@ -183,7 +186,7 @@ impl UnnamedCondition {
                     continue;
                 }
                 let inner = Self::condition_nouns(child);
-                if inner.len() != 1 || Self::bool_operands(child).is_none_or(|v| v.len() < 3) {
+                if inner.len() != 1 || Self::bool_operands(child).is_none_or(|v| v.len() < OPERANDS_MIN) {
                     continue;
                 }
                 let outside: HashSet<String> = b
@@ -305,15 +308,9 @@ impl UnnamedCondition {
         let Some(operands) = Self::bool_operands(expr) else {
             return Self::operand_nouns(expr);
         };
-        let mut nouns: Vec<String> = Vec::new();
-        for op in operands {
-            for n in Self::operand_nouns(op) {
-                if !nouns.contains(&n) {
-                    nouns.push(n);
-                }
-            }
-        }
+        let mut nouns: Vec<String> = operands.into_iter().flat_map(Self::operand_nouns).collect();
         nouns.sort();
+        nouns.dedup();
         nouns
     }
 

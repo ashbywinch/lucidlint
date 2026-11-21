@@ -18,8 +18,8 @@ class ModuleOutline:
     """One parsed module, queried by position."""
 
     def __init__(self, wrapper: cst.MetadataWrapper) -> None:
-        self.wrapper = wrapper
-        self.module = wrapper.module
+        self.wrapper: cst.MetadataWrapper = wrapper
+        self.module: cst.Module = wrapper.module
 
     def _find(self, probe):
         """Run one probe visitor over the tree and return what it found."""
@@ -28,11 +28,11 @@ class ModuleOutline:
 
     def enclosing_class(self, line: int) -> cst.ClassDef | None:
         """The innermost class whose span contains `line`."""
-        return self._find(ModuleOutline._EnclosingClass(line))
+        return self._find(ModuleOutline._Enclosing(line, cst.ClassDef))
 
     def enclosing_function(self, line: int) -> cst.FunctionDef | None:
         """The innermost function whose span contains `line`."""
-        return self._find(ModuleOutline._EnclosingFn(line))
+        return self._find(ModuleOutline._Enclosing(line, cst.FunctionDef))
 
     def function_at(self, line: int) -> cst.FunctionDef | None:
         """The module-level function whose def line is `line`."""
@@ -114,33 +114,28 @@ class ModuleOutline:
             for c in n.children:
                 yield from ModuleOutline.iter_nodes_pruned(c)
 
-    class _EnclosingClass(cst.CSTVisitor):
-        """The innermost ClassDef containing the line — the method's owner."""
+    class _Enclosing(cst.CSTVisitor):
+        """The innermost def or class of the asked-for kind whose span contains
+        the line — the method's owner, or the member assignment's constructor."""
 
         METADATA_DEPENDENCIES = (PositionProvider,)
 
-        def __init__(self, line: int) -> None:
+        def __init__(self, line: int, node_type: type) -> None:
             self.line: int = line
-            self.found: cst.ClassDef | None = None
+            self.node_type: type = node_type
+            self.found: cst.ClassDef | cst.FunctionDef | None = None
 
         @override
         def visit_ClassDef(self, node) -> None:
-            pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
-            if pos.start.line <= self.line <= pos.end.line:
-                self.found = node
-
-    class _EnclosingFn(cst.CSTVisitor):
-        """The innermost FunctionDef whose span contains the line — the member
-        assignment's enclosing constructor, for the annotation inference."""
-
-        METADATA_DEPENDENCIES = (PositionProvider,)
-
-        def __init__(self, line: int) -> None:
-            self.line: int = line
-            self.found: cst.FunctionDef | None = None
+            self._consider(node)
 
         @override
         def visit_FunctionDef(self, node) -> None:
+            self._consider(node)
+
+        def _consider(self, node) -> None:
+            if not isinstance(node, self.node_type):
+                return
             pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
             if pos.start.line <= self.line <= pos.end.line:
                 self.found = node

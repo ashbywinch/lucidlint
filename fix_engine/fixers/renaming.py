@@ -12,13 +12,14 @@ import libcst as cst
 from libcst.metadata import PositionProvider
 
 from fix_engine.module_outline import ModuleOutline
+from fix_engine.rewrite import Rewrite
 
 
 class Renaming:
     """The rename fix for one request."""
 
     def __init__(self, request: Any) -> None:
-        self.request = request
+        self.request: Any = request
 
     def run(self) -> str | None:
         source, line = self.request.loaded_source(), self.request.line
@@ -65,6 +66,4 @@ class Renaming:
 
         @override
         def leave_Name(self, original_node, updated_node):
-            if updated_node.value == self.old:
-                return updated_node.with_changes(value=self.new)
-            return updated_node
+            return Rewrite.renamed(updated_node, self.old, self.new)

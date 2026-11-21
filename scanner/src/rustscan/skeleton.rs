@@ -13,9 +13,8 @@ impl RsSkeleton {
     /// within the pool is what the dice threshold needs, not a shared vocab.
     pub(super) fn rs_skeleton(sig: &Signature, block: &Block) -> Vec<String> {
         let mut toks = vec!["Fn".to_string()];
-        for _input in &sig.inputs {
-            toks.push("A".to_string()); // params collapsed, like Python's "A"
-        }
+        // params collapsed, like Python's "A"
+        toks.extend(sig.inputs.iter().map(|_| "A".to_string()));
         for stmt in &block.stmts {
             Self::skel_stmt(&mut toks, stmt);
         }

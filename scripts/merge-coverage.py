@@ -51,9 +51,9 @@ class CoberturaMerge:
     class prefixed and its rates re-derived from the line records."""
 
     def __init__(self, reports: list[Report]):
-        self.reports = reports
-        self.covered_total = 0
-        self.valid_total = 0
+        self.reports: list[Report] = reports
+        self.covered_total: int = 0
+        self.valid_total: int = 0
 
     @staticmethod
     def rate(covered: int, valid: int) -> str:

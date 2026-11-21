@@ -14,6 +14,9 @@ use crate::ScanState;
 use super::super::push_stmt_children;
 
 /// The assembly-class rule: the module functions and the threading they share.
+/// The result-call count that makes a class an assembly of parts.
+const RESULT_CALLS_MIN: usize = 3;
+
 pub struct AssemblyClass;
 
 impl AssemblyClass {
@@ -34,13 +37,10 @@ impl AssemblyClass {
         for s in body {
             match s {
                 Stmt::FunctionDef(f) => fns.push((f, Source::line_of(state.source, f.name.range().start()))),
-                Stmt::ClassDef(c) => {
-                    for m in &c.body {
-                        if let Stmt::FunctionDef(f) = m {
-                            fns.push((f, Source::line_of(state.source, f.name.range().start())));
-                        }
-                    }
-                }
+                Stmt::ClassDef(c) => fns.extend(c.body.iter().filter_map(|m| match m {
+                    Stmt::FunctionDef(f) => Some((f, Source::line_of(state.source, f.name.range().start()))),
+                    _ => None,
+                })),
                 _ => {}
             }
         }
@@ -48,9 +48,7 @@ impl AssemblyClass {
             let mut results: HashSet<String> = HashSet::new();
             let mut calls: Vec<(String, Vec<String>)> = Vec::new();
             let mut stack: Vec<&Stmt> = Vec::new();
-            for b in &f.body {
-                stack.push(b);
-            }
+            stack.extend(f.body.iter());
             while let Some(s) = stack.pop() {
                 if matches!(s, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
                     continue;
@@ -90,7 +88,7 @@ impl AssemblyClass {
                 }
                 push_stmt_children(s, &mut stack);
             }
-            if calls.len() < 2 || results.len() < 3 {
+            if calls.len() < 2 || results.len() < RESULT_CALLS_MIN {
                 continue;
             }
             // chain: one call's argument is another call's result

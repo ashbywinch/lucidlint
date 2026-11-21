@@ -18,6 +18,11 @@ use super::shared_path::PathExpression;
 
 /// One substantive expression's occurrence: the canonical shape, the source
 /// text for the message, and the extent for the parent/child dedup.
+/// How much of a repeated expression the message quotes, and how many files it
+/// names before counting the rest.
+const PREVIEW_CHARS: usize = 120;
+const FILES_SHOWN: usize = 3;
+
 #[derive(Clone)]
 pub struct ExpressionOccurrence {
     pub key: String,
@@ -377,15 +382,16 @@ impl ExpressionOccurrence {
             Expr::Lambda(l) => {
                 let mut params = Vec::new();
                 if let Some(p) = &l.parameters {
-                    for a in p.posonlyargs.iter().chain(&p.args) {
-                        params.push(a.parameter.name.to_string());
-                    }
+                    params.extend(
+                        p.posonlyargs
+                            .iter()
+                            .chain(&p.args)
+                            .map(|a| a.parameter.name.to_string()),
+                    );
                     if let Some(v) = &p.vararg {
                         params.push(format!("*{}", v.name));
                     }
-                    for a in &p.kwonlyargs {
-                        params.push(a.parameter.name.to_string());
-                    }
+                    params.extend(p.kwonlyargs.iter().map(|a| a.parameter.name.to_string()));
                     if let Some(k) = &p.kwarg {
                         params.push(format!("**{}", k.name));
                     }
@@ -473,9 +479,11 @@ impl ExpressionOccurrence {
                 Self::expression_key(&gen.target, source, false, false),
                 Self::expression_key(&gen.iter, source, false, false)
             ));
-            for cond in &gen.ifs {
-                parts.push(format!("if {}", Self::expression_key(cond, source, false, false)));
-            }
+            parts.extend(
+                gen.ifs
+                    .iter()
+                    .map(|cond| format!("if {}", Self::expression_key(cond, source, false, false))),
+            );
         }
         format!("comp({})", parts.join(" "))
     }
@@ -530,12 +538,12 @@ impl ExpressionOccurrence {
     fn duplicate_expression_finding(occs: &[ExprOccurrenceRef]) -> Finding {
         let first = &occs[0];
         let count = occs.len();
-        let text = Self::truncate_text(&first.occ.text, 120);
+        let text = Self::truncate_text(&first.occ.text, PREVIEW_CHARS);
         let mut files: Vec<&str> = occs.iter().map(|o| o.rel).collect();
         files.sort_unstable();
         files.dedup();
         let file_word = if files.len() == 1 { "file" } else { "files" };
-        let where_text = if files.len() <= 3 {
+        let where_text = if files.len() <= FILES_SHOWN {
             files.join(", ")
         } else {
             format!("{}, {}, and {} more", files[0], files[1], files.len() - 2)

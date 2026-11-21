@@ -18,12 +18,8 @@ impl SkeletonWalk {
         toks.push(if f.is_async { "AsyncFunctionDef" } else { "FunctionDef" }.to_string());
         // CPython FunctionDef children: arguments, body, decorator_list, returns
         queue.push(Q::N(AnyNodeRef::Parameters(&f.parameters)));
-        for s in &f.body {
-            queue.push(Q::N(AnyNodeRef::from(s)));
-        }
-        for d in &f.decorator_list {
-            queue.push(Q::N(AnyNodeRef::from(&d.expression)));
-        }
+        queue.extend(f.body.iter().map(|s| Q::N(AnyNodeRef::from(s))));
+        queue.extend(f.decorator_list.iter().map(|d| Q::N(AnyNodeRef::from(&d.expression))));
         if let Some(r) = &f.returns {
             queue.push(Q::N(AnyNodeRef::from(r.as_ref())));
         }

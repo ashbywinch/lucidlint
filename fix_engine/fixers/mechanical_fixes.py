@@ -25,6 +25,20 @@ class MechanicalFixes:
     """The mechanical fix families for one request: the deletes, keyword
     arguments, the member annotation, and the three loop rewrites."""
 
+    # the duplicate-block rule's window: three consecutive statements repeated
+    _DUP_BLOCK = 3
+    # a member's initial value names its type by the literal's node kind
+    _LITERAL_TYPES = (
+        (cst.Integer, "int"),
+        (cst.Float, "float"),
+        (cst.SimpleString, "str"),
+        (cst.ConcatenatedString, "str"),
+        (cst.List, "list"),
+        (cst.Dict, "dict"),
+        (cst.Set, "set"),
+        (cst.Tuple, "tuple"),
+    )
+
     _HOIST_MUTATORS = {
         "append",
         "add",
@@ -61,7 +75,7 @@ class MechanicalFixes:
         if_test: cst.BaseExpression | None  # the one-filter test or None
 
     def __init__(self, request: Any) -> None:
-        self.request = request
+        self.request: Any = request
 
     def run(self) -> str | None:
         kind, source, line, opts = (
@@ -104,11 +118,7 @@ class MechanicalFixes:
             xform = MechanicalFixes._LoopsIntoComprehensions(
                 line, sequence=(kind == "loop-sequence"), fresh_name=MechanicalFixes._fresh_loop_name(source)
             )
-            out = cst.MetadataWrapper(cst.parse_module(source)).visit(xform).code
-            if xform.decline:
-                self.request.decline = xform.decline
-                return None
-            return out if xform.applied else None
+            return self._apply_transformer(source, xform)
         if kind == "loop-hoist":
             if not opts.name:
                 self.request.decline = (
@@ -122,12 +132,17 @@ class MechanicalFixes:
                 helper_local=MechanicalFixes._fresh_loop_name(source, base="val"),
                 element=MechanicalFixes._fresh_loop_name(source, base="part"),
             )
-            out = cst.MetadataWrapper(cst.parse_module(source)).visit(xform).code
-            if xform.decline:
-                self.request.decline = xform.decline
-                return None
-            return out if xform.applied else None
+            return self._apply_transformer(source, xform)
         return None
+
+    def _apply_transformer(self, source: str, xform) -> str | None:
+        """Run one fixer's transformer over the source: its decline is recorded
+        on the request, and an unapplied transform is a stale finding (None)."""
+        out = cst.MetadataWrapper(cst.parse_module(source)).visit(xform).code
+        if xform.decline:
+            self.request.decline = xform.decline
+            return None
+        return out if xform.applied else None
 
     def fix_duplicate_def(self) -> str | None:
         source, line = self.request.loaded_source(), self.request.line
@@ -173,15 +188,17 @@ class MechanicalFixes:
             return None
         flat: list = []
         MechanicalFixes._flatten_stmts(list(finder.fn.body.body), flat)
-        if len(flat) < 6:
-            return None
+        window = MechanicalFixes._DUP_BLOCK
+        if len(flat) < 2 * window:
+            return None  # two blocks cannot fit
         targets: list | None = None
-        for i in range(len(flat) - 5):
-            for j in range(i + 3, len(flat) - 2):
-                if all(flat[i + k].deep_equals(flat[j + k]) for k in range(3)):
+        # i starts the first copy, j the second; both windows must fit the list
+        for i in range(len(flat) - (2 * window - 1)):
+            for j in range(i + window, len(flat) - (window - 1)):
+                if all(flat[i + k].deep_equals(flat[j + k]) for k in range(window)):
                     pos = wrapper.resolve(PositionProvider)[flat[j]]
                     if pos.start.line == line:
-                        targets = flat[j : j + 3]
+                        targets = flat[j : j + window]
                         break
             if targets is not None:
                 break
@@ -208,11 +225,11 @@ class MechanicalFixes:
         fn = ModuleOutline(wrapper).enclosing_function(line)
         if fn is None:
             return {}
-        result: dict[str, str] = {}
-        for p in list(fn.params.posonly_params) + list(fn.params.params) + list(fn.params.kwonly_params):
-            if p.annotation is not None:
-                result[p.name.value] = cst.Module(body=[]).code_for_node(p.annotation.annotation)
-        return result
+        return {
+            p.name.value: cst.Module(body=[]).code_for_node(p.annotation.annotation)
+            for p in [*fn.params.posonly_params, *fn.params.params, *fn.params.kwonly_params]
+            if p.annotation is not None
+        }
 
     def _repo_params(self, callee: str) -> list[str] | None:
         repo, rel = self.request.repo, self.request.rel
@@ -374,29 +391,29 @@ class MechanicalFixes:
 
         @override
         def visit_FunctionDef(self, node) -> None:
-            pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
-            if self._is_target_at_top(pos):
-                self.found, self.name = node, node.name.value
-            self.depth += 1
+            self._enter(node)
+
+        @override
+        def visit_ClassDef(self, node) -> None:
+            self._enter(node)
 
         @override
         def leave_FunctionDef(self, original_node) -> None:
             self.depth -= 1
 
-        def _is_target_at_top(self, pos) -> bool:
-            """The first top-level definition at the finding's line."""
-            return self.depth == 0 and self.found is None and pos.start.line == self.line
-
         @override
-        def visit_ClassDef(self, node) -> None:
+        def leave_ClassDef(self, original_node) -> None:
+            self.depth -= 1
+
+        def _enter(self, node) -> None:
             pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
             if self._is_target_at_top(pos):
                 self.found, self.name = node, node.name.value
             self.depth += 1
 
-        @override
-        def leave_ClassDef(self, original_node) -> None:
-            self.depth -= 1
+        def _is_target_at_top(self, pos) -> bool:
+            """The first top-level definition at the finding's line."""
+            return self.depth == 0 and self.found is None and pos.start.line == self.line
 
     class _KeywordArgs(cst.CSTTransformer):
         """Keyword the positional literal args of the flagged call on the target
@@ -718,7 +735,8 @@ class MechanicalFixes:
                 loop_count = 1
             return self._rewrite_plan(stmts, first_idx, loop_count)
 
-        def _chain_length(self, stmts, start: int) -> int:
+        @staticmethod
+        def _chain_length(stmts, start: int) -> int:
             n = 0
             for s in stmts[start:]:
                 if isinstance(s, cst.For):
@@ -789,7 +807,8 @@ class MechanicalFixes:
             new_stmt = init.with_changes(body=[new_small])
             return stmts, init_idx, (first_idx + loop_count) - init_idx, new_stmt
 
-        def _loop_plan(self, for_node: cst.For) -> MechanicalFixes._LoopPipelinePlan | None:
+        @staticmethod
+        def _loop_plan(for_node: cst.For) -> MechanicalFixes._LoopPipelinePlan | None:
             if for_node.orelse:
                 return None
             body = list(for_node.body.body)
@@ -818,16 +837,14 @@ class MechanicalFixes:
             if plan.flatten is not None:
                 inner = cst.CompFor(target=cst.Name(self.fresh), iter=plan.flatten, inner_for_in=comp_for)
                 return cst.ListComp(elt=cst.Name(self.fresh), for_in=inner)
+            needs_a_key = plan.collection == "dict" and plan.key is None
+            if plan.element is None or needs_a_key:
+                return None  # a comprehension needs its element (and a dict its key)
             if plan.collection == "set":
-                if plan.element is None:
-                    return None
                 return cst.SetComp(elt=plan.element, for_in=comp_for)
             if plan.collection == "dict":
-                if plan.element is None or plan.key is None:
-                    return None
+                assert plan.key is not None
                 return cst.DictComp(key=plan.key, value=plan.element, for_in=comp_for)
-            if plan.element is None:
-                return None
             return cst.ListComp(elt=plan.element, for_in=comp_for)
 
     class _NameCount(cst.CSTVisitor):
@@ -850,9 +867,7 @@ class MechanicalFixes:
 
         @override
         def leave_Name(self, original_node, updated_node):
-            if updated_node.value == self.old:
-                return updated_node.with_changes(value=self.new)
-            return updated_node
+            return Rewrite.renamed(updated_node, self.old, self.new)
 
     class _StripDocstring(cst.CSTTransformer):
         """Delete the first body statement of the def at `line` when it is a
@@ -874,6 +889,8 @@ class MechanicalFixes:
                 return MechanicalFixes._strip_first_docstring(updated_node, original_node)
             return updated_node
 
+        # the class body can carry the docstring too — libcst dispatches the two
+        # definition kinds through separate hooks, so the body repeats
         @override
         def leave_ClassDef(self, original_node, updated_node):
             if self.done:
@@ -906,33 +923,61 @@ class MechanicalFixes:
             acc=aug.target.value, collection="list", element=None, key=None, flatten=aug.value, if_test=None
         )
 
+    # the compound kinds whose bodies bind names, and the reader for each
+    _BLOCK_BINDERS = (
+        (cst.For, "_for_binds"),
+        (cst.While, "_loop_binds"),
+        (cst.If, "_loop_binds"),
+        (cst.Try, "_try_binds"),
+        (cst.With, "_with_binds"),
+        (cst.Match, "_match_binds"),
+    )
+
     @staticmethod
     def _bind_children(stmt, bound: set[str]) -> None:
         """The names a compound statement binds across its child blocks."""
+        reader = next(
+            (getattr(MechanicalFixes, name) for kind, name in MechanicalFixes._BLOCK_BINDERS if type(stmt) is kind),
+            None,
+        )
+        if reader is None:
+            return
+        for child in reader(stmt, bound):
+            MechanicalFixes._bind_names(child, bound)
+
+    @staticmethod
+    def _for_binds(stmt, bound: set[str]) -> list:
+        bound.update(Bindings.expr_names(stmt.target))
+        return MechanicalFixes._loop_binds(stmt, bound)
+
+    @staticmethod
+    def _loop_binds(stmt, bound: set[str]) -> list:
+        return MechanicalFixes._stmt_seq(stmt.body) + MechanicalFixes._stmt_seq(stmt.orelse)
+
+    @staticmethod
+    def _try_binds(stmt, bound: set[str]) -> list:
+        seqs = (
+            MechanicalFixes._stmt_seq(stmt.body)
+            + MechanicalFixes._stmt_seq(stmt.orelse)
+            + MechanicalFixes._stmt_seq(stmt.finalbody)
+        )
+        for handler in stmt.handlers:
+            seqs += MechanicalFixes._stmt_seq(handler.body)
+        return seqs
+
+    @staticmethod
+    def _with_binds(stmt, bound: set[str]) -> list:
+        for item in stmt.items:
+            if item.asname is not None:
+                bound.update(Bindings.expr_names(item.asname.name))
+        return MechanicalFixes._stmt_seq(stmt.body)
+
+    @staticmethod
+    def _match_binds(stmt, bound: set[str]) -> list:
         seqs: list = []
-        if isinstance(stmt, cst.For):
-            bound.update(Bindings.expr_names(stmt.target))
-            seqs = MechanicalFixes._stmt_seq(stmt.body) + MechanicalFixes._stmt_seq(stmt.orelse)
-        elif isinstance(stmt, (cst.While, cst.If)):
-            seqs = MechanicalFixes._stmt_seq(stmt.body) + MechanicalFixes._stmt_seq(stmt.orelse)
-        elif isinstance(stmt, cst.Try):
-            seqs = (
-                MechanicalFixes._stmt_seq(stmt.body)
-                + MechanicalFixes._stmt_seq(stmt.orelse)
-                + MechanicalFixes._stmt_seq(stmt.finalbody)
-            )
-            for h in stmt.handlers:
-                seqs += MechanicalFixes._stmt_seq(h.body)
-        elif isinstance(stmt, cst.With):
-            for item in stmt.items:
-                if item.asname is not None:
-                    bound.update(Bindings.expr_names(item.asname.name))
-            seqs = MechanicalFixes._stmt_seq(stmt.body)
-        elif isinstance(stmt, cst.Match):
-            for case in stmt.cases:
-                seqs += MechanicalFixes._stmt_seq(case.body)
-        for b in seqs:
-            MechanicalFixes._bind_names(b, bound)
+        for case in stmt.cases:
+            seqs += MechanicalFixes._stmt_seq(case.body)
+        return seqs
 
     @staticmethod
     def _bind_names(stmt, bound: set[str]) -> None:
@@ -998,18 +1043,8 @@ class MechanicalFixes:
                     # its suite in an Else — flatten either into its statements
                     nested = [s.orelse] if isinstance(s.orelse, cst.If) else list(s.orelse.body.body)
                     MechanicalFixes._flatten_stmts(nested, out)
-            elif isinstance(s, (cst.For, cst.While)):
-                MechanicalFixes._flatten_stmts(list(s.body.body), out)
-                if s.orelse is not None:
-                    MechanicalFixes._flatten_stmts(list(s.orelse.body.body), out)
-            elif isinstance(s, cst.Try):
-                MechanicalFixes._flatten_stmts(list(s.body.body), out)
-                for h in s.handlers:
-                    MechanicalFixes._flatten_stmts(list(h.body.body), out)
-                if s.orelse is not None:
-                    MechanicalFixes._flatten_stmts(list(s.orelse.body.body), out)
-            elif isinstance(s, cst.With):
-                MechanicalFixes._flatten_stmts(list(s.body.body), out)
+            elif isinstance(s, (cst.For, cst.While, cst.Try, cst.With)):
+                MechanicalFixes._flatten_compound(s, out)
             elif isinstance(s, cst.Match):
                 for case in s.cases:
                     MechanicalFixes._flatten_stmts(list(case.body.body), out)
@@ -1031,6 +1066,17 @@ class MechanicalFixes:
         if collection == "dict":
             return isinstance(value, cst.Dict) and not value.elements
         return MechanicalFixes._is_empty_set_call(value)
+
+    @staticmethod
+    def _flatten_compound(stmt, out: list) -> None:
+        """A compound statement's blocks in source order: its own body, then a
+        Try's handlers, then its else."""
+        MechanicalFixes._flatten_stmts(list(stmt.body.body), out)
+        for handler in getattr(stmt, "handlers", []):
+            MechanicalFixes._flatten_stmts(list(handler.body.body), out)
+        orelse = getattr(stmt, "orelse", None)
+        if orelse is not None:
+            MechanicalFixes._flatten_stmts(list(orelse.body.body), out)
 
     @staticmethod
     def _for_index_at_line(metadata: cst.CSTTransformer, stmts: list[cst.BaseStatement], line: int) -> int | None:
@@ -1059,7 +1105,7 @@ class MechanicalFixes:
 
         try:
             cst.parse_module(source).visit(_Names())
-        except Exception:
+        except cst.ParserSyntaxError:
             return base
         candidate = base
         i = 2
@@ -1075,20 +1121,11 @@ class MechanicalFixes:
         type cannot be named safely (leave the member unannotated)."""
         if isinstance(value, cst.Name):
             return param_types.get(value.value)
-        if isinstance(value, cst.Integer):
-            return "int"
-        if isinstance(value, cst.Float):
-            return "float"
-        if isinstance(value, (cst.SimpleString, cst.ConcatenatedString)):
-            return "str"
-        if isinstance(value, cst.List):
-            return "list"
-        if isinstance(value, cst.Dict):
-            return "dict"
-        if isinstance(value, cst.Set):
-            return "set"
-        if isinstance(value, cst.Tuple):
-            return "tuple"
+        literal = next(
+            (named for kind, named in MechanicalFixes._LITERAL_TYPES if isinstance(value, kind)), None
+        )
+        if literal is not None:
+            return literal
         if isinstance(value, cst.Call) and isinstance(value.func, cst.Name):
             return value.func.value  # cst.FunctionDef(...) -> FunctionDef
         return None
@@ -1149,8 +1186,8 @@ class MechanicalFixes:
         for p in SourceFiles(repo).py_files():
             try:
                 module = cst.parse_module(p.read_text(encoding="utf-8"))
-            except Exception:  # parse errors in other files are their own findings
-                continue
+            except (OSError, UnicodeDecodeError, cst.ParserSyntaxError):
+                continue  # an unreadable/unparsable sibling is its own finding
 
             probe = MechanicalFixes._NameCount(name)
             module.visit(probe)
@@ -1163,7 +1200,7 @@ class MechanicalFixes:
         `__init__` in one module — self/cls dropped."""
         try:
             module = cst.parse_module(source)
-        except Exception:
+        except cst.ParserSyntaxError:
             return None
         found = None
 

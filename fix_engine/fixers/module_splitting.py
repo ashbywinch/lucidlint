@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import NamedTuple, cast, override
+from typing import Any, NamedTuple, cast, override
 
 import libcst as cst
 from libcst.metadata import ParentNodeProvider
@@ -81,7 +81,7 @@ class ModuleSplitting:
         decline: str | None = None
 
     def __init__(self, request) -> None:
-        self.request = request
+        self.request: Any = request
 
     def run(self) -> str | None:
         """Split a multi-class module (#31): the misplaced public classes move
@@ -119,7 +119,7 @@ class ModuleSplitting:
     @staticmethod
     def _module_parts(rel: str) -> list[str]:
         """A module's import path: its directory parts plus the stem."""
-        return rel.split("/")[:-1] + [rel.rsplit("/", 1)[-1][:-3]]
+        return rel.split("/")[:-1] + [rel.rsplit("/", 1)[-1].removesuffix(".py")]
 
     @staticmethod
     def _class_matches_stem(name: str, stem: str) -> bool:
@@ -224,29 +224,20 @@ class ModuleSplitting:
         parent = parents.get(node)
         if parent is None:
             return "skip"
-        if isinstance(parent, cst.AssignTarget):
+        # the node is a BINDING, not a reference: an assignment/loop target, a
+        # parameter or def name, an import alias, or a keyword/attribute name
+        binds_only = (cst.AssignTarget, cst.AsName, cst.ImportAlias)
+        targets = (cst.AnnAssign, cst.For, cst.CompFor, cst.NamedExpr)
+        names = (cst.Param, cst.ClassDef, cst.FunctionDef)
+        if isinstance(parent, binds_only):
             return "skip"
-        if isinstance(parent, cst.AnnAssign) and parent.target is node:
+        if isinstance(parent, targets) and parent.target is node:
             return "skip"
-        if isinstance(parent, cst.Param) and parent.name is node:
-            return "skip"
-        if isinstance(parent, cst.For) and parent.target is node:
-            return "skip"
-        if isinstance(parent, cst.CompFor) and parent.target is node:
-            return "skip"
-        if isinstance(parent, cst.AsName):
-            return "skip"
-        if isinstance(parent, cst.ImportAlias):
-            return "skip"
-        if isinstance(parent, cst.NamedExpr) and parent.target is node:
+        if isinstance(parent, names) and parent.name is node:
             return "skip"
         if isinstance(parent, cst.Arg) and parent.keyword is node:
             return "skip"
         if isinstance(parent, cst.Attribute) and parent.attr is node:
-            return "skip"
-        if isinstance(parent, cst.ClassDef) and parent.name is node:
-            return "skip"
-        if isinstance(parent, cst.FunctionDef) and parent.name is node:
             return "skip"
         cur = parent
         while cur is not None:
@@ -482,8 +473,8 @@ class ModuleSplitting:
                     continue
                 try:
                     mod = cst.parse_module(path.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
+                except (OSError, UnicodeDecodeError, cst.ParserSyntaxError):
+                    continue  # an unreadable sibling is its own finding
                 importer_dir = path.relative_to(self.repo).as_posix().split("/")[:-1]
                 alias_map = ModuleSplitting._module_alias_map(mod, origin_path)
 
@@ -940,6 +931,14 @@ class ModuleSplitting:
         return len(parts) == 1 and parts[0] in alias_map and alias_map[parts[0]] == origin_path
 
     @staticmethod
+    def _parts_are_origin(parts: list[str], origin_path: list[str], alias_map: dict[str, list[str]]) -> bool:
+        """An import path names the origin itself, or an alias of it — the one
+        question both the retarget rewrite and the constant probe ask."""
+        if parts == origin_path:
+            return True
+        return ModuleSplitting._alias_points_to_origin(parts, origin_path, alias_map)
+
+    @staticmethod
     def _import_refers_to_origin(ifrom: cst.ImportFrom, importer_dir: list[str], origin_path: list[str]) -> bool:
         """Does this ImportFrom resolve to the origin module (absolute full path,
         relative dots resolving to the origin's directory)?"""
@@ -974,9 +973,7 @@ class ModuleSplitting:
             self.added: set[str] = set()
 
         def _base_is_origin(self, parts: list[str]) -> bool:
-            if parts == self.origin_path:
-                return True
-            return ModuleSplitting._alias_points_to_origin(parts, self.origin_path, self.alias_map)
+            return ModuleSplitting._parts_are_origin(parts, self.origin_path, self.alias_map)
 
         @override
         def leave_SimpleStatementLine(self, original_node, updated_node):
@@ -1053,8 +1050,8 @@ class ModuleSplitting:
         chains. None when the file is unchanged."""
         try:
             module = cst.parse_module(text)
-        except Exception:  # parse errors in other files are their own findings
-            return None
+        except cst.ParserSyntaxError:
+            return None  # the sibling's parse error is its own finding
         alias_map = ModuleSplitting._module_alias_map(module, origin_path)
         importer_dir = p_rel.split("/")[:-1]
         tx = ModuleSplitting._SplitImportRewrite(origin_path, targets, alias_map, importer_dir)
@@ -1106,9 +1103,7 @@ class ModuleSplitting:
 
         def _refers_to_origin(self, parts: list[str]) -> bool:
             """The import path is the origin module itself, or an alias of it."""
-            if parts == self.origin_path:
-                return True
-            return ModuleSplitting._alias_points_to_origin(parts, self.origin_path, self.alias_map)
+            return ModuleSplitting._parts_are_origin(parts, self.origin_path, self.alias_map)
 
         @override
         def visit_ImportFrom(self, node) -> None:
@@ -1139,8 +1134,8 @@ class ModuleSplitting:
                 continue
             try:
                 mod = cst.parse_module(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
+            except (OSError, UnicodeDecodeError, cst.ParserSyntaxError):
+                continue  # an unreadable sibling is its own finding
             importer_dir = path.relative_to(repo).as_posix().split("/")[:-1]
             for stmt in mod.body:
                 if not isinstance(stmt, cst.SimpleStatementLine):
@@ -1159,8 +1154,8 @@ class ModuleSplitting:
                 continue
             try:
                 mod = cst.parse_module(source)
-            except Exception:
-                continue
+            except (OSError, UnicodeDecodeError, cst.ParserSyntaxError):
+                continue  # an unreadable sibling is its own finding
             importer_dir = p_rel.split("/")[:-1]
             for stmt in mod.body:
                 if not isinstance(stmt, cst.SimpleStatementLine):

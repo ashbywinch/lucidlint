@@ -55,7 +55,7 @@ class RuleInventory:
     the agreement check against the catalog (the one registration point)."""
 
     def __init__(self, catalog: Any):
-        self.catalog = catalog
+        self.catalog: Any = catalog
 
     @staticmethod
     def scanner_sources() -> list[Path]:

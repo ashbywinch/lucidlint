@@ -8,6 +8,12 @@ use syn::{BinOp, FnArg, Pat, Signature};
 /// read from one body: the classifier and the predicates its offer rests on.
 pub(crate) struct RustShape;
 
+/// The item count that makes a body a pipeline, and the closure candidate's
+/// complexity and span bars.
+const PIPELINE_ITEMS_MIN: usize = 3;
+const CLOSURE_CC_MIN: u32 = 15;
+const CLOSURE_SPAN_MIN: usize = 60;
+
 impl RustShape {
     /// A one-statement placeholder body: empty, `return`, `return None`, `()` or
     /// a `let _ = ...` discard — a framework override stub, not a param-list
@@ -129,7 +135,7 @@ impl RustShape {
             }
             n += 1;
         }
-        if n < 3 {
+        if n < PIPELINE_ITEMS_MIN {
             return None;
         }
         let sel = selector?;
@@ -229,7 +235,7 @@ impl RustShape {
             }
             n += 1;
         }
-        if n < 3 {
+        if n < PIPELINE_ITEMS_MIN {
             return None;
         }
         let syn::Stmt::Expr(te, _) = body.last()? else {
@@ -252,6 +258,6 @@ impl RustShape {
 
     /// The function is a closures candidate: nested definitions plus size.
     pub(super) fn is_closures_shape(inner: u32, cc: u32, span: usize) -> bool {
-        inner >= 2 && (cc >= 15 || span >= 60)
+        inner >= 2 && (cc >= CLOSURE_CC_MIN || span >= CLOSURE_SPAN_MIN)
     }
 }

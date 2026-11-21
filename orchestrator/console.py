@@ -17,7 +17,7 @@ class Console:
     The diff is trimmed to its head, and that bound is the console's."""
 
     def __init__(self, diff_head: int) -> None:
-        self.diff_head = diff_head
+        self.diff_head: int = diff_head
 
     def warn(self, msg: str) -> None:
         print(msg, file=sys.stderr)

@@ -29,7 +29,7 @@ class Bindings:
     """The bindings of one scope (a function, a class, or a statement)."""
 
     def __init__(self, scope: cst.CSTNode) -> None:
-        self.scope = scope
+        self.scope: cst.CSTNode = scope
 
     @staticmethod
     def import_base_name(name: cst.Attribute | cst.Name) -> str:

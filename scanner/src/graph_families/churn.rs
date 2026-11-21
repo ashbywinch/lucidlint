@@ -10,6 +10,9 @@ use super::graph_paths::GraphPaths;
 
 pub(crate) struct ChurnUntested;
 
+/// The smallest cut-off a top-fraction ranking may pick.
+const MIN_CUTOFF: f64 = 1.0;
+
 impl ChurnUntested {
     /// A file a test can exercise — the only population the churn-untested rule
     /// can make a coverage claim about. Docs, skills and config are churned but
@@ -40,7 +43,7 @@ impl ChurnUntested {
             .collect();
         entries.sort_by_key(|(f, c)| (*c, (*f).clone()));
         entries.reverse();
-        let cutoff = ((entries.len() as f64) * top_frac).max(1.0) as usize;
+        let cutoff = ((entries.len() as f64) * top_frac).max(MIN_CUTOFF) as usize;
         let mut out = Vec::new();
         for (rel, count) in entries.into_iter().take(cutoff) {
             if *count < 2 {

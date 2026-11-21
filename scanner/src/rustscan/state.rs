@@ -26,6 +26,16 @@ use syn::{Arm, Attribute, BinOp, Block, Expr, ExprLit, File, FnArg, ImplItem, It
 
 // --------------------------------------------------------------------------- the walk
 
+/// Rust-shape bars: the field count of a data class, the group size of a
+/// parameter clump, comparison operands, match cases, typed parameters, and a
+/// large function's span.
+const FIELDS_MIN: usize = 5;
+const GROUP_MIN: usize = 3;
+const OPERANDS_MIN: usize = 3;
+const CASES_MIN: usize = 3;
+const TYPED_PARAMS_MIN: usize = 5;
+const LARGE_FUNCTION_LINES: usize = 120;
+
 pub(crate) struct RsState<'a> {
     pub(crate) file: &'a str,
     pub(crate) source: &'a str,
@@ -93,7 +103,7 @@ impl<'a> RsState<'a> {
         let record_names: std::collections::HashSet<String> = structs
             .iter()
             .filter(|s| {
-                s.fields >= 5
+                s.fields >= FIELDS_MIN
                     && self
                         .impls
                         .iter()
@@ -156,7 +166,7 @@ impl<'a> RsState<'a> {
         }
         let mut strew_groups: Vec<(usize, usize, String)> = by_param
             .iter()
-            .filter(|(_, g)| g.len() >= 3)
+            .filter(|(_, g)| g.len() >= GROUP_MIN)
             .map(|(param, g)| {
                 let fns = g.iter().map(|c| c.0.as_str()).collect::<Vec<_>>().join("', '");
                 (g[0].1, g.len(), format!("{param}|{fns}"))
@@ -311,7 +321,7 @@ impl<'a> RsState<'a> {
             return;
         }
         let operands = RsDecision::rs_bool_operands(cond);
-        if operands.len() < 3 {
+        if operands.len() < OPERANDS_MIN {
             return;
         }
         let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
@@ -350,7 +360,7 @@ impl<'a> RsState<'a> {
             return;
         }
         let cases: Vec<&Arm> = m.arms.iter().filter(|a| !matches!(a.pat, Pat::Wild(_))).collect();
-        if cases.len() < 3 {
+        if cases.len() < CASES_MIN {
             return;
         }
         let classifies = cases
@@ -492,7 +502,7 @@ impl<'a> RsState<'a> {
             // verdicts) — per-function shapes, own module below
             crate::rustloops::RustLoops::findings(self, sig, block, &sig.ident.to_string(), line);
             let typed = sig.inputs.iter().filter(|i| matches!(i, FnArg::Typed(_))).count();
-            if typed > 5 && !RustShape::is_trivial_stub(&block.stmts) {
+            if typed > TYPED_PARAMS_MIN && !RustShape::is_trivial_stub(&block.stmts) {
                 self.finding(
                     "long-param-list",
                     "fail",
@@ -504,7 +514,7 @@ impl<'a> RsState<'a> {
                     ),
                 );
             }
-            if span >= 120 {
+            if span >= LARGE_FUNCTION_LINES {
                 self.finding(
                     "large-function",
                     "fail",

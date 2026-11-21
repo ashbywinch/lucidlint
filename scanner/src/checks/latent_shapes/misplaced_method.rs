@@ -22,15 +22,14 @@ impl MisplacedMethod {
         for s in body {
             let Stmt::FunctionDef(f) = s else { continue };
             let mut params = Vec::new();
-            for a in &f.parameters.posonlyargs {
-                params.push(a.parameter.name.to_string());
-            }
-            for a in &f.parameters.args {
-                params.push(a.parameter.name.to_string());
-            }
-            for a in &f.parameters.kwonlyargs {
-                params.push(a.parameter.name.to_string());
-            }
+            params.extend(
+                f.parameters
+                    .posonlyargs
+                    .iter()
+                    .chain(&f.parameters.args)
+                    .chain(&f.parameters.kwonlyargs)
+                    .map(|a| a.parameter.name.to_string()),
+            );
             if let Some(v) = &f.parameters.vararg {
                 params.push(v.name.to_string());
             }
@@ -52,9 +51,7 @@ impl MisplacedMethod {
             for m in &c.body {
                 let Stmt::FunctionDef(method) = m else { continue };
                 let mut stack: Vec<&Stmt> = Vec::new();
-                for b in &method.body {
-                    stack.push(b);
-                }
+                stack.extend(method.body.iter());
                 while let Some(st) = stack.pop() {
                     if matches!(st, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
                         continue;

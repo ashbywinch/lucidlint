@@ -12,6 +12,13 @@ use super::super::conditional_polymorphism::dispatch_key;
 use super::facts::{AnswerShape, ConditionScope, DecisionFacts};
 
 /// Whether the chain is the function's whole body or a branch inside one.
+/// Classification bars: the test count that makes a comparison a decision,
+/// the branch count that makes an if/elif a classification, and the case count
+/// that does the same for a match.
+const TESTS_MIN: usize = 3;
+const BRANCHES_MIN: usize = 4;
+const CASES_MIN: usize = 3;
+
 #[derive(Clone, Copy, PartialEq)]
 enum Level {
     Top,
@@ -132,7 +139,7 @@ impl UnnamedClassification {
                 bodies.push(&cl.body);
             }
         }
-        if tests.len() < 3 {
+        if tests.len() < TESTS_MIN {
             return;
         }
         let mut subject = None;
@@ -157,7 +164,7 @@ impl UnnamedClassification {
         }
         // a >=4-arm chain on one value is conditional-polymorphism's ruling; one
         // chain gets one verdict
-        if tests.len() >= 4 {
+        if tests.len() >= BRANCHES_MIN {
             let keys: Vec<Option<String>> = tests.iter().map(|t| dispatch_key(t)).collect();
             if keys.iter().all(|k| k.is_some()) && keys.windows(2).all(|w| w[0] == w[1]) {
                 return;
@@ -183,7 +190,7 @@ impl UnnamedClassification {
         if level == Level::Top && ctx.scope.single_chain {
             return;
         }
-        if m.cases.len() < 3 || !matches!(m.subject.as_ref(), Expr::Name(_) | Expr::Attribute(_)) {
+        if m.cases.len() < CASES_MIN || !matches!(m.subject.as_ref(), Expr::Name(_) | Expr::Attribute(_)) {
             return;
         }
         if m.cases

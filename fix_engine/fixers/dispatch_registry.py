@@ -5,7 +5,7 @@ Each arm's literal selects a handler, and one call dispatches.
 
 from __future__ import annotations
 
-from typing import NamedTuple, override
+from typing import Any, NamedTuple, override
 
 import libcst as cst
 
@@ -133,7 +133,7 @@ class DispatchRegistry:
     """One request's dispatch registry fix. The request is the fixer's state."""
 
     def __init__(self, request) -> None:
-        self.request = request
+        self.request: Any = request
 
     def fix_dispatch_registry(self) -> str | None:
         source, line = self.request.loaded_source(), self.request.line

@@ -68,15 +68,17 @@ impl NamingUnits {
     /// The DISTINCT unit tokens an identifier states — a component matching a
     /// token or its plural (`minutes`, `hours`, `miles`, `seconds`, ...).
     pub fn unit_tokens_of_name(name: &str) -> Vec<&'static str> {
-        let mut out: Vec<&'static str> = Vec::new();
-        for comp in Self::name_components(name) {
-            for tok in UNIT_TOKENS {
-                if Self::is_unit_token(comp.as_str(), tok) && !out.contains(tok) {
-                    out.push(tok);
-                }
-            }
-        }
-        out
+        let mut seen: HashSet<&'static str> = HashSet::new();
+        Self::name_components(name)
+            .iter()
+            .flat_map(|comp| {
+                UNIT_TOKENS
+                    .iter()
+                    .copied()
+                    .filter(|&tok| Self::is_unit_token(comp.as_str(), tok))
+            })
+            .filter(|tok| seen.insert(*tok))
+            .collect()
     }
 
     /// The first unit token an identifier states, if any.

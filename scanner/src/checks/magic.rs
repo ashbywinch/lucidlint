@@ -14,6 +14,9 @@ use ruff_text_size::Ranged;
 use super::expr_walk::{push_stmt_children, stmt_exprs, walk_expr_deep};
 
 /// `magic-number`: the rule object. Its methods read one literal's position and decide whether a name already explains it.
+/// The repeated-offset count that makes a tuple a named record.
+const REPEATED_OFFSETS_MIN: usize = 3;
+
 pub struct MagicNumber;
 
 impl MagicNumber {
@@ -53,7 +56,7 @@ impl MagicNumber {
             let mut groups: std::collections::HashMap<bool, Vec<usize>> = std::collections::HashMap::new();
             Self::census_collection(c, &mut groups);
             for offsets in groups.values() {
-                if offsets.len() >= 3 {
+                if offsets.len() >= REPEATED_OFFSETS_MIN {
                     exempt.extend(offsets.iter().copied());
                 }
             }
@@ -178,9 +181,7 @@ impl MagicNumber {
             }
             match s {
                 Stmt::FunctionDef(f) => {
-                    for b in &f.body {
-                        sq.push(b);
-                    }
+                    sq.extend(f.body.iter());
                 }
                 _ => push_stmt_children(s, &mut sq),
             }

@@ -38,7 +38,7 @@ class RecordFixes:
         keys: list[str]
 
     def __init__(self, request: Any) -> None:
-        self.request = request
+        self.request: Any = request
 
     def tuple_record(self) -> str | None:
         """The anonymous tuple record becomes a class: the build sites
@@ -145,6 +145,11 @@ class RecordFixes:
                 return False
             return self.col == 0 or pos.start.column + 1 == self.col
 
+        def _field_for(self, key: cst.SimpleString) -> str | None:
+            """The record field a literal key maps to (None when the map has none)."""
+            raw = key.evaluated_value
+            return self.key_map.get(raw if isinstance(raw, str) else str(raw))
+
         def _reads_one_bound_name(self, value: cst.BaseExpression, slices) -> bool:
             """The subscript indexes one name bound by the loop target."""
             return isinstance(value, cst.Name) and value.value in self.bind_names and len(slices) == 1
@@ -161,8 +166,7 @@ class RecordFixes:
                 k = el.key
                 if not isinstance(k, cst.SimpleString):
                     continue
-                raw = k.evaluated_value
-                field = self.key_map.get(raw if isinstance(raw, str) else str(raw))
+                field = self._field_for(k)
                 if field is None:
                     continue
                 keywords.append(
@@ -184,8 +188,7 @@ class RecordFixes:
                 idx = slices[0].slice
                 if not isinstance(idx, cst.Index) or not isinstance(idx.value, cst.SimpleString):
                     return updated_node
-                raw = idx.value.evaluated_value
-                field = self.key_map.get(raw if isinstance(raw, str) else str(raw))
+                field = self._field_for(idx.value)
                 if field:
                     return cst.Attribute(value=updated_node.value, attr=cst.Name(field))
             return updated_node

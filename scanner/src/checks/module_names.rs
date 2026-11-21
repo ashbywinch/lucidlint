@@ -32,6 +32,12 @@ use crate::ScanState;
 /// functions is a tool script, not a class file (the class is a component,
 /// not the module's identity) — renaming it after the class would be wrong.
 /// Private classes (`_`-prefixed) are never the module's identity.
+/// The span and member counts that make a vague name a real abstraction, and
+/// how many members the message shows.
+const VAGUE_SPAN_LINES: usize = 120;
+const VAGUE_MEMBERS: usize = 6;
+const MEMBERS_SHOWN: usize = 3;
+
 pub fn class_module_findings(state: &mut ScanState, module_body: &[Stmt], rel: &str) {
     if rel.ends_with("__init__.py") {
         return;
@@ -254,7 +260,7 @@ pub fn vague_name_findings(state: &mut ScanState, module_body: &[Stmt]) {
             let methods = cls.body.iter().filter(|m| matches!(m, Stmt::FunctionDef(_))).count();
             let span = Source::line_of(state.source, cls.range().end())
                 .saturating_sub(Source::line_of(state.source, cls.range().start()));
-            if span < 120 && methods < 6 {
+            if span < VAGUE_SPAN_LINES && methods < VAGUE_MEMBERS {
                 break; // thin role class — the name is the communication
             }
             let line = Source::stmt_line(state.source, s);
@@ -306,7 +312,7 @@ pub fn strewing_findings(state: &mut ScanState, module_body: &[Stmt]) {
         }
     }
     for (base, mut members) in groups {
-        if members.len() < 3 {
+        if members.len() < MEMBERS_SHOWN {
             continue;
         }
         members.sort_by_key(|m| m.1);

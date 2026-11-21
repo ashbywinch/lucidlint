@@ -6,7 +6,7 @@ members, and its libcst visitors are nested classes.
 
 from __future__ import annotations
 
-from typing import override
+from typing import Any, override
 
 import libcst as cst
 from libcst.metadata import PositionProvider
@@ -21,7 +21,7 @@ class HuskFixes:
     husk, never inline."""
 
     def __init__(self, request) -> None:
-        self.request = request
+        self.request: Any = request
 
     # lucidlint: ignore closures the nested visitors are one-purpose probes; hoisting names nothing owned
     def run(self) -> str | None:
@@ -85,26 +85,11 @@ class HuskFixes:
                 new_sources[rel] = rewired
         # build the origin's new source: removed husk class + rewired sites
         origin_rewired = new_sources.pop(self.request.rel, source)
-        origin_mod = cst.parse_module(origin_rewired)
-        removed = HuskFixes._RemoveHuskClass(husk)
-        origin_new = origin_mod.visit(removed).code
+        origin_new = Rewrite(cst.parse_module(origin_rewired)).without_class(husk).code
         if origin_new == source and not new_sources:
             return None  # nothing rewired and nothing deleted — stale
-        for rel, ns in new_sources.items():
-            self.request.extra_writes.append((rel, ns))
+        self.request.extra_writes.extend(new_sources.items())
         return origin_new
-
-    class _RemoveHuskClass(cst.CSTTransformer):
-        """Delete the husk class (by name) from the origin after rewiring."""
-
-        def __init__(self, husk: str) -> None:
-            self.husk: str = husk
-
-        @override
-        def leave_ClassDef(self, original_node, updated_node):
-            if original_node.name.value == self.husk:
-                return cst.RemoveFromParent()
-            return updated_node
 
     @staticmethod
     def _is_husk_instantiation(stmt: cst.BaseSmallStatement, husk: str) -> bool:
@@ -227,7 +212,7 @@ class HuskFixes:
             rewired = Rewrite(rewired).without(drop_probe.statements)
         # the husk class itself is deleted by the caller — scan leftovers on the
         # tree WITHOUT it (the class's own subtree must not count as a reference)
-        scanned = rewired.visit(HuskFixes._RemoveHuskClass(husk))
+        scanned = Rewrite(rewired).without_class(husk)
         left_scan = _Leftover()
         scanned.visit(left_scan)
         leftover_names = list(left_scan.names)

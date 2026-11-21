@@ -10,6 +10,9 @@ use super::graph_paths::GraphPaths;
 
 pub(crate) struct Cohesion;
 
+/// How many shared names the message shows.
+const NAMES_SHOWN: usize = 3;
+
 impl Cohesion {
     /// Module cohesion — `_module_cohesion_actions` (review-log §11.1, fail).
     /// A file whose nodes split across >= 2 graph communities (each >= 2 nodes)
@@ -61,7 +64,7 @@ impl Cohesion {
             }
             let groups = domains
                 .iter()
-                .take(3)
+                .take(NAMES_SHOWN)
                 .map(|(cid, members)| {
                     let name = contract
                         .communities

@@ -8,6 +8,9 @@ use syn::{Expr, FnArg, Item, ItemFn, Lit, Pat, Stmt};
 use super::text::FixText;
 
 /// `rule-table`: the rule object. Its methods read one rule battery and write the table rewrite.
+/// The arm count at which an if/append battery is a rule table.
+const TABLE_ARMS_MIN: usize = 3;
+
 pub struct RuleTable;
 
 /// One rule battery's analyzed shape: the typed params, the accumulator name,
@@ -109,7 +112,7 @@ impl RuleTable {
             arms.push((cond_text, s.token().to_string()));
             idx += 1;
         }
-        if arms.len() < 3 {
+        if arms.len() < TABLE_ARMS_MIN {
             return Err("fewer than 3 checks — not a battery".to_string());
         }
         if idx != stmts.len() - 1 {

@@ -108,6 +108,11 @@ class _FixTarget(NamedTuple):
 
 
 class FixCommand:
+    # how much of a preview a reader gets: the extracted body's first lines,
+    # and the whole diff's line budget before it is elided
+    _EXTRACTED_PREVIEW_LINES = 10
+    _DIFF_PREVIEW_LINES = 40
+
     """The `lucidlint fix` command: R27 line resolution, the engine checks,
     the preview surface, and the apply path — one command's behavior, not a
     slice of main()."""
@@ -400,12 +405,14 @@ class FixCommand:
             if def_idx is not None:
                 print("\nExtracted (the method being created, first lines):\n")
                 print(new_source.splitlines()[def_idx])
-                print("\n".join(body[:10]))
-                if len(body) > 10:
-                    print(f"... ({len(body) - 10} more lines omitted)")
+                print("\n".join(body[: FixCommand._EXTRACTED_PREVIEW_LINES]))
+                if len(body) > FixCommand._EXTRACTED_PREVIEW_LINES:
+                    print(f"... ({len(body) - FixCommand._EXTRACTED_PREVIEW_LINES} more lines omitted)")
         else:
-            if len(diff) > 40:
-                diff = diff[:40] + [f"... ({len(diff) - 40} more lines omitted)"]
+            if len(diff) > FixCommand._DIFF_PREVIEW_LINES:
+                diff = diff[: FixCommand._DIFF_PREVIEW_LINES] + [
+                    f"... ({len(diff) - FixCommand._DIFF_PREVIEW_LINES} more lines omitted)"
+                ]
             print("\n".join(diff))
         print(
             f"# the name `{self.args.name or '_extracted'}` is a placeholder — pick a real domain noun; "
@@ -482,8 +489,8 @@ class FixCommand:
         fix failure — the apply already succeeded."""
         try:
             rust = self.services.rust_scan.scan(self.repo, self.args, Counter(), None)
-        except Exception:
-            return
+        except (OSError, RuntimeError):
+            return  # the scan gap is the gate's finding, not the apply's
         remaining = [
             f
             for fs in rust.by_rel.values()

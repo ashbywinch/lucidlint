@@ -28,6 +28,9 @@ pub(super) struct HelperBody {
 /// plan that proves it, and the helper text it writes.
 pub(crate) struct LoopHoist;
 
+/// Slack for the rebuilt source's capacity hint.
+const CAPACITY_SLACK: usize = 16;
+
 impl LoopHoist {
     /// The single accumulator the body pushes to, plus the push-receiver
     /// paths (a mid-build READ check must not mistake a receiver for a read).
@@ -446,7 +449,7 @@ impl LoopHoist {
         // fallthrough, return the Option. Each push statement's span becomes the
         // return, and the arg text slices from its own span — nested calls, string
         // literals (`format!("({})", x)`) and blocks with their own `;` all exact.
-        let mut rebuilt = String::with_capacity(moved.len() + 16);
+        let mut rebuilt = String::with_capacity(moved.len() + CAPACITY_SLACK);
         let mut cursor = 0usize;
         for (start, end, arg_span) in push_sites {
             // a site already covered by an earlier range (a nested push in the same

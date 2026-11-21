@@ -133,9 +133,7 @@ fn fs_usage(f: &StmtFunctionDef) -> (bool, bool) {
     let mut real_fs = false;
     let mut needs_real = false;
     let mut fq: Vec<Q> = f.body.iter().map(|s| Q::N(AnyNodeRef::from(s))).collect();
-    for d in &f.decorator_list {
-        fq.push(Q::N(AnyNodeRef::from(&d.expression)));
-    }
+    fq.extend(f.decorator_list.iter().map(|d| Q::N(AnyNodeRef::from(&d.expression))));
     let mut fi = 0usize;
     while fi < fq.len() {
         if let Q::N(node) = fq[fi] {
