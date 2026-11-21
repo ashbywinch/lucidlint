@@ -138,7 +138,7 @@ sequences (76 → 55). Houses and album are byte-identical on both comparison
 keys — they have no Rust loop-pipeline findings in the scanned set — so the
 corpus contract holds.
 
-Verification: `make check`, `make test` (530 scanner + 323 Python tests),
+Verification: `make check`, `make test` (531 scanner + 323 Python tests),
 `make self-check` (`GATE: PASS`, 286 warnings, 0 fails); houses 420 / album
 699 identical on both `(file, kind, line)` and `(file, kind, message)`.
 

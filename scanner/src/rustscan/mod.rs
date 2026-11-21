@@ -1003,6 +1003,17 @@ mod tests {
     }
 
     #[test]
+    fn loop_cursor_growth_through_a_mut_arg_is_a_traversal() {
+        // issue #115/#113: the body grows the queue by handing it to a
+        // function as `&mut`; that is a write, and the cursor walk is a
+        // traversal even though the callee does the push.
+        let src = "fn walk(roots: &[u32]) -> usize {\n    let mut queue: Vec<u32> = roots.to_vec();\n    let mut i = 0;\n    while i < queue.len() {\n        let x = queue[i];\n        let y = x + 1;\n        let z = y * 2;\n        push_next(&mut queue, z);\n        i += 1;\n    }\n    i\n}\nfn push_next(q: &mut Vec<u32>, v: u32) { q.push(v); }\n";
+        let fs = scan(src);
+        assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
+        assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
+    }
+
+    #[test]
     fn loop_pipeline_idiomatic_combinator_passes() {
         let fs = scan(&fixture("loop_pipeline_rs_ok.rs"));
         assert!(!has_kind(&fs, "loop-pipeline"), "{fs:?}");
