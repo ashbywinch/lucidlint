@@ -97,7 +97,7 @@ class ModuleSplitting:
         the split back to flat."""
         if not self.request.rel.endswith(".py") or self.request.rel.endswith("__init__.py"):
             return None  # the scanner never flags __init__ — nothing to split
-        module, wrapper = ModuleSource.parse(self.request._loaded_source())
+        module, wrapper = ModuleSource.parse(self.request.loaded_source())
         origin = ModuleSplitting._split_origin(self.request.rel)
         subjects = ModuleSplitting._split_subjects(module.body, origin.stem)
         if not subjects:
@@ -857,22 +857,11 @@ class ModuleSplitting:
         class itself with its constants and references rewritten."""
         free = ModuleSplitting._class_free_names(cls) - ctx.moved - Bindings.BUILTINS
         imports = Imports(module).needed(free)  # verbatim copies for import-bound names
-        constructed: list = []
-        for n in sorted(free):
-            if n in ctx.subjects and n != cls.name.value:
-                if ctx.package is None:
-                    # unreachable via the cohesion edges (a reference would merge
-                    # the components) — emit the sibling-file form anyway
-                    constructed.append(
-                        ModuleSplitting._from_import_node([ModuleSplitting._snake_name(n)], [n], ctx.origin_dots)
-                    )
-                else:
-                    constructed.append(ModuleSplitting._from_import_node([n], [n], ctx.member_dots))
-            elif n in ctx.residual_def_names:
-                if ctx.package is None:
-                    constructed.append(ModuleSplitting._from_import_node([ctx.stem], [n], ctx.origin_dots))
-                else:
-                    constructed.append(ModuleSplitting._from_import_node([], [n], 1))  # from . import X
+        constructed = [
+            import_node
+            for n in sorted(free)
+            if (import_node := ModuleSplitting._constructed_import(n, cls, ctx)) is not None
+        ]
         seen: set[str] = set()
         body: list = []
         for stmt in imports + [cst.SimpleStatementLine(body=[i]) for i in constructed]:
@@ -883,6 +872,24 @@ class ModuleSplitting:
             body.append(stmt)
         cls_node = ModuleSplitting._class_with_moved_consts(wrapper, cls, ctx.moved, cls.name.value)
         return cst.Module(body=body + [cls_node]).code
+
+    @staticmethod
+    def _constructed_import(n: str, cls: cst.ClassDef, ctx: ModuleSplitting._SplitCtx) -> cst.ImportFrom | None:
+        """The import a free name needs in the moved class's file: a sibling
+        subject (from its own module) or a residual member (from the origin).
+        None means the name is already carried by the origin's own imports —
+        one of the three cases, so no free name is left unbound."""
+        if n in ctx.subjects and n != cls.name.value:
+            if ctx.package is None:
+                # unreachable via the cohesion edges (a reference would merge the
+                # components) — emit the sibling-file form anyway
+                return ModuleSplitting._from_import_node([ModuleSplitting._snake_name(n)], [n], ctx.origin_dots)
+            return ModuleSplitting._from_import_node([n], [n], ctx.member_dots)
+        if n in ctx.residual_def_names:
+            if ctx.package is None:
+                return ModuleSplitting._from_import_node([ctx.stem], [n], ctx.origin_dots)
+            return ModuleSplitting._from_import_node([], [n], 1)  # from . import X
+        return None
 
     @staticmethod
     def _dotted_expr(parts: list[str]) -> cst.Name | cst.Attribute:
@@ -900,6 +907,7 @@ class ModuleSplitting:
         cur = expr
         while isinstance(cur, cst.Attribute):
             parts.append(cur.attr.value)
+            cur = cur.value
         if isinstance(cur, cst.Name):
             parts.append(cur.value)
             return list(reversed(parts))

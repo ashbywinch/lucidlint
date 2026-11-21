@@ -63,7 +63,7 @@ class Partition:
         the class's name, and every group keeps the shared bases. Declines when a
         connector method (or unattributable __init__ logic) ties the groups
         together."""
-        source, line = self.request._loaded_source(), self.request.line
+        source, line = self.request.loaded_source(), self.request.line
         # the wrapper's own tree: the visitor's nodes must be the ones spliced
         # back into `module.body`, and metadata resolves by NODE IDENTITY
         wrapper = cst.MetadataWrapper(cst.parse_module(source))

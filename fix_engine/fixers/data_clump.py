@@ -42,7 +42,7 @@ class DataClump:
         call sites construct the instance. Declines when the pair cannot be
         recovered, a caller lives in another module, or a call cannot be
         resolved."""
-        source, line = self.request._loaded_source(), self.request.line
+        source, line = self.request.loaded_source(), self.request.line
         # the wrapper's own tree: metadata resolves by NODE IDENTITY, so the
         # module inspected here must be the wrapper's copy, not a parallel parse
         wrapper = cst.MetadataWrapper(cst.parse_module(source))

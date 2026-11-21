@@ -41,7 +41,7 @@ class WideTuple:
         class, matching tuple build sites construct it, and the class is
         prepended. Declines on an ambiguous anchor, an unusable name, or a name
         the file already binds."""
-        source, line = self.request._loaded_source(), self.request.line
+        source, line = self.request.loaded_source(), self.request.line
         wrapper = cst.MetadataWrapper(cst.parse_module(source))
         finder = WideTuple._FindWideTuples(line)
         wrapper.visit(finder)

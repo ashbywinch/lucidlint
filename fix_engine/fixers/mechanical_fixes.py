@@ -66,7 +66,7 @@ class MechanicalFixes:
     def run(self) -> str | None:
         kind, source, line, opts = (
             self.request.kind,
-            self.request._loaded_source(),
+            self.request.loaded_source(),
             self.request.line,
             self.request.opts,
         )
@@ -130,7 +130,7 @@ class MechanicalFixes:
         return None
 
     def fix_duplicate_def(self) -> str | None:
-        source, line = self.request._loaded_source(), self.request.line
+        source, line = self.request.loaded_source(), self.request.line
         """Delete the shadowing (second) module-scope binding when nothing
         references it — proven by a repo-wide Name count (only the two def sites
         hit). Referenced shadows are renamed by the agent, never auto-deleted."""
@@ -144,11 +144,11 @@ class MechanicalFixes:
         return Rewrite(wrapper.module).without([probe.found]).code
 
     def fix_restating_docstring(self) -> str | None:
-        source, line = self.request._loaded_source(), self.request.line
+        source, line = self.request.loaded_source(), self.request.line
         return cst.MetadataWrapper(cst.parse_module(source)).visit(MechanicalFixes._StripDocstring(line)).code
 
     def fix_duplicate_block(self) -> str | None:
-        source, line = self.request._loaded_source(), self.request.line
+        source, line = self.request.loaded_source(), self.request.line
         """Delete the second copy of a repeated 3-statement block. Refuses when
         the removal would empty a block (an emptied body needs `pass` — the
         agent's call)."""
@@ -203,7 +203,7 @@ class MechanicalFixes:
     def _member_param_types(self, line: int) -> dict[str, str]:
         """The enclosing def's param name -> annotation map, for the member
         annotation inference."""
-        module = cst.parse_module(self.request.source or "")
+        module = cst.parse_module(self.request.loaded_source())
         wrapper = cst.MetadataWrapper(module)
         fn = ModuleOutline(wrapper).enclosing_function(line)
         if fn is None:
@@ -240,30 +240,35 @@ class MechanicalFixes:
         return None
 
     def _callee_params_for_call(self) -> list[str] | None:
-        source, line = self.request._loaded_source(), self.request.line
         """The callee's param names for the call on `line`, resolved repo-wide.
         Mirrors the scanner's Name-callee rule: a method/builtin callee is not
         auto-fixable."""
+        source, line = self.request.loaded_source(), self.request.line
         module = cst.parse_module(source)
         wrapper = cst.MetadataWrapper(module)
-        callee = None
-
-        class _FindCall(cst.CSTVisitor):
-            METADATA_DEPENDENCIES = (PositionProvider,)
-
-            @override
-            def visit_Call(self, node) -> None:
-                nonlocal callee
-                if callee is not None:
-                    return
-                pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
-                if pos.start.line <= line <= pos.end.line and isinstance(node.func, cst.Name):
-                    callee = node.func.value
-
-        wrapper.visit(_FindCall())
-        if callee is None:
+        finder = MechanicalFixes._FindCall(line)
+        wrapper.visit(finder)
+        if finder.callee is None:
             return None
-        return self._repo_params(callee)
+        return self._repo_params(finder.callee)
+
+    class _FindCall(cst.CSTVisitor):
+        """The first Name-callee call on one source line — the call the
+        keywording fix can resolve to a same-file callee."""
+
+        METADATA_DEPENDENCIES = (PositionProvider,)
+
+        def __init__(self, line: int) -> None:
+            self.line: int = line
+            self.callee: str | None = None
+
+        @override
+        def visit_Call(self, node) -> None:
+            if self.callee is not None:
+                return
+            pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
+            if pos.start.line <= self.line <= pos.end.line and isinstance(node.func, cst.Name):
+                self.callee = node.func.value
 
     class _DeclareMember(cst.CSTTransformer):
         """Annotate the undeclared `self.x = v` member: `self.x: T = v` with T
@@ -533,7 +538,7 @@ class MechanicalFixes:
                 )
                 return None
             init = stmts[init_idx]
-            init_small = MechanicalFixes._LoopsIntoComprehensions._small_stmt(init)
+            init_small = MechanicalFixes._small_stmt(init)
             plan = self._hoist_plan(list(loop.body.body), loop.target.value)
             if plan is None:
                 return None
@@ -541,7 +546,7 @@ class MechanicalFixes:
             if acc is None or collection is None:
                 return None  # unreachable (the plan declines, never returns Nones) — the checker needs the guard
             init_value = init_small.value if isinstance(init_small, (cst.Assign, cst.AnnAssign)) else None
-            if not MechanicalFixes._LoopsIntoComprehensions._empty_init(init_value, collection):
+            if not MechanicalFixes._empty_init(init_value, collection):
                 self.decline = (
                     f"the accumulator `{acc}` must be initialized to an empty "
                     f"{'[]' if collection == 'list' else 'set()'}"
@@ -689,7 +694,7 @@ class MechanicalFixes:
                 if def_line != self.line:
                     return None
                 first = next((i for i, s in enumerate(stmts) if not isinstance(s, cst.EmptyLine)), None)
-                if first is None or not isinstance(self._small_stmt(stmts[first]), (cst.Assign, cst.AnnAssign)):
+                if first is None or not isinstance(MechanicalFixes._small_stmt(stmts[first]), (cst.Assign, cst.AnnAssign)):
                     return None
                 first_loop = next(
                     (i for i in range(first + 1, len(stmts)) if not isinstance(stmts[i], cst.EmptyLine)),
@@ -744,7 +749,7 @@ class MechanicalFixes:
                 )
                 return None
             init = stmts[init_idx]
-            init_small = self._small_stmt(init)
+            init_small = MechanicalFixes._small_stmt(init)
             init_value = init_small.value if isinstance(init_small, (cst.Assign, cst.AnnAssign)) else None
             if isinstance(loops[0].asynchronous, cst.Asynchronous):
                 self.decline = "an async for-loop cannot become a comprehension (comprehensions are synchronous)"
@@ -768,7 +773,7 @@ class MechanicalFixes:
                     f"loop to build the SAME empty-initialized collection ({acc})"
                 )
                 return None
-            if not self._empty_init(init_value, collection):
+            if not MechanicalFixes._empty_init(init_value, collection):
                 self.decline = (
                     f"the accumulator `{acc}` must be initialized to an empty "
                     f"{'[]' if collection == 'list' else '{}' if collection == 'dict' else 'set()'}"
@@ -783,15 +788,6 @@ class MechanicalFixes:
             new_small = init_small.with_changes(value=value)
             new_stmt = init.with_changes(body=[new_small])
             return stmts, init_idx, (first_idx + loop_count) - init_idx, new_stmt
-
-        @staticmethod
-        def _small_stmt(stmt):
-            """The small statement inside a statement line (blocks hold
-            SimpleStatementLine wrappers) — or the statement itself when it is
-            already compound/small."""
-            if isinstance(stmt, cst.SimpleStatementLine) and len(stmt.body) == 1:
-                return stmt.body[0]
-            return stmt
 
         def _loop_plan(self, for_node: cst.For) -> MechanicalFixes._LoopPipelinePlan | None:
             if for_node.orelse:
@@ -833,14 +829,6 @@ class MechanicalFixes:
             if plan.element is None:
                 return None
             return cst.ListComp(elt=plan.element, for_in=comp_for)
-
-        @staticmethod
-        def _empty_init(value, collection: str) -> bool:
-            if collection == "list":
-                return isinstance(value, cst.List) and not value.elements
-            if collection == "dict":
-                return isinstance(value, cst.Dict) and not value.elements
-            return MechanicalFixes._is_empty_set_call(value)
 
     class _NameCount(cst.CSTVisitor):
         def __init__(self, name: str) -> None:
@@ -1025,6 +1013,24 @@ class MechanicalFixes:
             elif isinstance(s, cst.Match):
                 for case in s.cases:
                     MechanicalFixes._flatten_stmts(list(case.body.body), out)
+
+    @staticmethod
+    def _small_stmt(stmt):
+        """The small statement inside a statement line (blocks hold
+        SimpleStatementLine wrappers) — or the statement itself when it is
+        already compound/small."""
+        if isinstance(stmt, cst.SimpleStatementLine) and len(stmt.body) == 1:
+            return stmt.body[0]
+        return stmt
+
+    @staticmethod
+    def _empty_init(value, collection: str) -> bool:
+        """Is this accumulator initializer the empty collection the loop fills?"""
+        if collection == "list":
+            return isinstance(value, cst.List) and not value.elements
+        if collection == "dict":
+            return isinstance(value, cst.Dict) and not value.elements
+        return MechanicalFixes._is_empty_set_call(value)
 
     @staticmethod
     def _for_index_at_line(metadata: cst.CSTTransformer, stmts: list[cst.BaseStatement], line: int) -> int | None:

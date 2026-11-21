@@ -41,7 +41,7 @@ class FeatureEnvy:
         is the local aliased from self.<attr> with the most field reads; the
         envied class comes from the owner's annotated `self.<attr>: <Class>` —
         the fix refuses when the class cannot be named (no annotation)."""
-        source = self.request.source or ""
+        source = self.request.loaded_source()
         method_name = self.request.opts.name
         if not method_name:
             return None

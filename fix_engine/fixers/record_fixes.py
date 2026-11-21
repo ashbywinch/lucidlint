@@ -45,7 +45,7 @@ class RecordFixes:
         construct it, the constant-index reads and destructures become
         attribute reads, and the class definition is prepended to the
         module."""
-        source = self.request._loaded_source()
+        source = self.request.loaded_source()
         class_name = self.request.opts.name
         if not class_name:
             return None
@@ -79,7 +79,7 @@ class RecordFixes:
         attribute reads, and the class definition is prepended to the module.
         The anchor (line, col) selects WHICH literal when several share a
         line; without col, the line must carry exactly one candidate."""
-        source = self.request._loaded_source()
+        source = self.request.loaded_source()
         raw_name = self.request.opts.name
         # a placeholder or non-identifier would generate `class _<Record>:`
         # — invalid Python; refuse before generating (review bot)

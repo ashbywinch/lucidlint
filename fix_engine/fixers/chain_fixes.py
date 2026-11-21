@@ -93,7 +93,7 @@ class ChainFixes:
         has other callers, on *args/**kwargs passthrough, on a
         `from mod import F` re-export, or when N has other callers — never
         blind inlining."""
-        module, wrapper = ModuleSource.parse(self.request._loaded_source())
+        module, wrapper = ModuleSource.parse(self.request.loaded_source())
         head = ChainFixes._chain_head(wrapper, self.request.line)
         if head is None:
             return None  # stale, or the method is not a pure forwarder (R28)

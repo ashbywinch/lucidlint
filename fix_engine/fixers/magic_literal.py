@@ -21,7 +21,7 @@ class MagicLiteral:
         self.request = request
 
     def run(self) -> str | None:
-        source, line = self.request._loaded_source(), self.request.line
+        source, line = self.request.loaded_source(), self.request.line
         name = self.request.opts.name
         # the dispatch gate (_fix_structural) refuses name-required kinds without one
         assert isinstance(name, str)

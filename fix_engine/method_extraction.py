@@ -26,9 +26,9 @@ class MethodExtraction:
         self.request = request
 
     def _fn_seam_analysis(self):
-        source, line = self.request._loaded_source(), self.request.line
         """Analyze the function at `line`: its body statements with per-statement
         spans, first-use contexts, writes, and control-flow flags."""
+        source, line = self.request.loaded_source(), self.request.line
         module = cst.parse_module(source)
         wrapper = cst.MetadataWrapper(module)
         state = MethodExtraction._FnBodyState(line)
@@ -38,18 +38,18 @@ class MethodExtraction:
         return module, wrapper, state
 
     def extract_method_proposal(self):
-        source, line = self.request._loaded_source(), self.request.line
-        name = self.request.opts.name
-        # the _FixRequest refactor dropped the caller-supplied 13 — the
-        # bound is the contract (an extracted helper must not still be
-        # complex); restore it as the default (review bot)
-        max_decisions = self.request.max_decisions if self.request.max_decisions is not None else 13
         """Compute the best extraction seam and the resulting source, WITHOUT
         writing. Returns (new_source, seam_text) or (None, None) when no safe
         seam exists. `name` may be None — the preview then shows a placeholder
         (`_extracted`) the agent replaces after reviewing the seam; a supplied
         name is normalized to the private convention (the extracted function
         cannot have external callers, so it takes the underscore)."""
+        source, line = self.request.loaded_source(), self.request.line
+        name = self.request.opts.name
+        # the _FixRequest refactor dropped the caller-supplied 13 — the
+        # bound is the contract (an extracted helper must not still be
+        # complex); restore it as the default (review bot)
+        max_decisions = self.request.max_decisions if self.request.max_decisions is not None else 13
         if name is None:
             name = "_extracted"
         elif Rewrite.extraction_is_private() and not name.startswith("_"):

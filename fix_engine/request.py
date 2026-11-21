@@ -177,7 +177,7 @@ class _FixRequest:
     extra_writes: list[tuple[str, str]] = field(default_factory=list)
     deletes: list[str] = field(default_factory=list)
 
-    def _loaded_source(self) -> str:
+    def loaded_source(self) -> str:
         """The file's text. propose_finding/fix_finding fill `source` from the
         file before any fix_* runs; a None here means dispatch was bypassed,
         and there is nothing to transform."""

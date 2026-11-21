@@ -31,7 +31,7 @@ class HuskFixes:
         `h.m(x)` -> `m(x)`), deletes the husk, and refuses when any reference
         or constructed instance escapes (imports, isinstance, annotations,
         subclassing, stored/passed instances) — never inlines."""
-        source, line = self.request._loaded_source(), self.request.line
+        source, line = self.request.loaded_source(), self.request.line
         module = cst.parse_module(source)
         wrapper = cst.MetadataWrapper(module)
 

@@ -27,7 +27,7 @@ class ClassExtraction:
         """Move the strewing group into a class named `name` (default: the shared
         leading type). Returns the new source, or None when the finding is stale
         or the group is not auto-fixable."""
-        source, line = self.request._loaded_source(), self.request.line
+        source, line = self.request.loaded_source(), self.request.line
         name = self.request.opts.name
         module = cst.parse_module(source)
         wrapper = cst.MetadataWrapper(module)

@@ -136,7 +136,7 @@ class DispatchRegistry:
         self.request = request
 
     def fix_dispatch_registry(self) -> str | None:
-        source, line = self.request._loaded_source(), self.request.line
+        source, line = self.request.loaded_source(), self.request.line
         """A dispatch chain (`if sel == "a": return f()  if sel == "b": ...`)
         is a handler REGISTRY in disguise — each arm is already a named handler.
         Rewrite it to a dict of selector -> handler functions and a one-line

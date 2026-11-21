@@ -53,21 +53,9 @@ FIXABLE_KINDS = set(MECHANICAL_KINDS) | set(_STRUCTURAL_FIXERS) | {"extract-modu
 _as_range = ModuleOutline.span
 _name_ref_kind = ModuleSplitting._name_ref_kind
 _exec_time_names = ModuleSplitting._exec_time_names
-_as_node = ModuleOutline.resolve_node
 _iter_nodes = ModuleOutline.iter_nodes
-_iter_nodes_pruned = ModuleOutline.iter_nodes_pruned
 _class_body_binds = Bindings.class_body_binds
-_expr_names = Bindings.expr_names
-_collect_alias_names = Bindings.collect_alias_names
-_is_keyword_name = ModuleOutline.is_keyword_name
-_is_self_attribute = ModuleOutline.is_self_attribute
-_import_base_name = Bindings.import_base_name
-_is_docstring_stmt = ModuleOutline.is_docstring_stmt
 
-_py_files = SourceFiles.py_files
-_record_class_def = Rewrite.record_class_def
-_self_attr_target = Rewrite.self_attr_target
-_hoist_target_names = Bindings.hoist_target_names
 _extraction_is_private = Rewrite.extraction_is_private
 _RemoveNodes = Rewrite._RemoveNodes
 

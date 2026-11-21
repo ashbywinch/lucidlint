@@ -52,7 +52,7 @@ class RuleTable:
         self.request = request
 
     def fix_rule_table(self) -> str | None:
-        source, line = self.request._loaded_source(), self.request.line
+        source, line = self.request.loaded_source(), self.request.line
         """A rule battery (`if cond: violations.append(...)` repeated) is a
         LATENT DATA STRUCTURE — a table of (condition, violation) pairs. Hoist
         it: each check becomes a tuple `(lambda: <cond>, <violation>)`, the

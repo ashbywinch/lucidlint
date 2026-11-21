@@ -29,7 +29,7 @@ class ModuleExtraction:
         self.request = request
 
     def proposal(self) -> ModuleExtraction._ModuleProposal | None:
-        source = self.request._loaded_source()
+        source = self.request.loaded_source()
         opts = self.request.opts
         """(new origin source, new module source) for the extract-module split, or
         None when the split is not safe. Pure — no writes; the apply path writes
