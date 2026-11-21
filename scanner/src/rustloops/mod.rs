@@ -1,6 +1,8 @@
 //! The loop family for Rust — the syn port of the Python Replace Loop with
 //! Pipeline family. `RustLoops` owns the shape predicates and the fn-scope
-//! binding facts; `LoopWalk` owns the per-function walk.
+//! binding facts; `LoopWalk` owns the per-function walk, the shape it derives
+//! from those facts (`LoopShape`, `PipelineBuild`), and the worklist-drain
+//! detection.
 //!
 //! Shapes, in syn terms:
 //!
@@ -33,82 +35,11 @@ use crate::rustscan;
 
 mod walk;
 
-use walk::LoopWalk;
+use walk::{LoopWalk, PipelineBuild};
 
 /// The minimum flattened body statement count for a single-mutation loop to
 /// carry the hoist advice — the body clearly computes more than it adds.
 const HOIST_MIN_STMTS: usize = 4;
-
-/// Removing methods — their receiver LOSES an element. A loop condition that
-/// calls one on a name the body writes is draining its own worklist.
-const DRAINING_METHODS: &[&str] = &["pop", "pop_front", "pop_back", "remove", "swap_remove", "drain"];
-
-/// The surviving names a loop condition REMOVES from — the worklist a
-/// `while let Some(x) = work.pop()` walk consumes.
-fn condition_drains(cond: &syn::Expr, survivors: &std::collections::HashSet<String>) -> Vec<String> {
-    use syn::visit::Visit;
-
-    struct Drains<'s> {
-        survivors: &'s std::collections::HashSet<String>,
-        names: Vec<String>,
-    }
-    impl Visit<'_> for Drains<'_> {
-        fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
-            if DRAINING_METHODS.contains(&node.method.to_string().as_str()) {
-                if let syn::Expr::Path(p) = node.receiver.as_ref() {
-                    if p.path.segments.len() == 1 {
-                        self.record(&p.path.segments[0].ident.to_string());
-                    }
-                }
-            }
-            syn::visit::visit_expr_method_call(self, node);
-        }
-
-        fn visit_expr_call(&mut self, node: &syn::ExprCall) {
-            // the UFCS spelling of the same drain — `Vec::pop(&mut stack)`:
-            // the removed-from name is the first argument, not a receiver
-            if let syn::Expr::Path(p) = node.func.as_ref() {
-                if let Some(last) = p.path.segments.last() {
-                    if DRAINING_METHODS.contains(&last.ident.to_string().as_str()) {
-                        if let Some(syn::Expr::Reference(r)) = node.args.first() {
-                            // a drain needs `&mut`: `Vec::pop(&stack)` removes
-                            // nothing, so a shared borrow is not a drain
-                            if r.mutability.is_some() {
-                                if let syn::Expr::Path(rp) = r.expr.as_ref() {
-                                    if rp.path.segments.len() == 1 {
-                                        self.record(&rp.path.segments[0].ident.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            syn::visit::visit_expr_call(self, node);
-        }
-    }
-    impl Drains<'_> {
-        fn record(&mut self, name: &str) {
-            if self.survivors.contains(name) && !self.names.iter().any(|n| n == name) {
-                self.names.push(name.to_string());
-            }
-        }
-    }
-    let mut drains = Drains {
-        survivors,
-        names: Vec::new(),
-    };
-    drains.visit_expr(cond);
-    drains.names
-}
-
-/// How a pipeline-shaped body collects its value.
-pub(crate) enum PipelineBuild {
-    /// `acc.push(item)` — one item joined per pass.
-    Push(String),
-    /// `acc[i] = v` — the position is the data.
-    Indexed(String),
-}
 
 /// Mutating receiver calls — `acc.<method>(..)` WRITES `acc`. Reads (`len`,
 /// `get`, `iter`, `is_empty`, ...) never count: a body that only inspects
