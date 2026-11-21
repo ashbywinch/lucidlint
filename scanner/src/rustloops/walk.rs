@@ -3,7 +3,7 @@
 use crate::rustscan;
 use syn::spanned::Spanned;
 
-use super::{RustLoops, HOIST_MIN_STMTS};
+use super::{condition_drains, PipelineBuild, RustLoops, HOIST_MIN_STMTS};
 
 /// One outermost loop's shape, for the sequence judgement.
 struct SeqLoop {
@@ -23,19 +23,30 @@ pub(super) struct LoopWalk<'a, 'b> {
 }
 
 impl<'a, 'b> LoopWalk<'a, 'b> {
-    fn judge(&mut self, line: usize, body: &[syn::Stmt], is_for: bool, mutated: Vec<String>) {
-        if is_for && RustLoops::body_is_pipeline(body) {
+    fn judge(&mut self, line: usize, body: &[syn::Stmt], is_for: bool, mutated: Vec<String>, drains: &[String]) {
+        if drains.iter().any(|d| mutated.contains(d)) {
+            // the loop consumes the worklist its body feeds — the writes are
+            // the walk's own state, so no output can be computed from the
+            // input and no per-item step exists to hoist; silence is the signal
+            return;
+        }
+        let build = if is_for { RustLoops::pipeline_build(body) } else { None };
+        if let Some(build) = build {
             // tier 1 (coding-standards.md: never offer a fix that cannot
             // apply): the directive appears ONLY when the fixer would
             // apply at this line — same contract, same refusal reasons.
             let fixable = crate::fix::LoopPipeline::fixable(self.state.source, self.state.file, line);
-            let message = if fixable {
-                "loop builds a collection — Replace Loop with Pipeline: use a combinator (.map()/.filter() to build the value, .for_each() where pushing is the whole body) — fix: loop-pipeline"
-            } else {
-                "loop builds a collection — Replace Loop with Pipeline: use a combinator (.map()/.filter() to build the value, .for_each() where pushing is the whole body)"
+            let directive = if fixable { " — fix: loop-pipeline" } else { "" };
+            let message = match build {
+                PipelineBuild::Push(acc) => format!(
+                    "the loop's body only pushes to `{acc}` — Replace Loop with Pipeline: `.map(..).collect()` (`.filter(..)` for the guarded push) when the loop creates `{acc}`; `.extend(..)` when `{acc}` already held items{directive}"
+                ),
+                PipelineBuild::Indexed(acc) => format!(
+                    "the loop's body only writes one position of `{acc}` per pass — Replace Loop with Pipeline: `.map(..).collect()` over the indices (`.filter(..)` for the guarded store) builds the value{directive}"
+                ),
             };
             self.state
-                .finding("loop-pipeline", "warn", line, &self.fn_name, message.into());
+                .finding("loop-pipeline", "warn", line, &self.fn_name, message);
         } else if mutated.len() >= 2 {
             self.state.finding(
                 "mutating-loop",
@@ -102,7 +113,7 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
                         .into_iter()
                         .filter(|r| self.survivors.contains(r) && !own.contains(r))
                         .collect();
-                    self.judge(line, &f.body.stmts, true, mutated.clone());
+                    self.judge(line, &f.body.stmts, true, mutated.clone(), &[]);
                     if !in_loop {
                         self.seq.push(SeqLoop { line, reads, mutated });
                     }
@@ -114,7 +125,8 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
                         .into_iter()
                         .filter(|r| self.survivors.contains(r))
                         .collect();
-                    self.judge(line, &w.body.stmts, false, mutated.clone());
+                    let drains = condition_drains(&w.cond, self.survivors);
+                    self.judge(line, &w.body.stmts, false, mutated.clone(), &drains);
                     if !in_loop {
                         self.seq.push(SeqLoop { line, reads, mutated });
                     }
@@ -122,7 +134,7 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
                 }
                 syn::Expr::Loop(l) => {
                     let mutated = self.surviving_mutations(&l.body.stmts, &[]);
-                    self.judge(line, &l.body.stmts, false, mutated.clone());
+                    self.judge(line, &l.body.stmts, false, mutated.clone(), &[]);
                     if !in_loop {
                         self.seq.push(SeqLoop {
                             line,
@@ -178,19 +190,20 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
                 let mut own = Vec::new();
                 RustLoops::pat_idents(&f.pat, &mut own);
                 let mutated = self.surviving_mutations(&f.body.stmts, &own);
-                self.judge(line, &f.body.stmts, true, mutated);
+                self.judge(line, &f.body.stmts, true, mutated, &[]);
                 self.walk_stmts(&f.body.stmts, true);
             }
             syn::Expr::While(w) => {
                 let line = e.span().start().line;
                 let mutated = self.surviving_mutations(&w.body.stmts, &[]);
-                self.judge(line, &w.body.stmts, false, mutated);
+                let drains = condition_drains(&w.cond, self.survivors);
+                self.judge(line, &w.body.stmts, false, mutated, &drains);
                 self.walk_stmts(&w.body.stmts, true);
             }
             syn::Expr::Loop(l) => {
                 let line = e.span().start().line;
                 let mutated = self.surviving_mutations(&l.body.stmts, &[]);
-                self.judge(line, &l.body.stmts, false, mutated);
+                self.judge(line, &l.body.stmts, false, mutated, &[]);
                 self.walk_stmts(&l.body.stmts, true);
             }
             _ => {}

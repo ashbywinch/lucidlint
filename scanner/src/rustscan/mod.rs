@@ -893,9 +893,60 @@ mod tests {
         let fs = scan(&fixture("loop_pipeline_rs.rs"));
         assert!(has_kind(&fs, "loop-pipeline"), "{fs:?}");
         let f = fs.iter().find(|x| x.kind == "loop-pipeline").unwrap();
-        assert!(f.message.contains(".map()"), "{}", f.message);
+        assert!(f.message.contains(".map("), "{}", f.message);
+        assert!(f.message.contains(".extend("), "{}", f.message);
         // the fixture IS the fixer contract — the directive must be present
         assert!(f.message.contains("fix: loop-pipeline"), "{}", f.message);
+    }
+
+    #[test]
+    fn loop_pipeline_message_names_the_extend_case() {
+        // issue #109: a push onto a collection that already existed is not a
+        // `.map().collect()` build, and `.for_each()` is never the better
+        // shape — the message must name `.extend()` for that case
+        let src = "fn add_children(edges: &[Vec<usize>], stack: &mut Vec<usize>) {\n    for next in &edges[0] {\n        stack.push(*next);\n    }\n}\n";
+        let fs = scan(src);
+        let f = fs.iter().find(|x| x.kind == "loop-pipeline").expect("pipeline fires");
+        assert!(f.message.contains(".extend("), "{}", f.message);
+        assert!(!f.message.contains("for_each"), "{}", f.message);
+    }
+
+    #[test]
+    fn loop_pipeline_indexed_store_gets_its_own_action() {
+        // an `acc[i] = v` store is a map over the indices — `.extend()` joins
+        // items and does not describe it
+        let src = "fn scaled(xs: &[u32]) -> Vec<u32> {\n    let mut out: Vec<u32> = vec![0; xs.len()];\n    for (i, x) in xs.iter().enumerate() {\n        out[i] = *x * 2;\n    }\n    out\n}\n";
+        let fs = scan(src);
+        let f = fs.iter().find(|x| x.kind == "loop-pipeline").expect("pipeline fires");
+        assert!(f.message.contains("over the indices"), "{}", f.message);
+        assert!(!f.message.contains(".extend("), "{}", f.message);
+    }
+
+    #[test]
+    fn loop_worklist_drain_is_not_a_shape_verdict() {
+        // issue #109: `while let Some(x) = work.pop()` consumes the loop's own
+        // worklist — the body's writes are traversal state, not outputs, so
+        // the multi-output and per-item recipes do not describe the loop. The
+        // push loop inside it is still a plain collection build.
+        let fs = scan(&fixture("worklist_walk_rs.rs"));
+        assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
+        assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
+        let pipes: Vec<&Finding> = fs.iter().filter(|f| f.kind == "loop-pipeline").collect();
+        assert_eq!(pipes.len(), 1, "only the inner push loop is a build: {fs:?}");
+        assert_eq!(pipes[0].line, 9, "{fs:?}");
+    }
+
+    #[test]
+    fn loop_worklist_drain_reads_the_ufcs_spelling_too() {
+        // `Vec::pop(&mut stack)` is the same drain written as a free call —
+        // the removed-from name is the first argument
+        let src = "fn drain(seeds: &[usize]) -> Vec<usize> {\n    let mut stack: Vec<usize> = seeds.to_vec();\n    let mut seen = Vec::new();\n    while let Some(node) = Vec::pop(&mut stack) {\n        seen.push(node);\n    }\n    seen\n}\n";
+        let fs = scan(src);
+        assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
+        assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
+        // a shared borrow removes nothing — the two outputs still count
+        let shared = "fn total(stack: &Vec<u32>) -> u32 {\n    let mut sum = 0;\n    let mut seen = 0;\n    while Vec::pop(&stack).is_some() {\n        sum += 1;\n        seen += 2;\n    }\n    sum + seen\n}\n";
+        assert!(has_kind(&scan(shared), "mutating-loop"), "{shared}");
     }
 
     #[test]

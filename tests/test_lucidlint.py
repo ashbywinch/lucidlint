@@ -1960,6 +1960,47 @@ def test_fix_rust_loop_hoist_needs_a_name(tmp_path, capsys):
     assert "filter_map" in lib.read_text(), out2 + lib.read_text()
 
 
+def test_loop_pipeline_directive_only_when_the_fixer_applies(tmp_path, capsys):
+    """Issue #109: the directive is a promise. A chained receiver
+    (`groups.setdefault(k, set()).add(v)`) and an accumulator initialized
+    apart from the loop are both shapes the comprehension rewrite refuses, so
+    neither may carry `fix:` — the plain shape must still carry it and apply."""
+    src = (
+        "def chained(rules):\n"
+        "    groups = {}\n"
+        "    for r in rules:\n"
+        "        groups.setdefault(r.kind, set()).add(r.severity)\n"
+        "    return groups\n"
+        "\n"
+        "\n"
+        "def moved(rules):\n"
+        "    out = []\n"
+        "    seed(out)\n"
+        "    for r in rules:\n"
+        "        out.append(r)\n"
+        "    return out\n"
+        "\n"
+        "\n"
+        "def built(rules):\n"
+        "    out = []\n"
+        "    for r in rules:\n"
+        "        out.append(r)\n"
+        "    return out\n"
+    )
+    repo = make_repo(tmp_path, app_src=src)
+    run_main(repo, "--warn", "--json")
+    actions = json.loads(capsys.readouterr().out)["actions"]
+    offered = {
+        a["function"]: "fix: lucidlint fix" in a["message"]
+        for a in actions
+        if a["signal"] == "loop-pipeline"
+    }
+    assert offered == {"chained": False, "moved": False, "built": True}, offered
+    # the advertised shape is the one the fixer rewrites
+    run_main(repo, "fix", "--kind", "loop-pipeline", "--file", "houses/app.py", "--line", "18")
+    assert "out = [r for r in rules]" in (repo / "houses" / "app.py").read_text()
+
+
 def test_fix_rust_line_less_resolves_unique_finding(tmp_path, capsys):
     """R27 on the .rs surface: `lucidlint fix --kind X --file F` with no
     --line applies when the file has exactly one finding of the kind — the

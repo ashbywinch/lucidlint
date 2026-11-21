@@ -737,15 +737,20 @@ CATALOG = RuleCatalog([
          "`name += [..]`, or a subscript store; Rust: `acc.push(item)` or "
          "`acc[i] = v`, plain or behind one if-filter) — Replace Loop with "
          "Pipeline: a comprehension (Python) or a combinator (Rust: "
-         ".map()/.filter() to build the value, .for_each() where pushing "
-         "is the whole body).",
+         "`.map(..).collect()` when the loop creates the collection (over the "
+         "indices for an `acc[i] = v` store), `.filter(..)` for the guarded write, "
+         "`.extend(..)` when the loop only pushes onto a collection that already "
+         "held items).",
          display_group="loop-pipeline", fix="loop-pipeline"),
     Rule("mutating-loop", "warn", "advice", "Both",
          "A loop that mutates >=2 pieces of state that survive it (Python: "
          "accumulated collections, rebound names, object writes; Rust: "
          "rebinds/compound-assigns of fn-scope locals, mutating receiver "
          "calls) — the changes are invisible at the call site; Replace "
-         "Loop with Pipeline: compute each output from the input instead.",
+         "Loop with Pipeline: compute each output from the input instead. "
+         "Exempt: a loop whose condition removes from a name its body writes "
+         "(`while let Some(x) = work.pop()`) — that loop drains its own "
+         "worklist and its writes are the walk's state, not outputs.",
          display_name="mutating-loop → loop-pipeline", display_group="loop-pipeline"),
     Rule("loop-sequence", "warn", "advice", "Both",
          "A function with >=2 sequential (non-nested) loops — each is a pass "

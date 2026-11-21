@@ -104,7 +104,7 @@ impl<'a, 'b> FunctionWalk<'a, 'b> {
     }
 
     fn walk_loops_from(&mut self, stmts: &[Stmt], bindings: &mut std::collections::HashMap<String, bool>) {
-        for s in stmts {
+        for (i, s) in stmts.iter().enumerate() {
             match s {
                 Stmt::For(f) => {
                     let line = Source::line_of(self.state.source, f.range().start());
@@ -114,10 +114,21 @@ impl<'a, 'b> FunctionWalk<'a, 'b> {
                     // and emits nothing. Only a fresh target or one whose
                     // every prior binding is an empty `= {}` / `= []`
                     // creation is this loop's own build.
-                    let fresh = LoopFamily::pipeline_target(&f.body)
-                        .is_none_or(|t| !bindings.get(&t).copied().unwrap_or(false));
+                    let target = LoopFamily::pipeline_target(&f.body);
+                    let fresh = target
+                        .as_ref()
+                        .is_none_or(|t| !bindings.get(t).copied().unwrap_or(false));
                     if fresh && LoopFamily::body_is_pipeline(&f.body) {
-                        let message = if LoopFamily::auto_fixable(&f.body) {
+                        // the directive is a promise about the fix engine:
+                        // the same shape and the same adjacent empty init
+                        // `_LoopsIntoComprehensions` requires, or no command
+                        let fixable = target.as_deref().is_some_and(|acc| {
+                            LoopFamily::collection_kind(&f.body).is_some_and(|kind| {
+                                LoopFamily::auto_fixable(&f.body)
+                                    && LoopFamily::init_is_empty(i.checked_sub(1).and_then(|p| stmts.get(p)), acc, kind)
+                            })
+                        });
+                        let message = if fixable {
                             "loop builds a collection — Replace Loop with Pipeline: use a comprehension — fix: loop-pipeline"
                         } else {
                             "loop builds a collection — Replace Loop with Pipeline: use a comprehension"
@@ -141,8 +152,8 @@ impl<'a, 'b> FunctionWalk<'a, 'b> {
                 }
                 _ => {
                     LoopFamily::collect_bindings(s, bindings);
-                    for child in LoopFamily::stmt_children(s) {
-                        self.walk_loops_from(std::slice::from_ref(child), bindings);
+                    for body in LoopFamily::stmt_bodies(s) {
+                        self.walk_loops_from(body, bindings);
                     }
                 }
             }
