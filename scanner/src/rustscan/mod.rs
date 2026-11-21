@@ -1066,6 +1066,44 @@ mod tests {
     }
 
     #[test]
+    fn every_advertised_loop_fix_applies() {
+        // issue #117: a finding that names `— fix: <kind>` is a promise; the
+        // fixer must accept the same site (offer equals fix).
+        let pipeline = "fn collect(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
+        let cases = [
+            (pipeline, "loop-pipeline"),
+            (
+                include_str!("../../../tests/fixtures/loop_hoist_rs_fix.rs"),
+                "loop-hoist",
+            ),
+            (
+                include_str!("../../../tests/fixtures/loop_sequence_rs_fix.rs"),
+                "loop-sequence",
+            ),
+        ];
+        for (src, kind) in cases {
+            let findings = scan(src);
+            let advertised: Vec<&Finding> = findings
+                .iter()
+                .filter(|f| f.kind == kind && f.message.contains(" — fix: "))
+                .collect();
+            assert!(
+                !advertised.is_empty(),
+                "the fixture must advertise {kind}: {findings:?}"
+            );
+            for f in advertised {
+                let applies = match kind {
+                    "loop-pipeline" => crate::fix::LoopPipeline::fixable(src, "x.rs", f.line),
+                    "loop-hoist" => crate::fix::LoopHoist::fixable_at(src, "x.rs", f.line),
+                    "loop-sequence" => crate::fix::loop_sequence_fixable(src, "x.rs", f.line),
+                    _ => unreachable!(),
+                };
+                assert!(applies, "{} at line {} advertises a fix it refuses", kind, f.line);
+            }
+        }
+    }
+
+    #[test]
     fn loop_while_never_pipeline_but_mutation_counts() {
         // a while condition is not an iterator — no combinator replaces it —
         // but its state writes still count for the stateful verdicts

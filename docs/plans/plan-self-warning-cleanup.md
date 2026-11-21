@@ -127,6 +127,9 @@ is what showed the fixes' shape:
   lives where its verdicts are.
 - The three premises and their fixtures: chained-receiver writes,
   branch-disjoint sequences, growing-cursor traversals.
+- **The directive is pinned.** Every finding that names `— fix: <kind>` is
+  exercised against the fixer's own predicate in the same test, so the
+  "offer equals fix" contract is checked, not just stated (#117).
 
 The count went 264 → **286**: the write model now counts chained receivers and
 `&mut` arguments, so loops that were misread as one output are truthfully
@@ -135,7 +138,7 @@ sequences (76 → 55). Houses and album are byte-identical on both comparison
 keys — they have no Rust loop-pipeline findings in the scanned set — so the
 corpus contract holds.
 
-Verification: `make check`, `make test` (529 scanner + 323 Python tests),
+Verification: `make check`, `make test` (530 scanner + 323 Python tests),
 `make self-check` (`GATE: PASS`, 286 warnings, 0 fails); houses 420 / album
 699 identical on both `(file, kind, line)` and `(file, kind, message)`.
 
