@@ -826,7 +826,7 @@ class MechanicalFixes:
             if plan is None:
                 return None
             # a loop that reads the collection it grows is a traversal, not a
-            # build — the comprehension would drop the appended values
+            # build — the comprehension would drop the body's appends
             reads_target = MechanicalFixes._NameCount(plan.acc)
             for_node.iter.visit(reads_target)
             if reads_target.n:
