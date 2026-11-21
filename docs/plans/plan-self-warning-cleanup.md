@@ -1,12 +1,16 @@
-# Plan — the self-warning cleanup: 587 → 264, and what is left
+# Plan — the self-warning cleanup: 587 → 286, and what is left
 
 The tool's own gate passes (`GATE: PASS`, 0 fails) with warnings, because
 every rule that fires here is a judgement signal rather than a gate. The
 cleanup drove the count down where the fix was mechanical and left the rest
-as decisions. It is behaviour-preserving: no rule, threshold or message
-changed. The original round compared against houses 353 / album 431; after
-the agreed `undeclared-attribute` restore the current baselines are houses
-420 / album 699, and both are unchanged by these rounds.
+as decisions. The original round compared against houses 353 / album 431;
+after the agreed `undeclared-attribute` restore the current baselines are
+houses 420 / album 699, and both are unchanged by these rounds.
+
+The count rose from 264 to **286** in the precision round below because the
+loop family now sees writes it used to miss (chained receivers and `&mut`
+arguments). That is more truth, not more debt: the removed findings were
+false, and the added ones are loops the rule previously misread.
 
 ## Landed (branch `refactor/self-warnings`, stacked on the fix-engine split)
 
@@ -27,55 +31,65 @@ Verification: `make check`, 318 tests, `make self-check` (`GATE: PASS`),
 houses 353 / album 431 (the baselines at that time) identical after every
 commit.
 
-## The loop family after #110 and #111
+## The loop family — the facts are now the verdicts
 
-#110 settled the worklist/drain shapes: a loop whose condition removes from a
-name the body writes is a traversal, and gets no verdict (issue #109 closed).
-It also aligned the messages with the readable structures: one accumulator =
-`map`/`filter_map` + `collect` or `fold`; several outputs from one pass = a
-named accumulator struct + `fold`, or `itertools::multiunzip` /
-`partition_map`; disjoint passes over a slice = leave them separate;
-traversal = the worklist loop, named as the traversal. What remains is
-254 findings, each a design decision rather than a mechanic:
+#110 settled the pop-drain traversal. This round finished the job: the family
+now reads one fact model per loop (`rustloops/facts.rs`), one branch relation
+(`rustloops/branches.rs`), and one walk that only finds sites and emits
+(`rustloops/walk.rs`). Three false premises went with it:
+
+- **A chained receiver is a write.** `map.entry(k).or_default().push(v)` writes
+  `map`; a `&mut name` argument is a potential write too. The old detector saw
+  only bare-path receivers, so `suppressions/mod.rs:91` was reported as
+  "mutates only file_map" while it also wrote `line_map`.
+- **Sibling branches are not a sequence.** Loops in if/else/match arms never
+  run together; the sequence verdict is now per statement list (branch path).
+  `expr_walk.rs:65` reported 11 "sequential" loops from 11 exclusive match
+  arms; it now reports the 2 loops that really are in one arm.
+- **A growing cursor is a traversal.** `while i < work.len()` whose body grows
+  `work` is the same worklist as a pop-drain, not a one-output hoist. The BFS
+  in `record_shape.rs` and its literal descent now get no stateful verdict.
+
+What remains is 276 loop findings, each a design decision:
 
 | shape | count | what clearing it costs |
 |---|---:|---|
-| "mutates only out" (`loop-hoist`) | 110 | hoist the per-item step into a named helper (a domain noun per site), then combine or fold — 110 naming decisions |
-| "N sequential loops" (`loop-sequence`) | 76 | merge two passes into one (folding one into the other's body) — the behaviour risk sits here |
-| "mutates several accumulators" (`mutating-loop`) | 42 | one pass feeding several collections; the rule's advice is "make it a struct", i.e. a new type per site |
-| Rust collection builds | 5 | guarded/nested walks with `continue` guards |
+| "mutates only out" (`loop-hoist`) | 151 | hoist the per-item step into a named helper (a domain noun per site), then combine or fold — 151 naming decisions |
+| "N sequential loops" (`loop-sequence`) | 55 | merge two passes into one (folding one into the other's body) — the behaviour risk sits here |
+| "mutates several accumulators" (`mutating-loop`) | 45 | one pass feeding several collections; the rule's advice is "make a struct", i.e. a new type per site |
+| Rust collection builds | 4 | guarded/nested walks with `continue` guards |
 | Python collection builds | 21 | `setdefault(k, []).append(v)` group-bys and `|=` folds — no comprehension expresses them (the tool's own fixer declines) |
 
-The hoists spread across the rules (`suppressions/mod.rs` 8,
-`duplicate_module.rs` 5, `class_facts.rs` 5, `duplicate_def.rs` 5, …); the
-sequences concentrate in `expr_walk.rs` 4, `state.rs` 4, `record_shape.rs` 3,
-`rustscan/state.rs` 3, `sibling.rs` 3; the several-accumulator sites lead with
-`main.rs` 5.
+The hoists spread across the rules (`latent_state.rs` 15,
+`over_abstraction.rs` 8, `suppressions/mod.rs` 7, `duplicate_module.rs` 6, …);
+the sequences concentrate in `sibling.rs` 3, `state.rs` 3, `main.rs` 2,
+`latent_state.rs` 2, `record_shape.rs` 2; the several-accumulator sites lead
+with `main.rs` 6.
 
 ## The loop decision — for the owner
 
-The owner's bar is that a loop is rewritten only where the rule's advice
-holds: a pure per-item expression body. Worklist/drain shapes are settled by
-#110 and stay as they are. The 26 collection builds are the shapes a
-comprehension or chain does not express — only 2 of the 26 carry a `fix:`
-directive — so they are not part of this decision. That leaves the 228
-stateful/shape findings, with three options:
+The owner's bar is unchanged: a loop is rewritten only where the rule's
+advice holds. The difference is that the facts are now trustworthy — the
+three false premises above are fixed and pinned by tests — so this is the
+first count worth deciding on. The 25 collection builds are the shapes a
+comprehension or chain does not express (only 2 of the 25 carry a `fix:`
+directive), so they are out of scope. That leaves the 251 stateful/shape
+findings, with three options:
 
 - **(a) Accept.** The scanner is a hand-written AST visitor, not a report
   generator. Many sites are the one-pass-over-scans idiom where a struct or a
   helper only renames what the loop already says. Record the acceptance in
   this plan; no config change, and the findings remain a standing signal.
-- **(b) Do the 110 hoists.** One named helper per site is real naming work
-  (~2 sessions); the 76 sequence merges carry the behaviour risk; the 42
-  structs mostly rename a one-pass idiom. The worklist/drain shapes are out
-  of scope either way.
+- **(b) Do the work.** 151 hoists (one named helper per site, real naming
+  work), 55 sequence merges (the behaviour risk), 45 structs (mostly renaming
+  a one-pass idiom). The traversals are out of scope either way.
 - **(c) Scope the rule for `scanner/`** in a documented config with a why: a
   `.lucidlint.toml` `ignore` (or `[lucidlint.guidance]` text) for
   `loop-pipeline` under the scanner, so the rule stays armed everywhere else.
   The repo has no `.lucidlint.toml` today; this would be its first entry.
 
-The decision is the owner's, not the next session's: (a) is silence, (b) is a
-large grind, (c) is a policy change. Nothing else in this plan blocks on it.
+The decision is the owner's: (a) is silence, (b) is a large grind, (c) is a
+policy change. Nothing else in this plan blocks on it.
 
 ## The small non-loop families (10)
 
@@ -94,22 +108,36 @@ The three deferred message items in
 beside a runnable command, churn's unit, `stale-suppression`'s autofix) are
 independent of this round and still open; none blocks it.
 
-## This round — the last mechanical finding
+## The precision round — the code the findings pointed at
 
-`scanner/src/rustloops/mod.rs` fired `several-definitions` (3 top-level
-definitions: `RustLoops`, `PipelineBuild`, `condition_drains`) after the
-loop-shape refactor. `PipelineBuild`, `condition_drains` and
-`DRAINING_METHODS` are consumed only by the per-function walk, so they moved
-to `scanner/src/rustloops/walk.rs`: `condition_drains` is now a `LoopWalk`
-method (it reads the walk's survivor set), `DRAINING_METHODS` a private const
-beside it, and `PipelineBuild` the walk's own classification record. `mod.rs`
-keeps the rule object (`RustLoops`) and its constants. No threshold, message
-or behaviour changed: 265 → 264 warnings, the one removal this finding.
+The rule fixes came after making the code at the three sites exemplary, which
+is what showed the fixes' shape:
 
-Verification for this round: `make check`, `make test` (519 scanner + 323
-Python tests), `make self-check` (`GATE: PASS`, 264 warnings, 0 fails);
-houses 420 / album 699 identical on both `(file, kind, line)` and
-`(file, kind, message)`.
+- **`Suppressions::from_comments`** is now a fold over `Marker` records: the
+  grammar lives in `suppressions/parse.rs` with per-comment tests, and
+  `Suppressions::add` is the one place the two maps are written. The false
+  "mutates only `file_map`" hoist disappeared with the code.
+- **`RecordShape::findings`** reads as three named phases (signature walk,
+  literal collection, emit), and the rule object owns its module facts. The
+  signature parameters became a `Param` record; the file's own
+  `ignore-file large-function` marker went stale and was deleted.
+- **The loop family** became `branches` (one statement descent), `facts` (the
+  per-loop model and its pure `shape`), and `walk` (the site finder and
+  emitter). The previous round's `mod.rs` cleanup is history; the model now
+  lives where its verdicts are.
+- The three premises and their fixtures: chained-receiver writes,
+  branch-disjoint sequences, growing-cursor traversals.
+
+The count went 264 → **286**: the write model now counts chained receivers and
+`&mut` arguments, so loops that were misread as one output are truthfully
+multi-output (151 hoists, 45 stateful) and branch grouping removed the false
+sequences (76 → 55). Houses and album are byte-identical on both comparison
+keys — they have no Rust loop-pipeline findings in the scanned set — so the
+corpus contract holds.
+
+Verification: `make check`, `make test` (529 scanner + 323 Python tests),
+`make self-check` (`GATE: PASS`, 286 warnings, 0 fails); houses 420 / album
+699 identical on both `(file, kind, line)` and `(file, kind, message)`.
 
 ## The repo-wide merge, and the audit that closed it
 
@@ -178,7 +206,7 @@ verdict is cleared where the marker is consumed.
 | `complexity` | yes | no | per-file cc; the LSP emits its own complexity diagnostic. |
 
 Verification after every step: `make check`, the Python and Rust suites,
-`make self-check` (`GATE: PASS`, 265 warnings at the close of the audit, 0
-fails; 264 after this round's move), and a `(file, kind, line)` plus
+`make self-check` (`GATE: PASS`, 286 warnings after the precision round, 0
+fails), and a `(file, kind, line)` plus
 `(file, kind, message)` finding-set comparison against the snapshot taken
 before the change.

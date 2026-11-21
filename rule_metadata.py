@@ -750,24 +750,29 @@ CATALOG = RuleCatalog([
          "A loop that mutates >=2 pieces of state that survive it (Python: "
          "accumulated collections, rebound names, object writes; Rust: "
          "rebinds/compound-assigns of fn-scope locals, mutating receiver "
-         "calls) — the changes are invisible at the call site; Replace "
-         "Loop with Pipeline: compute each output from the input instead. "
-         "Exempt: a loop whose condition removes from a name its body writes "
-         "(`while let Some(x) = work.pop()`) — that loop drains its own "
-         "worklist and its writes are the walk's state, not outputs.",
+         "calls including a chained receiver, and a `&mut name` argument) — "
+         "the changes are invisible at the call site; Replace Loop with "
+         "Pipeline: compute each output from the input instead. "
+         "Exempt: a traversal — a condition that removes from a name its body "
+         "writes (`while let Some(x) = work.pop()`), or a cursor over a "
+         "collection the body grows (`while i < work.len()`) — its writes are "
+         "the walk's state, not outputs.",
          display_name="mutating-loop → loop-pipeline", display_group="loop-pipeline"),
     Rule("loop-sequence", "warn", "advice", "Both",
-         "A function with >=2 sequential (non-nested) loops — each is a pass "
-         "that changes the function's state; combine the passes or extract "
-         "each loop into a named step (a pipeline of comprehensions / "
-         "combinators when the loops share or feed state).",
+         "A statement list with >=2 sequential (non-nested) loops — loops in "
+         "sibling if/else/match branches never run together and are separate "
+         "groups — each is a pass that changes the function's state; combine "
+         "the passes or extract each loop into a named step (a pipeline of "
+         "comprehensions / combinators when the loops share or feed state).",
          display_name="loop-sequence → loop-pipeline", display_group="loop-pipeline",
          fix="loop-sequence"),
     Rule("loop-hoist", "warn", "advice", "Both",
          "A loop that mutates exactly one surviving name but whose body is "
          "> a couple of statements — the body computes more than it adds; "
          "hoist the per-item step into a named helper that returns the "
-         "value, then combine or fold.",
+         "value, then combine or fold. Exempt: a traversal (a worklist drain "
+         "or a cursor over a collection the body grows) — it has no per-item "
+         "value to fold.",
          display_name="loop-hoist → loop-pipeline", display_group="loop-pipeline",
          fix="loop-hoist"),
     # ---- graph-based (require code-review-graph)
