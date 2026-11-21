@@ -1,4 +1,4 @@
-# Plan — the self-warning cleanup: 587 → 283, and what is left
+# Plan — the self-warning cleanup: 587 → 265, and what is left
 
 The tool's own gate passes (`GATE: PASS`, 0 fails) with warnings, because
 every rule that fires here is a judgement signal rather than a gate. This
@@ -116,9 +116,9 @@ Nothing above can be removed without someone saying what the code should say
 instead — a helper name, a merged pass, a struct, a suppression, a folder.
 That is the tool doing its job: the remaining findings are judgement.
 
-The repo-wide audit round below took the total to **283** (273
+The repo-wide audit round below took the total to **265** (254
 `loop-pipeline`, 5 `standard`, 2 `duplicate-block`, 1 `bulk-suppression`, 1
-`detached-method`, 1 `flat-folder`): it deleted the gate's duplicate gather,
+`several-definitions`, 1 `detached-method`, 1 `flat-folder`): it deleted the gate's duplicate gather,
 and the loops that lived in it. No remaining finding changed meaning.
 
 ## The repo-wide merge, and the audit that closed it
@@ -188,6 +188,6 @@ verdict is cleared where the marker is consumed.
 | `complexity` | yes | no | per-file cc; the LSP emits its own complexity diagnostic. |
 
 Verification after every step: `make check`, the Python and Rust suites,
-`make self-check` (`GATE: PASS`, 283 warnings, 0 fails), and a
+`make self-check` (`GATE: PASS`, 265 warnings, 0 fails), and a
 `(file, kind, line)` plus `(file, kind, message)` finding-set comparison
 against the snapshot taken before the change.
