@@ -44,30 +44,33 @@ impl ModuleWalk {
                 Stmt::For(f) => {
                     // P6: module-level loops — the target must be fresh:
                     // no module binding before the loop except empty
-                    // creations, which are this loop's own build.
-                    let target = LoopFamily::pipeline_target(&f.body);
-                    let fresh = target
-                        .as_ref()
-                        .is_none_or(|t| !module_bindings.get(t).copied().unwrap_or(false));
-                    if fresh && LoopFamily::body_is_pipeline(&f.body) {
-                        // the directive is a promise about the fix engine
-                        let previous = i.checked_sub(1).and_then(|p| stmts.get(p));
-                        let fixable = target
-                            .as_deref()
-                            .is_some_and(|acc| LoopFamily::directive_applies(previous, &f.body, acc));
-                        let line = Source::line_of(source, f.range().start());
-                        state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
-                    file: state.file.to_string(),
-                    line,
-                    function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
-                    kind: "loop-pipeline".into(),
-                    severity: "warn".into(),
-                    message: if fixable {
-                        "loop builds a collection — Replace Loop with Pipeline: use a comprehension — fix: loop-pipeline"
-                    } else {
-                        "loop builds a collection — Replace Loop with Pipeline: use a comprehension"
-                    }
-                    .into(), });
+                    // creations, which are this loop's own build. A target
+                    // the loop also READS is a traversal; a `for ... else`
+                    // is not a comprehension.
+                    if let Some(target) = LoopFamily::pipeline_target(&f.body) {
+                        let fresh = !module_bindings.get(&target).copied().unwrap_or(false);
+                        if LoopFamily::is_own_build(f, &target, fresh) {
+                            // the directive is a promise about the fix engine
+                            let previous = i.checked_sub(1).and_then(|p| stmts.get(p));
+                            let fixable = LoopFamily::directive_applies(previous, &f.body, &target);
+                            let line = Source::line_of(source, f.range().start());
+                            state.findings.push(Finding {
+                                logical_start: None,
+                                seam_members: Vec::new(),
+                                col: 0,
+                                file: state.file.to_string(),
+                                line,
+                                function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
+                                kind: "loop-pipeline".into(),
+                                severity: "warn".into(),
+                                message: if fixable {
+                                    "loop builds a collection — Replace Loop with Pipeline: use a comprehension — fix: loop-pipeline"
+                                } else {
+                                    "loop builds a collection — Replace Loop with Pipeline: use a comprehension"
+                                }
+                                .into(),
+                            });
+                        }
                     }
                     let mut inner_lines = module_lines.clone();
                     let mut inner = module_bindings.clone();

@@ -111,26 +111,24 @@ impl<'a, 'b> FunctionWalk<'a, 'b> {
                     // name bound earlier, module name) builds nothing new
                     // and emits nothing. Only a fresh target or one whose
                     // every prior binding is an empty `= {}` / `= []`
-                    // creation is this loop's own build.
-                    let target = LoopFamily::pipeline_target(&f.body);
-                    let fresh = target
-                        .as_ref()
-                        .is_none_or(|t| !bindings.get(t).copied().unwrap_or(false));
-                    if fresh && LoopFamily::body_is_pipeline(&f.body) {
-                        // the directive is a promise about the fix engine:
-                        // the same shape and the same adjacent empty init
-                        // `_LoopsIntoComprehensions` requires, or no command
-                        // the directive is a promise about the fix engine
-                        let previous = i.checked_sub(1).and_then(|p| stmts.get(p));
-                        let fixable = target
-                            .as_deref()
-                            .is_some_and(|acc| LoopFamily::directive_applies(previous, &f.body, acc));
-                        let message = if fixable {
-                            "loop builds a collection — Replace Loop with Pipeline: use a comprehension — fix: loop-pipeline"
-                        } else {
-                            "loop builds a collection — Replace Loop with Pipeline: use a comprehension"
-                        };
-                        self.push_finding(line, "loop-pipeline", message.into());
+                    // creation is this loop's own build. A target the loop
+                    // also READS in its iterable is a traversal, not a build;
+                    // a `for ... else` is not a comprehension.
+                    if let Some(target) = LoopFamily::pipeline_target(&f.body) {
+                        let fresh = !bindings.get(&target).copied().unwrap_or(false);
+                        if LoopFamily::is_own_build(f, &target, fresh) {
+                            // the directive is a promise about the fix engine:
+                            // the same shape and the same adjacent empty init
+                            // `_LoopsIntoComprehensions` requires, or no command
+                            let previous = i.checked_sub(1).and_then(|p| stmts.get(p));
+                            let fixable = LoopFamily::directive_applies(previous, &f.body, &target);
+                            let message = if fixable {
+                                "loop builds a collection — Replace Loop with Pipeline: use a comprehension — fix: loop-pipeline"
+                            } else {
+                                "loop builds a collection — Replace Loop with Pipeline: use a comprehension"
+                            };
+                            self.push_finding(line, "loop-pipeline", message.into());
+                        }
                     }
                     // the loop target itself binds (for later loops) —
                     // nested bodies get a clone so sibling bindings stay out

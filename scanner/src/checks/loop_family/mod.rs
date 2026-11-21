@@ -91,6 +91,15 @@ impl LoopFamily {
         }
     }
 
+    /// Is this loop a comprehension build of its OWN fresh target? The target
+    /// must be fresh (not a parameter or an earlier binding), the loop must not
+    /// read the collection it grows (a traversal, not a build), it must have no
+    /// `else` arm (a comprehension has none), and the body must be the one
+    /// collection mutation. `fresh` is the caller's binding fact.
+    fn is_own_build(f: &ruff_python_ast::StmtFor, target: &str, fresh: bool) -> bool {
+        fresh && f.orelse.is_empty() && !Self::expr_mentions(&f.iter, target) && Self::body_is_pipeline(&f.body)
+    }
+
     /// A loop whose body is exactly ONE collection mutation (with at most one
     /// if-filter, no else) — the comprehension shape.
     fn body_is_pipeline(stmts: &[Stmt]) -> bool {
@@ -134,6 +143,17 @@ impl LoopFamily {
             },
             _ => None,
         }
+    }
+
+    /// Does the expression READ `name` anywhere? A loop that reads the
+    /// collection it grows is a traversal, not a build — the comprehension
+    /// would drop the appended values.
+    fn expr_mentions(e: &Expr, name: &str) -> bool {
+        let mut exprs = Vec::new();
+        super::expr_walk::all_exprs(e, &mut exprs);
+        exprs
+            .iter()
+            .any(|e| matches!(e, Expr::Name(n) if n.id.as_str() == name))
     }
 
     /// (P6) Is this expression an EMPTY dict/list literal (`= {}`, `= []`)?

@@ -6204,6 +6204,29 @@ def two(work, batch):
     }
 
     #[test]
+    fn python_loop_pipeline_needs_a_plain_fresh_target_without_else() {
+        // issue #120: a chained receiver has no target, a for-else is not a
+        // comprehension, and a loop that reads the collection it grows is a
+        // traversal.
+        let group =
+            "def f(xs):\n    out = {}\n    for x in xs:\n        out.setdefault(x, []).append(x)\n    return out\n";
+        assert!(
+            !scan_src(group).iter().any(|f| f.kind == "loop-pipeline"),
+            "{:?}",
+            scan_src(group)
+        );
+        let attr =
+            "def f(rows):\n    out = Bag()\n    for row in rows:\n        out.items.append(row)\n    return out\n";
+        assert!(!scan_src(attr).iter().any(|f| f.kind == "loop-pipeline"));
+        let else_loop = "def f(xs):\n    out = []\n    for x in xs:\n        out.append(x)\n    else:\n        out.append(0)\n    return out\n";
+        assert!(!scan_src(else_loop).iter().any(|f| f.kind == "loop-pipeline"));
+        let self_feed = "def f():\n    xs = []\n    for x in xs:\n        xs.append(x)\n    return xs\n";
+        assert!(!scan_src(self_feed).iter().any(|f| f.kind == "loop-pipeline"));
+        let plain = "def f(xs):\n    out = []\n    for x in xs:\n        out.append(x)\n    return out\n";
+        assert!(scan_src(plain).iter().any(|f| f.kind == "loop-pipeline"));
+    }
+
+    #[test]
     fn loop_dict_build_subscript_store_still_fires() {
         // P5: the pure dict-build shape (eval_context.py:42 —
         // `result[k] = f(v)` in one per-item pass) IS a comprehension in
