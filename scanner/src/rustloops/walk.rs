@@ -3,7 +3,7 @@
 use crate::rustscan;
 use syn::spanned::Spanned;
 
-use super::{condition_drains, PipelineBuild, RustLoops, HOIST_MIN_STMTS};
+use super::{RustLoops, HOIST_MIN_STMTS};
 
 /// One outermost loop's shape, for the sequence judgement.
 struct SeqLoop {
@@ -20,6 +20,14 @@ pub(super) struct LoopWalk<'a, 'b> {
     fn_name: String,
     fn_line: usize,
     seq: Vec<SeqLoop>,
+}
+
+/// How a pipeline-shaped body collects its value.
+pub(crate) enum PipelineBuild {
+    /// `acc.push(item)` — one item joined per pass.
+    Push(String),
+    /// `acc[i] = v` — the position is the data.
+    Indexed(String),
 }
 
 /// What a loop IS — the one classification each verdict is read from.
@@ -65,7 +73,70 @@ fn shape(is_for: bool, body: &[syn::Stmt], mutated: Vec<String>, worklist: &[Str
     LoopShape::Quiet
 }
 
+/// Removing methods — their receiver LOSES an element. A loop condition that
+/// calls one on a name the body writes is draining its own worklist.
+const DRAINING_METHODS: &[&str] = &["pop", "pop_front", "pop_back", "remove", "swap_remove", "drain"];
+
 impl<'a, 'b> LoopWalk<'a, 'b> {
+    /// The surviving names a loop condition REMOVES from — the worklist a
+    /// `while let Some(x) = work.pop()` walk consumes.
+    fn condition_drains(&self, cond: &syn::Expr) -> Vec<String> {
+        use syn::visit::Visit;
+
+        struct Drains<'s> {
+            survivors: &'s std::collections::HashSet<String>,
+            names: Vec<String>,
+        }
+        impl Visit<'_> for Drains<'_> {
+            fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+                if DRAINING_METHODS.contains(&node.method.to_string().as_str()) {
+                    if let syn::Expr::Path(p) = node.receiver.as_ref() {
+                        if p.path.segments.len() == 1 {
+                            self.record(&p.path.segments[0].ident.to_string());
+                        }
+                    }
+                }
+                syn::visit::visit_expr_method_call(self, node);
+            }
+
+            fn visit_expr_call(&mut self, node: &syn::ExprCall) {
+                // the UFCS spelling of the same drain — `Vec::pop(&mut stack)`:
+                // the removed-from name is the first argument, not a receiver
+                if let syn::Expr::Path(p) = node.func.as_ref() {
+                    if let Some(last) = p.path.segments.last() {
+                        if DRAINING_METHODS.contains(&last.ident.to_string().as_str()) {
+                            if let Some(syn::Expr::Reference(r)) = node.args.first() {
+                                // a drain needs `&mut`: `Vec::pop(&stack)` removes
+                                // nothing, so a shared borrow is not a drain
+                                if r.mutability.is_some() {
+                                    if let syn::Expr::Path(rp) = r.expr.as_ref() {
+                                        if rp.path.segments.len() == 1 {
+                                            self.record(&rp.path.segments[0].ident.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                syn::visit::visit_expr_call(self, node);
+            }
+        }
+        impl Drains<'_> {
+            fn record(&mut self, name: &str) {
+                if self.survivors.contains(name) && !self.names.iter().any(|n| n == name) {
+                    self.names.push(name.to_string());
+                }
+            }
+        }
+        let mut drains = Drains {
+            survivors: self.survivors,
+            names: Vec::new(),
+        };
+        drains.visit_expr(cond);
+        drains.names
+    }
+
     fn judge(&mut self, line: usize, body: &[syn::Stmt], is_for: bool, mutated: Vec<String>, worklist: &[String]) {
         match shape(is_for, body, mutated, worklist) {
             LoopShape::Traversal | LoopShape::Quiet => {}
@@ -162,7 +233,7 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
                         .into_iter()
                         .filter(|r| self.survivors.contains(r))
                         .collect();
-                    let worklist = condition_drains(&w.cond, self.survivors);
+                    let worklist = self.condition_drains(&w.cond);
                     self.judge(line, &w.body.stmts, false, mutated.clone(), &worklist);
                     if !in_loop {
                         self.seq.push(SeqLoop { line, reads, mutated });
@@ -233,7 +304,7 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
             syn::Expr::While(w) => {
                 let line = e.span().start().line;
                 let mutated = self.surviving_mutations(&w.body.stmts, &[]);
-                let worklist = condition_drains(&w.cond, self.survivors);
+                let worklist = self.condition_drains(&w.cond);
                 self.judge(line, &w.body.stmts, false, mutated, &worklist);
                 self.walk_stmts(&w.body.stmts, true);
             }
