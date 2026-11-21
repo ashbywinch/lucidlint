@@ -6,7 +6,11 @@
 //!
 //! - `loop-pipeline`: the body is exactly one collection build —
 //!   `acc.push(item)` (plain or behind ONE if-filter, no else) or an
-//!   `acc[idx] = v` store — a combinator in disguise.
+//!   `acc[idx] = v` store — a combinator in disguise: `.map(..).collect()`
+//!   builds the value when the loop creates the collection (over the
+//!   indices for an indexed store), `.filter(..)` for the guarded write,
+//!   `.extend(..)` when a push joins items onto a collection that already
+//!   held some.
 //! - `mutating-loop`: the body mutates >= 2 pieces of state that SURVIVE the
 //!   loop — the changes are invisible at the call site.
 //! - `loop-hoist`: exactly one surviving mutation but a body of >= 4
@@ -18,6 +22,12 @@
 //! shape: a while condition is not an iterator. `loop {}` bodies are judged the
 //! same way. The messages carry the `fix:` directives the gate wires to
 //! `fix.rs` (offer equals fix).
+//!
+//! A loop whose CONDITION removes from a name its body writes drains its own
+//! worklist (`while let Some(x) = stack.pop()`): the writes are the walk's
+//! state, not outputs, and none of the stateful recipes describes a
+//! traversal — that loop gets no verdict. The Python pass reached the same
+//! conclusion under P5 (a worklist drain "fits none of the recipes").
 
 use crate::rustscan;
 
@@ -28,6 +38,77 @@ use walk::LoopWalk;
 /// The minimum flattened body statement count for a single-mutation loop to
 /// carry the hoist advice — the body clearly computes more than it adds.
 const HOIST_MIN_STMTS: usize = 4;
+
+/// Removing methods — their receiver LOSES an element. A loop condition that
+/// calls one on a name the body writes is draining its own worklist.
+const DRAINING_METHODS: &[&str] = &["pop", "pop_front", "pop_back", "remove", "swap_remove", "drain"];
+
+/// The surviving names a loop condition REMOVES from — the worklist a
+/// `while let Some(x) = work.pop()` walk consumes.
+fn condition_drains(cond: &syn::Expr, survivors: &std::collections::HashSet<String>) -> Vec<String> {
+    use syn::visit::Visit;
+
+    struct Drains<'s> {
+        survivors: &'s std::collections::HashSet<String>,
+        names: Vec<String>,
+    }
+    impl Visit<'_> for Drains<'_> {
+        fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+            if DRAINING_METHODS.contains(&node.method.to_string().as_str()) {
+                if let syn::Expr::Path(p) = node.receiver.as_ref() {
+                    if p.path.segments.len() == 1 {
+                        self.record(&p.path.segments[0].ident.to_string());
+                    }
+                }
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+
+        fn visit_expr_call(&mut self, node: &syn::ExprCall) {
+            // the UFCS spelling of the same drain — `Vec::pop(&mut stack)`:
+            // the removed-from name is the first argument, not a receiver
+            if let syn::Expr::Path(p) = node.func.as_ref() {
+                if let Some(last) = p.path.segments.last() {
+                    if DRAINING_METHODS.contains(&last.ident.to_string().as_str()) {
+                        if let Some(syn::Expr::Reference(r)) = node.args.first() {
+                            // a drain needs `&mut`: `Vec::pop(&stack)` removes
+                            // nothing, so a shared borrow is not a drain
+                            if r.mutability.is_some() {
+                                if let syn::Expr::Path(rp) = r.expr.as_ref() {
+                                    if rp.path.segments.len() == 1 {
+                                        self.record(&rp.path.segments[0].ident.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+    impl Drains<'_> {
+        fn record(&mut self, name: &str) {
+            if self.survivors.contains(name) && !self.names.iter().any(|n| n == name) {
+                self.names.push(name.to_string());
+            }
+        }
+    }
+    let mut drains = Drains {
+        survivors,
+        names: Vec::new(),
+    };
+    drains.visit_expr(cond);
+    drains.names
+}
+
+/// How a pipeline-shaped body collects its value.
+pub(crate) enum PipelineBuild {
+    /// `acc.push(item)` — one item joined per pass.
+    Push(String),
+    /// `acc[i] = v` — the position is the data.
+    Indexed(String),
+}
 
 /// Mutating receiver calls — `acc.<method>(..)` WRITES `acc`. Reads (`len`,
 /// `get`, `iter`, `is_empty`, ...) never count: a body that only inspects
@@ -156,20 +237,27 @@ impl RustLoops {
         }
     }
 
-    /// A loop whose body is exactly one collection build — one push or one
-    pub(crate) fn body_is_pipeline(stmts: &[syn::Stmt]) -> bool {
-        match stmts {
-            [s] if Self::single_push(s).is_some() || Self::index_store(s).is_some() => true,
-            [syn::Stmt::Expr(syn::Expr::If(i), _)]
-                if i.else_branch.is_none()
-                    && i.then_branch.stmts.len() == 1
-                    && (Self::single_push(&i.then_branch.stmts[0]).is_some()
-                        || Self::index_store(&i.then_branch.stmts[0]).is_some()) =>
-            {
-                true
+    /// The collection a pipeline-shaped body builds and how — the `acc` of a
+    /// bare `acc.push(x)` or `acc[i] = v`, plain or behind ONE if-filter with
+    /// no else. `None` for every other body.
+    pub(crate) fn pipeline_build(stmts: &[syn::Stmt]) -> Option<PipelineBuild> {
+        let stmt = match stmts {
+            [syn::Stmt::Expr(syn::Expr::If(i), _)] if i.else_branch.is_none() && i.then_branch.stmts.len() == 1 => {
+                &i.then_branch.stmts[0]
             }
-            _ => false,
+            [s] => s,
+            _ => return None,
+        };
+        if let Some(acc) = Self::single_push(stmt) {
+            return Some(PipelineBuild::Push(acc));
         }
+        Self::index_store(stmt).map(PipelineBuild::Indexed)
+    }
+
+    /// A loop whose body is exactly one collection build — one push or one
+    /// indexed store.
+    pub(crate) fn body_is_pipeline(stmts: &[syn::Stmt]) -> bool {
+        Self::pipeline_build(stmts).is_some()
     }
     /// The control-flow children of a statement — nested item scopes excluded.
     fn stmt_children(s: &syn::Stmt) -> Vec<&syn::Stmt> {

@@ -24,63 +24,40 @@ pub enum Creation {
 pub struct LoopFamily;
 
 impl LoopFamily {
-    /// The control-flow children of a statement — nested def/class scopes excluded.
-    fn stmt_children(s: &Stmt) -> Vec<&Stmt> {
-        let mut out = Vec::new();
+    /// The statement BLOCKS one compound statement owns — one entry per body
+    /// (`if`/`else`, `try`/`except`/`finally`, ...). Blocks, not flattened
+    /// children: the pipeline directive reads the statement directly before a
+    /// loop, which only a sibling list preserves.
+    fn stmt_bodies(s: &Stmt) -> Vec<&[Stmt]> {
+        let mut out: Vec<&[Stmt]> = Vec::new();
         match s {
             Stmt::If(i) => {
-                for b in &i.body {
-                    out.push(b);
-                }
+                out.push(&i.body);
                 for cl in &i.elif_else_clauses {
-                    for b in &cl.body {
-                        out.push(b);
-                    }
+                    out.push(&cl.body);
                 }
             }
             Stmt::For(f) => {
-                for b in &f.body {
-                    out.push(b);
-                }
-                for b in &f.orelse {
-                    out.push(b);
-                }
+                out.push(&f.body);
+                out.push(&f.orelse);
             }
             Stmt::While(w) => {
-                for b in &w.body {
-                    out.push(b);
-                }
-                for b in &w.orelse {
-                    out.push(b);
-                }
+                out.push(&w.body);
+                out.push(&w.orelse);
             }
-            Stmt::With(w) => {
-                for b in &w.body {
-                    out.push(b);
-                }
-            }
+            Stmt::With(w) => out.push(&w.body),
             Stmt::Try(t) => {
-                for b in &t.body {
-                    out.push(b);
-                }
+                out.push(&t.body);
                 for h in &t.handlers {
                     let ruff_python_ast::ExceptHandler::ExceptHandler(eh) = h;
-                    for b in &eh.body {
-                        out.push(b);
-                    }
+                    out.push(&eh.body);
                 }
-                for b in &t.orelse {
-                    out.push(b);
-                }
-                for b in &t.finalbody {
-                    out.push(b);
-                }
+                out.push(&t.orelse);
+                out.push(&t.finalbody);
             }
             Stmt::Match(m) => {
                 for case in &m.cases {
-                    for b in &case.body {
-                        out.push(b);
-                    }
+                    out.push(&case.body);
                 }
             }
             _ => {}
@@ -270,10 +247,17 @@ impl LoopFamily {
     /// advertise a fix that cannot apply (user ruling: never suggest a fix
     /// that cannot fix).
     fn auto_fixable(stmts: &[Stmt]) -> bool {
+        /// `acc.append(x)` with a BARE accumulator receiver and one positional
+        /// argument — `fix_engine._call_mutation_plan`'s contract. A chained
+        /// receiver (`groups.setdefault(k, set()).add(v)`) is not a collection
+        /// name, so no comprehension expresses the loop.
         fn supported_call(e: &Expr) -> bool {
             matches!(e, Expr::Call(c)
-            if matches!(c.func.as_ref(), Expr::Attribute(a)
-                if matches!(a.attr.as_str(), "append" | "appendleft" | "add" | "extend")))
+                if c.arguments.args.len() == 1
+                    && c.arguments.keywords.is_empty()
+                    && matches!(c.func.as_ref(), Expr::Attribute(a)
+                        if matches!(a.value.as_ref(), Expr::Name(_))
+                            && matches!(a.attr.as_str(), "append" | "appendleft" | "add" | "extend")))
         }
         match stmts {
             [Stmt::Expr(e)] => supported_call(&e.value),
@@ -283,6 +267,88 @@ impl LoopFamily {
                     && matches!(&i.body[0], Stmt::Expr(e) if supported_call(&e.value))
             }
             _ => false, // `+= [..]` and subscript stores: the base check holds
+        }
+    }
+
+    /// The empty collection the comprehension rewrite needs directly before the
+    /// loop: the accumulator's own `acc = []` / `acc = {}` / `acc = set()`, of
+    /// the SAME kind the loop mutates. Anything else (prior contents, a
+    /// different name, another statement in between) refuses in
+    /// `fix_engine._rewrite_plan` — the rewrite cannot preserve prior contents.
+    /// The `stmts` list holds statements only: comments and blank lines are
+    /// trivia, so the entry before the loop is the previous STATEMENT however
+    /// many lines separate them.
+    fn init_is_empty(prev: Option<&Stmt>, acc: &str, kind: &str) -> bool {
+        fn empty_kind(e: &Expr) -> Option<&'static str> {
+            match e {
+                Expr::List(l) if l.elts.is_empty() => Some("list"),
+                Expr::Dict(d) if d.items.is_empty() => Some("dict"),
+                Expr::Call(c)
+                    if c.arguments.args.is_empty()
+                        && c.arguments.keywords.is_empty()
+                        && matches!(c.func.as_ref(), Expr::Name(n) if n.id.as_str() == "set") =>
+                {
+                    Some("set")
+                }
+                _ => None,
+            }
+        }
+        let Some(prev) = prev else { return false };
+        match prev {
+            Stmt::Assign(a) => {
+                a.targets.len() == 1
+                    && matches!(&a.targets[0], Expr::Name(n) if n.id.as_str() == acc)
+                    && empty_kind(&a.value) == Some(kind)
+            }
+            Stmt::AnnAssign(a) => {
+                matches!(a.target.as_ref(), Expr::Name(n) if n.id.as_str() == acc)
+                    && a.value.as_deref().and_then(empty_kind) == Some(kind)
+            }
+            _ => false,
+        }
+    }
+
+    /// Would the comprehension rewrite apply to this loop as written? The
+    /// directive is a promise about the fix engine, so the promise is decided
+    /// in one place: the plan's shape (`auto_fixable`), the accumulator kind
+    /// (`collection_kind`), and the accumulator's own empty collection of that
+    /// kind directly before the loop (`init_is_empty`). `loop_body` is the
+    /// for-loop's own body; `previous` is the statement before the loop in the
+    /// ENCLOSING list (a `&[Stmt]`, so comments and blank lines are trivia —
+    /// the previous entry is the previous statement however many lines
+    /// separate them).
+    fn directive_applies(previous: Option<&Stmt>, loop_body: &[Stmt], acc: &str) -> bool {
+        Self::collection_kind(loop_body)
+            .is_some_and(|kind| Self::auto_fixable(loop_body) && Self::init_is_empty(previous, acc, kind))
+    }
+
+    /// The collection kind a pipeline-shaped body mutates — the accumulator the
+    /// comprehension rewrite initializes (`fix_engine._LoopPipelinePlan`).
+    fn collection_kind(stmts: &[Stmt]) -> Option<&'static str> {
+        let stmt = match stmts {
+            [Stmt::If(i)] => i.body.first()?,
+            [s] => s,
+            _ => return None,
+        };
+        match stmt {
+            Stmt::Expr(e) => match e.value.as_ref() {
+                Expr::Call(c) => match c.func.as_ref() {
+                    Expr::Attribute(a) => match a.attr.as_str() {
+                        "append" | "appendleft" | "extend" => Some("list"),
+                        "add" => Some("set"),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            },
+            Stmt::AugAssign(a) => match a.op {
+                Operator::Add => Some("list"),
+                Operator::BitOr => Some("set"),
+                _ => None,
+            },
+            Stmt::Assign(_) => Some("dict"),
+            _ => None,
         }
     }
     /// Replace Loop with Pipeline family (Python): the ONE loop shape a

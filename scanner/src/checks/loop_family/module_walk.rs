@@ -35,7 +35,7 @@ impl ModuleWalk {
         module_lines: &mut std::collections::HashMap<String, usize>,
         module_bindings: &mut std::collections::HashMap<String, bool>,
     ) {
-        for s in stmts {
+        for (i, s) in stmts.iter().enumerate() {
             match s {
                 Stmt::FunctionDef(f) => {
                     FunctionWalk::findings(state, f, module_lines);
@@ -45,9 +45,16 @@ impl ModuleWalk {
                     // P6: module-level loops — the target must be fresh:
                     // no module binding before the loop except empty
                     // creations, which are this loop's own build.
-                    let fresh = LoopFamily::pipeline_target(&f.body)
-                        .is_none_or(|t| !module_bindings.get(&t).copied().unwrap_or(false));
+                    let target = LoopFamily::pipeline_target(&f.body);
+                    let fresh = target
+                        .as_ref()
+                        .is_none_or(|t| !module_bindings.get(t).copied().unwrap_or(false));
                     if fresh && LoopFamily::body_is_pipeline(&f.body) {
+                        // the directive is a promise about the fix engine
+                        let previous = i.checked_sub(1).and_then(|p| stmts.get(p));
+                        let fixable = target
+                            .as_deref()
+                            .is_some_and(|acc| LoopFamily::directive_applies(previous, &f.body, acc));
                         let line = Source::line_of(source, f.range().start());
                         state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                     file: state.file.to_string(),
@@ -55,7 +62,7 @@ impl ModuleWalk {
                     function: state.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default(),
                     kind: "loop-pipeline".into(),
                     severity: "warn".into(),
-                    message: if LoopFamily::auto_fixable(&f.body) {
+                    message: if fixable {
                         "loop builds a collection — Replace Loop with Pipeline: use a comprehension — fix: loop-pipeline"
                     } else {
                         "loop builds a collection — Replace Loop with Pipeline: use a comprehension"
