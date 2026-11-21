@@ -92,6 +92,15 @@ pub(super) struct TypeBindings {
     aliases: std::collections::HashMap<String, Expr>,
 }
 
+/// One parameter of a signature: its name, annotation, and the line its
+/// finding anchors at. The three travel together through the signature arm.
+#[derive(Clone, Copy)]
+struct Param<'a> {
+    name: &'a str,
+    annotation: Option<&'a Expr>,
+    line: usize,
+}
+
 /// The annotation's collection form for the record-shape message: the
 /// message must name the shape the reader wrote (fixed tuple, list), never
 /// hard-code "dict". A union takes its record member's form.
@@ -806,7 +815,7 @@ impl RecordShape {
     /// kwarg — each with its annotation and the line the finding anchors at.
     /// H2: the anchor is the ANNOTATED PARAMETER's own line (its range start),
     /// not the def line, so a multi-line signature reports on its lines.
-    fn signature_params<'a>(f: &'a StmtFunctionDef, source: &str) -> Vec<(&'a str, Option<&'a Expr>, usize)> {
+    fn signature_params<'a>(f: &'a StmtFunctionDef, source: &str) -> Vec<Param<'a>> {
         f.parameters
             .posonlyargs
             .iter()
@@ -815,14 +824,71 @@ impl RecordShape {
             .map(|pwd| &pwd.parameter)
             .chain(f.parameters.vararg.iter().map(|p| p.as_ref()))
             .chain(f.parameters.kwarg.iter().map(|p| p.as_ref()))
-            .map(|p| {
-                (
-                    p.name.as_str(),
-                    p.annotation.as_deref(),
-                    Source::line_of(source, p.range().start()),
-                )
+            .map(|p| Param {
+                name: p.name.as_str(),
+                annotation: p.annotation.as_deref(),
+                line: Source::line_of(source, p.range().start()),
             })
             .collect()
+    }
+
+    /// The finding one annotated parameter earns, or None when the annotation
+    /// is not a record shape. Pure: the signature walk just collects.
+    fn signature_finding(&self, f: &StmtFunctionDef, file: &str, param: &Param, wire: bool) -> Option<Finding> {
+        let Param {
+            name: arg,
+            annotation: ann,
+            line: param_line,
+        } = *param;
+        let a = ann?;
+        if !Self::annotation_is_record(a, &self.bindings) {
+            return None;
+        }
+        // G2: a union-typed parameter whose record member
+        // is a module class with from_dict — the union
+        // hides which shape a caller passes; direct the
+        // ingestion at entry.
+        let message = if let Some(record) = Self::union_record_class(a, &self.from_dict_classes) {
+            format!("{arg} accepts the wire dict alongside the {record} class; the union hides which shape a caller passes. Ingest the wire at entry with {record}.from_dict and drop the dict from the union.")
+        } else if wire {
+            format!("{arg} is the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.")
+        } else if let Some(record) = Self::map_value_class(a, &self.bindings) {
+            // H1/P1: the collection is the unnamed shape —
+            // the message names the MAP, never the value
+            // (the annotation already names the value's
+            // class). Issue #46: a READ-ONLY parameter whose
+            // value class this module declares is the one
+            // shape with no missing noun — it comes in named
+            // and nothing is built here — so it is exempt;
+            // a map the function mutates keeps the finding.
+            // The shape must be SPELLED OUT: an alias
+            // (`Sources = dict[str, X]`) or a union
+            // (`dict[str, X] | None`) hides it behind a name,
+            // which is what the rule exists to make explicit
+            // (record_raw_dict_alias_does_not_exempt,
+            // record_optional_named_type_map).
+            if Self::is_unspelled_record_map(a, f, record.as_str(), &self.classes, arg) {
+                return None;
+            }
+            format!("{arg} is a map whose values are {record}. {COLLECTION_MESSAGE_TAIL}")
+        } else {
+            match Self::signature_record_shape(a, &self.bindings) {
+                SignatureRecordShape::FixedTuple => format!("{arg} is a fixed-size tuple; its positions are an unnamed record, so call sites pass positionally and a position change is silent. Type {arg} with a class whose fields name the positions; create that class if none exists."),
+                SignatureRecordShape::List => format!("{arg} is a list whose items are unnamed records; each item's shape has no name at the call site. Type each item with a class whose fields name the shape; create that class if none exists."),
+                SignatureRecordShape::Dict => format!("{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists."),
+            }
+        };
+        Some(Finding {
+            logical_start: None,
+            seam_members: Vec::new(),
+            col: 0,
+            file: file.to_string(),
+            line: param_line,
+            function: f.name.to_string(),
+            kind: "record-shape".into(),
+            severity: "fail".into(),
+            message,
+        })
     }
 
     /// One function def's signature facts: the parameters and return that leave
@@ -846,56 +912,9 @@ impl RecordShape {
         // already sits at a typed parse boundary — no record-shape
         // finding at all (the wire message's advice is a step taken).
         if !(wire && self.has_ingestion) {
-            for (arg, ann, param_line) in params {
-                if let Some(a) = ann {
-                    if !Self::annotation_is_record(a, &self.bindings) {
-                        continue;
-                    }
-                    // G2: a union-typed parameter whose record member
-                    // is a module class with from_dict — the union
-                    // hides which shape a caller passes; direct the
-                    // ingestion at entry.
-                    let message = if let Some(record) = Self::union_record_class(a, &self.from_dict_classes) {
-                        format!("{arg} accepts the wire dict alongside the {record} class; the union hides which shape a caller passes. Ingest the wire at entry with {record}.from_dict and drop the dict from the union.")
-                    } else if wire {
-                        format!("{arg} is the wire form of a record; the parse boundary has no type. Give the shape a named record and ingest the wire with its from_dict — call sites can then type against the record instead of the wire.")
-                    } else if let Some(record) = Self::map_value_class(a, &self.bindings) {
-                        // H1/P1: the collection is the unnamed shape —
-                        // the message names the MAP, never the value
-                        // (the annotation already names the value's
-                        // class). Issue #46: a READ-ONLY parameter whose
-                        // value class this module declares is the one
-                        // shape with no missing noun — it comes in named
-                        // and nothing is built here — so it is exempt;
-                        // a map the function mutates keeps the finding.
-                        // The shape must be SPELLED OUT: an alias
-                        // (`Sources = dict[str, X]`) or a union
-                        // (`dict[str, X] | None`) hides it behind a name,
-                        // which is what the rule exists to make explicit
-                        // (record_raw_dict_alias_does_not_exempt,
-                        // record_optional_named_type_map).
-                        if Self::is_unspelled_record_map(a, f, record.as_str(), &self.classes, arg) {
-                            continue;
-                        }
-                        format!("{arg} is a map whose values are {record}. {COLLECTION_MESSAGE_TAIL}")
-                    } else {
-                        match Self::signature_record_shape(a, &self.bindings) {
-                        SignatureRecordShape::FixedTuple => format!("{arg} is a fixed-size tuple; its positions are an unnamed record, so call sites pass positionally and a position change is silent. Type {arg} with a class whose fields name the positions; create that class if none exists."),
-                        SignatureRecordShape::List => format!("{arg} is a list whose items are unnamed records; each item's shape has no name at the call site. Type each item with a class whose fields name the shape; create that class if none exists."),
-                        SignatureRecordShape::Dict => format!("{arg} is a dict; its value is a fixed-shape record. Typed as dict, the shape has no name: call sites build it ad hoc, and field changes go unchecked. Type {arg} with the class that models this shape; create that class if none exists."),
-                    }
-                    };
-                    state.findings.push(Finding {
-                        logical_start: None,
-                        seam_members: Vec::new(),
-                        col: 0,
-                        file: state.file.to_string(),
-                        line: param_line,
-                        function: f.name.to_string(),
-                        kind: "record-shape".into(),
-                        severity: "fail".into(),
-                        message,
-                    });
+            for param in params {
+                if let Some(finding) = self.signature_finding(f, state.file, &param, wire) {
+                    state.findings.push(finding);
                 }
             }
             if let Some(r) = &f.returns {
