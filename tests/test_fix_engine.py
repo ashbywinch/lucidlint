@@ -2752,7 +2752,7 @@ def test_loop_pipeline_refuses_existing_contents_and_unsupported_mutations(tmp_p
 
 def test_loop_pipeline_refuses_a_collection_it_iterates(tmp_path):
     # a self-feeding loop is a traversal; the guard refuses it (this empty
-    # init is a no-op, but an iterable that mutates the target would lose work)
+    # init is a no-op; a real worklist is a `while` drain, not a comprehension)
     src = "def f():\n    xs = []\n    for x in xs:\n        xs.append(x)\n    return xs\n"
     out, fixed = _fix(tmp_path, "loop-pipeline", "houses/app.py", src, _loop_line(src, "f"))
     assert out is None

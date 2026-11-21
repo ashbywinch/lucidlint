@@ -93,9 +93,10 @@ impl LoopFamily {
 
     /// Is this loop a comprehension build of its OWN fresh target? The target
     /// must be fresh (not a parameter or an earlier binding), the loop must not
-    /// read the collection it grows (a traversal, not a build), it must have no
-    /// `else` arm (a comprehension has none), and the body must be the one
-    /// collection mutation. `fresh` is the caller's binding fact.
+    /// read the collection it grows (a traversal, not a build — its readable
+    /// form is a `while` drain, or no loop at all when it starts empty), it must
+    /// have no `else` arm (a comprehension has none), and the body must be the
+    /// one collection mutation. `fresh` is the caller's binding fact.
     fn is_own_build(f: &ruff_python_ast::StmtFor, target: &str, fresh: bool) -> bool {
         fresh && f.orelse.is_empty() && !Self::expr_mentions(&f.iter, target) && Self::body_is_pipeline(&f.body)
     }
@@ -146,8 +147,8 @@ impl LoopFamily {
     }
 
     /// Does the expression READ `name` anywhere? A loop that reads the
-    /// collection it grows is a traversal, not a build — the comprehension
-    /// would drop the appended values.
+    /// collection it grows is a traversal, not a build — its readable form is a
+    /// `while` drain (or no loop at all), not a comprehension.
     fn expr_mentions(e: &Expr, name: &str) -> bool {
         let mut exprs = Vec::new();
         super::expr_walk::all_exprs(e, &mut exprs);
