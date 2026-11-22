@@ -47,10 +47,27 @@ impl SourceInputs {
         self.source.contains(name)
     }
 
-    /// A branch sees the enclosing bindings but its writes stay local: the
-    /// clone is walked and dropped at the join.
+    /// A branch starts with the enclosing bindings. Its writes are committed
+    /// only by `join`.
     fn branch(&self) -> Self {
         self.clone()
+    }
+
+    /// The must-source join: a name survives only when it is a source input
+    /// on every path reaching this point. A conditional fixture load is a
+    /// source input on one path and not the other, so it is not a finding
+    /// after the join; a rebind to an output on one path removes the name for
+    /// the same reason. This is the rule's false-positive guard: the message
+    /// must be true on every path, not just the one the test happened to run.
+    fn join(&mut self, branches: &[SourceInputs]) {
+        let Some(first) = branches.first() else {
+            return;
+        };
+        let mut intersection = first.source.clone();
+        for branch in branches.iter().skip(1) {
+            intersection.retain(|name| branch.contains(name));
+        }
+        self.source = intersection;
     }
 
     fn is_source(&self, expr: &Expr) -> bool {
@@ -91,45 +108,71 @@ fn walk_body(state: &mut ScanState, body: &[Stmt], source: &str, function: &str,
                 walk_body(state, &c.body, source, function, &mut class);
             }
             Stmt::If(i) => {
+                let mut branches = Vec::new();
                 for body in std::iter::once(&i.body).chain(i.elif_else_clauses.iter().map(|clause| &clause.body)) {
                     let mut branch = inputs.branch();
                     walk_body(state, body, source, function, &mut branch);
+                    branches.push(branch);
                 }
+                if i.elif_else_clauses.is_empty() {
+                    // no else: the fall-through path keeps the pre-if inputs
+                    branches.push(inputs.branch());
+                }
+                inputs.join(&branches);
             }
             Stmt::For(f) => {
-                let mut branch = inputs.branch();
-                walk_body(state, &f.body, source, function, &mut branch);
+                let mut branches = vec![inputs.branch()]; // the zero-iteration path
+                let mut body = inputs.branch();
+                walk_body(state, &f.body, source, function, &mut body);
+                branches.push(body);
                 let mut orelse = inputs.branch();
                 walk_body(state, &f.orelse, source, function, &mut orelse);
+                branches.push(orelse);
+                inputs.join(&branches);
             }
             Stmt::While(w) => {
-                let mut branch = inputs.branch();
-                walk_body(state, &w.body, source, function, &mut branch);
+                let mut branches = vec![inputs.branch()]; // the zero-iteration path
+                let mut body = inputs.branch();
+                walk_body(state, &w.body, source, function, &mut body);
+                branches.push(body);
                 let mut orelse = inputs.branch();
                 walk_body(state, &w.orelse, source, function, &mut orelse);
+                branches.push(orelse);
+                inputs.join(&branches);
             }
             Stmt::With(w) => {
-                let mut branch = inputs.branch();
-                walk_body(state, &w.body, source, function, &mut branch);
+                // the body runs if the context manager enters
+                let mut body = inputs.branch();
+                walk_body(state, &w.body, source, function, &mut body);
+                *inputs = body;
             }
             Stmt::Try(t) => {
-                let mut body = inputs.branch();
+                let pre = inputs.branch();
+                let mut body = pre.clone();
                 walk_body(state, &t.body, source, function, &mut body);
+                walk_body(state, &t.orelse, source, function, &mut body);
+                let mut branches = vec![pre.clone(), body];
                 for handler in &t.handlers {
                     let ruff_python_ast::ExceptHandler::ExceptHandler(h) = handler;
-                    let mut branch = inputs.branch();
+                    let mut branch = pre.clone();
                     walk_body(state, &h.body, source, function, &mut branch);
+                    branches.push(branch);
                 }
-                let mut orelse = inputs.branch();
-                walk_body(state, &t.orelse, source, function, &mut orelse);
+                inputs.join(&branches);
+                // the finally block runs on every path that leaves the try
                 let mut finalbody = inputs.branch();
                 walk_body(state, &t.finalbody, source, function, &mut finalbody);
+                *inputs = finalbody;
             }
             Stmt::Match(m) => {
+                // without a wildcard the pre-match path is still possible
+                let mut branches = vec![inputs.branch()];
                 for case in &m.cases {
                     let mut branch = inputs.branch();
                     walk_body(state, &case.body, source, function, &mut branch);
+                    branches.push(branch);
                 }
+                inputs.join(&branches);
             }
             _ => {}
         }
@@ -241,15 +284,38 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_binding_does_not_rewrite_the_enclosing_scope() {
+    fn the_join_keeps_a_name_source_on_every_path() {
         let mut inputs = SourceInputs::default();
         inputs.record("src", true);
-        let mut conditionally_rebound = inputs.branch();
-        conditionally_rebound.record("src", false);
-        assert!(inputs.contains("src"), "the join keeps the enclosing binding");
+        let left = inputs.branch();
+        let mut right = inputs.branch();
+        right.record("src", true);
+        inputs.join(&[left, right]);
+        assert!(inputs.contains("src"));
+    }
+
+    #[test]
+    fn the_join_drops_a_name_source_on_only_one_path() {
+        let mut inputs = SourceInputs::default();
+        let mut loaded = inputs.branch();
+        loaded.record("src", true);
+        inputs.join(&[inputs.clone(), loaded]);
         assert!(
-            !conditionally_rebound.contains("src"),
-            "the branch sees its own output rebind"
+            !inputs.contains("src"),
+            "a conditional fixture load is not a finding after the join"
+        );
+    }
+
+    #[test]
+    fn the_join_drops_a_name_rebound_to_an_output_on_one_path() {
+        let mut inputs = SourceInputs::default();
+        inputs.record("src", true);
+        let mut output = inputs.branch();
+        output.record("src", false);
+        inputs.join(&[inputs.clone(), output]);
+        assert!(
+            !inputs.contains("src"),
+            "the assertion is not on fixture text on every path"
         );
     }
 }
