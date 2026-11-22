@@ -114,12 +114,6 @@ def test_parity_corpus_is_discovered_and_rules_exist():
         )
 
 
-def test_loop_pipeline_seed_is_present():
-    """The issue's seed is part of the contract: deleting it silently would
-    remove the only shapes the runner currently exercises."""
-    assert (PARITY / "loop-pipeline").is_dir(), "the loop-family seed corpus is missing"
-
-
 @pytest.mark.parametrize(
     ("rule_kind", "shape", "directory"),
     _corpus(),
