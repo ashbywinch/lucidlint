@@ -138,16 +138,8 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
             (LoopKind::While, Some(cond)) => self.condition_drains(cond),
             _ => Vec::new(),
         };
-        // A `for` whose iterable reads the collection its body rebuilds is a
-        // traversal, not a pipeline: the comprehension would consume what it
-        // produces. Drop the build so `shape` stays silent.
         let build = if kind == LoopKind::For {
-            RustLoops::pipeline_build(body).filter(|build| {
-                let acc = match build {
-                    PipelineBuild::Push(acc) | PipelineBuild::Indexed(acc) => acc,
-                };
-                !reads.contains(acc)
-            })
+            RustLoops::pipeline_build(body, iterable)
         } else {
             None
         };

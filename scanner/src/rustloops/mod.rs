@@ -223,8 +223,11 @@ impl RustLoops {
 
     /// The collection a pipeline-shaped body builds and how — the `acc` of a
     /// bare `acc.push(x)` or `acc[i] = v`, plain or behind ONE if-filter with
-    /// no else. `None` for every other body.
-    pub(crate) fn pipeline_build(stmts: &[syn::Stmt]) -> Option<PipelineBuild> {
+    /// no else. `None` for every other body, and for a loop whose iterable
+    /// reads the collection it builds (a self-feed is a traversal, not a
+    /// build). `iterable` is None for the fixer's body-shape check, which has
+    /// no loop context.
+    pub(crate) fn pipeline_build(stmts: &[syn::Stmt], iterable: Option<&syn::Expr>) -> Option<PipelineBuild> {
         let (stmt, guard) = match stmts {
             [syn::Stmt::Expr(syn::Expr::If(i), _)] if i.else_branch.is_none() && i.then_branch.stmts.len() == 1 => {
                 (&i.then_branch.stmts[0], Some(i.cond.as_ref()))
@@ -233,13 +236,13 @@ impl RustLoops {
             _ => return None,
         };
         if let Some(acc) = Self::single_push(stmt) {
-            if Self::pipeline_reads(stmt, guard, &acc) {
+            if Self::pipeline_reads(iterable, stmt, guard, &acc) {
                 return None;
             }
             return Some(PipelineBuild::Push(acc));
         }
         if let Some(acc) = Self::index_store(stmt) {
-            if Self::pipeline_reads(stmt, guard, &acc) {
+            if Self::pipeline_reads(iterable, stmt, guard, &acc) {
                 return None;
             }
             return Some(PipelineBuild::Indexed(acc));
@@ -247,12 +250,13 @@ impl RustLoops {
         None
     }
 
-    /// Does the pipeline body read the accumulator outside its own write? The
-    /// guard, the pushed item, and the store's index and value are the only
-    /// other expressions; any read of the target makes the loop a scan over a
-    /// growing collection, not a per-item map.
-    fn pipeline_reads(stmt: &syn::Stmt, guard: Option<&syn::Expr>, acc: &str) -> bool {
-        if Self::expr_mentions(guard, acc) {
+    /// Does the pipeline read the accumulator outside its own write? The
+    /// iterable, the guard, the pushed item, and the store's index and value
+    /// are the only other expressions; any read of the target makes the loop a
+    /// scan over a growing collection, not a per-item map. `iterable` is None
+    /// for the fixer's body-shape check, which has no loop context.
+    fn pipeline_reads(iterable: Option<&syn::Expr>, stmt: &syn::Stmt, guard: Option<&syn::Expr>, acc: &str) -> bool {
+        if Self::expr_mentions(iterable, acc) || Self::expr_mentions(guard, acc) {
             return true;
         }
         if let Some(item) = Self::push_item(stmt) {
@@ -293,7 +297,7 @@ impl RustLoops {
     /// A loop whose body is exactly one collection build — one push or one
     /// indexed store.
     pub(crate) fn body_is_pipeline(stmts: &[syn::Stmt]) -> bool {
-        Self::pipeline_build(stmts).is_some()
+        Self::pipeline_build(stmts, None).is_some()
     }
     /// The flattened statement count of a loop body — every control-flow child
     /// counts, nested items are not the body's business.
