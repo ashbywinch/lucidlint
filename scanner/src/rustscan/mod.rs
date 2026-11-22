@@ -1038,6 +1038,10 @@ mod tests {
         assert!(!has_kind(&scan(guard), "loop-pipeline"), "{guard}");
         let store = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = vec![0; xs.len()];\n    for (i, _) in xs.iter().enumerate() {\n        out[i] = out.get(i).copied().unwrap_or(0);\n    }\n    out\n}\n";
         assert!(!has_kind(&scan(store), "loop-pipeline"), "{store}");
+        let index_read = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = vec![0; xs.len() + 1];\n    for x in xs {\n        out[out.len() - 1] = *x;\n    }\n    out\n}\n";
+        assert!(!has_kind(&scan(index_read), "loop-pipeline"), "{index_read}");
+        let indirect = "fn compute(v: &[u32]) -> u32 { v.len() as u32 }\nfn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for _ in xs {\n        out.push(compute(&out));\n    }\n    out\n}\n";
+        assert!(!has_kind(&scan(indirect), "loop-pipeline"), "{indirect}");
         // an independent guard is still a pipeline
         let ok = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        if *x > 0 {\n            out.push(*x);\n        }\n    }\n    out\n}\n";
         assert!(has_kind(&scan(ok), "loop-pipeline"), "{ok}");
