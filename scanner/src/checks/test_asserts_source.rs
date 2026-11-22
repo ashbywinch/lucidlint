@@ -121,7 +121,9 @@ fn walk_body(state: &mut ScanState, body: &[Stmt], source: &str, function: &str,
                 inputs.join(&branches);
             }
             Stmt::For(f) => {
-                let mut branches = vec![inputs.branch()]; // the zero-iteration path
+                // a loop reaches the join through zero iterations, a body
+                // iteration, or the orelse; a name must be source on all three
+                let mut branches = vec![inputs.branch()];
                 let mut body = inputs.branch();
                 walk_body(state, &f.body, source, function, &mut body);
                 branches.push(body);
@@ -131,7 +133,9 @@ fn walk_body(state: &mut ScanState, body: &[Stmt], source: &str, function: &str,
                 inputs.join(&branches);
             }
             Stmt::While(w) => {
-                let mut branches = vec![inputs.branch()]; // the zero-iteration path
+                // a loop reaches the join through zero iterations, a body
+                // iteration, or the orelse; a name must be source on all three
+                let mut branches = vec![inputs.branch()];
                 let mut body = inputs.branch();
                 walk_body(state, &w.body, source, function, &mut body);
                 branches.push(body);
@@ -151,6 +155,8 @@ fn walk_body(state: &mut ScanState, body: &[Stmt], source: &str, function: &str,
                 let mut body = pre.clone();
                 walk_body(state, &t.body, source, function, &mut body);
                 walk_body(state, &t.orelse, source, function, &mut body);
+                // a handler may run before or after a try-body rebind, so the
+                // pre-try state is the only input every handler path shares
                 let mut branches = vec![pre.clone(), body];
                 for handler in &t.handlers {
                     let ruff_python_ast::ExceptHandler::ExceptHandler(h) = handler;
@@ -165,7 +171,8 @@ fn walk_body(state: &mut ScanState, body: &[Stmt], source: &str, function: &str,
                 *inputs = finalbody;
             }
             Stmt::Match(m) => {
-                // without a wildcard the pre-match path is still possible
+                // a wildcard is not proven here, so the pre-match path is a
+                // reachable branch; a case-only rebind cannot be must-source
                 let mut branches = vec![inputs.branch()];
                 for case in &m.cases {
                     let mut branch = inputs.branch();
