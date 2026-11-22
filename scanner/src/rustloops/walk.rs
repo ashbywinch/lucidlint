@@ -309,7 +309,11 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
                 }
                 syn::Expr::Match(m) => {
                     // expression arm bodies can BE loops; walk each arm's
-                    // expression so those sites are judged where they are
+                    // expression so those sites are judged where they are.
+                    // `Branches` is the statement-list relation INSIDE a body;
+                    // it cannot represent a loop expression as the site itself,
+                    // so the walk handles the expression and preserves the arm
+                    // index in the path.
                     for (i, arm) in m.arms.iter().enumerate() {
                         self.walk_expr(&arm.body, &Self::child_path(path, i), in_loop);
                     }

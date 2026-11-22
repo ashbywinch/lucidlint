@@ -1006,7 +1006,8 @@ mod tests {
     fn loop_cursor_growth_through_a_mut_arg_is_a_traversal() {
         // issue #115/#113: the body grows the queue by handing it to a
         // function as `&mut`; that is a write, and the cursor walk is a
-        // traversal even though the callee does the push.
+        // traversal even though the callee does the push. A traversal emits
+        // NO verdict, so the assertions below are the expected silence.
         let src = "fn walk(roots: &[u32]) -> usize {\n    let mut queue: Vec<u32> = roots.to_vec();\n    let mut i = 0;\n    while i < queue.len() {\n        let x = queue[i];\n        let y = x + 1;\n        let z = y * 2;\n        push_next(&mut queue, z);\n        i += 1;\n    }\n    i\n}\nfn push_next(q: &mut Vec<u32>, v: u32) { q.push(v); }\n";
         let fs = scan(src);
         assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
@@ -1117,11 +1118,23 @@ mod tests {
     #[test]
     fn loop_self_feeding_for_is_not_a_pipeline() {
         // a loop that reads the collection it rebuilds is a traversal, not a
-        // build — the same rule as the Python side (#120), so "leave the loop"
-        // is the verdict and nothing is emitted
-        let src = "fn rebuild() -> Vec<u32> {\n    let mut out = vec![1];\n    for x in std::mem::take(&mut out) {\n        out.push(x);\n    }\n    out\n}\n";
+        // build — the same rule as the Python side (#120). The filter is keyed
+        // on the TARGET name, not any field read, so a loop over another
+        // collection's items is still a pipeline.
+        let fs = scan(&fixture("loop_self_feeding_for.rs"));
+        let pipes: Vec<&Finding> = fs.iter().filter(|f| f.kind == "loop-pipeline").collect();
+        assert_eq!(pipes.len(), 1, "{fs:?}");
+        assert_eq!(pipes[0].function, "collect_other", "{fs:?}");
+    }
+
+    #[test]
+    fn loop_in_match_arm_expression_is_judged() {
+        // a match arm body is an expression and can BE the loop site; the
+        // statement-list relation cannot represent that, so the walk handles
+        // the expression and keeps the arm index in the path.
+        let src = "fn collect(n: u32, xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    match n {\n        0 => for x in xs {\n            out.push(*x);\n        },\n        _ => {}\n    }\n    out\n}\n";
         let fs = scan(src);
-        assert!(!has_kind(&fs, "loop-pipeline"), "{fs:?}");
+        assert!(has_kind(&fs, "loop-pipeline"), "{fs:?}");
     }
 
     #[test]
