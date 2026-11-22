@@ -49,6 +49,8 @@ now reads one fact model per loop (`rustloops/facts.rs`), one branch relation
 - **A growing cursor is a traversal.** `while i < work.len()` whose body grows
   `work` is the same worklist as a pop-drain, not a one-output hoist. The BFS
   in `record_shape.rs` and its literal descent now get no stateful verdict.
+  The same filter covers a `for` whose iterable reads the collection its body
+  rebuilds (`for x in take(&mut out) { out.push(x) }`): no pipeline verdict.
 
 What remains is 276 loop findings, each a design decision:
 
@@ -70,26 +72,29 @@ with `main.rs` 6.
 
 The owner's bar is unchanged: a loop is rewritten only where the rule's
 advice holds. The difference is that the facts are now trustworthy — the
-three false premises above are fixed and pinned by tests — so this is the
-first count worth deciding on. The 25 collection builds are the shapes a
+false premises above are fixed and pinned by tests — so this is the first
+count worth deciding on. The 25 collection builds are the shapes a
 comprehension or chain does not express (only 2 of the 25 carry a `fix:`
 directive), so they are out of scope. That leaves the 251 stateful/shape
-findings, with three options:
+findings.
 
-- **(a) Accept.** The scanner is a hand-written AST visitor, not a report
-  generator. Many sites are the one-pass-over-scans idiom where a struct or a
-  helper only renames what the loop already says. Record the acceptance in
-  this plan; no config change, and the findings remain a standing signal.
+The first principle is silence: **if the owner judges a loop correct as
+written, the rule must emit no finding.** A warning whose correct fix is "do
+nothing" is noise, not a standing signal. So "accept the warnings" is not an
+option. The decision is:
+
+- **(a) Judge the shape correct and silence the rule for `scanner/` with a
+  why** — a `.lucidlint.toml` `ignore`, or `[lucidlint.guidance]` text, naming
+  the shapes that are correct (the traversals, the one-pass-over-scans
+  idioms). If only a subset is correct, say which and why; the rest stay
+  findings. The repo has no `.lucidlint.toml` today; this would be its first
+  entry, and the rule stays armed everywhere else.
 - **(b) Do the work.** 151 hoists (one named helper per site, real naming
   work), 55 sequence merges (the behaviour risk), 45 structs (mostly renaming
   a one-pass idiom). The traversals are out of scope either way.
-- **(c) Scope the rule for `scanner/`** in a documented config with a why: a
-  `.lucidlint.toml` `ignore` (or `[lucidlint.guidance]` text) for
-  `loop-pipeline` under the scanner, so the rule stays armed everywhere else.
-  The repo has no `.lucidlint.toml` today; this would be its first entry.
 
-The decision is the owner's: (a) is silence, (b) is a large grind, (c) is a
-policy change. Nothing else in this plan blocks on it.
+The decision is the owner's: (a) is a documented judgment, (b) is a large
+grind. Nothing else in this plan blocks on it.
 
 ## The small non-loop families (10)
 
@@ -138,7 +143,7 @@ sequences (76 → 55). Houses and album are byte-identical on both comparison
 keys — they have no Rust loop-pipeline findings in the scanned set — so the
 corpus contract holds.
 
-Verification: `make check`, `make test` (531 scanner + 323 Python tests),
+Verification: `make check`, `make test` (532 scanner + 323 Python tests),
 `make self-check` (`GATE: PASS`, 286 warnings, 0 fails); houses 420 / album
 699 identical on both `(file, kind, line)` and `(file, kind, message)`.
 

@@ -1115,6 +1115,16 @@ mod tests {
     }
 
     #[test]
+    fn loop_self_feeding_for_is_not_a_pipeline() {
+        // a loop that reads the collection it rebuilds is a traversal, not a
+        // build — the same rule as the Python side (#120), so "leave the loop"
+        // is the verdict and nothing is emitted
+        let src = "fn rebuild() -> Vec<u32> {\n    let mut out = vec![1];\n    for x in std::mem::take(&mut out) {\n        out.push(x);\n    }\n    out\n}\n";
+        let fs = scan(src);
+        assert!(!has_kind(&fs, "loop-pipeline"), "{fs:?}");
+    }
+
+    #[test]
     fn loop_while_never_pipeline_but_mutation_counts() {
         // a while condition is not an iterator — no combinator replaces it —
         // but its state writes still count for the stateful verdicts

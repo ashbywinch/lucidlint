@@ -126,7 +126,7 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
             RustLoops::pat_idents(p, &mut own);
         }
         let mutated = self.surviving_mutations(body, &own);
-        let reads = iterable
+        let reads: Vec<String> = iterable
             .map(|e| {
                 rustscan::RustShape::expr_idents(e)
                     .into_iter()
@@ -138,8 +138,16 @@ impl<'a, 'b> LoopWalk<'a, 'b> {
             (LoopKind::While, Some(cond)) => self.condition_drains(cond),
             _ => Vec::new(),
         };
+        // A `for` whose iterable reads the collection its body rebuilds is a
+        // traversal, not a pipeline: the comprehension would consume what it
+        // produces. Drop the build so `shape` stays silent.
         let build = if kind == LoopKind::For {
-            RustLoops::pipeline_build(body)
+            RustLoops::pipeline_build(body).filter(|build| {
+                let acc = match build {
+                    PipelineBuild::Push(acc) | PipelineBuild::Indexed(acc) => acc,
+                };
+                !reads.contains(acc)
+            })
         } else {
             None
         };
