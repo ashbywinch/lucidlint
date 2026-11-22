@@ -233,25 +233,35 @@ impl RustLoops {
             _ => return None,
         };
         if let Some(acc) = Self::single_push(stmt) {
-            // the item must not read the accumulator: pushing `out.len()` or
-            // guarding on `out` is a scan over the growing collection, not a
-            // per-item map.
-            let item_reads = Self::push_item(stmt).is_some_and(|item| Self::expr_mentions(Some(item), &acc));
-            if item_reads || Self::expr_mentions(guard, &acc) {
+            if Self::pipeline_reads(stmt, guard, &acc) {
                 return None;
             }
             return Some(PipelineBuild::Push(acc));
         }
         if let Some(acc) = Self::index_store(stmt) {
-            let store_reads = Self::store_parts(stmt).is_some_and(|(index, value)| {
-                Self::expr_mentions(Some(index), &acc) || Self::expr_mentions(Some(value), &acc)
-            });
-            if store_reads || Self::expr_mentions(guard, &acc) {
+            if Self::pipeline_reads(stmt, guard, &acc) {
                 return None;
             }
             return Some(PipelineBuild::Indexed(acc));
         }
         None
+    }
+
+    /// Does the pipeline body read the accumulator outside its own write? The
+    /// guard, the pushed item, and the store's index and value are the only
+    /// other expressions; any read of the target makes the loop a scan over a
+    /// growing collection, not a per-item map.
+    fn pipeline_reads(stmt: &syn::Stmt, guard: Option<&syn::Expr>, acc: &str) -> bool {
+        if Self::expr_mentions(guard, acc) {
+            return true;
+        }
+        if let Some(item) = Self::push_item(stmt) {
+            return Self::expr_mentions(Some(item), acc);
+        }
+        if let Some((index, value)) = Self::store_parts(stmt) {
+            return Self::expr_mentions(Some(index), acc) || Self::expr_mentions(Some(value), acc);
+        }
+        false
     }
 
     /// Does the expression (when present) read `name`? The pipeline's item,

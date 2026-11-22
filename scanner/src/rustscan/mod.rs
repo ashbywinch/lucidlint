@@ -977,71 +977,54 @@ mod tests {
 
     #[test]
     fn loop_sequence_ignores_sibling_branches() {
-        let src = fixture("loop_sequence_sibling_branches.rs");
-        for name in ["if_else", "same_block", "else_if"] {
-            assert!(src.contains(&format!("fn {name}(")), "the fixture lost {name}");
-        }
-        let fs = scan(&src);
-        let sequence = |name: &str| {
-            fs.iter()
-                .any(|f| f.function.as_str() == name && f.kind == "loop-sequence")
-        };
-        for name in ["if_else", "else_if"] {
-            assert!(!sequence(name), "{name} is sibling branches, not a sequence: {fs:?}");
-        }
-        assert!(sequence("same_block"), "same_block is a sequence: {fs:?}");
+        // the finding set is the user outcome: only the same-block pair is a
+        // sequence; the if/else and else-if arms contribute nothing.
+        let fs = scan(&fixture("loop_sequence_sibling_branches.rs"));
+        let sequence: Vec<(&str, &str)> = fs
+            .iter()
+            .filter(|f| f.kind == "loop-sequence")
+            .map(|f| (f.function.as_str(), f.kind.as_str()))
+            .collect();
+        assert_eq!(sequence, vec![("same_block", "loop-sequence")], "{fs:?}");
+        let finding = fs.iter().find(|f| f.kind == "loop-sequence").expect("sequence");
+        assert!(finding.message.contains("2 sequential loops"), "{}", finding.message);
     }
 
     #[test]
     fn loop_growing_cursor_is_a_traversal() {
-        let src = fixture("loop_growing_cursor.rs");
-        for name in ["local_walk", "mut_arg_walk", "param_walk", "no_growth"] {
-            assert!(src.contains(&format!("fn {name}(")), "the fixture lost {name}");
-        }
-        let fs = scan(&src);
-        let stateful = |name: &str| {
-            fs.iter().any(|f| {
-                f.function.as_str() == name
-                    && matches!(f.kind.as_str(), "loop-hoist" | "mutating-loop" | "loop-pipeline")
-            })
-        };
-        for name in ["local_walk", "mut_arg_walk", "param_walk"] {
-            assert!(!stateful(name), "{name} is a traversal, not a stateful verdict: {fs:?}");
-        }
-        assert!(stateful("no_growth"), "no_growth is a stateful loop: {fs:?}");
+        // the finding set is the user outcome: the three traversals produce
+        // nothing; the no-growth cursor is the one stateful loop.
+        let fs = scan(&fixture("loop_growing_cursor.rs"));
+        let mut stateful: Vec<(&str, &str)> = fs
+            .iter()
+            .filter(|f| matches!(f.kind.as_str(), "loop-hoist" | "mutating-loop" | "loop-pipeline"))
+            .map(|f| (f.function.as_str(), f.kind.as_str()))
+            .collect();
+        stateful.sort();
+        assert_eq!(stateful, vec![("no_growth", "mutating-loop")], "{fs:?}");
+        let finding = fs.iter().find(|f| f.kind == "mutating-loop").expect("stateful");
+        assert!(finding.message.contains("loop mutates"), "{}", finding.message);
     }
 
     #[test]
     fn loop_pipeline_requires_an_accumulator_independent_item_and_guard() {
-        let src = fixture("loop_pipeline_accumulator_reads.rs");
-        for name in [
-            "push_reads_len",
-            "guard_reads_len",
-            "store_value_reads",
-            "store_index_reads",
-            "call_reads_accumulator",
-            "call_reads_other",
-            "guard_reads_other",
-        ] {
-            assert!(src.contains(&format!("fn {name}(")), "the fixture lost {name}");
-        }
-        let fs = scan(&src);
-        let pipeline = |name: &str| {
-            fs.iter()
-                .any(|f| f.function.as_str() == name && f.kind == "loop-pipeline")
-        };
-        for name in [
-            "push_reads_len",
-            "guard_reads_len",
-            "store_value_reads",
-            "store_index_reads",
-            "call_reads_accumulator",
-        ] {
-            assert!(!pipeline(name), "{name} reads the accumulator: {fs:?}");
-        }
-        for name in ["call_reads_other", "guard_reads_other"] {
-            assert!(pipeline(name), "{name} is a pipeline: {fs:?}");
-        }
+        // the finding set is the user outcome: the five accumulator-reading
+        // loops produce nothing; the two independent calls do.
+        let fs = scan(&fixture("loop_pipeline_accumulator_reads.rs"));
+        let mut pipeline: Vec<(&str, &str)> = fs
+            .iter()
+            .filter(|f| f.kind == "loop-pipeline")
+            .map(|f| (f.function.as_str(), f.kind.as_str()))
+            .collect();
+        pipeline.sort();
+        assert_eq!(
+            pipeline,
+            vec![
+                ("call_reads_other", "loop-pipeline"),
+                ("guard_reads_other", "loop-pipeline"),
+            ],
+            "{fs:?}"
+        );
     }
 
     #[test]
