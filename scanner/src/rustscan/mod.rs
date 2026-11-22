@@ -985,6 +985,10 @@ mod tests {
         let seq = "fn f(xs: &[u32], ys: &[u32]) -> u32 {\n    let mut a = 0;\n    for x in xs { a += *x; }\n    for y in ys { a += *y; }\n    a\n}\n";
         let fs = scan(seq);
         assert!(has_kind(&fs, "loop-sequence"), "{fs:?}");
+        // an else-if arm is a separate branch too
+        let else_if = "fn f(n: u32, xs: &[u32], ys: &[u32]) -> u32 {\n    let mut a = 0;\n    if n == 0 {\n        for x in xs { a += *x; }\n    } else if n == 1 {\n        for y in ys { a += *y; }\n    }\n    a\n}\n";
+        let fs = scan(else_if);
+        assert!(!has_kind(&fs, "loop-sequence"), "{fs:?}");
     }
 
     #[test]
@@ -1012,6 +1016,31 @@ mod tests {
         let fs = scan(src);
         assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
         assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
+    }
+
+    #[test]
+    fn loop_growing_cursor_over_a_parameter_is_a_traversal() {
+        // a parameter is a survivor; the collection in the condition cannot be
+        // a loop-body local (the condition is outside the body)
+        let src = "fn grow(queue: &mut Vec<u32>) {\n    let mut i = 0;\n    while i < queue.len() {\n        queue.push(queue[i] + 1);\n        i += 1;\n    }\n}\n";
+        let fs = scan(src);
+        assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
+        assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
+    }
+
+    #[test]
+    fn loop_pipeline_requires_an_accumulator_independent_item_and_guard() {
+        // a push whose item or guard reads the accumulator is a scan over the
+        // growing collection, not a per-item map.
+        let push_len = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for _ in xs {\n        out.push(out.len() as u32);\n    }\n    out\n}\n";
+        assert!(!has_kind(&scan(push_len), "loop-pipeline"), "{push_len}");
+        let guard = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        if out.len() < 3 {\n            out.push(*x);\n        }\n    }\n    out\n}\n";
+        assert!(!has_kind(&scan(guard), "loop-pipeline"), "{guard}");
+        let store = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = vec![0; xs.len()];\n    for (i, _) in xs.iter().enumerate() {\n        out[i] = out.get(i).copied().unwrap_or(0);\n    }\n    out\n}\n";
+        assert!(!has_kind(&scan(store), "loop-pipeline"), "{store}");
+        // an independent guard is still a pipeline
+        let ok = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        if *x > 0 {\n            out.push(*x);\n        }\n    }\n    out\n}\n";
+        assert!(has_kind(&scan(ok), "loop-pipeline"), "{ok}");
     }
 
     #[test]

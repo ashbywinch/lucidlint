@@ -225,17 +225,59 @@ impl RustLoops {
     /// bare `acc.push(x)` or `acc[i] = v`, plain or behind ONE if-filter with
     /// no else. `None` for every other body.
     pub(crate) fn pipeline_build(stmts: &[syn::Stmt]) -> Option<PipelineBuild> {
-        let stmt = match stmts {
+        let (stmt, guard) = match stmts {
             [syn::Stmt::Expr(syn::Expr::If(i), _)] if i.else_branch.is_none() && i.then_branch.stmts.len() == 1 => {
-                &i.then_branch.stmts[0]
+                (&i.then_branch.stmts[0], Some(i.cond.as_ref()))
             }
-            [s] => s,
+            [s] => (s, None),
             _ => return None,
         };
         if let Some(acc) = Self::single_push(stmt) {
+            // the item must not read the accumulator: pushing `out.len()` or
+            // guarding on `out` is a scan over the growing collection, not a
+            // per-item map.
+            let item_reads = Self::push_item(stmt).is_some_and(|item| Self::expr_mentions(Some(item), &acc));
+            if item_reads || Self::expr_mentions(guard, &acc) {
+                return None;
+            }
             return Some(PipelineBuild::Push(acc));
         }
-        Self::index_store(stmt).map(PipelineBuild::Indexed)
+        if let Some(acc) = Self::index_store(stmt) {
+            let store_reads = Self::store_parts(stmt).is_some_and(|(index, value)| {
+                Self::expr_mentions(Some(index), &acc) || Self::expr_mentions(Some(value), &acc)
+            });
+            if store_reads || Self::expr_mentions(guard, &acc) {
+                return None;
+            }
+            return Some(PipelineBuild::Indexed(acc));
+        }
+        None
+    }
+
+    /// Does the expression (when present) read `name`? The pipeline's item,
+    /// guard and store value are checked against the accumulator; the
+    /// mutation's own receiver is not.
+    fn expr_mentions(e: Option<&syn::Expr>, name: &str) -> bool {
+        e.is_some_and(|e| rustscan::RustShape::expr_idents(e).iter().any(|n| n == name))
+    }
+
+    fn push_item(stmt: &syn::Stmt) -> Option<&syn::Expr> {
+        let syn::Stmt::Expr(syn::Expr::MethodCall(m), Some(_)) = stmt else {
+            return None;
+        };
+        (m.method == "push" && m.args.len() == 1).then(|| &m.args[0])
+    }
+
+    /// The `(index, value)` of one `acc[idx] = value` store.
+    fn store_parts(stmt: &syn::Stmt) -> Option<(&syn::Expr, &syn::Expr)> {
+        let syn::Stmt::Expr(syn::Expr::Assign(a), Some(_)) = stmt else {
+            return None;
+        };
+        let syn::Expr::Index(i) = a.left.as_ref() else {
+            return None;
+        };
+        matches!(i.expr.as_ref(), syn::Expr::Path(p) if p.path.segments.len() == 1)
+            .then(|| (i.index.as_ref(), a.right.as_ref()))
     }
 
     /// A loop whose body is exactly one collection build — one push or one
