@@ -961,18 +961,21 @@ mod tests {
 
     #[test]
     fn loop_hoist_sees_a_chained_receiver_write() {
-        // issue #113: `map.entry(k).or_default().push(v)` writes `map` through
-        // a method-call chain. With a second map write the loop is
-        // multi-output, not a one-output hoist.
-        let src = "fn split(xs: &[(u32, u32)], line: &mut std::collections::HashMap<u32, Vec<u32>>, file: &mut std::collections::HashMap<u32, u32>) {\n    for (k, v) in xs {\n        line.entry(*k).or_default().push(*v);\n        file.insert(*k, *v);\n        let a = *v + 1;\n        let b = a * 2;\n    }\n}\n";
-        let fs = scan(src);
-        assert!(has_kind(&fs, "mutating-loop"), "{fs:?}");
-        assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
-        // only the chained map: one output and a long body is a hoist
-        let only = "fn fill(xs: &[(u32, u32)], line: &mut std::collections::HashMap<u32, Vec<u32>>) {\n    for (k, v) in xs {\n        line.entry(*k).or_default().push(*v);\n        let a = *v + 1;\n        let b = a * 2;\n        let c = b + 1;\n    }\n}\n";
-        let fs = scan(only);
-        assert!(has_kind(&fs, "loop-hoist"), "{fs:?}");
-        assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
+        // issue #113: `line.entry(k).or_default().push(v)` writes `line`
+        // through a method-call chain. `split` has a second map write and is
+        // multi-output; `fill` has only the chain and is a one-output hoist.
+        let fs = scan(&fixture("loop_chained_receiver_write.rs"));
+        let mut findings: Vec<(&str, &str)> = fs
+            .iter()
+            .filter(|f| matches!(f.kind.as_str(), "loop-hoist" | "mutating-loop"))
+            .map(|f| (f.function.as_str(), f.kind.as_str()))
+            .collect();
+        findings.sort();
+        assert_eq!(
+            findings,
+            vec![("fill", "loop-hoist"), ("split", "mutating-loop")],
+            "{fs:?}"
+        );
     }
 
     #[test]
