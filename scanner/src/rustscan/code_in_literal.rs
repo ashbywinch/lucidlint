@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use syn::visit::Visit;
 use syn::{Expr, File, Lit, LitStr};
 
-use crate::code_text::{is_code_block, is_code_helper, is_code_snippet};
+use crate::code_text::CodeText;
 use crate::finding::Finding;
 
 const MESSAGE: &str =
@@ -35,7 +35,7 @@ impl LiteralProbe<'_> {
     fn report_first_arg(&mut self, args: &syn::punctuated::Punctuated<Expr, syn::Token![,]>) {
         if let Some(Expr::Lit(lit)) = args.first() {
             if let Lit::Str(literal) = &lit.lit {
-                if is_code_snippet(literal.value().as_str()) {
+                if CodeText::is_code_snippet(literal.value().as_str()) {
                     self.report(literal);
                 }
             }
@@ -75,7 +75,7 @@ impl<'ast> Visit<'ast> for LiteralProbe<'_> {
                 .path
                 .segments
                 .last()
-                .is_some_and(|segment| is_code_helper(segment.ident.to_string().as_str())),
+                .is_some_and(|segment| CodeText::is_code_helper(segment.ident.to_string().as_str())),
             _ => false,
         };
         if helper {
@@ -87,14 +87,14 @@ impl<'ast> Visit<'ast> for LiteralProbe<'_> {
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         // a method-form scan helper (`self.scan_src`) is the same call; the
         // compile/exec/eval forms are free functions, not methods
-        if matches!(call.method.to_string().as_str(), "scan" | "scan_src" | "scan_source") {
+        if CodeText::is_qualified_code_helper(call.method.to_string().as_str()) {
             self.report_first_arg(&call.args);
         }
         syn::visit::visit_expr_method_call(self, call);
     }
 
     fn visit_lit_str(&mut self, literal: &'ast LitStr) {
-        if is_code_block(literal.value().as_str()) {
+        if CodeText::is_code_block(literal.value().as_str()) {
             self.report(literal);
         }
     }

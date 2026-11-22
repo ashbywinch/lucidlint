@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use ruff_python_ast::{AnyNodeRef, Expr, Stmt};
 use ruff_text_size::Ranged;
 
-use crate::code_text::{is_code_block, is_code_helper, is_code_snippet};
+use crate::code_text::CodeText;
 use crate::finding::Finding;
 use crate::skeleton::{skel_children, Q};
 use crate::source::Source;
@@ -32,9 +32,9 @@ pub fn code_in_literal_findings(state: &mut ScanState, body: &[Stmt], source: &s
                 AnyNodeRef::ExprCall(call) => {
                     // the snippet is the helper's FIRST argument; `compile`'s
                     // filename and mode follow it and are not code
-                    if is_helper(call.func.as_ref()) {
+                    if is_helper_call(call.func.as_ref()) {
                         if let Some(Expr::StringLiteral(literal)) = call.arguments.args.first() {
-                            if is_code_snippet(literal.value.to_str()) {
+                            if CodeText::is_code_snippet(literal.value.to_str()) {
                                 helper_strings.insert(literal.range().start().to_usize());
                             }
                         }
@@ -43,7 +43,7 @@ pub fn code_in_literal_findings(state: &mut ScanState, body: &[Stmt], source: &s
                 AnyNodeRef::ExprStringLiteral(literal) => {
                     let start = literal.range().start().to_usize();
                     if !docstrings.contains(&start)
-                        && (helper_strings.contains(&start) || is_code_block(literal.value.to_str()))
+                        && (helper_strings.contains(&start) || CodeText::is_code_block(literal.value.to_str()))
                     {
                         state.findings.push(Finding {
                             logical_start: None,
@@ -75,12 +75,13 @@ fn mark_docstring(body: &[Stmt], docstrings: &mut HashSet<usize>) {
     }
 }
 
-fn is_helper(func: &Expr) -> bool {
+/// The call feeds a snippet to a helper: a bare scan/compile/exec name, or a
+/// module-qualified scan helper. The receiver path is not the signal — the
+/// helper's name is — and `re.compile` stays a regex by the qualified set.
+fn is_helper_call(func: &Expr) -> bool {
     match func {
-        Expr::Name(name) => is_code_helper(name.id.as_str()),
-        // a module-qualified scan helper (`helpers.scan_src`) is the same call;
-        // `re.compile` is a regex, so compile/exec/eval stay bare-name only
-        Expr::Attribute(attr) => matches!(attr.attr.as_str(), "scan" | "scan_src" | "scan_source"),
+        Expr::Name(name) => CodeText::is_code_helper(name.id.as_str()),
+        Expr::Attribute(attribute) => CodeText::is_qualified_code_helper(attribute.attr.as_str()),
         _ => false,
     }
 }

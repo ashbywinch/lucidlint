@@ -18,6 +18,7 @@ fixture must produce, compared on the finding's function name.
 
 import json
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -98,20 +99,37 @@ def _language_fixtures(directory: Path, rule: rule_metadata.Rule) -> list[str]:
     return present
 
 
+@dataclass(frozen=True)
+class Shape:
+    """One validated shape directory: its rule, its present languages, and
+    the findings each fixture must produce. Loading it is the validation, so
+    a caller can never read `expected` before the rule check."""
+
+    rule: rule_metadata.Rule
+    directory: Path
+    languages: tuple[str, ...]
+    expected: dict[str, list[dict]]
+
+
+def load_shape(rule_kind: str, directory: Path) -> Shape:
+    rule = rule_metadata.CATALOG.by_kind(rule_kind)
+    assert rule is not None, f"{directory}: '{rule_kind}' is not in the rule registry"
+    languages = tuple(_language_fixtures(directory, rule))
+    assert languages, f"{directory}: no fixture for any implemented language"
+    expected = _expected(directory)
+    assert set(expected) == set(languages), (
+        f"{directory}: expected.json names {sorted(expected)} but the fixtures are {sorted(languages)}"
+    )
+    return Shape(rule=rule, directory=directory, languages=languages, expected=expected)
+
+
 def test_parity_corpus_is_discovered_and_rules_exist():
     """The tree itself is the manifest: every rule directory names a catalog
-    rule, every shape directory carries the expected language files."""
+    rule, and every shape loads (language files, reasons, expected findings)."""
     shapes = _corpus()
     assert shapes, "the parity corpus is empty"
     for rule_kind, _shape, directory in shapes:
-        rule = rule_metadata.CATALOG.by_kind(rule_kind)
-        assert rule is not None, f"{directory}: '{rule_kind}' is not in the rule registry"
-        present = _language_fixtures(directory, rule)
-        assert present, f"{directory}: no fixture for any implemented language"
-        expected = _expected(directory)
-        assert set(expected) == set(present), (
-            f"{directory}: expected.json names {sorted(expected)} but the fixtures are {sorted(present)}"
-        )
+        load_shape(rule_kind, directory)
 
 
 @pytest.mark.parametrize(
@@ -122,12 +140,10 @@ def test_parity_corpus_is_discovered_and_rules_exist():
 def test_shape_parity(rule_kind: str, shape: str, directory: Path):
     """Both language fixtures express the shape the same way: the same rule
     findings on the same functions, or the same silence."""
-    rule = rule_metadata.CATALOG.by_kind(rule_kind)
-    assert rule is not None
-    expected = _expected(directory)
-    for language in _language_fixtures(directory, rule):
+    loaded = load_shape(rule_kind, directory)
+    for language in loaded.languages:
         fixture = directory / LANGUAGE_FILES[language]
-        assert _findings(rule_kind, fixture) == expected[language], (
+        assert _findings(rule_kind, fixture) == loaded.expected[language], (
             f"{fixture}: {rule_kind} findings disagree with expected.json"
         )
 

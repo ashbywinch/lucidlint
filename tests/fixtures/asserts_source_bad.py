@@ -12,6 +12,7 @@ def test_bare_assertion_helper():
 
 
 def test_conditional_fixture_load(debug):
+    # both paths bind a fixture; the branch-local rebind must not clear it
     src = fixture("loop_sequence_sibling_branches.rs")
     if debug:
         src = fixture("loop_sequence_sibling_branches.rs")

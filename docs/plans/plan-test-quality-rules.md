@@ -82,8 +82,8 @@ gaps are now visible in one corpus before a reviewer sees a PR.
 
 ## Verification
 
-- `make check`, `make test` (333 pytest tests, 542 scanner tests),
-  `make self-check` (`GATE: PASS`, 276 warnings — 261 of them the loop
+- `make check`, `make test` (333 pytest tests, 547 scanner tests),
+  `make self-check` (`GATE: PASS`, 275 warnings — 261 of them the loop
   family the owner is deciding on).
 - houses: on `origin/main`, 238 findings → 235 after removing the three
   stale `loop-pipeline` markers; album: 677 → 676 after removing the one.
