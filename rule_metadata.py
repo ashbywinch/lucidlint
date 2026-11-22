@@ -401,8 +401,9 @@ CATALOG = RuleCatalog([
          "Rust, a type with its impl). The message writes both cases: if the "
          "definitions are one concern, they become that class's fields and "
          "methods; if they are several, the module is split until each concern "
-         "has its module and its class. All but one class being a method-less "
-         "value record is one concern plus its records, and is exempt; a "
+         "has its module and its class. All but one class being a value record "
+         "is one concern plus its records, and is exempt: a record acts on no "
+         "value of its own — its methods only build it, or take no instance. A "
          "decorated function is a framework entry point, not a definition the "
          "module owns. The upper rung is `many-definitions`."),
     Rule("many-definitions", "warn", "architecture", ("python", "rust"),

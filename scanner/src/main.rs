@@ -5595,7 +5595,7 @@ mod tests {
         assert!(msg.contains("package"), "{msg}");
         assert!(msg.contains("one file per class"), "{msg}");
         assert!(msg.contains("re-exported from __init__.py"), "{msg}");
-        assert!(msg.contains("no methods may stay"), "{msg}");
+        assert!(msg.contains("act on no value of its own"), "{msg}");
         assert_eq!(hits[0].file, "pkg/widgets.py");
         assert_eq!(hits[0].line, 0);
         assert!(!f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
@@ -5640,6 +5640,48 @@ mod tests {
         let records = several_classes_source(4, 0);
         let f = scan_corpus(&[("pkg/records.py", &records)]);
         assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn several_definitions_passes_a_class_and_the_record_its_constructor_builds() {
+        // #119: a value's constructor is how the value is made, not behaviour.
+        // One class and a record beside it is one concept, exactly as when the
+        // record has no methods at all.
+        let src = "class Marker:\n    def __init__(self, signal):\n        self.signal = signal\n\n\nclass Suppressions:\n    def add(self, marker):\n        self.markers.append(marker)\n\n\ndef parse(text):\n    return text\n";
+        let f = scan_corpus(&[("pkg/markers.py", src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        // a second class that acts on its own values is a second concern
+        let src = "class Marker:\n    def __init__(self, signal):\n        self.signal = signal\n\n\nclass Suppressions:\n    def add(self, marker):\n        self.markers.append(marker)\n\n\nclass Grammar:\n    def read(self, text):\n        return text\n";
+        let f = scan_corpus(&[("pkg/markers.py", src)]);
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn several_definitions_passes_a_class_its_records_and_its_helpers() {
+        // one class, the record it fills, and two helpers: the record adds no
+        // behaviour and the helpers belong to the class, so the module is one
+        // concept — the functions arm speaks only for a module the functions
+        // dominate (#119)
+        let src = "class BatchProjection:\n    def get(self, key):\n        return self.rows[key]\n\n\nclass BatchRow:\n    def __init__(self, values):\n        self.values = values\n\n\ndef read_row(store, key):\n    return store.get(key)\n\n\ndef write_row(store, key, value):\n    store.put(key, value)\n";
+        let f = scan_corpus(&[("pkg/batch_row.py", src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        // the same two helpers with the class gone are a bag of functions
+        let src = "def read_row(store, key):\n    return store.get(key)\n\n\ndef write_row(store, key, value):\n    store.put(key, value)\n\n\ndef drop_row(store, key):\n    store.pop(key)\n";
+        let f = scan_corpus(&[("pkg/rows.py", src)]);
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn several_definitions_reports_the_types_when_types_and_functions_tie() {
+        // two classes with behaviour and two helpers: the helpers belong to
+        // the classes, so the types arm names them — the functions arm would
+        // tell the reader to make the helpers a class instead
+        let src = "class Mark:\n    def width(self):\n        return self.w\n\n\nclass Ink:\n    def size(self):\n        return self.n\n\n\ndef draw(mark):\n    return mark.width()\n\n\ndef erase(ink):\n    return ink.size()\n";
+        let f = scan_corpus(&[("pkg/marks.py", src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("2 of them classes"), "{}", hits[0].message);
+        assert!(!hits[0].message.contains("2 of them functions"), "{}", hits[0].message);
     }
 
     #[test]
@@ -5718,6 +5760,23 @@ mod tests {
         assert!(!msg.contains("0 of them types"), "{msg}");
         assert!(msg.contains("1 function group"), "{msg}");
         assert!(msg.contains("The functions group by the type they take"), "{msg}");
+    }
+
+    #[test]
+    fn several_definitions_passes_a_rust_type_whose_impl_only_builds_it() {
+        // #119: Marker's impl builds markers, so Marker is a record. The
+        // module is Suppressions and its record — one concept.
+        let src = "pub enum Marker {\n    File { signal: String },\n}\n\nimpl Marker {\n    pub fn parse(text: &str) -> Vec<Marker> {\n        vec![Marker::File { signal: text.to_string() }]\n    }\n\n    fn signal_and_why(rest: &str) -> (String, String) {\n        (rest.to_string(), rest.to_string())\n    }\n}\n\npub struct Suppressions {\n    markers: Vec<Marker>,\n}\n\nimpl Suppressions {\n    pub fn add(&mut self, marker: Marker) {\n        self.markers.push(marker);\n    }\n}\n\npub fn scan(text: &str) -> usize {\n    text.len()\n}\n";
+        let rs = rustscan::RustScan::scan(src, "crate/src/suppressions.rs", true);
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/suppressions.rs");
+        let f = checks::ModuleShape::findings(&[("crate/src/suppressions.rs".to_string(), scan.module_shape.clone())]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        // two types whose impls act on their own values are two concerns
+        let src = "pub struct Marker {\n    signal: String,\n}\n\nimpl Marker {\n    pub fn signal(&self) -> &str {\n        &self.signal\n    }\n}\n\npub struct Suppressions {\n    markers: Vec<Marker>,\n}\n\nimpl Suppressions {\n    pub fn add(&mut self, marker: Marker) {\n        self.markers.push(marker);\n    }\n}\n\npub fn scan(text: &str) -> usize {\n    text.len()\n}\n";
+        let rs = rustscan::RustScan::scan(src, "crate/src/suppressions.rs", true);
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/suppressions.rs");
+        let f = checks::ModuleShape::findings(&[("crate/src/suppressions.rs".to_string(), scan.module_shape.clone())]);
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
     }
 
     #[test]
