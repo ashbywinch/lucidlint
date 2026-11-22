@@ -977,46 +977,51 @@ mod tests {
 
     #[test]
     fn loop_sequence_ignores_sibling_branches() {
-        // loops in if/else/else-if arms never run together; two loops in one
-        // block still are a sequence.
         let fs = scan(&fixture("loop_sequence_sibling_branches.rs"));
-        let mut functions: Vec<&str> = fs
-            .iter()
-            .filter(|f| f.kind == "loop-sequence")
-            .map(|f| f.function.as_str())
-            .collect();
-        functions.sort();
-        assert_eq!(functions, vec!["same_block"], "{fs:?}");
+        let sequence = |name: &str| {
+            fs.iter()
+                .any(|f| f.function.as_str() == name && f.kind == "loop-sequence")
+        };
+        for name in ["if_else", "else_if"] {
+            assert!(!sequence(name), "{name} is sibling branches, not a sequence: {fs:?}");
+        }
+        assert!(sequence("same_block"), "same_block is a sequence: {fs:?}");
     }
 
     #[test]
     fn loop_growing_cursor_is_a_traversal() {
-        // a cursor over a collection the body grows is a traversal: a local,
-        // through a &mut argument, or a parameter. The same cursor without
-        // growth is a stateful loop.
         let fs = scan(&fixture("loop_growing_cursor.rs"));
-        let mut findings: Vec<(&str, &str)> = fs
-            .iter()
-            .filter(|f| f.kind == "loop-hoist" || f.kind == "mutating-loop" || f.kind == "loop-pipeline")
-            .map(|f| (f.function.as_str(), f.kind.as_str()))
-            .collect();
-        findings.sort();
-        assert_eq!(findings, vec![("no_growth", "mutating-loop")], "{fs:?}");
+        let stateful = |name: &str| {
+            fs.iter().any(|f| {
+                f.function.as_str() == name
+                    && matches!(f.kind.as_str(), "loop-hoist" | "mutating-loop" | "loop-pipeline")
+            })
+        };
+        for name in ["local_walk", "mut_arg_walk", "param_walk"] {
+            assert!(!stateful(name), "{name} is a traversal, not a stateful verdict: {fs:?}");
+        }
+        assert!(stateful("no_growth"), "no_growth is a stateful loop: {fs:?}");
     }
 
     #[test]
     fn loop_pipeline_requires_an_accumulator_independent_item_and_guard() {
-        // the item, guard, store index and store value must not read the
-        // accumulator; `call_reads_other` and `guard_reads_other` are the
-        // controls that still build a pipeline.
         let fs = scan(&fixture("loop_pipeline_accumulator_reads.rs"));
-        let mut functions: Vec<&str> = fs
-            .iter()
-            .filter(|f| f.kind == "loop-pipeline")
-            .map(|f| f.function.as_str())
-            .collect();
-        functions.sort();
-        assert_eq!(functions, vec!["call_reads_other", "guard_reads_other"], "{fs:?}");
+        let pipeline = |name: &str| {
+            fs.iter()
+                .any(|f| f.function.as_str() == name && f.kind == "loop-pipeline")
+        };
+        for name in [
+            "push_reads_len",
+            "guard_reads_len",
+            "store_value_reads",
+            "store_index_reads",
+            "call_reads_accumulator",
+        ] {
+            assert!(!pipeline(name), "{name} reads the accumulator: {fs:?}");
+        }
+        for name in ["call_reads_other", "guard_reads_other"] {
+            assert!(pipeline(name), "{name} is a pipeline: {fs:?}");
+        }
     }
 
     #[test]
