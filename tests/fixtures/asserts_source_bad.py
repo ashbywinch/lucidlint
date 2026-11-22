@@ -11,8 +11,8 @@ def test_bare_assertion_helper():
     assertEqual(src, "fn same_block(")
 
 
-def test_conditional_fixture_load(debug=True):
-    src = ""
+def test_conditional_fixture_load(debug):
+    src = fixture("loop_sequence_sibling_branches.rs")
     if debug:
         src = fixture("loop_sequence_sibling_branches.rs")
     assert "fn same_block(" in src
