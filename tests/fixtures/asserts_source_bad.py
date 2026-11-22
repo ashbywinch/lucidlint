@@ -9,3 +9,9 @@ def test_loop_shape_is_in_the_corpus():
 def test_bare_assertion_helper():
     src = fixture("loop_sequence_sibling_branches.rs")
     assertEqual(src, "fn same_block(")
+
+
+def test_conditional_fixture_load():
+    if True:
+        src = fixture("loop_sequence_sibling_branches.rs")
+    assert "fn same_block(" in src

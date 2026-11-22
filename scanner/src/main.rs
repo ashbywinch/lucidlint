@@ -3634,9 +3634,10 @@ mod tests {
     fn test_asserts_source_flags_assertion_on_fixture_input() {
         let f = scan_src_test(include_str!("../../tests/fixtures/asserts_source_bad.py"));
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "test-asserts-source").collect();
-        assert_eq!(hits.len(), 2, "{f:?}");
+        assert_eq!(hits.len(), 3, "{f:?}");
         assert_eq!(hits[0].function, "test_loop_shape_is_in_the_corpus");
         assert_eq!(hits[1].function, "test_bare_assertion_helper");
+        assert_eq!(hits[2].function, "test_conditional_fixture_load");
         assert_eq!(hits[0].message, TEST_ASSERTS_SOURCE_MESSAGE);
     }
 
