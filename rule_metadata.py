@@ -553,6 +553,12 @@ CATALOG = RuleCatalog([
          "subfolder per thing its members are about, never by file kind, size "
          "or number."),
     # ---- style
+    Rule("code-in-literal", "warn", "style", "Both",
+         "A string literal holds a code block (line-start `fn`/`def`/`class`/"
+         "`let`/`impl`/`use`/`import`/`for`/`if`/`match`, several lines) or a "
+         "snippet passed to a scan/compile/exec helper — the code has no file, "
+         "so no linter or test runs it. Move it to a real file under "
+         "`tests/fixtures/` and read the file."),
     Rule("magic-number", "warn", "style", "Both",
          "Numeric literal (outside 0/1/2) used as an operand — name it as a "
          "constant.",

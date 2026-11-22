@@ -1,0 +1,2 @@
+def f(a, b, c, d):
+    return a and (b and (c and d))

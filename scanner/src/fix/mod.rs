@@ -76,7 +76,7 @@ mod loop_tests {
 
     #[test]
     fn sequence_refuses_interleaved_statements() {
-        let src = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    let n = out.len();\n    for y in xs {\n        out.push(*y);\n    }\n    out\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__af27ece8.rs");
         assert!(fix_loop_sequence(src, 1).is_err());
     }
 
@@ -86,7 +86,7 @@ mod loop_tests {
         // in a later fn rewrote through the wrong accumulator (or refused
         // with "no for-loop at line N"). The finding line selects the
         // enclosing fn.
-        let src = "fn first() -> u32 {\n    1\n}\n\nfn collect(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_collect__9a9d88be.rs");
         let out = LoopPipeline::fix(src, 7).expect("fix applies in the later fn");
         assert!(
             out.contains("let out: Vec<_> = xs.iter().map(|x| *x).collect();"),
@@ -120,9 +120,9 @@ mod hoist_tests {
 
     #[test]
     fn hoist_requires_a_name_and_refuses_mid_read() {
-        let src = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__cd21b710.rs");
         assert!(LoopHoist::fix(src, 3, "").is_err());
-        let read = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        let n = out.len();\n        out.push(*x + n as u32);\n    }\n    out\n}\n";
+        let read = include_str!("../../../tests/fixtures/code/sample_f__037eaf9e.rs");
         assert!(LoopHoist::fix(read, 3, "h").is_err());
     }
 
@@ -130,7 +130,7 @@ mod hoist_tests {
     fn hoist_option_arg_with_nested_parens_and_string() {
         // the paren scan this replaced would stop at the inner `)` of
         // `format!("({})", x)` — the span slice keeps the whole argument
-        let src = "fn f(xs: &[u32]) -> Vec<String> {\n    let mut out: Vec<String> = Vec::new();\n    for x in xs {\n        let doubled = *x * 2;\n        if doubled > 1 {\n            out.push(format!(\"({})\", doubled));\n        }\n    }\n    out\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__9939c1a6.rs");
         let out = LoopHoist::fix(src, 3, "label").expect("fix applies");
         assert!(out.contains("filter_map"), "{out}");
         assert!(out.contains("return Some(format!(\"({})\", doubled));"), "{out}");
@@ -144,7 +144,7 @@ mod hoist_tests {
         // the literal must not read as a second push site (that flipped the
         // helper to the Option shape: filter_map + a dead `None` where an
         // unconditional single push returns T directly)
-        let src = "fn f(xs: &[u32]) -> Vec<String> {\n    let mut out: Vec<String> = Vec::new();\n    for x in xs {\n        out.push(format!(\"out.push({})\", x));\n    }\n    out\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__cdb4f647.rs");
         let out = LoopHoist::fix(src, 3, "label").expect("fix applies");
         assert!(out.contains("\"out.push({})\""), "{out}");
         assert!(out.contains("fn _label(x: String) -> String"), "{out}");
@@ -158,7 +158,7 @@ mod hoist_tests {
         // the rebuild found each push by text and then skipped to the next
         // `;` — a block in the argument ends that scan mid-argument, leaving
         // the push (and an undeclared helper-local) in the helper
-        let src = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out: Vec<u32> = Vec::new();\n    for x in xs {\n        let scaled = *x * 2;\n        if scaled > 1 {\n            out.push((|y: u32| { let z = y * 2; z })(scaled));\n        }\n    }\n    out\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__211d96dc.rs");
         let out = LoopHoist::fix(src, 3, "label").expect("fix applies");
         assert!(
             out.contains("return Some((|y: u32| { let z = y * 2; z })(scaled));"),

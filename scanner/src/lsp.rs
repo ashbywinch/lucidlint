@@ -556,8 +556,15 @@ mod tests {
         // scan_source alone emits per-file findings only — duplicate/unused
         // never appear (they materialize in the CLI's repo-wide merge), so
         // the magic number is the surviving family; lines map 0-based
-        let scan = LspState::scan_buffer("file:///tmp/buf.py", "def f():\n    return a * 60\n");
-        let diags = LspState::diagnostics_for(&scan, "def f():\n    return a * 60\n", None);
+        let scan = LspState::scan_buffer(
+            "file:///tmp/buf.py",
+            include_str!("../../tests/fixtures/code/sample_diagnostics_exclude_repo_wide_and_map_lines__7194e7cd.py"),
+        );
+        let diags = LspState::diagnostics_for(
+            &scan,
+            include_str!("../../tests/fixtures/code/sample_diagnostics_exclude_repo_wide_and_map_lines__7194e7cd.py"),
+            None,
+        );
         let kinds: Vec<&str> = diags
             .iter()
             .filter_map(|d| d["message"].as_str())
@@ -636,8 +643,12 @@ mod tests {
         // LSP positions are UTF-16 code units, not bytes: a non-ASCII char
         // before the anchor (here "café" = 5 bytes, 4 units) must shift the
         // byte column by the byte/unit delta (review bot)
-        let scan = LspState::scan_buffer("file:///tmp/buf.py", "def f():\n    return café * 60\n");
-        let src = "def f():\n    return café * 60\n";
+        let scan = LspState::scan_buffer(
+            "file:///tmp/buf.py",
+            include_str!("../../tests/fixtures/code/sample_diagnostic_positions_are_utf16_code_units__8c422811.py"),
+        );
+        let src =
+            include_str!("../../tests/fixtures/code/sample_diagnostic_positions_are_utf16_code_units__8c422811.py");
         let diags = LspState::diagnostics_for(&scan, src, None);
         let magic = diags
             .iter()
@@ -769,7 +780,8 @@ mod tests {
         let mut docs = LspState::new();
         docs.documents.insert(
             "file:///tmp/buf.py".to_string(),
-            "def f():\n    return a * 60\n".to_string(),
+            include_str!("../../tests/fixtures/code/sample_diagnostics_exclude_repo_wide_and_map_lines__7194e7cd.py")
+                .to_string(),
         );
         let mut out = Vec::new();
         let msg = serde_json::json!({
@@ -883,13 +895,29 @@ mod tests {
         std::fs::create_dir(dir.join(".git")).unwrap(); // repo-root marker for derive_root
                                                         // dead.py defines _helper referenced nowhere; live.py is unrelated —
                                                         // the per-buffer scan of dead.py alone cannot see the absence
-        std::fs::write(dir.join("dead.py"), "def _helper():\n    return 1\n").unwrap();
-        std::fs::write(dir.join("live.py"), "def live():\n    return 2\n").unwrap();
+        std::fs::write(
+            dir.join("dead.py"),
+            include_str!(
+                "../../tests/fixtures/code/sample_didsave_publishes_repo_wide_unused_for_saved_file__2cfed781.py"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("live.py"),
+            include_str!(
+                "../../tests/fixtures/code/sample_didsave_publishes_repo_wide_unused_for_saved_file__d59a7d90.py"
+            ),
+        )
+        .unwrap();
         let uri = format!("file://{}/dead.py", dir.display());
         let mut state = LspState::new();
-        state
-            .documents
-            .insert(uri.clone(), "def _helper():\n    return 1\n".to_string());
+        state.documents.insert(
+            uri.clone(),
+            include_str!(
+                "../../tests/fixtures/code/sample_didsave_publishes_repo_wide_unused_for_saved_file__2cfed781.py"
+            )
+            .to_string(),
+        );
         let mut out = Vec::new();
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
@@ -915,13 +943,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir(dir.join(".git")).unwrap(); // repo-root marker for derive_root
-        std::fs::write(dir.join("dead.py"), "def _helper():\n    return 1\n").unwrap();
-        std::fs::write(dir.join("live.py"), "def live():\n    return 2\n").unwrap();
+        std::fs::write(
+            dir.join("dead.py"),
+            include_str!(
+                "../../tests/fixtures/code/sample_didsave_publishes_repo_wide_unused_for_saved_file__2cfed781.py"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("live.py"),
+            include_str!(
+                "../../tests/fixtures/code/sample_didsave_publishes_repo_wide_unused_for_saved_file__d59a7d90.py"
+            ),
+        )
+        .unwrap();
         let uri = format!("file://{}/dead.py", dir.display());
         let mut state = LspState::new();
-        state
-            .documents
-            .insert(uri.clone(), "def _helper():\n    return 1\n".to_string());
+        state.documents.insert(
+            uri.clone(),
+            include_str!(
+                "../../tests/fixtures/code/sample_didsave_publishes_repo_wide_unused_for_saved_file__2cfed781.py"
+            )
+            .to_string(),
+        );
         let mut out = Vec::new();
         let save = serde_json::json!({
             "jsonrpc": "2.0",
@@ -935,7 +979,13 @@ mod tests {
             "first save must flag dead code: {text}"
         );
         // live.py now CALLS _helper — written to disk, the editor never saw it
-        std::fs::write(dir.join("live.py"), "def live():\n    return _helper()\n").unwrap();
+        std::fs::write(
+            dir.join("live.py"),
+            include_str!(
+                "../../tests/fixtures/code/sample_didsave_scan_cache_tracks_external_file_changes__5242093d.py"
+            ),
+        )
+        .unwrap();
         out.clear();
         assert!(LspState::dispatch(&mut state, &save, &mut out));
         let text2 = String::from_utf8(out).unwrap();

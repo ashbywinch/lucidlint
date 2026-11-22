@@ -46,24 +46,20 @@ from orchestrator.sources.source_walk import SourceWalk, gitignored_docs
 from orchestrator.vendoring import vendor_path
 from orchestrator.version import VERSION, Version
 
+_CODE_FIXTURES = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "code"
+
+
+def code_fixture(name: str) -> str:
+    """Read a code sample kept in a real file under tests/fixtures/code/."""
+    return (_CODE_FIXTURES / name).read_text()
+
+
 ALL_RULE_KINDS = frozenset(rule_metadata.CATALOG.kinds())
 RULE_GROUPS = rule_metadata.CATALOG.groups()
 
-APP_SRC = """def alpha(a):
-    if a:
-        return 1
-    return 0
+APP_SRC = code_fixture("module__d246af0e.py")
 
-def beta(b):
-    return b
-"""
-
-SWALLOW_SRC = """def f():
-    try:
-        g()
-    except Exception:
-        pass
-"""
+SWALLOW_SRC = code_fixture("module__03ba191f.py")
 
 
 # --------------------------------------------------------------------------- fakes
@@ -156,12 +152,13 @@ def make_repo(tmp_path, app_src=APP_SRC):
     (repo / "tests" / "unit").mkdir(parents=True)
     (repo / "scripts").mkdir()
     (repo / "houses" / "app.py").write_text(app_src)
-    (repo / "scripts" / "oneoff.py").write_text("def main():\n    pass\n")
-    (repo / "tests" / "unit" / "test_app.py").write_text("def test_x():\n    pass\n")
+    (repo / "scripts" / "oneoff.py").write_text(code_fixture("build__37868550.py"))
+    (repo / "tests" / "unit" / "test_app.py").write_text(code_fixture("build__31d3b45e.py"))
     return repo
 
 
 # --------------------------------------------------------------------------- fixtures/helpers
+
 
 def materialize_test_repo(tmp_path) -> Path:
     """Extract the canonical lucidlint test repo (a committed fixture —
@@ -189,9 +186,7 @@ def git_routes(history="", diff="", branch="test-branch", commit="abc1234", log_
 
     def ls_files_stdout(args):
         repo = Path(args[2])
-        rels = sorted(
-            str(p.relative_to(repo)) for p in list(repo.rglob("*.py")) + list(repo.rglob("*.rs"))
-        )
+        rels = sorted(str(p.relative_to(repo)) for p in list(repo.rglob("*.py")) + list(repo.rglob("*.rs")))
         return "\0".join(rels) + ("\0" if rels else "")
 
     routes.append((lambda a: is_git(a) and a[3] == "ls-files", ls_files_stdout, 0))
@@ -238,11 +233,11 @@ def test_coverage_xml_unparseable(tmp_path):
 def test_coverage_xml_malformed_line_skipped(tmp_path, capsys):
     repo = make_repo(tmp_path)
     (repo / "coverage.xml").write_text(
-        "<coverage><class filename=\"houses/app.py\">"
-        "<line hits=\"1\" number=\"abc\"/>"
-        "<line hits=\"1\" number=\"2\"/>"
+        '<coverage><class filename="houses/app.py">'
+        '<line hits="1" number="abc"/>'
+        '<line hits="1" number="2"/>'
         "</class>"
-        "<class filename=\"notes.txt\"><line hits=\"1\" number=\"1\"/></class>"
+        '<class filename="notes.txt"><line hits="1" number="1"/></class>'
         "</coverage>"
     )
     cr = runner(repo).load_coverage()
@@ -348,9 +343,7 @@ def test_large_function_fires_without_the_graph(tmp_path, capsys):
 
 def test_large_function_is_not_claimed_for_a_test_file_without_include_tests(tmp_path, capsys):
     repo = make_repo(tmp_path)
-    (repo / "tests" / "unit" / "test_big.py").write_text(
-        "def test_big():\n" + "    x = 1\n" * 130 + "    assert x\n"
-    )
+    (repo / "tests" / "unit" / "test_big.py").write_text("def test_big():\n" + "    x = 1\n" * 130 + "    assert x\n")
     run_main(repo, "--file", "tests/unit/test_big.py")
     assert "large-function" not in capsys.readouterr().out
     run_main(repo, "--file", "tests/unit/test_big.py", "--include-tests")
@@ -393,15 +386,27 @@ def _file_history_with(routes, repo):
 
 def test_file_history_timeout_and_nonzero(tmp_path):
     repo = make_repo(tmp_path)
-    fh = _file_history_with([(
-        lambda a: a[:2] == ["git", "-C"] and a[3:5] == ["log", "--name-only"],
-        subprocess.TimeoutExpired, 0,
-    )], repo)
+    fh = _file_history_with(
+        [
+            (
+                lambda a: a[:2] == ["git", "-C"] and a[3:5] == ["log", "--name-only"],
+                subprocess.TimeoutExpired,
+                0,
+            )
+        ],
+        repo,
+    )
     assert fh.churn == {}  # timeout degrades to empty history
-    fh = _file_history_with([(
-        lambda a: a[:2] == ["git", "-C"] and a[3:5] == ["log", "--name-only"],
-        "", 1,
-    )], repo)
+    fh = _file_history_with(
+        [
+            (
+                lambda a: a[:2] == ["git", "-C"] and a[3:5] == ["log", "--name-only"],
+                "",
+                1,
+            )
+        ],
+        repo,
+    )
     assert fh.churn == {}  # nonzero exit degrades to empty history
 
 
@@ -424,7 +429,6 @@ def test_gate_output_has_no_diff_talk(tmp_path, capsys):
     assert "in_diff" not in json.dumps(meta)
 
 
-
 # --------------------------------------------------------------------------- scoring/merge/baseline units
 def test_raw_score_high_risk_callers():
     base = FileHistory.raw_score("high-risk", 0.5, 0)
@@ -440,7 +444,7 @@ def test_merge_keeps_distinct_line_findings(tmp_path, capsys):
     finding behind the other and the fix loop would thrash)."""
     repo = make_repo(
         tmp_path,
-        app_src="def g():\n    set_limits(10, 20)\n    Money(\"0\", \"GBP\")\n",
+        app_src=code_fixture("sample_merge_keeps_distinct_line_findings__8967dc9c.py"),
     )
     run_main(repo, "--warn", "--json")
     data = json.loads(capsys.readouterr().out)
@@ -455,7 +459,7 @@ def test_record_shape_keeps_same_line_parameter_findings(tmp_path, capsys):
     the second behind the first (issue #57 follow-up)."""
     repo = make_repo(
         tmp_path,
-        app_src="def pair(first: tuple[int, int], second: tuple[int, int]) -> None:\n    pass\n",
+        app_src=code_fixture("sample_record_shape_keeps_same_line_parameter_findings__e81ccef4.py"),
     )
     run_main(repo, "--warn", "--json")
     data = json.loads(capsys.readouterr().out)
@@ -477,38 +481,7 @@ def test_merge_warn_into_fail_target():
     assert "WARN: m2" in out[0].note  # the differing message lands in the note
 
 
-
-
-SIBLING_VALUES_SRC = '''from pathlib import Path
-
-
-class BatchPaths:
-    def __init__(self, work_dir: Path, batch_id: str) -> None:
-        self.work_dir = work_dir
-        self.batch_id = batch_id
-
-    @property
-    def guess_dir(self) -> Path:
-        return self.work_dir / self.batch_id / "ocr-guess"
-
-    @property
-    def oriented_dir(self) -> Path:
-        return self.work_dir / self.batch_id / "oriented"
-
-
-class BatchReadings:
-    def __init__(self, work_dir: Path, batch_id: str) -> None:
-        self.work_dir = work_dir
-        self.batch_id = batch_id
-
-    @property
-    def guess_dir(self) -> Path:
-        return self.work_dir / self.batch_id / "ocr-guess"
-
-    @property
-    def oriented_dir(self) -> Path:
-        return self.work_dir / self.batch_id / "oriented"
-'''
+SIBLING_VALUES_SRC = code_fixture("module__5dba5fac.py")
 
 
 def test_sibling_value_class_names_both_classes(tmp_path, capsys):
@@ -544,9 +517,7 @@ def test_config_ignored_detail_reconciles_with_the_total():
 def test_facts_line_never_guesses_the_anchor_kind():
     # the anchor field carries a class name too — "This function changed
     # often" on a class is a mislabel
-    a = Action(
-        "latent-class", "fail", "x.py", 10, "BatchPaths", "m", 1.0, 12, "1700000000", ""
-    )
+    a = Action("latent-class", "fail", "x.py", 10, "BatchPaths", "m", 1.0, 12, "1700000000", "")
     line = RenderCtx._facts_line(a)
     assert line is not None
     assert "function" not in line.lower(), line
@@ -554,9 +525,7 @@ def test_facts_line_never_guesses_the_anchor_kind():
 
 
 def test_lifecycle_note_renders_a_date_not_an_epoch(tmp_path):
-    a = Action(
-        "unused", "warn", "tools/scan.py", 10, "f", "m", 1.0, 2, "1792686177", ""
-    )
+    a = Action("unused", "warn", "tools/scan.py", 10, "f", "m", 1.0, 2, "1792686177", "")
     gate = runner(Path("."))
     gate._lifecycle_notes([a])
     assert "2026-10-22" in a.note, a.note
@@ -564,9 +533,7 @@ def test_lifecycle_note_renders_a_date_not_an_epoch(tmp_path):
 
 
 def test_config_ignored_advice_does_not_invite_extending_the_scope(capsys):
-    a = Action(
-        "standard", "warn", "tools/archive.py", 10, "_slug", "m", 1.0, 0, "", "", signal="duplicate"
-    )
+    a = Action("standard", "warn", "tools/archive.py", 10, "_slug", "m", 1.0, 0, "", "", signal="duplicate")
     RenderCtx._render_file_group("tools/archive.py", [a], {"duplicate": "tools/eval_memory.py"})
     out = capsys.readouterr().out
     assert "extend the ignore scope" not in out, out
@@ -702,29 +669,9 @@ def test_flat_folder_counts_docs(tmp_path, capsys):
     assert "21 docs" in out
 
 
-DUPLICATE_COLLECT_SRC = '''def collect(rows):
-    out = []
-    for row in rows:
-        text = str(row).strip()
-        if not text:
-            continue
-        out.append(text)
-    return out
+DUPLICATE_COLLECT_SRC = code_fixture("module__ea6a1c12.py")
 
-
-def never_called() -> int:
-    return 42
-'''
-
-DUPLICATE_GATHER_SRC = '''def gather(items):
-    out = []
-    for item in items:
-        text = str(item).strip()
-        if not text:
-            continue
-        out.append(text)
-    return out
-'''
+DUPLICATE_GATHER_SRC = code_fixture("module__4d9e6ff2.py")
 
 
 def _single_package_repo(tmp_path) -> Path:
@@ -819,7 +766,9 @@ def test_corrupt_baseline_ignored(tmp_path, capsys):
 def test_git_lsfiles_failure_falls_back_to_rglob(tmp_path, capsys):
     repo = make_repo(tmp_path)
     (repo / ".venv").mkdir()
-    (repo / ".venv" / "x.py").write_text("def f():\n    return 60\n")  # would fail if scanned
+    (repo / ".venv" / "x.py").write_text(
+        code_fixture("sample_did_change_updates_diagnostics__3df572ce.py")
+    )  # would fail if scanned
     routes = [
         (lambda a: a[:2] == ["git", "-C"] and a[3:5] == ["log", "--name-only"], "", 1),
         (lambda a: a[:2] == ["git", "-C"] and "-L" in a[3:], "", 1),
@@ -846,7 +795,9 @@ def test_no_pygit2_file_list_uses_git_and_honors_gitignore(tmp_path):
     repo = materialize_test_repo(tmp_path)
     (repo / ".gitignore").write_text(".tools/\n")
     (repo / ".tools").mkdir()
-    (repo / ".tools" / "self.py").write_text("def f():\n    return 60\n")  # would fail the gate if scanned
+    (repo / ".tools" / "self.py").write_text(
+        code_fixture("sample_did_change_updates_diagnostics__3df572ce.py")
+    )  # would fail the gate if scanned
 
     def is_git(args):
         return args[:2] == ["git", "-C"]
@@ -1054,15 +1005,24 @@ def test_scanner_failure_raises(tmp_path):
 
 def test_scanner_garbage_findings_dropped(tmp_path, capsys):
     repo = make_repo(tmp_path)
-    scan_json = json.dumps({
-        "schema_version": 4,
-        "findings": [{
-            "kind": "standard", "signal": "standard", "severity": "fail",
-            "file": "/elsewhere/x.py", "line": 1, "function": "", "message": "drop me",
-        }],
-        "cc": [{"function": "f", "line": 1, "cc": 20, "file": "/elsewhere/x.py"}],
-        "complexity": [],
-    })
+    scan_json = json.dumps(
+        {
+            "schema_version": 4,
+            "findings": [
+                {
+                    "kind": "standard",
+                    "signal": "standard",
+                    "severity": "fail",
+                    "file": "/elsewhere/x.py",
+                    "line": 1,
+                    "function": "",
+                    "message": "drop me",
+                }
+            ],
+            "cc": [{"function": "f", "line": 1, "cc": 20, "file": "/elsewhere/x.py"}],
+            "complexity": [],
+        }
+    )
     routes = git_routes()
     routes.insert(0, (lambda a: str(a[0]).endswith("lucidlint"), scan_json, 0))
     rc = run_main(repo, routes=routes)
@@ -1110,12 +1070,28 @@ def test_graph_contract_failure_degrades(tmp_path, capsys):
 
 def test_actions_from_rust_test_only_filter():
     rf = RustFindings(
-        {"tests/unit/test_app.py": [
-            RustFinding(kind="magic-number", signal="magic-number", severity="fail",
-                           file="tests/unit/test_app.py", line=1, function="", message="not test-only"),
-            RustFinding(kind="standard", signal="monkeypatch", severity="fail",
-                           file="tests/unit/test_app.py", line=2, function="", message="test-only rule"),
-        ]},
+        {
+            "tests/unit/test_app.py": [
+                RustFinding(
+                    kind="magic-number",
+                    signal="magic-number",
+                    severity="fail",
+                    file="tests/unit/test_app.py",
+                    line=1,
+                    function="",
+                    message="not test-only",
+                ),
+                RustFinding(
+                    kind="standard",
+                    signal="monkeypatch",
+                    severity="fail",
+                    file="tests/unit/test_app.py",
+                    line=2,
+                    function="",
+                    message="test-only rule",
+                ),
+            ]
+        },
         {},
     )
     acts = RustScan._actions_from_rust(rf, include_tests=False, file_churn=Counter(), last_modified={})
@@ -1125,6 +1101,7 @@ def test_actions_from_rust_test_only_filter():
 def test_render_actions_acks(tmp_path, capsys):
     repo = make_repo(tmp_path)
     import argparse
+
     ack = Action("standard", "ack", "houses/app.py", 1, "", "m", 1, 0, "", "")
     RenderCtx._render_actions(repo, argparse.Namespace(baseline=None), [], [ack])
     assert "acknowledged in baseline (1): houses/app.py:1" in capsys.readouterr().out
@@ -1140,7 +1117,6 @@ def test_render_latent_class_variant_shows_no_suppression_recipe(capsys):
     a.signal = "data-clump"
     RenderCtx._render_file_group("x.py", [a])
     assert "suppress with:" not in capsys.readouterr().out
-
 
 
 def test_render_stamps_judgement_and_mechanical(capsys):
@@ -1179,24 +1155,7 @@ def test_naming_notice_printed_once_iff_judge_true(tmp_path, capsys):
     # finding exists — never repeated per finding
     repo = make_repo(tmp_path)
     (repo / "houses" / "app.py").write_text(
-        "def f(a):\n"
-        "    if a:\n        return 1\n"
-        "    if a:\n        return 2\n"
-        "    if a:\n        return 3\n"
-        "    if a:\n        return 4\n"
-        "    if a:\n        return 5\n"
-        "    if a:\n        return 6\n"
-        "    if a:\n        return 7\n"
-        "    if a:\n        return 8\n"
-        "    if a:\n        return 9\n"
-        "    if a:\n        return 10\n"
-        "    if a:\n        return 11\n"
-        "    if a:\n        return 12\n"
-        "    if a:\n        return 13\n"
-        "    if a:\n        return 14\n"
-        "    if a:\n        return 15\n"
-        "    if a:\n        return 16\n"
-        "    return 0\n"
+        code_fixture("sample_naming_notice_printed_once_iff_judge_true__d777d52b.py")
     )
     run_main(repo, "--warn")
     out = capsys.readouterr().out
@@ -1204,9 +1163,9 @@ def test_naming_notice_printed_once_iff_judge_true(tmp_path, capsys):
     assert "what the domain calls the THING" in out, out
 
     # a report with no judge-true finding prints no notice
-    (
-        repo / "houses" / "app.py"
-    ).write_text("def g(items):\n    out = []\n    for i in items:\n        out.append(i)\n    return out\n")
+    (repo / "houses" / "app.py").write_text(
+        code_fixture("sample_naming_notice_printed_once_iff_judge_true__ea502231.py")
+    )
     run_main(repo, "--warn")
     assert "NAMING —" not in capsys.readouterr().out
 
@@ -1215,8 +1174,20 @@ def test_seam_groups_combine_overlapping_member_sets():
     # #34: union-find over overlapping seam_members sets — the issue's
     # 62-findings case renders ONE heading; the groups array is always present
     actions = [
-        Action("latent-class", "fail", "a.py", i, f"f{i}", "m", 1, 0, "", "",
-                  seam_members=("fingerprint", "folder"), fix_kind="extract-class")
+        Action(
+            "latent-class",
+            "fail",
+            "a.py",
+            i,
+            f"f{i}",
+            "m",
+            1,
+            0,
+            "",
+            "",
+            seam_members=("fingerprint", "folder"),
+            fix_kind="extract-class",
+        )
         for i in (1, 2, 3)
     ]
     groups = RenderCtx._seam_groups(actions)
@@ -1227,14 +1198,27 @@ def test_seam_groups_combine_overlapping_member_sets():
     assert "share ONE seam" in heading
     assert RenderCtx._seam_groups(actions[:1]) == []  # below the >=3 bar
 
+
 # ------------------------------------------------------------------ #26-#34 evaluation round: render mechanics (B1-B6)
 def test_seam_heading_never_renders_empty_member_list():
     # B1: three findings transitively share seams but no single member is in
     # all of them — the heading must drop the parenthetical, never render
     # "the seams: )" (round: "these 14 findings share ONE seam (the seams: )")
     actions = [
-        Action("latent-class", "fail", "a.py", i, f"f{i}", "m", 1, 0, "", "",
-                  seam_members=members, fix_kind="extract-class")
+        Action(
+            "latent-class",
+            "fail",
+            "a.py",
+            i,
+            f"f{i}",
+            "m",
+            1,
+            0,
+            "",
+            "",
+            seam_members=members,
+            fix_kind="extract-class",
+        )
         for i, members in enumerate((("a", "b"), ("b", "c"), ("c", "d")), start=1)
     ]
     groups = RenderCtx._seam_groups(actions)
@@ -1272,9 +1256,7 @@ def test_facts_line_names_complex_and_churn_facts(capsys):
     a = Action("complexity", "fail", "x.py", 3, "f", "m", 17.0, 14, "", "")
     RenderCtx._render_file_group("x.py", [a])
     out = capsys.readouterr().out
-    assert (
-        "-> Is complex (17 decision points) and changed often (14 changes)." in out
-    ), out
+    assert "-> Is complex (17 decision points) and changed often (14 changes)." in out, out
 
 
 def test_facts_line_absent_on_quiet_finding(capsys):
@@ -1294,14 +1276,11 @@ def test_facts_line_skips_absent_metrics_and_names_callers():
     # callers clause fires only when the fan-in list is present and >= 10.
     quiet = Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "")
     assert RenderCtx._facts_line(quiet) is None
-    few = Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "",
-                    callers=[f"c{i}" for i in range(9)])
+    few = Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "", callers=[f"c{i}" for i in range(9)])
     assert RenderCtx._facts_line(few) is None
-    many = Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "",
-                     callers=[f"c{i}" for i in range(11)])
+    many = Action("standard", "fail", "x.py", 3, "f", "m", 1.0, 0, "", "", callers=[f"c{i}" for i in range(11)])
     assert RenderCtx._facts_line(many) == "Has 11 callers."
-    triple = Action("complexity", "fail", "x.py", 3, "f", "m", 20.0, 12, "", "",
-                       callers=[f"c{i}" for i in range(10)])
+    triple = Action("complexity", "fail", "x.py", 3, "f", "m", 20.0, 12, "", "", callers=[f"c{i}" for i in range(10)])
     assert RenderCtx._facts_line(triple) == (
         "Is complex (20 decision points), changed often (12 changes), and has 10 callers."
     )
@@ -1327,18 +1306,23 @@ def test_summary_header_names_scope_not_change_cost(tmp_path, capsys):
     for word in ("RISK", "risk", "change-cost", "percentile"):
         assert word not in out, out
 
+
 def test_legacy_baseline_prints_migration_line(tmp_path, capsys):
     # B3: a baseline carrying the pre-round 'actions' schema (line-less keys)
     # must print ONE migration line — never read as "+0 acknowledged" debt,
     # never failed as phantom-stale entries
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
     baseline = tmp_path / "lucidlint.json"
-    baseline.write_text(json.dumps({
-        "actions": [
-            "record-shape:houses/app.py:from_dict",
-            "swallow:houses/app.py:f",
-        ]
-    }))
+    baseline.write_text(
+        json.dumps(
+            {
+                "actions": [
+                    "record-shape:houses/app.py:from_dict",
+                    "swallow:houses/app.py:f",
+                ]
+            }
+        )
+    )
     rc = run_main(repo, "--baseline", str(baseline))
     out, err = capsys.readouterr()
     assert rc == 1  # the current swallow finding is unacknowledged
@@ -1354,9 +1338,9 @@ def test_repo_root_lucidlint_json_legacy_replaces_cannot_tell(tmp_path, capsys):
     # pre-round acknowledgements must not be silently read as "no baseline —
     # cannot tell what is new" — the migration note names it
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
-    (repo / "lucidlint.json").write_text(json.dumps({
-        "actions": ["record-shape:houses/app.py:from_dict", "swallow:houses/app.py:f"]
-    }))
+    (repo / "lucidlint.json").write_text(
+        json.dumps({"actions": ["record-shape:houses/app.py:from_dict", "swallow:houses/app.py:f"]})
+    )
     run_main(repo)
     out = capsys.readouterr().out
     assert "lucidlint.json uses a pre-round 'actions' schema" in out
@@ -1370,18 +1354,20 @@ def test_ledger_names_baseline_flag_with_repo_root_acks(tmp_path, capsys):
     # attaches the flag itself so the reader learns it from the message
     # (round-3: "95 acknowledged action(s)" read as "+0 acknowledged")
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)
-    (repo / "lucidlint.json").write_text(json.dumps({
-        "actions": [
-            "swallow:houses/app.py:4:f",
-            "record-shape:houses/app.py:1:from_dict",
-        ]
-    }))
+    (repo / "lucidlint.json").write_text(
+        json.dumps(
+            {
+                "actions": [
+                    "swallow:houses/app.py:4:f",
+                    "record-shape:houses/app.py:1:from_dict",
+                ]
+            }
+        )
+    )
     run_main(repo)
     out = capsys.readouterr().out
     assert (
-        "+ 0 acknowledged (baseline) — "
-        "2 acknowledged in lucidlint.json — "
-        "pass --baseline lucidlint.json to activate"
+        "+ 0 acknowledged (baseline) — 2 acknowledged in lucidlint.json — pass --baseline lucidlint.json to activate"
     ) in out
     gate = next(line for line in out.splitlines() if line.startswith("GATE:"))
     assert "acknowledged" not in gate and "action(s)" not in gate, gate
@@ -1399,7 +1385,9 @@ def test_suppression_ledger_reconciles_all_three_accounts(tmp_path, capsys):
     # scanner.
     src = (
         SWALLOW_SRC  # reported fail
-        + "\ndef m():\n    return 60 * 24\n"  # magic-number warn -> config-ignored
+        + code_fixture(
+            "sample_suppression_ledger_reconciles_all_three_accounts__4f0189d5.py"
+        )  # magic-number warn -> config-ignored
         + 'RECORD = {"a": 1}  # lucidlint: ignore record-shape data table row\n'  # census
     )
     repo = make_repo(tmp_path, app_src=src)
@@ -1443,7 +1431,9 @@ def test_ledger_single_home_of_numbers_gate_repeats_none(tmp_path, capsys):
     # the mode and the target count only (Phase 4: no change-cost line).
     src = (
         SWALLOW_SRC  # 1 reported fail
-        + "\ndef m():\n    return 60 * 24\n"  # magic-number warn -> config-ignored
+        + code_fixture(
+            "sample_suppression_ledger_reconciles_all_three_accounts__4f0189d5.py"
+        )  # magic-number warn -> config-ignored
         + 'RECORD = {"a": 1}  # lucidlint: ignore record-shape data table row\n'  # census
     )
     repo = make_repo(tmp_path, app_src=src)
@@ -1466,8 +1456,13 @@ def test_ledger_single_home_of_numbers_gate_repeats_none(tmp_path, capsys):
     assert re.search(r"across \d+ failing targets?", gate), gate
     assert "change-cost" not in gate and "RISK" not in gate, gate
     for count_word in (
-        "action(s)", "reported", " acknowledged", " config-ignored", " comment-suppressed",
-        "warnings never-fail", "fails +",
+        "action(s)",
+        "reported",
+        " acknowledged",
+        " config-ignored",
+        " comment-suppressed",
+        "warnings never-fail",
+        "fails +",
     ):
         assert count_word not in gate, gate
 
@@ -1477,8 +1472,12 @@ def test_config_ignored_family_advisory_names_config_key(tmp_path, capsys):
     # offered a bare per-site marker as the remedy — the per-item line says
     # the family is config-ignored and names the config key (round:
     # "suppress with:" next to "Fix findings instead of suppressing")
-    repo = make_repo(tmp_path, app_src="def f():\n    return 60 * 24\n")
-    (repo / "scripts" / "oneoff.py").write_text("def main():\n    return 60 * 24\n")
+    repo = make_repo(
+        tmp_path, app_src=code_fixture("sample_config_ignored_family_advisory_names_config_key__5a7f865c.py")
+    )
+    (repo / "scripts" / "oneoff.py").write_text(
+        code_fixture("sample_config_ignored_family_advisory_names_config_key__81c9a803.py")
+    )
     (repo / ".lucidlint.toml").write_text('[lucidlint."houses/**"]\nignore = ["magic-number"]\n')
     run_main(repo, "--warn")
     out = capsys.readouterr().out
@@ -1573,13 +1572,7 @@ def test_marker_one_line_above_window_renders_finding_no_stale(tmp_path, capsys)
     # tool never tells the reader to move a marker). "Stale — remove it" is
     # reserved for a signal that fires NOWHERE in the file. (rightmove_url
     # shape: marker one line past the window reported 'stale' round 2/3)
-    src = (
-        "def f():\n"
-        "    # lucidlint: ignore magic-number deliberate ordering constant\n"
-        "    pass\n"
-        "def g():\n"
-        "    return 60 * 24\n"
-    )
+    src = code_fixture("sample_marker_one_line_above_window_renders_finding_no_stale__53a1eb10.py")
     repo = make_repo(tmp_path, app_src=src)
     run_main(repo, "--warn")
     out = capsys.readouterr().out
@@ -1630,7 +1623,7 @@ def test_marker_one_line_above_class_suppresses_class_line_finding(tmp_path, cap
     # above the class binds it (the window counts from the class line).
     # The class is named after the file stem so class-module does not fire
     # and merge away the unused finding (both render kind "standard")
-    src = "class App:\n    pass\n"
+    src = code_fixture("sample_marker_one_line_above_class_suppresses_class_line_finding__5a30adf2.py")
     repo = make_repo(tmp_path, app_src="# lucidlint: ignore unused kept for the repl\n" + src)
     run_main(repo, "--warn", "--json")
     data = json.loads(capsys.readouterr().out)
@@ -1647,11 +1640,18 @@ def test_bulk_suppression_renders_at_report_level(capsys):
     # ONCE at report level, NOT inside a per-file section at its arbitrary
     # anchor file (round: layout.py:1)
     bulk = Action(
-        "bulk-suppression", "warn", "layout.py", 1, "",
+        "bulk-suppression",
+        "warn",
+        "layout.py",
+        1,
+        "",
         "record-shape suppressed at 12 sites - repeated identical whys are POLICY, "
         "not per-site judgment: move the rule into [lucidlint.guidance] config guidance "
         "or a documented config ignore, or fix the recurring cause",
-        1, 0, "", "",
+        1,
+        0,
+        "",
+        "",
     )
     warn = Action("magic-number", "warn", "x.py", 3, "f", "m1", 1, 0, "", "")
     RenderCtx._render_actions(Path("repo"), argparse.Namespace(baseline=None), [bulk, warn], [])
@@ -1662,16 +1662,18 @@ def test_bulk_suppression_renders_at_report_level(capsys):
     assert out.index("bulk suppression") < out.index("x.py")
 
 
-
 def test_json_carries_naming_notice_and_groups(tmp_path, capsys):
     repo = make_repo(tmp_path)
     (repo / "houses" / "app.py").write_text(
-        "def f(a):\n" + "    if a:\n        return 1\n" * 16 + "    return 0\n"
+        code_fixture("sample_json_carries_naming_notice_and_groups__c76da39c.py")
+        + code_fixture("sample_json_carries_naming_notice_and_groups__acc234cf.py") * 16
+        + code_fixture("sample_json_carries_naming_notice_and_groups__36d8864e.py")
     )
     run_main(repo, "--warn", "--json")
     data = json.loads(capsys.readouterr().out)
-    assert data["naming_notice"] is not None, (data["naming_notice"] is not None)
+    assert data["naming_notice"] is not None, data["naming_notice"] is not None
     assert "groups" in data and data["groups"] == []
+
 
 def test_render_standard_bucket_keeps_the_suppression_signal(capsys):
     """A finding collapsed to the `standard` catch-all has NO display-bucket
@@ -1709,6 +1711,7 @@ def test_main_stale_coverage_warning(tmp_path, capsys):
     assert rc == 1  # the except finding still fails the gate
     assert "snapshot predates the repo's tests" in out
 
+
 # --------------------------------------------------------------------------- scan-core contract
 def test_empty_repo_passes_clean(tmp_path, capsys):
     repo = tmp_path / "emptyrepo"
@@ -1731,12 +1734,12 @@ def test_missing_binary_fails_fast(tmp_path):
         assert "scan binary is required" in str(e)
 
 
-
 def test_scanner_build_staleness_is_a_path_mtime_decision(tmp_path):
     """The stale-binary guard: a local cargo build (.../scanner/target/
     release/<bin>) whose scanner sources are newer is refused; a fresh build
     is fine; bundled/env binaries (not under .../scanner/target/release)
     are never refused even when a dev checkout's sources are newer."""
+
     def touch(p: Path, when: float) -> None:
         os.utime(p, (when, when))
 
@@ -1761,11 +1764,12 @@ def test_scanner_build_staleness_is_a_path_mtime_decision(tmp_path):
     touch(bundled, 1000.0)
     assert RustScan._scanner_build_is_stale(bundled) is False
 
+
 # --------------------------------------------------------------------------- rust layer
 def test_rust_files_are_scanned(tmp_path, capsys):
     repo = make_repo(tmp_path)
     (repo / "src").mkdir()
-    (repo / "src" / "mod.rs").write_text("pub fn f() {\n    let x = 3 * 60;\n    x;\n}\n")
+    (repo / "src" / "mod.rs").write_text(code_fixture("sample_rust_files_are_scanned__f3d7b7ec.py"))
     rc = run_main(repo)
     out = capsys.readouterr().out
     assert rc == 1  # the rust finding fails the gate
@@ -1778,7 +1782,9 @@ def test_config_global_ignore_suppresses(tmp_path, capsys):
     """A .lucidlint.toml global ignore suppresses the signal — and must not
     crash (regression: Action lacked a signal field, so any ignore entry
     raised AttributeError at the config filter)."""
-    repo = make_repo(tmp_path, app_src="def f():\n    return 60 * 24\n")
+    repo = make_repo(
+        tmp_path, app_src=code_fixture("sample_config_ignored_family_advisory_names_config_key__5a7f865c.py")
+    )
     (repo / ".lucidlint.toml").write_text('[lucidlint]\nignore = ["magic-number"]\n')
     rc = run_main(repo, "--warn")
     out = capsys.readouterr().out
@@ -1788,7 +1794,9 @@ def test_config_global_ignore_suppresses(tmp_path, capsys):
 
 def test_config_group_ignore_suppresses(tmp_path, capsys):
     """group:style suppresses magic-number (a style member)."""
-    repo = make_repo(tmp_path, app_src="def f():\n    return 60 * 24\n")
+    repo = make_repo(
+        tmp_path, app_src=code_fixture("sample_config_ignored_family_advisory_names_config_key__5a7f865c.py")
+    )
     (repo / ".lucidlint.toml").write_text('[lucidlint]\nignore = ["group:style"]\n')
     rc = run_main(repo, "--warn")
     out = capsys.readouterr().out
@@ -1798,7 +1806,9 @@ def test_config_group_ignore_suppresses(tmp_path, capsys):
 
 def test_config_per_path_ignore_suppresses(tmp_path, capsys):
     """A per-path ignore suppresses only under its glob."""
-    repo = make_repo(tmp_path, app_src="def f():\n    return 60 * 24\n")
+    repo = make_repo(
+        tmp_path, app_src=code_fixture("sample_config_ignored_family_advisory_names_config_key__5a7f865c.py")
+    )
     (repo / ".lucidlint.toml").write_text('[lucidlint]\n[lucidlint."houses/**"]\nignore = ["magic-number"]\n')
     rc = run_main(repo, "--warn")
     out = capsys.readouterr().out
@@ -1810,13 +1820,14 @@ def test_config_ignored_ledger_shows_when_all_actions_ignored(tmp_path, capsys):
     """The debt ledger must print even when the config-ignores ate every
     action — "clean" while debt is hidden is the invisibility the ledger
     exists to remove (review finding)."""
-    repo = make_repo(tmp_path, app_src="def f():\n    return 60 * 24\n")
+    repo = make_repo(
+        tmp_path, app_src=code_fixture("sample_config_ignored_family_advisory_names_config_key__5a7f865c.py")
+    )
     (repo / ".lucidlint.toml").write_text('[lucidlint]\nignore = ["magic-number"]\n')
     run_main(repo, "--warn")
     out = capsys.readouterr().out
     assert "config-ignored" in out
     assert "magic-number=" in out
-
 
 
 # --------------------------------------------------------------------------- fix + scan contracts
@@ -1847,11 +1858,9 @@ def test_preview_refusal_on_no_seam_is_silent(tmp_path, capsys):
     # None source, and the tool stays completely SILENT — nothing here is
     # fixable, and the missing-name refusal would send the agent on a naming
     # chase that cannot succeed (review bot; R28 three-shape contract)
-    repo = make_repo(tmp_path, app_src="def f(a, b):\n    return a + b\n")
-    (repo / "houses" / "app.py").write_text("def f(a, b):\n    return a + b\n")
-    rc = run_main(
-        repo, "fix", "--kind", "long-param-list", "--file", "houses/app.py", "--line", "1"
-    )
+    repo = make_repo(tmp_path, app_src=code_fixture("sample_preview_refusal_on_no_seam_is_silent__8afbd433.py"))
+    (repo / "houses" / "app.py").write_text(code_fixture("sample_preview_refusal_on_no_seam_is_silent__8afbd433.py"))
+    rc = run_main(repo, "fix", "--kind", "long-param-list", "--file", "houses/app.py", "--line", "1")
     out = capsys.readouterr().out
     assert rc == 0
     assert out.strip() == "", out
@@ -1859,12 +1868,20 @@ def test_preview_refusal_on_no_seam_is_silent(tmp_path, capsys):
 
 
 def test_magic_fix_cli_derives_anchor_column(tmp_path, capsys):
-    src = "class W:\n    def f(self):\n        return a * 60 + b * 90\n"
+    src = code_fixture("sample_magic_literal_fix_honors_column_anchor__0da673be.py")
     repo = make_repo(tmp_path, app_src=src)
     (repo / "houses" / "app.py").write_text(src)
     rc = run_main(
-        repo, "fix", "--kind", "magic-number", "--file", "houses/app.py",
-        "--line", "3", "--name", "NINETY",
+        repo,
+        "fix",
+        "--kind",
+        "magic-number",
+        "--file",
+        "houses/app.py",
+        "--line",
+        "3",
+        "--name",
+        "NINETY",
     )
     assert rc == 0
     fixed = (repo / "houses" / "app.py").read_text()
@@ -1876,7 +1893,7 @@ def test_callee_flag_selects_the_named_call_on_the_line(tmp_path, capsys):
     # NAMED call; before the forwarding fix the flag was parsed and dropped,
     # and the first call on the line was keyworded with the wrong params
     # (review bot)
-    src = 'def g():\n    Other("x", 1) + Money("0", "GBP")\n'
+    src = code_fixture("sample_callee_flag_selects_the_named_call_on_the_line__3450d2fc.py")
     repo = make_repo(tmp_path, app_src=src)
     (repo / "houses" / "app.py").write_text(src)
     rc = run_main(
@@ -1903,11 +1920,9 @@ def test_fix_refuses_rust_targets_cleanly(tmp_path, capsys):
     """A name-less extract-method on a .rs target must refuse SILENTLY (R28:
     extract-method's semantic name is required; the scanner would otherwise
     write `fn ()` — invalid Rust). No traceback, no file modification."""
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     lib = repo / "houses" / "lib.rs"
-    lib.write_text(
-        "pub fn f(x: i32) -> i32 {\n    if x > 10 { x * 2 } else { x }\n}\n"
-    )
+    lib.write_text("pub fn f(x: i32) -> i32 {\n    if x > 10 { x * 2 } else { x }\n}\n")
     run_main(repo, "fix", "--kind", "extract-method", "--file", "houses/lib.rs", "--line", "1")
     out = capsys.readouterr().out
     assert "Traceback" not in out, "a .rs fix target crashed — it must refuse cleanly"
@@ -1918,7 +1933,7 @@ def test_fix_refuses_rust_targets_cleanly(tmp_path, capsys):
 def test_fix_rust_loop_pipeline_rewrites_push_loop(tmp_path, capsys):
     """End to end on the .rs surface: a loop-pipeline finding's `fix:`
     directive resolves through the orchestrator into the syn rewrite."""
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     lib = repo / "houses" / "lib.rs"
     lib.write_text((Path(__file__).resolve().parent / "fixtures" / "loop_pipeline_rs.rs").read_text())
     run_main(repo, "fix", "--kind", "loop-pipeline", "--file", "houses/lib.rs", "--line", "3")
@@ -1927,7 +1942,7 @@ def test_fix_rust_loop_pipeline_rewrites_push_loop(tmp_path, capsys):
 
 
 def test_fix_rust_loop_sequence_concatenates_chain(tmp_path, capsys):
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     lib = repo / "houses" / "lib.rs"
     lib.write_text((Path(__file__).resolve().parent / "fixtures" / "loop_sequence_rs_fix.rs").read_text())
     run_main(repo, "fix", "--kind", "loop-sequence", "--file", "houses/lib.rs", "--line", "1")
@@ -1938,7 +1953,7 @@ def test_fix_rust_loop_sequence_concatenates_chain(tmp_path, capsys):
 def test_fix_rust_loop_hoist_needs_a_name(tmp_path, capsys):
     """loop-hoist is name-required end to end: no --fix-name refuses with
     the naming guidance, a name applies the helper + filter_map rewrite."""
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     lib = repo / "houses" / "lib.rs"
     lib.write_text((Path(__file__).resolve().parent / "fixtures" / "loop_hoist_rs_fix.rs").read_text())
     run_main(repo, "fix", "--kind", "loop-hoist", "--file", "houses/lib.rs", "--line", "3")
@@ -1966,36 +1981,11 @@ def test_loop_pipeline_directive_only_when_the_fixer_applies(tmp_path, capsys):
     pipeline finding at all (#120). An accumulator initialized apart from the
     loop is a pipeline the fixer refuses, so it may not carry `fix:` — the
     plain shape must still carry it and apply."""
-    src = (
-        "def chained(rules):\n"
-        "    groups = {}\n"
-        "    for r in rules:\n"
-        "        groups.setdefault(r.kind, set()).add(r.severity)\n"
-        "    return groups\n"
-        "\n"
-        "\n"
-        "def moved(rules):\n"
-        "    out = []\n"
-        "    seed(out)\n"
-        "    for r in rules:\n"
-        "        out.append(r)\n"
-        "    return out\n"
-        "\n"
-        "\n"
-        "def built(rules):\n"
-        "    out = []\n"
-        "    for r in rules:\n"
-        "        out.append(r)\n"
-        "    return out\n"
-    )
+    src = code_fixture("sample_loop_pipeline_directive_only_when_the_fixer_applies__d559fde9.py")
     repo = make_repo(tmp_path, app_src=src)
     run_main(repo, "--warn", "--json")
     actions = json.loads(capsys.readouterr().out)["actions"]
-    offered = {
-        a["function"]: "fix: lucidlint fix" in a["message"]
-        for a in actions
-        if a["signal"] == "loop-pipeline"
-    }
+    offered = {a["function"]: "fix: lucidlint fix" in a["message"] for a in actions if a["signal"] == "loop-pipeline"}
     assert offered == {"moved": False, "built": True}, offered
     assert "chained" not in offered, "a chained receiver has no plain target and is not a pipeline"
     # the advertised shape is the one the fixer rewrites
@@ -2007,14 +1997,10 @@ def test_fix_rust_line_less_resolves_unique_finding(tmp_path, capsys):
     """R27 on the .rs surface: `lucidlint fix --kind X --file F` with no
     --line applies when the file has exactly one finding of the kind — the
     orchestrator resolves the line, the agent never counts lines."""
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     lib = repo / "houses" / "lib.rs"
-    arms = "".join(
-        f'    if sel == "k{i}" {{\n        return {i};\n    }}\n' for i in range(16)
-    )
-    lib.write_text(
-        "pub fn route(sel: &str) -> i32 {\n" + arms + "    -1\n}\n"
-    )
+    arms = "".join(f'    if sel == "k{i}" {{\n        return {i};\n    }}\n' for i in range(16))
+    lib.write_text("pub fn route(sel: &str) -> i32 {\n" + arms + "    -1\n}\n")
     run_main(repo, "fix", "--kind", "dispatch-registry", "--file", "houses/lib.rs")
     out = capsys.readouterr().out
     assert "match sel {" in lib.read_text(), out
@@ -2179,8 +2165,9 @@ def test_rules_md_documents_every_family_kind():
     # documents the family; 'standard' (Group 6) is a display bucket, not a kind
     aliases = {"partition": "closures"}
     for kind in sorted(_family_kinds()):
-        assert kind in documented or aliases.get(kind) in documented, \
+        assert kind in documented or aliases.get(kind) in documented, (
             f"kind '{kind}' is emitted but has no RULES.md row"
+        )
 
 
 # --------------------------------------------------------------------------- utilities
@@ -2241,7 +2228,6 @@ def test_load_coverage_dot(tmp_path):
     assert cr.lines.get("houses/app.py") == {1}
 
 
-
 def test_load_coverage_prefers_xml(tmp_path):
     repo = make_repo(tmp_path)
     (repo / "coverage.xml").write_text(
@@ -2259,8 +2245,6 @@ def test_file_history(tmp_path):
     assert fh.churn["houses/app.py"] == 2  # base + modify
     assert fh.churn["scripts/oneoff.py"] == 1
     assert fh.churn["tests/unit/test_app.py"] == 1
-
-
 
 
 def test_main_exit_codes(tmp_path, capsys):
@@ -2284,7 +2268,7 @@ def test_main_no_git_scans_clean(tmp_path, capsys):
     # degrades to rglob file gathering + empty history/diff/provenance)
     plain = tmp_path / "plain"
     plain.mkdir()
-    (plain / "app.py").write_text("def f():\n    return 1\n")
+    (plain / "app.py").write_text(code_fixture("sample_restating_docstring_absent_returns_none__527061b5.py"))
     rc = run_main(plain)
     out = capsys.readouterr().out
     assert rc == 0
@@ -2293,7 +2277,7 @@ def test_main_no_git_scans_clean(tmp_path, capsys):
 
 def test_main_merges_function_targets(tmp_path, capsys):
     # a function that is BOTH complex and long merges into one action
-    src = "def big(a):\n    x = a\n"
+    src = code_fixture("sample_main_merges_function_targets__7035bc50.py")
     for i in range(20):
         src += f"    if x > {i}:\n        x -= 1\n"
     src += "    return x\n"
@@ -2328,8 +2312,6 @@ def test_main_json_meta(tmp_path, capsys):
     assert "diff_state" not in data["meta"]
 
 
-
-
 def test_report_renders_no_risk_or_percentile(tmp_path, capsys):
     # Phase 4: the percentile, the highest change-cost line, and its legend
     # leave the report — the composite read as urgency (round-7: RISK99
@@ -2351,7 +2333,7 @@ def test_report_renders_no_risk_or_percentile(tmp_path, capsys):
 
 
 def test_update_baseline_excludes_warns(tmp_path):
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 60\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("sample_update_baseline_excludes_warns__76cd55ac.py"))
     baseline = tmp_path / "lucidlint.json"
     assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
     keys = json.loads(baseline.read_text())["actions"]
@@ -2359,7 +2341,7 @@ def test_update_baseline_excludes_warns(tmp_path):
 
 
 def test_fail_run_lists_warnings(tmp_path, capsys):
-    repo = make_repo(tmp_path, app_src=SWALLOW_SRC + "\ndef alpha(a):\n    return a * 60\n")
+    repo = make_repo(tmp_path, app_src=SWALLOW_SRC + code_fixture("sample_fail_run_lists_warnings__28457eb7.py"))
     run_main(repo)
     out = capsys.readouterr().out
     assert "warnings (reported, never fail)" in out
@@ -2405,7 +2387,9 @@ def test_census_prints_once_when_fails_and_warns_coexist(tmp_path, capsys):
     # both _render_actions calls passed the census, duplicating the footer)
     src = (
         SWALLOW_SRC  # fail, unsuppressed
-        + "\ndef m():\n    return 60 * 24\n"  # magic-number warn, unsuppressed
+        + code_fixture(
+            "sample_suppression_ledger_reconciles_all_three_accounts__4f0189d5.py"
+        )  # magic-number warn, unsuppressed
         + 'RECORD = {"a": 1}  # lucidlint: ignore record-shape data table row\n'  # suppressed -> census entry
     )
     repo = make_repo(tmp_path, app_src=src)
@@ -2419,22 +2403,22 @@ GUIDANCE = "quantities go through houses.units — never bare ints"
 
 
 def test_guidance_config_appends_house_rule(tmp_path, capsys):
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 60\n")
-    (repo / ".lucidlint.toml").write_text(f"[lucidlint.guidance]\nmagic-number = \"{GUIDANCE}\"\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("sample_update_baseline_excludes_warns__76cd55ac.py"))
+    (repo / ".lucidlint.toml").write_text(f'[lucidlint.guidance]\nmagic-number = "{GUIDANCE}"\n')
     run_main(repo)
     out = capsys.readouterr().out
     assert f"house rule: {GUIDANCE}" in out
 
 
 def test_guidance_via_pyproject_tool_table(tmp_path, capsys):
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 60\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("sample_update_baseline_excludes_warns__76cd55ac.py"))
     (repo / "pyproject.toml").write_text(f'[tool.lucidlint.guidance]\nmagic-number = "{GUIDANCE}"\n')
     run_main(repo)
     assert f"house rule: {GUIDANCE}" in capsys.readouterr().out
 
 
 def test_no_config_no_house_rule_suffix(tmp_path, capsys):
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 60\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("sample_update_baseline_excludes_warns__76cd55ac.py"))
     run_main(repo)
     assert "house rule:" not in capsys.readouterr().out
 
@@ -2442,8 +2426,8 @@ def test_no_config_no_house_rule_suffix(tmp_path, capsys):
 def test_guidance_unknown_signal_is_dropped(tmp_path, capsys):
     # a typo'd key would silently do nothing while reading like it works —
     # the loader drops it instead of carrying dead config
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a * 60\n")
-    (repo / ".lucidlint.toml").write_text("[lucidlint.guidance]\nmagic-numberr = \"typo\"\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("sample_update_baseline_excludes_warns__76cd55ac.py"))
+    (repo / ".lucidlint.toml").write_text('[lucidlint.guidance]\nmagic-numberr = "typo"\n')
     run_main(repo)
     assert "house rule:" not in capsys.readouterr().out
 
@@ -2483,9 +2467,7 @@ def test_baseline_line_drift_is_stale_and_clause_renders(tmp_path, capsys):
     assert run_main(repo, "--baseline", str(baseline)) == 1
     out = capsys.readouterr().out
     assert "except that swallows at line 7" in out  # the finding re-reports
-    assert (
-        "1 acknowledged entry matches no current finding — re-acknowledge with --update-baseline" in out
-    ), out
+    assert "1 acknowledged entry matches no current finding — re-acknowledge with --update-baseline" in out, out
 
 
 def test_baseline_exact_key_is_acknowledged_no_clause(tmp_path, capsys):
@@ -2537,10 +2519,11 @@ def test_rust_rule_groups_match_python():
     both sides deriving from one source makes drift structurally impossible
     otherwise."""
     import re
+
     rust_src = (Path(__file__).parent.parent / "scanner" / "src" / "rules_gen.rs").read_text()
     # scope to the rule_groups function — the same (\"name\", &[...) shape
     # appears in FAMILY_VARIANTS and must not leak into the group map
-    rust_src = rust_src[rust_src.index("pub fn rule_groups"):]
+    rust_src = rust_src[rust_src.index("pub fn rule_groups") :]
     rust_groups = {}
     for m in re.finditer(r'\(\s*"([\w-]+)",\s*&\[\s*((?:"[a-z-]+",?\s*)+)', rust_src):
         rust_groups[m.group(1)] = set(re.findall(r'"([a-z-]+)"', m.group(2)))
@@ -2594,9 +2577,7 @@ class _FakeGraphStore:
         return ["/repo/pkg/a.py"]
 
     def get_nodes_by_file(self, path):
-        return [
-            _FakeGraphNode("Function", "f", "pkg/a.py::f", path, 1, 4, ["x"], "int")
-        ]
+        return [_FakeGraphNode("Function", "f", "pkg/a.py::f", path, 1, 4, ["x"], "int")]
 
     def get_all_edges(self):
         return [_FakeGraphEdge("CALLS", "pkg/a.py::f", "pkg/b.py::g", "/repo/pkg/a.py")]
@@ -2658,9 +2639,7 @@ def test_graph_contract_degrades_when_the_db_or_store_is_broken(tmp_path):
     repo = make_repo(tmp_path)
     data_dir = tmp_path / "graph"
     data_dir.mkdir()
-    graph = Services(
-        make_host(graph_store=_FakeGraphStore, graph_registry=lambda: _FakeRegistry(data_dir))
-    ).graph
+    graph = Services(make_host(graph_store=_FakeGraphStore, graph_registry=lambda: _FakeRegistry(data_dir))).graph
     assert graph.contract(repo) is None  # no graph.db
 
     (data_dir / "graph.db").touch()
@@ -2672,9 +2651,7 @@ def test_graph_contract_degrades_when_the_db_or_store_is_broken(tmp_path):
         def __enter__(self):
             raise sqlite3.OperationalError("bad schema")
 
-    broken = Services(
-        make_host(graph_store=_BrokenStore, graph_registry=lambda: _FakeRegistry(data_dir))
-    ).graph
+    broken = Services(make_host(graph_store=_BrokenStore, graph_registry=lambda: _FakeRegistry(data_dir))).graph
     assert broken.contract(repo) is None
 
 
@@ -2721,9 +2698,7 @@ def test_fix_identifier_problem_names_the_bad_argument():
 
 def test_config_per_path_ignore_accepts_a_group_and_a_plain_signal(tmp_path):
     repo = make_repo(tmp_path)
-    (repo / ".lucidlint.toml").write_text(
-        '[lucidlint."houses/*"]\nignore = ["group:architecture", "magic-number"]\n'
-    )
+    (repo / ".lucidlint.toml").write_text('[lucidlint."houses/*"]\nignore = ["group:architecture", "magic-number"]\n')
     config = runner(repo)._load_lucidlint_config()
     patterns = dict(config.per_path_ignore)
     assert set(patterns["houses/*"]) >= {"magic-number", "complexity", "large-function"}
@@ -2734,20 +2709,13 @@ def test_fix_rust_refuses_a_missing_name(tmp_path, capsys):
     prerequisite, refused before the binary can write a nameless fn."""
     repo = make_repo(tmp_path)
     lib = repo / "houses" / "lib.rs"
-    source = (
-        "pub fn f(xs: &[i32]) -> Vec<i32> {\n"
-        "    let mut out = Vec::new();\n"
-        "    for x in xs {\n"
-        "        out.push(*x);\n"
-        "    }\n"
-        "    out\n"
-        "}\n"
-    )
+    source = code_fixture("sample_fix_rust_refuses_a_missing_name__dae80d65.py")
     lib.write_text(source)
     rc = run_main(repo, "fix", "--kind", "loop-hoist", "--file", "houses/lib.rs", "--line", "3")
     assert rc == 0
     assert "--name" in capsys.readouterr().out
     assert lib.read_text() == source
+
 
 def test_scan_inputs_live_in_one_process_directory():
     """The binary needs file PATHS for the graph/churn/coverage inputs, and a

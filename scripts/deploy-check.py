@@ -35,46 +35,27 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import Path as _CodePath
+
+_CODE_FIXTURES = _CodePath(__file__).resolve().parent.parent / "tests" / "fixtures" / "code"
+
+
+def code_fixture(name: str) -> str:
+    """Read a code sample kept in a real file under tests/fixtures/code/."""
+    return (_CODE_FIXTURES / name).read_text()
+
 
 # The mini project: one fixable finding per file, every function reachable
 # from main() (reachable functions avoid the unused family — the check
 # asserts the finding kinds it expects, not incidental noise).
-PROJECT_FILES = {
-    "a.py": (
-        "# lucidlint: ignore magic-number nothing on this line\n"
-        "\n"
-        "def a():\n"
-        "    return 1 + 1\n"
-    ),
-    "b.py": (
-        "def unreach():\n"
-        "    return 1\n"
-        "    x = 2\n"
-    ),
-    "c.py": (
-        "def noop():\n"
-        "    x = 1\n"
-        "    x + 1\n"
-        "    return x\n"
-    ),
-    "d.py": (
-        "def callee(a, b):\n"
-        "    return a + b\n"
-        "\n"
-        "def caller():\n"
-        "    return callee(10, 20)\n"
-    ),
-    "main.py": (
-        "def main():\n"
-        "    a()\n"
-        "    unreach()\n"
-        "    noop()\n"
-        "    caller()\n"
-        "\n"
-        'if __name__ == "__main__":\n'
-        "    main()\n"
-    ),
-}
+PROJECT_FIXTURES = [
+    ("a.py", "module__cc73b7e9.py"),
+    ("b.py", "module__4ffe0671.py"),
+    ("c.py", "module__e7f65ada.py"),
+    ("d.py", "module__f997c099.py"),
+    ("main.py", "module__ab8d0dde.py"),
+]
+PROJECT_FILES = {name: code_fixture(fixture) for name, fixture in PROJECT_FIXTURES}
 
 # The fail-tier findings the project must produce — the gate's exit 1 on
 # them is the assertion that the scan actually ran.

@@ -23,21 +23,20 @@ from fix_engine.fixers.module_splitting import ModuleSplitting
 from fix_engine.fixers.parameter_objects import ParameterObjects
 from fix_engine.module_outline import ModuleOutline
 
+_CODE_FIXTURES = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "code"
+
+
+def code_fixture(name: str) -> str:
+    """Read a code sample kept in a real file under tests/fixtures/code/."""
+    return (_CODE_FIXTURES / name).read_text()
+
 
 def test_tuple_record_becomes_a_class(tmp_path):
     # the record direction: a CLASS, not a NamedTuple — the build sites
     # construct it, the positional reads and destructures become attribute
     # reads, and the class is prepended (the fixer's end-to-end shape)
-    src = (
-        "em = {r[\"id\"]: (p, n) for r in epics}\n"
-        "def render(em):\n"
-        "    for cid, (p, nm) in em.items():\n"
-        "        if em[cid][0]:\n"
-        "            print(nm)\n"
-        "    a, b = em[cid]\n"
-        "    return a, b\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_tuple_record_becomes_a_class__37688251.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     _req("tuple-record", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Page"), source=src).fix_finding()
@@ -50,22 +49,12 @@ def test_tuple_record_becomes_a_class(tmp_path):
 
 
 def test_undeclared_attribute_declares_the_member(tmp_path):
-    src = (
-        "class C:\n"
-        "    def __init__(self, x: int, repo):\n"
-        "        self.x = x\n"
-        "        self.count = 0\n"
-        "        self.names = []\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_undeclared_attribute_declares_the_member__cd905e2e.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
-    _req(
-        "undeclared-attribute", "houses/app.py", repo, 3, fix_engine.FixOptions(), source=src
-    ).fix_finding()
+    _req("undeclared-attribute", "houses/app.py", repo, 3, fix_engine.FixOptions(), source=src).fix_finding()
     assert "self.x: int = x" in (repo / "houses" / "app.py").read_text()
-    _req(
-        "undeclared-attribute", "houses/app.py", repo, 5, fix_engine.FixOptions(), source=src
-    ).fix_finding()
+    _req("undeclared-attribute", "houses/app.py", repo, 5, fix_engine.FixOptions(), source=src).fix_finding()
     out = (repo / "houses" / "app.py").read_text()
     assert "self.names: list = []" in out
     # a member assigned OUTSIDE __init__ is not auto-annotated (the fix
@@ -77,18 +66,8 @@ def test_positional_literals_binds_the_call_the_resolver_named(tmp_path):
     # the INNERMOST call while the param resolver picked the OUTERMOST callee,
     # so GeoPoint got Money's parameter names. The fixer must keyword the SAME
     # call the resolver named.
-    src = (
-        "class Pair:\n"
-        "    def __init__(self, a, b):\n"
-        "        self.a = a\n"
-        "\n"
-        "def merge(x, y, pair):\n"
-        "    return x + y + pair.a\n"
-        "\n"
-        "def build():\n"
-        "    return merge('a', 'b', Pair(1, 2))\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_positional_literals_binds_the_call_the_resolver_named__4b0c3b09.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     _req("positional-literals", "houses/app.py", repo, 9, fix_engine.FixOptions(), source=src).fix_finding()
@@ -101,23 +80,13 @@ def test_name_required_kinds_refuse_placeholders_and_missing_names(tmp_path):
     # the LSP hands the verbatim directive tokens to a shell: a <placeholder>
     # name must be refused with a message (never an invalid-identifier
     # crash), and a missing name must say what is missing
-    src = (
-        "class R:\n"
-        "    def render(self):\n"
-        "        graph = self.graph\n"
-        "        em, vm = graph.em, graph.vm\n"
-        "        roots = [v for v in vm if v not in graph.vs_parent]\n"
-        "        done = [v for v in vm if v not in graph.kids]\n"
-        "        return roots, em, done\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_name_required_kinds_refuse_placeholders_and_missing_names__76b25b14.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     missing = _req("feature-envy", "houses/app.py", repo, 2, fix_engine.FixOptions(), source=src)
     assert missing.fix_finding() is None
-    placeholder = _req(
-        "feature-envy", "houses/app.py", repo, 2, fix_engine.FixOptions(name="<Method>"), source=src
-    )
+    placeholder = _req("feature-envy", "houses/app.py", repo, 2, fix_engine.FixOptions(name="<Method>"), source=src)
     assert placeholder.fix_finding() is None  # refused, not applied
     assert p.read_text() == src  # nothing was rewritten
 
@@ -126,11 +95,19 @@ def test_applied_reports_the_reattached_line(tmp_path, capsys):
     """R27/R28: after 'anchor moved — ... now at F:L' the applied message
     names L, not the stale --line from the directive — the output must never
     contradict the announced move (review-bot finding on PR #14)."""
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
-    (repo / "houses" / "app.py").write_text("class W:\n    def f(self):\n        x = 3 * 60\n        return x\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(code_fixture("sample_applied_reports_the_reattached_line__38036901.py"))
     rc = run_main(
-        repo, "fix", "--kind", "magic-number", "--file", "houses/app.py",
-        "--line", "1", "--name", "SECONDS_PER_MINUTE",
+        repo,
+        "fix",
+        "--kind",
+        "magic-number",
+        "--file",
+        "houses/app.py",
+        "--line",
+        "1",
+        "--name",
+        "SECONDS_PER_MINUTE",
     )
     assert rc == 0
     out = capsys.readouterr().out
@@ -138,36 +115,15 @@ def test_applied_reports_the_reattached_line(tmp_path, capsys):
     assert "fix: applied magic-number at houses/app.py:3" in out, out
     assert "houses/app.py:1" not in out, out
 
+
 def test_feature_envy_moves_the_envied_reads_into_a_method(tmp_path):
     # the generate_tree roots()/epic_roots() shape: the receiver's field
     # reads move onto the envied class as a method; the caller gets a call
-    src = (
-        "class _RelationGraph:\n"
-        "    def __init__(self):\n"
-        "        self.em = {}\n"
-        "        self.vm = {}\n"
-        "        self.vs_parent = {}\n"
-        "        self.parent_epic = {}\n"
-        "\n"
-        "class _TreeRenderer:\n"
-        "    def __init__(self, graph: _RelationGraph):\n"
-        "        self.graph: _RelationGraph = graph\n"
-        "        self.lines = []\n"
-        "\n"
-        "    def render(self):\n"
-        "        graph = self.graph\n"
-        "        em, vm = graph.em, graph.vm\n"
-        "        roots = [vid for vid in vm if vid not in graph.vs_parent]\n"
-        "        epic_roots = [cid for cid in em if cid not in graph.parent_epic]\n"
-        "        x = self.lines\n"
-        "        return roots, epic_roots, x\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_feature_envy_moves_the_envied_reads_into_a_method__2c101640.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    _req(
-        "feature-envy", "houses/app.py", repo, 13, fix_engine.FixOptions(name="root_query"), source=src
-    ).fix_finding()
+    _req("feature-envy", "houses/app.py", repo, 13, fix_engine.FixOptions(name="root_query"), source=src).fix_finding()
     out = p.read_text()
     assert "def root_query(self):" in out
     assert "em, vm = self.em, self.vm" in out
@@ -181,30 +137,11 @@ def test_feature_envy_moves_the_envied_reads_into_a_method(tmp_path):
 def test_feature_envy_refuses_without_the_envied_class_annotation(tmp_path):
     # the envied class must be nameable: `self.graph: _RelationGraph` — no
     # annotation, no fix (the method has nowhere to go)
-    src = (
-        "class _RelationGraph:\n"
-        "    def __init__(self):\n"
-        "        self.em = {}\n"
-        "        self.vm = {}\n"
-        "        self.vs_parent = {}\n"
-        "\n"
-        "class _TreeRenderer:\n"
-        "    def __init__(self, graph):\n"
-        "        self.graph = graph\n"
-        "\n"
-        "    def render(self):\n"
-        "        graph = self.graph\n"
-        "        em, vm = graph.em, graph.vm\n"
-        "        roots = [vid for vid in vm if vid not in graph.vs_parent]\n"
-        "        x = self.lines\n"
-        "        return roots, x\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_feature_envy_refuses_without_the_envied_class_annotation__1a5b432e.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    _req(
-        "feature-envy", "houses/app.py", repo, 11, fix_engine.FixOptions(name="root_query"), source=src
-    ).fix_finding()
+    _req("feature-envy", "houses/app.py", repo, 11, fix_engine.FixOptions(name="root_query"), source=src).fix_finding()
     assert p.read_text() == src  # untouched
 
 
@@ -237,6 +174,7 @@ def _rust_run_compare(tmp_path, before: str, after: str, main_body: str) -> None
     only check cannot catch arm reordering, dropped branches, or a wrong
     fallback)."""
     import subprocess
+
     rustc = str(Path.home() / ".cargo" / "bin" / "rustc")
     if not Path(rustc).is_file():
         rustc = "rustc"
@@ -255,7 +193,7 @@ def _rust_run_compare(tmp_path, before: str, after: str, main_body: str) -> None
 
 
 def _fix(tmp_path, kind, rel, src, line):
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / rel).write_text(src)
     repo.mkdir(exist_ok=True)
     out = _fix_finding(kind, rel, repo, line)
@@ -263,7 +201,7 @@ def _fix(tmp_path, kind, rel, src, line):
 
 
 def test_stale_suppression_comment_deleted(tmp_path):
-    src = "def f():\n    return 1\n# lucidlint: ignore magic-number nothing here\n"
+    src = code_fixture("sample_stale_suppression_comment_deleted__e17300d2.py")
     out, fixed = _fix(tmp_path, "stale-suppression", "houses/app.py", src, 3)
     assert out is not None
     assert "lucidlint: ignore" not in fixed
@@ -272,7 +210,7 @@ def test_stale_suppression_comment_deleted(tmp_path):
 
 
 def test_noop_statement_deleted(tmp_path):
-    src = "def f():\n    x + 1\n    return 2\n"
+    src = code_fixture("sample_noop_statement_deleted__d6e3730e.py")
     out, fixed = _fix(tmp_path, "noop-statement", "houses/app.py", src, 2)
     assert out is not None
     assert "x + 1" not in fixed
@@ -280,7 +218,7 @@ def test_noop_statement_deleted(tmp_path):
 
 
 def test_unreachable_statement_deleted(tmp_path):
-    src = "def f():\n    return 1\n    x = 2\n"
+    src = code_fixture("sample_unreachable_statement_deleted__928cbe83.py")
     out, fixed = _fix(tmp_path, "unreachable", "houses/app.py", src, 3)
     assert out is not None
     assert "x = 2" not in fixed
@@ -288,7 +226,7 @@ def test_unreachable_statement_deleted(tmp_path):
 
 
 def test_positional_literals_keyworded(tmp_path):
-    src = "def set_limits(min_v, max_v):\n    return min_v\n\n\ndef g():\n    set_limits(10, 20)\n"
+    src = code_fixture("sample_positional_literals_keyworded__cdd6820b.py")
     out, fixed = _fix(tmp_path, "positional-literals", "houses/app.py", src, 6)
     assert out is not None
     assert "set_limits(min_v=10, max_v=20)" in fixed
@@ -297,7 +235,7 @@ def test_positional_literals_keyworded(tmp_path):
 
 def test_positional_literals_cross_file_callee_skipped(tmp_path):
     # the callee is not defined in the file — no edit, but no crash either
-    src = "def g():\n    set_limits(10, 20)\n"
+    src = code_fixture("sample_positional_literals_cross_file_callee_skipped__24131384.py")
     out, fixed = _fix(tmp_path, "positional-literals", "houses/app.py", src, 2)
     assert out is None
     assert fixed == src
@@ -306,7 +244,7 @@ def test_positional_literals_cross_file_callee_skipped(tmp_path):
 def test_external_callee_with_supplied_params(tmp_path):
     # Money is a third-party class — the agent reads its signature once and
     # supplies the param names; the tool applies the mechanical edit
-    src = "def g():\n    Money(\"0\", \"GBP\")\n"
+    src = code_fixture("sample_external_callee_with_supplied_params__3f292568.py")
     out, fixed = _fix(tmp_path, "positional-literals", "houses/app.py", src, 2)
     assert out is None  # unresolvable without params
     out2 = _fix_finding(
@@ -321,24 +259,8 @@ def test_external_callee_with_supplied_params(tmp_path):
 
 
 def test_extract_class_moves_fns_and_rewrites_calls(tmp_path):
-    src = (
-        "class GraphContract:\n"
-        "    def __init__(self):\n"
-        "        self.edges = []\n"
-        "\n"
-        "def hub_edge_counts(contract: GraphContract):\n"
-        "    return len(contract.edges)\n"
-        "\n"
-        "def dominant_callee(contract: GraphContract, x):\n"
-        "    return len(contract.edges) + x\n"
-        "\n"
-        "def resolve_callee_module(contract: GraphContract, y):\n"
-        "    return contract.edges\n"
-        "\n"
-        "def g():\n"
-        "    return hub_edge_counts(GraphContract())\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_extract_class_moves_fns_and_rewrites_calls__b60d4c6a.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     out = _fix_finding("extract-class", "houses/app.py", repo, 5)
     assert out is not None
@@ -351,25 +273,10 @@ def test_extract_class_moves_fns_and_rewrites_calls(tmp_path):
 
 
 def test_extract_class_with_explicit_name(tmp_path):
-    src = (
-        "class GraphContract:\n"
-        "    def __init__(self):\n"
-        "        self.edges = []\n"
-        "\n"
-        "def hub_edge_counts(contract: GraphContract):\n"
-        "    return 1\n"
-        "\n"
-        "def dominant_callee(contract: GraphContract, x):\n"
-        "    return len(contract.edges) + x\n"
-        "\n"
-        "def resolve_callee_module(contract: GraphContract, y):\n"
-        "    return contract.edges\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_extract_class_with_explicit_name__0344e7cc.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
-    out = _fix_finding(
-        "extract-class", "houses/app.py", repo, 5, fix_engine.FixOptions(name="GraphOps")
-    )
+    out = _fix_finding("extract-class", "houses/app.py", repo, 5, fix_engine.FixOptions(name="GraphOps"))
     assert out is not None
     fixed = (repo / "houses" / "app.py").read_text()
     assert "class GraphOps:" in fixed
@@ -378,8 +285,8 @@ def test_extract_class_with_explicit_name(tmp_path):
 
 def test_fix_gate_rerun_is_clean(tmp_path, capsys):
     """After the fix, scanning the file no longer yields the finding."""
-    src = "def set_limits(min_v, max_v):\n    return min_v\n\n\ndef g():\n    set_limits(10, 20)\n"
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_positional_literals_keyworded__cdd6820b.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     fixed = _fix_finding("positional-literals", "houses/app.py", repo, 6)
     assert fixed is not None
@@ -390,38 +297,7 @@ def test_fix_gate_rerun_is_clean(tmp_path, capsys):
 
 # --------------------------------------------------------------------------- message -> fix, end to end
 
-_FIX_ALL_SRC = (
-    "# lucidlint: ignore magic-number nothing on this line\n"
-    "def set_limits(min_v, max_v):\n"
-    "    return min_v\n"
-    "\n"
-    "class GraphContract:\n"
-    "    def __init__(self):\n"
-    "        self.edges = []\n"
-    "\n"
-    "def hub_edge_counts(contract: GraphContract):\n"
-    "    return len(contract.edges)\n"
-    "\n"
-    "def dominant_callee(contract: GraphContract, x):\n"
-    "    return len(contract.edges) + x\n"
-    "\n"
-    "def resolve_callee_module(contract: GraphContract, y):\n"
-    "    return contract.edges\n"
-    "\n"
-    "class ConfigManager:\n"
-    "    def load(self):\n"
-    "        return 1\n"
-    "\n"
-    "def build(a, b, c, d, e, f):\n"
-    "    return a + b + c + d + e + f\n"
-    "\n"
-    "def g():\n"
-    "    set_limits(10, 20)\n"
-    "    Money(\"0\", \"GBP\")\n"
-    "    x + 1\n"
-    "    return 1\n"
-    "    x = 2\n"
-)
+_FIX_ALL_SRC = code_fixture("module__f80558d9.py")
 
 # the gate reports display kinds; the fix command maps them to transforms
 FIXABLE_KINDS = {
@@ -446,12 +322,10 @@ FIX_NAMES = {
 def test_magic_literal_becomes_class_attribute(tmp_path):
     # third-pass 4: the constant lands as a CLASS ATTRIBUTE of the enclosing
     # class — module-top constants are themselves global-state findings
-    src = "class Window:\n    def g(self):\n        return 60 * 24\n"
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_magic_literal_becomes_class_attribute__5ce44cfd.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
-    out = _fix_finding(
-        "magic-number", "houses/app.py", repo, 3, fix_engine.FixOptions(name="MINUTES_PER_DAY")
-    )
+    out = _fix_finding("magic-number", "houses/app.py", repo, 3, fix_engine.FixOptions(name="MINUTES_PER_DAY"))
     assert out is not None
     fixed = (repo / "houses" / "app.py").read_text()
     assert "MINUTES_PER_DAY = 60" in fixed
@@ -459,12 +333,11 @@ def test_magic_literal_becomes_class_attribute(tmp_path):
     assert fixed.startswith("class Window:"), fixed  # not parked at module top
 
 
-
 def test_magic_literal_refuses_without_owning_class(tmp_path):
     # a literal in a module-level function has no class to own its constant —
     # refuse with a why, never park it at module top
-    src = "def g():\n    return 60 * 24\n"
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_magic_literal_refuses_without_owning_class__05a27ae9.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     req = fix_engine._FixRequest(
         kind="magic-number",
@@ -481,11 +354,10 @@ def test_magic_literal_refuses_without_owning_class(tmp_path):
     assert fixed == src
 
 
-
 def test_extract_record_class_rejects_placeholder_name(tmp_path):
     # a placeholder <Record> must not generate `class _<Record>:` — invalid
     # Python; refuse before generating (review bot)
-    src = 'def f():\n    return {"a": 1, "b": 2}\n'
+    src = code_fixture("sample_extract_record_class_rejects_placeholder_name__d42b6a66.py")
     repo = make_repo(tmp_path, app_src=src)
     req = fix_engine._FixRequest(
         kind="extract-record-class",
@@ -502,7 +374,7 @@ def test_extract_record_class_rejects_placeholder_name(tmp_path):
 def test_magic_literal_fix_honors_column_anchor(tmp_path):
     # two numeric literals on the target line — the schema-3 col pins the
     # anchored one; the fix must not rewrite the first literal (review bot)
-    src = "class W:\n    def f(self):\n        return a * 60 + b * 90\n"
+    src = code_fixture("sample_magic_literal_fix_honors_column_anchor__0da673be.py")
     repo = make_repo(tmp_path, app_src=src)
     # 60 sits at 1-based byte col 20, 90 at col 29 — anchor the 90
     req = fix_engine._FixRequest(
@@ -519,13 +391,13 @@ def test_magic_literal_fix_honors_column_anchor(tmp_path):
     assert new_source is not None, out
     assert "a * 60 + b * NINETY" in new_source, new_source
     assert "return a * 60" in new_source, "the unanchored first literal must stay: {new_source}"
+
+
 def test_vague_name_rename(tmp_path):
-    src = "class DataManager:\n    def run(self):\n        return 1\n\n\ndef use():\n    return DataManager()\n"
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_vague_name_rename__477032f1.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
-    out = _fix_finding(
-        "vague-name", "houses/app.py", repo, 1, fix_engine.FixOptions(name="DataRegistry")
-    )
+    out = _fix_finding("vague-name", "houses/app.py", repo, 1, fix_engine.FixOptions(name="DataRegistry"))
     assert out is not None
     fixed = (repo / "houses" / "app.py").read_text()
     assert "class DataRegistry:" in fixed
@@ -534,18 +406,10 @@ def test_vague_name_rename(tmp_path):
 
 
 def test_parameter_object_introduced(tmp_path):
-    src = (
-        "def build(a, b, c, d, e, f):\n"
-        "    return a + b + c + d + e + f\n"
-        "\n"
-        "def g():\n"
-        "    return build(1, 2, 3, 4, 5, 6)\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_parameter_object_introduced__23d8316c.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
-    out = _fix_finding(
-        "long-param-list", "houses/app.py", repo, 1, fix_engine.FixOptions(name="BuildOptions")
-    )
+    out = _fix_finding("long-param-list", "houses/app.py", repo, 1, fix_engine.FixOptions(name="BuildOptions"))
     assert out is not None
     fixed = (repo / "houses" / "app.py").read_text()
     assert "class BuildOptions:" in fixed
@@ -561,16 +425,18 @@ def test_extract_method_refuses_over_thirteen_decision_seam(tmp_path):
     conds = []
     for i in range(14):
         conds.append(
-            "        if x > 0:\n            out.append(x * 0)\n"
+            code_fixture("sample_extract_method_refuses_over_thirteen_decision_seam__ed9b064d.py")
             if i == 0
             else f"        elif x >= {i * 10}:\n            out.append(x * {i})\n"
         )
-    src = "def f(xs):\n    out = []\n    for x in xs:\n" + "".join(conds) + "    return out\n"
+    src = (
+        code_fixture("sample_extract_method_refuses_over_thirteen_decision_seam__f76567ec.py")
+        + "".join(conds)
+        + code_fixture("sample_extract_method_refuses_over_thirteen_decision_seam__08a0fd58.py")
+    )
     repo = make_repo(tmp_path, app_src=src)
     (repo / "houses" / "app.py").write_text(src)
-    out = _fix_finding(
-        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="helper")
-    )
+    out = _fix_finding("extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="helper"))
     assert out is None, "a >13-decision seam must refuse, not move wholesale"
 
 
@@ -578,18 +444,15 @@ def test_extract_module_moves_import_from_multi_statement_line(tmp_path):
     # `import os; import sys` on ONE line — _moved_imports skipped
     # multi-statement SimpleStatementLines, so the new module lost the
     # import the moved def needs and would NameError (review bot)
-    src = (
-        "import os; import sys\n"
-        "\n"
-        "def t():\n"
-        "    return os.getcwd()\n"
-        "\n"
-        "def u():\n"
-        "    return sys.version\n"
-    )
+    src = code_fixture("sample_extract_module_moves_import_from_multi_statement_line__726d423a.py")
     out, fixed = _fix_opts(
-        tmp_path, "extract-module", "houses/layout.py", src, 1,
-        name="text", params=["t"],
+        tmp_path,
+        "extract-module",
+        "houses/layout.py",
+        src,
+        1,
+        name="text",
+        params=["t"],
     )
     assert out is not None
     new_mod = (tmp_path / "repo" / "houses" / "text.py").read_text()
@@ -602,9 +465,13 @@ def test_parameter_object_fix_counts_posonly_params(tmp_path):
     # leading self/cls); the fixer must count the SAME set — six
     # positional-only params are flagged and must be fixable, not silently
     # refused because .params excludes the /-separated ones (review bot)
-    src = "def f(a, /, b, c, d, e, g):\n    return a + b + c + d + e + g\n"
+    src = code_fixture("sample_parameter_object_fix_counts_posonly_params__40772fad.py")
     out, fixed = _fix_opts(
-        tmp_path, "long-param-list", "houses/app.py", src, 1,
+        tmp_path,
+        "long-param-list",
+        "houses/app.py",
+        src,
+        1,
         name="Opts",
     )
     assert out is not None
@@ -616,23 +483,8 @@ def test_extract_class_renames_receiver_and_internal_calls(tmp_path):
     """The missed-class scenario that tripped a hand-fix: moved methods must
     rename the receiver to self AND rewrite inter-fn calls to self-calls —
     otherwise the extraction produces broken code."""
-    src = (
-        "class _FnBodyState:\n"
-        "    def __init__(self, line):\n"
-        "        self.line = line\n"
-        "\n"
-        "def _window_score(state: _FnBodyState, i, j, min_lines):\n"
-        "    if state.line > 0:\n"
-        "        return 1\n"
-        "    return 0\n"
-        "\n"
-        "def _window_has_outvars(state: _FnBodyState, j, writes_all):\n"
-        "    return state.line > 0\n"
-        "\n"
-        "def _best_seam(state: _FnBodyState, min_lines=2):\n"
-        "    return _window_score(state, 0, 1, min_lines)\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_extract_class_renames_receiver_and_internal_calls__94d5cbdd.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     out = _fix_finding("extract-class", "houses/app.py", repo, 5)
@@ -653,25 +505,8 @@ def test_extract_class_renames_after_nested_function(tmp_path):
     leave_FunctionDef reset the visitor's current fn to None, leaving the
     post-nested-def receiver references unrenamed and the moved method
     referencing a param that no longer exists."""
-    src = (
-        "class _FnBodyState:\n"
-        "    def __init__(self, line):\n"
-        "        self.line = line\n"
-        "\n"
-        "def _score(state: _FnBodyState, i, j):\n"
-        "    def helper(v):\n"
-        "        return v * 2\n"
-        "    if state.line > 0:\n"
-        "        return helper(state.line) + i\n"
-        "    return 0\n"
-        "\n"
-        "def _other(state: _FnBodyState, n):\n"
-        "    return state.line + n\n"
-        "\n"
-        "def _run(state: _FnBodyState):\n"
-        "    return _score(state, 1, 2)\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_extract_class_renames_after_nested_function__ce855596.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     out = _fix_finding("extract-class", "houses/app.py", repo, 5)
@@ -686,29 +521,19 @@ def test_extract_class_renames_after_nested_function(tmp_path):
 
 
 def test_extract_method_preview_and_confirm(tmp_path):
-    src = (
-        "def process(data, factor):\n"
-        "    results = []\n"
-        "    for item in data:\n"
-        "        results.append(item * factor)\n"
-        "    return sum(results)\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_extract_method_preview_and_confirm__d0dc1eb7.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     # preview needs NO name — the seam shows with a placeholder, the agent
     # names AFTER seeing it (the S3 flow)
-    new_source, desc = _propose_finding(
-        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions()
-    )
+    new_source, desc = _propose_finding("extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions())
     assert desc is not None
     assert new_source is not None
     assert "_extracted(" in new_source  # the placeholder in the diff
     assert p.read_text() == src  # nothing written
     # apply with a name — normalized to private: scale_total -> _scale_total
-    out = _fix_finding(
-        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="scale_total")
-    )
+    out = _fix_finding("extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="scale_total"))
     assert out is not None
     fixed = p.read_text()
     assert "def _scale_total(" in fixed
@@ -724,47 +549,11 @@ def test_extract_method_descends_into_loop_body(tmp_path):
     yields an inner chunk as the seam — the call lands INSIDE the loop, the
     loop survives, and behavior is preserved. (The old flat analysis could
     only move whole statements.)"""
-    src = (
-        "def grade_all(rows, mode):\n"
-        "    out = []\n"
-        "    for row in rows:\n"
-        "        s = row['score']\n"
-        "        if s >= 95:\n"
-        "            out.append('A+')\n"
-        "        elif s >= 90:\n"
-        "            out.append('A')\n"
-        "        elif s >= 85:\n"
-        "            out.append('A-')\n"
-        "        elif s >= 80:\n"
-        "            out.append('B+')\n"
-        "        elif s >= 75:\n"
-        "            out.append('B')\n"
-        "        elif s >= 70:\n"
-        "            out.append('B-')\n"
-        "        elif s >= 65:\n"
-        "            out.append('C+')\n"
-        "        elif s >= 60:\n"
-        "            out.append('C')\n"
-        "        elif s >= 55:\n"
-        "            out.append('C-')\n"
-        "        elif s >= 50:\n"
-        "            out.append('D+')\n"
-        "        elif s >= 45:\n"
-        "            out.append('D')\n"
-        "        elif s >= 40:\n"
-        "            out.append('D-')\n"
-        "        else:\n"
-        "            out.append('F')\n"
-        "        if mode == 'debug':\n"
-        "            out.append(row['name'])\n"
-        "    return out\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_extract_method_descends_into_loop_body__33a14c9c.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    out = _fix_finding(
-        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="grade_row")
-    )
+    out = _fix_finding("extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="grade_row"))
     assert out is not None
     fixed = p.read_text()
     assert "for row in rows:" in fixed  # the loop survives
@@ -779,6 +568,7 @@ def test_extract_method_descends_into_loop_body(tmp_path):
     assert ns["grade_all"](rows, "debug") == ["A+", "x", "D+", "y"]
     assert ns["grade_all"](rows, "quiet") == ["A+", "D+"]
 
+
 def test_extract_method_refuses_seam_with_block_local_accumulator(tmp_path):
     """Issue #21: a block-local accumulator (created inside the extracted
     block, filled, and read AFTER it in the same loop iteration) must not be
@@ -789,34 +579,8 @@ def test_extract_method_refuses_seam_with_block_local_accumulator(tmp_path):
     creation and the later `for segment in segments` broke. The `continue`
     in the loop body is what forces the seam down into the inner chunk
     (the whole-loop seam is a control-flow refusal)."""
-    src = (
-        "def split(shapes, lines, unit):\n"
-        "    out = []\n"
-        "    for shape in shapes:\n"
-        "        segments = []\n"
-        "        for y in sorted(lines):\n"
-        "            nearest = y % max(len(lines), 1)\n"
-        "            if segments and segments[-1][0] == nearest and y - segments[-1][2] <= 2:\n"
-        "                segments[-1][2] = y\n"
-        "            elif segments and segments[-1][0] != nearest and y % 3 != 0:\n"
-        "                segments[-1] = [segments[-1][0], segments[-1][1], y]\n"
-        "            else:\n"
-        "                segments.append([nearest, y, y])\n"
-        "        groups = []\n"
-        "        for segment in segments:\n"
-        "            if groups and not segment[1] > shape:\n"
-        "                groups[-1][2] = segment[2]\n"
-        "            else:\n"
-        "                groups.append(list(segment))\n"
-        "        if len(groups) == 1:\n"
-        "            out.append(groups)\n"
-        "            continue\n"
-        "        for group in groups:\n"
-        "            if len(group) >= 3 and group[0] <= shape:\n"
-        "                out.append(group)\n"
-        "    return out\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_extract_method_refuses_seam_with_block_local_accumulator__47b7beb2.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     new_source, _ = _propose_finding(
@@ -839,19 +603,11 @@ def test_extract_method_keyword_args_are_not_phantom_params(tmp_path):
     variable reference, but the seam analysis counted it as a free var,
     so the proposal carried a phantom parameter and the rewritten call
     would have raised NameError at runtime."""
-    src = (
-        "def wrap(stmts):\n"
-        "    body_stmts = stmts\n"
-        "    if body_stmts:\n"
-        "        body_stmts[0] = body_stmts[0].with_changes(leading_lines=[])\n"
-        "    return body_stmts\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_extract_method_keyword_args_are_not_phantom_params__fb5799fa.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    out = _fix_finding(
-        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="reset_leading")
-    )
+    out = _fix_finding("extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="reset_leading"))
     assert out is not None
     fixed = p.read_text()
     assert "def _reset_leading(body_stmts):" in fixed
@@ -864,22 +620,11 @@ def test_extract_method_refuses_nested_function_target(tmp_path):
     """A complexity finding on a nested function cannot host the extracted
     helper (the insert lands at module level — the call would NameError).
     Refuse rather than write a broken file."""
-    src = (
-        "def outer():\n"
-        "    def inner():\n"
-        "        if a:\n"
-        "            x = 1\n"
-        "        if b:\n"
-        "            x = 2\n"
-        "        return x\n"
-        "    return inner()\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_extract_method_refuses_nested_function_target__3af6ce24.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    new_source, desc = _propose_finding(
-        "extract-method", "houses/app.py", repo, 2, fix_engine.FixOptions(name="_x")
-    )
+    new_source, desc = _propose_finding("extract-method", "houses/app.py", repo, 2, fix_engine.FixOptions(name="_x"))
     assert desc is None  # no safe seam — refuse, do not corrupt
 
 
@@ -888,15 +633,19 @@ def test_extract_method_min_bound_refuses_insufficient_splits(tmp_path):
     land the ORIGINAL under CC 15 (the extracted side is bounded separately),
     the tool refuses — a 1-decision extraction of a 16-CC function leaves 15
     and the fix loop would thrash."""
-    src = "def f(" + ", ".join(f"c{i}" for i in range(16)) + "):\n" + "".join(
-        f"    if c{i}:\n        x{i} = {i}\n" for i in range(16)
-    ) + "    return " + " + ".join(f"x{i}" for i in range(16)) + "\n"
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = (
+        "def f("
+        + ", ".join(f"c{i}" for i in range(16))
+        + "):\n"
+        + "".join(f"    if c{i}:\n        x{i} = {i}\n" for i in range(16))
+        + "    return "
+        + " + ".join(f"x{i}" for i in range(16))
+        + "\n"
+    )
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    new_source, desc = _propose_finding(
-        "extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="_x")
-    )
+    new_source, desc = _propose_finding("extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="_x"))
     assert desc is None  # every same-container window is a single if — no split
 
 
@@ -912,9 +661,9 @@ def test_decision_count_matches_radon_for_nested_and_or():
 
     # three operands -> 2 decisions; a parenthesized 4-operand chain -> 3
     for src, expected in [
-        ("def f(a, b, c):\n    return a and b and c\n", 2),
-        ("def f(a, b, c, d):\n    return (a and b) and (c and d)\n", 3),
-        ("def f(a, b, c, d):\n    return a and (b and (c and d))\n", 3),
+        (code_fixture("sample_decision_count_matches_radon_for_nested_and_or__a53c52f3.py"), 2),
+        (code_fixture("sample_decision_count_matches_radon_for_nested_and_or__8c0879d1.py"), 3),
+        (code_fixture("sample_decision_count_matches_radon_for_nested_and_or__849ecbe9.py"), 3),
     ]:
         fn = cst.parse_module(src).body[0]
         assert isinstance(fn, cst.FunctionDef)
@@ -923,42 +672,34 @@ def test_decision_count_matches_radon_for_nested_and_or():
         assert n == expected, (src, n)
 
 
-
 def test_rust_extract_method_applies(tmp_path):
     """extract-method works on Rust via the scan core (syn) — a seam whose
     free variables are fn params (types known) and that has no out-vars
     moves into a private helper. The Python/libcst engine cannot touch a .rs
     target; the fix routes through the Rust binary."""
-    src = (
-        "pub fn enrich(items: &mut Vec<i32>, factor: i32) -> () {\n"
-        "    if items.is_empty() {\n"
-        "        return;\n"
-        "    }\n"
-        "    for it in items.iter_mut() {\n"
-        "        *it *= factor;\n"
-        "    }\n"
-        "}\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_rust_extract_method_applies__e23ad0e7.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "lib.rs"
     p.write_text(src)
     before = p.read_text()
     run_main(
-        repo, "fix", "--kind", "extract-method", "--file", "houses/lib.rs",
-        "--line", "1", "--name", "_apply_enrich",
+        repo,
+        "fix",
+        "--kind",
+        "extract-method",
+        "--file",
+        "houses/lib.rs",
+        "--line",
+        "1",
+        "--name",
+        "_apply_enrich",
     )
     fixed = p.read_text()
     assert "fn _apply_enrich(items: &mut Vec<i32>, factor: i32)" in fixed
     assert "_apply_enrich(items, factor);" in fixed
     assert "fn enrich(" in fixed  # the original survives, now delegating
     # behavior preserved: compile AND run both versions, compare the output
-    main = (
-        "fn main() {\n"
-        "    let mut v = vec![1, 2, 3, 4];\n"
-        "    enrich(&mut v, 3);\n"
-        "    println!(\"out: {}\", v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(\",\"));\n"
-        "}\n"
-    )
+    main = code_fixture("sample_rust_extract_method_applies__cc885241.py")
     _rust_run_compare(tmp_path, before, fixed, main)
 
 
@@ -967,20 +708,20 @@ def test_extract_method_cli_preview_confirm_flow(tmp_path, capsys):
     name, nothing written); a name applies DIRECTLY — the name IS the
     commitment, no --confirm dance. Agents are bad at line numbers — the
     preview IS the line-number-free contract."""
-    src = (
-        "def process(data, factor):\n"
-        "    results = []\n"
-        "    for item in data:\n"
-        "        results.append(item * factor)\n"
-        "    return sum(results)\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_extract_method_preview_and_confirm__d0dc1eb7.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     # preview WITHOUT a name: prints a diff, writes NOTHING
     rc = run_main(
-        repo, "fix", "--kind", "extract-method", "--file", "houses/app.py",
-        "--line", "1",
+        repo,
+        "fix",
+        "--kind",
+        "extract-method",
+        "--file",
+        "houses/app.py",
+        "--line",
+        "1",
     )
     assert rc == 0
     out = capsys.readouterr().out
@@ -991,8 +732,16 @@ def test_extract_method_cli_preview_confirm_flow(tmp_path, capsys):
     assert p.read_text() == src  # nothing written yet
     # WITH a name: applies directly (no --confirm — the name is the commit)
     rc = run_main(
-        repo, "fix", "--kind", "extract-method", "--file", "houses/app.py",
-        "--line", "1", "--name", "accumulate",
+        repo,
+        "fix",
+        "--kind",
+        "extract-method",
+        "--file",
+        "houses/app.py",
+        "--line",
+        "1",
+        "--name",
+        "accumulate",
     )
     assert rc == 0
     capsys.readouterr()
@@ -1012,23 +761,8 @@ def test_extract_method_cli_preview_confirm_flow(tmp_path, capsys):
 def test_strewing_message_tees_up_the_fix(tmp_path, capsys):
     """The output gap that caused a manual missed-class hand-fix: the finding
     must say the fix exists, with the exact command (R27)."""
-    src = (
-        "class _FnBodyState:\n"
-        "    def __init__(self, line):\n"
-        "        self.line = line\n"
-        "\n"
-        "def _window_score(state: _FnBodyState, i, j, min_lines):\n"
-        "    if state.line > 0:\n"
-        "        return 1\n"
-        "    return 0\n"
-        "\n"
-        "def _window_has_outvars(state: _FnBodyState, j, writes_all):\n"
-        "    return state.line > 0\n"
-        "\n"
-        "def _best_seam(state: _FnBodyState, min_lines=2):\n"
-        "    return _window_score(state, 0, 1, min_lines)\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_extract_class_renames_receiver_and_internal_calls__94d5cbdd.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     run_main(repo, "--warn", "--json")
     data = json.loads(capsys.readouterr().out)
@@ -1040,18 +774,8 @@ def test_strewing_message_tees_up_the_fix(tmp_path, capsys):
 def test_dissolve_husk_rewires_calls_and_deletes_class(tmp_path):
     # #27: Memory only forwards to module functions — its callers reach the
     # functions directly, the husk is deleted (never inline)
-    src = (
-        "def fetch_name(user):\n"
-        "    return user.name\n"
-        "\n"
-        "class Memory:\n"
-        "    def name(self, user):\n"
-        "        return fetch_name(user)\n"
-        "\n"
-        "def use():\n"
-        "    return Memory().name('a')\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_dissolve_husk_rewires_calls_and_deletes_class__31dc763f.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     req = fix_engine._FixRequest(
         kind="dissolve-husk",
@@ -1069,19 +793,8 @@ def test_dissolve_husk_rewires_calls_and_deletes_class(tmp_path):
 
 def test_dissolve_husk_rewires_instance_variable_sites(tmp_path):
     # `h = Memory(); h.name(x)` -> `h` deleted, call rewired to the module fn
-    src = (
-        "def fetch_name(user):\n"
-        "    return user.name\n"
-        "\n"
-        "class Memory:\n"
-        "    def name(self, user):\n"
-        "        return fetch_name(user)\n"
-        "\n"
-        "def use():\n"
-        "    h = Memory()\n"
-        "    return h.name('x')\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_dissolve_husk_rewires_instance_variable_sites__54d4ef78.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     req = fix_engine._FixRequest(
         kind="dissolve-husk",
@@ -1101,18 +814,8 @@ def test_dissolve_husk_rewires_instance_variable_sites(tmp_path):
 def test_dissolve_husk_refuses_escaping_instance(tmp_path):
     # a construction that escapes (stored/returned) can't be dissolved
     # blindly — refuse with a why
-    src = (
-        "def fetch_name(user):\n"
-        "    return user.name\n"
-        "\n"
-        "class Memory:\n"
-        "    def name(self, user):\n"
-        "        return fetch_name(user)\n"
-        "\n"
-        "def escape():\n"
-        "    return Memory()\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_dissolve_husk_refuses_escaping_instance__10206d36.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     req = fix_engine._FixRequest(
         kind="dissolve-husk",
@@ -1126,25 +829,11 @@ def test_dissolve_husk_refuses_escaping_instance(tmp_path):
     assert req.decline is not None and "escapes" in req.decline, req.decline
 
 
-
 def test_collapse_chain_rewires_real_terminal(tmp_path):
     # #30: Store has identity (self.cache) — fetch rewires to store.load
     # directly, the middle forwarder is deleted, D survives
-    src = (
-        "class Store:\n"
-        "    def __init__(self):\n"
-        "        self.cache = {}\n"
-        "    def load(self, key):\n"
-        "        return self.cache[key]\n"
-        "\n"
-        "def get_stored(store, key):\n"
-        "    return store.load(key)\n"
-        "\n"
-        "class Facade:\n"
-        "    def fetch(self, store, key):\n"
-        "        return get_stored(store, key)\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_collapse_chain_rewires_real_terminal__7d357759.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     req = fix_engine._FixRequest(
         kind="collapse-chain",
@@ -1164,22 +853,8 @@ def test_collapse_chain_rewires_real_terminal(tmp_path):
 def test_collapse_chain_promotes_stateless_terminal(tmp_path):
     # D has no identity (only forwarders) and zero external refs — N is
     # promoted to C, D dissolves
-    src = (
-        "def fetch_key(key):\n"
-        "    return key\n"
-        "\n"
-        "class Store:\n"
-        "    def load(self, key):\n"
-        "        return fetch_key(key)\n"
-        "\n"
-        "def get_stored(store, key):\n"
-        "    return store.load(key)\n"
-        "\n"
-        "class Facade:\n"
-        "    def fetch(self, store, key):\n"
-        "        return get_stored(store, key)\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_collapse_chain_promotes_stateless_terminal__b3873a8b.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     req = fix_engine._FixRequest(
         kind="collapse-chain",
@@ -1198,18 +873,11 @@ def test_collapse_chain_promotes_stateless_terminal(tmp_path):
 
 def test_collapse_chain_refuses_boundary_between_modules(tmp_path):
     # the chain is the ONLY coupling between independent modules — refuse
-    src = (
-        "class Server:\n"
-        "    def handle(self, store, key):\n"
-        "        return get_stored(store, key)\n"
-        "\n"
-        "def get_stored(store, key):\n"
-        "    return store.load(key)\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_collapse_chain_refuses_boundary_between_modules__3eaff56d.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     (repo / "houses" / "store.py").write_text(
-        "class Store:\n    def load(self, key):\n        return key\n"
+        code_fixture("sample_collapse_chain_refuses_boundary_between_modules__ea4ad7de.py")
     )
     req = fix_engine._FixRequest(
         kind="collapse-chain",
@@ -1230,29 +898,11 @@ def test_split_module_flat_singleton_moves_class_and_rewrites_callsites(tmp_path
     # User is misplaced (stem prod_mod); ProdMod matches the stem and stays,
     # _Helper is private and stays, the module fn stays — the FLAT singleton
     # split rewrites `from prod_mod import User` and `prod_mod.User` repo-wide
-    src = (
-        "class User:\n"
-        "    def name(self):\n"
-        "        return 'u'\n"
-        "\n"
-        "class ProdMod:\n"
-        "    def name(self):\n"
-        "        return 'p'\n"
-        "\n"
-        "class _Helper:\n"
-        "    def tag(self):\n"
-        "        return 'h'\n"
-        "\n"
-        "def make_user():\n"
-        "    return User()\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_split_module_flat_singleton_moves_class_and_rewrites_callsites__b2d63eb8.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "prod_mod.py").write_text(src)
     (repo / "consumer.py").write_text(
-        "import prod_mod\n"
-        "from prod_mod import User\n"
-        "def go():\n"
-        "    return User(), prod_mod.User()\n"
+        code_fixture("sample_split_module_flat_singleton_moves_class_and_rewrites_callsites__bcc975fd.py")
     )
     req = fix_engine._FixRequest(
         kind="split-module",
@@ -1287,25 +937,10 @@ def test_split_module_whole_cluster_package_by_stem(tmp_path):
     # Team reads User and both share the class-level LABEL attribute — one
     # cohesive cluster -> PACKAGE named by the stem; `from prod_mod import
     # User` keeps resolving (zero caller rewrites)
-    src = (
-        "class User:\n"
-        "    LABEL = 'user'\n"
-        "    def name(self):\n"
-        "        return 'u'\n"
-        "\n"
-        "class Team:\n"
-        "    LABEL = 'team'\n"
-        "    def member(self):\n"
-        "        return User().name()\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_split_module_whole_cluster_package_by_stem__1ae693ea.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "prod_mod.py").write_text(src)
-    (repo / "consumer.py").write_text(
-        "import prod_mod\n"
-        "from prod_mod import User\n"
-        "def go():\n"
-        "    return User(), prod_mod.Team()\n"
-    )
+    (repo / "consumer.py").write_text(code_fixture("sample_split_module_whole_cluster_package_by_stem__1fd2b9e8.py"))
     req = fix_engine._FixRequest(
         kind="split-module",
         repo=repo,
@@ -1342,25 +977,11 @@ def test_split_module_sub_cluster_package_requires_name(tmp_path):
     # proper sub-cluster needs --name: absent -> DECLINE (never
     # flat-for-convenience); present -> the package holds the cluster, Extra
     # goes flat
-    src = (
-        "class User:\n"
-        "    def name(self):\n"
-        "        return 'u'\n"
-        "\n"
-        "class Team:\n"
-        "    def member(self):\n"
-        "        return User().name()\n"
-        "\n"
-        "class Extra:\n"
-        "    def extra(self):\n"
-        "        return 'x'\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_split_module_sub_cluster_package_requires_name__bcf9e40e.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "prod_mod.py").write_text(src)
     (repo / "consumer.py").write_text(
-        "from prod_mod import Team, Extra\n"
-        "def go():\n"
-        "    return Team(), Extra()\n"
+        code_fixture("sample_split_module_sub_cluster_package_requires_name__7550e01d.py")
     )
     req = fix_engine._FixRequest(
         kind="split-module",
@@ -1399,16 +1020,8 @@ def test_split_module_refuses_target_collision(tmp_path):
     # a cohesive pair wants the stem package but prod_mod/ exists and no
     # --name is given -> decline (never flat-for-convenience); a flat target
     # collision (user.py exists) also declines
-    src = (
-        "class User:\n"
-        "    def member(self):\n"
-        "        return Team().name()\n"
-        "\n"
-        "class Team:\n"
-        "    def name(self):\n"
-        "        return 't'\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_split_module_refuses_target_collision__348318f3.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "prod_mod.py").write_text(src)
     (repo / "prod_mod").mkdir()
     req = fix_engine._FixRequest(
@@ -1421,15 +1034,8 @@ def test_split_module_refuses_target_collision(tmp_path):
     assert req.fix_finding() is None
     assert req.decline is not None and "prod_mod" in req.decline and "name" in req.decline, req.decline
 
-    repo2 = make_repo(tmp_path / "b", app_src="def alpha(a):\n    return a\n")
-    (repo2 / "prod_mod.py").write_text(
-        "class User:\n"
-        "    def name(self):\n"
-        "        return 'u'\n"
-        "\n"
-        "class ProdMod:\n"
-        "    pass\n"
-    )
+    repo2 = make_repo(tmp_path / "b", app_src=code_fixture("build__f9694aad.py"))
+    (repo2 / "prod_mod.py").write_text(code_fixture("sample_split_module_refuses_target_collision__2b1d6792.py"))
     (repo2 / "user.py").write_text("EXISTING = True\n")
     req2 = fix_engine._FixRequest(
         kind="split-module",
@@ -1445,17 +1051,8 @@ def test_split_module_refuses_target_collision(tmp_path):
 def test_split_module_refuses_import_cycle(tmp_path):
     # User and Team reference each other — the produced class files would
     # import each other (a genuine circular import): refuse with a reason
-    src = (
-        "class User:\n"
-        "    def name(self):\n"
-        "        return Team.NAME\n"
-        "\n"
-        "class Team:\n"
-        "    NAME = 't'\n"
-        "    def member(self):\n"
-        "        return User().name()\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_split_module_refuses_import_cycle__f01b2d95.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "prod_mod.py").write_text(src)
     req = fix_engine._FixRequest(
         kind="split-module",
@@ -1472,23 +1069,15 @@ def test_split_module_relative_import_in_origin_falls_back_to_flat(tmp_path):
     # prod_mod.py lives in a package and imports a sibling (from .common) —
     # the package layout would change the path root: refuse PACKAGE and split
     # flat (the class files are siblings, the relative imports keep resolving)
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
-    (repo / "houses" / "common.py").write_text("def fmt(s):\n    return s\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "common.py").write_text(
+        code_fixture("sample_split_module_relative_import_in_origin_falls_back_to_flat__e6febd8e.py")
+    )
     (repo / "houses" / "prod_mod.py").write_text(
-        "from .common import fmt\n"
-        "\n"
-        "class User:\n"
-        "    def name(self):\n"
-        "        return 'u'\n"
-        "\n"
-        "class Team:\n"
-        "    def member(self):\n"
-        "        return fmt(User().name())\n"
+        code_fixture("sample_split_module_relative_import_in_origin_falls_back_to_flat__381e4c59.py")
     )
     (repo / "houses" / "app.py").write_text(
-        "from .prod_mod import User, Team\n"
-        "def go():\n"
-        "    return User(), Team()\n"
+        code_fixture("sample_split_module_relative_import_in_origin_falls_back_to_flat__32511444.py")
     )
     req = fix_engine._FixRequest(
         kind="split-module",
@@ -1514,18 +1103,8 @@ def test_split_module_relative_import_in_origin_falls_back_to_flat(tmp_path):
 def test_split_module_refuses_executable_statements_between_classes(tmp_path):
     # configure() runs between the subject classes — splitting would reorder
     # it relative to the classes: refuse with a reason
-    src = (
-        "class User:\n"
-        "    def name(self):\n"
-        "        return 'u'\n"
-        "\n"
-        "configure()\n"
-        "\n"
-        "class Team:\n"
-        "    def name(self):\n"
-        "        return 't'\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_split_module_refuses_executable_statements_between_classes__7cb948ca.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "prod_mod.py").write_text(src)
     req = fix_engine._FixRequest(
         kind="split-module",
@@ -1542,17 +1121,8 @@ def test_split_module_constant_moves_into_owning_class(tmp_path):
     # THRESHOLD is read only by the misplaced User — it moves INTO User as a
     # class attribute and the method reference becomes User.THRESHOLD; no
     # module-level constant survives in either layout (BQ6)
-    src = (
-        "THRESHOLD = 10\n"
-        "\n"
-        "class User:\n"
-        "    def allowed(self):\n"
-        "        return THRESHOLD\n"
-        "\n"
-        "class ProdMod:\n"
-        "    pass\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_split_module_constant_moves_into_owning_class__0a695b84.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "prod_mod.py").write_text(src)
     req = fix_engine._FixRequest(
         kind="split-module",
@@ -1574,16 +1144,8 @@ def test_split_module_constant_moves_into_owning_class(tmp_path):
 def test_split_module_ownerless_constant_stays_in_residual(tmp_path):
     # LIMIT has no owning class — it stays with the residual origin module
     # (never stranded, never moved into a class file's top level)
-    src = (
-        "LIMIT = 5\n"
-        "\n"
-        "class User:\n"
-        "    pass\n"
-        "\n"
-        "class ProdMod:\n"
-        "    pass\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_split_module_ownerless_constant_stays_in_residual__f353fde8.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "prod_mod.py").write_text(src)
     req = fix_engine._FixRequest(
         kind="split-module",
@@ -1603,18 +1165,8 @@ def test_split_module_ownerless_constant_stays_in_residual(tmp_path):
 def test_split_module_package_refuses_imported_constant(tmp_path):
     # LIMIT is imported from another file — it cannot move into a class; the
     # package __init__ may hold no constants (BQ6): refuse, never strand
-    src = (
-        "LIMIT = 5\n"
-        "\n"
-        "class User:\n"
-        "    def member(self):\n"
-        "        return Team().name()\n"
-        "\n"
-        "class Team:\n"
-        "    def name(self):\n"
-        "        return 't'\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_split_module_package_refuses_imported_constant__b2b55a88.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "prod_mod.py").write_text(src)
     (repo / "consumer.py").write_text("from prod_mod import LIMIT\n")
     req = fix_engine._FixRequest(
@@ -1632,21 +1184,11 @@ def test_split_module_package_refuses_imported_constant(tmp_path):
 def test_split_module_two_independent_classes_go_flat_and_origin_deleted(tmp_path):
     # no edges between User and Team -> two singleton FLAT files; the origin
     # becomes empty and, with no import naming it, is deleted
-    src = (
-        "class User:\n"
-        "    def name(self):\n"
-        "        return 'u'\n"
-        "\n"
-        "class Team:\n"
-        "    def name(self):\n"
-        "        return 't'\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_split_module_two_independent_classes_go_flat_and_origin_deleted__b40717cf.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "prod_mod.py").write_text(src)
     (repo / "consumer.py").write_text(
-        "from prod_mod import User, Team\n"
-        "def go():\n"
-        "    return User(), Team()\n"
+        code_fixture("sample_split_module_two_independent_classes_go_flat_and_origin_deleted__078ae8ba.py")
     )
     req = fix_engine._FixRequest(
         kind="split-module",
@@ -1663,11 +1205,12 @@ def test_split_module_two_independent_classes_go_flat_and_origin_deleted(tmp_pat
     assert "from team import Team" in consumer, consumer
     assert "from prod_mod import" not in consumer
 
+
 def test_fix_without_line_resolves_single_finding(tmp_path, capsys):
     """R27: no --fix-line needed when the file has exactly one finding of the
     kind — the tool scans and owns the coordinates."""
-    src = "def g():\n    x + 1\n    return 2\n"
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_fix_without_line_resolves_single_finding__196f913a.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     # no --fix-line: the noop is the only finding of its kind in the file
     rc = run_main(repo, "fix", "--kind", "noop-statement", "--file", "houses/app.py")
@@ -1680,21 +1223,8 @@ def test_fix_without_line_resolves_single_finding(tmp_path, capsys):
 def test_extract_class_previews_without_writing(tmp_path, capsys):
     """Structural fixes preview a diff and write NOTHING without --confirm —
     the reviewable-application contract for every structural kind."""
-    src = (
-        "class S:\n"
-        "    def __init__(self):\n"
-        "        self.x = 0\n"
-        "\n"
-        "def a(s: S):\n"
-        "    return s.x\n"
-        "\n"
-        "def b(s: S):\n"
-        "    return s.x + 1\n"
-        "\n"
-        "def c(s: S):\n"
-        "    return s.x + 2\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_extract_class_previews_without_writing__cc3cded6.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     rc = run_main(repo, "fix", "--kind", "latent-class", "--file", "houses/app.py", "--line", "5")
@@ -1710,78 +1240,76 @@ def test_extract_class_previews_without_writing(tmp_path, capsys):
 
 # --------------------------------------------------------------------------- R27: follow the message's fix directive
 
-_INDEPENDENT_IFS = "".join(
-    f"    if c{i} > 0:\n        out.append({1 << i})\n" for i in range(14)
-)
+_INDEPENDENT_IFS = "".join(f"    if c{i} > 0:\n        out.append({1 << i})\n" for i in range(14))
 
 # (finding kind, fixture, before-expr, after-expr, expected, --fix-name)
 DIRECTIVE_CASES = [
     (
         "stale-suppression",
-        "# lucidlint: ignore magic-number nothing on this line\ndef g():\n    return 1\n",
-        "g()", "g()", "1", None,
+        code_fixture("module__55e2d78a.py"),
+        "g()",
+        "g()",
+        "1",
+        None,
     ),
     (
         "noop-statement",
-        "def g():\n    x = 1\n    x + 1\n    return 2\n",
-        "g()", "g()", "2", None,
+        code_fixture("module__b52c6748.py"),
+        "g()",
+        "g()",
+        "2",
+        None,
     ),
     (
         "unreachable",
-        "def g():\n    return 1\n    x = 2\n",
-        "g()", "g()", "1", None,
+        code_fixture("module__0541d0ab.py"),
+        "g()",
+        "g()",
+        "1",
+        None,
     ),
     (
         "positional-literals",
-        "def set_limits(min_v, max_v):\n    return min_v\n\ndef g():\n    return set_limits(10, 20)\n",
-        "g()", "g()", "10", None,
+        code_fixture("module__3cf09399.py"),
+        "g()",
+        "g()",
+        "10",
+        None,
     ),
     (
         "vague-name",
-        (
-            "class DataManager:\n    def run(self):\n        return 1\n"
-            "    def stop(self):\n        return 2\n"
-            "    def reset(self):\n        return 3\n"
-            "    def start(self):\n        return 4\n"
-            "    def pause(self):\n        return 5\n"
-            "    def resume(self):\n        return 6\n"
-            "\ndef use():\n    return DataManager()\n"
-        ),
-        "use().run()", "use().run()", "1", "DataRegistry",
+        (code_fixture("module__cd0799e3.py")),
+        "use().run()",
+        "use().run()",
+        "1",
+        "DataRegistry",
     ),
     (
         "long-param-list",
-        (
-            "def build(a, b, c, d, e, f):\n"
-            "    return a + b + c + d + e + f\n"
-            "\ndef g():\n    return build(1, 2, 3, 4, 5, 6)\n"
-        ),
-        "g()", "g()", "21", "BuildOptions",
+        (code_fixture("sample_parameter_object_introduced__23d8316c.py")),
+        "g()",
+        "g()",
+        "21",
+        "BuildOptions",
     ),
     (
         "latent-class",
-        (
-            "class _FnBodyState:\n    def __init__(self, line):\n        self.line = line\n\n"
-            "def _window_score(state: _FnBodyState, i, j, min_lines):\n"
-            "    if state.line > 0:\n        return 1\n    return 0\n\n"
-            "def _window_has_outvars(state: _FnBodyState, j, writes_all):\n"
-            "    return state.line > 0\n\n"
-            "def _best_seam(state: _FnBodyState, min_lines=2):\n"
-            "    return _window_score(state, 0, 1, min_lines)\n"
-        ),
-        "_best_seam(_FnBodyState(1))", "_FnBodyState(1)._best_seam()", "1", None,
+        (code_fixture("sample_extract_class_renames_receiver_and_internal_calls__94d5cbdd.py")),
+        "_best_seam(_FnBodyState(1))",
+        "_FnBodyState(1)._best_seam()",
+        "1",
+        None,
     ),
     (
         "complexity",
         (
             "def score(" + ", ".join(f"c{i}" for i in range(14)) + "):\n"
-            "    out = []\n"
-            + _INDEPENDENT_IFS
-            + "    label = 's' + str(sum(out))\n    return label\n"
+            "    out = []\n" + _INDEPENDENT_IFS + "    label = 's' + str(sum(out))\n    return label\n"
         ),
         "score(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0)",
         "score(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0)",
-        "s5461", "sum_bonus",
+        "s5461",
+        "sum_bonus",
     ),
 ]
 
@@ -1793,7 +1321,7 @@ def test_every_fix_directive_clears_its_finding(tmp_path, capsys):
     preserves behavior."""
     for kind, src, before_expr, after_expr, expected, name_value in DIRECTIVE_CASES:
         tmp = tmp_path / kind
-        repo = make_repo(tmp, app_src="def alpha(a):\n    return a\n")
+        repo = make_repo(tmp, app_src=code_fixture("build__f9694aad.py"))
         p = repo / "houses" / "app.py"
         p.write_text(src)
         before = {}
@@ -1818,9 +1346,12 @@ def test_every_fix_directive_clears_its_finding(tmp_path, capsys):
 
         args = [
             "fix",
-            "--kind", fix_kind,
-            "--file", fix_file,
-            "--line", str(fix_line),
+            "--kind",
+            fix_kind,
+            "--file",
+            fix_file,
+            "--line",
+            str(fix_line),
         ]
         # name-driven kinds get the table's name whether the message still
         # carries the slot or not (the extract-method directive no longer
@@ -1848,7 +1379,7 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
     """The full loop the agent runs: gate -> read the finding -> apply the fix
     (supplying a name/signature where the message cannot) -> re-gate, until
     every fixable kind is gone. Drives the real CLI, not the functions."""
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(_FIX_ALL_SRC)
     attempts: dict = {}
 
@@ -1871,9 +1402,7 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
                     f"{len(fixable)}) — the loop would thrash; fix the transform"
                 )
             else:
-                assert len(fixable) <= last_count, (
-                    f"no-op fix changed the file ({last_count} -> {len(fixable)})"
-                )
+                assert len(fixable) <= last_count, f"no-op fix changed the file ({last_count} -> {len(fixable)})"
         fix_kind = FIXABLE_KINDS[finding["kind"]]
         key = (finding["kind"], finding["file"], finding["line"])
         extra = []
@@ -1887,9 +1416,12 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
         rc = run_main(
             repo,
             "fix",
-            "--kind", fix_kind,
-            "--file", finding["file"],
-            "--line", str(finding["line"]),
+            "--kind",
+            fix_kind,
+            "--file",
+            finding["file"],
+            "--line",
+            str(finding["line"]),
             "--confirm",  # structural fixes preview unless confirmed
             *extra,
         )
@@ -1926,33 +1458,32 @@ def test_extract_method_refusal_is_silent(tmp_path, capsys):
     never tells the user it could not figure out a fix (the silence is the
     signal; the user sees the code and figures it out)."""
     repo = make_repo(tmp_path)
-    (repo / "houses" / "app.py").write_text(
-        "def price(t):\n    x = 3 * t\n    return x\n"
+    (repo / "houses" / "app.py").write_text(code_fixture("sample_extract_method_refusal_is_silent__90a0c5ca.py"))
+    rc = run_main(
+        repo,
+        "fix",
+        "--kind",
+        "extract-method",
+        "--file",
+        "houses/app.py",
+        "--line",
+        "1",
+        "--name",
+        "_apply",
+        "--confirm",
     )
-    rc = run_main(repo, "fix", "--kind", "extract-method",
-                  "--file", "houses/app.py", "--line", "1",
-                  "--name", "_apply", "--confirm")
     assert rc == 0
     out = capsys.readouterr().out
     # R28 three-shape contract: nothing fixable here -> complete silence
     assert out.strip() == "", out
     assert "out-variable" not in out and "extractable" not in out, out
 
+
 def test_dispatch_registry_preserves_behavior(tmp_path):
     """The dispatch-registry fix: an if/elif chain over a selector becomes a
     dict of selector -> handler functions. Behavior must be identical for
     every selector, including the no-match fallback."""
-    src = '''def run_tool(tool, args, facts):
-    people = facts["people"]
-    if tool == "search_people":
-        q = str(args.get("query", "")).strip().lower()
-        return {"hits": [p for p in people if q in p.lower()]}
-    if tool == "person":
-        return {"id": str(args.get("id", ""))}
-    if tool == "relationships":
-        return {"rels": [r for r in facts["rels"] if r.get("a") == args.get("id")]}
-    return {"error": "unknown tool"}
-'''
+    src = code_fixture("sample_dispatch_registry_preserves_behavior__049f9d33.py")
     fixed = _dispatch(src, 1)
     assert fixed is not None and fixed != src
     facts = {"people": ["Alice Smith", "Bob"], "rels": [{"a": "1"}]}
@@ -1978,11 +1509,7 @@ def test_dispatch_registry_preserves_behavior(tmp_path):
 def test_dispatch_registry_refuses_non_chain(tmp_path):
     """A fn whose body is not a >=3-arm dispatch chain over one selector gets
     no fix (extract-method remains the tool for it)."""
-    src = '''def f(x):
-    if x == "a":
-        return 1
-    return 2
-'''
+    src = code_fixture("sample_dispatch_registry_refuses_non_chain__e8f448cb.py")
     assert _dispatch(src, 1) is None
 
 
@@ -1990,18 +1517,7 @@ def test_dispatch_registry_passes_selector_to_selector_reading_arms(tmp_path):
     """A multi-statement arm body that READS the selector (module-level named
     handlers cannot capture the fn's locals) gets the selector passed as the
     first handler parameter — behavior preserved, not a NameError."""
-    src = '''def run_tool(tool, args):
-    if tool == "search":
-        q = args.get("q", "")
-        return {"tool": tool, "q": q}
-    if tool == "person":
-        i = args.get("id", "")
-        return {"tool": tool, "id": i}
-    if tool == "rels":
-        ids = args.get("ids", [])
-        return {"tool": tool, "n": len(ids)}
-    return {"error": "unknown"}
-'''
+    src = code_fixture("sample_dispatch_registry_passes_selector_to_selector_reading_arms__14071eec.py")
     fixed = _dispatch(src, 1)
     assert fixed is not None and fixed != src
     before, after = {}, {}
@@ -2021,16 +1537,7 @@ def test_dispatch_registry_refuses_sibling_bound_reads(tmp_path):
     original if/elif runs one arm, so the value may not exist at the uniform
     call site, and the rewrite would crash every selector. The fix must not
     be offered (the classifier refuses the same shape)."""
-    src = '''def run_tool(tool, args):
-    if tool == "a":
-        q = args.get("q", "")
-        return {"a": q}
-    if tool == "b":
-        return {"b": q}
-    if tool == "c":
-        return {"c": args.get("id", "")}
-    return {"error": "unknown"}
-'''
+    src = code_fixture("sample_dispatch_registry_refuses_sibling_bound_reads__799321ec.py")
     assert _dispatch(src, 1) is None
 
 
@@ -2038,26 +1545,20 @@ def test_rust_dispatch_registry_applies(tmp_path):
     """dispatch-registry works on Rust via the scan core (syn): the if/elif
     chain over one selector becomes a match — Rust's idiomatic dispatch
     table. Behavior preserved (verified by running both versions)."""
-    src = (
-        "pub fn route(sel: &str, n: i32) -> i32 {\n"
-        "    if sel == \"a\" {\n"
-        "        return n + 1;\n"
-        "    }\n"
-        "    if sel == \"b\" {\n"
-        "        return n * 2;\n"
-        "    }\n"
-        "    if sel == \"c\" {\n"
-        "        return n - 1;\n"
-        "    }\n"
-        "    -1\n"
-        "}\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_rust_dispatch_registry_applies__c3a285e6.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "lib.rs"
     p.write_text(src)
     before = p.read_text()
     run_main(
-        repo, "fix", "--kind", "dispatch-registry", "--file", "houses/lib.rs", "--line", "1",
+        repo,
+        "fix",
+        "--kind",
+        "dispatch-registry",
+        "--file",
+        "houses/lib.rs",
+        "--line",
+        "1",
     )
     fixed = p.read_text()
     assert "match sel {" in fixed, fixed
@@ -2066,13 +1567,7 @@ def test_rust_dispatch_registry_applies(tmp_path):
     assert "if sel ==" not in fixed
     # behavior preserved: compile AND RUN both versions, compare the output
     # (a compile-only check cannot catch a dropped arm or a wrong fallback)
-    main = (
-        "fn main() {\n"
-        "    for sel in [\"a\", \"b\", \"c\", \"zz\"] {\n"
-        "        println!(\"{} -> {}\", sel, route(sel, 5));\n"
-        "    }\n"
-        "}\n"
-    )
+    main = code_fixture("sample_rust_dispatch_registry_applies__35ad4ae4.py")
     _rust_run_compare(tmp_path, before, fixed, main)
 
 
@@ -2080,15 +1575,8 @@ def test_rust_dispatch_registry_refuses_else_arms(tmp_path):
     """An arm with an else would be SILENTLY DELETED by the match splice —
     the fix must refuse (and the classifier must not offer the directive).
     The original file stays untouched."""
-    src = (
-        "pub fn route(sel: &str) -> i32 {\n"
-        "    if sel == \"a\" {\n        return 1;\n    } else {\n        return 9;\n    }\n"
-        "    if sel == \"b\" {\n        return 2;\n    }\n"
-        "    if sel == \"c\" {\n        return 3;\n    }\n"
-        "    -1\n"
-        "}\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_rust_dispatch_registry_refuses_else_arms__610d949a.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "lib.rs"
     p.write_text(src)
     before = p.read_text()
@@ -2100,15 +1588,8 @@ def test_rust_dispatch_registry_refuses_else_arms(tmp_path):
 def test_rust_dispatch_registry_refuses_string_selector(tmp_path):
     """`match sel { \"lit\" => ... }` only compiles for &str — a String
     selector must be refused (no directive, no broken rewrite)."""
-    src = (
-        "pub fn route(sel: String) -> i32 {\n"
-        "    if sel == \"a\" {\n        return 1;\n    }\n"
-        "    if sel == \"b\" {\n        return 2;\n    }\n"
-        "    if sel == \"c\" {\n        return 3;\n    }\n"
-        "    -1\n"
-        "}\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_rust_dispatch_registry_refuses_string_selector__3be0ac30.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "lib.rs"
     p.write_text(src)
     before = p.read_text()
@@ -2119,15 +1600,8 @@ def test_rust_dispatch_registry_refuses_string_selector(tmp_path):
 def test_rust_dispatch_registry_refuses_duplicate_literals(tmp_path):
     """Two arms on the same literal -> unreachable-pattern compile error —
     refuse."""
-    src = (
-        "pub fn route(sel: &str) -> i32 {\n"
-        "    if sel == \"a\" {\n        return 1;\n    }\n"
-        "    if sel == \"a\" {\n        return 2;\n    }\n"
-        "    if sel == \"c\" {\n        return 3;\n    }\n"
-        "    -1\n"
-        "}\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_rust_dispatch_registry_refuses_duplicate_literals__ea5f4373.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "lib.rs"
     p.write_text(src)
     before = p.read_text()
@@ -2139,17 +1613,7 @@ def test_rule_table_preserves_behavior(tmp_path):
     """The rule-table fix (hoist the latent data structure): the battery of
     if/append checks becomes a list of (lambda condition, violation) tuples.
     Same violations, same order; the lambdas capture shared preamble locals."""
-    src = (
-        "def check(assessment, who):\n"
-        "    violations = []\n"
-        '    if who.strip() and assessment.get("q"):\n'
-        '        violations.append("the narrator is not known")\n'
-        '    if assessment.get("facts"):\n'
-        '        violations.append("facts without a date")\n'
-        '    if assessment.get("ages") is None:\n'
-        '        violations.append("no ages recorded")\n'
-        "    return violations\n"
-    )
+    src = code_fixture("sample_rule_table_preserves_behavior__5427f6d6.py")
     fixed = _rule_table(src, 1)
     assert fixed is not None and fixed != src
     before, after = {}, {}
@@ -2174,17 +1638,7 @@ def test_rule_table_defers_value_evaluation(tmp_path):
     KeyError at table-construction time. The regression: the value sat in
     the tuple directly and ran eagerly, breaking every guard whose value
     reads the guarded key."""
-    src = (
-        "def check(d):\n"
-        "    violations = []\n"
-        '    if d.get("k"):\n'
-        '        violations.append(d["k"])\n'
-        '    if d.get("m"):\n'
-        '        violations.append(d["m"] + 1)\n'
-        '    if "n" in d:\n'
-        '        violations.append(d["n"])\n'
-        "    return violations\n"
-    )
+    src = code_fixture("sample_rule_table_defers_value_evaluation__1103a831.py")
     fixed = _rule_table(src, 1)
     assert fixed is not None
     before, after = {}, {}
@@ -2200,18 +1654,7 @@ def test_rule_table_defers_value_evaluation(tmp_path):
 def test_rule_table_captures_preamble_locals(tmp_path):
     """The hoisted lambdas capture the fn's shared computed locals — no
     param plumbing, unlike a named-function hoist (v1 refused these)."""
-    src = (
-        "def check(assessment, who):\n"
-        '    facts = assessment.get("facts", [])\n'
-        "    violations = []\n"
-        "    if facts and who.strip():\n"
-        '        violations.append("facts without a narrator")\n'
-        "    if not facts:\n"
-        '        violations.append("no facts at all")\n'
-        "    if who.strip() and len(facts) > 3:\n"
-        '        violations.append("too many facts")\n'
-        "    return violations\n"
-    )
+    src = code_fixture("sample_rule_table_captures_preamble_locals__39836f88.py")
     fixed = _rule_table(src, 1)
     assert fixed is not None
     before, after = {}, {}
@@ -2228,39 +1671,29 @@ def test_rust_rule_table_applies(tmp_path):
     battery becomes a (fn-pointer condition, violation) table — parity with
     the Python lambda-table (Rust closures cannot form a homogeneous table).
     Both compile."""
-    src = (
-        "pub fn check(a: &M, who: &str) -> Vec<&'static str> {\n"
-        "    let mut out = vec![];\n"
-        "    if a.get(1) { out.push(\"v1\"); }\n"
-        "    if a.get(2) { out.push(\"v2\"); }\n"
-        "    if a.get(3) { out.push(\"v3\"); }\n"
-        "    out\n"
-        "}\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_rust_rule_table_applies__a8be477e.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "lib.rs"
     p.write_text(src)
     before = p.read_text()
     run_main(
-        repo, "fix", "--kind", "rule-table", "--file", "houses/lib.rs", "--line", "1",
+        repo,
+        "fix",
+        "--kind",
+        "rule-table",
+        "--file",
+        "houses/lib.rs",
+        "--line",
+        "1",
     )
     fixed = p.read_text()
     assert "fn _rule_1(a: &M, who: &str) -> bool" in fixed
-    assert "(_rule_1, \"v1\")" in fixed and "(_rule_2, \"v2\")" in fixed and "(_rule_3, \"v3\")" in fixed
+    assert '(_rule_1, "v1")' in fixed and '(_rule_2, "v2")' in fixed and '(_rule_3, "v3")' in fixed
     assert "for (_cond, _msg) in rules" in fixed
     assert "fn(&M, &str) -> bool" in fixed  # the fn-pointer table type
     assert fixed.count("out.push(") == 1  # only the collector loop pushes
     # behavior preserved: compile AND RUN both versions, compare the output
-    main = (
-        "pub struct M { bits: i32 }\n"
-        "impl M { fn get(&self, i: i32) -> bool { (self.bits >> i) & 1 == 1 } }\n"
-        "fn main() {\n"
-        "    for bits in [0b111, 0b101, 0b000] {\n"
-        "        let m = M { bits };\n"
-        "        println!(\"{}\", check(&m, \"w\").join(\",\"));\n"
-        "    }\n"
-        "}\n"
-    )
+    main = code_fixture("sample_rust_rule_table_applies__1b151cac.py")
     _rust_run_compare(tmp_path, before, fixed, main)
 
 
@@ -2268,15 +1701,7 @@ def test_dispatch_registry_lambda_table(tmp_path):
     """Single-expression arms collapse into a pure data table — a dict of
     selector -> lambda, capturing the scope: no names, no param plumbing
     (the rule-table principle applied to dispatch)."""
-    src = '''def route(sel, n):
-    if sel == "a":
-        return n + 1
-    if sel == "b":
-        return n * 2
-    if sel == "c":
-        return n - 1
-    return -1
-'''
+    src = code_fixture("sample_dispatch_registry_lambda_table__ae25b4be.py")
     fixed = _dispatch(src, 1)
     assert fixed is not None and fixed != src
     assert "_tools = {'a': lambda: n + 1" in fixed
@@ -2293,32 +1718,21 @@ def test_dispatch_registry_lambda_table(tmp_path):
 def test_dispatch_registry_collision_guard(tmp_path):
     """A literal-derived handler name must never shadow an existing module
     function — the collision guard suffixes it."""
-    src = '''def _search_people(args):
-    return "existing"
-
-def run_tool(tool, args):
-    if tool == "search_people":
-        q = args.get("query", "")
-        return {"hits": [q]}
-    if tool == "person":
-        return {"id": "x"}
-    if tool == "relationships":
-        return {"rels": []}
-    return {"error": "unknown tool"}
-'''
+    src = code_fixture("sample_dispatch_registry_collision_guard__d7051bcd.py")
     fixed = _dispatch(src, 4)
     assert fixed is not None
-    assert "def _search_people(args):\n    return \"existing\"" in fixed  # untouched
+    assert code_fixture("sample_dispatch_registry_collision_guard__443ef584.py") in fixed  # untouched
     assert "def _search_people_1(" in fixed  # the colliding handler is suffixed
     assert "_search_people_1" in fixed
 
 
 # --------------------------------------------------------------------------- review-log fixes
 
+
 def _fix_opts(tmp_path, kind, rel, src, line, name=None, params=None):
     """Like _fix but with the agent-supplied semantic bits (extract-module's
     module name + member list)."""
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / rel).write_text(src)
     repo.mkdir(exist_ok=True)
     opts = fix_engine.FixOptions(name=name, params=params)
@@ -2329,7 +1743,7 @@ def _fix_opts(tmp_path, kind, rel, src, line, name=None, params=None):
 def test_duplicate_def_unreferenced_shadow_deleted(tmp_path):
     # the review-log guess_pages shadow: the second def is referenced nowhere
     # (only the two def sites hit the name) — the delete is provably safe
-    src = "def guess_pages():\n    return 1\n\n\ndef guess_pages(model):\n    return model\n"
+    src = code_fixture("sample_duplicate_def_unreferenced_shadow_deleted__43e2754a.py")
     out, fixed = _fix(tmp_path, "duplicate-def", "houses/app.py", src, 5)
     assert out is not None
     assert fixed.count("def guess_pages") == 1
@@ -2338,20 +1752,14 @@ def test_duplicate_def_unreferenced_shadow_deleted(tmp_path):
 
 def test_duplicate_def_referenced_shadow_not_deleted(tmp_path):
     # a caller exists — a delete would break it; the agent must rename
-    src = "def f():\n    return 1\n\n\ndef f(x):\n    return x\n\n\ndef g():\n    return f(2)\n"
+    src = code_fixture("sample_duplicate_def_referenced_shadow_not_deleted__7fbceba0.py")
     out, fixed = _fix(tmp_path, "duplicate-def", "houses/app.py", src, 5)
     assert out is None
     assert fixed == src
 
 
 def test_restating_docstring_deleted(tmp_path):
-    src = (
-        "def check(box, line):\n"
-        '    """the line orientation must be consistent with the box aspect"""\n'
-        "    orientation = line.orientation\n"
-        "    consistent = box.aspect\n"
-        "    return orientation == consistent\n"
-    )
+    src = code_fixture("sample_restating_docstring_deleted__3ab003ea.py")
     out, fixed = _fix(tmp_path, "restating-docstring", "houses/app.py", src, 1)
     assert out is not None
     assert '"""the line orientation' not in fixed
@@ -2359,7 +1767,7 @@ def test_restating_docstring_deleted(tmp_path):
 
 
 def test_restating_docstring_absent_returns_none(tmp_path):
-    src = "def f():\n    return 1\n"
+    src = code_fixture("sample_restating_docstring_absent_returns_none__527061b5.py")
     out, fixed = _fix(tmp_path, "restating-docstring", "houses/app.py", src, 1)
     assert out is None
     assert fixed == src
@@ -2368,17 +1776,7 @@ def test_restating_docstring_absent_returns_none(tmp_path):
 def test_duplicate_block_second_copy_deleted(tmp_path):
     # the transcribe-twice class: the post-loop copy is removed, the loop
     # body survives
-    src = (
-        "def run(pages):\n"
-        "    for p in pages:\n"
-        "        t = transcribe(p)\n"
-        "        write(t)\n"
-        "        mark(p)\n"
-        "    t = transcribe(p)\n"
-        "    write(t)\n"
-        "    mark(p)\n"
-        "    return t\n"
-    )
+    src = code_fixture("sample_duplicate_block_second_copy_deleted__f2f102a7.py")
     out, fixed = _fix(tmp_path, "duplicate-block", "houses/app.py", src, 6)
     assert out is not None
     assert fixed.count("write(t)") == 1
@@ -2389,37 +1787,24 @@ def test_duplicate_block_empty_block_refused(tmp_path):
     # the second copy FILLS the second loop body — deleting it empties the
     # block -> invalid Python; the fix must refuse rather than emit a bare
     # block
-    src = (
-        "def run(pages):\n"
-        "    for p in pages:\n"
-        "        t = transcribe(p)\n"
-        "        write(t)\n"
-        "        mark(p)\n"
-        "    for p in pages:\n"
-        "        t = transcribe(p)\n"
-        "        write(t)\n"
-        "        mark(p)\n"
-    )
+    src = code_fixture("sample_duplicate_block_empty_block_refused__3824f761.py")
     out, fixed = _fix(tmp_path, "duplicate-block", "houses/app.py", src, 7)
     assert out is None
     assert fixed == src
 
 
-
 def test_extract_module_moves_domain_and_reexports(tmp_path):
     # the module-cohesion fix: one domain's defs move to the new module; the
     # origin re-exports them so every other file's imports keep working
-    src = (
-        "from math import sqrt\n"
-        "def tokenize(s):\n"
-        "    return sqrt(len(s.split()))\n"
-        "\n"
-        "def words(s):\n"
-        "    return tokenize(s)\n"
-    )
+    src = code_fixture("sample_extract_module_moves_domain_and_reexports__cb808349.py")
     out, fixed = _fix_opts(
-        tmp_path, "extract-module", "houses/layout.py", src, 1,
-        name="text", params=["tokenize", "words"],
+        tmp_path,
+        "extract-module",
+        "houses/layout.py",
+        src,
+        1,
+        name="text",
+        params=["tokenize", "words"],
     )
     assert out is not None
     repo = tmp_path / "repo"
@@ -2434,16 +1819,15 @@ def test_extract_module_moves_domain_and_reexports(tmp_path):
 def test_extract_module_refuses_leaking_dependency(tmp_path):
     # the moved code needs an origin def that is NOT moving -> a from-origin
     # import in the new module would create a cycle (review log §3.4) — refuse
-    src = (
-        "def helper():\n"
-        "    return 1\n"
-        "\n"
-        "def tokenize(s):\n"
-        "    return helper()\n"
-    )
+    src = code_fixture("sample_extract_module_refuses_leaking_dependency__025de62a.py")
     out, fixed = _fix_opts(
-        tmp_path, "extract-module", "houses/layout.py", src, 1,
-        name="text", params=["tokenize"],
+        tmp_path,
+        "extract-module",
+        "houses/layout.py",
+        src,
+        1,
+        name="text",
+        params=["tokenize"],
     )
     assert out is None
     assert fixed == src
@@ -2453,16 +1837,9 @@ def test_extract_module_refuses_leaking_dependency(tmp_path):
 def test_extract_module_name_free_preview_does_not_write(tmp_path):
     # the preview shows the seam with a placeholder module name and writes
     # nothing — naming AFTER seeing the diff
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     rel = "houses/layout.py"
-    (repo / rel).write_text(
-        "from math import sqrt\n"
-        "def tokenize(s):\n"
-        "    return sqrt(len(s.split()))\n"
-        "\n"
-        "def words(s):\n"
-        "    return tokenize(s)\n"
-    )
+    (repo / rel).write_text(code_fixture("sample_extract_module_moves_domain_and_reexports__cb808349.py"))
     opts = fix_engine.FixOptions(params=["tokenize", "words"])
     new_source, desc = _propose_finding("extract-module", rel, repo, 1, opts)
     assert new_source is not None
@@ -2477,18 +1854,15 @@ def test_extract_module_name_free_preview_does_not_write(tmp_path):
 def test_extract_module_refuses_module_level_constant(tmp_path):
     # the moved code reads a module-level constant — the new module would
     # NameError at runtime; the split must refuse (review finding)
-    src = (
-        "LIMIT = 10\n"
-        "\n"
-        "def tokenize(s):\n"
-        "    return s.split()[:LIMIT]\n"
-        "\n"
-        "def words(s):\n"
-        "    return tokenize(s)\n"
-    )
+    src = code_fixture("sample_extract_module_refuses_module_level_constant__7456d863.py")
     out, fixed = _fix_opts(
-        tmp_path, "extract-module", "houses/layout.py", src, 1,
-        name="text", params=["tokenize", "words"],
+        tmp_path,
+        "extract-module",
+        "houses/layout.py",
+        src,
+        1,
+        name="text",
+        params=["tokenize", "words"],
     )
     assert out is None
     assert fixed == src
@@ -2499,54 +1873,50 @@ def test_extract_module_package_reexport_is_relative(tmp_path):
     # houses/layout.py is inside a package — the re-export must be
     # `from .text import ...`, not the top-level `from text import ...`
     # (review finding: a sibling module is not on sys.path)
-    src = (
-        "def tokenize(s):\n"
-        "    return s.split()\n"
-        "\n"
-        "def words(s):\n"
-        "    return tokenize(s)\n"
-    )
+    src = code_fixture("sample_extract_module_package_reexport_is_relative__319c7c81.py")
     out, fixed = _fix_opts(
-        tmp_path, "extract-module", "houses/layout.py", src, 1,
-        name="text", params=["tokenize", "words"],
+        tmp_path,
+        "extract-module",
+        "houses/layout.py",
+        src,
+        1,
+        name="text",
+        params=["tokenize", "words"],
     )
     assert out is not None
     assert "from .text import tokenize, words" in fixed
     assert "from text import" not in fixed
 
 
-
 def test_extract_module_binds_positional_only_params(tmp_path):
     # `LIMIT` is a POSITIONAL-ONLY parameter — a local, not a read of the
     # module constant of the same name; without binding posonly_params the
     # free-name check treats it as a dependency and falsely refuses (bot)
-    src = (
-        "LIMIT = 10\n"
-        "\n"
-        "def scale(LIMIT, /, factor):\n"
-        "    return LIMIT * factor\n"
-    )
+    src = code_fixture("sample_extract_module_binds_positional_only_params__a638bd64.py")
     out, fixed = _fix_opts(
-        tmp_path, "extract-module", "houses/layout.py", src, 1,
-        name="metrics", params=["scale"],
+        tmp_path,
+        "extract-module",
+        "houses/layout.py",
+        src,
+        1,
+        name="metrics",
+        params=["scale"],
     )
     assert out is not None, "a posonly param named like a constant is a local, not a dependency"
+
 
 def test_extract_module_star_import_does_not_crash(tmp_path):
     # `from x import *` in the origin — ImportStar has no .value; the fix
     # must skip it, not raise (review finding)
-    src = (
-        "from math import *\n"
-        "\n"
-        "def tokenize(s):\n"
-        "    return s.split()\n"
-        "\n"
-        "def words(s):\n"
-        "    return tokenize(s)\n"
-    )
+    src = code_fixture("sample_extract_module_star_import_does_not_crash__d508366d.py")
     out, fixed = _fix_opts(
-        tmp_path, "extract-module", "houses/layout.py", src, 1,
-        name="text", params=["tokenize", "words"],
+        tmp_path,
+        "extract-module",
+        "houses/layout.py",
+        src,
+        1,
+        name="text",
+        params=["tokenize", "words"],
     )
     assert out is not None
     assert "def tokenize(s):" in (tmp_path / "repo" / "houses" / "text.py").read_text()
@@ -2555,18 +1925,15 @@ def test_extract_module_star_import_does_not_crash(tmp_path):
 def test_extract_module_param_named_like_constant_not_refused(tmp_path):
     # a parameter named like a module-level constant is a LOCAL binding, not
     # a module read — the split must not refuse it (review finding)
-    src = (
-        "config = {}\n"
-        "\n"
-        "def tokenize(s, config=None):\n"
-        "    return s.split()\n"
-        "\n"
-        "def words(s):\n"
-        "    return tokenize(s)\n"
-    )
+    src = code_fixture("sample_extract_module_param_named_like_constant_not_refused__531fa28d.py")
     out, fixed = _fix_opts(
-        tmp_path, "extract-module", "houses/layout.py", src, 1,
-        name="text", params=["tokenize", "words"],
+        tmp_path,
+        "extract-module",
+        "houses/layout.py",
+        src,
+        1,
+        name="text",
+        params=["tokenize", "words"],
     )
     assert out is not None
     new_mod = (tmp_path / "repo" / "houses" / "text.py").read_text()
@@ -2576,19 +1943,15 @@ def test_extract_module_param_named_like_constant_not_refused(tmp_path):
 def test_extract_module_except_as_binding_does_not_crash(tmp_path):
     # `except ValueError as e:` — libcst's ExceptHandler.name is an AsName;
     # the free-name scan must not crash on it (review finding)
-    src = (
-        "def tokenize(s):\n"
-        "    try:\n"
-        "        return s.split()\n"
-        "    except ValueError as e:\n"
-        "        return str(e)\n"
-        "\n"
-        "def words(s):\n"
-        "    return tokenize(s)\n"
-    )
+    src = code_fixture("sample_extract_module_except_as_binding_does_not_crash__1fa55c93.py")
     out, fixed = _fix_opts(
-        tmp_path, "extract-module", "houses/layout.py", src, 1,
-        name="text", params=["tokenize", "words"],
+        tmp_path,
+        "extract-module",
+        "houses/layout.py",
+        src,
+        1,
+        name="text",
+        params=["tokenize", "words"],
     )
     assert out is not None
     assert "except ValueError as e:" in (tmp_path / "repo" / "houses" / "text.py").read_text()
@@ -2597,16 +1960,15 @@ def test_extract_module_except_as_binding_does_not_crash(tmp_path):
 def test_extract_module_bare_star_signature_does_not_crash(tmp_path):
     # a bare `*` keyword-only separator is ParamStar, not Param — the
     # free-name scan must not crash (review finding)
-    src = (
-        "def tokenize(s, *, limit=None):\n"
-        "    return s.split()[:limit]\n"
-        "\n"
-        "def words(s):\n"
-        "    return tokenize(s)\n"
-    )
+    src = code_fixture("sample_extract_module_bare_star_signature_does_not_crash__6c77a89a.py")
     out, fixed = _fix_opts(
-        tmp_path, "extract-module", "houses/layout.py", src, 1,
-        name="text", params=["tokenize", "words"],
+        tmp_path,
+        "extract-module",
+        "houses/layout.py",
+        src,
+        1,
+        name="text",
+        params=["tokenize", "words"],
     )
     assert out is not None
     assert "def tokenize(s, *, limit=None):" in (tmp_path / "repo" / "houses" / "text.py").read_text()
@@ -2614,14 +1976,15 @@ def test_extract_module_bare_star_signature_does_not_crash(tmp_path):
 
 # --------------------------------------------------------------------------- extract-record-class
 
+
 def test_extract_record_class_converts_literal_and_reads(tmp_path):
-    src = (
-        "def go(u):\n"
-        "    payload = {\"user\": u, \"stamp\": u}\n"
-        "    return payload[\"user\"], payload\n"
-    )
+    src = code_fixture("sample_extract_record_class_converts_literal_and_reads__f28162e0.py")
     out, fixed = _fix_opts(
-        tmp_path, "extract-record-class", "houses/rec.py", src, 2,
+        tmp_path,
+        "extract-record-class",
+        "houses/rec.py",
+        src,
+        2,
         name="Payload",
     )
     assert out is not None
@@ -2634,11 +1997,8 @@ def test_extract_record_class_converts_literal_and_reads(tmp_path):
 def test_extract_record_class_col_disambiguates_twins(tmp_path):
     # two constant-key dicts share the line — the anchor column selects
     # WHICH one becomes the class (schema-3 col transport)
-    src = (
-        "def deep(user):\n"
-        "    return {\"a\": {\"x\": user, \"y\": user}, \"b\": 1}\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_extract_record_class_col_disambiguates_twins__2590316a.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "twin.py").write_text(src)
     inner = fix_engine._FixRequest(
         kind="extract-record-class",
@@ -2654,17 +2014,17 @@ def test_extract_record_class_col_disambiguates_twins(tmp_path):
     assert "class _Inner:" in out
     assert "self.x" in out and "self.y" in out
     assert "_Inner(x=user, y=user)" in out  # the INNER record converted
-    assert '{\"x\": user' not in out
+    assert '{"x": user' not in out
 
 
 def test_extract_record_class_refuses_non_identifier_keys(tmp_path):
-    src = (
-        "def go(u):\n"
-        "    payload = {\"content-type\": u, \"stamp\": u}\n"
-        "    return payload\n"
-    )
+    src = code_fixture("sample_extract_record_class_refuses_non_identifier_keys__5213d858.py")
     out, fixed = _fix_opts(
-        tmp_path, "extract-record-class", "houses/bad.py", src, 2,
+        tmp_path,
+        "extract-record-class",
+        "houses/bad.py",
+        src,
+        2,
         name="Payload",
     )
     assert out is None
@@ -2685,11 +2045,7 @@ def _fixture(name: str) -> str:
 
 def _fn_line(src: str, fn: str) -> int:
     """The 1-based line of `def fn` — the loop-sequence fixer's anchor."""
-    return next(
-        i + 1
-        for i, line in enumerate(src.splitlines())
-        if line.startswith((f"def {fn}", f"async def {fn}"))
-    )
+    return next(i + 1 for i, line in enumerate(src.splitlines()) if line.startswith((f"def {fn}", f"async def {fn}")))
 
 
 def _loop_line(src: str, fn: str) -> int:
@@ -2708,7 +2064,9 @@ def test_loop_pipeline_append_becomes_comprehension(tmp_path):
     out, fixed = _fix(tmp_path, "loop-pipeline", "houses/app.py", src, _loop_line(src, "f_append"))
     assert out is not None
     assert "out = [x for x in items]" in fixed
-    assert "    for x in items:\n        out.append" not in fixed  # the loop STATEMENT is gone
+    assert (
+        code_fixture("sample_loop_pipeline_append_becomes_comprehension__0a11b098.py") not in fixed
+    )  # the loop STATEMENT is gone
     assert "return out" in fixed
 
 
@@ -2736,7 +2094,7 @@ def test_loop_pipeline_set_add_becomes_set_comprehension(tmp_path):
 
 def test_loop_pipeline_refuses_existing_contents_and_unsupported_mutations(tmp_path):
     # a non-empty accumulator: the rewrite would drop prior contents
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     target = repo / "houses" / "app.py"
     src = _fixture("loop_pipeline_bad.py")
     target.write_text(src)
@@ -2753,7 +2111,7 @@ def test_loop_pipeline_refuses_existing_contents_and_unsupported_mutations(tmp_p
 def test_loop_pipeline_refuses_a_collection_it_iterates(tmp_path):
     # a self-feeding loop is a traversal; the guard refuses it (this empty
     # init is a no-op; a real worklist is a `while` drain, not a comprehension)
-    src = "def f():\n    xs = []\n    for x in xs:\n        xs.append(x)\n    return xs\n"
+    src = code_fixture("sample_loop_pipeline_refuses_a_collection_it_iterates__aabb74d9.py")
     out, fixed = _fix(tmp_path, "loop-pipeline", "houses/app.py", src, _loop_line(src, "f"))
     assert out is None
     assert fixed == src  # untouched on refusal
@@ -2764,7 +2122,10 @@ def test_loop_sequence_shared_accumulator_becomes_concatenated_comprehensions(tm
     out, fixed = _fix(tmp_path, "loop-sequence", "houses/app.py", src, _fn_line(src, "all_text"))
     assert out is not None
     assert 'chunks = [p["name"] for p in people] + [q["bio"] for q in people]' in fixed
-    assert "    for p in people:\n        chunks +=" not in fixed  # the loop statements are gone
+    assert (
+        code_fixture("sample_loop_sequence_shared_accumulator_becomes_concatenated_comprehensions__eced649a.py")
+        not in fixed
+    )  # the loop statements are gone
 
 
 def test_loop_sequence_refuses_interleaved_statements(tmp_path):
@@ -2781,7 +2142,7 @@ def _hoist_fix(tmp_path, fixture: str, fn: str, name="price"):
     src = _fixture(fixture)
     repo = tmp_path / "repo"
     if not (repo / ".git").exists():  # one repo per test, reused across cases
-        repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+        repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     target = repo / "houses" / "app.py"
     target.write_text(src)
     out = _req("loop-hoist", "houses/app.py", repo, _loop_line(src, fn), fix_engine.FixOptions(name=name)).fix_finding()
@@ -2841,20 +2202,11 @@ def test_wide_tuple_becomes_a_record_class(tmp_path):
     """A fixed-arity tuple annotation becomes a record: the field names come
     from the build site's element expressions, every same-shape annotation in
     the file is retargeted, and each build site constructs the class."""
-    src = (
-        "state: tuple[str, int, float, bool] = (mode, level, ratio, alive)\n"
-        "backup: tuple[str, int, float, bool] = (mode, level, ratio, alive)\n"
-        "\n"
-        "\n"
-        "def reset():\n"
-        "    return state\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_wide_tuple_becomes_a_record_class__7a0c0427.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    out = _fix_finding(
-        "wide-tuple", "houses/app.py", repo, 1, fix_engine.FixOptions(name="RunState")
-    )
+    out = _fix_finding("wide-tuple", "houses/app.py", repo, 1, fix_engine.FixOptions(name="RunState"))
     assert out is not None
     fixed = p.read_text()
     assert "class RunState:" in fixed
@@ -2869,7 +2221,7 @@ def test_wide_tuple_refuses_an_ambiguous_anchor(tmp_path):
     """Two wide-tuple annotations anchored on one line cannot be told apart —
     the fixer declines instead of guessing which one becomes the record."""
     src = "first: tuple[int, int, int] = (1, 2, 3); second: tuple[int, int, int] = (4, 5, 6)\n"
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     req = _req("wide-tuple", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Triple"), source=src)
@@ -2882,28 +2234,11 @@ def test_data_clump_pair_becomes_a_parameter_object(tmp_path):
     """The shared parameter pair threads as one object: the clump's functions
     take the instance instead of the two values, their bodies read the pair
     as attributes, and module-scope call sites construct the instance."""
-    src = (
-        "def save(folder, fingerprint, payload):\n"
-        "    return folder + fingerprint + payload\n"
-        "\n"
-        "\n"
-        "def load(folder, fingerprint):\n"
-        "    return folder + fingerprint\n"
-        "\n"
-        "\n"
-        "def verify(folder, fingerprint, strict):\n"
-        "    return folder + fingerprint + strict\n"
-        "\n"
-        "\n"
-        "def main():\n"
-        '    return save("a", "b", "c")\n'
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_data_clump_pair_becomes_a_parameter_object__8bd61bd4.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    out = _fix_finding(
-        "data-clump", "houses/app.py", repo, 1, fix_engine.FixOptions(name="FolderFingerprint")
-    )
+    out = _fix_finding("data-clump", "houses/app.py", repo, 1, fix_engine.FixOptions(name="FolderFingerprint"))
     assert out is not None
     fixed = p.read_text()
     assert "class FolderFingerprint:" in fixed
@@ -2919,36 +2254,8 @@ def test_data_clump_declines_when_the_shared_names_have_mismatched_types(tmp_pat
     """Issue #57: Wall, Point, and a tuple share parameter names but not
     types. No typed group reaches three, so there is no clump to thread and
     the fixer must decline instead of generating a false shared class."""
-    src = (
-        "from dataclasses import dataclass\n"
-        "\n"
-        "\n"
-        "@dataclass(frozen=True)\n"
-        "class Wall:\n"
-        "    low: int\n"
-        "    high: int\n"
-        "\n"
-        "\n"
-        "@dataclass(frozen=True)\n"
-        "class Point:\n"
-        "    x: int\n"
-        "    y: int\n"
-        "\n"
-        "\n"
-        "def combine(first: Wall, second: Wall) -> Wall:\n"
-        "    return Wall(min(first.low, second.low), max(first.high, second.high))\n"
-        "\n"
-        "\n"
-        "def distance(first: Point, second: Point) -> float:\n"
-        "    return ((first.x - second.x) ** 2 + (first.y - second.y) ** 2) ** 0.5\n"
-        "\n"
-        "\n"
-        "def ranges_touch(\n"
-        "    first: tuple[int, int], second: tuple[int, int], tolerance: int\n"
-        ") -> bool:\n"
-        "    return min(first[1], second[1]) + tolerance >= max(first[0], second[0])\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_data_clump_declines_when_the_shared_names_have_mismatched_types__6f677bf4.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     req = _req("data-clump", "houses/app.py", repo, 16)
@@ -2960,31 +2267,11 @@ def test_data_clump_declines_when_the_shared_names_have_mismatched_types(tmp_pat
 def test_data_clump_fix_resolves_a_param_type_alias(tmp_path):
     """The fixer groups by resolved annotations, matching the scanner: an
     alias spelling of the same type keeps the clump threadable."""
-    src = (
-        "class Wall:\n"
-        "    pass\n"
-        "\n"
-        "\n"
-        "WallAlias = Wall\n"
-        "\n"
-        "\n"
-        "def combine(first: WallAlias, second: WallAlias):\n"
-        "    return first, second\n"
-        "\n"
-        "\n"
-        "def union(first: Wall, second: Wall):\n"
-        "    return first, second\n"
-        "\n"
-        "\n"
-        "def intersect(first: Wall, second: Wall):\n"
-        "    return first, second\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_data_clump_fix_resolves_a_param_type_alias__67e190a9.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    out = _fix_finding(
-        "data-clump", "houses/app.py", repo, 8, fix_engine.FixOptions(name="WallPair")
-    )
+    out = _fix_finding("data-clump", "houses/app.py", repo, 8, fix_engine.FixOptions(name="WallPair"))
     assert out is not None
     fixed = p.read_text()
     assert "class WallPair:" in fixed
@@ -2996,19 +2283,8 @@ def test_data_clump_fix_resolves_a_param_type_alias(tmp_path):
 def test_data_clump_refuses_a_cross_module_caller(tmp_path):
     """A clump function imported by another module cannot be threaded — the
     other caller's call site is outside the fixer's resolvable scope."""
-    src = (
-        "def save(folder, fingerprint, payload):\n"
-        "    return folder + fingerprint + payload\n"
-        "\n"
-        "\n"
-        "def load(folder, fingerprint):\n"
-        "    return folder + fingerprint\n"
-        "\n"
-        "\n"
-        "def verify(folder, fingerprint, strict):\n"
-        "    return folder + fingerprint + strict\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_data_clump_refuses_a_cross_module_caller__2066d4de.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     (repo / "consumer.py").write_text("from houses.app import save\n")
@@ -3022,38 +2298,8 @@ def test_partition_splits_field_disjoint_groups(tmp_path):
     """A class whose methods form two field-disjoint groups splits into two
     classes: each keeps the shared base and only its own fields and methods,
     and the first group keeps the base class's name."""
-    src = (
-        "class BaseReport:\n"
-        "    pass\n"
-        "\n"
-        "\n"
-        "class Report(BaseReport):\n"
-        "    def __init__(self):\n"
-        "        self.rows = []\n"
-        "        self.total = 0\n"
-        '        self.title = ""\n'
-        '        self.author = ""\n'
-        "\n"
-        "    def add_row(self, row):\n"
-        "        self.rows.append(row)\n"
-        "\n"
-        "    def row_count(self):\n"
-        "        return len(self.rows)\n"
-        "\n"
-        "    def clear_rows(self):\n"
-        "        self.rows = []\n"
-        "        self.total = 0\n"
-        "\n"
-        "    def set_title(self, title):\n"
-        "        self.title = title\n"
-        "\n"
-        "    def set_author(self, author):\n"
-        "        self.author = author\n"
-        "\n"
-        "    def describe(self):\n"
-        "        return self.title + self.author\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_partition_splits_field_disjoint_groups__b3b46f01.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     out = _fix_finding("partition", "houses/app.py", repo, 5, fix_engine.FixOptions(name="Report"))
@@ -3065,7 +2311,7 @@ def test_partition_splits_field_disjoint_groups(tmp_path):
     assert "def add_row(self, row):" in head
     assert "self.total = 0" in head  # the rows group keeps its field initializers
     assert "def describe(self):" in tail
-    assert "self.title = \"\"" in tail  # the title/author group's initializer moved
+    assert 'self.title = ""' in tail  # the title/author group's initializer moved
     assert "def set_author(self, author):" in tail
     assert "add_row" not in tail
     assert "describe" not in head
@@ -3074,37 +2320,8 @@ def test_partition_splits_field_disjoint_groups(tmp_path):
 def test_partition_refuses_a_connector_method(tmp_path):
     """A method touching two groups' fields is a connector — the class is not
     field-disjoint, so the fixer declines instead of splitting it wrongly."""
-    src = (
-        "class Report:\n"
-        "    def __init__(self):\n"
-        "        self.rows = []\n"
-        "        self.total = 0\n"
-        '        self.title = ""\n'
-        '        self.author = ""\n'
-        "\n"
-        "    def add_row(self, row):\n"
-        "        self.rows.append(row)\n"
-        "\n"
-        "    def row_count(self):\n"
-        "        return len(self.rows)\n"
-        "\n"
-        "    def clear_rows(self):\n"
-        "        self.rows = []\n"
-        "        self.total = 0\n"
-        "\n"
-        "    def set_title(self, title):\n"
-        "        self.title = title\n"
-        "\n"
-        "    def set_author(self, author):\n"
-        "        self.author = author\n"
-        "\n"
-        "    def describe(self):\n"
-        "        return self.title + self.author\n"
-        "\n"
-        "    def summary(self):\n"
-        "        return self.title + str(self.total)\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_partition_refuses_a_connector_method__3a762272.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     req = _req("partition", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Report"))
@@ -3117,20 +2334,11 @@ def test_wide_tuple_function_annotation_creates_the_record(tmp_path):
     """A tuple annotation with no assignment still yields the record: the
     parameter's annotation is retargeted, and the matching return literals of
     the function annotated with the same shape construct the class."""
-    src = (
-        "def build(state: tuple[str, int, float], flag) -> None:\n"
-        "    print(state, flag)\n"
-        "\n"
-        "\n"
-        "def grid() -> tuple[str, int, float]:\n"
-        "    return (name, rows, ratio)\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_wide_tuple_function_annotation_creates_the_record__4c95e7d2.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
-    out = _fix_finding(
-        "wide-tuple", "houses/app.py", repo, 1, fix_engine.FixOptions(name="RunState")
-    )
+    out = _fix_finding("wide-tuple", "houses/app.py", repo, 1, fix_engine.FixOptions(name="RunState"))
     assert out is not None
     fixed = p.read_text()
     assert "class RunState:" in fixed
@@ -3143,19 +2351,8 @@ def test_data_clump_derives_the_class_name_without_a_name(tmp_path):
     """Without --name the class name is derived from the pair (the anchor's
     signature order) and only the PREVIEW is produced — the apply needs the
     explicit name, so nothing is written here."""
-    src = (
-        "def save(folder, fingerprint, payload):\n"
-        "    return folder + fingerprint + payload\n"
-        "\n"
-        "\n"
-        "def load(folder, fingerprint):\n"
-        "    return folder + fingerprint\n"
-        "\n"
-        "\n"
-        "def verify(folder, fingerprint, strict):\n"
-        "    return folder + fingerprint + strict\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_data_clump_refuses_a_cross_module_caller__2066d4de.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     new_source, description = _propose_finding("data-clump", "houses/app.py", repo, 1)
@@ -3171,7 +2368,7 @@ def test_extract_class_directive_fixes_a_wide_tuple_finding(tmp_path):
     entry point), so the extract-class invocation must pick the arm from the
     anchor's shape — not fall through to the strewing group."""
     src = "state: tuple[str, int, float] = (mode, level, ratio)\n"
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
     out = _fix_finding("extract-class", "houses/app.py", repo, 1, fix_engine.FixOptions(name="RunState"))
@@ -3192,33 +2389,7 @@ def _wrapper(source: str) -> MetadataWrapper:
 
 
 def test_flatten_stmts_walks_every_nested_block_kind():
-    module = cst.parse_module(
-        "if a:\n"
-        "    x = 1\n"
-        "elif b:\n"
-        "    y = 2\n"
-        "else:\n"
-        "    z = 3\n"
-        "for i in xs:\n"
-        "    p = i\n"
-        "else:\n"
-        "    q = 0\n"
-        "while c:\n"
-        "    r = 1\n"
-        "else:\n"
-        "    s = 2\n"
-        "try:\n"
-        "    t = 1\n"
-        "except E:\n"
-        "    u = 2\n"
-        "else:\n"
-        "    v = 3\n"
-        "with ctx:\n"
-        "    w = 4\n"
-        "match n:\n"
-        "    case 1:\n"
-        "        y2 = 5\n"
-    )
+    module = cst.parse_module(code_fixture("sample_flatten_stmts_walks_every_nested_block_kind__0a521da7.py"))
     flat = []
     MechanicalFixes._flatten_stmts(module.body, flat)
     kinds = [type(s) for s in flat]
@@ -3228,37 +2399,17 @@ def test_flatten_stmts_walks_every_nested_block_kind():
 
 
 def test_module_level_names_covers_import_and_binding_shapes():
-    module = cst.parse_module(
-        "import os.path\n"
-        "import json as j\n"
-        "from m import n\n"
-        "from m import q as r\n"
-        "from m import *\n"
-        "A = 1\n"
-        "B, C = 2, 3\n"
-        "obj.attr = 4\n"
-        "D: int = 5\n"
-        "def f():\n"
-        "    return A\n"
-        "class K:\n"
-        "    pass\n"
-    )
+    module = cst.parse_module(code_fixture("sample_module_level_names_covers_import_and_binding_shapes__dc1f2cad.py"))
     names = fix_engine._module_level_names(module)
     assert {"os", "j", "n", "r", "A", "B", "C", "D", "f", "K"} <= names
     assert "obj" not in names  # an attribute store binds nothing at module scope
 
 
 def test_class_body_binds_recognises_every_member_shape():
-    cls = cast(cst.ClassDef, cst.parse_statement(
-        "class C:\n"
-        "    def run(self):\n"
-        "        pass\n"
-        "    class Inner:\n"
-        "        pass\n"
-        "    limit = 1\n"
-        "    name: str = 'x'\n"
-        "    from m import imported\n"
-    ))
+    cls = cast(
+        cst.ClassDef,
+        cst.parse_statement(code_fixture("sample_class_body_binds_recognises_every_member_shape__aef01ab6.py")),
+    )
     assert fix_engine._class_body_binds(cls, "run")
     assert fix_engine._class_body_binds(cls, "Inner")
     assert fix_engine._class_body_binds(cls, "limit")
@@ -3268,18 +2419,7 @@ def test_class_body_binds_recognises_every_member_shape():
 
 
 def test_name_ref_kind_reads_the_execution_context():
-    wrapper = _wrapper(
-        "X = 1\n"
-        "def deco(fn):\n"
-        "    return fn\n"
-        "@deco\n"
-        "def f(a, b=X):\n"
-        "    for i in range(2):\n"
-        "        v = i\n"
-        "    return v\n"
-        "class K:\n"
-        "    attr = X\n"
-    )
+    wrapper = _wrapper(code_fixture("sample_name_ref_kind_reads_the_execution_context__96c63e11.py"))
     seen: dict[tuple[str, int], str] = {}
 
     class Probe(cst.CSTVisitor):
@@ -3301,9 +2441,7 @@ def test_name_ref_kind_reads_the_execution_context():
 
 def test_infer_member_type_names_only_what_it_can_prove():
     def infer(text: str, param_types: dict[str, str] | None = None) -> str | None:
-        return MechanicalFixes._infer_member_type(
-            cst.parse_expression(text), param_types or {}
-        )
+        return MechanicalFixes._infer_member_type(cst.parse_expression(text), param_types or {})
 
     assert infer("1") == "int"
     assert infer("1.5") == "float"
@@ -3334,7 +2472,7 @@ def test_subscript_mutation_plan_maps_a_dict_store_only():
 
 
 def test_exec_time_names_defer_function_bodies():
-    wrapper = _wrapper("C = 1\ndef f():\n    return C\nD = C\n")
+    wrapper = _wrapper(code_fixture("sample_exec_time_names_defer_function_bodies__6e6e2afb.py"))
     names = fix_engine._exec_time_names(wrapper, wrapper.module)
     assert "C" in names  # `D = C` runs at import time
     assert fix_engine._name_ref_kind  # the classifier the walk uses
@@ -3357,7 +2495,7 @@ def test_loop_hoist_refuses_each_unsafe_loop_shape(tmp_path):
     # the refusals are distinct decisions — a runner collapsing them to one
     # "cannot fix" message would lose the reason the reader needs
     src = _fixture("loop_hoist_edges.py")
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     target = repo / "houses" / "app.py"
     cases = {
         "h_else": "without an else",
@@ -3368,9 +2506,7 @@ def test_loop_hoist_refuses_each_unsafe_loop_shape(tmp_path):
     }
     for fn, reason in cases.items():
         target.write_text(src)
-        req = _req(
-            "loop-hoist", "houses/app.py", repo, _loop_line(src, fn), fix_engine.FixOptions(name="part")
-        )
+        req = _req("loop-hoist", "houses/app.py", repo, _loop_line(src, fn), fix_engine.FixOptions(name="part"))
         assert req.fix_finding() is None, fn
         assert req.decline is not None
         assert reason in req.decline, (fn, req.decline)
@@ -3379,7 +2515,7 @@ def test_loop_hoist_refuses_each_unsafe_loop_shape(tmp_path):
 
 def test_loop_sequence_refuses_an_async_chain(tmp_path):
     src = _fixture("loop_sequence_edges.py")
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     target = repo / "houses" / "app.py"
     target.write_text(src)
     req = _req("loop-sequence", "houses/app.py", repo, _fn_line(src, "s_async"))
@@ -3390,20 +2526,8 @@ def test_loop_sequence_refuses_an_async_chain(tmp_path):
 
 
 def test_data_clump_threads_one_parameter_object(tmp_path):
-    src = (
-        "def area(width: int, height: int, scale: int) -> int:\n"
-        "    return width * height * scale\n"
-        "\n"
-        "def perimeter(width: int, height: int, scale: int) -> int:\n"
-        "    return 2 * (width + height) * scale\n"
-        "\n"
-        "def diagonal(width: int, height: int) -> float:\n"
-        "    return (width ** 2 + height ** 2) ** 0.5\n"
-        "\n"
-        "def report() -> str:\n"
-        "    return str(area(2, 3, 1) + perimeter(2, 3, 1) + diagonal(2, 3))\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_data_clump_threads_one_parameter_object__56a5e3ea.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     req = _req("extract-class", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Rect"))
     assert req.fix_finding() is not None, req.decline
@@ -3417,17 +2541,8 @@ def test_data_clump_threads_one_parameter_object(tmp_path):
 
 
 def test_data_clump_refuses_variadic_parameters(tmp_path):
-    src = (
-        "def area(width: int, height: int, *rest) -> int:\n"
-        "    return width * height\n"
-        "\n"
-        "def perimeter(width: int, height: int) -> int:\n"
-        "    return 2 * (width + height)\n"
-        "\n"
-        "def diagonal(width: int, height: int) -> float:\n"
-        "    return (width ** 2 + height ** 2) ** 0.5\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_data_clump_refuses_variadic_parameters__723cf43d.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     target = repo / "houses" / "app.py"
     target.write_text(src)
     req = _req("data-clump", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Rect"))
@@ -3438,35 +2553,8 @@ def test_data_clump_refuses_variadic_parameters(tmp_path):
 
 
 def test_partition_splits_field_disjoint_methods(tmp_path):
-    src = (
-        "class Account:\n"
-        "    def __init__(self, balance: int, limit: int, name: str, title: str):\n"
-        "        self.balance = balance\n"
-        "        self.limit = limit\n"
-        "        self.name = name\n"
-        "        self.title = title\n"
-        "\n"
-        "    def deposit(self, amount: int) -> int:\n"
-        "        self.balance += min(amount, self.limit)\n"
-        "        return self.balance\n"
-        "\n"
-        "    def withdraw(self, amount: int) -> int:\n"
-        "        self.balance -= min(amount, self.limit)\n"
-        "        return self.balance\n"
-        "\n"
-        "    def fee(self) -> int:\n"
-        "        return self.balance // self.limit\n"
-        "\n"
-        "    def label(self) -> str:\n"
-        "        return self.name.upper() + self.title\n"
-        "\n"
-        "    def greet(self) -> str:\n"
-        "        return 'Hi ' + self.name + ' ' + self.title\n"
-        "\n"
-        "    def rename(self, name: str) -> None:\n"
-        "        self.name = name\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_partition_splits_field_disjoint_methods__e07250b7.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     req = _req("extract-class", "houses/app.py", repo, 1, fix_engine.FixOptions())
     assert req.fix_finding() is not None, req.decline
@@ -3480,28 +2568,8 @@ def test_partition_splits_field_disjoint_methods(tmp_path):
 
 
 def test_partition_refuses_a_fieldless_method(tmp_path):
-    src = (
-        "class Mixed:\n"
-        "    def __init__(self, left: int, right: int):\n"
-        "        self.left = left\n"
-        "        self.right = right\n"
-        "\n"
-        "    def a(self) -> int:\n"
-        "        return self.left\n"
-        "\n"
-        "    def b(self) -> int:\n"
-        "        return self.left + 1\n"
-        "\n"
-        "    def c(self) -> int:\n"
-        "        return self.right\n"
-        "\n"
-        "    def d(self) -> int:\n"
-        "        return self.right + 1\n"
-        "\n"
-        "    def ping(self) -> int:\n"
-        "        return 1\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_partition_refuses_a_fieldless_method__05e3f85a.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     target = repo / "houses" / "app.py"
     target.write_text(src)
     req = _req("partition", "houses/app.py", repo, 1, fix_engine.FixOptions())
@@ -3514,18 +2582,8 @@ def test_partition_refuses_a_fieldless_method(tmp_path):
 def test_collapse_chain_rewires_a_module_function_terminal(tmp_path):
     # M -> F -> G where G is a MODULE function (not a method): the head calls
     # G directly and the middle forwarder is deleted
-    src = (
-        "def format_currency(value):\n"
-        "    return f'{value:.2f}'\n"
-        "\n"
-        "def show_price(value):\n"
-        "    return format_currency(value)\n"
-        "\n"
-        "class Panel:\n"
-        "    def display(self, value):\n"
-        "        return show_price(value)\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_collapse_chain_rewires_a_module_function_terminal__a43f88e5.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     req = _req("collapse-chain", "houses/app.py", repo, 8, fix_engine.FixOptions())
     assert req.fix_finding() is not None, req.decline
@@ -3540,31 +2598,18 @@ def test_bind_children_walks_every_compound_statement():
         MechanicalFixes._bind_children(cst.parse_statement(src), names)
         return names
 
-    assert {"i", "a"} <= bound("for i in xs:\n    a = 1\n")
+    assert {"i", "a"} <= bound(code_fixture("sample_bind_children_walks_every_compound_statement__a74cf66c.py"))
     assert {"w", "n"} <= bound("while cond:\n    w = 1\nelse:\n    n = 2\n")
-    assert {"z", "y"} <= bound("if cond:\n    z = 1\nelse:\n    y = 2\n")
+    assert {"z", "y"} <= bound(code_fixture("sample_bind_children_walks_every_compound_statement__af5662ec.py"))
     assert {"t", "h", "e", "f"} <= bound(
         "try:\n    t = 1\nexcept E:\n    h = 2\nelse:\n    e = 3\nfinally:\n    f = 4\n"
     )
     assert "handle" in bound("with open(p) as handle:\n    pass\n")
-    assert "m" in bound("match x:\n    case 1:\n        m = 1\n")
+    assert "m" in bound(code_fixture("sample_bind_children_walks_every_compound_statement__10dc4c80.py"))
 
 
 def test_name_ref_kind_skips_definition_positions():
-    wrapper = _wrapper(
-        "x: int = 1\n"
-        "import os as operating\n"
-        "from m import n as en\n"
-        "with open(p) as handle:\n"
-        "    pass\n"
-        "if (walrus := 1):\n"
-        "    pass\n"
-        "def g(key=None):\n"
-        "    [item\n"
-        "     for item in xs]\n"
-        "class K:\n"
-        "    attr = obj.value\n"
-    )
+    wrapper = _wrapper(code_fixture("sample_name_ref_kind_skips_definition_positions__bc97c6f1.py"))
     seen: dict[tuple[str, int], str] = {}
 
     class Probe(cst.CSTVisitor):
@@ -3589,20 +2634,11 @@ def test_name_ref_kind_skips_definition_positions():
     assert seen[("attr", 12)] == "skip"  # an attribute's name is not a bare read
 
 
-CLUMP_SRC = (
-    "def area(width: int, height: int, scale: int) -> int:\n"
-    "    return width * height * scale\n"
-    "\n"
-    "def perimeter(width: int, height: int, scale: int) -> int:\n"
-    "    return 2 * (width + height) * scale\n"
-    "\n"
-    "def diagonal(width: int, height: int) -> float:\n"
-    "    return (width ** 2 + height ** 2) ** 0.5\n"
-)
+CLUMP_SRC = code_fixture("module__38ef7335.py")
 
 
 def test_data_clump_refuses_defaulted_pair_and_imported_callers(tmp_path):
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     target = repo / "houses" / "app.py"
     defaulted = CLUMP_SRC.replace(
         "def diagonal(width: int, height: int) -> float:",
@@ -3625,7 +2661,7 @@ def test_data_clump_refuses_defaulted_pair_and_imported_callers(tmp_path):
 
 
 def test_data_clump_refuses_an_unusable_class_name(tmp_path):
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     target = repo / "houses" / "app.py"
     target.write_text(CLUMP_SRC)
     req = _req("data-clump", "houses/app.py", repo, 1, fix_engine.FixOptions(name="9bad"))
@@ -3635,34 +2671,8 @@ def test_data_clump_refuses_an_unusable_class_name(tmp_path):
 
 
 def test_partition_refuses_an_unusable_name_and_a_bound_name(tmp_path):
-    src = (
-        "class Report:\n"
-        "    def __init__(self):\n"
-        "        self.rows = []\n"
-        "        self.total = 0\n"
-        '        self.title = ""\n'
-        '        self.author = ""\n'
-        "\n"
-        "    def add_row(self) -> None:\n"
-        "        self.rows.append(1)\n"
-        "\n"
-        "    def row_count(self) -> int:\n"
-        "        return len(self.rows) + self.total\n"
-        "\n"
-        "    def clear_rows(self) -> None:\n"
-        "        self.rows = []\n"
-        "        self.total = 0\n"
-        "\n"
-        "    def set_title(self) -> None:\n"
-        '        self.title = "x"\n'
-        "\n"
-        "    def set_author(self) -> None:\n"
-        '        self.author = "y"\n'
-        "\n"
-        "    def describe(self) -> str:\n"
-        "        return self.title + self.author\n"
-    )
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    src = code_fixture("sample_partition_refuses_an_unusable_name_and_a_bound_name__0b40eaeb.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     target = repo / "houses" / "app.py"
     target.write_text(src)
     req = _req("partition", "houses/app.py", repo, 1, fix_engine.FixOptions(name="9bad"))
@@ -3670,7 +2680,7 @@ def test_partition_refuses_an_unusable_name_and_a_bound_name(tmp_path):
     assert req.decline is not None
     assert "not a usable class-name prefix" in req.decline
 
-    target.write_text(src + "\n\nclass ReportAuthor:\n    pass\n")
+    target.write_text(src + code_fixture("sample_partition_refuses_an_unusable_name_and_a_bound_name__57d48272.py"))
     req = _req("partition", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Report"))
     assert req.fix_finding() is None
     assert req.decline is not None
@@ -3693,7 +2703,7 @@ def test_module_outline_locates_the_class_function_and_scope_at_a_line():
     # every fixer resolves its anchor through this outline, so the four
     # lookups are pinned together: the innermost class, the innermost
     # function, the module-level def line, and module membership
-    source = 'class Owner:\n    def method(self):\n        value = 1\n\ndef free():\n    return 2\n'
+    source = code_fixture("sample_module_outline_locates_the_class_function_and_scope_at_a_line__f716d74d.py")
     module = cst.parse_module(source)
     wrapper = MetadataWrapper(module)
     outline = ModuleOutline(wrapper)
@@ -3717,7 +2727,7 @@ def test_module_outline_locates_the_class_function_and_scope_at_a_line():
 def test_module_outline_reads_empty_files_and_docstrings():
     assert ModuleOutline.is_empty("# only comments\n\n")
     assert not ModuleOutline.is_empty("value = 1\n")
-    fn = cst.parse_module('def f():\n    """doc"""\n    return 1\n').body[0]
+    fn = cst.parse_module(code_fixture("sample_module_outline_reads_empty_files_and_docstrings__b4e8a380.py")).body[0]
     assert isinstance(fn, cst.FunctionDef)
     assert ModuleOutline.is_docstring_stmt(fn.body.body[0])
     assert not ModuleOutline.is_docstring_stmt(fn.body.body[1])

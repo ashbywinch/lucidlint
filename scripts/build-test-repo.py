@@ -24,8 +24,17 @@ import io
 import shutil
 import tarfile
 from pathlib import Path
+from pathlib import Path as _CodePath
 
 import pygit2
+
+_CODE_FIXTURES = _CodePath(__file__).resolve().parent.parent / "tests" / "fixtures" / "code"
+
+
+def code_fixture(name: str) -> str:
+    """Read a code sample kept in a real file under tests/fixtures/code/."""
+    return (_CODE_FIXTURES / name).read_text()
+
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "tests" / "fixtures" / "test-repo.tar.gz"
@@ -52,15 +61,17 @@ def build() -> None:
     (work / "tests" / "unit").mkdir(parents=True)
 
     repo = pygit2.init_repository(str(work))
-    c1 = commit_all(repo, {"houses/app.py": "def alpha(a):\n    return a\n"}, "base: houses", [])
+    c1 = commit_all(repo, {"houses/app.py": code_fixture("build__f9694aad.py")}, "base: houses", [])
     c2 = commit_all(
         repo,
-        {"houses/app.py": "def alpha(a):\n    if a:\n        return 1\n    return 0\n"},
+        {"houses/app.py": code_fixture("build__269ea9ca.py")},
         "modify: houses/app.py",
         [repo.head.target],
     )
-    c3 = commit_all(repo, {"scripts/oneoff.py": "def main():\n    pass\n"}, "add: scripts", [repo.head.target])
-    c4 = commit_all(repo, {"tests/unit/test_app.py": "def test_x():\n    pass\n"}, "add: tests", [repo.head.target])
+    c3 = commit_all(repo, {"scripts/oneoff.py": code_fixture("build__37868550.py")}, "add: scripts", [repo.head.target])
+    c4 = commit_all(
+        repo, {"tests/unit/test_app.py": code_fixture("build__31d3b45e.py")}, "add: tests", [repo.head.target]
+    )
     assert all((c1, c2, c3, c4))
 
     # tar the working tree + .git (not the parent dir)

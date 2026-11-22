@@ -82,7 +82,7 @@ fn test_visitor_simple() {
 fn test_visitor_linenos_are_source_lines() {
     // radon's blocks carry 1-based SOURCE lines — a byte offset like 342 for
     // a function near the top would break Order::Lines and the mirror API
-    let code = "# comment\nx = 1\n\ndef f(a):\n    return a\n\nclass C:\n    def m(self):\n        return 1\n";
+    let code = include_str!("../../../tests/fixtures/code/sample_test_visitor_linenos_are_source_lines__8d5bc032.py");
     let v = ComplexityVisitor::from_code(code);
     let blocks = v.blocks();
     let f = blocks
@@ -112,15 +112,15 @@ fn test_visitor_linenos_are_source_lines() {
 fn test_visitor_single_functions() {
     let cases = [
         (
-            "def f(a, b, c):\n    if a and b == 4:\n        return c ** c\n    elif a and not c:\n        return sum(i for i in range(41) if i & 1)\n    return a + b",
+            include_str!("../../../tests/fixtures/code/sample_test_visitor_single_functions__e583e3d5.py"),
             7,
         ),
         (
-            "if a and not b: pass\nelif b or c: pass\nelse: pass\n\ndef g(a, b):\n    while a < b:\n        b, a = a ** 2, b ** 2\n    return b",
+            include_str!("../../../tests/fixtures/code/sample_test_visitor_single_functions__ec33d4bd.py"),
             2,
         ),
         (
-            "def f(a, b):\n    while a ** b:\n        a, b = b, a * (b - 1)\n        if a and b:\n            b = 0\n        else:\n            b = 1\n    return sum(i for i in range(b))",
+            include_str!("../../../tests/fixtures/code/sample_test_visitor_single_functions__6f245526.py"),
             5,
         ),
     ];
@@ -136,11 +136,11 @@ fn test_visitor_single_functions() {
 fn test_visitor_classes_cc() {
     let cases = [
         (
-            "class A(object):\n\n    def m(self, a, b):\n        if not a or b:\n            return b - 1\n        try:\n            return a / b\n        except ZeroDivisionError:\n            return a\n\n    def n(self, k):\n        while self.m(k) < k:\n            k -= self.m(k ** 2 - min(self.m(j) for j in range(k ** 4)))\n        return k",
+            include_str!("../../../tests/fixtures/code/sample_test_visitor_classes_cc__a895af49.py"),
             vec![8, 4, 3],
         ),
         (
-            "class B(object):\n\n    ATTR = 1 if A().n(1) == 1 else 2\n    import sys\n    if sys.version_info >= (3, 3):\n        import os\n        AT = os.open('/random/loc')\n\n    def __iter__(self):\n        return __import__('itertools').tee(B.__dict__)\n\n    def test(self, func):\n        a = func(self.ATTR, self.AT)\n        if a < self.ATTR:\n            yield self\n        elif a > self.ATTR ** 2:\n            yield self.__iter__()\n        yield iter(a)",
+            include_str!("../../../tests/fixtures/code/sample_test_visitor_classes_cc__889b79e4.py"),
             vec![7, 1, 3],
         ),
     ];
@@ -161,7 +161,7 @@ fn test_visitor_classes_cc() {
 fn test_visitor_module() {
     let cases = [
         (
-            "if a and b:\n    print\nelse:\n    print\na = sum(i for i in range(1000) if i % 3 == 0 and i % 5 == 0)\n\ndef f(n):\n    def inner(n):\n        return n ** 2\n\n    if n == 0:\n        return 1\n    elif n == 1:\n        return n\n    elif n < 5:\n        return (n - 1) ** 2\n    return n * pow(inner(n), f(n - 1), n - 3)\n",
+            include_str!("../../../tests/fixtures/code/sample_test_visitor_module__6ef3d15c.py"),
             (6, 3, 0, 9),
         ),
     ];
@@ -194,7 +194,7 @@ fn test_cc_rank() {
 /// cc_visit — the top-level API: returns blocks, like radon's cc_visit
 #[test]
 fn test_cc_visit_blocks() {
-    let blocks = cc_visit("def f():\n    if a:\n        return 1\n    return 0\n");
+    let blocks = cc_visit(include_str!("../../../tests/fixtures/code/sample_test_cc_visit_blocks__6bfc5cab.py"));
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].name(), "f");
     assert_eq!(blocks[0].complexity(), 2);

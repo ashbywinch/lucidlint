@@ -6,8 +6,17 @@ publishes diagnostics from the in-process scan core."""
 import json
 import subprocess
 from pathlib import Path
+from pathlib import Path as _CodePath
 
 import pytest
+
+_CODE_FIXTURES = _CodePath(__file__).resolve().parent.parent / "tests" / "fixtures" / "code"
+
+
+def code_fixture(name: str) -> str:
+    """Read a code sample kept in a real file under tests/fixtures/code/."""
+    return (_CODE_FIXTURES / name).read_text()
+
 
 ROOT = Path(__file__).resolve().parent.parent
 BINARY = ROOT / "scanner" / "target" / "release" / "lucidlint"
@@ -38,9 +47,7 @@ def send(proc: subprocess.Popen, msg) -> None:
 
 
 def session() -> tuple[subprocess.Popen, dict]:
-    proc = subprocess.Popen(
-        [str(BINARY), "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE
-    )
+    proc = subprocess.Popen([str(BINARY), "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     send(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
     return proc, read_msg(proc)
 
@@ -60,7 +67,7 @@ def test_initialize_and_publish_diagnostics(binary):
     assert init["id"] == 1
     assert init["result"]["capabilities"]["textDocumentSync"]["change"] == 1
 
-    bad = "def f():\n    try:\n        g()\n    except Exception:\n        log('x')\n    return a * 60\n"
+    bad = code_fixture("sample_initialize_and_publish_diagnostics__5a2a1541.py")
     send(
         proc,
         {
@@ -82,7 +89,7 @@ def test_diagnostics_payload_never_carries_the_report_header(binary):
     # the header is a REPORT surface (CLI text/json) — per-buffer LSP
     # diagnostics are editor UI, not the report; the banner must never leak
     proc, _ = session()
-    bad = "def f():\n    return a * 60\n"
+    bad = code_fixture("sample_diagnostics_payload_never_carries_the_report_header__7194e7cd.py")
     send(
         proc,
         {
@@ -99,8 +106,8 @@ def test_diagnostics_payload_never_carries_the_report_header(binary):
 
 def test_did_change_updates_diagnostics(binary):
     proc, _ = session()
-    bad = "def f():\n    return a * 60\n"
-    fixed = "def f():\n    return 60\n"
+    bad = code_fixture("sample_diagnostics_payload_never_carries_the_report_header__7194e7cd.py")
+    fixed = code_fixture("sample_did_change_updates_diagnostics__3df572ce.py")
     send(
         proc,
         {
