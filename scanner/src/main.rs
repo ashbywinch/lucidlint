@@ -283,6 +283,7 @@ impl Pipeline {
             skipif_findings(&mut state, &body, source);
             fakefs_findings(&mut state, &body, source);
             no_assert_test_findings(&mut state, &body, source);
+            test_asserts_source_findings(&mut state, &body, source);
         }
         // large-function: the span is a fact of THIS file's AST, computed here so
         // the LSP and a graph-less CI run see it too (the graph contract only
@@ -3596,6 +3597,24 @@ mod tests {
             "{}",
             na[0].message
         );
+    }
+
+    // ------------------------------------------------------------- test-asserts-source
+    const TEST_ASSERTS_SOURCE_MESSAGE: &str = "this test asserts on the source text it fed the code, not on the behaviour under test — a source assertion pins the input, so it passes even when the code does nothing. Assert the parsed finding/output instead.";
+
+    #[test]
+    fn test_asserts_source_flags_assertion_on_fixture_input() {
+        let f = scan_src_test(include_str!("../../tests/fixtures/asserts_source_bad.py"));
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "test-asserts-source").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert_eq!(hits[0].function, "test_loop_shape_is_in_the_corpus");
+        assert_eq!(hits[0].message, TEST_ASSERTS_SOURCE_MESSAGE);
+    }
+
+    #[test]
+    fn test_asserts_source_allows_assertions_on_the_output() {
+        let f = scan_src_test(include_str!("../../tests/fixtures/asserts_source_ok.py"));
+        assert!(!f.iter().any(|x| x.kind == "test-asserts-source"), "{f:?}");
     }
 
     #[test]

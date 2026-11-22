@@ -37,6 +37,7 @@ mod shape;
 mod skeleton;
 mod state;
 mod stmts;
+mod test_asserts_source;
 mod types;
 
 pub(crate) use comments::RsComments;
@@ -47,6 +48,7 @@ pub(crate) use modshape::MixedModule;
 pub(crate) use no_assert_test::no_assert_test_findings;
 pub(crate) use shape::RustShape;
 pub(crate) use state::RsState;
+pub(crate) use test_asserts_source::test_asserts_source_findings;
 
 /// One struct: name, declaration line, named-field count, line span.
 #[derive(Clone)]
@@ -138,6 +140,7 @@ impl RustScan {
         // the whole file, then the production walk skips test subtrees
         state.findings.extend(ignored_test_findings(&file, name));
         state.findings.extend(no_assert_test_findings(&file, name));
+        state.findings.extend(test_asserts_source_findings(&file, name));
         state.walk_file(&file);
         let mut scan = state.finish();
         scan.module_shape = MixedModule::module_shape(&file, source);
@@ -667,6 +670,24 @@ mod tests {
         assert!(!has_kind(&panic, "no-assert-test"));
         let ignored = scan("#[test]\n#[ignore]\nfn t() {}\n");
         assert!(!has_kind(&ignored, "no-assert-test"));
+    }
+
+    #[test]
+    fn test_asserts_source_flags_assertion_on_fixture_input() {
+        let fs = scan(&fixture("test_asserts_source_bad.rs"));
+        let hits: Vec<&Finding> = fs.iter().filter(|f| f.kind == "test-asserts-source").collect();
+        assert_eq!(hits.len(), 1, "{fs:?}");
+        assert_eq!(hits[0].function, "inventory_has_the_loop_shape");
+        assert_eq!(
+            hits[0].message,
+            "this test asserts on the source text it fed the code, not on the behaviour under test — a source assertion pins the input, so it passes even when the code does nothing. Assert the parsed finding/output instead."
+        );
+    }
+
+    #[test]
+    fn test_asserts_source_allows_assertions_on_the_output() {
+        let fs = scan(&fixture("test_asserts_source_ok.rs"));
+        assert!(!has_kind(&fs, "test-asserts-source"), "{fs:?}");
     }
 
     #[test]

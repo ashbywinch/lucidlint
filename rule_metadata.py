@@ -661,6 +661,11 @@ CATALOG = RuleCatalog([
     Rule("no-assert-test", "fail", "test-discipline", "Both",
          "A test function with no assertion anywhere in its body — it can never "
          "fail."),
+    Rule("test-asserts-source", "warn", "test-discipline", "Both",
+         "A test asserts on the source text it fed the code (`fixture(...)`, "
+         "`include_str!`, `read_text`) instead of on the parsed finding or the "
+         "code's output — the assertion pins the input, so it passes even when "
+         "the code does nothing. Assert the finding or the output."),
     # ---- suppression discipline
     Rule("suppression", "fail", "suppression", "Both",
          "`lucidlint: ignore <signal>` with no explanation — every exemption "

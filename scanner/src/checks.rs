@@ -46,6 +46,7 @@ mod signature;
 mod skipif;
 mod special_case;
 mod static_husk;
+mod test_asserts_source;
 mod type_ignore;
 mod unused;
 
@@ -102,5 +103,6 @@ pub use signature::{BooleanArg, DetachedMethod, Except, LongParamList, Positiona
 pub use skipif::skipif_findings;
 pub use special_case::SpecialCase;
 pub use static_husk::StaticHusk;
+pub use test_asserts_source::test_asserts_source_findings;
 pub use type_ignore::type_ignore_findings;
 pub use unused::Unused;

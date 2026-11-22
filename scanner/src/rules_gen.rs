@@ -67,6 +67,7 @@ pub const FAMILY_KINDS: &[&str] = &[
     "skipif",
     "fakefs",
     "no-assert-test",
+    "test-asserts-source",
     "suppression",
     "type-ignore",
     "allow-reason",
@@ -257,6 +258,7 @@ pub const DISPLAY_BUCKETS: &[(&str, &str)] = &[
     ("skipif", "skipif"),
     ("fakefs", "standard"),
     ("no-assert-test", "no-assert-test"),
+    ("test-asserts-source", "test-asserts-source"),
     ("suppression", "standard"),
     ("type-ignore", "standard"),
     ("allow-reason", "standard"),
@@ -378,7 +380,13 @@ pub fn rule_groups() -> &'static [(&'static str, &'static [&'static str])] {
         ),
         (
             "test-discipline",
-            &["fakefs", "monkeypatch", "no-assert-test", "skipif"],
+            &[
+                "fakefs",
+                "monkeypatch",
+                "no-assert-test",
+                "skipif",
+                "test-asserts-source",
+            ],
         ),
         (
             "suppression",
