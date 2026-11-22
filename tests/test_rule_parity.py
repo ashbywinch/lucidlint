@@ -102,7 +102,7 @@ def test_parity_corpus_is_discovered_and_rules_exist():
     """The tree itself is the manifest: every rule directory names a catalog
     rule, every shape directory carries the expected language files."""
     shapes = _corpus()
-    assert "loop-pipeline" in {rule for rule, _shape, _dir in shapes}
+    assert shapes, "the parity corpus is empty"
     for rule_kind, _shape, directory in shapes:
         rule = rule_metadata.CATALOG.by_kind(rule_kind)
         assert rule is not None, f"{directory}: '{rule_kind}' is not in the rule registry"
@@ -112,6 +112,12 @@ def test_parity_corpus_is_discovered_and_rules_exist():
         assert set(expected) == set(present), (
             f"{directory}: expected.json names {sorted(expected)} but the fixtures are {sorted(present)}"
         )
+
+
+def test_loop_pipeline_seed_is_present():
+    """The issue's seed is part of the contract: deleting it silently would
+    remove the only shapes the runner currently exercises."""
+    assert (PARITY / "loop-pipeline").is_dir(), "the loop-family seed corpus is missing"
 
 
 @pytest.mark.parametrize(
