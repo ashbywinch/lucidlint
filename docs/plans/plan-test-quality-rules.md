@@ -26,6 +26,15 @@ Wiring: the Python pass runs with the test-only families (test paths, or
 tests are fixtures — `asserts_source_bad.py` / `asserts_source_ok.py` and
 their Rust pair — and assert the finding set, not the fixture text.
 
+The origin model is one type, `SourceInputs`: a name is a fixture input when
+its last unconditional binding was a source read, and every branch runs on a
+clone whose writes are committed by an explicit must-source join. The join
+intersects every reachable path — zero-iteration/body/orelse for a loop,
+pre-try/body/handlers for a try, pre-match/cases for a match — so a fixture
+load or an output rebind on only one path is not a finding: the message must
+be true on every path. The keep and both drop directions are unit-tested in
+the module.
+
 ## #123 — code lives in a file, not a string literal
 
 `code-in-literal` (Both, warn) reports a string literal that holds a code
@@ -48,6 +57,11 @@ The 39 remaining initial matches were false positives the helper-argument
 rule removed (`compile`'s filename/mode arguments and bare filenames passed
 to `scan`); they were not suppressed. A fresh `--include-tests` scan of the
 repository reports zero `code-in-literal` findings.
+
+Helper recognition is two named sets on `CodeText`: bare scan/compile/exec
+names, and qualified scan helpers only (`re.compile` stays a regex). Macro
+arguments are outside the rule by design and the `my_macro!("fn …")` case is
+pinned in the exclusion fixture.
 
 ## #124 — one list, derived
 
