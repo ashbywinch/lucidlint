@@ -2750,6 +2750,15 @@ def test_loop_pipeline_refuses_existing_contents_and_unsupported_mutations(tmp_p
     assert target.read_text() == src
 
 
+def test_loop_pipeline_refuses_a_collection_it_iterates(tmp_path):
+    # a self-feeding loop is a traversal; the guard refuses it (this empty
+    # init is a no-op; a real worklist is a `while` drain, not a comprehension)
+    src = "def f():\n    xs = []\n    for x in xs:\n        xs.append(x)\n    return xs\n"
+    out, fixed = _fix(tmp_path, "loop-pipeline", "houses/app.py", src, _loop_line(src, "f"))
+    assert out is None
+    assert fixed == src  # untouched on refusal
+
+
 def test_loop_sequence_shared_accumulator_becomes_concatenated_comprehensions(tmp_path):
     src = _fixture("loop_sequence.py")
     out, fixed = _fix(tmp_path, "loop-sequence", "houses/app.py", src, _fn_line(src, "all_text"))

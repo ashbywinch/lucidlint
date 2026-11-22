@@ -741,7 +741,10 @@ CATALOG = RuleCatalog([
          "`.map(..).collect()` when the loop creates the collection (over the "
          "indices for an `acc[i] = v` store), `.filter(..)` for the guarded write, "
          "`.extend(..)` when the loop only pushes onto a collection that already "
-         "held items).",
+         "held items). Python: the target must be the loop's own fresh collection, "
+         "and the loop must not read it in its iterable — that is a traversal (a "
+         "`while` drain, or no loop at all), not a comprehension; a `for ... else` "
+         "is not a comprehension either.",
          display_group="loop-pipeline", fix="loop-pipeline"),
     Rule("mutating-loop", "warn", "advice", "Both",
          "A loop that mutates >=2 pieces of state that survive it (Python: "

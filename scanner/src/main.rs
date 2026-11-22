@@ -6204,6 +6204,21 @@ def two(work, batch):
     }
 
     #[test]
+    fn python_loop_pipeline_needs_a_plain_fresh_target_without_else() {
+        // issue #120: a chained receiver has no target, a for-else is not a
+        // comprehension, and a loop that reads the collection it grows is a
+        // traversal. The module-level group-by also pins the MODULE walker:
+        // its target is not a plain name, so it must not fire either.
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/loop_pipeline_python_own_build__01.py"
+        ));
+        let pipes: Vec<&Finding> = f.iter().filter(|x| x.kind == "loop-pipeline").collect();
+        assert_eq!(pipes.len(), 1, "{f:?}");
+        assert_eq!(pipes[0].function, "plain_build", "{f:?}");
+        assert!(pipes[0].message.contains("fix:"), "{}", pipes[0].message);
+    }
+
+    #[test]
     fn loop_dict_build_subscript_store_still_fires() {
         // P5: the pure dict-build shape (eval_context.py:42 —
         // `result[k] = f(v)` in one per-item pass) IS a comprehension in
