@@ -150,7 +150,7 @@ suppressions and album lost 7 false loop findings plus gained 1 stale
 suppression — those `ignore loop-pipeline` markers were hiding the false
 shapes and should be removed in the two repos.
 
-Verification: `make check`, `make test` (536 scanner + 324 Python tests),
+Verification: `make check`, `make test` (534 scanner + 324 Python tests),
 `make self-check` (`GATE: PASS`, 271 warnings, 0 fails); houses 423 / album
 693 — the intended Python-loop delta (+3 stale suppressions in houses; -7
 false loop findings +1 stale suppression in album).

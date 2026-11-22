@@ -977,77 +977,46 @@ mod tests {
 
     #[test]
     fn loop_sequence_ignores_sibling_branches() {
-        // issue #114: loops in if/else arms never run together
-        let src = "fn f(flag: bool, xs: &[u32], ys: &[u32]) -> u32 {\n    let mut a = 0;\n    if flag {\n        for x in xs { a += *x; }\n    } else {\n        for y in ys { a += *y; }\n    }\n    a\n}\n";
-        let fs = scan(src);
-        assert!(!has_kind(&fs, "loop-sequence"), "{fs:?}");
-        // two loops in one block still are a sequence
-        let seq = "fn f(xs: &[u32], ys: &[u32]) -> u32 {\n    let mut a = 0;\n    for x in xs { a += *x; }\n    for y in ys { a += *y; }\n    a\n}\n";
-        let fs = scan(seq);
-        assert!(has_kind(&fs, "loop-sequence"), "{fs:?}");
-        // an else-if arm is a separate branch too
-        let else_if = "fn f(n: u32, xs: &[u32], ys: &[u32]) -> u32 {\n    let mut a = 0;\n    if n == 0 {\n        for x in xs { a += *x; }\n    } else if n == 1 {\n        for y in ys { a += *y; }\n    }\n    a\n}\n";
-        let fs = scan(else_if);
-        assert!(!has_kind(&fs, "loop-sequence"), "{fs:?}");
+        // loops in if/else/else-if arms never run together; two loops in one
+        // block still are a sequence.
+        let fs = scan(&fixture("loop_sequence_sibling_branches.rs"));
+        let mut functions: Vec<&str> = fs
+            .iter()
+            .filter(|f| f.kind == "loop-sequence")
+            .map(|f| f.function.as_str())
+            .collect();
+        functions.sort();
+        assert_eq!(functions, vec!["same_block"], "{fs:?}");
     }
 
     #[test]
-    fn loop_growing_cursor_walk_is_a_traversal() {
-        // issue #115: `while i < queue.len()` with the body growing `queue`
-        // is a worklist traversal, not a one-output hoist
-        let src = "fn walk(roots: &[u32]) -> Vec<u32> {\n    let mut queue: Vec<u32> = roots.to_vec();\n    let mut i = 0;\n    while i < queue.len() {\n        let x = queue[i];\n        let y = x + 1;\n        let z = y * 2;\n        queue.push(z);\n        i += 1;\n    }\n    queue\n}\n";
-        let fs = scan(src);
-        assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
-        assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
-        assert!(!has_kind(&fs, "loop-pipeline"), "{fs:?}");
-        // the same cursor without growth is not a traversal
-        let sum = "fn sum(xs: &[u32]) -> u32 {\n    let mut total = 0;\n    let mut i = 0;\n    while i < xs.len() {\n        let a = xs[i];\n        let b = a + 1;\n        let c = b * 2;\n        total += c;\n        i += 1;\n    }\n    total\n}\n";
-        let fs = scan(sum);
-        assert!(has_kind(&fs, "mutating-loop"), "{fs:?}");
-    }
-
-    #[test]
-    fn loop_cursor_growth_through_a_mut_arg_is_a_traversal() {
-        // issue #115/#113: the body grows the queue by handing it to a
-        // function as `&mut`; that is a write, and the cursor walk is a
-        // traversal even though the callee does the push. A traversal emits
-        // NO verdict, so the assertions below are the expected silence.
-        let src = "fn walk(roots: &[u32]) -> usize {\n    let mut queue: Vec<u32> = roots.to_vec();\n    let mut i = 0;\n    while i < queue.len() {\n        let x = queue[i];\n        let y = x + 1;\n        let z = y * 2;\n        push_next(&mut queue, z);\n        i += 1;\n    }\n    i\n}\nfn push_next(q: &mut Vec<u32>, v: u32) { q.push(v); }\n";
-        let fs = scan(src);
-        assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
-        assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
-    }
-
-    #[test]
-    fn loop_growing_cursor_over_a_parameter_is_a_traversal() {
-        // a parameter is a survivor; the collection in the condition cannot be
-        // a loop-body local (the condition is outside the body)
-        let src = "fn grow(queue: &mut Vec<u32>) {\n    let mut i = 0;\n    while i < queue.len() {\n        queue.push(queue[i] + 1);\n        i += 1;\n    }\n}\n";
-        let fs = scan(src);
-        assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
-        assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
+    fn loop_growing_cursor_is_a_traversal() {
+        // a cursor over a collection the body grows is a traversal: a local,
+        // through a &mut argument, or a parameter. The same cursor without
+        // growth is a stateful loop.
+        let fs = scan(&fixture("loop_growing_cursor.rs"));
+        let mut findings: Vec<(&str, &str)> = fs
+            .iter()
+            .filter(|f| f.kind == "loop-hoist" || f.kind == "mutating-loop" || f.kind == "loop-pipeline")
+            .map(|f| (f.function.as_str(), f.kind.as_str()))
+            .collect();
+        findings.sort();
+        assert_eq!(findings, vec![("no_growth", "mutating-loop")], "{fs:?}");
     }
 
     #[test]
     fn loop_pipeline_requires_an_accumulator_independent_item_and_guard() {
-        // a push whose item or guard reads the accumulator is a scan over the
-        // growing collection, not a per-item map.
-        let push_len = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for _ in xs {\n        out.push(out.len() as u32);\n    }\n    out\n}\n";
-        assert!(!has_kind(&scan(push_len), "loop-pipeline"), "{push_len}");
-        let guard = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        if out.len() < 3 {\n            out.push(*x);\n        }\n    }\n    out\n}\n";
-        assert!(!has_kind(&scan(guard), "loop-pipeline"), "{guard}");
-        let store = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = vec![0; xs.len()];\n    for (i, _) in xs.iter().enumerate() {\n        out[i] = out.get(i).copied().unwrap_or(0);\n    }\n    out\n}\n";
-        assert!(!has_kind(&scan(store), "loop-pipeline"), "{store}");
-        let index_read = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = vec![0; xs.len() + 1];\n    for x in xs {\n        out[out.len() - 1] = *x;\n    }\n    out\n}\n";
-        assert!(!has_kind(&scan(index_read), "loop-pipeline"), "{index_read}");
-        let indirect = "fn compute(v: &[u32]) -> u32 { v.len() as u32 }\nfn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for _ in xs {\n        out.push(compute(&out));\n    }\n    out\n}\n";
-        assert!(!has_kind(&scan(indirect), "loop-pipeline"), "{indirect}");
-        // control: the same call over a different collection is a pipeline
-        let independent_call = "fn compute(v: &[u32]) -> u32 { v.len() as u32 }\nfn f(xs: &[u32], other: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for _ in xs {\n        out.push(compute(other));\n    }\n    out\n}\n";
-        assert!(has_kind(&scan(independent_call), "loop-pipeline"), "{independent_call}");
-        // an independent guard is still a pipeline
-        let ok = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        if *x > 0 {\n            out.push(*x);\n        }\n    }\n    out\n}\n";
-        assert!(has_kind(&scan(ok), "loop-pipeline"), "{ok}");
+        // the item, guard, store index and store value must not read the
+        // accumulator; `call_reads_other` and `guard_reads_other` are the
+        // controls that still build a pipeline.
+        let fs = scan(&fixture("loop_pipeline_accumulator_reads.rs"));
+        let mut functions: Vec<&str> = fs
+            .iter()
+            .filter(|f| f.kind == "loop-pipeline")
+            .map(|f| f.function.as_str())
+            .collect();
+        functions.sort();
+        assert_eq!(functions, vec!["call_reads_other", "guard_reads_other"], "{fs:?}");
     }
 
     #[test]
