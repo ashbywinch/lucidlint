@@ -60,7 +60,7 @@ def _findings(rule: str, fixture: Path) -> list[dict]:
     )
 
 
-def _expected(directory: Path, rule: str) -> dict:
+def _expected(directory: Path) -> dict:
     path = directory / "expected.json"
     assert path.exists(), f"{directory}: missing expected.json"
     expected = json.loads(path.read_text())
@@ -102,13 +102,13 @@ def test_parity_corpus_is_discovered_and_rules_exist():
     """The tree itself is the manifest: every rule directory names a catalog
     rule, every shape directory carries the expected language files."""
     shapes = _corpus()
-    assert {rule for rule, _shape, _dir in shapes} == {"loop-pipeline"}
+    assert "loop-pipeline" in {rule for rule, _shape, _dir in shapes}
     for rule_kind, _shape, directory in shapes:
         rule = rule_metadata.CATALOG.by_kind(rule_kind)
         assert rule is not None, f"{directory}: '{rule_kind}' is not in the rule registry"
         present = _language_fixtures(directory, rule)
         assert present, f"{directory}: no fixture for any implemented language"
-        expected = _expected(directory, rule_kind)
+        expected = _expected(directory)
         assert set(expected) == set(present), (
             f"{directory}: expected.json names {sorted(expected)} but the fixtures are {sorted(present)}"
         )
@@ -124,7 +124,7 @@ def test_shape_parity(rule_kind: str, shape: str, directory: Path):
     findings on the same functions, or the same silence."""
     rule = rule_metadata.CATALOG.by_kind(rule_kind)
     assert rule is not None
-    expected = _expected(directory, rule_kind)
+    expected = _expected(directory)
     for language in _language_fixtures(directory, rule):
         fixture = directory / LANGUAGE_FILES[language]
         assert _findings(rule_kind, fixture) == expected[language], (
