@@ -977,7 +977,11 @@ mod tests {
 
     #[test]
     fn loop_sequence_ignores_sibling_branches() {
-        let fs = scan(&fixture("loop_sequence_sibling_branches.rs"));
+        let src = fixture("loop_sequence_sibling_branches.rs");
+        for name in ["if_else", "same_block", "else_if"] {
+            assert!(src.contains(&format!("fn {name}(")), "the fixture lost {name}");
+        }
+        let fs = scan(&src);
         let sequence = |name: &str| {
             fs.iter()
                 .any(|f| f.function.as_str() == name && f.kind == "loop-sequence")
@@ -990,7 +994,11 @@ mod tests {
 
     #[test]
     fn loop_growing_cursor_is_a_traversal() {
-        let fs = scan(&fixture("loop_growing_cursor.rs"));
+        let src = fixture("loop_growing_cursor.rs");
+        for name in ["local_walk", "mut_arg_walk", "param_walk", "no_growth"] {
+            assert!(src.contains(&format!("fn {name}(")), "the fixture lost {name}");
+        }
+        let fs = scan(&src);
         let stateful = |name: &str| {
             fs.iter().any(|f| {
                 f.function.as_str() == name
@@ -1005,7 +1013,19 @@ mod tests {
 
     #[test]
     fn loop_pipeline_requires_an_accumulator_independent_item_and_guard() {
-        let fs = scan(&fixture("loop_pipeline_accumulator_reads.rs"));
+        let src = fixture("loop_pipeline_accumulator_reads.rs");
+        for name in [
+            "push_reads_len",
+            "guard_reads_len",
+            "store_value_reads",
+            "store_index_reads",
+            "call_reads_accumulator",
+            "call_reads_other",
+            "guard_reads_other",
+        ] {
+            assert!(src.contains(&format!("fn {name}(")), "the fixture lost {name}");
+        }
+        let fs = scan(&src);
         let pipeline = |name: &str| {
             fs.iter()
                 .any(|f| f.function.as_str() == name && f.kind == "loop-pipeline")
