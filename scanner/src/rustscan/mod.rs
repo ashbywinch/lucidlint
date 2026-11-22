@@ -960,6 +960,77 @@ mod tests {
     }
 
     #[test]
+    fn loop_hoist_sees_a_chained_receiver_write() {
+        // issue #113: `line.entry(k).or_default().push(v)` writes `line`
+        // through a method-call chain. `split` has a second map write and is
+        // multi-output; `fill` has only the chain and is a one-output hoist.
+        let fs = scan(&fixture("loop_chained_receiver_write.rs"));
+        let mut findings: Vec<(&str, &str)> = fs
+            .iter()
+            .filter(|f| matches!(f.kind.as_str(), "loop-hoist" | "mutating-loop"))
+            .map(|f| (f.function.as_str(), f.kind.as_str()))
+            .collect();
+        findings.sort();
+        assert_eq!(
+            findings,
+            vec![("fill", "loop-hoist"), ("split", "mutating-loop")],
+            "{fs:?}"
+        );
+    }
+
+    #[test]
+    fn loop_sequence_ignores_sibling_branches() {
+        // the finding set is the user outcome: only the same-block pair is a
+        // sequence; the if/else and else-if arms contribute nothing.
+        let fs = scan(&fixture("loop_sequence_sibling_branches.rs"));
+        let sequence: Vec<(&str, &str)> = fs
+            .iter()
+            .filter(|f| f.kind == "loop-sequence")
+            .map(|f| (f.function.as_str(), f.kind.as_str()))
+            .collect();
+        assert_eq!(sequence, vec![("same_block", "loop-sequence")], "{fs:?}");
+        let finding = fs.iter().find(|f| f.kind == "loop-sequence").expect("sequence");
+        assert!(finding.message.contains("2 sequential loops"), "{}", finding.message);
+    }
+
+    #[test]
+    fn loop_growing_cursor_is_a_traversal() {
+        // the finding set is the user outcome: the three traversals produce
+        // nothing; the no-growth cursor is the one stateful loop.
+        let fs = scan(&fixture("loop_growing_cursor.rs"));
+        let mut stateful: Vec<(&str, &str)> = fs
+            .iter()
+            .filter(|f| matches!(f.kind.as_str(), "loop-hoist" | "mutating-loop" | "loop-pipeline"))
+            .map(|f| (f.function.as_str(), f.kind.as_str()))
+            .collect();
+        stateful.sort();
+        assert_eq!(stateful, vec![("no_growth", "mutating-loop")], "{fs:?}");
+        let finding = fs.iter().find(|f| f.kind == "mutating-loop").expect("stateful");
+        assert!(finding.message.contains("loop mutates"), "{}", finding.message);
+    }
+
+    #[test]
+    fn loop_pipeline_requires_an_accumulator_independent_item_and_guard() {
+        // the finding set is the user outcome: the five accumulator-reading
+        // loops produce nothing; the two independent calls do.
+        let fs = scan(&fixture("loop_pipeline_accumulator_reads.rs"));
+        let mut pipeline: Vec<(&str, &str)> = fs
+            .iter()
+            .filter(|f| f.kind == "loop-pipeline")
+            .map(|f| (f.function.as_str(), f.kind.as_str()))
+            .collect();
+        pipeline.sort();
+        assert_eq!(
+            pipeline,
+            vec![
+                ("call_reads_other", "loop-pipeline"),
+                ("guard_reads_other", "loop-pipeline"),
+            ],
+            "{fs:?}"
+        );
+    }
+
+    #[test]
     fn loop_pipeline_idiomatic_combinator_passes() {
         let fs = scan(&fixture("loop_pipeline_rs_ok.rs"));
         assert!(!has_kind(&fs, "loop-pipeline"), "{fs:?}");
@@ -1020,6 +1091,66 @@ mod tests {
             .find(|x| x.kind == "loop-sequence")
             .expect("feed chain fires");
         assert!(!f.message.contains("fix:"), "{}", f.message);
+    }
+
+    #[test]
+    fn every_advertised_loop_fix_applies() {
+        // issue #117: a finding that names `— fix: <kind>` is a promise; the
+        // fixer must accept the same site (offer equals fix).
+        let pipeline = "fn collect(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
+        let cases = [
+            (pipeline, "loop-pipeline"),
+            (
+                include_str!("../../../tests/fixtures/loop_hoist_rs_fix.rs"),
+                "loop-hoist",
+            ),
+            (
+                include_str!("../../../tests/fixtures/loop_sequence_rs_fix.rs"),
+                "loop-sequence",
+            ),
+        ];
+        for (src, kind) in cases {
+            let findings = scan(src);
+            let advertised: Vec<&Finding> = findings
+                .iter()
+                .filter(|f| f.kind == kind && f.message.contains(" — fix: "))
+                .collect();
+            assert!(
+                !advertised.is_empty(),
+                "the fixture must advertise {kind}: {findings:?}"
+            );
+            for f in advertised {
+                let applies = match kind {
+                    "loop-pipeline" => crate::fix::LoopPipeline::fixable(src, "x.rs", f.line),
+                    "loop-hoist" => crate::fix::LoopHoist::fixable_at(src, "x.rs", f.line),
+                    "loop-sequence" => crate::fix::loop_sequence_fixable(src, "x.rs", f.line),
+                    _ => unreachable!(),
+                };
+                assert!(applies, "{} at line {} advertises a fix it refuses", kind, f.line);
+            }
+        }
+    }
+
+    #[test]
+    fn loop_self_feeding_for_is_not_a_pipeline() {
+        // a loop that reads the collection it rebuilds is a traversal, not a
+        // build — the same rule as the Python side (#120). The filter is keyed
+        // on the TARGET name, not any field read, so a loop over another
+        // collection's items is still a pipeline.
+        let fs = scan(&fixture("loop_self_feeding_for.rs"));
+        let pipes: Vec<&Finding> = fs.iter().filter(|f| f.kind == "loop-pipeline").collect();
+        assert_eq!(pipes.len(), 1, "{fs:?}");
+        assert_eq!(pipes[0].function, "collect_other", "{fs:?}");
+    }
+
+    #[test]
+    fn loop_in_match_arm_expression_is_judged() {
+        // a match arm body is an expression and can BE the loop site; the
+        // statement-list relation cannot represent that, so the walk handles
+        // the expression and keeps the arm index in the path.
+        let src = "fn collect(n: u32, xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    match n {\n        0 => for x in xs {\n            out.push(*x);\n        },\n        _ => {}\n    }\n    out\n}\n";
+        let fs = scan(src);
+        assert!(has_kind(&fs, "loop-pipeline"), "{fs:?}");
     }
 
     #[test]

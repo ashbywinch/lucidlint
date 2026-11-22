@@ -14,9 +14,11 @@ use crate::finding::Finding;
 use crate::source::Source;
 
 mod marker;
+mod parse;
 mod stale;
 
 use marker::LineMarkerCtx;
+use parse::Marker;
 use stale::StaleCtx;
 
 /// One line-level suppression and the (signal, why) parsed from it.
@@ -86,35 +88,23 @@ impl Suppressions {
     /// cut mid-expression still binds — G5); only a marker with NO why at all
     /// is why-less and does not bind.
     pub fn from_comments(comments: &[(usize, String)]) -> Suppressions {
-        let mut line_map: HashMap<usize, Vec<(String, String)>> = HashMap::new();
-        let mut file_map = HashMap::new();
-        for (ln, text) in comments {
-            let trimmed = text.trim_start_matches(['#', '/']).trim_start();
-            if let Some(rest) = trimmed.strip_prefix("lucidlint: ignore-file ") {
-                let mut it = rest.splitn(2, char::is_whitespace);
-                let signal = it.next().unwrap_or("").to_string();
-                let why = it.next().unwrap_or("").trim().to_string();
-                if !signal.is_empty() {
-                    file_map.insert(signal, why);
-                }
-            } else if let Some(rest) = trimmed.strip_prefix("lucidlint: ignore ") {
-                let mut it = rest.splitn(2, char::is_whitespace);
-                let signals = it.next().unwrap_or("");
-                let why = it.next().unwrap_or("").trim().to_string();
-                // comma-separated signals let one comment exempt several families
-                // (`ignore long-param-list,detached-method <why>`) — stacked
-                // comments only fit the line/line-1 window for the last one
-                for sig in signals.split(',') {
-                    let sig = sig.trim();
-                    if !sig.is_empty() {
-                        line_map.entry(*ln).or_default().push((sig.to_string(), why.clone()));
-                    }
-                }
-            }
+        let mut suppressions = Suppressions::default();
+        for marker in comments.iter().flat_map(|(line, text)| Marker::parse(*line, text)) {
+            suppressions.add(marker);
         }
-        Suppressions {
-            line: line_map,
-            file: file_map,
+        suppressions
+    }
+
+    /// Fold one parsed marker into the two maps — the per-marker step the loop
+    /// above names, so the maps are written in one place.
+    fn add(&mut self, marker: Marker) {
+        match marker {
+            Marker::File { signal, why } => {
+                self.file.insert(signal, why);
+            }
+            Marker::Line { line, signal, why } => {
+                self.line.entry(line).or_default().push((signal, why));
+            }
         }
     }
 
@@ -605,6 +595,31 @@ mod tests {
             severity: "fail".into(),
             message: "m".into(),
         }
+    }
+
+    #[test]
+    fn from_comments_builds_both_maps_from_markers() {
+        let comments = vec![
+            (
+                3,
+                "// lucidlint: ignore-file closures the walker is one pass".to_string(),
+            ),
+            (
+                7,
+                "// lucidlint: ignore closed-classes,closure-strewing one site".to_string(),
+            ),
+            (9, "// an ordinary comment".to_string()),
+        ];
+        let supps = Suppressions::from_comments(&comments);
+        assert_eq!(
+            supps.file.get("closures").map(String::as_str),
+            Some("the walker is one pass")
+        );
+        let line = &supps.line[&7];
+        assert_eq!(line.len(), 2);
+        assert!(line
+            .iter()
+            .any(|(sig, why)| sig == "closed-classes" && why == "one site"));
     }
 
     #[test]
