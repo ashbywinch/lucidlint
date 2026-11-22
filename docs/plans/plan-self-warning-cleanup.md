@@ -1,4 +1,4 @@
-# Plan — the self-warning cleanup: 587 → 286, and what is left
+# Plan — the self-warning cleanup: 587 → 271, and what is left
 
 The tool's own gate passes (`GATE: PASS`, 0 fails) with warnings, because
 every rule that fires here is a judgement signal rather than a gate. The
@@ -7,9 +7,10 @@ as decisions. The original round compared against houses 353 / album 431;
 after the agreed `undeclared-attribute` restore the current baselines are
 houses 420 / album 699, and both are unchanged by these rounds.
 
-The count rose from 264 to **286** in the precision round below because the
-loop family now sees writes it used to miss (chained receivers and `&mut`
-arguments). That is more truth, not more debt: the removed findings were
+The count rose from 264 to 286 in the Rust precision round because the loop
+family now sees writes it used to miss (chained receivers and `&mut`
+arguments); the Python precision round then removed 15 false Python findings,
+leaving **271**. That is more truth, not more debt: the removed findings were
 false, and the added ones are loops the rule previously misread.
 
 ## Landed (branch `refactor/self-warnings`, stacked on the fix-engine split)
@@ -52,7 +53,7 @@ now reads one fact model per loop (`rustloops/facts.rs`), one branch relation
   The same filter covers a `for` whose iterable reads the collection its body
   rebuilds (`for x in take(&mut out) { out.push(x) }`): no pipeline verdict.
 
-What remains is 276 loop findings, each a design decision:
+What remains is 261 loop findings, each a design decision:
 
 | shape | count | what clearing it costs |
 |---|---:|---|
@@ -60,7 +61,7 @@ What remains is 276 loop findings, each a design decision:
 | "N sequential loops" (`loop-sequence`) | 55 | merge two passes into one (folding one into the other's body) — the behaviour risk sits here |
 | "mutates several accumulators" (`mutating-loop`) | 45 | one pass feeding several collections; the rule's advice is "make a struct", i.e. a new type per site |
 | Rust collection builds | 4 | guarded/nested walks with `continue` guards |
-| Python collection builds | 21 | `setdefault(k, []).append(v)` group-bys and `|=` folds — no comprehension expresses them (the tool's own fixer declines) |
+| Python collection builds | 6 | the real plain-target builds; the chained group-bys, for-else and self-feeds are no longer findings |
 
 The hoists spread across the rules (`latent_state.rs` 15,
 `over_abstraction.rs` 8, `suppressions/mod.rs` 7, `duplicate_module.rs` 6, …);
@@ -73,8 +74,8 @@ with `main.rs` 6.
 The owner's bar is unchanged: a loop is rewritten only where the rule's
 advice holds. The difference is that the facts are now trustworthy — the
 false premises above are fixed and pinned by tests — so this is the first
-count worth deciding on. The 25 collection builds are the shapes a
-comprehension or chain does not express (only 2 of the 25 carry a `fix:`
+count worth deciding on. The 10 collection builds are the shapes a
+comprehension or chain does not express (only 2 of the 10 carry a `fix:`
 directive), so they are out of scope. That leaves the 251 stateful/shape
 findings.
 
@@ -136,16 +137,23 @@ is what showed the fixes' shape:
   exercised against the fixer's own predicate in the same test, so the
   "offer equals fix" contract is checked, not just stated (#117).
 
-The count went 264 → **286**: the write model now counts chained receivers and
-`&mut` arguments, so loops that were misread as one output are truthfully
-multi-output (151 hoists, 45 stateful) and branch grouping removed the false
-sequences (76 → 55). Houses and album are byte-identical on both comparison
-keys — they have no Rust loop-pipeline findings in the scanned set — so the
-corpus contract holds.
+The count went 264 → 286 in the Rust round: the write model now counts chained
+receivers and `&mut` arguments, so loops that were misread as one output are
+truthfully multi-output (151 hoists, 45 stateful) and branch grouping removed
+the false sequences (76 → 55). Houses and album were byte-identical for the
+Rust round — they have no Rust loop-pipeline findings in the scanned set.
 
-Verification: `make check`, `make test` (533 scanner + 323 Python tests),
-`make self-check` (`GATE: PASS`, 286 warnings, 0 fails); houses 420 / album
-699 identical on both `(file, kind, line)` and `(file, kind, message)`.
+The Python round removed 15 false findings, leaving **271**: a pipeline needs a
+plain, fresh target the loop does not read, and a `for ... else` is not a
+comprehension. The 6 real Python builds remain. Houses gained 3 stale
+suppressions and album lost 7 false loop findings plus gained 1 stale
+suppression — those `ignore loop-pipeline` markers were hiding the false
+shapes and should be removed in the two repos.
+
+Verification: `make check`, `make test` (533 scanner + 324 Python tests),
+`make self-check` (`GATE: PASS`, 271 warnings, 0 fails); houses 423 / album
+693 — the intended Python-loop delta (+3 stale suppressions in houses; -7
+false loop findings +1 stale suppression in album).
 
 ## The repo-wide merge, and the audit that closed it
 
@@ -214,7 +222,7 @@ verdict is cleared where the marker is consumed.
 | `complexity` | yes | no | per-file cc; the LSP emits its own complexity diagnostic. |
 
 Verification after every step: `make check`, the Python and Rust suites,
-`make self-check` (`GATE: PASS`, 286 warnings after the precision round, 0
+`make self-check` (`GATE: PASS`, 271 warnings after both precision rounds, 0
 fails), and a `(file, kind, line)` plus
 `(file, kind, message)` finding-set comparison against the snapshot taken
 before the change.

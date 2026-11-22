@@ -45,7 +45,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | Message precision round 2 (section I residuals) | `docs/plans/plan-message-precision-round-2.md` |
 | Message precision round 3 (section J residuals) | `docs/plans/plan-message-precision-round-3.md` |
 | Next round: the fix-engine split (246 definitions → one class per fixer) | `docs/plans/plan-fix-engine-split.md` |
-| The self-warning cleanup (587 → 286) and the decisions it leaves open | `docs/plans/plan-self-warning-cleanup.md` |
+| The self-warning cleanup (587 → 271) and the decisions it leaves open | `docs/plans/plan-self-warning-cleanup.md` |
 | Issue #42: record-shape export exemption for to_dict/to_json | `docs/plans/plan-issue-42-export-exemption.md` |
 | Issue #93: `unnamed-condition` + `unnamed-classification` (criterion, message, measurement) | `docs/plans/plan-issue-93-unnamed-condition.md` |
 | Issue #107: `several-classes` + `many-functions` and the `checks.rs` split | `docs/plans/plan-issue-107-module-shape.md` |
