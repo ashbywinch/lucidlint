@@ -1,0 +1,1 @@
+Rust has no for/else arm: a for loop cannot carry an else branch, so the construct does not exist.
