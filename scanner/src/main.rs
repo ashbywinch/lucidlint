@@ -3634,8 +3634,9 @@ mod tests {
     fn test_asserts_source_flags_assertion_on_fixture_input() {
         let f = scan_src_test(include_str!("../../tests/fixtures/asserts_source_bad.py"));
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "test-asserts-source").collect();
-        assert_eq!(hits.len(), 1, "{f:?}");
+        assert_eq!(hits.len(), 2, "{f:?}");
         assert_eq!(hits[0].function, "test_loop_shape_is_in_the_corpus");
+        assert_eq!(hits[1].function, "test_bare_assertion_helper");
         assert_eq!(hits[0].message, TEST_ASSERTS_SOURCE_MESSAGE);
     }
 
@@ -3650,7 +3651,7 @@ mod tests {
     fn code_in_literal_flags_a_code_block_and_a_scan_snippet() {
         let f = scan_src(include_str!("../../tests/fixtures/code_in_literal_bad.py"));
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "code-in-literal").collect();
-        assert_eq!(hits.len(), 2, "{f:?}");
+        assert_eq!(hits.len(), 3, "{f:?}");
         assert!(hits
             .iter()
             .all(|h| h.message.contains("move it to a real file under tests/fixtures/")));

@@ -32,6 +32,16 @@ struct LiteralProbe<'a> {
 }
 
 impl LiteralProbe<'_> {
+    fn report_first_arg(&mut self, args: &syn::punctuated::Punctuated<Expr, syn::Token![,]>) {
+        if let Some(Expr::Lit(lit)) = args.first() {
+            if let Lit::Str(literal) = &lit.lit {
+                if is_code_snippet(literal.value().as_str()) {
+                    self.report(literal);
+                }
+            }
+        }
+    }
+
     fn report(&mut self, literal: &LitStr) {
         let start = literal.span().start();
         if !self.seen.insert((start.line, start.column)) {
@@ -53,8 +63,10 @@ impl LiteralProbe<'_> {
 
 impl<'ast> Visit<'ast> for LiteralProbe<'_> {
     /// A macro's tokens are never a file the reader can lint: `include_str!`
-    /// is the target, and `format!`/`println!`/`assert!` carry messages. Do
-    /// not descend into any macro.
+    /// is the target, and `format!`/`println!`/`assert!` carry messages. A
+    /// macro's argument semantics are not knowable here, so descending would
+    /// flag every message that happens to look like code. Do not descend into
+    /// any macro.
     fn visit_macro(&mut self, _mac: &'ast syn::Macro) {}
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
@@ -67,15 +79,18 @@ impl<'ast> Visit<'ast> for LiteralProbe<'_> {
             _ => false,
         };
         if helper {
-            if let Some(Expr::Lit(lit)) = call.args.first() {
-                if let Lit::Str(literal) = &lit.lit {
-                    if is_code_snippet(literal.value().as_str()) {
-                        self.report(literal);
-                    }
-                }
-            }
+            self.report_first_arg(&call.args);
         }
         syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        // a method-form scan helper (`self.scan_src`) is the same call; the
+        // compile/exec/eval forms are free functions, not methods
+        if matches!(call.method.to_string().as_str(), "scan" | "scan_src" | "scan_source") {
+            self.report_first_arg(&call.args);
+        }
+        syn::visit::visit_expr_method_call(self, call);
     }
 
     fn visit_lit_str(&mut self, literal: &'ast LitStr) {

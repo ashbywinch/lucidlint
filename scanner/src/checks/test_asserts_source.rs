@@ -37,17 +37,12 @@ fn walk_body(state: &mut ScanState, body: &[Stmt], source: &str, function: &str,
                 }
             }
             Stmt::Assert(a) if assertion_reads_source(&a.test, origins) => {
-                state.findings.push(Finding {
-                    logical_start: None,
-                    seam_members: Vec::new(),
-                    col: 0,
-                    file: state.file.to_string(),
-                    line: Source::line_of(source, a.range().start()),
-                    function: function.to_string(),
-                    kind: "test-asserts-source".into(),
-                    severity: "warn".into(),
-                    message: MESSAGE.to_string(),
-                });
+                record(state, source, a.range().start(), function);
+            }
+            // an assertion helper imported by name is an expression statement,
+            // not an `assert` (unittest's `assertEqual(src, "…")`)
+            Stmt::Expr(e) if assertion_reads_source(&e.value, origins) => {
+                record(state, source, e.range().start(), function);
             }
             Stmt::FunctionDef(f) => {
                 walk_body(state, &f.body, source, f.name.as_str(), &mut HashSet::new());
@@ -92,9 +87,26 @@ fn walk_body(state: &mut ScanState, body: &[Stmt], source: &str, function: &str,
     }
 }
 
+fn record(state: &mut ScanState, source: &str, offset: ruff_text_size::TextSize, function: &str) {
+    state.findings.push(Finding {
+        logical_start: None,
+        seam_members: Vec::new(),
+        col: 0,
+        file: state.file.to_string(),
+        line: Source::line_of(source, offset),
+        function: function.to_string(),
+        kind: "test-asserts-source".into(),
+        severity: "warn".into(),
+        message: MESSAGE.to_string(),
+    });
+}
+
 /// Bind `name` to the source-origin set when the value is a fixture/source
 /// read; any other assignment clears it, so an output variable named like the
-/// input cannot inherit the input's origin.
+/// input cannot inherit the input's origin. Branch reachability is not
+/// modelled: a rebind in a branch that did not run makes this rule silent,
+/// which is the side to err on — flagging an output the test legitimately
+/// asserts is the false positive the rule's contract forbids.
 fn bind(name: &str, value: &Expr, origins: &mut HashSet<String>) {
     if is_source_read(value) {
         origins.insert(name.to_string());
@@ -152,11 +164,14 @@ fn compare_reads_source(cmp: &ruff_python_ast::ExprCompare, origins: &HashSet<St
 /// `assertIn(member, src)`, `assertEqual(src, literal)`, `assertRegex(src, ..)`,
 /// and `assertTrue(<expr>)` recurse into the expression.
 fn call_reads_source(call: &ruff_python_ast::ExprCall, origins: &HashSet<String>) -> bool {
-    let Expr::Attribute(method) = call.func.as_ref() else {
-        return false;
+    let method = match call.func.as_ref() {
+        Expr::Attribute(attribute) => attribute.attr.as_str(),
+        // an assertion helper imported by name (`from helpers import assertEqual`)
+        Expr::Name(name) => name.id.as_str(),
+        _ => return false,
     };
     let args = call.arguments.args.as_ref();
-    match method.attr.as_str() {
+    match method {
         "assertIn" | "assertNotIn" => args.get(1).is_some_and(|arg| is_source_name(arg, origins)),
         "assertEqual" | "assertNotEqual" | "assertRegex" | "assertNotRegex" | "assertStartsWith" | "assertEndsWith" => {
             args.first().is_some_and(|arg| is_source_name(arg, origins))

@@ -76,5 +76,11 @@ fn mark_docstring(body: &[Stmt], docstrings: &mut HashSet<usize>) {
 }
 
 fn is_helper(func: &Expr) -> bool {
-    matches!(func, Expr::Name(name) if is_code_helper(name.id.as_str()))
+    match func {
+        Expr::Name(name) => is_code_helper(name.id.as_str()),
+        // a module-qualified scan helper (`helpers.scan_src`) is the same call;
+        // `re.compile` is a regex, so compile/exec/eval stay bare-name only
+        Expr::Attribute(attr) => matches!(attr.attr.as_str(), "scan" | "scan_src" | "scan_source"),
+        _ => false,
+    }
 }

@@ -694,7 +694,7 @@ mod tests {
     fn code_in_literal_flags_a_code_block_and_a_scan_snippet() {
         let fs = scan(&fixture("code_in_literal_bad.rs"));
         let hits: Vec<&Finding> = fs.iter().filter(|f| f.kind == "code-in-literal").collect();
-        assert_eq!(hits.len(), 2, "{fs:?}");
+        assert_eq!(hits.len(), 3, "{fs:?}");
         assert!(hits
             .iter()
             .all(|h| h.message.contains("move it to a real file under tests/fixtures/")));
