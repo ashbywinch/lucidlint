@@ -17,7 +17,16 @@ use crate::finding::Finding;
 
 use super::attrs::Attrs;
 
-const MESSAGE: &str = "this test asserts on code text, not on the behaviour under test — a text match pins one spelling, so it passes even when the code does nothing. Assert the parsed finding/output instead.";
+const MESSAGE: &str = "asserts on code text, not on the behaviour under test — a text match pins one spelling, so it passes even when the code does nothing. Keep the test: assert the parsed finding/output instead. For a fixer, re-scan the fixed source and assert the finding is gone; for a parser, assert the parsed result. Do not delete the test or loosen it to match the text.";
+
+fn message(function: &str) -> String {
+    let subject = if function.is_empty() {
+        "this test".to_string()
+    } else {
+        format!("test '{function}'")
+    };
+    format!("{subject} {MESSAGE}")
+}
 
 /// Every test function — `#[test]` fns and helpers inside `#[cfg(test)]`
 /// modules — is walked for an assertion on code text.
@@ -210,7 +219,7 @@ fn check_assert_macro(mac: &Macro, function: &str, file_name: &str, names: &Code
             function: function.to_string(),
             kind: "test-asserts-source".into(),
             severity: "warn".into(),
-            message: MESSAGE.to_string(),
+            message: message(function),
         });
     }
 }

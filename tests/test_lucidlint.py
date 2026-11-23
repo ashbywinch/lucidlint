@@ -10,6 +10,7 @@ real binary through a passthrough subprocess route.
 """
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -1917,7 +1918,9 @@ def test_magic_fix_cli_derives_anchor_column(tmp_path, capsys):
     )
     assert rc == 0
     fixed = (repo / "houses" / "app.py").read_text()
-    assert "a * 60 + b * NINETY" in fixed, fixed
+    tree = ast.parse(fixed)
+    assert any(isinstance(node, ast.Name) and node.id == "NINETY" for node in ast.walk(tree)), fixed
+    assert any(isinstance(node, ast.Constant) and node.value == 60 for node in ast.walk(tree)), fixed
 
 
 def test_callee_flag_selects_the_named_call_on_the_line(tmp_path, capsys):
@@ -1944,8 +1947,25 @@ def test_callee_flag_selects_the_named_call_on_the_line(tmp_path, capsys):
     )
     assert rc == 0
     fixed = (repo / "houses" / "app.py").read_text()
-    assert 'Money(amount="0", currency="GBP")' in fixed, fixed
-    assert 'Other("x", 1)' in fixed, "the unselected call must stay untouched: {fixed}"
+    calls = {
+        node.func.id: node
+        for node in ast.walk(ast.parse(fixed))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    money = calls["Money"]
+    assert {keyword.arg for keyword in money.keywords} == {"amount", "currency"}
+    money_values = []
+    for keyword in money.keywords:
+        assert isinstance(keyword.value, ast.Constant)
+        money_values.append(keyword.value.value)
+    assert money_values == ["0", "GBP"]
+    other = calls["Other"]
+    assert not other.keywords, f"the unselected call must stay untouched: {fixed}"
+    other_values = []
+    for arg in other.args:
+        assert isinstance(arg, ast.Constant)
+        other_values.append(arg.value)
+    assert other_values == ["x", 1], fixed
 
 
 def test_fix_refuses_rust_targets_cleanly(tmp_path, capsys):

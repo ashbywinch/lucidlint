@@ -3628,7 +3628,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------- test-asserts-source
-    const TEST_ASSERTS_SOURCE_MESSAGE: &str = "this test asserts on code text, not on the behaviour under test — a text match pins one spelling, so it passes even when the code does nothing. Assert the parsed finding/output instead.";
+    const TEST_ASSERTS_SOURCE_MESSAGE: &str = "test 'test_needle_is_code' asserts on code text, not on the behaviour under test — a text match pins one spelling, so it passes even when the code does nothing. Keep the test: assert the parsed finding/output instead. For a fixer, re-scan the fixed source and assert the finding is gone; for a parser, assert the parsed result. Do not delete the test or loosen it to match the text.";
 
     #[test]
     fn test_asserts_source_flags_code_text_assertions() {

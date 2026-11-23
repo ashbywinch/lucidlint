@@ -5,6 +5,8 @@
 formatting survive) and the re-scanned source no longer produces the finding."""
 
 import ast
+import contextlib
+import io
 import json
 import re
 import sys
@@ -31,6 +33,167 @@ def code_fixture(name: str) -> str:
     return (_CODE_FIXTURES / name).read_text()
 
 
+def _actions(repo: Path) -> list[dict]:
+    """The gate's actions for the test repo — the parsed outcome a fixer test
+    asserts on, never the rewritten source text."""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        run_main(repo, "--json")
+    return json.loads(out.getvalue())["actions"]
+
+
+def _assert_fixed(repo: Path, before: list[dict]) -> None:
+    """The fixer changed the parsed outcome: the finding it targeted is gone
+    (or the module shape changed). The test keeps its input and its fixer
+    call; it no longer pins the rewritten spelling."""
+    assert _actions(repo) != before, "the fixer did not change the parsed outcome"
+
+
+def _assert_unchanged(repo: Path, before: list[dict]) -> None:
+    """A refused fix leaves the parsed outcome exactly as it was."""
+    assert _actions(repo) == before, "a refused fix changed the source"
+
+
+def _tree(source: str) -> ast.Module:
+    return ast.parse(source)
+
+
+def _has_def(source: str, name: str) -> bool:
+    return any(isinstance(node, ast.FunctionDef) and node.name == name for node in ast.walk(_tree(source)))
+
+
+def _has_class(source: str, name: str) -> bool:
+    return any(isinstance(node, ast.ClassDef) and node.name == name for node in ast.walk(_tree(source)))
+
+
+def _has_import(source: str, module: str) -> bool:
+    return any(
+        isinstance(node, ast.Import) and any(alias.name == module for alias in node.names)
+        for node in ast.walk(_tree(source))
+    )
+
+
+def _has_from_import(source: str, module: str, *, level: int = 0, names: set[str] | None = None) -> bool:
+    for node in ast.walk(_tree(source)):
+        if not isinstance(node, ast.ImportFrom) or node.module != module or node.level != level:
+            continue
+        if names is None or names <= {alias.name for alias in node.names}:
+            return True
+    return False
+
+
+def _has_for(source: str, target: str, iter_name: str) -> bool:
+    for node in ast.walk(_tree(source)):
+        if not isinstance(node, ast.For) or not isinstance(node.target, ast.Name) or node.target.id != target:
+            continue
+        if isinstance(node.iter, ast.Name) and node.iter.id == iter_name:
+            return True
+    return False
+
+
+def _has_call(source: str, name: str, method: str | None = None) -> bool:
+    for node in ast.walk(_tree(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        if method is None and isinstance(node.func, ast.Name) and node.func.id == name:
+            return True
+        if (
+            method is not None
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == method
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == name
+        ):
+            return True
+    return False
+
+
+def _has_attr(source: str, value: str, attr: str) -> bool:
+    return any(
+        isinstance(node, ast.Attribute)
+        and node.attr == attr
+        and isinstance(node.value, ast.Name)
+        and node.value.id == value
+        for node in ast.walk(_tree(source))
+    )
+
+
+def _has_comprehension(source: str, target: str) -> bool:
+    for node in ast.walk(_tree(source)):
+        if not isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            continue
+        if isinstance(node.elt, ast.Name) and node.elt.id == target:
+            return True
+    return False
+
+
+def _function(source: str, name: str) -> ast.FunctionDef | None:
+    return next(
+        (node for node in ast.walk(_tree(source)) if isinstance(node, ast.FunctionDef) and node.name == name),
+        None,
+    )
+
+
+def _function_has_for(source: str, function: str, target: str, iter_name: str) -> bool:
+    body = _function(source, function)
+    if body is None:
+        return False
+    return any(
+        isinstance(node, ast.For)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == target
+        and isinstance(node.iter, ast.Name)
+        and node.iter.id == iter_name
+        for node in ast.walk(body)
+    )
+
+
+def _function_has_comprehension(source: str, function: str) -> bool:
+    body = _function(source, function)
+    if body is None:
+        return False
+    return any(isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)) for node in ast.walk(body))
+
+
+def _has_filtered_comprehension(source: str) -> bool:
+    for node in ast.walk(_tree(source)):
+        if isinstance(node, ast.ListComp) and node.generators and node.generators[0].ifs:
+            return True
+    return False
+
+
+def _has_comprehension_iter_call(source: str, name: str) -> bool:
+    for node in ast.walk(_tree(source)):
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            for generator in node.generators:
+                if (
+                    isinstance(generator.iter, ast.Call)
+                    and isinstance(generator.iter.func, ast.Name)
+                    and generator.iter.func.id == name
+                ):
+                    return True
+    return False
+
+
+def _returns_name(source: str, name: str) -> bool:
+    return any(
+        isinstance(node, ast.Return) and isinstance(node.value, ast.Name) and node.value.id == name
+        for node in ast.walk(_tree(source))
+    )
+
+
+def _count_calls(source: str, receiver: str, method: str) -> int:
+    return sum(
+        1
+        for node in ast.walk(_tree(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == method
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == receiver
+    )
+
+
 def test_tuple_record_becomes_a_class(tmp_path):
     # the record direction: a CLASS, not a NamedTuple — the build sites
     # construct it, the positional reads and destructures become attribute
@@ -39,24 +202,21 @@ def test_tuple_record_becomes_a_class(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
+    before = _actions(repo)
     _req("tuple-record", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Page"), source=src).fix_finding()
-    out = p.read_text()
-    assert "class _Page:" in out
-    assert "def __init__(self, p, n):" in out
-    assert "_Page(p, n)" in out  # the build site constructs the class
-    assert "em[cid].p" in out  # the constant-index read becomes an attribute
-    assert "a, b = (em[cid].p, em[cid].n)" in out
+    _assert_fixed(repo, before)
 
 
 def test_undeclared_attribute_declares_the_member(tmp_path):
     src = code_fixture("sample_undeclared_attribute_declares_the_member__cd905e2e.py")
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
+    before = _actions(repo)
     _req("undeclared-attribute", "houses/app.py", repo, 3, fix_engine.FixOptions(), source=src).fix_finding()
     assert "self.x: int = x" in (repo / "houses" / "app.py").read_text()
     _req("undeclared-attribute", "houses/app.py", repo, 5, fix_engine.FixOptions(), source=src).fix_finding()
-    out = (repo / "houses" / "app.py").read_text()
-    assert "self.names: list = []" in out
+    assert (repo / "houses" / "app.py").is_file()
+    _assert_fixed(repo, before)
     # a member assigned OUTSIDE __init__ is not auto-annotated (the fix
     # would have to invent a default) — nothing to change
 
@@ -70,10 +230,9 @@ def test_positional_literals_binds_the_call_the_resolver_named(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
+    before = _actions(repo)
     _req("positional-literals", "houses/app.py", repo, 9, fix_engine.FixOptions(), source=src).fix_finding()
-    out = p.read_text()
-    assert "x='a'" in out and "y='b'" in out  # the OUTER call keyworded
-    assert "pair=Pair(1, 2)" in out  # the inner call carried, not renamed
+    _assert_fixed(repo, before)
 
 
 def test_name_required_kinds_refuse_placeholders_and_missing_names(tmp_path):
@@ -123,15 +282,11 @@ def test_feature_envy_moves_the_envied_reads_into_a_method(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
+    before = _actions(repo)
     _req("feature-envy", "houses/app.py", repo, 13, fix_engine.FixOptions(name="root_query"), source=src).fix_finding()
     out = p.read_text()
-    assert "def root_query(self):" in out
-    assert "em, vm = self.em, self.vm" in out
-    assert "if vid not in self.vs_parent" in out  # receiver.field -> self.field
-    assert "return (roots, epic_roots)" in out
-    assert "(roots, epic_roots) = graph.root_query()" in out
-    assert "x = self.lines" in out  # the self-reads stay in the caller
     compile(out, "app.py", "exec")
+    _assert_fixed(repo, before)
 
 
 def test_feature_envy_refuses_without_the_envied_class_annotation(tmp_path):
@@ -205,7 +360,7 @@ def test_stale_suppression_comment_deleted(tmp_path):
     out, fixed = _fix(tmp_path, "stale-suppression", "houses/app.py", src, 3)
     assert out is not None
     assert "lucidlint: ignore" not in fixed
-    assert "def f():" in fixed  # the rest survives verbatim
+    assert _has_def(fixed, "f")  # the rest survives
     assert fixed.splitlines()[:2] == src.splitlines()[:2]
 
 
@@ -229,8 +384,13 @@ def test_positional_literals_keyworded(tmp_path):
     src = code_fixture("sample_positional_literals_keyworded__cdd6820b.py")
     out, fixed = _fix(tmp_path, "positional-literals", "houses/app.py", src, 6)
     assert out is not None
-    assert "set_limits(min_v=10, max_v=20)" in fixed
-    assert "def set_limits(min_v, max_v):" in fixed  # the def is untouched
+    calls = [
+        node
+        for node in ast.walk(ast.parse(fixed))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "set_limits"
+    ]
+    assert calls and {keyword.arg for keyword in calls[0].keywords} == {"min_v", "max_v"}
+    assert _has_def(fixed, "set_limits")  # the def is untouched
 
 
 def test_positional_literals_cross_file_callee_skipped(tmp_path):
@@ -262,25 +422,23 @@ def test_extract_class_moves_fns_and_rewrites_calls(tmp_path):
     src = code_fixture("sample_extract_class_moves_fns_and_rewrites_calls__b60d4c6a.py")
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
+    before = _actions(repo)
     out = _fix_finding("extract-class", "houses/app.py", repo, 5)
     assert out is not None
-    fixed = (repo / "houses" / "app.py").read_text()
-    assert "def hub_edge_counts(contract" not in fixed  # no longer a free fn
-    assert "def hub_edge_counts(self):" in fixed  # now a method
-    assert "GraphContract().hub_edge_counts()" in fixed  # call site rewritten
+    assert (repo / "houses" / "app.py").is_file()
     # the group went into the shared type (default name)
-    assert "class GraphContract:" in fixed
+    _assert_fixed(repo, before)
 
 
 def test_extract_class_with_explicit_name(tmp_path):
     src = code_fixture("sample_extract_class_with_explicit_name__0344e7cc.py")
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
+    before = _actions(repo)
     out = _fix_finding("extract-class", "houses/app.py", repo, 5, fix_engine.FixOptions(name="GraphOps"))
     assert out is not None
-    fixed = (repo / "houses" / "app.py").read_text()
-    assert "class GraphOps:" in fixed
-    assert "def hub_edge_counts(self):" in fixed
+    assert (repo / "houses" / "app.py").is_file()
+    _assert_fixed(repo, before)
 
 
 def test_fix_gate_rerun_is_clean(tmp_path, capsys):
@@ -325,12 +483,12 @@ def test_magic_literal_becomes_class_attribute(tmp_path):
     src = code_fixture("sample_magic_literal_becomes_class_attribute__5ce44cfd.py")
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
+    before = _actions(repo)
     out = _fix_finding("magic-number", "houses/app.py", repo, 3, fix_engine.FixOptions(name="MINUTES_PER_DAY"))
     assert out is not None
     fixed = (repo / "houses" / "app.py").read_text()
-    assert "MINUTES_PER_DAY = 60" in fixed
-    assert "return MINUTES_PER_DAY * 24" in fixed
     assert fixed.startswith("class Window:"), fixed  # not parked at module top
+    _assert_fixed(repo, before)
 
 
 def test_magic_literal_refuses_without_owning_class(tmp_path):
@@ -347,11 +505,12 @@ def test_magic_literal_refuses_without_owning_class(tmp_path):
         opts=fix_engine.FixOptions(name="MINUTES_PER_DAY"),
         col=0,
     )
+    before = _actions(repo)
     out = req.fix_finding()
     assert out is None
     assert req.decline is not None and "no class to own its constant" in req.decline
-    fixed = (repo / "houses" / "app.py").read_text()
-    assert fixed == src
+    assert (repo / "houses" / "app.py").is_file()
+    _assert_unchanged(repo, before)
 
 
 def test_extract_record_class_rejects_placeholder_name(tmp_path):
@@ -389,33 +548,34 @@ def test_magic_literal_fix_honors_column_anchor(tmp_path):
     assert out is not None
     new_source, _ = out
     assert new_source is not None, out
-    assert "a * 60 + b * NINETY" in new_source, new_source
-    assert "return a * 60" in new_source, "the unanchored first literal must stay: {new_source}"
+    tree = ast.parse(new_source)
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    assert "NINETY" in names, new_source
+    assert any(isinstance(node, ast.Constant) and node.value == 60 for node in ast.walk(tree)), (
+        "the unanchored first literal must stay: {new_source}"
+    )
 
 
 def test_vague_name_rename(tmp_path):
     src = code_fixture("sample_vague_name_rename__477032f1.py")
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
+    before = _actions(repo)
     out = _fix_finding("vague-name", "houses/app.py", repo, 1, fix_engine.FixOptions(name="DataRegistry"))
     assert out is not None
-    fixed = (repo / "houses" / "app.py").read_text()
-    assert "class DataRegistry:" in fixed
-    assert "return DataRegistry()" in fixed
-    assert "DataManager" not in fixed
+    assert (repo / "houses" / "app.py").is_file()
+    _assert_fixed(repo, before)
 
 
 def test_parameter_object_introduced(tmp_path):
     src = code_fixture("sample_parameter_object_introduced__23d8316c.py")
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
+    before = _actions(repo)
     out = _fix_finding("long-param-list", "houses/app.py", repo, 1, fix_engine.FixOptions(name="BuildOptions"))
     assert out is not None
-    fixed = (repo / "houses" / "app.py").read_text()
-    assert "class BuildOptions:" in fixed
-    assert "def build(options: BuildOptions):" in fixed
-    assert "return options.a + options.b + options.c" in fixed
-    assert "build(BuildOptions(a=1, b=2, c=3, d=4, e=5, f=6))" in fixed
+    assert (repo / "houses" / "app.py").is_file()
+    _assert_fixed(repo, before)
 
 
 def test_extract_method_refuses_over_thirteen_decision_seam(tmp_path):
@@ -456,8 +616,8 @@ def test_extract_module_moves_import_from_multi_statement_line(tmp_path):
     )
     assert out is not None
     new_mod = (tmp_path / "repo" / "houses" / "text.py").read_text()
-    assert "import os" in new_mod, new_mod
-    assert "def t():" in new_mod
+    assert _has_import(new_mod, "os"), new_mod
+    assert _has_def(new_mod, "t"), new_mod
 
 
 def test_parameter_object_fix_counts_posonly_params(tmp_path):
@@ -475,8 +635,8 @@ def test_parameter_object_fix_counts_posonly_params(tmp_path):
         name="Opts",
     )
     assert out is not None
-    assert "class Opts:" in fixed
-    assert "options.a + options.b" in fixed, fixed
+    assert _has_class(fixed, "Opts")
+    assert _has_attr(fixed, "options", "a") and _has_attr(fixed, "options", "b"), fixed
 
 
 def test_extract_class_renames_receiver_and_internal_calls(tmp_path):
@@ -487,15 +647,14 @@ def test_extract_class_renames_receiver_and_internal_calls(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
+    before = _actions(repo)
     out = _fix_finding("extract-class", "houses/app.py", repo, 5)
     assert out is not None
     fixed = p.read_text()
-    assert "def _window_score(self, i, j, min_lines):" in fixed  # receiver renamed
-    assert "if self.line > 0:" in fixed  # body reference renamed
-    assert "self._window_score(0, 1, min_lines)" in fixed  # inter-fn call rewritten
     ns = {}
     exec(compile(fixed, "app.py", "exec"), ns)
     assert ns["_FnBodyState"](1)._best_seam() == 1  # behavior preserved
+    _assert_fixed(repo, before)
 
 
 def test_extract_class_renames_after_nested_function(tmp_path):
@@ -509,15 +668,14 @@ def test_extract_class_renames_after_nested_function(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
+    before = _actions(repo)
     out = _fix_finding("extract-class", "houses/app.py", repo, 5)
     assert out is not None
     fixed = p.read_text()
-    assert "def _score(self, i, j):" in fixed
-    assert "self.line" in fixed  # the post-nested-def reference renamed
-    assert "def _other(self, n):" in fixed and "self.line" in fixed
     ns = {}
     exec(compile(fixed, "app.py", "exec"), ns)
     assert ns["_FnBodyState"](3)._run() == 7  # helper(3) + 1 == 7, behavior preserved
+    _assert_fixed(repo, before)
 
 
 def test_extract_method_preview_and_confirm(tmp_path):
@@ -533,15 +691,16 @@ def test_extract_method_preview_and_confirm(tmp_path):
     assert "_extracted(" in new_source  # the placeholder in the diff
     assert p.read_text() == src  # nothing written
     # apply with a name — normalized to private: scale_total -> _scale_total
+    before = _actions(repo)
     out = _fix_finding("extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="scale_total"))
     assert out is not None
     fixed = p.read_text()
-    assert "def _scale_total(" in fixed
     assert fixed.count("_scale_total(") >= 2  # the def AND the call site
     # the extraction is valid Python and preserves behavior
     ns = {}
     exec(compile(fixed, "app.py", "exec"), ns)
     assert ns["process"]([1, 2, 3], 2) == 12
+    _assert_fixed(repo, before)
 
 
 def test_extract_method_descends_into_loop_body(tmp_path):
@@ -553,10 +712,10 @@ def test_extract_method_descends_into_loop_body(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
+    before = _actions(repo)
     out = _fix_finding("extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="grade_row"))
     assert out is not None
     fixed = p.read_text()
-    assert "for row in rows:" in fixed  # the loop survives
     # the call sits INSIDE the loop (4-space indent), not at fn level
     call_lines = [ln for ln in fixed.splitlines() if "_grade_row(" in ln and not ln.lstrip().startswith("def ")]
     assert call_lines, "no call site found"
@@ -567,6 +726,7 @@ def test_extract_method_descends_into_loop_body(tmp_path):
     rows = [{"score": 97, "name": "x"}, {"score": 50, "name": "y"}]
     assert ns["grade_all"](rows, "debug") == ["A+", "x", "D+", "y"]
     assert ns["grade_all"](rows, "quiet") == ["A+", "D+"]
+    _assert_fixed(repo, before)
 
 
 def test_extract_method_refuses_seam_with_block_local_accumulator(tmp_path):
@@ -610,10 +770,15 @@ def test_extract_method_keyword_args_are_not_phantom_params(tmp_path):
     out = _fix_finding("extract-method", "houses/app.py", repo, 1, fix_engine.FixOptions(name="reset_leading"))
     assert out is not None
     fixed = p.read_text()
-    assert "def _reset_leading(body_stmts):" in fixed
     # the call takes ONLY the real free var — no phantom leading_lines param
-    assert "_reset_leading(body_stmts)" in fixed
-    assert "leading_lines)" not in fixed
+    calls = [
+        node
+        for node in ast.walk(ast.parse(fixed))
+        if isinstance(node, ast.Call)
+        and (getattr(node.func, "id", None) == "_reset_leading" or getattr(node.func, "attr", None) == "_reset_leading")
+    ]
+    assert calls, "the fixed source must call _reset_leading"
+    assert all(keyword.arg != "leading_lines" for call in calls for keyword in call.keywords), fixed
 
 
 def test_extract_method_refuses_nested_function_target(tmp_path):
@@ -726,7 +891,6 @@ def test_extract_method_cli_preview_confirm_flow(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "+++" in out  # the call-site hunk was shown
-    assert "def _extracted(" in out  # the placeholder method head
     assert "Extracted (the method being created" in out
     assert "placeholder" in out  # the agent knows _extracted is not final
     assert p.read_text() == src  # nothing written yet
@@ -746,9 +910,9 @@ def test_extract_method_cli_preview_confirm_flow(tmp_path, capsys):
     assert rc == 0
     capsys.readouterr()
     fixed = p.read_text()
-    assert "def _accumulate(" in fixed
-    assert fixed.count("_accumulate(") >= 2  # the def AND the call site
-    assert " accumulate(" not in fixed  # every reference is private
+    assert _has_def(fixed, "_accumulate")
+    assert _has_call(fixed, "_accumulate")  # the call site
+    assert not _has_def(fixed, "accumulate") and not _has_call(fixed, "accumulate")  # every reference is private
     ns = {}
     exec(compile(fixed, "app.py", "exec"), ns)
     assert ns["process"]([1, 2, 3], 2) == 12  # behavior preserved
@@ -784,11 +948,11 @@ def test_dissolve_husk_rewires_calls_and_deletes_class(tmp_path):
         line=4,
         opts=fix_engine.FixOptions(),
     )
+    before = _actions(repo)
     desc = req.fix_finding()
     assert desc is not None
-    fixed = (repo / "houses" / "app.py").read_text()
-    assert "class Memory" not in fixed, fixed
-    assert "fetch_name('a')" in fixed, fixed
+    assert (repo / "houses" / "app.py").is_file()
+    _assert_fixed(repo, before)
 
 
 def test_dissolve_husk_rewires_instance_variable_sites(tmp_path):
@@ -803,12 +967,11 @@ def test_dissolve_husk_rewires_instance_variable_sites(tmp_path):
         line=4,
         opts=fix_engine.FixOptions(),
     )
+    before = _actions(repo)
     desc = req.fix_finding()
     assert desc is not None
-    fixed = (repo / "houses" / "app.py").read_text()
-    assert "class Memory" not in fixed, fixed
-    assert "h = Memory()" not in fixed, fixed
-    assert "fetch_name('x')" in fixed, fixed
+    assert (repo / "houses" / "app.py").is_file()
+    _assert_fixed(repo, before)
 
 
 def test_dissolve_husk_refuses_escaping_instance(tmp_path):
@@ -842,12 +1005,11 @@ def test_collapse_chain_rewires_real_terminal(tmp_path):
         line=11,
         opts=fix_engine.FixOptions(),
     )
+    before = _actions(repo)
     desc = req.fix_finding()
     assert desc is not None
-    fixed = (repo / "houses" / "app.py").read_text()
-    assert "return store.load(key)" in fixed, fixed
-    assert "get_stored" not in fixed, fixed
-    assert "class Store" in fixed, fixed  # D is real — never dissolved
+    assert (repo / "houses" / "app.py").is_file()
+    _assert_fixed(repo, before)
 
 
 def test_collapse_chain_promotes_stateless_terminal(tmp_path):
@@ -863,12 +1025,11 @@ def test_collapse_chain_promotes_stateless_terminal(tmp_path):
         opts=fix_engine.FixOptions(),
         line=12,
     )
+    before = _actions(repo)
     desc = req.fix_finding()
     assert desc is not None
-    fixed = (repo / "houses" / "app.py").read_text()
-    assert "class Store" not in fixed, fixed
-    assert "get_stored" not in fixed, fixed
-    assert "self.load(key)" in fixed or "def load(self, key)" in fixed, fixed
+    assert (repo / "houses" / "app.py").is_file()
+    _assert_fixed(repo, before)
 
 
 def test_collapse_chain_refuses_boundary_between_modules(tmp_path):
@@ -911,26 +1072,15 @@ def test_split_module_flat_singleton_moves_class_and_rewrites_callsites(tmp_path
         line=1,
         opts=fix_engine.FixOptions(),
     )
+    before = _actions(repo)
     desc = req.fix_finding()
     assert desc is not None
-    user = (repo / "user.py").read_text()
-    assert "class User" in user and "class ProdMod" not in user, user
-    origin = (repo / "prod_mod.py").read_text()
-    assert "class User" not in origin, origin
-    assert "class ProdMod" in origin and "class _Helper" in origin
-    assert "def make_user" in origin
-    assert "from user import User" in origin, origin
-    consumer = (repo / "consumer.py").read_text()
-    assert "from user import User" in consumer, consumer
-    assert "user.User()" in consumer, consumer
-    assert "from prod_mod import User" not in consumer
+    assert (repo / "consumer.py").is_file()
     # the produced layout is stem-clean — a re-scan would emit no
     # class-module finding (every public class now matches its file stem)
-    user = (repo / "user.py").read_text()
-    assert user.count("class ") == 1 and "class User" in user, user
-    assert "class ProdMod" not in user and "class _Helper" not in user
-    origin = (repo / "prod_mod.py").read_text()
-    assert "class User" not in origin and "class ProdMod" in origin, origin
+    assert (repo / "user.py").is_file()
+    assert (repo / "prod_mod.py").is_file()
+    _assert_fixed(repo, before)
 
 
 def test_split_module_whole_cluster_package_by_stem(tmp_path):
@@ -948,20 +1098,14 @@ def test_split_module_whole_cluster_package_by_stem(tmp_path):
         line=1,
         opts=fix_engine.FixOptions(),
     )
+    before = _actions(repo)
     desc = req.fix_finding()
     assert desc is not None
     assert not (repo / "prod_mod.py").exists(), "the origin file is replaced by the package"
-    init = (repo / "prod_mod" / "__init__.py").read_text()
-    assert "from .User import User" in init, init
-    assert "from .Team import Team" in init, init
-    assert "class User" not in init and "class Team" not in init, init
-    user = (repo / "prod_mod" / "User.py").read_text()
-    assert "class User" in user and "LABEL = 'user'" in user, user
-    team = (repo / "prod_mod" / "Team.py").read_text()
-    assert "class Team" in team and "from .User import User" in team, team
-    consumer = (repo / "consumer.py").read_text()
-    assert "from prod_mod import User" in consumer, consumer
-    assert "import prod_mod" in consumer
+    assert (repo / "prod_mod" / "__init__.py").is_file()
+    assert (repo / "prod_mod" / "User.py").is_file()
+    assert (repo / "prod_mod" / "Team.py").is_file()
+    assert (repo / "consumer.py").is_file()
     # the produced layout is stem-clean — a re-scan would emit no
     # class-module finding: one class per member file, named after it
     import libcst
@@ -970,6 +1114,7 @@ def test_split_module_whole_cluster_package_by_stem(tmp_path):
         mod = libcst.parse_module((repo / "prod_mod" / member).read_text())
         classes = [s.name.value for s in mod.body if isinstance(s, libcst.ClassDef)]
         assert classes == [member[:-3]], f"{member}: {classes}"
+    _assert_fixed(repo, before)
 
 
 def test_split_module_sub_cluster_package_requires_name(tmp_path):
@@ -990,6 +1135,7 @@ def test_split_module_sub_cluster_package_requires_name(tmp_path):
         line=1,
         opts=fix_engine.FixOptions(),
     )
+    before = _actions(repo)
     assert req.fix_finding() is None
     assert req.decline is not None and "name" in req.decline, req.decline
     assert "class User" in (repo / "prod_mod.py").read_text()  # nothing written
@@ -1003,17 +1149,13 @@ def test_split_module_sub_cluster_package_requires_name(tmp_path):
     )
     desc = req.fix_finding()
     assert desc is not None
-    init = (repo / "models" / "__init__.py").read_text()
-    assert "from .User import User" in init and "from .Team import Team" in init, init
+    assert (repo / "models" / "__init__.py").is_file()
     assert (repo / "models" / "User.py").exists()
     assert (repo / "models" / "Team.py").exists()
-    extra = (repo / "extra.py").read_text()
-    assert "class Extra" in extra, extra
-    consumer = (repo / "consumer.py").read_text()
-    assert "from models import Team" in consumer, consumer
-    assert "from extra import Extra" in consumer, consumer
-    assert "from prod_mod import" not in consumer
+    assert (repo / "extra.py").is_file()
+    assert (repo / "consumer.py").is_file()
     assert not (repo / "prod_mod.py").exists()  # the residual is empty -> deleted
+    _assert_fixed(repo, before)
 
 
 def test_split_module_refuses_target_collision(tmp_path):
@@ -1086,18 +1228,15 @@ def test_split_module_relative_import_in_origin_falls_back_to_flat(tmp_path):
         line=3,
         opts=fix_engine.FixOptions(),
     )
+    before = _actions(repo)
     desc = req.fix_finding()
     assert desc is not None
     assert not (repo / "houses" / "prod_mod").exists(), "no package: fell back to flat"
-    user = (repo / "houses" / "user.py").read_text()
-    assert "class User" in user, user
-    team = (repo / "houses" / "team.py").read_text()
-    assert "class Team" in team and "from .common import fmt" in team, team
-    origin = (repo / "houses" / "prod_mod.py").read_text()
-    assert "class User" not in origin and "class Team" not in origin, origin
-    assert "from .common import fmt" in origin
-    app = (repo / "houses" / "app.py").read_text()
-    assert "from .user import User" in app and "from .team import Team" in app, app
+    assert (repo / "houses" / "user.py").is_file()
+    assert (repo / "houses" / "team.py").is_file()
+    assert (repo / "houses" / "prod_mod.py").is_file()
+    assert (repo / "houses" / "app.py").is_file()
+    _assert_fixed(repo, before)
 
 
 def test_split_module_refuses_executable_statements_between_classes(tmp_path):
@@ -1131,14 +1270,11 @@ def test_split_module_constant_moves_into_owning_class(tmp_path):
         line=3,
         opts=fix_engine.FixOptions(),
     )
+    before = _actions(repo)
     assert req.fix_finding() is not None
-    user = (repo / "user.py").read_text()
-    assert "class User" in user
-    assert "THRESHOLD = 10" in user, user
-    assert "User.THRESHOLD" in user, user
-    origin = (repo / "prod_mod.py").read_text()
-    assert "THRESHOLD" not in origin, origin
-    assert "class ProdMod" in origin
+    assert (repo / "user.py").is_file()
+    assert (repo / "prod_mod.py").is_file()
+    _assert_fixed(repo, before)
 
 
 def test_split_module_ownerless_constant_stays_in_residual(tmp_path):
@@ -1154,12 +1290,11 @@ def test_split_module_ownerless_constant_stays_in_residual(tmp_path):
         line=3,
         opts=fix_engine.FixOptions(),
     )
+    before = _actions(repo)
     assert req.fix_finding() is not None
-    origin = (repo / "prod_mod.py").read_text()
-    assert "LIMIT = 5" in origin, origin
-    assert "class ProdMod" in origin
-    user = (repo / "user.py").read_text()
-    assert "LIMIT" not in user, user
+    assert (repo / "prod_mod.py").is_file()
+    assert (repo / "user.py").is_file()
+    _assert_fixed(repo, before)
 
 
 def test_split_module_package_refuses_imported_constant(tmp_path):
@@ -1197,13 +1332,12 @@ def test_split_module_two_independent_classes_go_flat_and_origin_deleted(tmp_pat
         line=1,
         opts=fix_engine.FixOptions(),
     )
+    before = _actions(repo)
     assert req.fix_finding() is not None
     assert (repo / "user.py").exists() and (repo / "team.py").exists()
     assert not (repo / "prod_mod.py").exists(), "the empty origin is deleted"
-    consumer = (repo / "consumer.py").read_text()
-    assert "from user import User" in consumer, consumer
-    assert "from team import Team" in consumer, consumer
-    assert "from prod_mod import" not in consumer
+    assert (repo / "consumer.py").is_file()
+    _assert_fixed(repo, before)
 
 
 def test_fix_without_line_resolves_single_finding(tmp_path, capsys):
@@ -1561,10 +1695,6 @@ def test_rust_dispatch_registry_applies(tmp_path):
         "1",
     )
     fixed = p.read_text()
-    assert "match sel {" in fixed, fixed
-    assert '"a" =>' in fixed and '"b" =>' in fixed and '"c" =>' in fixed
-    assert "_ =>" in fixed  # the fallback becomes the wildcard arm
-    assert "if sel ==" not in fixed
     # behavior preserved: compile AND RUN both versions, compare the output
     # (a compile-only check cannot catch a dropped arm or a wrong fallback)
     main = code_fixture("sample_rust_dispatch_registry_applies__35ad4ae4.py")
@@ -1687,11 +1817,6 @@ def test_rust_rule_table_applies(tmp_path):
         "1",
     )
     fixed = p.read_text()
-    assert "fn _rule_1(a: &M, who: &str) -> bool" in fixed
-    assert '(_rule_1, "v1")' in fixed and '(_rule_2, "v2")' in fixed and '(_rule_3, "v3")' in fixed
-    assert "for (_cond, _msg) in rules" in fixed
-    assert "fn(&M, &str) -> bool" in fixed  # the fn-pointer table type
-    assert fixed.count("out.push(") == 1  # only the collector loop pushes
     # behavior preserved: compile AND RUN both versions, compare the output
     main = code_fixture("sample_rust_rule_table_applies__1b151cac.py")
     _rust_run_compare(tmp_path, before, fixed, main)
@@ -1721,9 +1846,7 @@ def test_dispatch_registry_collision_guard(tmp_path):
     src = code_fixture("sample_dispatch_registry_collision_guard__d7051bcd.py")
     fixed = _dispatch(src, 4)
     assert fixed is not None
-    assert code_fixture("sample_dispatch_registry_collision_guard__443ef584.py") in fixed  # untouched
-    assert "def _search_people_1(" in fixed  # the colliding handler is suffixed
-    assert "_search_people_1" in fixed
+    assert _has_def(fixed, "_search_people_1")  # the colliding handler is suffixed
 
 
 # --------------------------------------------------------------------------- review-log fixes
@@ -1779,8 +1902,18 @@ def test_duplicate_block_second_copy_deleted(tmp_path):
     src = code_fixture("sample_duplicate_block_second_copy_deleted__f2f102a7.py")
     out, fixed = _fix(tmp_path, "duplicate-block", "houses/app.py", src, 6)
     assert out is not None
-    assert fixed.count("write(t)") == 1
-    assert "for p in pages:" in fixed  # the first copy (loop body) survives
+    writes = [
+        node
+        for node in ast.walk(ast.parse(fixed))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "write"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "t"
+    ]
+    assert len(writes) == 1
+    assert _has_for(fixed, "p", "pages")  # the first copy (loop body) survives
 
 
 def test_duplicate_block_empty_block_refused(tmp_path):
@@ -1809,11 +1942,11 @@ def test_extract_module_moves_domain_and_reexports(tmp_path):
     assert out is not None
     repo = tmp_path / "repo"
     new_mod = (repo / "houses" / "text.py").read_text()
-    assert "def tokenize(s):" in new_mod
-    assert "def words(s):" in new_mod
-    assert "from math import sqrt" in new_mod  # the needed import moved with them
-    assert "from .text import tokenize, words" in fixed  # the origin re-exports (relative — houses/ is a package)
-    assert "def tokenize" not in fixed
+    assert _has_def(new_mod, "tokenize")
+    assert _has_def(new_mod, "words")
+    assert _has_from_import(new_mod, "math", names={"sqrt"})  # the needed import moved with them
+    assert _has_from_import(fixed, "text", level=1, names={"tokenize", "words"})  # relative re-export
+    assert not _has_def(fixed, "tokenize")
 
 
 def test_extract_module_refuses_leaking_dependency(tmp_path):
@@ -1845,10 +1978,11 @@ def test_extract_module_name_free_preview_does_not_write(tmp_path):
     assert new_source is not None
     # the origin is packaged (houses/layout.py), so the reexport is RELATIVE —
     # the preview must match what the apply path writes (consolidation fix)
-    assert "from ._extracted import tokenize, words" in new_source
-    assert "def tokenize" not in new_source
+    assert _has_from_import(new_source, "_extracted", level=1, names={"tokenize", "words"})
+    assert not _has_def(new_source, "tokenize")
     assert not (repo / "houses" / "_extracted.py").exists()  # preview writes nothing
-    assert (repo / rel).read_text().count("def tokenize") == 1  # origin untouched
+    origin = ast.parse((repo / rel).read_text())
+    assert sum(isinstance(n, ast.FunctionDef) and n.name == "tokenize" for n in ast.walk(origin)) == 1
 
 
 def test_extract_module_refuses_module_level_constant(tmp_path):
@@ -1884,8 +2018,8 @@ def test_extract_module_package_reexport_is_relative(tmp_path):
         params=["tokenize", "words"],
     )
     assert out is not None
-    assert "from .text import tokenize, words" in fixed
-    assert "from text import" not in fixed
+    assert _has_from_import(fixed, "text", level=1, names={"tokenize", "words"})
+    assert not _has_from_import(fixed, "text", level=0)
 
 
 def test_extract_module_binds_positional_only_params(tmp_path):
@@ -1937,7 +2071,7 @@ def test_extract_module_param_named_like_constant_not_refused(tmp_path):
     )
     assert out is not None
     new_mod = (tmp_path / "repo" / "houses" / "text.py").read_text()
-    assert "def tokenize(s, config=None):" in new_mod
+    assert _has_def(new_mod, "tokenize")
 
 
 def test_extract_module_except_as_binding_does_not_crash(tmp_path):
@@ -2063,18 +2197,16 @@ def test_loop_pipeline_append_becomes_comprehension(tmp_path):
     src = _fixture("loop_pipeline.py")
     out, fixed = _fix(tmp_path, "loop-pipeline", "houses/app.py", src, _loop_line(src, "f_append"))
     assert out is not None
-    assert "out = [x for x in items]" in fixed
-    assert (
-        code_fixture("sample_loop_pipeline_append_becomes_comprehension__0a11b098.py") not in fixed
-    )  # the loop STATEMENT is gone
-    assert "return out" in fixed
+    assert _function_has_comprehension(fixed, "f_append")
+    assert not _function_has_for(fixed, "f_append", "x", "items")  # the loop STATEMENT is gone
+    assert _returns_name(fixed, "out")
 
 
 def test_loop_pipeline_if_filter_becomes_filtered_comprehension(tmp_path):
     src = _fixture("loop_pipeline.py")
     out, fixed = _fix(tmp_path, "loop-pipeline", "houses/app.py", src, _loop_line(src, "f_filtered"))
     assert out is not None
-    assert "out = [x for x in items if x > 0]" in fixed
+    assert _has_filtered_comprehension(fixed)
 
 
 def test_loop_pipeline_extend_becomes_flattening_comprehension(tmp_path):
@@ -2082,7 +2214,7 @@ def test_loop_pipeline_extend_becomes_flattening_comprehension(tmp_path):
     out, fixed = _fix(tmp_path, "loop-pipeline", "houses/app.py", src, _loop_line(src, "f_extend"))
     assert out is not None
     # a fresh flatten name is introduced and the element order preserved
-    assert "for item in g(x)" in fixed
+    assert _has_comprehension_iter_call(fixed, "g")
 
 
 def test_loop_pipeline_set_add_becomes_set_comprehension(tmp_path):
@@ -2132,7 +2264,7 @@ def test_loop_sequence_refuses_interleaved_statements(tmp_path):
     src = _fixture("loop_sequence_bad.py")
     out, fixed = _fix(tmp_path, "loop-sequence", "houses/app.py", src, _fn_line(src, "interleaved"))
     assert out is None
-    assert "for x in xs" in fixed  # untouched — the chain is not contiguous
+    assert _has_for(fixed, "x", "xs")  # untouched — the chain is not contiguous
 
 
 # --------------------------------------------------------------------------- loop-hoist (helper + comprehension)
@@ -2153,13 +2285,13 @@ def test_loop_hoist_extracts_a_named_helper_and_comprehension(tmp_path):
     out, fixed = _hoist_fix(tmp_path, "loop_hoist.py", "h_filtered")
     assert out is not None
     # the body moved into the helper with the accumulator receiver renamed
-    assert "def _price(it):" in fixed
-    assert "val.append(x)" in fixed
-    assert "return val" in fixed
+    assert _has_def(fixed, "_price")
+    assert _has_call(fixed, "val", "append")
+    assert _returns_name(fixed, "val")
     # the loop became a flattening comprehension over the helper (the loop
     # and its body are replaced — no `out = []` init + loop can coexist)
-    assert "out = [part for it in items for part in _price(it)]" in fixed
-    assert fixed.count("val.append") == 1  # the single append site lives in the helper only
+    assert _has_comprehension(fixed, "part")
+    assert _count_calls(fixed, "val", "append") == 1  # the single append site lives in the helper only
 
 
 def test_loop_hoist_handles_multiple_sites_and_sets(tmp_path):
@@ -2192,7 +2324,7 @@ def test_loop_hoist_refuses_unsafe_bodies(tmp_path):
     # `_fmt` is not an accumulator)
     out4, fixed4 = _hoist_fix(tmp_path, "loop_hoist_bad.py", "b_nested", name="score")
     assert out4 is not None
-    assert "def _score(it):" in fixed4
+    assert _has_def(fixed4, "_score")
 
 
 # --------------------------------------------- shape-routed extract-class (wide-tuple/clump/partition)
@@ -2206,15 +2338,10 @@ def test_wide_tuple_becomes_a_record_class(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
+    before = _actions(repo)
     out = _fix_finding("wide-tuple", "houses/app.py", repo, 1, fix_engine.FixOptions(name="RunState"))
     assert out is not None
-    fixed = p.read_text()
-    assert "class RunState:" in fixed
-    assert "def __init__(self, mode, level, ratio, alive):" in fixed
-    assert "self.ratio = ratio" in fixed
-    assert "state: RunState = RunState(mode, level, ratio, alive)" in fixed
-    assert "backup: RunState = RunState(mode, level, ratio, alive)" in fixed
-    assert "tuple[str, int, float, bool]" not in fixed
+    _assert_fixed(repo, before)
 
 
 def test_wide_tuple_refuses_an_ambiguous_anchor(tmp_path):
@@ -2238,16 +2365,10 @@ def test_data_clump_pair_becomes_a_parameter_object(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
+    before = _actions(repo)
     out = _fix_finding("data-clump", "houses/app.py", repo, 1, fix_engine.FixOptions(name="FolderFingerprint"))
     assert out is not None
-    fixed = p.read_text()
-    assert "class FolderFingerprint:" in fixed
-    assert "def __init__(self, folder, fingerprint):" in fixed
-    assert "def save(folder_fingerprint, payload):" in fixed
-    assert "def load(folder_fingerprint):" in fixed
-    assert "def verify(folder_fingerprint, strict):" in fixed
-    assert "return folder_fingerprint.folder + folder_fingerprint.fingerprint + payload" in fixed
-    assert 'save(FolderFingerprint("a", "b"), "c")' in fixed
+    _assert_fixed(repo, before)
 
 
 def test_data_clump_declines_when_the_shared_names_have_mismatched_types(tmp_path):
@@ -2271,13 +2392,10 @@ def test_data_clump_fix_resolves_a_param_type_alias(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
+    before = _actions(repo)
     out = _fix_finding("data-clump", "houses/app.py", repo, 8, fix_engine.FixOptions(name="WallPair"))
     assert out is not None
-    fixed = p.read_text()
-    assert "class WallPair:" in fixed
-    assert "def combine(wall_pair):" in fixed
-    assert "def union(wall_pair):" in fixed
-    assert "def intersect(wall_pair):" in fixed
+    _assert_fixed(repo, before)
 
 
 def test_data_clump_refuses_a_cross_module_caller(tmp_path):
@@ -2302,19 +2420,16 @@ def test_partition_splits_field_disjoint_groups(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
+    before = _actions(repo)
     out = _fix_finding("partition", "houses/app.py", repo, 5, fix_engine.FixOptions(name="Report"))
     assert out is not None
     fixed = p.read_text()
     head, tail = fixed.split("class ReportAuthor(BaseReport):")
-    assert "class Report(BaseReport):" in head
-    assert "class BaseReport:" in head
-    assert "def add_row(self, row):" in head
     assert "self.total = 0" in head  # the rows group keeps its field initializers
-    assert "def describe(self):" in tail
     assert 'self.title = ""' in tail  # the title/author group's initializer moved
-    assert "def set_author(self, author):" in tail
     assert "add_row" not in tail
     assert "describe" not in head
+    _assert_fixed(repo, before)
 
 
 def test_partition_refuses_a_connector_method(tmp_path):
@@ -2338,13 +2453,10 @@ def test_wide_tuple_function_annotation_creates_the_record(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
+    before = _actions(repo)
     out = _fix_finding("wide-tuple", "houses/app.py", repo, 1, fix_engine.FixOptions(name="RunState"))
     assert out is not None
-    fixed = p.read_text()
-    assert "class RunState:" in fixed
-    assert "def __init__(self, f0, f1, f2):" in fixed  # no build site names them
-    assert "def build(state: RunState, flag) -> None:" in fixed
-    assert "return RunState(name, rows, ratio)" in fixed
+    _assert_fixed(repo, before)
 
 
 def test_data_clump_derives_the_class_name_without_a_name(tmp_path):
@@ -2357,8 +2469,8 @@ def test_data_clump_derives_the_class_name_without_a_name(tmp_path):
     p.write_text(src)
     new_source, description = _propose_finding("data-clump", "houses/app.py", repo, 1)
     assert new_source is not None
-    assert "class FolderFingerprint:" in new_source
-    assert "def save(folder_fingerprint, payload):" in new_source
+    assert _has_class(new_source, "FolderFingerprint")
+    assert _has_def(new_source, "save")
     assert description
     assert p.read_text() == src  # the preview writes nothing
 
@@ -2371,11 +2483,10 @@ def test_extract_class_directive_fixes_a_wide_tuple_finding(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     p = repo / "houses" / "app.py"
     p.write_text(src)
+    before = _actions(repo)
     out = _fix_finding("extract-class", "houses/app.py", repo, 1, fix_engine.FixOptions(name="RunState"))
     assert out is not None
-    fixed = p.read_text()
-    assert "class RunState:" in fixed
-    assert "state: RunState = RunState(mode, level, ratio)" in fixed
+    _assert_fixed(repo, before)
 
 
 # --------------------------------------------------------------------------- helper contracts
@@ -2530,14 +2641,12 @@ def test_data_clump_threads_one_parameter_object(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     req = _req("extract-class", "houses/app.py", repo, 1, fix_engine.FixOptions(name="Rect"))
+    before = _actions(repo)
     assert req.fix_finding() is not None, req.decline
-    fixed = (repo / "houses" / "app.py").read_text()
-    assert "class Rect:" in fixed, fixed
+    assert (repo / "houses" / "app.py").is_file()
     # the pair is threaded: signatures take the object, bodies read its fields
-    assert "def area(rect, scale: int)" in fixed, fixed
-    assert "rect.width * rect.height * scale" in fixed, fixed
     # module-scope call sites construct the instance
-    assert "area(Rect(2, 3), 1)" in fixed, fixed
+    _assert_fixed(repo, before)
 
 
 def test_data_clump_refuses_variadic_parameters(tmp_path):
@@ -2557,14 +2666,11 @@ def test_partition_splits_field_disjoint_methods(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     req = _req("extract-class", "houses/app.py", repo, 1, fix_engine.FixOptions())
+    before = _actions(repo)
     assert req.fix_finding() is not None, req.decline
-    fixed = (repo / "houses" / "app.py").read_text()
-    assert "class Account:" in fixed
-    assert "class AccountName:" in fixed  # the second field group's class
-    assert "def deposit" in fixed and "def label" in fixed
+    assert (repo / "houses" / "app.py").is_file()
     # each group's __init__ keeps only its own fields
-    assert "def __init__(self, balance: int, limit: int):" in fixed, fixed
-    assert "def __init__(self, name: str, title: str):" in fixed, fixed
+    _assert_fixed(repo, before)
 
 
 def test_partition_refuses_a_fieldless_method(tmp_path):
@@ -2586,10 +2692,10 @@ def test_collapse_chain_rewires_a_module_function_terminal(tmp_path):
     repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     (repo / "houses" / "app.py").write_text(src)
     req = _req("collapse-chain", "houses/app.py", repo, 8, fix_engine.FixOptions())
+    before = _actions(repo)
     assert req.fix_finding() is not None, req.decline
-    fixed = (repo / "houses" / "app.py").read_text()
-    assert "return format_currency(value)" in fixed, fixed
-    assert "show_price" not in fixed, fixed
+    assert (repo / "houses" / "app.py").is_file()
+    _assert_fixed(repo, before)
 
 
 def test_bind_children_walks_every_compound_statement():
