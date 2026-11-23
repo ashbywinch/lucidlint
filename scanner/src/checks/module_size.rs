@@ -46,6 +46,8 @@
 
 use ruff_python_ast::{Stmt, StmtFunctionDef};
 
+// `class_facts` is a sibling module inside `checks`; `has_decorator` is
+// `pub(super)` there, the same path `static_husk` and `middle_man` use.
 use super::class_facts::has_decorator;
 use crate::finding::Finding;
 
@@ -115,6 +117,16 @@ enum Rung {
     Several,
     /// Both languages: at or above the loose floor.
     Many,
+}
+
+/// Which arm speaks for a module. The two arms partition the result: the
+/// types arm names the class equivalents, the functions arm names the free
+/// functions, and neither speaks when the module is one concept plus records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShapeArm {
+    Types,
+    Functions,
+    None,
 }
 
 /// One top-level type: a class, or a Rust struct/enum/trait/union. `methods`
@@ -189,87 +201,100 @@ impl ModuleShape {
     /// free functions get the class they are missing. A module of classes and
     /// framework entry points only is a framework contract, not a finding.
     fn many_finding(&self, rel: &str) -> Option<Finding> {
-        if self.classes_dominate() {
-            Some(Self::finding(
+        match self.arm() {
+            ShapeArm::Types => Some(Self::finding(
                 "many-definitions",
                 "warn",
                 rel,
                 self.classes_message(rel),
-            ))
-        } else if self.functions_are_a_group() {
-            Some(Self::finding(
+            )),
+            ShapeArm::Functions => Some(Self::finding(
                 "many-definitions",
                 "warn",
                 rel,
                 self.functions_message(rel, true),
-            ))
-        } else {
-            None
+            )),
+            ShapeArm::None => None,
         }
     }
 
     fn several_finding(&self, rel: &str) -> Option<Finding> {
-        if self.classes_dominate() {
-            Some(Self::finding(
+        match self.arm() {
+            ShapeArm::Types => Some(Self::finding(
                 "several-definitions",
                 "warn",
                 rel,
                 self.classes_message(rel),
-            ))
-        } else if self.functions_are_a_group() {
-            Some(Self::finding(
+            )),
+            ShapeArm::Functions => Some(Self::finding(
                 "several-definitions",
                 "warn",
                 rel,
                 self.functions_message(rel, false),
-            ))
+            )),
+            ShapeArm::None => None,
+        }
+    }
+
+    /// The one decision the two findings share: which arm speaks for this
+    /// module.
+    fn arm(&self) -> ShapeArm {
+        if self.types_dominate() {
+            ShapeArm::Types
+        } else if self.functions_are_a_group() {
+            ShapeArm::Functions
         } else {
-            None
+            ShapeArm::None
         }
     }
 
     /// The functions arm speaks only for a module the functions dominate: the
-    /// free functions are most of its definitions. A module of one class, its
-    /// records and two helpers is one concept — telling that reader about the
-    /// two helpers hides the class the module is about (#119).
+    /// free functions are strictly more than the class equivalents. A module
+    /// of one class, its records and two helpers is one concept — telling that
+    /// reader about the two helpers hides the class the module is about (#119).
     fn functions_are_a_group(&self) -> bool {
-        self.functions >= FUNCTIONS_GROUP_MIN && self.functions > self.owned()
+        self.functions >= FUNCTIONS_GROUP_MIN && self.functions > self.class_equivalents()
     }
 
-    /// The definitions the types arm owns: the module's types and the function
-    /// groups that take one (a Rust class equivalent).
-    fn owned(&self) -> usize {
+    /// The module's class equivalents: its types plus the Rust function groups
+    /// that take one. A group is a class equivalent — the type plus the
+    /// methods it did not get to own.
+    fn class_equivalents(&self) -> usize {
         self.classes.len() + self.receiver_groups.len()
     }
 
-    /// The types arm applies when the owned concepts (types and the function
-    /// groups that take one) are at least the bulk of the definitions AND more
-    /// than one of the types carries behaviour. "All but one are records", with
-    /// no function groups, is one class plus its value types: one concept, no
-    /// finding. The two arms partition the module: a tie belongs to the types,
-    /// because a helper belongs to the class it is about (#119).
-    fn classes_dominate(&self) -> bool {
+    /// The types arm speaks when the class equivalents are at least the bulk
+    /// of the definitions and there is a second concept: more than one type
+    /// acts on its values, or a receiver group is another class equivalent.
+    ///
+    /// A tie belongs to the types: at `class_equivalents == functions` neither
+    /// side dominates, and the free functions are then the helpers of the
+    /// class they are about. The reader can check the claim because the
+    /// message states the counts and names the groups.
+    fn types_dominate(&self) -> bool {
         // the types arm can only speak for a module that HAS types: a Rust
         // module of function groups and free functions was getting
         // "0 of them types ()" (2026-11-18 review)
         if self.classes.is_empty() {
             return false;
         }
-        // more than one type that owns behaviour is the "several concerns"
-        // case; a type with no acting method is a record — the exclusion this
-        // arm makes (one class plus its records is one concept)
-        let behavioural = self.classes.iter().filter(|c| c.methods > 0).count();
-        self.owned() >= self.functions && (behavioural > 1 || !self.receiver_groups.is_empty())
+        self.class_equivalents() >= self.functions && (self.behavioural_types() > 1 || !self.receiver_groups.is_empty())
+    }
+
+    /// The types that act on a value of their own; a record has none.
+    fn behavioural_types(&self) -> usize {
+        self.classes.iter().filter(|class| class.methods > 0).count()
     }
 
     fn classes_message(&self, rel: &str) -> String {
         let names: Vec<&str> = self.classes.iter().map(|c| c.name.as_str()).collect();
         format!(
-            "'{rel}' holds {count} top-level definitions, {types} of them {noun} ({list}){framework}. {principle} {reader} {merge} {package} {record}",
+            "'{rel}' holds {count} top-level definitions, {types} of them {noun} ({list}){groups}{framework}. {principle} {reader} {merge} {package} {record}",
             count = self.definitions(),
             types = names.len(),
             noun = self.type_noun(),
             list = Self::name_list(&names),
+            groups = self.groups_clause(),
             framework = self.framework_clause(),
             principle = self.principle(),
             reader = self.reader_harm(),
@@ -451,9 +476,13 @@ impl ModuleShape {
     }
 
     fn acts_on_value(f: &StmtFunctionDef) -> bool {
-        !CONSTRUCTOR_METHODS.contains(&f.name.as_str())
-            && !has_decorator(f, "staticmethod")
-            && !has_decorator(f, "classmethod")
+        !CONSTRUCTOR_METHODS.contains(&f.name.as_str()) && !Self::takes_no_instance(f)
+    }
+
+    /// A static or class method takes no instance of the class, so it cannot
+    /// act on one of the type's values.
+    fn takes_no_instance(f: &StmtFunctionDef) -> bool {
+        has_decorator(f, "staticmethod") || has_decorator(f, "classmethod")
     }
 
     /// Measure one module from its parsed body and source text.
