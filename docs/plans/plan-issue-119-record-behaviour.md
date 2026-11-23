@@ -53,12 +53,16 @@ gap and was described by the wrong arm.
 
 The arms now partition the module:
 
-- types arm: `owned >= functions` (the types are at least the bulk) and more
-  than one type behaves;
-- functions arm: `functions > owned` (the functions are the bulk) and at least
-  `FUNCTIONS_GROUP_MIN` of them.
+- types arm: `class_equivalents >= functions` (the class equivalents are at
+  least the bulk) and a second concept of its own — more than one type behaves,
+  or a receiver group is another class equivalent;
+- functions arm: `functions > class_equivalents` (the functions are strictly
+  the bulk) and at least `FUNCTIONS_GROUP_MIN` of them;
+- neither: one class, its records, and at most as many helpers is one concept.
 
 A tie belongs to the types, because a helper belongs to the class it is about.
+The types message names the receiver groups too, so every definition in its
+count is visible to the reader.
 
 ## Measured
 
@@ -102,3 +106,24 @@ act on their values) still fires in both languages, pinned by tests.
 - `docs/plans/plan-issue-107-module-shape.md` still says "a class with no
   methods is a value record"; that doc records the round that shipped the
   ladder. `RULES.md` and this doc are the current statement.
+
+## Review refactor
+
+The review found the arm predicate hard to read, not wrong. The refactor makes
+the decision structural:
+
+- `ShapeArm` (Types/Functions/None) is the one arm decision; both findings
+  match on it instead of repeating the `if`/`else`.
+- `class_equivalents()` names what the types arm owns (types plus receiver
+  groups); `types_dominate()` and `functions_are_a_group()` name the two
+  comparisons. The tie and the `None` silence are documented at the decision.
+- The types message now includes the receiver-group clause, so a module whose
+  count includes a function group can be checked by the reader.
+- The new tests are real files under `tests/fixtures/code/`, not inline
+  strings. On rebase, `code-in-literal` (from #126) reported all seven inline
+  snippets; they were migrated rather than suppressed. The rule caught exactly
+  the smell the PR would otherwise have reintroduced.
+
+The one thing the tool could not have caught is the message omission: the
+counts were right but one counted category was unnamed. That is a message test
+gap, now pinned by `several_definitions_types_arm_names_the_receiver_groups`.

@@ -5631,6 +5631,18 @@ mod tests {
     }
 
     #[test]
+    fn several_definitions_still_asks_for_classes_when_one_class_is_outnumbered() {
+        // one behaviour class + its record, then five free functions: the
+        // functions are strictly more than the two class equivalents, so the
+        // functions arm speaks. The tie is only one class + its helpers.
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_outnumbered_class.py");
+        let f = scan_corpus(&[("pkg/markers.py", src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("5 of them functions"), "{}", hits[0].message);
+    }
+
+    #[test]
     fn several_definitions_passes_a_class_and_its_records() {
         // three classes where all but one are records (no methods)
         let src = several_classes_source(3, 1);

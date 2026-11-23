@@ -126,6 +126,10 @@ enum Rung {
 enum ShapeArm {
     Types,
     Functions,
+    /// One concept plus its records and helpers: neither arm has a claim.
+    /// This is the deliberate silence — the functions arm needs the functions
+    /// to be strictly more than the class equivalents, and the types arm needs
+    /// a second concept of its own.
     None,
 }
 
@@ -244,6 +248,10 @@ impl ModuleShape {
         } else if self.functions_are_a_group() {
             ShapeArm::Functions
         } else {
+            // neither side is the bulk: one class, its records, and at most
+            // as many helpers is one concept. The functions arm requires the
+            // functions to be strictly more than the class equivalents, so a
+            // tie with only one behavioural type has no arm to speak.
             ShapeArm::None
         }
     }
