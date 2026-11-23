@@ -227,19 +227,17 @@ fn is_fixture_helper(name: &str) -> bool {
 
 /// The path expression names a fixtures location: a `tests/fixtures/` string,
 /// a name such as `FIXTURES`/`_CODE_FIXTURES`, or a path built from either.
+/// The one expression walk handles every wrapper — a ternary, a comprehension,
+/// an `await`, or a future node cannot hide the literal or name.
 fn reads_a_fixture(path: &Expr) -> bool {
-    match path {
+    let mut exprs = Vec::new();
+    super::expr_walk::all_exprs(path, &mut exprs);
+    exprs.iter().any(|expr| match expr {
         Expr::StringLiteral(literal) => literal.value.to_str().contains("fixtures"),
         Expr::Name(name) => name.id.as_str().to_ascii_lowercase().contains("fixture"),
-        Expr::Attribute(attr) => reads_a_fixture(&attr.value) || attr.attr.as_str().contains("fixture"),
-        Expr::BinOp(binary) => reads_a_fixture(&binary.left) || reads_a_fixture(&binary.right),
-        Expr::Call(call) => reads_a_fixture(call.func.as_ref()) || call.arguments.args.iter().any(reads_a_fixture),
-        Expr::Subscript(subscript) => reads_a_fixture(&subscript.value) || reads_a_fixture(&subscript.slice),
-        Expr::Tuple(tuple) => tuple.elts.iter().any(reads_a_fixture),
-        Expr::Await(await_expr) => reads_a_fixture(&await_expr.value),
-        Expr::Yield(yield_expr) => yield_expr.value.as_deref().is_some_and(reads_a_fixture),
+        Expr::Attribute(attr) => attr.attr.as_str().contains("fixture"),
         _ => false,
-    }
+    })
 }
 
 /// The assertion inspects a fixture-input name as text, rather than feeding it
