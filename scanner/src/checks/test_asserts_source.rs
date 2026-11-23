@@ -236,6 +236,8 @@ fn reads_a_fixture(path: &Expr) -> bool {
         Expr::Call(call) => reads_a_fixture(call.func.as_ref()) || call.arguments.args.iter().any(reads_a_fixture),
         Expr::Subscript(subscript) => reads_a_fixture(&subscript.value) || reads_a_fixture(&subscript.slice),
         Expr::Tuple(tuple) => tuple.elts.iter().any(reads_a_fixture),
+        Expr::Await(await_expr) => reads_a_fixture(&await_expr.value),
+        Expr::Yield(yield_expr) => yield_expr.value.as_deref().is_some_and(reads_a_fixture),
         _ => false,
     }
 }
