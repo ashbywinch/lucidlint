@@ -23,8 +23,8 @@ The message:
 
 > test '{function}' asserts on code text, not on the behaviour under test —
 > a text match pins one spelling, so it passes even when the code does
-> nothing. Keep the test: assert the parsed result or the observable
-> behaviour instead. Do not delete the test or weaken it to match the text.
+> nothing. Keep the test: assert what the code actually does instead. Do
+> not delete the test or weaken it to match the text.
 
 Wiring: the Python pass runs with the test-only families (test paths, or
 `--include-tests`); the Rust pass is a pre-pass over `#[test]` and

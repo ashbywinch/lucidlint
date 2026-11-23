@@ -17,7 +17,7 @@ use crate::finding::Finding;
 use crate::source::Source;
 use crate::ScanState;
 
-const MESSAGE: &str = "asserts on code text, not on the behaviour under test — a text match pins one spelling, so it passes even when the code does nothing. Keep the test: assert the parsed result or the observable behaviour instead. Do not delete the test or weaken it to match the text.";
+const MESSAGE: &str = "asserts on code text, not on the behaviour under test — a text match pins one spelling, so it passes even when the code does nothing. Keep the test: assert what the code actually does instead. Do not delete the test or weaken it to match the text.";
 
 fn message(function: &str) -> String {
     let subject = if function.is_empty() {

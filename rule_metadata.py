@@ -701,10 +701,10 @@ CATALOG = RuleCatalog([
          "fail."),
     Rule("test-asserts-source", "warn", "test-discipline", ("python", "rust"),
          "A test asserts on code text — a code-shaped fragment, a code block, "
-         "or a name holding one — instead of on the parsed result or the "
-         "observable behaviour. A text match pins one spelling, so it passes "
-         "even when the code does nothing. Keep the test: assert the parsed "
-         "result instead; do not delete or weaken the test to silence this."),
+         "or a name holding one — instead of on what the code actually does. "
+         "A text match pins one spelling, so it passes even when the code does "
+         "nothing. Keep the test: assert what the code actually does instead; "
+         "do not delete or weaken the test to silence this."),
     # ---- suppression discipline
     Rule("suppression", "fail", "suppression", ("python", "rust"),
          "`lucidlint: ignore <signal>` with no explanation — every exemption "
