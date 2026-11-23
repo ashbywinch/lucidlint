@@ -690,7 +690,7 @@ mod tests {
         );
         assert_eq!(
             hits[0].message,
-            "test 'needle_is_code' asserts on code text, not on the behaviour under test — a text match pins one spelling, so it passes even when the code does nothing. Keep the test: assert the parsed finding/output instead. For a fixer, re-scan the fixed source and assert the finding is gone; for a parser, assert the parsed result. Do not delete the test or loosen it to match the text."
+            "test 'needle_is_code' asserts on code text, not on the behaviour under test — a text match pins one spelling, so it passes even when the code does nothing. Keep the test: assert the parsed result or the observable behaviour instead. If the code under test transforms source, parse the output and assert its structure, or run it and assert what it does. Do not delete the test or weaken it to match the text."
         );
     }
 

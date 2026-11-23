@@ -21,9 +21,12 @@ code under test.
 
 The message:
 
-> this test asserts on code text, not on the behaviour under test — a text
-> match pins one spelling, so it passes even when the code does nothing.
-> Assert the parsed finding/output instead.
+> test '{function}' asserts on code text, not on the behaviour under test —
+> a text match pins one spelling, so it passes even when the code does
+> nothing. Keep the test: assert the parsed result or the observable
+> behaviour instead. If the code under test transforms source, parse the
+> output and assert its structure, or run it and assert what it does. Do not
+> delete the test or weaken it to match the text.
 
 Wiring: the Python pass runs with the test-only families (test paths, or
 `--include-tests`); the Rust pass is a pre-pass over `#[test]` and
@@ -100,24 +103,25 @@ test-quality signals (the full audit without it fails on test-only standards).
 non-compliant input.
 
 The code-text rule reports the repo's own code-text assertions rather than
-exempting output text. On this branch:
+exempting output text. Before migration:
 
-| repo | `test-asserts-source` | what they are |
+| repo | `test-asserts-source` | what they were |
 |---|---:|---|
 | lucidlint | 163 | 160 fixer-output assertions in `tests/test_fix_engine.py`, 3 CLI fixer output assertions |
 | houses | 0 | the 7 pre-scoping findings were shell/HTML/JS artefacts, outside the Python code under test |
 | family-history-album | 3 | import-line assertions in `tests/test_architecture.py` |
 
-All are warnings; `make self-check` is `GATE: PASS` with 438 reported warnings
-(275 existing + 163). The 163 lucidlint assertions are true under the blanket
-ban: a fixer test should re-scan the output and assert the finding is gone,
-not match the rewritten text. That migration is the next cleanup.
+All 163 lucidlint assertions are migrated in this PR: 130 now assert the
+parsed action set changed (or stayed unchanged for a refusal), 30 assert the
+output's AST structure, and 3 CLI tests assert the parsed call/keyword shape.
+No test was deleted. The gate is back to 275 warnings, 0 fails, and the rule
+reports zero findings under `--include-tests`.
 
 ## Verification
 
 - `make check`, `make test` (334 pytest tests, 555 scanner tests),
-  `make self-check` (`GATE: PASS`, 438 warnings — 261 loop-family, 163
-  code-text assertions).
+  `make self-check` (`GATE: PASS`, 275 warnings — 261 loop-family; zero
+  `test-asserts-source`).
 - houses: on `origin/main`, 238 findings → 235 after removing the three
   stale `loop-pipeline` markers; album: 677 → 676 after removing the one.
   The before/after diff on `(file, kind, line)` and `(file, kind, message)`
