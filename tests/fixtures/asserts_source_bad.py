@@ -20,3 +20,7 @@ def test_code_text_variable_prose_needle():
 def test_code_literal_comparison():
     src = load_source()
     assert src == "def f():\n    pass\n"
+
+
+def test_two_code_literals():
+    assert "def f():" == "def f():"

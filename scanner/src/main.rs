@@ -3634,7 +3634,7 @@ mod tests {
     fn test_asserts_source_flags_code_text_assertions() {
         let f = scan_src_test(include_str!("../../tests/fixtures/asserts_source_bad.py"));
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "test-asserts-source").collect();
-        assert_eq!(hits.len(), 4, "{f:?}");
+        assert_eq!(hits.len(), 5, "{f:?}");
         let functions: Vec<&str> = hits.iter().map(|hit| hit.function.as_str()).collect();
         assert_eq!(
             functions,
@@ -3643,6 +3643,7 @@ mod tests {
                 "test_output_text_is_code",
                 "test_code_text_variable_prose_needle",
                 "test_code_literal_comparison",
+                "test_two_code_literals",
             ]
         );
         assert_eq!(hits[0].message, TEST_ASSERTS_SOURCE_MESSAGE);

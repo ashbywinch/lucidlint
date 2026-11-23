@@ -32,4 +32,9 @@ mod tests {
         let out = fix("src");
         assert_eq!(out, "fn f() {\n    let x = 1;\n}\n");
     }
+
+    #[test]
+    fn two_code_literals() {
+        assert_eq!("fn f()", "fn f()");
+    }
 }

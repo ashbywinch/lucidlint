@@ -281,6 +281,7 @@ fn expression_reads_code(expr: &Expr, names: &CodeNames) -> bool {
 fn equality_reads_code(left: &Expr, right: &Expr, names: &CodeNames) -> bool {
     (is_code_literal(left) && is_searchable_string(right))
         || (is_code_literal(right) && is_searchable_string(left))
+        || (is_code_literal(left) && is_code_literal(right))
         || names.is_code(left)
         || names.is_code(right)
 }
