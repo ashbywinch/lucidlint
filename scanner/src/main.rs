@@ -3628,27 +3628,34 @@ mod tests {
     }
 
     // ------------------------------------------------------------- test-asserts-source
-    const TEST_ASSERTS_SOURCE_MESSAGE: &str = "this test asserts on the source text it fed the code, not on the behaviour under test — a source assertion pins the input, so it passes even when the code does nothing. Assert the parsed finding/output instead.";
+    const TEST_ASSERTS_SOURCE_MESSAGE: &str = "this test asserts on code text, not on the behaviour under test — a text match pins one spelling, so it passes even when the code does nothing. Assert the parsed finding/output instead.";
 
     #[test]
-    fn test_asserts_source_flags_assertion_on_fixture_input() {
+    fn test_asserts_source_flags_code_text_assertions() {
         let f = scan_src_test(include_str!("../../tests/fixtures/asserts_source_bad.py"));
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "test-asserts-source").collect();
-        assert_eq!(hits.len(), 3, "{f:?}");
-        assert_eq!(hits[0].function, "test_loop_shape_is_in_the_corpus");
-        assert_eq!(hits[1].function, "test_bare_assertion_helper");
-        assert_eq!(hits[2].function, "test_conditional_fixture_load");
+        assert_eq!(hits.len(), 4, "{f:?}");
+        let functions: Vec<&str> = hits.iter().map(|hit| hit.function.as_str()).collect();
+        assert_eq!(
+            functions,
+            vec![
+                "test_needle_is_code",
+                "test_output_text_is_code",
+                "test_code_text_variable_prose_needle",
+                "test_code_literal_comparison",
+            ]
+        );
         assert_eq!(hits[0].message, TEST_ASSERTS_SOURCE_MESSAGE);
     }
 
     #[test]
-    fn test_asserts_source_allows_assertions_on_the_output() {
+    fn test_asserts_source_allows_assertions_on_the_parsed_finding() {
         let f = scan_src_test(include_str!("../../tests/fixtures/asserts_source_ok.py"));
         assert!(!f.iter().any(|x| x.kind == "test-asserts-source"), "{f:?}");
     }
 
     #[test]
-    fn test_asserts_source_flags_a_raw_read_of_a_fixture_path() {
+    fn test_asserts_source_flags_a_raw_read_of_a_source_path() {
         let f = scan_src_test(include_str!("../../tests/fixtures/asserts_source_fixture_read.py"));
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "test-asserts-source").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
@@ -3656,9 +3663,11 @@ mod tests {
     }
 
     #[test]
-    fn test_asserts_source_allows_a_read_of_the_file_the_test_wrote() {
+    fn test_asserts_source_flags_a_read_of_the_file_the_test_wrote() {
+        // the blanket ban: the fixer's output is code text too
         let f = scan_src_test(include_str!("../../tests/fixtures/asserts_source_output_read.py"));
-        assert!(!f.iter().any(|x| x.kind == "test-asserts-source"), "{f:?}");
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "test-asserts-source").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
     }
 
     // ------------------------------------------------------------- code-in-literal

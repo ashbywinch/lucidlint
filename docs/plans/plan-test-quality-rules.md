@@ -7,33 +7,29 @@ loop-policy decision stay with the owner.
 
 ## #125 — a source assertion is not a behaviour test
 
-`test-asserts-source` (Both, warn) follows the variable's origin inside a
-test and reports an assertion on a value bound directly from a fixture or a
-source read (`fixture(...)`, `_fixture`, `read_text`, Rust `include_str!`).
-The result of the code under test (`out`, `fixed`, the findings) is an
-output; the rule never binds it, so asserting on a fixer's or parser's output
-stays legal even when that output is source text.
+`test-asserts-source` (Both, warn) reports an assertion whose subject is
+**code text** — a code-shaped fragment or block in the assertion, or a name
+holding code text (a code literal, an `include_str!` of a source file, or a
+read of one). There is no fixture-name or origin heuristic: a code fragment is
+about code wherever it came from, and the same rule applies to a fixer's
+output — `fixed` is code text too.
 
-The message is the one the owner wrote:
+The code is scoped to the language under test: a Python test is judged on
+Python code, a Rust test on Rust code. A shell or HTML artefact read by a
+Python test is outside the rule; its text is the artefact, not the Python
+code under test.
 
-> this test asserts on the source text it fed the code, not on the behaviour
-> under test — a source assertion pins the input, so it passes even when the
-> code does nothing. Assert the parsed finding/output instead.
+The message:
+
+> this test asserts on code text, not on the behaviour under test — a text
+> match pins one spelling, so it passes even when the code does nothing.
+> Assert the parsed finding/output instead.
 
 Wiring: the Python pass runs with the test-only families (test paths, or
 `--include-tests`); the Rust pass is a pre-pass over `#[test]` and
 `#[cfg(test)]` code. `tests/fixtures/` is never scanned, so the rule's own
 tests are fixtures — `asserts_source_bad.py` / `asserts_source_ok.py` and
 their Rust pair — and assert the finding set, not the fixture text.
-
-The origin model is one type, `SourceInputs`: a name is a fixture input when
-its last unconditional binding was a source read, and every branch runs on a
-clone whose writes are committed by an explicit must-source join. The join
-intersects every reachable path — zero-iteration/body/orelse for a loop,
-pre-try/body/handlers for a try, pre-match/cases for a match — so a fixture
-load or an output rebind on only one path is not a finding: the message must
-be true on every path. The keep and both drop directions are unit-tested in
-the module.
 
 ## #123 — code lives in a file, not a string literal
 
@@ -103,20 +99,25 @@ test-quality signals (the full audit without it fails on test-only standards).
 `tests/fixtures/` stays excluded by the source walk — it is intentionally
 non-compliant input.
 
-The first run exposed 149 `test-asserts-source` findings, almost all the same
-false positive: a test reads back the file the fixer wrote
-(`out = p.read_text()` after `p.write_text(src)`, or
-`fixed = (repo / "houses" / "app.py").read_text()`). A raw `read_text` is now
-a source read only when its path names a fixtures location; a read of a file
-the test or the code under test wrote is the OUTPUT the test legitimately
-asserts. The suite is at zero `test-asserts-source` and zero
-`code-in-literal` findings under `--include-tests`.
+The code-text rule reports the repo's own code-text assertions rather than
+exempting output text. On this branch:
+
+| repo | `test-asserts-source` | what they are |
+|---|---:|---|
+| lucidlint | 163 | 160 fixer-output assertions in `tests/test_fix_engine.py`, 3 CLI fixer output assertions |
+| houses | 0 | the 7 pre-scoping findings were shell/HTML/JS artefacts, outside the Python code under test |
+| family-history-album | 3 | import-line assertions in `tests/test_architecture.py` |
+
+All are warnings; `make self-check` is `GATE: PASS` with 438 reported warnings
+(275 existing + 163). The 163 lucidlint assertions are true under the blanket
+ban: a fixer test should re-scan the output and assert the finding is gone,
+not match the rewritten text. That migration is the next cleanup.
 
 ## Verification
 
-- `make check`, `make test` (333 pytest tests, 551 scanner tests),
-  `make self-check` (`GATE: PASS`, 275 warnings — 261 of them the loop
-  family the owner is deciding on).
+- `make check`, `make test` (334 pytest tests, 555 scanner tests),
+  `make self-check` (`GATE: PASS`, 438 warnings — 261 loop-family, 163
+  code-text assertions).
 - houses: on `origin/main`, 238 findings → 235 after removing the three
   stale `loop-pipeline` markers; album: 677 → 676 after removing the one.
   The before/after diff on `(file, kind, line)` and `(file, kind, message)`

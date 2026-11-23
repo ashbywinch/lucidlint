@@ -673,19 +673,28 @@ mod tests {
     }
 
     #[test]
-    fn test_asserts_source_flags_assertion_on_fixture_input() {
+    fn test_asserts_source_flags_code_text_assertions() {
         let fs = scan(&fixture("test_asserts_source_bad.rs"));
         let hits: Vec<&Finding> = fs.iter().filter(|f| f.kind == "test-asserts-source").collect();
-        assert_eq!(hits.len(), 1, "{fs:?}");
-        assert_eq!(hits[0].function, "inventory_has_the_loop_shape");
+        assert_eq!(hits.len(), 4, "{fs:?}");
+        let functions: Vec<&str> = hits.iter().map(|hit| hit.function.as_str()).collect();
+        assert_eq!(
+            functions,
+            vec![
+                "needle_is_code",
+                "output_text_is_code",
+                "code_text_variable_prose_needle",
+                "code_literal_comparison",
+            ]
+        );
         assert_eq!(
             hits[0].message,
-            "this test asserts on the source text it fed the code, not on the behaviour under test — a source assertion pins the input, so it passes even when the code does nothing. Assert the parsed finding/output instead."
+            "this test asserts on code text, not on the behaviour under test — a text match pins one spelling, so it passes even when the code does nothing. Assert the parsed finding/output instead."
         );
     }
 
     #[test]
-    fn test_asserts_source_allows_assertions_on_the_output() {
+    fn test_asserts_source_allows_assertions_on_the_parsed_finding() {
         let fs = scan(&fixture("test_asserts_source_ok.rs"));
         assert!(!has_kind(&fs, "test-asserts-source"), "{fs:?}");
     }
