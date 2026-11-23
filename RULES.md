@@ -168,7 +168,7 @@ with a why).
 | **skipif** | fail | Both | `@pytest.mark.skipif` on environment presence (`os.environ`, `sys.platform`, etc.), a bare `@pytest.mark.skip`, or `#[test] #[ignore]` — a skipped test rots; fake the dependency instead. |
 | **fakefs** | fail | Both | Real filesystem I/O (`open`, `pathlib.Path`) in a test without `pyfakefs` — tests fake the filesystem. |
 | **no-assert-test** | fail | Both | A test function with no assertion anywhere in its body — it can never fail. |
-| **test-asserts-source** | **warn** | Both | A test asserts on code text — a code-shaped fragment, a code block, or a name holding one — instead of on the parsed result or the observable behaviour. A text match pins one spelling, so it passes even when the code does nothing. Keep the test: parse the output and assert its structure, or run it and assert what it does; do not delete or weaken the test to silence this. |
+| **test-asserts-source** | **warn** | Both | A test asserts on code text — a code-shaped fragment, a code block, or a name holding one — instead of on the parsed result or the observable behaviour. A text match pins one spelling, so it passes even when the code does nothing. Keep the test: assert the parsed result instead; do not delete or weaken the test to silence this. |
 
 ## Group 4: Suppression discipline
 | Rule | Severity | Language | What it checks |
