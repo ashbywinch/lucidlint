@@ -465,7 +465,7 @@ mod tests {
         // the per-file pass cannot see a repo-wide finding, so an `ignore
         // unused` marker starts life as stale; the corpus consumes it and the
         // verdict must go — the marker is the reason the finding is silent
-        let plain = scan("prod.py", "def placeholder():\n    return 1\n");
+        let plain = scan("prod.py", include_str!("../../tests/fixtures/code/sample_reconcile_clears_the_stale_marker_the_per_file_pass_left__d3a91676.py"));
         assert!(
             RepoScan::of_names(&[plain])
                 .findings()

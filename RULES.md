@@ -138,6 +138,7 @@ with a why).
 ## Group 2: Style & correctness
 | Rule | Severity | Language | What it checks |
 |---|---|---|---|
+| **code-in-literal** | **warn** | Both | A string literal holds a code block (line-start `fn`/`def`/`class`/`let`/`impl`/`use`/`import`/`for`/`if`/`match`, several lines) or a snippet passed to a scan/compile/exec helper — the code has no file, so no linter or test runs it. Move it to a real file under `tests/fixtures/` and read the file. |
 | **magic-number** | **warn** | Both | Numeric literal (outside 0/1/2) used as an operand — name it as a constant. |
 | **debug-artifact** | fail | Both | `dbg!()` / `.unwrap()` / `.expect()` in production Rust; `breakpoint()` in production Python — debugging left in. |
 | **noop-statement** | fail | Both | Expression statement that discards its value (`x;`, `a + b;`) — dead statement. |
@@ -167,6 +168,7 @@ with a why).
 | **skipif** | fail | Both | `@pytest.mark.skipif` on environment presence (`os.environ`, `sys.platform`, etc.), a bare `@pytest.mark.skip`, or `#[test] #[ignore]` — a skipped test rots; fake the dependency instead. |
 | **fakefs** | fail | Both | Real filesystem I/O (`open`, `pathlib.Path`) in a test without `pyfakefs` — tests fake the filesystem. |
 | **no-assert-test** | fail | Both | A test function with no assertion anywhere in its body — it can never fail. |
+| **test-asserts-source** | **warn** | Both | A test asserts on the source text it fed the code (`fixture(...)`, `include_str!`, `read_text`) instead of on the parsed finding or the code's output — the assertion pins the input, so it passes even when the code does nothing. Assert the finding or the output. |
 
 ## Group 4: Suppression discipline
 | Rule | Severity | Language | What it checks |

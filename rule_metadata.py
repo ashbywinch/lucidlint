@@ -73,7 +73,11 @@ class Rule:
     - `section` — the RULES.md section the rule's row lives in
       (architecture/style/test-discipline/suppression/advice/graph/
       cross-cutting).
-    - `languages` — the RULES.md language column (Both/Python/Rust/Graph).
+    - `implementations` — where the rule's detector lives (`python`, `rust`,
+      or `graph`). The RULES.md language column is DERIVED from this set:
+      both code languages → `Both`, one → `Python`/`Rust`, the graph
+      contract → `Graph`. There is no `languages` input to label a rule
+      independently of its implementations.
     - `description` — the RULES.md row text; the message's fix directive is
       separate (the scanner owns it).
     - `display_name` — the RULES.md row title when it differs from the kind
@@ -96,11 +100,35 @@ class Rule:
     kind: str
     severity: str
     section: str
-    languages: str
+    implementations: tuple[str, ...]
     description: str
     display_name: str | None = None
     display_group: str | None = None
     fix: str | None = None
+
+    def __post_init__(self) -> None:
+        allowed = {"python", "rust", "graph"}
+        unknown = set(self.implementations) - allowed
+        if unknown:
+            raise ValueError(f"rule '{self.kind}': unknown implementation(s) {sorted(unknown)}")
+        if not self.implementations:
+            raise ValueError(f"rule '{self.kind}': at least one implementation is required")
+
+    @property
+    def languages(self) -> str:
+        """The RULES.md language column, derived from the implementations:
+        both code languages is `Both`, one code language is its name, the
+        graph contract is `Graph`."""
+        languages = frozenset(self.implementations)
+        labels = {
+            frozenset({"python", "rust"}): "Both",
+            frozenset({"python"}): "Python",
+            frozenset({"rust"}): "Rust",
+            frozenset({"graph"}): "Graph",
+        }
+        if languages not in labels:
+            raise ValueError(f"rule '{self.kind}': no language label for {sorted(languages)}")
+        return labels[languages]
 
 
 @dataclass(frozen=True)
@@ -282,6 +310,10 @@ class RuleCatalog:
 
 
     def __init__(self, rules: list[Rule]) -> None:
+        kinds = [rule.kind for rule in rules]
+        duplicates = sorted({kind for kind in kinds if kinds.count(kind) > 1})
+        if duplicates:
+            raise ValueError(f"duplicate rule kinds in the catalog: {duplicates}")
         self.rules: list[Rule] = rules
         # the fixes the rows advertise: one owner with the catalog, so a rule
         # and the fix it names are read in one place
@@ -343,7 +375,7 @@ class RuleCatalog:
 # (kind, severity, section, languages, description[, display_name][, display_group][, fix])
 CATALOG = RuleCatalog([
     # ---- architecture
-    Rule("complexity", "fail", "architecture", "Both",
+    Rule("complexity", "fail", "architecture", ("python", "rust"),
          "Cyclomatic complexity ≥ 15 (radon-equivalent rules: `if`/`elif` count, "
          "`match` arms minus wildcard, `&&`/`||`, ternary, loops, `assert!`, "
          "closures +0 walked) — Extract Function: `lucidlint fix --kind "
@@ -352,16 +384,16 @@ CATALOG = RuleCatalog([
          "construction, so the fix underscores it); apply with `--name <N>` "
          "(the name IS the commitment — no `--confirm`).",
          fix="extract-method"),
-    Rule("long-param-list", "fail", "architecture", "Both",
+    Rule("long-param-list", "fail", "architecture", ("python", "rust"),
          "A function with > 5 parameters (receiver/`self` excluded) — introduce "
          "a parameter object.",
          fix="long-param-list"),
-    Rule("large-function", "fail", "architecture", "Both",
+    Rule("large-function", "fail", "architecture", ("python", "rust"),
          "Function spans ≥ 120 lines — the steps it performs are not named, so "
          "a reader cannot hold the whole job: extract each domain step into a "
          "named function.",
          fix="extract-method"),
-    Rule("several-definitions", "warn", "architecture", "Both",
+    Rule("several-definitions", "warn", "architecture", ("python", "rust"),
          "A module holding 3–10 top-level definitions — Python functions and "
          "classes (constants are data); Rust types, groups of functions that "
          "take one type (a class equivalent), and functions left with no "
@@ -373,56 +405,56 @@ CATALOG = RuleCatalog([
          "value record is one concern plus its records, and is exempt; a "
          "decorated function is a framework entry point, not a definition the "
          "module owns. The upper rung is `many-definitions`."),
-    Rule("many-definitions", "warn", "architecture", "Both",
+    Rule("many-definitions", "warn", "architecture", ("python", "rust"),
          "A module holding more than 10 top-level definitions — Python "
          "functions and classes; Rust types, groups of functions that take one "
          "type (a class equivalent), and functions left with no receiver. Past "
          "ten, the module is a grab bag of concerns: split it by concern, one "
          "module per concern, each holding the class it is about. The second "
          "rung of the `several-definitions` ladder, in both languages."),
-    Rule("closures", "fail", "architecture", "Both",
+    Rule("closures", "fail", "architecture", ("python", "rust"),
          "A function defining ≥2 inner functions/closures (≥15 CC *or* ≥60 line "
          "span) — the nested structure is a class waiting to be extracted.",
          display_name="closures → latent-class", display_group="latent-class"),
-    Rule("partition", "fail", "architecture", "Python",
+    Rule("partition", "fail", "architecture", ("python",),
          "The field-partition variant of latent-class: a class's methods "
          "partition its fields (each group touches a disjoint subset) — the "
          "class is really that many independent classes.",
          display_name="partition → latent-class", display_group="latent-class",
          fix="extract-class"),
-    Rule("strewing", "fail", "architecture", "Both",
+    Rule("strewing", "fail", "architecture", ("python", "rust"),
          "≥3 free functions sharing the same leading parameter — they share "
          "data, so the class exists without its methods: in Python, extract the "
          "class (or the struct that already names it); in Rust, give the "
          "struct an impl and move the functions onto it.",
          display_name="strewing → latent-class", display_group="latent-class",
          fix="extract-class"),
-    Rule("misplaced-method", "fail", "architecture", "Python",
+    Rule("misplaced-method", "fail", "architecture", ("python",),
          "A module-level function called from a method with `self.<attr>` "
          "arguments matching every parameter — the class already holds the "
          "data, so the function is that class's method in exile; move it "
          "onto the class.",
          display_name="misplaced-method → latent-class", display_group="latent-class"),
-    Rule("assembly-class", "fail", "architecture", "Python",
+    Rule("assembly-class", "fail", "architecture", ("python",),
          "A function assembles >=3 structures by threading the same data "
          "through module-level functions whose outputs feed each other's "
          "inputs — a class in waiting: the threaded state belongs on an "
          "object, the module functions are its methods.",
          display_name="assembly-class → latent-class", display_group="latent-class"),
-    Rule("tuple-record", "fail", "architecture", "Python",
+    Rule("tuple-record", "fail", "architecture", ("python",),
          "A dict whose values are same-arity tuples read with constant "
          "integer indexes — an anonymous record; make it a class (the "
          "record's fields are the tuple positions).",
          display_name="tuple-record → latent-class", display_group="latent-class",
          fix="tuple-record"),
-    Rule("wide-tuple", "fail", "architecture", "Python",
+    Rule("wide-tuple", "fail", "architecture", ("python",),
          "A tuple annotation with 3+ fixed elements (parameter, return, or "
          "variable) — an anonymous record: the positions carry meaning the "
          "call site cannot see. 2-tuples are pairs; tuple[X, ...] is a "
          "variadic sequence, not a record. 4+ elements fail, 3 warns.",
          display_name="wide-tuple → latent-class", display_group="latent-class",
          fix="extract-class"),
-    Rule("data-clump", "fail", "architecture", "Python",
+    Rule("data-clump", "fail", "architecture", ("python",),
          ">=3 module functions sharing the same parameter pair — the pair "
          "travels together, so it is a data clump. Two directions: give the "
          "clump its own class named with a domain noun (a subset of a "
@@ -432,7 +464,7 @@ CATALOG = RuleCatalog([
          "functions methods of that class.",
          display_name="data-clump → latent-class", display_group="latent-class",
          fix="extract-class"),
-    Rule("shared-path", "warn", "architecture", "Python",
+    Rule("shared-path", "warn", "architecture", ("python",),
          "The same path expression — a shared run of names and path-shaped "
          "literals — built in >=2 production modules. The run is one value "
          "with no home: name the class when the functions share a leading "
@@ -441,19 +473,19 @@ CATALOG = RuleCatalog([
          display_name="shared-path → latent-class", display_group="latent-class"),
     # #104: the tool's own Python reports 0 duplicate-expression warnings;
     # the structural duplicates the first cut flagged are named helpers.
-    Rule("duplicate-expression", "warn", "architecture", "Python",
+    Rule("duplicate-expression", "warn", "architecture", ("python",),
          "The same non-trivial expression — 15+ nodes and two or more "
          "meaningful steps, with key literals abstracted — occurs more than "
          "once in production Python (any files, any functions). It is one "
          "idea with no name: make one helper, predicate, or type alias.",
          display_name="duplicate-expression"),
-    Rule("feature-envy", "fail", "architecture", "Python",
+    Rule("feature-envy", "fail", "architecture", ("python",),
          "A method reads another object's fields more than its own state — "
          "the logic belongs on that object (feature envy); move the "
          "computation onto the envied class as a method.",
          display_name="feature-envy → latent-class", display_group="latent-class",
          fix="feature-envy"),
-    Rule("undeclared-attribute", "fail", "architecture", "Python",
+    Rule("undeclared-attribute", "fail", "architecture", ("python",),
          "A class must DECLARE its members — annotated in the class body, in "
          "__slots__, or in __init__ — not assign them quietly in member "
          "functions. A plain `self.x = ...` in __init__ or any member "
@@ -461,22 +493,22 @@ CATALOG = RuleCatalog([
          "finding: declare it.",
          display_name="undeclared-attribute", display_group=None,
          fix="undeclared-attribute"),
-    Rule("sibling-value-class", "warn", "architecture", "Python",
+    Rule("sibling-value-class", "warn", "architecture", ("python",),
          "Two classes in one package over the same data — >=2 shared instance "
          "fields and >=2 structurally equivalent accessors reading only those "
          "fields, with no containment or inheritance: one of them is the "
          "duplicate; keep one class and move the other's extra accessors "
          "onto it."),
-    Rule("duplicate-field", "fail", "architecture", "Python",
+    Rule("duplicate-field", "fail", "architecture", ("python",),
          "A class and a class it CONTAINS both hold the same >=2 fields — "
          "duplicated domain state across a containment edge; one source of "
          "truth should own it.",
          display_name="duplicate-field → latent-class", display_group="latent-class"),
-    Rule("module-cohesion", "fail", "architecture", "Graph",
+    Rule("module-cohesion", "fail", "architecture", ("graph",),
          "A file whose nodes split across ≥2 graph communities (each ≥2 nodes) "
          "holds several sub-domains — split the module at the domain seams.",
          fix="extract-module"),
-    Rule("record-shape", "fail", "architecture", "Both",
+    Rule("record-shape", "fail", "architecture", ("python", "rust"),
          "A signature or literal leaves a record unnamed: a bare dict/grab-bag, "
          "a dict of records, a fixed-size tuple (including a 2-tuple pair), or a "
          "list of records, plus a dict literal with constant keys. Type the shape "
@@ -484,16 +516,16 @@ CATALOG = RuleCatalog([
          "for the collection class, except a parameter the function only reads: "
          "its content is already named, and no operation belongs to the collection.",
          fix="extract-record-class"),
-    Rule("detached-method", "warn", "architecture", "Both",
+    Rule("detached-method", "warn", "architecture", ("python", "rust"),
          "A method that never touches its receiver — a classmethod should "
          "always use `cls`; a plain method should use `self` or move out — it "
          "doesn't use instance state; make it a `@staticmethod`/associated fn "
          "or move it out of the class."),
-    Rule("duplicate", "warn", "architecture", "Both",
+    Rule("duplicate", "warn", "architecture", ("python", "rust"),
          "Dice similarity ≥ 0.9 (structural skeleton bigrams) — copy-paste; "
          "extract the shared logic.",
          display_group="standard"),
-    Rule("mixed-module", "warn", "architecture", "Rust",
+    Rule("mixed-module", "warn", "architecture", ("rust",),
          "A Rust module whose top-level definitions fall into parts that never "
          "reference each other, by one of two arms: ≥ 3 groups of items that "
          "reference each other (each group is a connected component of the item "
@@ -504,30 +536,30 @@ CATALOG = RuleCatalog([
          "`use`/`mod` are boundaries rather than items, and test items are "
          "skipped. Move each group into its own module, named after what its "
          "members are about."),
-    Rule("duplicate-module", "fail", "architecture", "Both",
+    Rule("duplicate-module", "fail", "architecture", ("python", "rust"),
          "Two modules or classes with the same structural skeleton (>= 0.9 "
          "Dice) and the same declared fields — plus, for two classes, "
          "identical constants — a structural match: a fix can land in one "
          "copy and miss the other; reconcile the copies into one. A copy "
          "generated from the other and pinned by a check that fails when they "
          "diverge is not a fork; the finding does not apply."),
-    Rule("static-husk", "warn", "architecture", "Python",
+    Rule("static-husk", "warn", "architecture", ("python",),
          "A class with no state of its own (no `self.X =` anywhere, no "
          "dataclass fields, no properties) whose members are all "
          "staticmethods — a namespace wearing a domain noun: it presents an "
          "object's shape while owning nothing."),
-    Rule("delegating-husk", "warn", "architecture", "Python",
+    Rule("delegating-husk", "warn", "architecture", ("python",),
          "A class where every instance method's body is exactly "
          "`return F(<all params>)` with F a module-level function — an "
          "indirection layer with no behavior; callers could reach the "
          "functions directly (dissolve the husk — never inline).",
          fix="dissolve-husk"),
-    Rule("process-class", "fail", "architecture", "Python",
+    Rule("process-class", "fail", "architecture", ("python",),
          "A top-level class whose name is a process noun (Builder, Validator, "
          "Importer, ...) — a verb wearing a noun: the work belongs on the "
          "domain objects it operates on; the four-part honesty test "
          "decides (fold, rename, or delete)."),
-    Rule("forwarding-chain", "fail", "architecture", "Python",
+    Rule("forwarding-chain", "fail", "architecture", ("python",),
          "A method whose body exactly forwards to a module function that "
          "forwards to another class's method (depth >= 2) — dead "
          "indirection inside an already-coupled module; collapse the "
@@ -535,45 +567,51 @@ CATALOG = RuleCatalog([
          "otherwise-independent modules — then it is a deliberate "
          "boundary).",
          fix="collapse-chain"),
-    Rule("closure-cluster", "warn", "architecture", "Python",
+    Rule("closure-cluster", "warn", "architecture", ("python",),
          "A method whose nested closures partition its locals — a "
          "class-in-a-method; the split is structurally visible but often a "
          "deliberate cohesive serving method, so a warning, not a demand.",
          display_name="closure-cluster → latent-class", display_group="latent-class"),
-    Rule("layer-mix", "fail", "architecture", "Graph",
+    Rule("layer-mix", "fail", "architecture", ("graph",),
          "A file calls into multiple architectural layers (determined via the "
          "code-review-graph contract) — files belong in one layer."),
-    Rule("folder-mix", "fail", "architecture", "Graph",
+    Rule("folder-mix", "fail", "architecture", ("graph",),
          "Files in a directory are split across graph communities — they belong "
          "together."),
-    Rule("flat-folder", "warn", "architecture", "Both",
+    Rule("flat-folder", "warn", "architecture", ("python", "rust"),
          "A directory holding 20+ browsable files (source modules and docs, "
          "combined) — a folder that large stops telling a reader which files "
          "belong together; split it into coherent domain subsets, one "
          "subfolder per thing its members are about, never by file kind, size "
          "or number."),
     # ---- style
-    Rule("magic-number", "warn", "style", "Both",
+    Rule("code-in-literal", "warn", "style", ("python", "rust"),
+         "A string literal holds a code block (line-start `fn`/`def`/`class`/"
+         "`let`/`impl`/`use`/`import`/`for`/`if`/`match`, several lines) or a "
+         "snippet passed to a scan/compile/exec helper — the code has no file, "
+         "so no linter or test runs it. Move it to a real file under "
+         "`tests/fixtures/` and read the file."),
+    Rule("magic-number", "warn", "style", ("python", "rust"),
          "Numeric literal (outside 0/1/2) used as an operand — name it as a "
          "constant.",
          fix="magic-number"),
-    Rule("debug-artifact", "fail", "style", "Both",
+    Rule("debug-artifact", "fail", "style", ("python", "rust"),
          "`dbg!()` / `.unwrap()` / `.expect()` in production Rust; "
          "`breakpoint()` in production Python — debugging left in."),
-    Rule("noop-statement", "fail", "style", "Both",
+    Rule("noop-statement", "fail", "style", ("python", "rust"),
          "Expression statement that discards its value (`x;`, `a + b;`) — dead "
          "statement.",
          fix="noop-statement"),
-    Rule("unreachable", "fail", "style", "Both",
+    Rule("unreachable", "fail", "style", ("python", "rust"),
          "Statement after an unconditional `return`/`break`/`continue`/`panic!` "
          "— dead code is deleted.",
          fix="unreachable"),
-    Rule("vague-name", "fail", "style", "Both",
+    Rule("vague-name", "fail", "style", ("python", "rust"),
          "Type ending in Manager, Handler, Store, Repository, Controller, Utils, "
          "or Info with significant size/methods — the domain concept should "
          "name it.",
          fix="vague-name"),
-    Rule("class-module", "fail", "style", "Python",
+    Rule("class-module", "fail", "style", ("python",),
          "A Python module whose public class(es) aren't findable by name: "
          "exactly one class whose name doesn't match the filename, or >=2 "
          "public classes where any name doesn't match the stem — rename the "
@@ -583,142 +621,147 @@ CATALOG = RuleCatalog([
          "that class does, and it belongs beside it).",
          display_group="standard",
          fix="split-module"),
-    Rule("builtin-shadow", "fail", "style", "Python",
+    Rule("builtin-shadow", "fail", "style", ("python",),
          "A variable/parameter that shadows a Python builtin (`list`, `dict`, "
          "`str`, `id`...).",
          display_group="standard"),
-    Rule("broad-except", "warn", "style", "Python",
+    Rule("broad-except", "warn", "style", ("python",),
          "Bare `except:` — catch specific exceptions.",
          display_group="standard"),
-    Rule("boolean-arg", "fail", "style", "Both",
+    Rule("boolean-arg", "fail", "style", ("python", "rust"),
          "A boolean literal passed as a call argument (`connect(host, True)`) — "
          "name the flag at the call site."),
-    Rule("positional-literals", "warn", "style", "Both",
+    Rule("positional-literals", "warn", "style", ("python", "rust"),
          "A call passing ≥2 literals of the same kind positionally "
          "(`set_limits(10, 20)`) — a swapped argument is a silent bug; use "
          "keyword arguments.",
          fix="positional-literals"),
-    Rule("swallow", "fail", "style", "Both",
+    Rule("swallow", "fail", "style", ("python", "rust"),
          "A catch that neither re-raises nor exits with control flow (no "
          "return/break/continue); in Rust, a `Result`/`Option` discarded with "
          "`let _ =` — the error vanishes, re-raise or handle it."),
-    Rule("inline-import", "fail", "style", "Python",
+    Rule("inline-import", "fail", "style", ("python",),
          "`import` inside a function body (Python) — imports belong at module "
          "top.",
          display_group="standard"),
-    Rule("private-import", "fail", "style", "Both",
+    Rule("private-import", "fail", "style", ("python", "rust"),
          "Importing an underscore-prefixed symbol from another module.",
          display_group="standard"),
-    Rule("global-state", "fail", "style", "Both",
+    Rule("global-state", "fail", "style", ("python", "rust"),
          "Any module-level variable assignment — mutable or constant, mutated "
          "or not: values are a class's private internals. The finding names the "
          "action for the value's kind — mutable container, constant, or "
          "re-binding. Exception: global services containers and "
          "framework-required globals (`app = Flask(...)`, DI registries).",
          display_group="standard"),
-    Rule("unused", "warn", "style", "Python",
+    Rule("unused", "warn", "style", ("python",),
          "A function or class defined in production code that's never "
          "referenced anywhere in the repo (same-file references count — "
          "Python only).",
          display_group="standard"),
-    Rule("duplicate-def", "fail", "style", "Both",
+    Rule("duplicate-def", "fail", "style", ("python", "rust"),
          "A module-scope def/class/import that shadows an earlier module-scope "
          "binding of the same name — the later definition wins legally, but it "
          "is a shadowing hazard (dispatch or edit mistake); rename one.",
          fix="duplicate-def"),
-    Rule("restating-docstring", "warn", "style", "Both",
+    Rule("restating-docstring", "warn", "style", ("python", "rust"),
          "A docstring whose content words all appear in the body's own tokens "
          "— it restates the code; name the concept instead.",
          fix="restating-docstring"),
-    Rule("duplicate-block", "warn", "style", "Both",
+    Rule("duplicate-block", "warn", "style", ("python", "rust"),
          "An identical statement block (≥3 statements) appearing twice in one "
          "function — duplicated work (an edit mistake?); delete the second "
          "copy.",
          fix="duplicate-block"),
-    Rule("import-cycle", "fail", "style", "Both",
+    Rule("import-cycle", "fail", "style", ("python", "rust"),
          "Circular imports — restructure modules.",
          display_group="standard"),
-    Rule("docs-link", "fail", "style", "Both",
+    Rule("docs-link", "fail", "style", ("python", "rust"),
          "An internal MD link or backticked path does not resolve to an "
          "existing file.",
          display_group="docs"),
-    Rule("docs-undiscoverable", "fail", "style", "Both",
+    Rule("docs-undiscoverable", "fail", "style", ("python", "rust"),
          "A doc file is not reachable from `AGENTS.md` (the repo's doc index) "
          "via the link graph.",
          display_group="docs"),
     # ---- test discipline
-    Rule("monkeypatch", "fail", "test-discipline", "Python",
+    Rule("monkeypatch", "fail", "test-discipline", ("python",),
          "`monkeypatch`/`unittest.mock.patch` — prefer dependency injection.",
          display_group="standard"),
-    Rule("skipif", "fail", "test-discipline", "Both",
+    Rule("skipif", "fail", "test-discipline", ("python", "rust"),
          "`@pytest.mark.skipif` on environment presence (`os.environ`, "
          "`sys.platform`, etc.), a bare `@pytest.mark.skip`, or `#[test] "
          "#[ignore]` — a skipped test rots; fake the dependency instead."),
-    Rule("fakefs", "fail", "test-discipline", "Both",
+    Rule("fakefs", "fail", "test-discipline", ("python", "rust"),
          "Real filesystem I/O (`open`, `pathlib.Path`) in a test without "
          "`pyfakefs` — tests fake the filesystem.",
          display_group="standard"),
-    Rule("no-assert-test", "fail", "test-discipline", "Both",
+    Rule("no-assert-test", "fail", "test-discipline", ("python", "rust"),
          "A test function with no assertion anywhere in its body — it can never "
          "fail."),
+    Rule("test-asserts-source", "warn", "test-discipline", ("python", "rust"),
+         "A test asserts on the source text it fed the code (`fixture(...)`, "
+         "`include_str!`, `read_text`) instead of on the parsed finding or the "
+         "code's output — the assertion pins the input, so it passes even when "
+         "the code does nothing. Assert the finding or the output."),
     # ---- suppression discipline
-    Rule("suppression", "fail", "suppression", "Both",
+    Rule("suppression", "fail", "suppression", ("python", "rust"),
          "`lucidlint: ignore <signal>` with no explanation — every exemption "
          "needs a why.",
          display_group="standard"),
-    Rule("type-ignore", "fail", "suppression", "Python",
+    Rule("type-ignore", "fail", "suppression", ("python",),
          "`# type: ignore` with no comment — a suppression is itself a finding; "
          "explain why the checker is wrong.",
          display_group="standard"),
-    Rule("allow-reason", "fail", "suppression", "Rust",
+    Rule("allow-reason", "fail", "suppression", ("rust",),
          "`#[allow(...)]` / `#[expect(...)]` with no reason comment on the line "
          "or the line above.",
          display_group="standard"),
-    Rule("noqa", "fail", "suppression", "Python",
+    Rule("noqa", "fail", "suppression", ("python",),
          "`# noqa` / `# pragma: no cover` with no explanation — a suppression "
          "is itself a finding."),
-    Rule("stale-suppression", "fail", "suppression", "Both",
+    Rule("stale-suppression", "fail", "suppression", ("python", "rust"),
          "A `lucidlint: ignore` / `ignore-file` that no longer suppresses "
          "anything — remove it.",
          fix="stale-suppression"),
-    Rule("bulk-suppression", "warn", "suppression", "Both",
+    Rule("bulk-suppression", "warn", "suppression", ("python", "rust"),
          "One signal suppressed at 10+ sites: repeated identical whys are a "
          "policy decision (a config guidance or documented config ignore), not "
          "per-site judgment - mass suppression hides systematic problems from "
          "review."),
     # ---- refactoring advice (all warn — detection-only)
-    Rule("guard-clauses", "warn", "advice", "Python",
+    Rule("guard-clauses", "warn", "advice", ("python",),
          "≥3 levels of if-in-if (\"arrow code\") — Replace Nested Conditional "
          "with Guard Clauses: invert to early returns."),
-    Rule("latent-visitor", "warn", "advice", "Both",
+    Rule("latent-visitor", "warn", "advice", ("python", "rust"),
          "≥2 operations dispatching over the same element family "
          "(`isinstance`/`type()` chains) — Replace Conditional with Visitor: "
          "elements accept a visitor with `visit_<Type>` methods. Chains this "
          "rule claims are exempt from conditional-polymorphism — one ruling per "
          "chain."),
-    Rule("conditional-polymorphism", "warn", "advice", "Python",
+    Rule("conditional-polymorphism", "warn", "advice", ("python",),
          "An if/elif chain of ≥4 arms dispatching on the same value — Replace "
          "Conditional with Polymorphism."),
-    Rule("scattered-instance", "warn", "architecture", "Python",
+    Rule("scattered-instance", "warn", "architecture", ("python",),
          "≥2 module-level bindings that construct a class defined in this repo — "
          "one object holds them, and the class that uses it owns it. A single "
          "registry or container object is exempt.",
          display_name="scattered-instance → latent-class", display_group="latent-class"),
-    Rule("special-case", "warn", "advice", "Python",
+    Rule("special-case", "warn", "advice", ("python",),
          "≥3 repeated `None`/empty checks on one name — Introduce Special "
          "Case."),
-    Rule("unnamed-condition", "warn", "advice", "Both",
+    Rule("unnamed-condition", "warn", "advice", ("python", "rust"),
          "A condition joining ≥3 facts about one name, or about several, with "
          "no name for the decision — name it as a predicate and call it. "
          "Exempt: a function whose body is exactly `return <condition>` (the "
          "name already exists), and a condition about `self` alone (internal "
          "state on an object that already has a name)."),
-    Rule("unnamed-classification", "warn", "advice", "Both",
+    Rule("unnamed-classification", "warn", "advice", ("python", "rust"),
          "A match or if/elif chain of ≥3 cases sorting one value into "
          "constants, with no name for the classification — name the cases as "
          "one kind and return it. Exempt: the chain is the function's whole "
          "body (the function's name is the name)."),
-    Rule("middle-man", "warn", "advice", "Python",
+    Rule("middle-man", "warn", "advice", ("python",),
          "A method that only forwards (`return self.x.y(...)`) — Remove Middle "
          "Man. Exempt where the advice cannot be taken: the delegated member is "
          "not declared anywhere in the scanned codebase (a library's method — the "
@@ -730,10 +773,10 @@ CATALOG = RuleCatalog([
          "an unrelated module is not evidence about this class); or the call fixes "
          "an argument the target defaults (`self.dump(by_alias=True)`) — the "
          "policy lives in the named method."),
-    Rule("unused-setter", "warn", "advice", "Python",
+    Rule("unused-setter", "warn", "advice", ("python",),
          "A `set_*` method or property setter never referenced — Remove Setting "
          "Method."),
-    Rule("loop-pipeline", "warn", "advice", "Both",
+    Rule("loop-pipeline", "warn", "advice", ("python", "rust"),
          "A loop whose body is only a collection mutation (Python: append/add/update, "
          "`name += [..]`, or a subscript store; Rust: `acc.push(item)` or "
          "`acc[i] = v`, plain or behind one if-filter) — Replace Loop with "
@@ -746,7 +789,7 @@ CATALOG = RuleCatalog([
          "`while` drain, or no loop at all), not a comprehension; a `for ... else` "
          "is not a comprehension either.",
          display_group="loop-pipeline", fix="loop-pipeline"),
-    Rule("mutating-loop", "warn", "advice", "Both",
+    Rule("mutating-loop", "warn", "advice", ("python", "rust"),
          "A loop that mutates >=2 pieces of state that survive it (Python: "
          "accumulated collections, rebound names, object writes; Rust: "
          "rebinds/compound-assigns of fn-scope locals, mutating receiver "
@@ -758,7 +801,7 @@ CATALOG = RuleCatalog([
          "collection the body grows (`while i < work.len()`) — its writes are "
          "the walk's state, not outputs.",
          display_name="mutating-loop → loop-pipeline", display_group="loop-pipeline"),
-    Rule("loop-sequence", "warn", "advice", "Both",
+    Rule("loop-sequence", "warn", "advice", ("python", "rust"),
          "A statement list with >=2 sequential (non-nested) loops — loops in "
          "sibling if/else/match branches never run together and are separate "
          "groups — each is a pass that changes the function's state; combine "
@@ -766,7 +809,7 @@ CATALOG = RuleCatalog([
          "comprehensions / combinators when the loops share or feed state).",
          display_name="loop-sequence → loop-pipeline", display_group="loop-pipeline",
          fix="loop-sequence"),
-    Rule("loop-hoist", "warn", "advice", "Both",
+    Rule("loop-hoist", "warn", "advice", ("python", "rust"),
          "A loop that mutates exactly one surviving name but whose body is "
          "> a couple of statements — the body computes more than it adds; "
          "hoist the per-item step into a named helper that returns the "
@@ -776,18 +819,18 @@ CATALOG = RuleCatalog([
          display_name="loop-hoist → loop-pipeline", display_group="loop-pipeline",
          fix="loop-hoist"),
     # ---- graph-based (require code-review-graph)
-    Rule("high-risk", "fail", "graph", "Graph",
+    Rule("high-risk", "fail", "graph", ("graph",),
          "A function with >10 callers, no test coverage, and/or a "
          "security-related name (`auth`, `login`, `token`, `sql`...)."),
-    Rule("hotspot", "fail", "graph", "Both",
+    Rule("hotspot", "fail", "graph", ("python", "rust"),
          "A file in the top N% by churn with a function at ≥15 CC — volatile "
          "code that needs refactoring."),
-    Rule("churn-untested", "fail", "graph", "Both",
+    Rule("churn-untested", "fail", "graph", ("python", "rust"),
          "A code file in the top N% by churn that the repo's coverage snapshot "
          "names with no covered line — volatile and unverified. A file the "
          "snapshot does not name is UNKNOWN, never flagged; a snapshot older "
          "than the repo's tests reports verify as a warning."),
-    Rule("over-abstraction", "fail", "graph", "Graph",
+    Rule("over-abstraction", "fail", "graph", ("graph",),
          "An abstract base class (Python ABC) with exactly one concrete "
          "subclass — the abstraction doesn't earn its keep.",
          display_group="standard"),

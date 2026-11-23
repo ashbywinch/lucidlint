@@ -55,6 +55,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | Issue #65: middle-man interface evidence (own module, or a named base) | `docs/plans/plan-issue-65-middle-man-interface-evidence.md` |
 | Duplicate near-rule and repeated-literal decisions (measurements) | `docs/plans/plan-duplicate-and-literal-decisions.md` |
 | Usefulness round 0.7.0 (houses + album: signals, fixes, deferred) | `docs/plans/plan-usefulness-round-0-7-0.md` |
+| Test-quality rules (#125 source assertions, #123 code in literals, #124 parity corpus) | `docs/plans/plan-test-quality-rules.md` |
 | Coding standards (canonical + language conventions) | `docs/coding-standards.md` |
 | Testing standards | `docs/testing-standards.md` |
 | UX standards | `docs/ux-standards.md` |
@@ -100,3 +101,9 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
   docs. No separate docs-links test is needed — the tool IS the checker.
 - The tools import only stdlib at module level; the scan engine is the
   Rust binary (built by `make scanner-check`, required by the gate).
+- The test-quality family runs on test paths with
+  `python lucidlint.py --repo . --include-tests`; `make self-check` is the
+  production gate and excludes `tests/`.
+- Rule parity is the corpus in `tests/parity/<rule>/<shape>/`, discovered by
+  `tests/test_rule_parity.py`; the rule catalog's `implementations` is the
+  one language list.

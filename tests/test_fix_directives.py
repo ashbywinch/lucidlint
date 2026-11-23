@@ -13,11 +13,20 @@ in the original error message.
 
 import re
 from pathlib import Path
+from pathlib import Path as _CodePath
 
 import fix_engine
 import lucidlint
 from orchestrator.host import Host
 from orchestrator.services import Services
+
+_CODE_FIXTURES = _CodePath(__file__).resolve().parent.parent / "tests" / "fixtures" / "code"
+
+
+def code_fixture(name: str) -> str:
+    """Read a code sample kept in a real file under tests/fixtures/code/."""
+    return (_CODE_FIXTURES / name).read_text()
+
 
 SCANNER_SRC = Path(__file__).resolve().parent.parent / "scanner" / "src"
 TAIL = re.compile(r"— fix: ([a-z-]+)")
@@ -31,10 +40,7 @@ def rust_fixable_from_dispatch() -> set[str]:
     snake = {m.replace("_", "-") for m in re.findall(r"fix::fix_([a-z_]+)\(", src)}
     # the class-based fixers (LoopPipeline::fix, LoopHoist::fix) — the same
     # dispatcher routes, named by the type that owns the rewrite
-    camel = {
-        re.sub(r"(?<!^)(?=[A-Z])", "-", m).lower()
-        for m in re.findall(r"fix::([A-Za-z]+)::fix\(", src)
-    }
+    camel = {re.sub(r"(?<!^)(?=[A-Z])", "-", m).lower() for m in re.findall(r"fix::([A-Za-z]+)::fix\(", src)}
     return snake | camel
 
 
@@ -43,8 +49,6 @@ def tails_of(src: str) -> list[str]:
     full_fix_command TEMPLATE (the plumbing that appends the command to a
     message), not an admission — the binary name leads it, so skip it."""
     return [k for k in TAIL.findall(src) if k != "lucidlint"]
-
-
 
 
 def test_python_finding_tails_name_python_fixable_kinds():
@@ -125,7 +129,7 @@ def test_fix_refuses_engine_less_kind_on_rust_file(tmp_path, capsys):
 
     from test_lucidlint import make_repo
 
-    repo = make_repo(tmp_path, app_src="def alpha(a):\n    return a\n")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
     target = repo / "houses" / "lib.rs"
     target.write_text("fn main() {}\n")
     binary = Services(Host.default()).rust_scan.binary(repo)
@@ -143,7 +147,9 @@ def test_fix_names_the_params_prerequisite_when_unresolvable(tmp_path, capsys):
     'nothing to change' (which reads as already-fixed)."""
     repo = tmp_path / "repo"
     (repo / "houses").mkdir(parents=True)
-    (repo / "houses" / "app.py").write_text("def g():\n    mystery(10, 20)\n")
+    (repo / "houses" / "app.py").write_text(
+        code_fixture("sample_fix_names_the_params_prerequisite_when_unresolvable__aa3dafea.py")
+    )
     rc = run_fix(repo, "fix", "--kind", "positional-literals", "--file", "houses/app.py", "--line", "2")
     assert rc == 0
     out = capsys.readouterr().out

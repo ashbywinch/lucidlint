@@ -49,7 +49,7 @@ fn scan_emits_the_json_contract() {
     let project = Project::new("scan");
     let file = project.write(
         "pkg/a.py",
-        "def f():\n    try:\n        g()\n    except Exception:\n        pass\n",
+        include_str!("../../tests/fixtures/code/sample_scan_emits_the_json_contract__03ba191f.py"),
     );
     let output = project.run(&["--root", &project.root.to_string_lossy(), &file]);
     assert!(output.status.success(), "{output:?}");

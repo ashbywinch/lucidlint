@@ -12,7 +12,7 @@ fn blocks(code: &str) -> Vec<Block> {
     cc_visit(code)
 }
 
-const TWO_FUNCTIONS: &str = "def beta():\n    if a: pass\n\ndef alpha():\n    pass\n";
+const TWO_FUNCTIONS: &str = include_str!("../../../tests/fixtures/code/sample_blocks__4019f231.py");
 
 #[test]
 fn average_complexity_of_no_blocks_is_zero() {
@@ -93,7 +93,7 @@ fn add_inner_blocks_lifts_closures_and_inner_classes() {
 
 #[test]
 fn cc_visit_ast_matches_cc_visit() {
-    let code = "def f():\n    if a: pass\n";
+    let code = include_str!("../../../tests/fixtures/code/sample_cc_visit_ast_matches_cc_visit__292e1ac5.py");
     let parsed = ruff_python_parser::parse_module(code).expect("the source parses");
     let from_ast = cc_visit_ast(parsed.syntax());
     let from_code = cc_visit(code);

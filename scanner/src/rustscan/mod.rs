@@ -24,6 +24,7 @@
 use crate::{finding::Finding, FnCc};
 
 mod attrs;
+mod code_in_literal;
 mod comments;
 mod decisions;
 mod exprs;
@@ -37,8 +38,10 @@ mod shape;
 mod skeleton;
 mod state;
 mod stmts;
+mod test_asserts_source;
 mod types;
 
+pub(crate) use code_in_literal::code_in_literal_findings;
 pub(crate) use comments::RsComments;
 pub(crate) use exprs::is_compound_op;
 pub(crate) use graph::ModuleGraph;
@@ -47,6 +50,7 @@ pub(crate) use modshape::MixedModule;
 pub(crate) use no_assert_test::no_assert_test_findings;
 pub(crate) use shape::RustShape;
 pub(crate) use state::RsState;
+pub(crate) use test_asserts_source::test_asserts_source_findings;
 
 /// One struct: name, declaration line, named-field count, line span.
 #[derive(Clone)]
@@ -138,14 +142,15 @@ impl RustScan {
         // the whole file, then the production walk skips test subtrees
         state.findings.extend(ignored_test_findings(&file, name));
         state.findings.extend(no_assert_test_findings(&file, name));
+        state.findings.extend(test_asserts_source_findings(&file, name));
+        state.findings.extend(code_in_literal_findings(&file, name));
         state.walk_file(&file);
         let mut scan = state.finish();
         scan.module_shape = MixedModule::module_shape(&file, source);
         MixedModule::mixed_module_into(&mut scan, &file, name);
         // G4: does the file hold magic-CANDIDATE literals anywhere — the fact
-        // the stale magic-number message cites when the family fires nowhere.
-        // Rust's only exemptions are the position rule, so the label set is
-        // ["position/index"] or empty.
+        // the stale magic-number message cites when the family fires nowhere;
+        // Rust's only exemption is the position rule, so the set is empty or ["position/index"].
         let mut probe = NumericLiteralProbe { found: false };
         syn::visit::Visit::visit_file(&mut probe, &file);
         let magic_exempt_labels: Vec<&'static str> = if probe.found {
@@ -248,7 +253,7 @@ mod tests {
     fn comment_lines_survive_raw_and_continued_strings() {
         // a `\`-continued line and a multi-line raw string each consume a
         // source line; missing either drifts every later suppression window
-        let src = "fn f() {\n    let a = \"one \\\n two\";\n    let b = r#\"raw\nline\"#;\n}\n// tail comment\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__aff414dc.rs");
         let cs = RsComments::rs_comment_lines(src);
         let (line, text) = cs.last().expect("the tail comment");
         assert_eq!(*line, 7, "comments: {cs:?}");
@@ -267,27 +272,26 @@ mod tests {
 
     #[test]
     fn cc_if_else_if_counts_elifs_not_else() {
-        let src = "fn f(a: u32, b: u32) -> u32 {\n    if a > 0 { return 1; } else if b > 0 { return 2; } else { return 3; }\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__c7fc0f57.rs");
         assert_eq!(scan_cc(src)[0].cc, 3); // if + else-if; trailing else does NOT count
     }
 
     #[test]
     fn cc_match_arms_minus_wildcard() {
-        let src =
-            "fn f(x: u32) -> u32 {\n    match x {\n        1 => 10,\n        2 => 20,\n        _ => 0,\n    }\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__ac3f8b86.rs");
         assert_eq!(scan_cc(src)[0].cc, 3); // 2 arms + base; the wildcard does NOT count
     }
 
     #[test]
     fn cc_loops_boolop_assert_closure() {
-        let src = "fn f(xs: &[u32], a: bool, b: bool) -> u32 {\n    let mut n = 0;\n    for x in xs {\n        if a && b { n += 1; }\n    }\n    while n < 10 { n += 1; }\n    loop { n += 1; if n > 20 { break; } }\n    assert!(a || b);\n    let g = |y: u32| if y > 1 { y } else { 0 };\n    n + g(1)\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__0c5ed441.rs");
         // for(1) if(1) &&(1) while(1) loop(1) if(1) break(0) assert(1) closure(+0) ternary(1) + base
         assert_eq!(scan_cc(src)[0].cc, 8);
     }
 
     #[test]
     fn cc_nested_fn_excluded_from_outer() {
-        let src = "fn outer() -> u32 {\n    fn inner(x: u32) -> u32 { if x > 0 { 1 } else { 0 } }\n    if inner(1) > 0 { 1 } else { 0 }\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_inner__07da2c69.rs");
         // radon's fn_map holds module-level fns only — the nested fn's
         // decisions count for ITS scope (closures rule) but never reach cc
         let cc = scan_cc(src);
@@ -317,7 +321,7 @@ mod tests {
 
     #[test]
     fn magic_return_value_and_const_def_not_found() {
-        let src = "fn f() -> u32 { return 60; }\nconst LIMIT: u32 = 60;\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__074f6491.rs");
         let fs = scan(src);
         assert!(!has_kind(&fs, "magic-number"));
     }
@@ -330,7 +334,7 @@ mod tests {
 
     #[test]
     fn magic_skipped_in_test_code() {
-        let src = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert_eq!(foo(), 60); }\n}\nfn f(x: u32) -> u32 { x + 2 }\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__ebf9b005.rs");
         let fs = scan(src);
         assert!(!has_kind(&fs, "magic-number")); // 60 lives in test code; 2 is trivial in prod
     }
@@ -338,7 +342,7 @@ mod tests {
     // ------------------------------------------------------------- noop
     #[test]
     fn noop_bare_path_and_binary_flagged() {
-        let src = "fn f(x: u32, y: u32) {\n    x;\n    x + y;\n    foo();\n    let z = 1;\n    z += 1;\n    println!(\"hi\");\n    x;\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__8bdb7049.rs");
         let fs = scan(src);
         assert_eq!(fs.iter().filter(|f| f.kind == "noop-statement").count(), 3);
         // x; x+y; x; — calls/macros/assigns pass
@@ -346,21 +350,21 @@ mod tests {
 
     #[test]
     fn noop_if_and_match_statements_flagged() {
-        let src = "fn f(x: u32) {\n    if x > 1 { 1 } else { 0 };\n    match x { _ => 0 };\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__e7e1c2f9.rs");
         assert_eq!(scan(src).iter().filter(|f| f.kind == "noop-statement").count(), 2);
     }
 
     // ------------------------------------------------------------- unreachable
     #[test]
     fn unreachable_after_return_and_panic() {
-        let src = "fn f(x: u32) -> u32 {\n    if x > 0 {\n        return 1;\n        foo();\n    }\n    panic!(\"no\");\n    bar();\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__442cc792.rs");
         let fs = scan(src);
         assert_eq!(fs.iter().filter(|f| f.kind == "unreachable").count(), 2);
     }
 
     #[test]
     fn unreachable_nested_fn_body_does_not_leak() {
-        let src = "fn outer() -> u32 {\n    fn inner() -> u32 { return 1; }\n    inner()\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_inner__d8821e83.rs");
         assert!(!has_kind(&scan(src), "unreachable")); // inner's return ends only inner's block
     }
 
@@ -368,7 +372,7 @@ mod tests {
     #[test]
     fn closures_latent_class_with_cc_gate() {
         // nested FN definitions (not closures — those are idiomatic Rust)
-        let mut body = String::from("fn f() -> u32 {\n    fn a() -> u32 { 1 }\n    fn b() -> u32 { 2 }\n");
+        let mut body = String::from(include_str!("../../../tests/fixtures/code/sample_b__4e488818.rs"));
         for i in 0..18 {
             body.push_str(&format!("    if {i} > 0 {{ a(); }} else {{ b(); }}\n"));
         }
@@ -379,20 +383,20 @@ mod tests {
     #[test]
     fn closures_closures_are_not_counted() {
         // a fn full of idiomatic local closures is NOT a latent class
-        let src = "fn f(xs: &[u32]) -> u32 {\n    let a = |x: u32| x + 1;\n    let b = |x: u32| x * 2;\n    xs.iter().map(a).map(b).sum()\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__d7b72a59.rs");
         assert!(!has_kind(&scan(src), "closures"));
     }
 
     #[test]
     fn closures_thin_fn_passes() {
-        let src = "fn f() -> u32 {\n    fn a() -> u32 { 1 }\n    fn b() -> u32 { 2 }\n    a() + b()\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_b__38686f92.rs");
         assert!(!has_kind(&scan(src), "closures")); // 2 inner but cc < 15 and span < 60
     }
 
     // ------------------------------------------------------------- large-function
     #[test]
     fn large_function_over_120_lines() {
-        let mut src = String::from("fn f() -> u32 {\n    let mut n = 0;\n");
+        let mut src = String::from(include_str!("../../../tests/fixtures/code/sample_f__000f2129.rs"));
         for i in 0..130 {
             src.push_str(&format!("    n += {i};\n"));
         }
@@ -404,14 +408,13 @@ mod tests {
     #[test]
     fn vague_role_suffix_struct_with_weight() {
         // a role-suffixed struct with 6+ methods is load-bearing — the name hides it
-        let src = "struct ConfigManager { a: u32, b: u32, c: u32 }\nimpl ConfigManager {\n    fn m1(&self) -> u32 { self.a }\n    fn m2(&self) -> u32 { self.b }\n    fn m3(&self) -> u32 { self.c }\n    fn m4(&self) -> u32 { self.a + self.b }\n    fn m5(&self) -> u32 { self.b + self.c }\n    fn m6(&self) -> u32 { self.a + self.c }\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_m6__d2ea271c.rs");
         assert!(has_kind(&scan(src), "vague-name"));
     }
 
     #[test]
     fn record_shape_boundary_finding() {
-        let src =
-            "struct BigRecord { a: u32, b: u32, c: u32, d: u32, e: u32 }\nfn consume(r: &BigRecord) -> u32 { r.a }\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_consume__9e0a8887.rs");
         let fs = scan(src);
         assert!(has_kind(&fs, "record-shape"));
         let f = fs.iter().find(|f| f.kind == "record-shape").unwrap();
@@ -420,7 +423,7 @@ mod tests {
 
     #[test]
     fn record_shape_with_methods_passes() {
-        let src = "struct Big { a: u32, b: u32, c: u32, d: u32, e: u32 }\nimpl Big { fn total(&self) -> u32 { self.a } }\nfn use_big(b: &Big) -> u32 { b.total() }\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_use_big__8ec3d9e1.rs");
         assert!(!has_kind(&scan(src), "record-shape"));
     }
 
@@ -430,7 +433,7 @@ mod tests {
         // capacity: one marker exempts ONE anchor, inner-first (schema-3
         // col) — the second literal on the line stays visible until it is
         // named or gets its own marker (peel ruling)
-        let src = "fn f() -> u32 {\n    // lucidlint: ignore magic-number the gate threshold\n    let x = 3 * 60;\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__9182b618.rs");
         let fs = scan(src);
         let mn: Vec<&Finding> = fs.iter().filter(|x| x.kind == "magic-number").collect();
         assert_eq!(mn.len(), 1, "{fs:?}");
@@ -438,27 +441,27 @@ mod tests {
             mn[0].message.contains("magic number 3"),
             "the lower-col literal remains: {mn:?}"
         );
-        let src2 = "fn f() -> u32 {\n    // lucidlint: ignore magic-number\n    let x = 3 * 60;\n}\n";
+        let src2 = include_str!("../../../tests/fixtures/code/sample_f__0a97453f.rs");
         assert!(has_kind(&scan(src2), "suppression"));
     }
 
     #[test]
     fn allow_without_reason_is_finding() {
-        let src = "#[allow(clippy::too_many_lines)]\nfn f() {}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__60656ae7.rs");
         assert!(has_kind(&scan(src), "allow-reason"));
     }
 
     #[test]
     fn allow_with_two_line_reason_passes() {
         // the checks.rs case: a reason comment spanning two lines above the attr
-        let src = "// reason: first line —\n// second line\n#[allow(clippy::too_many_lines)]\nfn f() {}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__babfd97c.rs");
         let fs = scan(src);
         assert!(!has_kind(&fs, "allow-reason"), "{:?}", fs);
     }
 
     #[test]
     fn allow_with_reason_passes() {
-        let src = "// the gate intentionally allows this\n#[allow(clippy::too_many_lines)]\nfn f() {}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_f__1e2ac427.rs");
         let fs = scan(src);
         assert!(!has_kind(&fs, "allow-reason"));
     }
@@ -466,7 +469,7 @@ mod tests {
     // ------------------------------------------------------------- test rules
     #[test]
     fn ignored_test_is_skipif_finding() {
-        let src = "#[cfg(test)]\nmod tests {\n    #[test]\n    #[ignore]\n    fn slow() {}\n    #[test]\n    fn fast() {}\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_fast__fe07c6f6.rs");
         let fs = scan(src);
         assert!(has_kind(&fs, "skipif"));
         assert_eq!(fs.iter().filter(|f| f.kind == "skipif").count(), 1);
@@ -476,7 +479,9 @@ mod tests {
     #[test]
     fn comment_extraction_handles_hashed_raw_strings() {
         // r#"..."# content may contain " and // — neither is a comment
-        let src = "let a = r#\"not // a comment \" inside\"#;\n// real comment\nlet b = r##\"has # in it\"##;\n";
+        let src = include_str!(
+            "../../../tests/fixtures/code/sample_comment_extraction_handles_hashed_raw_strings__8f3e8eec.rs"
+        );
         let lines = RsComments::rs_comment_lines(src);
         let texts: Vec<String> = lines.iter().map(|(_, t)| t.clone()).collect();
         assert_eq!(texts.len(), 1);
@@ -485,7 +490,7 @@ mod tests {
 
     #[test]
     fn comment_extraction_is_string_aware() {
-        let src = "// real comment\nlet s = \"// not a comment\";\nlet c = '/'; // trailing\n/* block\ncomment */\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_comment_extraction_is_string_aware__75dc422d.rs");
         let lines = RsComments::rs_comment_lines(src);
         let texts: Vec<String> = lines.iter().map(|(_, t)| t.clone()).collect();
         assert_eq!(texts.len(), 3); // the quoted "// not a comment" is not one
@@ -498,10 +503,8 @@ mod tests {
     // ------------------------------------------------------------- duplicates
     #[test]
     fn duplicate_detection_across_rust_fns() {
-        let a =
-            "fn alpha(x: u32) -> u32 {\n    let mut n = x;\n    for i in 0..10 {\n        n += i;\n    }\n    n\n}\n";
-        let b =
-            "fn beta(y: u32) -> u32 {\n    let mut m = y;\n    for j in 0..10 {\n        m += j;\n    }\n    m\n}\n";
+        let a = include_str!("../../../tests/fixtures/code/sample_alpha__6fffef7b.rs");
+        let b = include_str!("../../../tests/fixtures/code/sample_beta__b5c5f7cb.rs");
         let sa = RustScan::scan(a, "a.rs", true);
         let sb = RustScan::scan(b, "b.rs", true);
         let mut pool: Vec<crate::skeleton::SkeletonFn> = Vec::new();
@@ -558,23 +561,23 @@ mod tests {
 
     #[test]
     fn swallow_let_underscore_discards_calls() {
-        let fs = scan("fn f() {\n    let _ = foo();\n}\n");
+        let fs = scan(include_str!("../../../tests/fixtures/code/sample_f__7103100e.rs"));
         assert!(has_kind(&fs, "swallow"));
-        let fs2 = scan("fn f() {\n    let _ = x;\n}\n");
+        let fs2 = scan(include_str!("../../../tests/fixtures/code/sample_f__d58838e3.rs"));
         assert!(!has_kind(&fs2, "swallow")); // plain-path moves are not swallows
     }
 
     #[test]
     fn swallow_skipped_in_test_code() {
-        let fs = scan("#[cfg(test)]\nmod t {\n    #[test]\n    fn f() {\n        let _ = foo();\n    }\n}\n");
+        let fs = scan(include_str!("../../../tests/fixtures/code/sample_f__c5f9cae3.rs"));
         assert!(!has_kind(&fs, "swallow"));
     }
 
     #[test]
     fn debug_artifact_dbg_and_unwrap() {
-        let fs = scan("fn f() {\n    dbg!(x);\n    let y = foo().unwrap();\n}\n");
+        let fs = scan(include_str!("../../../tests/fixtures/code/sample_f__067f5aad.rs"));
         assert!(has_kind(&fs, "debug-artifact"));
-        let fs2 = scan("fn f() {\n    let y = foo();\n}\n");
+        let fs2 = scan(include_str!("../../../tests/fixtures/code/sample_f__659c79d2.rs"));
         assert!(!has_kind(&fs2, "debug-artifact"));
     }
 
@@ -583,23 +586,23 @@ mod tests {
         // the pre-fix walker only saw expression-position macros — the
         // common `dbg!(x);` statement slipped through (found while proving
         // the LSP install; the old fixture passed on the unwrap alone)
-        let fs = scan("fn f() {\n    dbg!(1);\n}\n");
+        let fs = scan(include_str!("../../../tests/fixtures/code/sample_f__cb0c937f.rs"));
         assert!(has_kind(&fs, "debug-artifact"));
-        let ok = scan("fn f() {\n    println!(\"x\");\n}\n");
+        let ok = scan(include_str!("../../../tests/fixtures/code/sample_f__772d6dd3.rs"));
         assert!(!has_kind(&ok, "debug-artifact"));
     }
 
     #[test]
     fn debug_artifact_skipped_in_tests() {
-        let fs = scan("#[cfg(test)]\nmod t {\n    #[test]\n    fn f() {\n        dbg!(x);\n        let y = foo().unwrap();\n    }\n}\n");
+        let fs = scan(include_str!("../../../tests/fixtures/code/sample_f__c89d239d.rs"));
         assert!(!has_kind(&fs, "debug-artifact"));
     }
 
     #[test]
     fn boolean_literal_argument_is_found() {
-        let fs = scan("fn f() {\n    connect(\"host\", true);\n}\n");
+        let fs = scan(include_str!("../../../tests/fixtures/code/sample_f__591e79b9.rs"));
         assert!(has_kind(&fs, "boolean-arg"));
-        let fs2 = scan("fn f() {\n    let retry = true;\n    connect(\"host\", retry);\n}\n");
+        let fs2 = scan(include_str!("../../../tests/fixtures/code/sample_f__6a224272.rs"));
         assert!(!has_kind(&fs2, "boolean-arg"));
     }
 
@@ -607,9 +610,9 @@ mod tests {
     fn long_parameter_list_over_five() {
         // a REAL body — an empty/trivial stub is a protocol placeholder,
         // not a param-list smell (review: redirect_request override)
-        let fs = scan("fn f(a: i32, b: i32, c: i32, d: i32, e: i32, g: i32) -> i32 { a + g }\n");
+        let fs = scan(include_str!("../../../tests/fixtures/code/sample_f__7c67583a.rs"));
         assert!(has_kind(&fs, "long-param-list"));
-        let fs2 = scan("fn f(a: i32, b: i32, c: i32, d: i32, e: i32) -> i32 { a }\n");
+        let fs2 = scan(include_str!("../../../tests/fixtures/code/sample_f__7bf4e9e3.rs"));
         assert!(!has_kind(&fs2, "long-param-list"));
     }
 
@@ -618,11 +621,11 @@ mod tests {
         // parity with the Python rule: a 6-param override stub (like
         // urllib's redirect_request) must not be flagged — a parameter
         // object would break the framework protocol
-        let stub = scan(
-            "fn redirect_request(self_: &S, req: u32, fp: u32, code: u32, msg: &str, headers: &str, newurl: &str) {}\n",
-        );
+        let stub = scan(include_str!(
+            "../../../tests/fixtures/code/sample_redirect_request_stub.rs"
+        ));
         assert!(!has_kind(&stub, "long-param-list"), "{:?}", stub);
-        let pass = scan("fn stub(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) { let _ = a; }\n");
+        let pass = scan(include_str!("../../../tests/fixtures/code/sample_stub__dd8c4e5c.rs"));
         assert!(!has_kind(&pass, "long-param-list"), "{:?}", pass);
     }
 
@@ -631,7 +634,7 @@ mod tests {
         // parity with python_fn_shape: the complexity message routes by the
         // body's shape — dispatch chains and rule batteries get the lucid
         // refactoring for their shape
-        let dispatch = "fn route(sel: &str) -> i32 {\n    if sel == \"a\" { return 1; }\n    if sel == \"b\" { return 2; }\n    if sel == \"c\" { return 3; }\n    -1\n}\n";
+        let dispatch = include_str!("../../../tests/fixtures/code/sample_route__c2fe1561.rs");
         let file = syn::parse_file(dispatch).unwrap();
         let (body, sig) = match &file.items[0] {
             syn::Item::Fn(f) => (f.block.stmts.clone(), f.sig.clone()),
@@ -639,7 +642,7 @@ mod tests {
         };
         let (shape, detail) = RustShape::fn_shape(&body, &sig);
         assert_eq!((shape, detail.as_str()), ("dispatch", "sel"));
-        let rules = "fn check(a: &M) -> Vec<&str> {\n    let mut out = vec![];\n    if a.get(1) { out.push(\"x\"); }\n    if a.get(2) { out.push(\"y\"); }\n    if a.get(3) { out.push(\"z\"); }\n    out\n}\n";
+        let rules = include_str!("../../../tests/fixtures/code/sample_check__917c07e7.rs");
         let file = syn::parse_file(rules).unwrap();
         let (body, sig2) = match &file.items[0] {
             syn::Item::Fn(f) => (f.block.stmts.clone(), f.sig.clone()),
@@ -659,38 +662,56 @@ mod tests {
 
     #[test]
     fn no_assert_test_is_flagged() {
-        let fs = scan("fn helper() {}\n#[test]\nfn t() {}\n");
+        let fs = scan(include_str!("../../../tests/fixtures/code/sample_t__f0bef57f.rs"));
         assert!(has_kind(&fs, "no-assert-test"));
-        let ok = scan("#[test]\nfn t() {\n    assert_eq!(1, 1);\n}\n");
+        let ok = scan(include_str!("../../../tests/fixtures/code/sample_t__80da3d6c.rs"));
         assert!(!has_kind(&ok, "no-assert-test"));
-        let panic = scan("#[test]\n#[should_panic]\nfn t() {}\n");
+        let panic = scan(include_str!("../../../tests/fixtures/code/sample_t__72494f09.rs"));
         assert!(!has_kind(&panic, "no-assert-test"));
-        let ignored = scan("#[test]\n#[ignore]\nfn t() {}\n");
+        let ignored = scan(include_str!("../../../tests/fixtures/code/sample_t__51b9ea1d.rs"));
         assert!(!has_kind(&ignored, "no-assert-test"));
+    }
+
+    #[test]
+    fn test_asserts_source_flags_assertion_on_fixture_input() {
+        let fs = scan(&fixture("test_asserts_source_bad.rs"));
+        let hits: Vec<&Finding> = fs.iter().filter(|f| f.kind == "test-asserts-source").collect();
+        assert_eq!(hits.len(), 1, "{fs:?}");
+        assert_eq!(hits[0].function, "inventory_has_the_loop_shape");
+        assert_eq!(
+            hits[0].message,
+            "this test asserts on the source text it fed the code, not on the behaviour under test — a source assertion pins the input, so it passes even when the code does nothing. Assert the parsed finding/output instead."
+        );
+    }
+
+    #[test]
+    fn test_asserts_source_allows_assertions_on_the_output() {
+        let fs = scan(&fixture("test_asserts_source_ok.rs"));
+        assert!(!has_kind(&fs, "test-asserts-source"), "{fs:?}");
+    }
+
+    #[test]
+    fn code_in_literal_flags_a_code_block_and_a_scan_snippet() {
+        let fs = scan(&fixture("code_in_literal_bad.rs"));
+        let hits: Vec<&Finding> = fs.iter().filter(|f| f.kind == "code-in-literal").collect();
+        assert_eq!(hits.len(), 3, "{fs:?}");
+        assert!(hits
+            .iter()
+            .all(|h| h.message.contains("move it to a real file under tests/fixtures/")));
+    }
+
+    #[test]
+    fn code_in_literal_excludes_include_str_and_messages() {
+        let fs = scan(&fixture("code_in_literal_ok.rs"));
+        assert!(!has_kind(&fs, "code-in-literal"), "{fs:?}");
     }
 
     #[test]
     fn mixed_module_fires_when_groups_do_not_meet() {
         // three pairs that reference each other and nothing else, plus four
         // stand-alone fns: 10 definitions, 3 groups -> several modules
-        let src = "\
-struct A;
-impl A { fn a(&self) { let _ = B; } }
-struct B;
-impl B { fn b(&self) { let _ = A; } }
-struct C;
-impl C { fn c(&self) { let _ = D; } }
-struct D;
-impl D { fn d(&self) { let _ = C; } }
-struct E;
-impl E { fn e(&self) { let _ = F; } }
-struct F;
-impl F { fn f(&self) { let _ = E; } }
-fn g() {}
-fn h() {}
-fn i() {}
-fn j() {}
-";
+        let src =
+            include_str!("../../../tests/fixtures/code/sample_mixed_module_fires_when_groups_do_not_meet__946ea264.rs");
         let fs = scan(src);
         let hit = fs.iter().find(|f| f.kind == "mixed-module").expect("mixed-module");
         assert!(hit.message.contains("3 groups"), "{}", hit.message);
@@ -701,24 +722,8 @@ fn j() {}
     #[test]
     fn mixed_module_passes_one_connected_module() {
         // a chain references through every item: one group, however many items
-        let src = "\
-struct A;
-impl A { fn a(&self) { let _ = B; } }
-struct B;
-impl B { fn b(&self) { let _ = C; } }
-struct C;
-impl C { fn c(&self) { let _ = D; } }
-struct D;
-impl D { fn d(&self) { let _ = E; } }
-struct E;
-impl E { fn e(&self) { let _ = F; } }
-struct F;
-impl F { fn f(&self) { let _ = A; } }
-fn g() {}
-fn h() {}
-fn i() {}
-fn j() {}
-";
+        let src =
+            include_str!("../../../tests/fixtures/code/sample_mixed_module_passes_one_connected_module__3804045e.rs");
         assert!(!has_kind(&scan(src), "mixed-module"));
     }
 
@@ -736,101 +741,77 @@ fn j() {}
     #[test]
     fn mixed_module_needs_three_groups() {
         // two groups is a pair of concepts, under the bar
-        let src = "\
-struct A;
-impl A { fn a(&self) { let _ = B; } }
-struct B;
-impl B { fn b(&self) { let _ = A; } }
-struct C;
-impl C { fn c(&self) { let _ = D; } }
-struct D;
-impl D { fn d(&self) { let _ = C; } }
-fn g() {}
-fn h() {}
-fn i() {}
-fn j() {}
-";
+        let src = include_str!("../../../tests/fixtures/code/sample_mixed_module_needs_three_groups__cd5761c9.rs");
         assert!(!has_kind(&scan(src), "mixed-module"));
     }
 
     #[test]
     fn mixed_module_ignores_test_items() {
         // a test module references everything; the rule reads production items
-        let src = "\
-struct A;
-struct B;
-struct C;
-struct D;
-fn g() {}
-fn h() {}
-fn i() {}
-fn j() {}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn a() { let _ = A; let _ = B; let _ = C; let _ = D; let _ = g(); let _ = h(); let _ = i(); let _ = j(); }
-}
-";
+        let src = include_str!("../../../tests/fixtures/code/sample_mixed_module_ignores_test_items__997505d4.rs");
         assert!(!has_kind(&scan(src), "mixed-module"));
     }
 
     #[test]
     fn strewing_free_fns_sharing_struct_param() {
-        let fs = scan("struct S { x: i32 }\nfn a(s: S) { let _ = s.x; }\nfn b(s: S) { let _ = s.x; }\nfn c(s: S) { let _ = s.x; }\n");
+        let fs = scan(include_str!("../../../tests/fixtures/code/sample_c__c120e836.rs"));
         assert!(has_kind(&fs, "strewing"));
         // the struct already names the data: the action is an impl, not a new class
         let msg = fs.iter().find(|f| f.kind == "strewing").unwrap().message.clone();
         assert!(msg.contains("Give 'S' an impl"), "{msg}");
         assert!(!msg.contains("extract a class"), "{msg}");
-        let fs2 = scan("struct S {}\nfn a(s: S) {}\nfn b(s: S) {}\n");
+        let fs2 = scan(include_str!("../../../tests/fixtures/code/sample_b__8165808e.rs"));
         assert!(!has_kind(&fs2, "strewing"));
     }
 
     #[test]
     fn global_state_statics_flagged() {
-        let fs = scan("static mut X: i32 = 0;\n");
+        let fs = scan(include_str!(
+            "../../../tests/fixtures/code/sample_global_state_statics_flagged__add8c226.rs"
+        ));
         assert!(has_kind(&fs, "global-state"));
-        let fs2 = scan("static X: Mutex<i32> = Mutex::new(0);\n");
+        let fs2 = scan(include_str!(
+            "../../../tests/fixtures/code/sample_global_state_statics_flagged__9463cb58.rs"
+        ));
         assert!(has_kind(&fs2, "global-state"));
-        let ok = scan("static X: i32 = 0;\n");
+        let ok = scan(include_str!(
+            "../../../tests/fixtures/code/sample_global_state_statics_flagged__927e7bfb.rs"
+        ));
         assert!(!has_kind(&ok, "global-state"));
     }
 
     #[test]
     fn fakefs_literal_path_in_test() {
-        let fs = scan("#[test]\nfn t() {\n    std::fs::write(\"out.txt\", b\"x\");\n}\n");
+        let fs = scan(include_str!("../../../tests/fixtures/code/sample_t__e59158e5.rs"));
         assert!(has_kind(&fs, "fakefs"));
-        let ok = scan(
-            "#[test]\nfn t() {\n    let dir = std::env::temp_dir();\n    std::fs::write(dir.join(\"x\"), b\"x\");\n}\n",
-        );
+        let ok = scan(include_str!("../../../tests/fixtures/code/sample_t__22ce9bea.rs"));
         assert!(!has_kind(&ok, "fakefs"));
-        let prod = scan("fn f() {\n    std::fs::write(\"out.txt\", b\"x\");\n}\n");
+        let prod = scan(include_str!("../../../tests/fixtures/code/sample_f__e347b357.rs"));
         assert!(!has_kind(&prod, "fakefs")); // test-only family
     }
 
     #[test]
     fn stale_suppression_flagged() {
-        let fs = scan("// lucidlint: ignore magic-number this line has nothing\nfn f() {}\n");
+        let fs = scan(include_str!("../../../tests/fixtures/code/sample_f__70df61b2.rs"));
         assert!(has_kind(&fs, "stale-suppression"));
-        let ok = scan("fn f() {\n    let x = 3 * 60; // lucidlint: ignore magic-number the gate threshold\n}\n");
+        let ok = scan(include_str!("../../../tests/fixtures/code/sample_f__b0d4a305.rs"));
         assert!(!has_kind(&ok, "stale-suppression"));
     }
 
     #[test]
     fn detached_method_rust_flagged() {
-        let fs = scan("struct S {}\nimpl S {\n    fn m(&self, x: i32) -> i32 {\n        x + 1\n    }\n}\n");
+        let fs = scan(include_str!("../../../tests/fixtures/code/sample_m__78e6a9b7.rs"));
         assert!(has_kind(&fs, "detached-method"));
-        let ok = scan("struct S {}\nimpl S {\n    fn m(&self, x: i32) -> i32 {\n        self.x + x\n    }\n}\n");
+        let ok = scan(include_str!("../../../tests/fixtures/code/sample_m__6d992314.rs"));
         assert!(!has_kind(&ok, "detached-method"));
-        let assoc = scan("struct S {}\nimpl S {\n    fn m(x: i32) -> i32 {\n        x\n    }\n}\n");
+        let assoc = scan(include_str!("../../../tests/fixtures/code/sample_m__4c75c78d.rs"));
         assert!(!has_kind(&assoc, "detached-method")); // no receiver — associated fn
     }
 
     #[test]
     fn detached_method_self_inside_macro_counts() {
         // write! hides `self` in a macro token group — the probe must descend
-        let fs = scan("struct S { x: i32 }\nimpl std::fmt::Display for S {\n    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n        write!(f, \"{}\", self.x)\n    }\n}\n");
+        let fs = scan(include_str!("../../../tests/fixtures/code/sample_fmt__f8b3953d.rs"));
         assert!(!has_kind(&fs, "detached-method"));
     }
 
@@ -862,7 +843,7 @@ mod tests {
         // a Box/Rc/Arc/Cow parameter is carried allocation, not a foreign
         // receiver: `fn f(s: Box<State>)` is a State method in exile, exactly
         // as `fn f(s: &State)` is
-        let src = "struct State { x: i32 }\nfn a(s: &Box<State>) {}\nfn b(s: std::sync::Arc<State>) {}\nfn c(s: Box<Box<State>>) {}\nfn d(e: Box<Expr>) {}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_d__e0ff1d3b.rs");
         let file = syn::parse_file(src).unwrap();
         let shape = crate::rustscan::modshape::MixedModule::module_shape(&file, src);
         // the three State takers are State's methods in exile, not free fns
@@ -904,7 +885,7 @@ mod tests {
         // issue #109: a push onto a collection that already existed is not a
         // `.map().collect()` build, and `.for_each()` is never the better
         // shape — the message must name `.extend()` for that case
-        let src = "fn add_children(edges: &[Vec<usize>], stack: &mut Vec<usize>) {\n    for next in &edges[0] {\n        stack.push(*next);\n    }\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_add_children__d610bdb0.rs");
         let fs = scan(src);
         let f = fs.iter().find(|x| x.kind == "loop-pipeline").expect("pipeline fires");
         assert!(f.message.contains(".extend("), "{}", f.message);
@@ -915,7 +896,7 @@ mod tests {
     fn loop_pipeline_indexed_store_gets_its_own_action() {
         // an `acc[i] = v` store is a map over the indices — `.extend()` joins
         // items and does not describe it
-        let src = "fn scaled(xs: &[u32]) -> Vec<u32> {\n    let mut out: Vec<u32> = vec![0; xs.len()];\n    for (i, x) in xs.iter().enumerate() {\n        out[i] = *x * 2;\n    }\n    out\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_scaled__958026e1.rs");
         let fs = scan(src);
         let f = fs.iter().find(|x| x.kind == "loop-pipeline").expect("pipeline fires");
         assert!(f.message.contains("over the indices"), "{}", f.message);
@@ -940,7 +921,7 @@ mod tests {
     fn loop_worklist_drain_with_a_separate_result_stays_silent() {
         // a drain whose body only accumulates a result is still the traversal:
         // the hoist recipe's "then combine or fold" describes neither shape
-        let src = "fn collect(stack: &mut Vec<u32>) -> Vec<u32> {\n    let mut out = Vec::new();\n    while let Some(x) = stack.pop() {\n        let a = x * 2;\n        let b = a + 1;\n        let c = b - 1;\n        let d = c * 2;\n        out.push(d);\n    }\n    out\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_collect__81124fe1.rs");
         let fs = scan(src);
         assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
         assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
@@ -950,12 +931,12 @@ mod tests {
     fn loop_worklist_drain_reads_the_ufcs_spelling_too() {
         // `Vec::pop(&mut stack)` is the same drain written as a free call —
         // the removed-from name is the first argument
-        let src = "fn drain(seeds: &[usize]) -> Vec<usize> {\n    let mut stack: Vec<usize> = seeds.to_vec();\n    let mut seen = Vec::new();\n    while let Some(node) = Vec::pop(&mut stack) {\n        seen.push(node);\n    }\n    seen\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_drain__746e1028.rs");
         let fs = scan(src);
         assert!(!has_kind(&fs, "mutating-loop"), "{fs:?}");
         assert!(!has_kind(&fs, "loop-hoist"), "{fs:?}");
         // a shared borrow removes nothing — the two outputs still count
-        let shared = "fn total(stack: &Vec<u32>) -> u32 {\n    let mut sum = 0;\n    let mut seen = 0;\n    while Vec::pop(&stack).is_some() {\n        sum += 1;\n        seen += 2;\n    }\n    sum + seen\n}\n";
+        let shared = include_str!("../../../tests/fixtures/code/sample_total__c75850f2.rs");
         assert!(has_kind(&scan(shared), "mutating-loop"), "{shared}");
     }
 
@@ -1058,9 +1039,7 @@ mod tests {
         let fs = scan(&fixture("loop_hoist_rs_fix.rs"));
         let h = fs.iter().find(|x| x.kind == "loop-hoist").expect("hoist fires");
         assert!(h.message.contains("fix: loop-hoist"), "{}", h.message);
-        let untyped = scan(
-            "fn score(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        let doubled = *x * 2;\n        let adj = doubled + 1;\n        if adj > 0 {\n            out.push(adj);\n        }\n    }\n    out\n}\n",
-        );
+        let untyped = scan(include_str!("../../../tests/fixtures/code/sample_score__f3b94d19.rs"));
         let u = untyped
             .iter()
             .find(|x| x.kind == "loop-hoist")
@@ -1097,7 +1076,7 @@ mod tests {
     fn every_advertised_loop_fix_applies() {
         // issue #117: a finding that names `— fix: <kind>` is a promise; the
         // fixer must accept the same site (offer equals fix).
-        let pipeline = "fn collect(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
+        let pipeline = include_str!("../../../tests/fixtures/code/sample_collect__83d4b5f6.rs");
         let cases = [
             (pipeline, "loop-pipeline"),
             (
@@ -1148,7 +1127,7 @@ mod tests {
         // a match arm body is an expression and can BE the loop site; the
         // statement-list relation cannot represent that, so the walk handles
         // the expression and keeps the arm index in the path.
-        let src = "fn collect(n: u32, xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    match n {\n        0 => for x in xs {\n            out.push(*x);\n        },\n        _ => {}\n    }\n    out\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_collect__bb6fc063.rs");
         let fs = scan(src);
         assert!(has_kind(&fs, "loop-pipeline"), "{fs:?}");
     }
@@ -1157,22 +1136,20 @@ mod tests {
     fn loop_while_never_pipeline_but_mutation_counts() {
         // a while condition is not an iterator — no combinator replaces it —
         // but its state writes still count for the stateful verdicts
-        let fs = scan("fn f() -> u32 { let mut n = 0; while n < 10 { n += 1; } n }\n");
+        let fs = scan(include_str!("../../../tests/fixtures/code/sample_f__118503a2.rs"));
         assert!(!has_kind(&fs, "loop-pipeline"), "{fs:?}");
-        let multi =
-            scan("fn f(xs: &[u32]) -> u32 { let mut a = 0; let mut b = 0; while a < 10 { a += 1; b += 2; } a + b }\n");
+        let multi = scan(include_str!("../../../tests/fixtures/code/sample_f__9c1a0eab.rs"));
         assert!(has_kind(&multi, "mutating-loop"), "{multi:?}");
     }
 
     #[test]
     fn loop_suppression_with_why_exempts() {
-        let src = "fn collect(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    // lucidlint: ignore loop-pipeline the order of pushes is load-bearing\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
+        let src = include_str!("../../../tests/fixtures/code/sample_collect__cd980694.rs");
         assert!(
             !has_kind(&scan(src), "loop-pipeline"),
             "the why'd suppression must exempt"
         );
-        let bare =
-            "fn collect(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    // lucidlint: ignore loop-pipeline\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
+        let bare = include_str!("../../../tests/fixtures/code/sample_collect__428dc879.rs");
         assert!(has_kind(&scan(bare), "suppression"));
     }
 }
