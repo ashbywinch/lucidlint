@@ -101,7 +101,9 @@ class GateRunner:
             only_rel=self.args.file,
             coverage=CoverageInput(cr, cc.graph_preferred),
         )
-        self.actions = RustScan._actions_from_rust(rust, self.args.include_tests, fh.churn, fh.last_modified)
+        self.actions = RustScan._actions_from_rust(
+            rust, self.args.include_tests, getattr(self.args, "test_quality", False), fh.churn, fh.last_modified
+        )
         self.report_header = rust.header
         self.suppression_census = rust.suppressions or {}
 

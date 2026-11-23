@@ -94,9 +94,27 @@ Seed (loop family):
 The negative shapes are the point: the Rust self-feed and Python for-else
 gaps are now visible in one corpus before a reviewer sees a PR.
 
+## The gate now includes tests
+
+`make self-check` runs
+`lucidlint.py --repo . --include-tests --test-quality`: `--include-tests`
+brings test files into the scan, and `--test-quality` judges them by the
+test-quality signals (the full audit without it fails on test-only standards).
+`tests/fixtures/` stays excluded by the source walk — it is intentionally
+non-compliant input.
+
+The first run exposed 149 `test-asserts-source` findings, almost all the same
+false positive: a test reads back the file the fixer wrote
+(`out = p.read_text()` after `p.write_text(src)`, or
+`fixed = (repo / "houses" / "app.py").read_text()`). A raw `read_text` is now
+a source read only when its path names a fixtures location; a read of a file
+the test or the code under test wrote is the OUTPUT the test legitimately
+asserts. The suite is at zero `test-asserts-source` and zero
+`code-in-literal` findings under `--include-tests`.
+
 ## Verification
 
-- `make check`, `make test` (333 pytest tests, 549 scanner tests),
+- `make check`, `make test` (333 pytest tests, 551 scanner tests),
   `make self-check` (`GATE: PASS`, 275 warnings — 261 of them the loop
   family the owner is deciding on).
 - houses: on `origin/main`, 238 findings → 235 after removing the three
@@ -113,5 +131,5 @@ gaps are now visible in one corpus before a reviewer sees a PR.
 - The loop hoists and the loop policy (owner).
 - Add the other `Both` families to `tests/parity/`; the runner is ready and
   each new shape is one directory.
-- `test-asserts-source` over the suite (`--include-tests`) surfaces existing
-  source-text assertions; none were suppressed in this round.
+- The loop policy (owner), and the other test-quality families if any are
+  added.

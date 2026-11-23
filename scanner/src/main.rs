@@ -3647,6 +3647,20 @@ mod tests {
         assert!(!f.iter().any(|x| x.kind == "test-asserts-source"), "{f:?}");
     }
 
+    #[test]
+    fn test_asserts_source_flags_a_raw_read_of_a_fixture_path() {
+        let f = scan_src_test(include_str!("../../tests/fixtures/asserts_source_fixture_read.py"));
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "test-asserts-source").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert_eq!(hits[0].function, "test_fixture_read_assertion");
+    }
+
+    #[test]
+    fn test_asserts_source_allows_a_read_of_the_file_the_test_wrote() {
+        let f = scan_src_test(include_str!("../../tests/fixtures/asserts_source_output_read.py"));
+        assert!(!f.iter().any(|x| x.kind == "test-asserts-source"), "{f:?}");
+    }
+
     // ------------------------------------------------------------- code-in-literal
     #[test]
     fn code_in_literal_flags_a_code_block_and_a_scan_snippet() {

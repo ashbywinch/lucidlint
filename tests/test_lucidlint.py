@@ -212,6 +212,7 @@ def gate_args() -> argparse.Namespace:
         repo=Path.cwd(),
         file=None,
         include_tests=False,
+        test_quality=False,
         baseline=None,
         update_baseline=False,
         json=False,
@@ -347,6 +348,35 @@ def test_large_function_is_not_claimed_for_a_test_file_without_include_tests(tmp
     run_main(repo, "--file", "tests/unit/test_big.py")
     assert "large-function" not in capsys.readouterr().out
     run_main(repo, "--file", "tests/unit/test_big.py", "--include-tests")
+    assert "large-function" in capsys.readouterr().out
+
+
+def test_test_quality_rules_run_on_test_files_in_the_default_gate(tmp_path, capsys):
+    """The gate includes tests for the test-quality family without
+    `--include-tests`: that flag means every family on test code, which would
+    judge tests by production standards."""
+    repo = make_repo(tmp_path)
+    (repo / "tests" / "unit" / "test_source_assertion.py").write_text(code_fixture("gate_source_assertion_sample.py"))
+    (repo / "tests" / "unit" / "test_literal.py").write_text(code_fixture("gate_code_literal_sample.py"))
+    (repo / "tests" / "unit" / "test_big.py").write_text("def test_big():\n" + "    x = 1\n" * 130 + "    assert x\n")
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "test-asserts-source" in out, out
+    assert "code-in-literal" in out, out
+    # the explicit test-quality run judges the same files; production rules
+    # stay out of the test paths
+    run_main(repo, "--warn", "--test-quality")
+    out = capsys.readouterr().out
+    assert "test-asserts-source" in out, out
+    assert "large-function" not in out, out
+
+
+def test_a_test_file_is_still_judged_by_production_rules_only_with_include_tests(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    (repo / "tests" / "unit" / "test_big.py").write_text("def test_big():\n" + "    x = 1\n" * 130 + "    assert x\n")
+    run_main(repo, "--warn")
+    assert "large-function" not in capsys.readouterr().out
+    run_main(repo, "--warn", "--include-tests")
     assert "large-function" in capsys.readouterr().out
 
 
@@ -1094,8 +1124,10 @@ def test_actions_from_rust_test_only_filter():
         },
         {},
     )
-    acts = RustScan._actions_from_rust(rf, include_tests=False, file_churn=Counter(), last_modified={})
-    assert [a.message for a in acts] == ["test-only rule"]  # only TEST_ONLY_SIGNALS survive
+    acts = RustScan._actions_from_rust(
+        rf, include_tests=False, test_quality=False, file_churn=Counter(), last_modified={}
+    )
+    assert [a.message for a in acts] == ["test-only rule"]  # only DEFAULT_TEST_SIGNALS survive
 
 
 def test_render_actions_acks(tmp_path, capsys):

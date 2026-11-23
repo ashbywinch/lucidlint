@@ -200,20 +200,42 @@ fn record(state: &mut ScanState, source: &str, offset: ruff_text_size::TextSize,
     });
 }
 
-/// A fixture helper or a file read — the value is the test's INPUT.
+/// A fixture helper, or a read of a path that names a fixtures directory —
+/// the value is the test's INPUT. A raw `read_text` of a file the test or the
+/// code under test wrote is the OUTPUT (`fixed`, `out`, `table`): flagging it
+/// would tell a test author to stop asserting on the fixer's result.
 fn is_source_read(value: &Expr) -> bool {
     let Expr::Call(call) = value else {
         return false;
     };
     match call.func.as_ref() {
-        Expr::Name(name) => {
-            let name = name.id.as_str();
-            name == "fixture" || name == "_fixture" || name.ends_with("_fixture") || name.ends_with("fixture")
-        }
+        Expr::Name(name) => is_fixture_helper(name.id.as_str()),
         Expr::Attribute(attr) => {
             let name = attr.attr.as_str();
-            matches!(name, "read_text" | "read" | "read_bytes") || name.ends_with("fixture")
+            if is_fixture_helper(name) {
+                return true;
+            }
+            matches!(name, "read_text" | "read" | "read_bytes") && reads_a_fixture(&attr.value)
         }
+        _ => false,
+    }
+}
+
+fn is_fixture_helper(name: &str) -> bool {
+    name == "fixture" || name == "_fixture" || name.ends_with("_fixture") || name.ends_with("fixture")
+}
+
+/// The path expression names a fixtures location: a `tests/fixtures/` string,
+/// a name such as `FIXTURES`/`_CODE_FIXTURES`, or a path built from either.
+fn reads_a_fixture(path: &Expr) -> bool {
+    match path {
+        Expr::StringLiteral(literal) => literal.value.to_str().contains("fixtures"),
+        Expr::Name(name) => name.id.as_str().to_ascii_lowercase().contains("fixture"),
+        Expr::Attribute(attr) => reads_a_fixture(&attr.value) || attr.attr.as_str().contains("fixture"),
+        Expr::BinOp(binary) => reads_a_fixture(&binary.left) || reads_a_fixture(&binary.right),
+        Expr::Call(call) => reads_a_fixture(call.func.as_ref()) || call.arguments.args.iter().any(reads_a_fixture),
+        Expr::Subscript(subscript) => reads_a_fixture(&subscript.value) || reads_a_fixture(&subscript.slice),
+        Expr::Tuple(tuple) => tuple.elts.iter().any(reads_a_fixture),
         _ => false,
     }
 }

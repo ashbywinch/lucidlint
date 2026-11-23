@@ -168,7 +168,7 @@ with a why).
 | **skipif** | fail | Both | `@pytest.mark.skipif` on environment presence (`os.environ`, `sys.platform`, etc.), a bare `@pytest.mark.skip`, or `#[test] #[ignore]` — a skipped test rots; fake the dependency instead. |
 | **fakefs** | fail | Both | Real filesystem I/O (`open`, `pathlib.Path`) in a test without `pyfakefs` — tests fake the filesystem. |
 | **no-assert-test** | fail | Both | A test function with no assertion anywhere in its body — it can never fail. |
-| **test-asserts-source** | **warn** | Both | A test asserts on the source text it fed the code (`fixture(...)`, `include_str!`, `read_text`) instead of on the parsed finding or the code's output — the assertion pins the input, so it passes even when the code does nothing. Assert the finding or the output. |
+| **test-asserts-source** | **warn** | Both | A test asserts on the fixture text it fed the code (`fixture(...)`, `include_str!`, a `read_text` of a `tests/fixtures/` path) instead of on the parsed finding or the code's output — the assertion pins the input, so it passes even when the code does nothing. Assert the finding or the output. |
 
 ## Group 4: Suppression discipline
 | Rule | Severity | Language | What it checks |
@@ -217,4 +217,6 @@ with a why).
 
 ## The `--include-tests` flag
 
-By default, test files (`tests/`, `test_`-prefixed, `#[cfg(test)]` items in Rust) are scanned for Group 3 rules only — their magic numbers, complexity, and architecture findings are suppressed (tests have different standards). Pass `--include-tests` to scan everything in test files.
+By default, test files (`tests/`, `test_`-prefixed, `#[cfg(test)]` items in Rust) are scanned for Group 3 rules and the test-quality signals only — their magic numbers, complexity, and architecture findings are suppressed (tests have different standards). Pass `--include-tests` to scan everything in test files.
+
+`--test-quality` is the gate's explicit test run: it includes test files but judges them by the test-quality signals (`test-asserts-source`, `code-in-literal`) instead of production standards. It implies `--include-tests`. `make self-check` uses both flags, so the gate sees tests without applying production standards to them.
