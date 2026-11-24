@@ -1,11 +1,11 @@
 //! `test-asserts-source` for Rust: a test asserts on code text instead of on
-//! the parsed finding or the code's output. A text match pins one spelling, so
+//! the behaviour under test. A text match pins one spelling, so
 //! it passes even when the code does nothing.
 //!
 //! The rule is content-based: a code-shaped literal in the assertion, or a
 //! name that holds code text (a code literal, an `include_str!` of a source
 //! file, or a read of a source file), is the finding. It does not care what a
-//! repository names its inputs, and it applies to a fixer's output too.
+//! repository names its inputs, and it applies to the code's output as well.
 
 use std::collections::HashSet;
 

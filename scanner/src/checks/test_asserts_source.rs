@@ -1,12 +1,11 @@
 //! `test-asserts-source`: a test asserts on code text instead of on the
-//! parsed finding or the code's output. A text match pins one spelling, so it
-//! passes even when the code does nothing.
+//! behaviour under test. A text match pins one spelling, so it passes even
+//! when the code does nothing.
 //!
 //! The rule is content-based: a code-shaped literal in the assertion, or a
 //! name that holds code text (a code literal, an `include_str!` of a source
 //! file, or a read of a source file), is the finding. It does not care what a
-//! repository names its inputs, and it applies to the code's output too —
-//! a fixer's `fixed` text is code, not a behaviour.
+//! repository names its inputs, and it applies to the code's output as well.
 
 use ruff_python_ast::{CmpOp, Expr, Stmt};
 use ruff_text_size::Ranged;
@@ -190,8 +189,8 @@ fn code_path_of(value: &Expr) -> bool {
     }
 }
 
-/// A value whose content an assertion can search. An attribute or call is the
-/// parsed world (`finding.message`, `str(finding)`), not a code string.
+/// A value whose content an assertion can search. An attribute or call is an
+/// unknown type (`finding.message`, `str(finding)`), not a code string.
 fn is_searchable_string(expr: &Expr) -> bool {
     matches!(expr, Expr::Name(_) | Expr::Subscript(_) | Expr::BinOp(_))
 }
