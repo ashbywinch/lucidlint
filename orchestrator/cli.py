@@ -53,7 +53,8 @@ class Cli:
             help="scan ONE repo-relative file (the LSP mode): per-file findings only, "
             "no git history / graph / coverage / repo-wide scans",
         )
-        p.add_argument("--include-tests", action="store_true", help="also analyze test files/nodes")
+        Cli._switch(p, "include-tests", "also analyze test files/nodes")
+        Cli._switch(p, "test-quality", "judge test files by the test-quality signals only")
         p.add_argument(
             "--baseline",
             type=Path,
@@ -78,30 +79,26 @@ class Cli:
             "fix",
             help="apply a deterministic fix for one finding (the finding's message carries the exact command)",
         )
-        Cli._text_option(
-            fix,
-            "kind",
-            "the fix family (from the finding message: magic-number, extract-method, stale-suppression, ...)",
-        )
-        Cli._text_option(fix, "file", "repo-relative file for the finding")
+        text_options = [
+            (
+                "kind",
+                "the fix family (from the finding message: magic-number, extract-method, stale-suppression, ...)",
+            ),
+            ("file", "repo-relative file for the finding"),
+            (
+                "name",
+                "the semantic name the tool cannot invent: a constant for magic-number, the extracted method/class name",
+            ),
+            (
+                "callee",
+                "the callee whose --params these are, when the finding's message names it "
+                "(binds the fix on lines with nested calls)",
+            ),
+            ("params", "comma-separated callee parameter names for positional-literals (external callees)"),
+        ]
+        for name, help_text in text_options:
+            Cli._text_option(fix, name, help_text)
         fix.add_argument("--line", type=int, default=0, help="line of the finding (omitted when the file has one)")
-        Cli._text_option(
-            fix,
-            "name",
-            "the semantic name the tool cannot invent: a constant for magic-number, "
-            "the extracted method/class name",
-        )
-        Cli._text_option(
-            fix,
-            "callee",
-            "the callee whose --params these are, when the finding's message names it "
-            "(binds the fix on lines with nested calls)",
-        )
-        Cli._text_option(
-            fix,
-            "params",
-            "comma-separated callee parameter names for positional-literals (external callees)",
-        )
         Cli._switch(
             fix,
             "confirm",

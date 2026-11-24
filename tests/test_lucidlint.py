@@ -10,6 +10,7 @@ real binary through a passthrough subprocess route.
 """
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -212,6 +213,7 @@ def gate_args() -> argparse.Namespace:
         repo=Path.cwd(),
         file=None,
         include_tests=False,
+        test_quality=False,
         baseline=None,
         update_baseline=False,
         json=False,
@@ -347,6 +349,35 @@ def test_large_function_is_not_claimed_for_a_test_file_without_include_tests(tmp
     run_main(repo, "--file", "tests/unit/test_big.py")
     assert "large-function" not in capsys.readouterr().out
     run_main(repo, "--file", "tests/unit/test_big.py", "--include-tests")
+    assert "large-function" in capsys.readouterr().out
+
+
+def test_test_quality_rules_run_on_test_files_in_the_default_gate(tmp_path, capsys):
+    """The gate includes tests for the test-quality family without
+    `--include-tests`: that flag means every family on test code, which would
+    judge tests by production standards."""
+    repo = make_repo(tmp_path)
+    (repo / "tests" / "unit" / "test_source_assertion.py").write_text(code_fixture("gate_source_assertion_sample.py"))
+    (repo / "tests" / "unit" / "test_literal.py").write_text(code_fixture("gate_code_literal_sample.py"))
+    (repo / "tests" / "unit" / "test_big.py").write_text("def test_big():\n" + "    x = 1\n" * 130 + "    assert x\n")
+    run_main(repo, "--warn")
+    out = capsys.readouterr().out
+    assert "test-asserts-source" in out, out
+    assert "code-in-literal" in out, out
+    # the explicit test-quality run judges the same files; production rules
+    # stay out of the test paths
+    run_main(repo, "--warn", "--test-quality")
+    out = capsys.readouterr().out
+    assert "test-asserts-source" in out, out
+    assert "large-function" not in out, out
+
+
+def test_a_test_file_is_still_judged_by_production_rules_only_with_include_tests(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    (repo / "tests" / "unit" / "test_big.py").write_text("def test_big():\n" + "    x = 1\n" * 130 + "    assert x\n")
+    run_main(repo, "--warn")
+    assert "large-function" not in capsys.readouterr().out
+    run_main(repo, "--warn", "--include-tests")
     assert "large-function" in capsys.readouterr().out
 
 
@@ -1094,8 +1125,10 @@ def test_actions_from_rust_test_only_filter():
         },
         {},
     )
-    acts = RustScan._actions_from_rust(rf, include_tests=False, file_churn=Counter(), last_modified={})
-    assert [a.message for a in acts] == ["test-only rule"]  # only TEST_ONLY_SIGNALS survive
+    acts = RustScan._actions_from_rust(
+        rf, include_tests=False, test_quality=False, file_churn=Counter(), last_modified={}
+    )
+    assert [a.message for a in acts] == ["test-only rule"]  # only DEFAULT_TEST_SIGNALS survive
 
 
 def test_render_actions_acks(tmp_path, capsys):
@@ -1885,7 +1918,9 @@ def test_magic_fix_cli_derives_anchor_column(tmp_path, capsys):
     )
     assert rc == 0
     fixed = (repo / "houses" / "app.py").read_text()
-    assert "a * 60 + b * NINETY" in fixed, fixed
+    tree = ast.parse(fixed)
+    assert any(isinstance(node, ast.Name) and node.id == "NINETY" for node in ast.walk(tree)), fixed
+    assert any(isinstance(node, ast.Constant) and node.value == 60 for node in ast.walk(tree)), fixed
 
 
 def test_callee_flag_selects_the_named_call_on_the_line(tmp_path, capsys):
@@ -1912,8 +1947,25 @@ def test_callee_flag_selects_the_named_call_on_the_line(tmp_path, capsys):
     )
     assert rc == 0
     fixed = (repo / "houses" / "app.py").read_text()
-    assert 'Money(amount="0", currency="GBP")' in fixed, fixed
-    assert 'Other("x", 1)' in fixed, "the unselected call must stay untouched: {fixed}"
+    calls = {
+        node.func.id: node
+        for node in ast.walk(ast.parse(fixed))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    money = calls["Money"]
+    assert {keyword.arg for keyword in money.keywords} == {"amount", "currency"}
+    money_values = []
+    for keyword in money.keywords:
+        assert isinstance(keyword.value, ast.Constant)
+        money_values.append(keyword.value.value)
+    assert money_values == ["0", "GBP"]
+    other = calls["Other"]
+    assert not other.keywords, f"the unselected call must stay untouched: {fixed}"
+    other_values = []
+    for arg in other.args:
+        assert isinstance(arg, ast.Constant)
+        other_values.append(arg.value)
+    assert other_values == ["x", 1], fixed
 
 
 def test_fix_refuses_rust_targets_cleanly(tmp_path, capsys):

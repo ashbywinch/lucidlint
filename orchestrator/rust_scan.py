@@ -49,7 +49,21 @@ class RustScan:
 
     # the test-only families: a test file is excluded from the health scan,
     # but the rules that live in tests are scanned for alone
-    TEST_ONLY_SIGNALS = frozenset({"suppression", "type-ignore", "monkeypatch", "skipif", "fakefs", "allow-reason"})
+    # The signals a test file is judged on by default: the test-only rules and
+    # the two test-quality rules. `--include-tests` lifts the filter so every
+    # family sees test code (a full audit, not the gate's default).
+    DEFAULT_TEST_SIGNALS = frozenset(
+        {
+            "suppression",
+            "type-ignore",
+            "monkeypatch",
+            "skipif",
+            "fakefs",
+            "allow-reason",
+            "test-asserts-source",
+            "code-in-literal",
+        }
+    )
 
     # a scanner run that fails to start, hangs, or answers with an unreadable
     # contract is "Rust unavailable" — the caller fail-fasts, never a silent pass
@@ -233,12 +247,12 @@ class RustScan:
 
     def _flags(self) -> ScanFlags:
         return ScanFlags(
-            self._pending_graph,
-            self._pending_churn,
-            self._pending_coverage,
-            self._pending_tests,
-            self._pending_docs,
-            self._pending_gitignored,
+            graph=self._pending_graph,
+            churn_json=self._pending_churn,
+            coverage=self._pending_coverage,
+            include_tests=self._pending_tests,
+            docs_root=self._pending_docs,
+            gitignored=self._pending_gitignored,
         )
 
     def active(self, repo: Path) -> bool:
@@ -344,28 +358,37 @@ class RustScan:
         a finding file that cannot be mapped is a root-resolution mismatch, not a
         clean run."""
         shown = ", ".join(sorted(values)[: RustScan._UNMAPPED_SHOWN])
-        more = (
-            ""
-            if len(values) <= RustScan._UNMAPPED_SHOWN
-            else f" (+{len(values) - RustScan._UNMAPPED_SHOWN} more)"
-        )
+        more = "" if len(values) <= RustScan._UNMAPPED_SHOWN else f" (+{len(values) - RustScan._UNMAPPED_SHOWN} more)"
         return (
             f"dropped findings for {len(values)} file(s) outside the scan set: {shown}{more} — "
             "a finding file that cannot be mapped back is a root-resolution mismatch, not a clean run"
         )
 
     @staticmethod
+    def _test_quality_scope(rel: str, include_tests: bool, test_quality: bool) -> bool:
+        """Whether this file's findings are judged by the test-quality signals:
+        a test path in the default gate, or any test path when the caller asks
+        for the test-quality mode."""
+        if not SourceWalk.is_test_path(rel):
+            return False
+        return test_quality or not include_tests
+
+    @staticmethod
     def _actions_from_rust(
-        rust: RustFindings, include_tests: bool, file_churn: Counter[str], last_modified: dict[str, str]
+        rust: RustFindings,
+        include_tests: bool,
+        test_quality: bool,
+        file_churn: Counter[str],
+        last_modified: dict[str, str],
     ) -> list[Action]:
         """The contract findings ARE the action model — converted verbatim, with
         the orchestrator's fields (churn, provenance, raw risk) filled in."""
         actions: list[Action] = []
         for rel, findings in rust.by_rel.items():
-            if not include_tests and SourceWalk.is_test_path(rel):
-                # test files are excluded from the health scan, but the rules
-                # that live in tests are scanned for alone
-                findings = [f for f in findings if f.signal in RustScan.TEST_ONLY_SIGNALS]
+            if RustScan._test_quality_scope(rel, include_tests, test_quality):
+                # test files are judged by the test-quality signals; the
+                # `--include-tests` full audit lifts the filter
+                findings = [f for f in findings if f.signal in RustScan.DEFAULT_TEST_SIGNALS]
             for f in findings:
                 churn = file_churn.get(rel, 0)
                 actions.append(
@@ -411,10 +434,10 @@ class RustScan:
                 "the scan binary is required — build it with `make scanner-check` "
                 "or install the lucidlint release bundle"
             )
-        self.prepare(repo, only_rel, args.include_tests, file_churn, coverage)
+        include_tests = args.include_tests or getattr(args, "test_quality", False)
+        self.prepare(repo, only_rel, include_tests, file_churn, coverage)
         files = SourceWalk(repo, self._host).py_files(only_rel)
         rust = self.load(repo, files)
         if rust is None:
             raise RuntimeError("the Rust scan core failed — rebuild with `make scanner-check`")
         return rust
-

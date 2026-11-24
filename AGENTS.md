@@ -101,9 +101,11 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
   docs. No separate docs-links test is needed — the tool IS the checker.
 - The tools import only stdlib at module level; the scan engine is the
   Rust binary (built by `make scanner-check`, required by the gate).
-- The test-quality family runs on test paths with
-  `python lucidlint.py --repo . --include-tests`; `make self-check` is the
-  production gate and excludes `tests/`.
+- `make self-check` runs the gate with `--include-tests --test-quality`:
+  `--include-tests` brings `tests/` into the scan, and `--test-quality`
+  judges them by the test-quality family (`test-asserts-source`,
+  `code-in-literal`) instead of production standards. `tests/fixtures/` stays
+  excluded by the source walk — it is intentionally non-compliant input.
 - Rule parity is the corpus in `tests/parity/<rule>/<shape>/`, discovered by
   `tests/test_rule_parity.py`; the rule catalog's `implementations` is the
   one language list.

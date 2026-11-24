@@ -14,5 +14,6 @@ class ScanFlags:
     churn_json: Path | None = None
     coverage: Path | None = None
     include_tests: bool = False
+    test_quality: bool = False
     docs_root: str | None = None
     gitignored: tuple[str, ...] = ()
