@@ -48,6 +48,7 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | The self-warning cleanup (587 → 271) and the decisions it leaves open | `docs/plans/plan-self-warning-cleanup.md` |
 | Issue #42: record-shape export exemption for to_dict/to_json | `docs/plans/plan-issue-42-export-exemption.md` |
 | Issue #93: `unnamed-condition` + `unnamed-classification` (criterion, message, measurement) | `docs/plans/plan-issue-93-unnamed-condition.md` |
+| Issue #119: a record's constructor is not behaviour (module-shape arms) | `docs/plans/plan-issue-119-record-behaviour.md` |
 | Issue #107: `several-classes` + `many-functions` and the `checks.rs` split | `docs/plans/plan-issue-107-module-shape.md` |
 | Docs walk: ask git for ignored docs, guard unreadable reads | `docs/plans/plan-docs-walk-git.md` |
 | Issue #44: middle-man exemptions (library targets, interface members, fixed defaults) | `docs/plans/plan-issue-44-middle-man-exemptions.md` |

@@ -86,7 +86,11 @@ impl MixedModule {
                 }),
                 Item::Trait(i) => types.push(TypeShape {
                     name: i.ident.to_string(),
-                    methods: i.items.iter().filter(|t| matches!(t, syn::TraitItem::Fn(_))).count(),
+                    methods: i
+                        .items
+                        .iter()
+                        .filter(|t| matches!(t, syn::TraitItem::Fn(f) if f.sig.receiver().is_some()))
+                        .count(),
                 }),
                 _ => {}
             }
@@ -94,12 +98,18 @@ impl MixedModule {
         types
     }
 
-    /// The methods each `impl` block adds to its type.
+    /// The methods each `impl` block adds to its type: the ones that take a
+    /// value of it (`self`). An impl fn without a receiver builds a value — a
+    /// record's constructor is the record's algebra, not behaviour (#119).
     fn attach_impl_methods(file: &File, types: &mut [crate::checks::TypeShape]) {
         for item in &file.items {
             let Item::Impl(block) = item else { continue };
             let name = static_type_ident(&block.self_ty);
-            let methods = block.items.iter().filter(|i| matches!(i, ImplItem::Fn(_))).count();
+            let methods = block
+                .items
+                .iter()
+                .filter(|i| matches!(i, ImplItem::Fn(f) if f.sig.receiver().is_some()))
+                .count();
             if let Some(shape) = types.iter_mut().find(|t| t.name == name) {
                 shape.methods += methods;
             }
