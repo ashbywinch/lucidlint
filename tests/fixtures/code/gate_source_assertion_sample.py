@@ -1,3 +1,3 @@
 def test_shape():
-    src = fixture("x.rs")
+    src = load_source()
     assert "def f(" in src

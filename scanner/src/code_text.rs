@@ -245,11 +245,11 @@ mod tests {
 
     #[test]
     fn code_paths_are_the_language_source_extension() {
-        assert!(CodeText::is_python_path("tests/fixtures/x.py"));
+        assert!(CodeText::is_python_path("src/app.py"));
         assert!(CodeText::is_python_path("src/app.pyi"));
         assert!(!CodeText::is_python_path("src/lib.rs"));
         assert!(CodeText::is_rust_path("src/lib.rs"));
-        assert!(!CodeText::is_rust_path("tests/fixtures/x.py"));
+        assert!(!CodeText::is_rust_path("src/app.py"));
         assert!(!CodeText::is_python_path("table.md"));
         assert!(!CodeText::is_rust_path("data.json"));
     }

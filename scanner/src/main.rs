@@ -3657,10 +3657,10 @@ mod tests {
 
     #[test]
     fn test_asserts_source_flags_a_raw_read_of_a_source_path() {
-        let f = scan_src_test(include_str!("../../tests/fixtures/asserts_source_fixture_read.py"));
+        let f = scan_src_test(include_str!("../../tests/fixtures/asserts_source_read.py"));
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "test-asserts-source").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
-        assert_eq!(hits[0].function, "test_fixture_read_assertion");
+        assert_eq!(hits[0].function, "test_source_read_assertion");
     }
 
     #[test]

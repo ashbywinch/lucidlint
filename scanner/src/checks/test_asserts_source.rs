@@ -5,7 +5,7 @@
 //! The rule is content-based: a code-shaped literal in the assertion, or a
 //! name that holds code text (a code literal, an `include_str!` of a source
 //! file, or a read of a source file), is the finding. It does not care what a
-//! repository calls its fixtures, and it applies to the code's output too —
+//! repository names its inputs, and it applies to the code's output too —
 //! a fixer's `fixed` text is code, not a behaviour.
 
 use ruff_python_ast::{CmpOp, Expr, Stmt};
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn a_source_file_read_marks_a_name_as_code() {
-        let names = names_from("src = Path(\"tests/fixtures/x.py\").read_text()\n");
+        let names = names_from("src = Path(\"src/app.py\").read_text()\n");
         assert!(names.code.contains("src"));
     }
 

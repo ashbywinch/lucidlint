@@ -5,7 +5,7 @@
 //! The rule is content-based: a code-shaped literal in the assertion, or a
 //! name that holds code text (a code literal, an `include_str!` of a source
 //! file, or a read of a source file), is the finding. It does not care what a
-//! repository calls its fixtures, and it applies to a fixer's output too.
+//! repository names its inputs, and it applies to a fixer's output too.
 
 use std::collections::HashSet;
 
