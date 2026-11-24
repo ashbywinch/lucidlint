@@ -405,6 +405,12 @@ class GateRunner:
         if self.args.update_baseline:
             return self._write_baseline(self.unique, self.ignored_by_signal)
         bl = Baseline(self.args.baseline)
+        if bl.problem:
+            # a file that exists but is not a baseline: comparing against it
+            # would report acknowledged debt as new (or pass) while checking
+            # nothing. A configuration error, never a silent empty ledger.
+            CONSOLE.warn(bl.problem)
+            return 2
         baseline_keys, self.baseline_ignored = bl.keys, bl.ignored
         self.stale = Baseline.apply(self.unique, baseline_keys)
         # B3: a pre-round 'actions' schema (line-less keys or action dicts)
@@ -429,8 +435,9 @@ class GateRunner:
         # the baseline is debt being added to, not held — the ignore's scope is
         # wrong. A warning, never a gate failure (growing repos legitimately
         # grow): --update-baseline re-locks the new counts. Only meaningful when
-        # a baseline exists to compare against.
-        if self.args.baseline:
+        # the baseline recorded counts: with no 'config_ignored' map it measured
+        # nothing, and "grew 0 -> N" would invent the comparison (#127).
+        if self.args.baseline and bl.counts_recorded:
             for sig, n in self.ignored_by_signal.items():
                 if self.baseline_ignored.get(sig, 0) < n:
                     CONSOLE.warn(

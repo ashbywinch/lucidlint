@@ -189,6 +189,8 @@ lucidlint --repo . --baseline lucidlint.json   # now fails only on NEW findings
 
 Baselines lock today's debt so the gate blocks only what is new. Lucidlint will raise an error if the baseline can be lowered.
 
+A file that holds nothing — a missing file, an empty file, `[]`, `{}` — is an empty baseline: the gate acknowledges nothing and passes. A file that holds something the gate cannot read as a baseline (invalid JSON, another JSON type, an unknown key, a count that is not a count) is a configuration error: the gate names the flaw and exits 2 instead of passing while comparing nothing.
+
 ---
 
 ## Use
