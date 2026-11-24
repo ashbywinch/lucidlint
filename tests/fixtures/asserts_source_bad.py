@@ -1,19 +1,26 @@
-from tests.fixtures.helpers import fixture
+from pathlib import Path
 
 
-def test_loop_shape_is_in_the_corpus():
-    src = fixture("loop_sequence_sibling_branches.rs")
-    assert "fn same_block(" in src
+def test_needle_is_code():
+    src = load_source()
+    assert "def f(" in src
 
 
-def test_bare_assertion_helper():
-    src = fixture("loop_sequence_sibling_branches.rs")
-    assertEqual(src, "fn same_block(")
+def test_output_text_is_code():
+    src = load_source()
+    out = fix(src)
+    assert "class Foo" in out
 
 
-def test_conditional_fixture_load(debug):
-    # both paths bind a fixture; the branch-local rebind must not clear it
-    src = fixture("loop_sequence_sibling_branches.rs")
-    if debug:
-        src = fixture("loop_sequence_sibling_branches.rs")
-    assert "fn same_block(" in src
+def test_code_text_variable_prose_needle():
+    text = Path("src/app.py").read_text()
+    assert "filter_map" in text
+
+
+def test_code_literal_comparison():
+    src = load_source()
+    assert src == "def f():\n    pass\n"
+
+
+def test_two_code_literals():
+    assert "def f():" == "def f():"

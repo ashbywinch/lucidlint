@@ -185,9 +185,13 @@ format: setup
 	@$(RUFF) format *.py tests/ scripts/
 
 # The repo's defining gate: the tool must pass on itself — every finding
-# family (record-shape included) computes in the Rust core.
+# family (record-shape included) computes in the Rust core. Tests are IN the
+# gate: `--include-tests` brings them into the scan, and `--test-quality`
+# judges them by the test-quality signals (source assertions, code in
+# literals) instead of production standards. `tests/fixtures/` stays excluded
+# by the source walk because it is intentionally non-compliant input.
 self-check: deps scanner-check
-	@$(PYTHON) lucidlint.py --repo .
+	@$(PYTHON) lucidlint.py --repo . --include-tests --test-quality
 	@echo "ok — the tool passes its own gate"
 
 # Run the health tool on another repo (default: the parent directory).

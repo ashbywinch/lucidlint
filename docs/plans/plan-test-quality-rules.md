@@ -7,33 +7,30 @@ loop-policy decision stay with the owner.
 
 ## #125 — a source assertion is not a behaviour test
 
-`test-asserts-source` (Both, warn) follows the variable's origin inside a
-test and reports an assertion on a value bound directly from a fixture or a
-source read (`fixture(...)`, `_fixture`, `read_text`, Rust `include_str!`).
-The result of the code under test (`out`, `fixed`, the findings) is an
-output; the rule never binds it, so asserting on a fixer's or parser's output
-stays legal even when that output is source text.
+`test-asserts-source` (Both, warn) reports an assertion whose subject is
+**code text** — a code-shaped fragment or block in the assertion, or a name
+holding code text (a code literal, an `include_str!` of a source file, or a
+read of one). There is no fixture-name or origin heuristic: a code fragment is
+about code wherever it came from, and the same rule applies to a fixer's
+output — `fixed` is code text too.
 
-The message is the one the owner wrote:
+The code is scoped to the language under test: a Python test is judged on
+Python code, a Rust test on Rust code. A shell or HTML artefact read by a
+Python test is outside the rule; its text is the artefact, not the Python
+code under test.
 
-> this test asserts on the source text it fed the code, not on the behaviour
-> under test — a source assertion pins the input, so it passes even when the
-> code does nothing. Assert the parsed finding/output instead.
+The message:
+
+> test '{function}' asserts on code text, not on the behaviour under test —
+> a text match pins one spelling, so it passes even when the code does
+> nothing. Keep the test: assert what the code actually does instead. Do
+> not delete the test or weaken it to match the text.
 
 Wiring: the Python pass runs with the test-only families (test paths, or
 `--include-tests`); the Rust pass is a pre-pass over `#[test]` and
 `#[cfg(test)]` code. `tests/fixtures/` is never scanned, so the rule's own
 tests are fixtures — `asserts_source_bad.py` / `asserts_source_ok.py` and
 their Rust pair — and assert the finding set, not the fixture text.
-
-The origin model is one type, `SourceInputs`: a name is a fixture input when
-its last unconditional binding was a source read, and every branch runs on a
-clone whose writes are committed by an explicit must-source join. The join
-intersects every reachable path — zero-iteration/body/orelse for a loop,
-pre-try/body/handlers for a try, pre-match/cases for a match — so a fixture
-load or an output rebind on only one path is not a finding: the message must
-be true on every path. The keep and both drop directions are unit-tested in
-the module.
 
 ## #123 — code lives in a file, not a string literal
 
@@ -94,11 +91,35 @@ Seed (loop family):
 The negative shapes are the point: the Rust self-feed and Python for-else
 gaps are now visible in one corpus before a reviewer sees a PR.
 
+## The gate now includes tests
+
+`make self-check` runs
+`lucidlint.py --repo . --include-tests --test-quality`: `--include-tests`
+brings test files into the scan, and `--test-quality` judges them by the
+test-quality signals (the full audit without it fails on test-only standards).
+`tests/fixtures/` stays excluded by the source walk — it is intentionally
+non-compliant input.
+
+The code-text rule reports the repo's own code-text assertions rather than
+exempting output text. Before migration:
+
+| repo | `test-asserts-source` | what they were |
+|---|---:|---|
+| lucidlint | 163 | 160 fixer-output assertions in `tests/test_fix_engine.py`, 3 CLI fixer output assertions |
+| houses | 0 | the 7 pre-scoping findings were shell/HTML/JS artefacts, outside the Python code under test |
+| family-history-album | 3 | import-line assertions in `tests/test_architecture.py` |
+
+All 163 lucidlint assertions are migrated in this PR: 130 now assert the
+parsed action set changed (or stayed unchanged for a refusal), 30 assert the
+output's AST structure, and 3 CLI tests assert the parsed call/keyword shape.
+No test was deleted. The gate is back to 275 warnings, 0 fails, and the rule
+reports zero findings under `--include-tests`.
+
 ## Verification
 
-- `make check`, `make test` (333 pytest tests, 549 scanner tests),
-  `make self-check` (`GATE: PASS`, 275 warnings — 261 of them the loop
-  family the owner is deciding on).
+- `make check`, `make test` (334 pytest tests, 555 scanner tests),
+  `make self-check` (`GATE: PASS`, 275 warnings — 261 loop-family; zero
+  `test-asserts-source`).
 - houses: on `origin/main`, 238 findings → 235 after removing the three
   stale `loop-pipeline` markers; album: 677 → 676 after removing the one.
   The before/after diff on `(file, kind, line)` and `(file, kind, message)`
@@ -113,5 +134,5 @@ gaps are now visible in one corpus before a reviewer sees a PR.
 - The loop hoists and the loop policy (owner).
 - Add the other `Both` families to `tests/parity/`; the runner is ready and
   each new shape is one directory.
-- `test-asserts-source` over the suite (`--include-tests`) surfaces existing
-  source-text assertions; none were suppressed in this round.
+- The loop policy (owner), and the other test-quality families if any are
+  added.

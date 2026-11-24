@@ -1,28 +1,31 @@
 #[cfg(test)]
 mod tests {
-    fn fixture(name: &str) -> String {
-        std::fs::read_to_string(name).unwrap()
+    fn load_source() -> String {
+        String::new()
     }
 
-    fn fix(src: &str) -> String {
-        src.replace("for ", "for_each ")
-    }
-
-    fn format_module(src: &str) -> String {
-        src.to_string()
+    fn scan(src: &str) -> Vec<Finding> {
+        let _ = src;
+        Vec::new()
     }
 
     #[test]
-    fn fixer_output_keeps_the_combinator() {
-        let src = fixture("loop_pipeline_rs.rs");
-        let fixed = fix(&src);
-        assert!(fixed.contains(".map("));
+    fn findings_are_parsed() {
+        let src = load_source();
+        let findings = scan(&src);
+        assert!(!findings.is_empty());
+        assert_eq!(findings[0].kind, "magic-number");
     }
 
     #[test]
-    fn parser_output_is_the_user_outcome() {
-        let src = fixture("loop_pipeline_rs.rs");
-        let formatted = format_module(&src);
-        assert!(formatted.contains("fn collect("));
+    fn prose_needle_in_log() {
+        let stderr = "error: bad";
+        assert!(stderr.contains("could not parse"));
+    }
+
+    #[test]
+    fn finding_message_is_output() {
+        let findings = scan("x");
+        assert!(findings[0].message.contains("fn f("));
     }
 }

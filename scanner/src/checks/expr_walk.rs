@@ -103,6 +103,12 @@ pub(crate) fn walk_expr_deep<'a>(e: &'a Expr, in_call_func: bool, f: &mut impl F
         }
         Expr::Named(n) => walk_expr_deep(&n.value, false, f),
         Expr::Await(a) => walk_expr_deep(&a.value, false, f),
+        Expr::Yield(y) => {
+            if let Some(value) = &y.value {
+                walk_expr_deep(value, false, f);
+            }
+        }
+        Expr::YieldFrom(y) => walk_expr_deep(&y.value, false, f),
         Expr::Starred(st) => walk_expr_deep(&st.value, false, f),
         Expr::Tuple(t) => {
             for el in &t.elts {
