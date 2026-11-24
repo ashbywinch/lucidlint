@@ -785,13 +785,69 @@ def test_update_baseline_requires_path(tmp_path):
     assert run_main(repo, "--update-baseline") == 2
 
 
-def test_corrupt_baseline_ignored(tmp_path, capsys):
+def test_baseline_that_holds_nothing_is_an_empty_ledger(tmp_path, capsys):
+    """A missing file, a blank file, [] and {} are the fresh-repo state: the
+    gate acknowledges nothing and says nothing about it. A well-formed empty
+    file is not a warning."""
     repo = make_repo(tmp_path)
-    baseline = tmp_path / "bad.json"
+    baseline = tmp_path / "lucidlint.json"
+    for content in ("", "[]", "{}", '{"actions": []}'):
+        baseline.write_text(content)
+        assert run_main(repo, "--baseline", str(baseline)) == 0, content
+        assert "unreadable" not in capsys.readouterr().err, content
+    assert run_main(repo, "--baseline", str(tmp_path / "absent.json")) == 0
+    assert "unreadable" not in capsys.readouterr().err
+
+
+def test_baseline_that_is_not_a_baseline_is_a_configuration_error(tmp_path, capsys):
+    """A file that EXISTS but is not a baseline must not degrade to an empty
+    one: the gate would report acknowledged debt as new, or pass, while
+    comparing nothing. It exits 2 and names the flaw and the repair."""
+    repo = make_repo(tmp_path)
+    baseline = tmp_path / "lucidlint.json"
+    cases = {
+        '{"actions": [': "is not JSON",
+        "7": "holds a JSON number",
+        '["a", "b"]': "holds a JSON list of 2 entries",
+        '{"actions": 5}': "has 'actions' as a JSON number",
+        '{"name": "pkg"}': "holds the key 'name'",
+        '{"config_ignored": 5}': "has 'config_ignored' as a JSON number",
+        '{"actions": [], "config_ignored": {"magic-number": "many"}}': (
+            "has 'config_ignored.magic-number' as 'many'"
+        ),
+    }
+    for content, flaw in cases.items():
+        baseline.write_text(content)
+        assert run_main(repo, "--baseline", str(baseline)) == 2, content
+        captured = capsys.readouterr()
+        assert flaw in captured.err, (content, captured.err)
+        assert str(baseline) in captured.err
+        assert "--update-baseline --baseline" in captured.err
+        assert captured.out == "", content  # no report pretends the run compared
+    # --warn is the findings' verdict, not the configuration's
     baseline.write_text("{not json")
-    rc = run_main(repo, "--baseline", str(baseline))
-    assert rc == 0  # unbaselined — the clean repo still passes
-    assert "unreadable" in capsys.readouterr().err
+    assert run_main(repo, "--warn", "--baseline", str(baseline)) == 2
+    # the repair path stays open: --update-baseline rewrites the same file
+    assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
+    assert run_main(repo, "--baseline", str(baseline)) == 0
+
+
+def test_config_ignore_growth_needs_a_baseline_that_recorded_counts(tmp_path, capsys):
+    """'grew 0 -> N' claims the ignore's scope was widened since the baseline.
+    A baseline that recorded no counts measured nothing, so the claim would be
+    invented; a recorded map (even a zero) makes it checkable."""
+    repo = make_repo(
+        tmp_path,
+        app_src=code_fixture("sample_suppression_ledger_reconciles_all_three_accounts__4f0189d5.py"),
+    )
+    (repo / ".lucidlint.toml").write_text('[lucidlint]\nignore = ["magic-number"]\n')
+    baseline = tmp_path / "lucidlint.json"
+    baseline.write_text('{"actions": []}')
+    run_main(repo, "--baseline", str(baseline))
+    assert "grew" not in capsys.readouterr().err
+    baseline.write_text('{"actions": [], "config_ignored": {"magic-number": 0}}')
+    run_main(repo, "--baseline", str(baseline))
+    assert "config-ignored 'magic-number' grew 0 ->" in capsys.readouterr().err
 
 
 def test_git_lsfiles_failure_falls_back_to_rglob(tmp_path, capsys):
