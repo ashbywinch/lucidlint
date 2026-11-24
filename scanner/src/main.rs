@@ -5595,7 +5595,6 @@ mod tests {
         assert!(msg.contains("package"), "{msg}");
         assert!(msg.contains("one file per class"), "{msg}");
         assert!(msg.contains("re-exported from __init__.py"), "{msg}");
-        assert!(msg.contains("no methods may stay"), "{msg}");
         assert_eq!(hits[0].file, "pkg/widgets.py");
         assert_eq!(hits[0].line, 0);
         assert!(!f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
@@ -5631,15 +5630,68 @@ mod tests {
     }
 
     #[test]
-    fn several_definitions_passes_a_class_and_its_records() {
-        // three classes where all but one are records (no methods)
+    fn several_definitions_still_asks_for_classes_when_one_class_is_outnumbered() {
+        // one behaviour class + its record, then five free functions: the
+        // functions are strictly more than the two class equivalents, so the
+        // functions arm speaks. The tie is only one class + its helpers.
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_outnumbered_class.py");
+        let f = scan_corpus(&[("pkg/markers.py", src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("5 of them functions"), "{}", hits[0].message);
+    }
+
+    #[test]
+    fn several_definitions_reports_a_class_and_its_records() {
+        // more than two definitions fires, whether the siblings are records
+        // or acting classes: only Rust class equivalents are grouped
         let src = several_classes_source(3, 1);
         let f = scan_corpus(&[("pkg/widget.py", &src)]);
-        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
-        // all records is not this finding either
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
         let records = several_classes_source(4, 0);
         let f = scan_corpus(&[("pkg/records.py", &records)]);
-        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn several_definitions_reports_a_class_and_its_constructor_record() {
+        // the constructor still does not make the record behavioural; the
+        // three top-level definitions still fire
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_record_constructor.py");
+        let f = scan_corpus(&[("pkg/markers.py", src)]);
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        // a second class that acts on its own values is a second concern
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_second_behaviour.py");
+        let f = scan_corpus(&[("pkg/markers.py", src)]);
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn several_definitions_reports_a_class_its_records_and_its_helpers() {
+        // more than two definitions fires; the types arm names the class when
+        // neither side is the bulk
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_records_and_helpers.py");
+        let f = scan_corpus(&[("pkg/batch_row.py", src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("2 of them classes"), "{}", hits[0].message);
+        // the same two helpers with the class gone are a bag of functions
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_helpers_only.py");
+        let f = scan_corpus(&[("pkg/rows.py", src)]);
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn several_definitions_reports_the_types_when_types_and_functions_tie() {
+        // two classes with behaviour and two helpers: the helpers belong to
+        // the classes, so the types arm names them — the functions arm would
+        // tell the reader to make the helpers a class instead
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_tie.py");
+        let f = scan_corpus(&[("pkg/marks.py", src)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("2 of them classes"), "{}", hits[0].message);
+        assert!(!hits[0].message.contains("2 of them functions"), "{}", hits[0].message);
     }
 
     #[test]
@@ -5718,6 +5770,40 @@ mod tests {
         assert!(!msg.contains("0 of them types"), "{msg}");
         assert!(msg.contains("1 function group"), "{msg}");
         assert!(msg.contains("The functions group by the type they take"), "{msg}");
+    }
+
+    #[test]
+    fn several_definitions_reports_a_rust_type_whose_impl_only_builds_it() {
+        // Marker's impl builds markers, so Marker is a record; the third
+        // top-level definition still fires
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_rust_record_constructor.rs");
+        let rs = rustscan::RustScan::scan(src, "crate/src/suppressions.rs", true);
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/suppressions.rs");
+        let f = checks::ModuleShape::findings(&[("crate/src/suppressions.rs".to_string(), scan.module_shape.clone())]);
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        // two types whose impls act on their own values are two concerns
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_rust_two_types.rs");
+        let rs = rustscan::RustScan::scan(src, "crate/src/suppressions.rs", true);
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/suppressions.rs");
+        let f = checks::ModuleShape::findings(&[("crate/src/suppressions.rs".to_string(), scan.module_shape.clone())]);
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn several_definitions_types_arm_names_the_receiver_groups() {
+        // one behavioural type, a foreign receiver group (Expr), and a free
+        // function: the types arm speaks, so its message must account for the
+        // group as a class equivalent — otherwise the reader cannot check the
+        // definition count (#119)
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_types_arm_names_groups.rs");
+        let rs = rustscan::RustScan::scan(src, "crate/src/markers.rs", true);
+        let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/markers.rs");
+        let f = checks::ModuleShape::findings(&[("crate/src/markers.rs".to_string(), scan.module_shape.clone())]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        let msg = &hits[0].message;
+        assert!(msg.contains("The functions group by the type they take"), "{msg}");
+        assert!(msg.contains("Expr"), "{msg}");
     }
 
     #[test]
@@ -5922,8 +6008,9 @@ mod tests {
     }
 
     #[test]
-    fn rust_record_exception_spares_a_type_and_its_records() {
-        // one type with an impl plus two plain records: one concept, no finding
+    fn rust_records_still_count_as_definitions() {
+        // one type with an impl plus two plain records is three definitions;
+        // only a Rust class equivalent (type + impl/functions) is grouped
         let mut src = String::new();
         for i in 0..2 {
             src.push_str(&format!("pub struct Row{i} {{ pub size: u32 }}\n\n"));
@@ -5932,7 +6019,7 @@ mod tests {
         let rs = rustscan::RustScan::scan(&src, "crate/src/table.rs", true);
         let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/table.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/table.rs".to_string(), scan.module_shape.clone())]);
-        assert!(f.is_empty(), "{f:?}");
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
     }
 
     #[test]

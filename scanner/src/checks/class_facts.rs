@@ -79,6 +79,9 @@ pub(super) fn class_methods(cls: &StmtClassDef) -> Vec<&StmtFunctionDef> {
         .collect()
 }
 
+/// Whether the function carries a decorator with this name — bare (`@name`)
+/// or qualified (`@module.name`). `pub(super)` keeps it inside `checks`, where
+/// its sibling rules live.
 pub(super) fn has_decorator(f: &StmtFunctionDef, name: &str) -> bool {
     f.decorator_list.iter().any(|d| match &d.expression {
         Expr::Name(n) => n.id.as_str() == name,
