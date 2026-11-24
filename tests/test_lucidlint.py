@@ -796,6 +796,9 @@ def test_baseline_that_is_not_a_baseline_is_a_configuration_error(tmp_path, caps
     # --warn is the findings' verdict, not the configuration's
     baseline.write_text("{not json")
     assert run_main(repo, "--warn", "--baseline", str(baseline)) == 2
+    # the repair path stays open: --update-baseline rewrites the same file
+    assert run_main(repo, "--update-baseline", "--baseline", str(baseline)) == 0
+    assert run_main(repo, "--baseline", str(baseline)) == 0
 
 
 def test_config_ignore_growth_needs_a_baseline_that_recorded_counts(tmp_path, capsys):
