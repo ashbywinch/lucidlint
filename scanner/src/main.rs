@@ -5595,7 +5595,6 @@ mod tests {
         assert!(msg.contains("package"), "{msg}");
         assert!(msg.contains("one file per class"), "{msg}");
         assert!(msg.contains("re-exported from __init__.py"), "{msg}");
-        assert!(msg.contains("act on no value of its own"), "{msg}");
         assert_eq!(hits[0].file, "pkg/widgets.py");
         assert_eq!(hits[0].line, 0);
         assert!(!f.iter().any(|x| x.kind == "many-definitions"), "{f:?}");
@@ -5643,25 +5642,24 @@ mod tests {
     }
 
     #[test]
-    fn several_definitions_passes_a_class_and_its_records() {
-        // three classes where all but one are records (no methods)
+    fn several_definitions_reports_a_class_and_its_records() {
+        // more than two definitions fires, whether the siblings are records
+        // or acting classes: only Rust class equivalents are grouped
         let src = several_classes_source(3, 1);
         let f = scan_corpus(&[("pkg/widget.py", &src)]);
-        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
-        // all records is not this finding either
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
         let records = several_classes_source(4, 0);
         let f = scan_corpus(&[("pkg/records.py", &records)]);
-        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
     }
 
     #[test]
-    fn several_definitions_passes_a_class_and_the_record_its_constructor_builds() {
-        // #119: a value's constructor is how the value is made, not behaviour.
-        // One class and a record beside it is one concept, exactly as when the
-        // record has no methods at all.
+    fn several_definitions_reports_a_class_and_its_constructor_record() {
+        // the constructor still does not make the record behavioural; the
+        // three top-level definitions still fire
         let src = include_str!("../../tests/fixtures/code/sample_several_definitions_record_constructor.py");
         let f = scan_corpus(&[("pkg/markers.py", src)]);
-        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
         // a second class that acts on its own values is a second concern
         let src = include_str!("../../tests/fixtures/code/sample_several_definitions_second_behaviour.py");
         let f = scan_corpus(&[("pkg/markers.py", src)]);
@@ -5669,14 +5667,14 @@ mod tests {
     }
 
     #[test]
-    fn several_definitions_passes_a_class_its_records_and_its_helpers() {
-        // one class, the record it fills, and two helpers: the record adds no
-        // behaviour and the helpers belong to the class, so the module is one
-        // concept — the functions arm speaks only for a module the functions
-        // dominate (#119)
+    fn several_definitions_reports_a_class_its_records_and_its_helpers() {
+        // more than two definitions fires; the types arm names the class when
+        // neither side is the bulk
         let src = include_str!("../../tests/fixtures/code/sample_several_definitions_records_and_helpers.py");
         let f = scan_corpus(&[("pkg/batch_row.py", src)]);
-        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "several-definitions").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("2 of them classes"), "{}", hits[0].message);
         // the same two helpers with the class gone are a bag of functions
         let src = include_str!("../../tests/fixtures/code/sample_several_definitions_helpers_only.py");
         let f = scan_corpus(&[("pkg/rows.py", src)]);
@@ -5775,14 +5773,14 @@ mod tests {
     }
 
     #[test]
-    fn several_definitions_passes_a_rust_type_whose_impl_only_builds_it() {
-        // #119: Marker's impl builds markers, so Marker is a record. The
-        // module is Suppressions and its record — one concept.
+    fn several_definitions_reports_a_rust_type_whose_impl_only_builds_it() {
+        // Marker's impl builds markers, so Marker is a record; the third
+        // top-level definition still fires
         let src = include_str!("../../tests/fixtures/code/sample_several_definitions_rust_record_constructor.rs");
         let rs = rustscan::RustScan::scan(src, "crate/src/suppressions.rs", true);
         let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/suppressions.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/suppressions.rs".to_string(), scan.module_shape.clone())]);
-        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
         // two types whose impls act on their own values are two concerns
         let src = include_str!("../../tests/fixtures/code/sample_several_definitions_rust_two_types.rs");
         let rs = rustscan::RustScan::scan(src, "crate/src/suppressions.rs", true);
@@ -6010,8 +6008,9 @@ mod tests {
     }
 
     #[test]
-    fn rust_record_exception_spares_a_type_and_its_records() {
-        // one type with an impl plus two plain records: one concept, no finding
+    fn rust_records_still_count_as_definitions() {
+        // one type with an impl plus two plain records is three definitions;
+        // only a Rust class equivalent (type + impl/functions) is grouped
         let mut src = String::new();
         for i in 0..2 {
             src.push_str(&format!("pub struct Row{i} {{ pub size: u32 }}\n\n"));
@@ -6020,7 +6019,7 @@ mod tests {
         let rs = rustscan::RustScan::scan(&src, "crate/src/table.rs", true);
         let scan = Pipeline::rustscan_to_filescan_ref(&rs, "crate/src/table.rs");
         let f = checks::ModuleShape::findings(&[("crate/src/table.rs".to_string(), scan.module_shape.clone())]);
-        assert!(f.is_empty(), "{f:?}");
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
     }
 
     #[test]

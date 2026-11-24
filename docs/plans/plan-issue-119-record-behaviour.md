@@ -1,9 +1,11 @@
 # Plan — issue #119: a record's constructor is not behaviour
 
-Fixes github.com/ashbywinch/lucidlint issue #119. The rule's own exemption
-already said "all but one class being a value record is one concern plus its
-records"; the detector counted a constructor as behaviour, so the exemption
-stopped at the record that has one. Every change ships test-first.
+Fixes github.com/ashbywinch/lucidlint issue #119. The detector counted a
+constructor as behaviour, so a record looked like a second behavioural class.
+Behaviour is now a method that acts on the type's values. The threshold is
+unchanged: more than two top-level definitions fires, and a Rust class
+equivalent (a type plus its impl/functions) is one definition. Every change
+ships test-first.
 
 ## The report, claim by claim
 
@@ -33,66 +35,51 @@ Behaviour is a method that acts on one of the type's values.
   instance".
 
 `TypeShape.methods` now counts only those, so a record with a constructor, a
-parser, or a `to_dict` no longer makes its module "several". A namespace — a
+parser, or a `to_dict` is not behavioural. The module still fires when it holds
+more than two top-level definitions; the constructor decides the behaviour
+count the message states, not whether the finding exists. A namespace — a
 fieldless type whose impl is all associated functions — is a record by the same
-test; the rule's remedy ("fold them into the one that owns the state") cannot
-name a stateless owner, so claiming one was never checkable.
+test.
 
-The message says what the detector now does: "A type whose impl acts on no value
-of its own adds no behaviour, so it may stay beside the type that uses it."
+## More than two definitions fires
 
-## The side effect the corpus exposed: which arm speaks
-
-Silencing the types arm for a record-heavy module left the functions arm as the
-only voice, and it spoke for modules the functions do not dominate:
-`loft/live/batch_row.py` became "holds 7 top-level definitions, 2 of them
-functions … make them a class" — a message about two helpers beside five types.
-The two arms were never a partition (`owned > functions` for the types arm, and
-`functions >= 2` for the functions arm), so a record-heavy module fell into the
-gap and was described by the wrong arm.
-
-The arms now partition the module:
+The rule is a count. The arms only choose the message:
 
 - types arm: `class_equivalents >= functions` (the class equivalents are at
   least the bulk) and a second concept of its own — more than one type behaves,
   or a receiver group is another class equivalent;
 - functions arm: `functions > class_equivalents` (the functions are strictly
   the bulk) and at least `FUNCTIONS_GROUP_MIN` of them;
-- neither: one class, its records, and at most as many helpers is one concept.
+- when neither side is the bulk, the types arm names the types when there are
+  any, otherwise the functions arm.
 
-A tie belongs to the types, because a helper belongs to the class it is about.
-The types message names the receiver groups too, so every definition in its
-count is visible to the reader.
+There is no third, silent arm: a record-heavy module with more than two
+definitions fires. A tie names the types when there are types, because the
+helpers belong to the class they are about. The types message names the receiver
+groups too, so every definition in its count is visible to the reader.
 
 ## Measured
 
-Old core (`origin/main`, `e50592d`) and new core, both scanned through the same
-orchestrator at the two corpora's `main`; `(file, kind)` diff:
+Old core (current `main`) and new core, both scanned through the same
+orchestrator on the two corpora's `main`; `(file, kind)` diff:
 
-| repo | before | after |
-|---|---:|---:|
-| family-history-album | 683 | 674 |
-| houses | 229 | 220 |
+| repo | before | after | change |
+|---|---:|---:|---:|
+| houses | 249 | 255 | +6 `several-definitions` |
+| family-history-album | 676 | 681 | +5 `several-definitions` |
 
-Nine findings removed per repo, none added. Every removed finding is a module of
-one class (or one namespace) plus its records plus its helpers — the shape the
-exemption names:
+No finding is removed: the constructor change corrects the behaviour count and
+the message, but these corpora's record-heavy modules still hold more than two
+definitions, so they now fire where the previous arm gate was silent. The added
+modules are:
 
-| module | shape |
-|---|---|
-| `loft/live/document_row.py`, `page_row.py`, `review_row.py`, `batch_row.py` | one `*Projection` + its `*Row`/`*State`/`*Bundle` records + helpers |
-| `loft/live/migrate.py`, `schema.py`, `pipeline/model/ai_client.py` | one class + an error/value record + helpers (`Schema` is all `@classmethod`) |
-| `pipeline/api/approval.py`, `pipeline/evals/eval_review.py` | one behavioural class + its records (eval flows) + helpers |
-| `houses/{apcoa_scraper,bus_journey,comments,stations}.py`, `dag/measurement.py` | one class or namespace + its records + helpers |
-| `houses/{map_layers,town_desc,transit_route}.py`, `houses/model/domain.py`, `houses/web/settings_payload.py`, `tools/commute/searches.py` | records (`from_dict`/`to_dict` only) + helpers |
+- houses: `houses/commute.py`, `houses/nodes/{bus_route_node,commute_breakdown_node,property_detail,property_summary}.py`,
+  `tools/check_docs_links.py`
+- album: `document/transcript.py`, `loft/live/{change,compat_pages,errors}.py`,
+  `research/spike-word-segmentation/render_marks_wholepage.py`
 
-Three modules keep their finding and change arm, from the functions message to
-the types message, because their types and functions tie: `pipeline/detect/mark.py`
-(5 types), `pipeline/stage_table.py` (4), `houses/model/domain.py` (10, three of
-them behavioural). The message now names the types the reader is looking for.
-
-No removed finding had two behavioural types: the positive case (two classes that
-act on their values) still fires in both languages, pinned by tests.
+The positive case (two classes that act on their values) still fires in both
+languages, pinned by tests.
 
 ## Residuals
 
@@ -100,23 +87,25 @@ act on their values) still fires in both languages, pinned by tests.
   as behaviour, so a value class that declares one is not exempt. Whether a
   value's dunders are "acting on its values" is a separate decision; this round
   did not widen the exemption.
-- A module of several stateless namespaces is no longer judged by this rule: it
-  holds no stateful owner for the message to name, and #107's `mixed-module`
-  family is the signal for a module whose parts never reference each other.
-- `docs/plans/plan-issue-107-module-shape.md` still says "a class with no
-  methods is a value record"; that doc records the round that shipped the
-  ladder. `RULES.md` and this doc are the current statement.
+- A module of several stateless namespaces is judged by the count like any
+  other module; the message names the types, and `mixed-module` remains the
+  signal for parts that never reference each other.
+- `docs/plans/plan-issue-107-module-shape.md` records the round that shipped
+  the ladder; its record exemption sentence is superseded by this round.
+  `RULES.md` and this doc are the current statement.
 
 ## Review refactor
 
 The review found the arm predicate hard to read, not wrong. The refactor makes
 the decision structural:
 
-- `ShapeArm` (Types/Functions/None) is the one arm decision; both findings
-  match on it instead of repeating the `if`/`else`.
+- `ShapeArm` (Types/Functions) is the message choice; both findings match on
+  it instead of repeating the `if`/`else`. A module over the threshold always
+  fires.
 - `class_equivalents()` names what the types arm owns (types plus receiver
   groups); `types_dominate()` and `functions_are_a_group()` name the two
-  comparisons. The tie and the `None` silence are documented at the decision.
+  comparisons. The fallback to types (or functions when there are no types) is
+  documented at the decision.
 - The types message now includes the receiver-group clause, so a module whose
   count includes a function group can be checked by the reader.
 - The new tests are real files under `tests/fixtures/code/`, not inline

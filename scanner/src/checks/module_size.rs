@@ -119,18 +119,12 @@ enum Rung {
     Many,
 }
 
-/// Which arm speaks for a module. The two arms partition the result: the
-/// types arm names the class equivalents, the functions arm names the free
-/// functions, and neither speaks when the module is one concept plus records.
+/// Which arm names a module's definitions. Both arms are a message choice:
+/// a module with more than two definitions always fires.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShapeArm {
     Types,
     Functions,
-    /// One concept plus its records and helpers: neither arm has a claim.
-    /// This is the deliberate silence — the functions arm needs the functions
-    /// to be strictly more than the class equivalents, and the types arm needs
-    /// a second concept of its own.
-    None,
 }
 
 /// One top-level type: a class, or a Rust struct/enum/trait/union. `methods`
@@ -218,7 +212,6 @@ impl ModuleShape {
                 rel,
                 self.functions_message(rel, true),
             )),
-            ShapeArm::None => None,
         }
     }
 
@@ -236,7 +229,6 @@ impl ModuleShape {
                 rel,
                 self.functions_message(rel, false),
             )),
-            ShapeArm::None => None,
         }
     }
 
@@ -244,15 +236,17 @@ impl ModuleShape {
     /// module.
     fn arm(&self) -> ShapeArm {
         if self.types_dominate() {
-            ShapeArm::Types
-        } else if self.functions_are_a_group() {
+            return ShapeArm::Types;
+        }
+        if self.functions_are_a_group() {
+            return ShapeArm::Functions;
+        }
+        // More than two definitions always fires; when neither side is the
+        // bulk, name the types when there are any, otherwise the functions.
+        if self.classes.is_empty() {
             ShapeArm::Functions
         } else {
-            // neither side is the bulk: one class, its records, and at most
-            // as many helpers is one concept. The functions arm requires the
-            // functions to be strictly more than the class equivalents, so a
-            // tie with only one behavioural type has no arm to speak.
-            ShapeArm::None
+            ShapeArm::Types
         }
     }
 
@@ -297,7 +291,7 @@ impl ModuleShape {
     fn classes_message(&self, rel: &str) -> String {
         let names: Vec<&str> = self.classes.iter().map(|c| c.name.as_str()).collect();
         format!(
-            "'{rel}' holds {count} top-level definitions, {types} of them {noun} ({list}){groups}{framework}. {principle} {reader} {merge} {package} {record}",
+            "'{rel}' holds {count} top-level definitions, {types} of them {noun} ({list}){groups}{framework}. {principle} {reader} {merge} {package}",
             count = self.definitions(),
             types = names.len(),
             noun = self.type_noun(),
@@ -308,7 +302,6 @@ impl ModuleShape {
             reader = self.reader_harm(),
             merge = self.merge_action(),
             package = self.package_action(),
-            record = self.record_exclusion(),
         )
     }
 
@@ -430,17 +423,6 @@ impl ModuleShape {
             }
             (Language::Rust, true) => {
                 "If the functions are several concerns, split the module by concern: one module per family, each owning the type it introduces. If they are one concern, give them the type they operate on as an impl, keeping the free function where a `&mut` borrow would conflict."
-            }
-        }
-    }
-
-    fn record_exclusion(&self) -> &'static str {
-        match self.language {
-            Language::Python => {
-                "A class whose methods act on no value of its own adds no behaviour, so it may stay beside the class that uses it."
-            }
-            Language::Rust => {
-                "A type whose impl acts on no value of its own adds no behaviour, so it may stay beside the type that uses it."
             }
         }
     }
