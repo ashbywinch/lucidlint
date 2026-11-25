@@ -5713,6 +5713,20 @@ mod tests {
     }
 
     #[test]
+    fn several_definitions_counts_a_module_dunder_that_is_not_a_hook() {
+        // only __getattr__/__dir__ are interpreted at module scope; __str__ and
+        // __repr__ are names nothing calls, so they stay definitions
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_dunder_not_a_hook.py");
+        let parsed = parse_module(src).unwrap();
+        let shape = checks::ModuleShape::python(src, &parsed.syntax().body);
+        assert_eq!(shape.functions, 2);
+        assert_eq!(shape.framework_functions, 0);
+        assert_eq!(shape.definitions(), 3);
+        let f = scan_corpus(&[("pkg/registry.py", src)]);
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
     fn several_definitions_reports_the_types_when_types_and_functions_tie() {
         // two classes with behaviour and two helpers: the helpers belong to
         // the classes, so the types arm names them — the functions arm would
