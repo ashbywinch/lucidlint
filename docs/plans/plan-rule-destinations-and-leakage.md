@@ -119,7 +119,7 @@ different types, the finding is the *type* question, not a duplicate.
 ## 4. `derived-method` (warn) names the direct form
 
 The call-shaped `misplaced-method` stays a fail. The direct form is a warning:
-the formatting may belong to the call site, so the reader decides.
+the value may be for one caller, so the reader decides.
 
 A module-level function whose first parameter is a class this module defines,
 which reads through it at two or more places, never uses it as a bare value,
@@ -136,10 +136,9 @@ accessor stays: a getter is not always a method. A bare use means the function
 needs the object, not the object's fields.
 
 Negative: `_parse_gender(raw: str)` has no class parameter and stays.
-The message states both outcomes: "`_format_address` takes `School` and only
-reads through it. If the result describes `School` itself, make it the method
-`_format_address`; if the formatting is specific to the code that calls it,
-keep it here."
+The message states both outcomes: "`_format_address` takes only a `School` and
+reads its fields. If every caller would want the same value, it belongs on
+`School` as a method. If only this caller wants it, keep it with the caller."
 
 ## 5. `feature-envy` gains the free-function form
 
