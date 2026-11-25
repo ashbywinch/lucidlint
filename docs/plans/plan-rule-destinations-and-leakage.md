@@ -138,8 +138,8 @@ needs the object, not the object's fields.
 Negative: `_parse_gender(raw: str)` has no class parameter and stays.
 The message states both outcomes: "`_format_address` takes `School` and only
 reads through it. If the result describes `School` itself, make it the method
-`_format_address`; if the formatting is specific to this call site, keep it
-here."
+`_format_address`; if the formatting is specific to the code that calls it,
+keep it here."
 
 ## 5. `feature-envy` gains the free-function form
 
