@@ -657,7 +657,10 @@ CATALOG = RuleCatalog([
          "imported name (`m._x`). A private name belongs to the module that "
          "defines it; reach a public API, or move the call into that module. "
          "Making it public is not the default fix: once a name is public, other "
-         "code can depend on it and it has to keep working. "
+         "code can depend on it and it has to keep working. Before making it "
+         "public, check whether the class mixes concerns and the function "
+         "belongs on the class that owns them, or the caller is doing work "
+         "the callee should own. "
          "A package's `__init__.py` may reassemble names from its own package; "
          "a peer module may not, and another package's private name is "
          "leakage even in a facade.",

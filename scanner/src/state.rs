@@ -477,7 +477,7 @@ impl<'a> ScanState<'a> {
                                     "so it can change without notice and this call can break. ",
                                     "Do not just rename it public: other code can then depend on it, and you have to keep it working. ",
                                     "Call the public API that already does the job, or move the behaviour into the module that owns the data. ",
-                                    "Make it public only when callers really need it, and name it for what it does."
+                                    "Before making it public, check two things: does the class mix concerns, so the function belongs on the class that owns them? Is the caller doing work the class should do itself?"
                                 ),
                                 target = target
                             ),
@@ -510,7 +510,7 @@ impl<'a> ScanState<'a> {
                                     "so it can change without notice and this import can break. ",
                                     "Do not just drop the underscore: other code can then depend on the module's contents, and you have to keep them working. ",
                                     "Use the package's public modules, or move the behaviour into the package. ",
-                                    "Make the module public only when callers really need it, and name it for what it does."
+                                    "Before making the module public, check two things: does the package mix concerns, so this belongs in a module of its own? Is the caller doing work the package should do itself?"
                                 ),
                                 name = name
                             ),
@@ -677,7 +677,7 @@ impl ScanState<'_> {
                         "so it can change without notice and this call can break. ",
                         "Do not just rename it public: other code can then depend on it, and you have to keep it working. ",
                         "Call the public API that already does the job, or move the call into the module that owns the data. ",
-                        "Make it public only when callers really need it, and name it for what it does."
+                        "Before making it public, check two things: does the class mix concerns, so the function belongs on the class that owns them? Is the caller doing work the class should do itself?"
                     ),
                     target = target
                 ),
