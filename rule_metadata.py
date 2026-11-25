@@ -446,8 +446,8 @@ CATALOG = RuleCatalog([
          "module defines, returns one expression about it, and only reads "
          "through it. The formatting may belong to the call site, so this is "
          "a warning: if the result describes the class itself, make it a "
-         "method on the class; if it is the caller's presentation, keep it "
-         "there.",
+         "method on the class; if the code that calls it needs that "
+         "formatting, keep it there.",
          display_name="derived-method → latent-class", display_group="latent-class"),
     Rule("assembly-class", "fail", "architecture", ("python",),
          "A function assembles >=3 structures by threading the same data "
