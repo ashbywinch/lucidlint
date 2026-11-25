@@ -138,9 +138,9 @@ needs the object, not the object's fields.
 
 Negative: `_parse_gender(raw: str)` has no class parameter and stays.
 The message states both outcomes: "`_format_address` takes only a `School` and
-reads its fields. If a change to `School` would force a change here, move it
-onto `School` as a method. If a change to the caller would force a change here,
-keep it with the caller."
+reads its fields. If a change to `School` would force this function to change,
+move it onto `School` as a method. If a change to the caller would force this
+function to change, keep it with the caller."
 
 ## 5. `feature-envy` gains the free-function form
 
