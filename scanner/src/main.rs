@@ -136,6 +136,14 @@ struct ScanState<'a> {
     magic_unit_named_exempts: HashSet<usize>,
     /// Every referenced name (Name nodes + import aliases) in this file.
     refs: HashSet<String>,
+    /// Bound name -> the module it was imported from: the module alias for
+    /// `import a.b [as c]`, the bound name for `from a import b [as c]`.
+    /// `private-code-leakage` resolves a private attribute's receiver here, and
+    /// a package `__init__.py` may reassemble its own package's names.
+    import_sources: std::collections::HashMap<String, String>,
+    /// Underscore-attribute reaches found during the walk, resolved after it:
+    /// (receiver root, dotted target, line, enclosing function).
+    private_reaches: Vec<(String, String, usize, String)>,
     /// String literal values (prod files only).
     strings: Vec<String>,
     /// Module-level function names with decorators (framework-registered).
@@ -1481,12 +1489,54 @@ mod tests {
     }
 
     #[test]
-    fn private_import_both_forms_and_future_skip() {
+    fn private_code_leakage_imports_and_module_attribute() {
         let f = scan_src(include_str!(
-            "../../tests/fixtures/rust/private_import_both_forms_and_future_skip__01.py"
+            "../../tests/fixtures/rust/private_code_leakage_imports_and_module_attribute__01.py"
         ));
-        let priv_imports: Vec<&Finding> = f.iter().filter(|x| x.kind == "private-import").collect();
-        assert_eq!(priv_imports.len(), 2); // __future__ skipped
+        let leaks: Vec<&Finding> = f.iter().filter(|x| x.kind == "private-code-leakage").collect();
+        assert_eq!(leaks.len(), 5); // two private imports + three module-attribute reaches
+        assert!(
+            leaks
+                .iter()
+                .any(|x| x.line == 11 && x.message.contains("houses.school._try_geopoint")),
+            "the module-path reach is named at its line: {leaks:?}"
+        );
+        assert!(
+            !leaks.iter().any(|x| x.message.contains("self._value")),
+            "a class reaching its own private attribute is not leakage: {leaks:?}"
+        );
+        assert!(
+            !leaks.iter().any(|x| x.message.contains("__future__")),
+            "__future__ is skipped: {leaks:?}"
+        );
+    }
+
+    #[test]
+    fn private_code_leakage_package_facade_reassembles_its_own_names() {
+        let own = include_str!("../../tests/fixtures/rust/private_code_leakage_package_facade__01.py");
+        let facade = scan_corpus(&[("pkg/__init__.py", own)]);
+        assert!(
+            !facade.iter().any(|x| x.kind == "private-code-leakage"),
+            "a package __init__ may reassemble its own package's names: {facade:?}"
+        );
+        let peer = scan_corpus(&[("pkg/peer.py", own)]);
+        assert!(
+            peer.iter().any(|x| x.kind == "private-code-leakage"),
+            "a peer module may not reach the same private name: {peer:?}"
+        );
+        let foreign = include_str!("../../tests/fixtures/rust/private_code_leakage_foreign_package__01.py");
+        let facade = scan_corpus(&[("pkg/__init__.py", foreign)]);
+        assert!(
+            facade.iter().any(|x| x.kind == "private-code-leakage"),
+            "another package's private name is leakage even in a facade: {facade:?}"
+        );
+        // a package whose name only shares a prefix is not the same package
+        let prefixed = include_str!("../../tests/fixtures/rust/private_code_leakage_prefixed_package__01.py");
+        let facade = scan_corpus(&[("pkg/__init__.py", prefixed)]);
+        assert!(
+            facade.iter().any(|x| x.kind == "private-code-leakage"),
+            "pkg_extra is not pkg: {facade:?}"
+        );
     }
 
     // ------------------------------------------------------------- unreachable
