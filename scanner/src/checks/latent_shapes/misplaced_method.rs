@@ -3,7 +3,10 @@
 //! matching EVERY parameter — the class already holds the data, so the function
 //! is its method in exile.
 
-use ruff_python_ast::{Expr, Stmt};
+use std::collections::{HashMap, HashSet};
+
+use ruff_python_ast::visitor::source_order::{walk_expr, SourceOrderVisitor};
+use ruff_python_ast::{Expr, Stmt, StmtFunctionDef};
 use ruff_text_size::Ranged;
 
 use crate::finding::Finding;
@@ -16,32 +19,102 @@ use super::super::{class_attr_names, push_stmt_children, stmt_exprs};
 pub struct MisplacedMethod;
 
 impl MisplacedMethod {
+    /// The class an annotation names, when it is one this module defines.
+    fn annotation_class(annotation: Option<&Expr>, classes: &HashSet<String>) -> Option<String> {
+        let name = match annotation? {
+            Expr::Name(n) => n.id.to_string(),
+            Expr::StringLiteral(s) => s.value.to_str().to_string(),
+            _ => return None,
+        };
+        classes.contains(&name).then_some(name)
+    }
+
+    /// How a function body uses one name: reads through the name's attributes,
+    /// and whether the name is also used as a value (passed, returned,
+    /// assigned).
+    fn receiver_use(body: &[Stmt], param: &str) -> (usize, bool) {
+        struct Use<'a> {
+            param: &'a str,
+            reads: usize,
+            bare: bool,
+        }
+        impl<'a> SourceOrderVisitor<'a> for Use<'a> {
+            fn visit_expr(&mut self, expr: &'a Expr) {
+                if let Expr::Attribute(a) = expr {
+                    if matches!(a.value.as_ref(), Expr::Name(n) if n.id.as_str() == self.param) {
+                        self.reads += 1;
+                        return;
+                    }
+                }
+                if matches!(expr, Expr::Name(n) if n.id.as_str() == self.param) {
+                    self.bare = true;
+                }
+                walk_expr(self, expr);
+            }
+        }
+        let mut usage = Use {
+            param,
+            reads: 0,
+            bare: false,
+        };
+        let mut stack: Vec<&Stmt> = body.iter().collect();
+        while let Some(st) = stack.pop() {
+            if matches!(st, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+                continue;
+            }
+            for expr in stmt_exprs(st) {
+                usage.visit_expr(expr);
+            }
+            push_stmt_children(st, &mut stack);
+        }
+        (usage.reads, usage.bare)
+    }
+
+    /// Every module-level function: its name, line, and parameters.
+    fn module_functions(body: &[Stmt], source: &str) -> HashMap<String, (usize, Vec<String>)> {
+        body.iter()
+            .filter_map(|s| match s {
+                Stmt::FunctionDef(f) => Some((
+                    f.name.to_string(),
+                    (Source::line_of(source, f.name.range().start()), Self::param_names(f)),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn param_names(f: &StmtFunctionDef) -> Vec<String> {
+        let mut params: Vec<String> = f
+            .parameters
+            .posonlyargs
+            .iter()
+            .chain(&f.parameters.args)
+            .chain(&f.parameters.kwonlyargs)
+            .map(|a| a.parameter.name.to_string())
+            .collect();
+        if let Some(v) = &f.parameters.vararg {
+            params.push(v.name.to_string());
+        }
+        if let Some(k) = &f.parameters.kwarg {
+            params.push(k.name.to_string());
+        }
+        params
+    }
+
     /// Report every module function that receives the class's own state.
     pub fn findings(state: &mut ScanState, body: &[Stmt]) {
-        let mut module_fns: std::collections::HashMap<String, (usize, Vec<String>)> = std::collections::HashMap::new();
-        for s in body {
-            let Stmt::FunctionDef(f) = s else { continue };
-            let mut params = Vec::new();
-            params.extend(
-                f.parameters
-                    .posonlyargs
-                    .iter()
-                    .chain(&f.parameters.args)
-                    .chain(&f.parameters.kwonlyargs)
-                    .map(|a| a.parameter.name.to_string()),
-            );
-            if let Some(v) = &f.parameters.vararg {
-                params.push(v.name.to_string());
-            }
-            if let Some(k) = &f.parameters.kwarg {
-                params.push(k.name.to_string());
-            }
-            let line = Source::line_of(state.source, f.name.range().start());
-            module_fns.insert(f.name.to_string(), (line, params));
-        }
+        let module_fns = Self::module_functions(body, state.source);
         if module_fns.is_empty() {
             return;
         }
+        let module_classes: HashSet<String> = body
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::ClassDef(c) => Some(c.name.to_string()),
+                _ => None,
+            })
+            .collect();
+        let mut reported: HashSet<usize> = HashSet::new();
         for s in body {
             let Stmt::ClassDef(c) = s else { continue };
             let attrs = class_attr_names(&c.body);
@@ -77,7 +150,7 @@ impl MisplacedMethod {
                                 _ => false,
                             })
                         });
-                        if matched {
+                        if matched && reported.insert(*def_line) {
                             state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                                         file: state.file.to_string(),
                                                         line: *def_line,
@@ -96,6 +169,66 @@ impl MisplacedMethod {
                     push_stmt_children(st, &mut stack);
                 }
             }
+        }
+
+        Self::direct_form(state, body, &module_classes, &mut reported);
+    }
+
+    /// A derivation is one returned expression (after an optional docstring):
+    /// the function states a value about its parameter, rather than running a
+    /// service that happens to take it.
+    fn is_derivation(body: &[Stmt]) -> bool {
+        let mut statements = body
+            .iter()
+            .filter(|s| !matches!(s, Stmt::Expr(e) if matches!(e.value.as_ref(), Expr::StringLiteral(_))));
+        matches!((statements.next(), statements.next()), (Some(Stmt::Return(_)), None))
+    }
+
+    /// A module function that takes one of the module's classes as its first
+    /// parameter and only reads through it is that class's method, with no call
+    /// site needed.
+    fn direct_form(
+        state: &mut ScanState,
+        body: &[Stmt],
+        module_classes: &HashSet<String>,
+        reported: &mut HashSet<usize>,
+    ) {
+        for s in body {
+            let Stmt::FunctionDef(f) = s else { continue };
+            if !f.decorator_list.is_empty() {
+                continue;
+            }
+            let Some(first) = f.parameters.posonlyargs.first().or_else(|| f.parameters.args.first()) else {
+                continue;
+            };
+            let Some(class) = Self::annotation_class(first.parameter.annotation.as_deref(), module_classes) else {
+                continue;
+            };
+            let (reads, bare) = Self::receiver_use(&f.body, first.parameter.name.as_str());
+            if reads < 2 || bare || !Self::is_derivation(&f.body) {
+                continue;
+            }
+            let line = Source::line_of(state.source, f.name.range().start());
+            if !reported.insert(line) {
+                continue;
+            }
+            state.findings.push(Finding {
+                logical_start: None,
+                seam_members: Vec::new(),
+                col: 0,
+                file: state.file.to_string(),
+                line,
+                function: f.name.to_string(),
+                kind: "misplaced-method".into(),
+                severity: "fail".into(),
+                message: format!(
+                    "'{}' takes '{}' and only reads through it; move it onto '{}' as the method '{}'",
+                    f.name.as_str(),
+                    class,
+                    class,
+                    f.name.as_str()
+                ),
+            });
         }
     }
 }
