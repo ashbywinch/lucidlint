@@ -650,8 +650,15 @@ CATALOG = RuleCatalog([
          "`import` inside a function body (Python) — imports belong at module "
          "top.",
          display_group="standard"),
-    Rule("private-import", "fail", "style", ("python", "rust"),
-         "Importing an underscore-prefixed symbol from another module.",
+    Rule("private-code-leakage", "fail", "style", ("python",),
+         "A private name reached from another module: importing an underscore "
+         "symbol (`from m import _x`), importing a private module path "
+         "(`import pkg._internal`), or reading a private attribute on an "
+         "imported name (`m._x`). A private name belongs to the module that "
+         "defines it; reach a public API, or move the call into that module. "
+         "A package's `__init__.py` may reassemble names from its own package; "
+         "a peer module may not, and another package's private name is "
+         "leakage even in a facade.",
          display_group="standard"),
     Rule("global-state", "fail", "style", ("python", "rust"),
          "Any module-level variable assignment — mutable or constant, mutated "
