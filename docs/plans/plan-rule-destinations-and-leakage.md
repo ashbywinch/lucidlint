@@ -37,7 +37,16 @@ The rename states the full problem, and the rule gains the attribute arm.
   four `lucidlint: ignore private-import` sites in `houses` in a paired PR (a
   different repository cannot ride the same PR); no alias is kept (an alias
   would leave two names for one rule).
-- Tests: the three forms fire; a public import and a public attribute do not.
+- A package's `__init__.py` may reassemble names from its own package; that is
+  the facade's job, not leakage. A peer module may not, and another package's
+  private name is leakage even in a facade. The rule row states the exemption.
+- The attribute arm found twenty facade reaches in `fix_engine/__init__.py`
+  (its documented re-export surface) and two genuine reaches:
+  `RustScan._actions_from_rust` and `RenderCtx._FEEDBACK_REQUEST`. The two
+  become public in this round; the facade is exempt by the rule.
+- Tests: the three forms fire; a public import and a public attribute do not;
+  the facade reassembles its own names, a peer module reaching the same name
+  does not, and a facade reaching another package's private name does not.
 
 ## 2. Private functions do not count toward `several-definitions` / `many-definitions`
 
