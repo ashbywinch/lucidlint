@@ -116,12 +116,14 @@ different types, the finding is the *type* question, not a duplicate.
 - When the types are structurally identical and the difference is only names,
   report one duplicate with the merged type named.
 
-## 4. `misplaced-method` gains the direct form
+## 4. `derived-method` (warn) names the direct form
 
-Today it fires only when a method calls a module-level function passing
-`self.<attr>` for every parameter. Add: a module-level function whose first
-parameter is annotated as a class defined in the same module, and whose body
-only reads or writes that parameter.
+The call-shaped `misplaced-method` stays a fail. The direct form is a warning:
+the formatting may belong to the call site, so the reader decides.
+
+A module-level function whose first parameter is a class this module defines,
+which reads through it at two or more places, never uses it as a bare value,
+and returns one expression with no conditional, is a method in disguise —
 
 ```python
 def _format_address(school: School) -> str:
@@ -134,9 +136,10 @@ accessor stays: a getter is not always a method. A bare use means the function
 needs the object, not the object's fields.
 
 Negative: `_parse_gender(raw: str)` has no class parameter and stays.
-The message names the class and the method: "`_format_address` takes `School`
-and only reads through it; move it onto `School` as the method
-`_format_address`."
+The message states both outcomes: "`_format_address` takes `School` and only
+reads through it. If the result describes `School` itself, make it the method
+`_format_address`; if the formatting is specific to this call site, keep it
+here."
 
 ## 5. `feature-envy` gains the free-function form
 
