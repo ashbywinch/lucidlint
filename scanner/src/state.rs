@@ -473,11 +473,11 @@ impl<'a> ScanState<'a> {
                             severity: "fail".into(),
                             message: format!(
                                 concat!(
-                                    "imports private symbol '{target}' from another module — the name is an implementation detail, ",
-                                    "and depending on it couples this code to a choice the owner may change. ",
-                                    "Renaming it public is not the fix: that turns a detail into a promise. ",
-                                    "Call the public API that expresses the need, or move the behaviour into the owning module. ",
-                                    "Make it public only when it is part of the module's contract."
+                                    "imports private symbol '{target}' from another module — the name is not part of the module's public API, ",
+                                    "so it can change without notice and this call can break. ",
+                                    "Do not just rename it public: other code can then depend on it, and you have to keep it working. ",
+                                    "Call the public API that already does the job, or move the behaviour into the module that owns the data. ",
+                                    "Make it public only when callers really need it, and name it for what it does."
                                 ),
                                 target = target
                             ),
@@ -506,11 +506,11 @@ impl<'a> ScanState<'a> {
                             severity: "fail".into(),
                             message: format!(
                                 concat!(
-                                    "imports private module path '{name}' — the layout is an implementation detail, ",
-                                    "and depending on it couples this code to a structure the owner may change. ",
-                                    "Dropping the underscore is not the fix: that turns a private module into a promise. ",
-                                    "Use the package's public surface, or move the behaviour into the package. ",
-                                    "Make it public only when it is part of the package's contract."
+                                    "imports private module path '{name}' — the package's file layout is not part of its public API, ",
+                                    "so it can change without notice and this import can break. ",
+                                    "Do not just drop the underscore: other code can then depend on the module's contents, and you have to keep them working. ",
+                                    "Use the package's public modules, or move the behaviour into the package. ",
+                                    "Make the module public only when callers really need it, and name it for what it does."
                                 ),
                                 name = name
                             ),
@@ -673,11 +673,11 @@ impl ScanState<'_> {
                 severity: "fail".into(),
                 message: format!(
                     concat!(
-                        "reaches private '{target}' from another module — the name is an implementation detail, ",
-                        "and reaching it couples this code to a choice the owner may change. ",
-                        "Renaming it public is not the fix: that turns a detail into a promise. ",
-                        "Call the public API that expresses the need, or move the call into the owning module. ",
-                        "Make it public only when it is part of the module's contract."
+                        "reaches private '{target}' from another module — the name is not part of the module's public API, ",
+                        "so it can change without notice and this call can break. ",
+                        "Do not just rename it public: other code can then depend on it, and you have to keep it working. ",
+                        "Call the public API that already does the job, or move the call into the module that owns the data. ",
+                        "Make it public only when callers really need it, and name it for what it does."
                     ),
                     target = target
                 ),
