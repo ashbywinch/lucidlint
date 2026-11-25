@@ -259,11 +259,11 @@ impl MisplacedMethod {
                 kind: "derived-method".into(),
                 severity: "warn".into(),
                 message: format!(
-                    "'{}' takes '{}' and only reads through it. If the result describes '{}' itself, make it the method '{}'; if the formatting is specific to the code that calls it, keep it here.",
+                    "'{}' takes only a '{}' and reads its fields. If a change to '{}' would force a change here, move it onto '{}' as a method. If a change to its caller would force a change here, keep it with the caller.",
                     f.name.as_str(),
                     class,
                     class,
-                    f.name.as_str()
+                    class
                 ),
             });
         }
