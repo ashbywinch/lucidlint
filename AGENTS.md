@@ -49,7 +49,8 @@ pyrefly both exclude it (the fixtures are intentionally broken input).
 | Issue #42: record-shape export exemption for to_dict/to_json | `docs/plans/plan-issue-42-export-exemption.md` |
 | Issue #93: `unnamed-condition` + `unnamed-classification` (criterion, message, measurement) | `docs/plans/plan-issue-93-unnamed-condition.md` |
 | Issue #119: a record's constructor is not behaviour (module-shape arms) | `docs/plans/plan-issue-119-record-behaviour.md` |
-| Issue #107: `several-classes` + `many-functions` and the `checks.rs` split | `docs/plans/plan-issue-107-module-shape.md` |
+| Issue #107: the module-shape ladder (`several-definitions`/`many-definitions`) and the `checks.rs` split | `docs/plans/plan-issue-107-module-shape.md` |
+| Rule destinations and private code leakage (message review follow-up) | `docs/plans/plan-rule-destinations-and-leakage.md` |
 | Docs walk: ask git for ignored docs, guard unreadable reads | `docs/plans/plan-docs-walk-git.md` |
 | Issue #44: middle-man exemptions (library targets, interface members, fixed defaults) | `docs/plans/plan-issue-44-middle-man-exemptions.md` |
 | Issue #57: data-clump parameter-type grouping + record-shape tuple wording | `docs/plans/plan-issue-57-param-type-clump.md` |

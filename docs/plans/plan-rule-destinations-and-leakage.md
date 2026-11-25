@@ -1,0 +1,163 @@
+# Plan — rule destinations and private code leakage
+
+Follows the 0.8.0 message review run on `houses` (`608e54b4`, 255 findings) and
+`the-loft` (`a655d813`, 681 findings). The review's through-line: several
+high-volume rules name a mechanic and then ask the reader to make a decision
+the detector can already make. This round fixes the detectors and the messages
+together, one PR per change.
+
+## Principle
+
+A message names the destination when the evidence names it. It does not say
+"decide which before editing", "reconsider whether this class is the correct
+abstraction", or "if this is deliberate, keep both" when the detector can see
+which case the code is. If the detector cannot tell, it does not emit the
+finding — it never hands the reader a question the tool could answer.
+
+This is the message standard's existing "state only what the detector knows",
+applied to the action as well as the fact.
+
+## 1. `private-import` becomes `private-code-leakage`
+
+The rule today catches `from houses.school import _try_geopoint` and
+`import houses._internal`. It misses the third way code leaks out of a module:
+
+```python
+import houses.school
+houses.school._try_geopoint("51.4", "-1.0")
+```
+
+The rename states the full problem, and the rule gains the attribute arm.
+
+- Kind: `private-import` → `private-code-leakage`; severity stays `fail`.
+- Covers: a private name imported from another module, a private module path
+  imported, and an underscore attribute reached on a module imported from
+  another module.
+- The kind is a config, suppression and baseline key. The rename updates the
+  four `lucidlint: ignore private-import` sites in `houses` in the same PR; no
+  alias is kept (an alias would leave two names for one rule).
+- Tests: the three forms fire; a public import and a public attribute do not.
+
+## 2. Private functions do not count toward `several-definitions` / `many-definitions`
+
+A module-level function whose name starts with one underscore is a helper of
+the module's subject, not a second concern. `houses/school.py` is one class and
+two private parsers; it fires today and should not.
+
+- The exemption is honest because privacy is enforced: `private-code-leakage`
+  fails the import and the attribute form. A helper that another module can
+  reach is not private.
+- Public functions still count. A module of unrelated public definitions still
+  fires. The ladder's unit stays "definitions"; only the private helper is
+  removed from the count.
+- No separate `many-functions` rung: the name is the old label for this ladder,
+  and a second count over the same definitions would report one module twice.
+  A large private module remains covered by `large-function`, the file-edge
+  measure and `flat-folder`.
+- Tests: `houses/school.py`'s shape is silent; a module of three unrelated
+  public functions still fires; a private helper reached from another module
+  is a `private-code-leakage` failure, not a silent exemption.
+
+## 3. A duplicate names its home when the evidence names one
+
+Two new outcomes, decided by the detector, not the reader.
+
+**A repeated small construction has a home.** `GeoPoint(float(lat), float(lng))`
+appears at `houses/school.py:106`, `:181`,
+`tools/update_school_coords.py:88`, `:118` and
+`houses/apis/nominatim_api.py:30`. It is under `duplicate-expression`'s 15-node
+floor and its enclosing functions are not `duplicate`-similar, so neither rule
+sees it.
+
+- New kind `shared-construction` (warn, Python): the same call shape — same
+  callee, same argument conversions — in two or more functions or modules,
+  where the callee is a project class and the arguments are raw values being
+  converted. The message names the constructor to add:
+  "`GeoPoint.from_strings(lat, lng)` removes the five-site conversion; add it
+  to `GeoPoint` and call it here."
+- It does not fire on a direct constructor of already-typed values
+  (`GeoPoint(lat, lon)` with `float` parameters), on builtins, or on one site.
+
+**A deliberate parallel implementation is not a duplicate.** Same-named methods
+on a test double and its production store (`require`, `to_dict` in the loft), or
+per-type adapters (`_with_people` / `_with_places` in `tools/archive.py`), are
+parallel implementations with different types. The rule does not emit a
+duplicate finding for them, and the message never says "keep both" — the
+standard forbids approving duplication. When the pair is the same logic over
+different types, the finding is the *type* question, not a duplicate.
+
+- Detector: compare the parameter and return types and the literal/attribute
+  differences. Same name plus different types plus a test-double/production
+  pair or a per-type adapter is not a duplicate.
+- When the types are structurally identical and the difference is only names,
+  report one duplicate with the merged type named.
+
+## 4. `misplaced-method` gains the direct form
+
+Today it fires only when a method calls a module-level function passing
+`self.<attr>` for every parameter. Add: a module-level function whose first
+parameter is annotated as a class defined in the same module, and whose body
+only reads or writes that parameter.
+
+```python
+def _format_address(school: School) -> str:
+    return f"{school.name}, {school.postcode}"   # belongs on School
+```
+
+Negative: `_parse_gender(raw: str)` has no class parameter and stays.
+The message names the class and the method shape: "`_format_address` only reads
+`School`'s fields; make it `School.address`."
+
+## 5. `feature-envy` gains the free-function form
+
+Today it judges methods. Add: a free function whose reads are dominated by one
+parameter's attributes, where that parameter is a project class. Same read
+count and threshold as the method form.
+
+Negative: `format_line(text, width)` reads no object.
+The message names the class and the fields it reads.
+
+## 6. The drift check moves into `make check`
+
+`RULES.md` and `scanner/src/rules_gen.rs` are generated from
+`rule_metadata.CATALOG`; `scripts/gen-rules.py --check` validates both
+directions. It currently runs only in `make test` (via
+`tests/test_lucidlint.py`), so a stale generated file can pass the pre-push
+hook. Add the check to `lint-check` (the target both the hook and CI run).
+
+## 7. Audit: the declared language is not verified
+
+`private-import` declares `implementations=("python", "rust")`, but only the
+Python AST emits it. The language column is hand-declared per rule; the
+inventory checks the kind, not the language. Record this as an audit item:
+either verify every declared language has an emission, or derive the column
+from the emission sites. This round fixes `private-code-leakage`'s declaration
+to the language that actually emits it; the full audit is its own change.
+
+## Rejected, with the recorded reason
+
+- `several-classes` — tried; Python's unit is the class, and the Rust-count
+  transplant was wrong (`plan-issue-107-module-shape.md`).
+- `hub-file` — deleted 2026-11-17: fan-in measures popularity, not mixedness;
+  a shared model is legitimately imported by every rule module.
+- `duplicate-near` — no finding lived in the 0.7–0.9 band on either repo.
+- `duplicate-module-similarity` — rejected in the #26–#34 round.
+- `large-module` — the first cut, replaced by `several-definitions` /
+  `many-definitions`.
+- `many-functions` — not a distinct rule; the ladder counts definitions.
+
+## Measurement and gates
+
+Each PR records the before/after on `houses` and `the-loft`: the finding counts
+by kind, the new kind's examples, and the false positives the change avoids.
+`make check`, `make test` and `make self-check` are green before the PR. No
+threshold is changed to make a repo pass.
+
+## Order
+
+1. This plan and the `AGENTS.md` routing row.
+2. `private-code-leakage` (rename + attribute arm + `houses` suppressions).
+3. Private-helper exemption in the definition ladder.
+4. `shared-construction` and the duplicate-home message.
+5. `misplaced-method` direct form and `feature-envy` free-function form.
+6. `gen-rules.py --check` in `make check`.
