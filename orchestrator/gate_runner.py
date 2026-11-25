@@ -101,7 +101,7 @@ class GateRunner:
             only_rel=self.args.file,
             coverage=CoverageInput(cr, cc.graph_preferred),
         )
-        self.actions = RustScan._actions_from_rust(
+        self.actions = RustScan.actions_from_rust(
             rust, self.args.include_tests, getattr(self.args, "test_quality", False), fh.churn, fh.last_modified
         )
         self.report_header = rust.header
@@ -395,7 +395,7 @@ class GateRunner:
         if self.args.file:
             return
         print()
-        print(RenderCtx._FEEDBACK_REQUEST)
+        print(RenderCtx.FEEDBACK_REQUEST)
 
     def run(self) -> int:
         """The gate verdict for the repo."""
