@@ -374,7 +374,7 @@ class RustScan:
         return test_quality or not include_tests
 
     @staticmethod
-    def _actions_from_rust(
+    def actions_from_rust(
         rust: RustFindings,
         include_tests: bool,
         test_quality: bool,
