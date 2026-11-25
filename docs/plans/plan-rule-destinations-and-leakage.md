@@ -118,18 +118,25 @@ def _format_address(school: School) -> str:
     return f"{school.name}, {school.postcode}"   # belongs on School
 ```
 
+The function must read through the parameter at two or more places and never
+use it as a bare value (a return, an argument, an assignment). A one-field
+accessor stays: a getter is not always a method. A bare use means the function
+needs the object, not the object's fields.
+
 Negative: `_parse_gender(raw: str)` has no class parameter and stays.
-The message names the class and the method shape: "`_format_address` only reads
-`School`'s fields; make it `School.address`."
+The message names the class and the method: "`_format_address` takes `School`
+and only reads through it; move it onto `School` as the method
+`_format_address`."
 
-## 5. `feature-envy` gains the free-function form
+## 5. `feature-envy`'s free-function form waits for the class index
 
-Today it judges methods. Add: a free function whose reads are dominated by one
-parameter's attributes, where that parameter is a project class. Same read
-count and threshold as the method form.
-
-Negative: `format_line(text, width)` reads no object.
-The message names the class and the fields it reads.
+The method form is unchanged. The free-function form — a function that reads an
+*imported* project class — needs the repo-wide class index before it can name
+its destination. Without it, a parameter annotated `Path` or `Request` would
+produce "move this onto `pathlib.Path`", which is not a thing the reader can
+do. The rule does not guess a destination; it lands after the class index is
+available, and the plan records the dependency rather than shipping a message
+that names the wrong home.
 
 ## 6. The drift check moves into `make check`
 
