@@ -30,10 +30,14 @@
 //! mostly free functions has no object to own the data they pass around, so
 //! the reader names the domain concepts and makes them classes.
 //!
-//! Two exclusions: "all but one class are value records" is one class plus
-//! its records, and a decorated function is registered with a caller outside
-//! the module (a framework route, a CLI command) — a module made only of
-//! those is a framework contract, not a module full of concepts.
+//! Three exclusions: "all but one class are value records" is one class plus
+//! its records; a decorated function, and a module-level `__getattr__`/`__dir__`
+//! hook, are registered with a caller outside the module — a module made only
+//! of those is a framework contract, not a module full of concepts; and a
+//! private module function (`_name`) is the module's own helper, not a second
+//! concept. The sibling rule `private-code-leakage` (landing separately)
+//! enforces that the helper cannot be reached from another module; this
+//! exemption is conditional on that rule, and the two land together.
 //!
 //! A record is a type that adds no behaviour of its own: its methods build it
 //! (`__init__`, `Marker::parse`) or take no instance (a `@staticmethod`, a
@@ -150,17 +154,21 @@ pub struct ModuleShape {
     /// equivalent, so the group counts as one definition. A group over a
     /// foreign type (`&Expr`) is one concept too: the helpers around `Expr`.
     pub receiver_groups: Vec<(String, usize)>,
-    /// Functions with no receiver type: undecorated (Python) and ungrouped.
+    /// Functions with no receiver type: undecorated and public in Python (a
+    /// `_name` function is the module's helper), ungrouped in Rust.
     pub functions: usize,
-    /// Decorated functions: registered with a caller outside the module.
+    /// Decorated functions and module-level hooks (`__getattr__`, `__dir__`):
+    /// registered with a caller outside the module.
     pub framework_functions: usize,
     pub generated: bool,
 }
 
 impl ModuleShape {
     /// The definitions the module holds. Python: classes and undecorated
-    /// functions (a constant is a value, not a name; a decorated function is
-    /// the framework's entry point). Rust: types, the groups of functions that
+    /// public functions (a constant is a value, not a name; a decorated
+    /// function is the framework's entry point; a module hook is a protocol
+    /// hook; a `_name` function is the module's helper). Rust: types, the groups of
+    /// functions that
     /// take one type (a class equivalent — the type plus its methods in
     /// exile), and the functions left with no receiver.
     pub fn definitions(&self) -> usize {
@@ -440,6 +448,21 @@ impl ModuleShape {
         }
     }
 
+    /// The dunder functions the interpreter calls on a *module* (PEP 562): they
+    /// are protocol hooks, not concepts the module owns. Other dunders at module
+    /// scope (`__str__`, `__init__`) are names nothing calls.
+    const MODULE_HOOKS: &[&str] = &["__getattr__", "__dir__"];
+
+    fn is_module_hook(name: &str) -> bool {
+        Self::MODULE_HOOKS.contains(&name)
+    }
+
+    /// A private module function: one leading underscore, but not a dunder (a
+    /// dunder that is not a module hook is a name nothing calls, not a helper).
+    fn is_private_helper(name: &str) -> bool {
+        name.starts_with('_') && !(name.starts_with("__") && name.ends_with("__"))
+    }
+
     fn finding(kind: &str, severity: &str, rel: &str, message: String) -> Finding {
         Finding {
             logical_start: None,
@@ -487,10 +510,20 @@ impl ModuleShape {
                     methods: Self::acting_methods(&class.body),
                 }),
                 Stmt::FunctionDef(function) => {
-                    if function.decorator_list.is_empty() {
-                        functions += 1;
-                    } else {
+                    if !function.decorator_list.is_empty() {
                         framework_functions += 1;
+                    } else if Self::is_module_hook(&function.name) {
+                        // a module hook (`__getattr__`, `__dir__`) is called
+                        // by the interpreter — not a concept, and not a
+                        // private helper
+                        framework_functions += 1;
+                    } else if Self::is_private_helper(&function.name) {
+                        // a private module function is the module's own helper,
+                        // not a second concept; the sibling rule
+                        // `private-code-leakage` enforces that no other module
+                        // can reach it, and this exemption lands with it
+                    } else {
+                        functions += 1;
                     }
                 }
                 _ => {}
