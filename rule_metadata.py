@@ -656,6 +656,9 @@ CATALOG = RuleCatalog([
          "(`import pkg._internal`), or reading a private attribute on an "
          "imported name (`m._x`). A private name belongs to the module that "
          "defines it; reach a public API, or move the call into that module. "
+         "Making it public is not the default fix: a public name is part of "
+         "the module's contract, and widening the contract to silence a caller "
+         "creates the coupling the boundary exists to prevent. "
          "A package's `__init__.py` may reassemble names from its own package; "
          "a peer module may not, and another package's private name is "
          "leakage even in a facade.",

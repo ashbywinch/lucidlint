@@ -472,7 +472,14 @@ impl<'a> ScanState<'a> {
                             kind: "private-code-leakage".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "imports private symbol '{target}' from another module — a private name belongs to its module; import a public name, or move the behaviour to the module that owns it"
+                                concat!(
+                                    "imports private symbol '{target}' from another module — the name is an implementation detail, ",
+                                    "and depending on it couples this code to a choice the owner may change. ",
+                                    "Renaming it public is not the fix: that turns a detail into a promise. ",
+                                    "Call the public API that expresses the need, or move the behaviour into the owning module. ",
+                                    "Make it public only when it is part of the module's contract."
+                                ),
+                                target = target
                             ),
                         });
                     }
@@ -498,7 +505,14 @@ impl<'a> ScanState<'a> {
                             kind: "private-code-leakage".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "imports private module path '{name}' — a private module belongs to its package; import a public module, or move the behaviour into the package that owns it"
+                                concat!(
+                                    "imports private module path '{name}' — the layout is an implementation detail, ",
+                                    "and depending on it couples this code to a structure the owner may change. ",
+                                    "Dropping the underscore is not the fix: that turns a private module into a promise. ",
+                                    "Use the package's public surface, or move the behaviour into the package. ",
+                                    "Make it public only when it is part of the package's contract."
+                                ),
+                                name = name
                             ),
                         });
                     }
@@ -658,7 +672,14 @@ impl ScanState<'_> {
                 kind: "private-code-leakage".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "reaches private '{target}' from another module — a private name belongs to its module; call a public API, or move the call into that module"
+                    concat!(
+                        "reaches private '{target}' from another module — the name is an implementation detail, ",
+                        "and reaching it couples this code to a choice the owner may change. ",
+                        "Renaming it public is not the fix: that turns a detail into a promise. ",
+                        "Call the public API that expresses the need, or move the call into the owning module. ",
+                        "Make it public only when it is part of the module's contract."
+                    ),
+                    target = target
                 ),
             });
         }
