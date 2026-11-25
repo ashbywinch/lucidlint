@@ -54,12 +54,15 @@ A module-level function whose name starts with one underscore is a helper of
 the module's subject, not a second concern. `houses/school.py` is one class and
 two private parsers; it fires today and should not.
 
-- The exemption is honest because privacy is enforced: `private-code-leakage`
-  fails the import and the attribute form. A helper that another module can
-  reach is not private.
+- The exemption is honest because privacy is enforced in the same tree:
+  `private-code-leakage` fails the import and the attribute form. A helper that
+  another module can reach is not private.
 - Public functions still count. A module of unrelated public definitions still
   fires. The ladder's unit stays "definitions"; only the private helper is
   removed from the count.
+- A module-level `__getattr__` / `__dir__` is a protocol hook (PEP 562), like a
+  decorated framework entry point; other dunders (`__str__`, `__repr__`) are
+  names nothing calls and stay counted.
 - No separate `many-functions` rung: the name is the old label for this ladder,
   and a second count over the same definitions would report one module twice.
   A large private module remains covered by `large-function`, the file-edge
@@ -74,17 +77,18 @@ Two new outcomes, decided by the detector, not the reader.
 
 **A repeated small construction has a home.** `GeoPoint(float(lat), float(lng))`
 appears at `houses/school.py:106`, `:181`,
-`tools/update_school_coords.py:88`, `:118` and
-`houses/apis/nominatim_api.py:30`. It is under `duplicate-expression`'s 15-node
-floor and its enclosing functions are not `duplicate`-similar, so neither rule
-sees it.
+`tools/update_school_coords.py:88`, and `:118`. It is under
+`duplicate-expression`'s 15-node floor and its enclosing functions are not
+`duplicate`-similar, so neither rule sees it. (`houses/apis/nominatim_api.py`
+builds the same class from a subscripted JSON row; that expression is over the
+floor, so `duplicate-expression` owns it.)
 
 - New kind `shared-construction` (warn, Python): the same call shape — same
   callee, same argument conversions — in two or more functions or modules,
   where the callee is a project class and the arguments are raw values being
-  converted. The message names the constructor to add:
-  "`GeoPoint.from_strings(lat, lng)` removes the five-site conversion; add it
-  to `GeoPoint` and call it here."
+  converted. The message names the class and offers the constructor to add:
+  "Add one named constructor on `GeoPoint` (for example `from_values`) and call
+  it everywhere."
 - It does not fire on a direct constructor of already-typed values
   (`GeoPoint(lat, lon)` with `float` parameters), on builtins, or on one site.
 
