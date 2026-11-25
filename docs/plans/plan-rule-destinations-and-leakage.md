@@ -34,8 +34,9 @@ The rename states the full problem, and the rule gains the attribute arm.
   imported, and an underscore attribute reached on a module imported from
   another module.
 - The kind is a config, suppression and baseline key. The rename updates the
-  four `lucidlint: ignore private-import` sites in `houses` in the same PR; no
-  alias is kept (an alias would leave two names for one rule).
+  four `lucidlint: ignore private-import` sites in `houses` in a paired PR (a
+  different repository cannot ride the same PR); no alias is kept (an alias
+  would leave two names for one rule).
 - Tests: the three forms fire; a public import and a public attribute do not.
 
 ## 2. Private functions do not count toward `several-definitions` / `many-definitions`
