@@ -472,7 +472,14 @@ impl<'a> ScanState<'a> {
                             kind: "private-code-leakage".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "imports private symbol '{target}' from another module — a private name belongs to its module; import a public name, or move the behaviour to the module that owns it"
+                                concat!(
+                                    "imports private symbol '{target}' from another module — the name is not part of the module's public API, ",
+                                    "so it can change without notice and this call can break. ",
+                                    "Do not just rename it public: other code can then depend on it, and you have to keep it working. ",
+                                    "Call the public API that already does the job, or move the behaviour into the module that owns the data. ",
+                                    "Before making it public, check: does the class mix concerns, so the function belongs on the class that owns them? Or is the caller doing work the class should do itself?"
+                                ),
+                                target = target
                             ),
                         });
                     }
@@ -498,7 +505,14 @@ impl<'a> ScanState<'a> {
                             kind: "private-code-leakage".into(),
                             severity: "fail".into(),
                             message: format!(
-                                "imports private module path '{name}' — a private module belongs to its package; import a public module, or move the behaviour into the package that owns it"
+                                concat!(
+                                    "imports private module path '{name}' — it is not part of the package's public API, ",
+                                    "so it can change without notice and this import can break. ",
+                                    "Do not just drop the underscore: other code can then depend on the module's contents, and you have to keep them working. ",
+                                    "Use the package's public modules, or move the behaviour into the package. ",
+                                    "Before making the module public, check: does the package mix concerns, so this belongs in a module of its own? Or is the caller doing work the package should do itself?"
+                                ),
+                                name = name
                             ),
                         });
                     }
@@ -658,7 +672,14 @@ impl ScanState<'_> {
                 kind: "private-code-leakage".into(),
                 severity: "fail".into(),
                 message: format!(
-                    "reaches private '{target}' from another module — a private name belongs to its module; call a public API, or move the call into that module"
+                    concat!(
+                        "reaches private '{target}' from another module — it is not part of the module's public API, ",
+                        "so it can change without notice and this call can break. ",
+                        "Do not just rename it public: other code can then depend on it, and you have to keep it working. ",
+                        "Call the public API that does the job, or move the call into the module that owns the data. ",
+                        "Before making it public, check: does the class mix concerns, so the function belongs on the class that owns them? Or is the caller doing work the class should do itself?"
+                    ),
+                    target = target
                 ),
             });
         }
