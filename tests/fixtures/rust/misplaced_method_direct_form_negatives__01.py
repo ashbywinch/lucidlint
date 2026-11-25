@@ -18,5 +18,13 @@ def _describe(school: School) -> str:
     return f"{name} {postcode}"
 
 
+def _label(school: School) -> str:
+    return school.name if school.postcode else "N/A"
+
+
+def _validate(school: School, rules: dict) -> bool:
+    return school.name in rules and school.postcode in rules
+
+
 def _parse(raw: str) -> str:
     return raw

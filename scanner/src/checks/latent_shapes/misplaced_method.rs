@@ -181,7 +181,33 @@ impl MisplacedMethod {
         let mut statements = body
             .iter()
             .filter(|s| !matches!(s, Stmt::Expr(e) if matches!(e.value.as_ref(), Expr::StringLiteral(_))));
-        matches!((statements.next(), statements.next()), (Some(Stmt::Return(_)), None))
+        let (Some(Stmt::Return(ret)), None) = (statements.next(), statements.next()) else {
+            return false;
+        };
+        let Some(value) = &ret.value else {
+            return false;
+        };
+        !Self::contains_decision(value)
+    }
+
+    /// A conditional in the returned expression is a decision about the object,
+    /// not a derivation of one of its values; the direct form leaves it to the
+    /// reader's judgment.
+    fn contains_decision(expr: &Expr) -> bool {
+        struct Probe {
+            found: bool,
+        }
+        impl<'a> SourceOrderVisitor<'a> for Probe {
+            fn visit_expr(&mut self, expr: &'a Expr) {
+                if matches!(expr, Expr::If(_)) {
+                    self.found = true;
+                }
+                walk_expr(self, expr);
+            }
+        }
+        let mut probe = Probe { found: false };
+        probe.visit_expr(expr);
+        probe.found
     }
 
     /// A module function that takes one of the module's classes as its first
@@ -196,6 +222,14 @@ impl MisplacedMethod {
         for s in body {
             let Stmt::FunctionDef(f) = s else { continue };
             if !f.decorator_list.is_empty() {
+                continue;
+            }
+            let positional = f.parameters.posonlyargs.len() + f.parameters.args.len();
+            if positional != 1
+                || !f.parameters.kwonlyargs.is_empty()
+                || f.parameters.vararg.is_some()
+                || f.parameters.kwarg.is_some()
+            {
                 continue;
             }
             let Some(first) = f.parameters.posonlyargs.first().or_else(|| f.parameters.args.first()) else {
