@@ -117,6 +117,8 @@ struct ScanState<'a> {
     duplicate_expressions: Vec<checks::ExpressionOccurrence>,
     /// Free functions that read an imported class — the free feature-envy arm.
     free_envy: Vec<checks::EnvyCandidate>,
+    /// Small constructor calls — the shared-construction family's raw material.
+    shared_constructions: Vec<checks::ConstructionOccurrence>,
     /// Duplicate-module identities (#26) — modules + top-level classes with
     /// their structural skeletons and constant tokens.
     skeleton_modules: Vec<checks::SkeletonModule>,
@@ -427,6 +429,7 @@ impl Pipeline {
             scattered: state.scattered,
             duplicate_expressions: state.duplicate_expressions,
             free_envy: state.free_envy,
+            shared_constructions: state.shared_constructions,
             path_expressions: state.path_expressions,
             module_shape: checks::ModuleShape::python(source, &body),
             setters: state.setters,
@@ -510,6 +513,7 @@ impl Pipeline {
             scattered: Vec::new(),
             duplicate_expressions: Vec::new(),
             free_envy: Vec::new(),
+            shared_constructions: Vec::new(),
             path_expressions: Vec::new(),
             module_shape: rs.module_shape.clone(),
             setters: Vec::new(),
@@ -5615,6 +5619,48 @@ mod tests {
         assert!(hits[0].message.contains("one"), "{}", hits[0].message);
     }
 
+    #[test]
+    fn shared_construction_names_the_constructor_to_add() {
+        let geo = include_str!("../../tests/fixtures/code/sample_shared_construction_geo.py");
+        let parse = include_str!("../../tests/fixtures/code/sample_shared_construction_parse.py");
+        let f = scan_corpus(&[("pkg/geo.py", geo), ("pkg/parse.py", parse)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "shared-construction").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        let message = &hits[0].message;
+        assert!(message.contains("named constructor on `GeoPoint`"), "{message}");
+        assert!(message.contains("from_values"), "{message}");
+        assert!(message.contains("2 places"), "{message}");
+        assert!(
+            message.contains("pkg/geo.py") && message.contains("pkg/parse.py"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn shared_construction_ignores_typed_values_single_sites_one_function_and_foreign_classes() {
+        let direct = include_str!("../../tests/fixtures/code/sample_shared_construction_direct.py");
+        let f = scan_corpus(&[("pkg/geo.py", direct)]);
+        assert!(
+            !f.iter().any(|x| x.kind == "shared-construction"),
+            "typed values: {f:?}"
+        );
+        let single = include_str!("../../tests/fixtures/code/sample_shared_construction_single.py");
+        let f = scan_corpus(&[("pkg/geo.py", single)]);
+        assert!(!f.iter().any(|x| x.kind == "shared-construction"), "one site: {f:?}");
+        let one_fn = include_str!("../../tests/fixtures/code/sample_shared_construction_one_function.py");
+        let f = scan_corpus(&[("pkg/geo.py", one_fn)]);
+        assert!(
+            !f.iter().any(|x| x.kind == "shared-construction"),
+            "one function: {f:?}"
+        );
+        let third = include_str!("../../tests/fixtures/code/sample_shared_construction_third_party.py");
+        let f = scan_corpus(&[("pkg/a.py", third), ("pkg/b.py", third)]);
+        assert!(
+            !f.iter().any(|x| x.kind == "shared-construction"),
+            "foreign class: {f:?}"
+        );
+    }
+
     /// A synthetic module with `n` classes; `with_methods` of them carry a
     /// method, the rest are records.
     fn several_classes_source(n: usize, with_methods: usize) -> String {
@@ -5746,6 +5792,51 @@ mod tests {
         // the same two helpers with the class gone are a bag of functions
         let src = include_str!("../../tests/fixtures/code/sample_several_definitions_helpers_only.py");
         let f = scan_corpus(&[("pkg/rows.py", src)]);
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn several_definitions_exempts_private_helpers() {
+        // one class and its private parsers are one concept: the helpers are
+        // the module's own, not a second concern
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_private_helpers.py");
+        let f = scan_corpus(&[("pkg/school.py", src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        // the exemption is the private name's: public helpers still count
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_helpers_only.py");
+        let f = scan_corpus(&[("pkg/rows.py", src)]);
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        // a module of private helpers is one implementation, not a bag of concepts
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_private_helpers_only.py");
+        let f = scan_corpus(&[("pkg/rows.py", src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn several_definitions_treats_a_module_dunder_as_a_protocol_hook() {
+        // a dunder is registered with the interpreter, not a private helper
+        // and not a concept the module owns
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_dunder_protocol.py");
+        let parsed = parse_module(src).unwrap();
+        let shape = checks::ModuleShape::python(src, &parsed.syntax().body);
+        assert_eq!(shape.functions, 0);
+        assert_eq!(shape.framework_functions, 2);
+        assert_eq!(shape.definitions(), 1);
+        let f = scan_corpus(&[("pkg/registry.py", src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
+    fn several_definitions_counts_a_module_dunder_that_is_not_a_hook() {
+        // only __getattr__/__dir__ are interpreted at module scope; __str__ and
+        // __repr__ are names nothing calls, so they stay definitions
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_dunder_not_a_hook.py");
+        let parsed = parse_module(src).unwrap();
+        let shape = checks::ModuleShape::python(src, &parsed.syntax().body);
+        assert_eq!(shape.functions, 2);
+        assert_eq!(shape.framework_functions, 0);
+        assert_eq!(shape.definitions(), 3);
+        let f = scan_corpus(&[("pkg/registry.py", src)]);
         assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
     }
 

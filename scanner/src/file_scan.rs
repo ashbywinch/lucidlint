@@ -89,6 +89,8 @@ pub struct FileScan {
     pub duplicate_expressions: Vec<checks::ExpressionOccurrence>,
     /// The file's free functions that read an imported class (feature-envy).
     pub free_envy: Vec<checks::EnvyCandidate>,
+    /// The file's small constructor calls (shared-construction).
+    pub shared_constructions: Vec<checks::ConstructionOccurrence>,
     /// The file's module-level path expressions (#60 shared-path).
     pub path_expressions: Vec<checks::PathExpression>,
     /// The file's size and concept groups (#107 large-module).

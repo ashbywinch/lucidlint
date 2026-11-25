@@ -156,7 +156,7 @@ impl ExpressionOccurrence {
     /// (`json.loads(path.read_text())`) stay out; the complex shapes — the 25+
     /// node formulas, builders and predicates — are the target. The RULES.md row
     /// describes this floor; this constant is the executable source.
-    const EXPRESSION_NODE_FLOOR: usize = 15;
+    pub(crate) const EXPRESSION_NODE_FLOOR: usize = 15;
 
     /// The agreed gate for #104. The ticket's original filter (a literal or a
     /// call chain, >=2 modules, >=3 uses) kept one-step reads and missed the
@@ -220,7 +220,7 @@ impl ExpressionOccurrence {
         substantive && Self::expr_node_count(expr) >= Self::EXPRESSION_NODE_FLOOR
     }
 
-    fn expr_node_count(expr: &Expr) -> usize {
+    pub(crate) fn expr_node_count(expr: &Expr) -> usize {
         use ruff_python_ast::visitor::source_order::{walk_expr, SourceOrderVisitor};
         struct Count(usize);
         impl<'a> SourceOrderVisitor<'a> for Count {

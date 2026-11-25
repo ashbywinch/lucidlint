@@ -247,6 +247,13 @@ impl<'a> RepoScan<'a> {
         );
         self.add(
             findings,
+            checks::ConstructionOccurrence::findings(
+                &self.per_file(|scan| &scan.shared_constructions),
+                &self.class_names(),
+            ),
+        );
+        self.add(
+            findings,
             checks::EnvyCandidate::findings(&self.per_file(|scan| &scan.free_envy), &self.class_names()),
         );
         self.add(
