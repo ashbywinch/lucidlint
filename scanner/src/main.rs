@@ -115,6 +115,8 @@ struct ScanState<'a> {
     path_expressions: Vec<checks::PathExpression>,
     /// Substantive expressions — the duplicate-expression family's raw material.
     duplicate_expressions: Vec<checks::ExpressionOccurrence>,
+    /// Small constructor calls — the shared-construction family's raw material.
+    shared_constructions: Vec<checks::ConstructionOccurrence>,
     /// Duplicate-module identities (#26) — modules + top-level classes with
     /// their structural skeletons and constant tokens.
     skeleton_modules: Vec<checks::SkeletonModule>,
@@ -424,6 +426,7 @@ impl Pipeline {
             class_defs: state.class_defs,
             scattered: state.scattered,
             duplicate_expressions: state.duplicate_expressions,
+            shared_constructions: state.shared_constructions,
             path_expressions: state.path_expressions,
             module_shape: checks::ModuleShape::python(source, &body),
             setters: state.setters,
@@ -506,6 +509,7 @@ impl Pipeline {
             class_defs: Vec::new(),
             scattered: Vec::new(),
             duplicate_expressions: Vec::new(),
+            shared_constructions: Vec::new(),
             path_expressions: Vec::new(),
             module_shape: rs.module_shape.clone(),
             setters: Vec::new(),
@@ -5595,6 +5599,48 @@ mod tests {
         assert_eq!(hits.len(), 1, "{f:?}");
         assert!(hits[0].message.contains("read_text"), "{}", hits[0].message);
         assert!(hits[0].message.contains("one"), "{}", hits[0].message);
+    }
+
+    #[test]
+    fn shared_construction_names_the_constructor_to_add() {
+        let geo = include_str!("../../tests/fixtures/code/sample_shared_construction_geo.py");
+        let parse = include_str!("../../tests/fixtures/code/sample_shared_construction_parse.py");
+        let f = scan_corpus(&[("pkg/geo.py", geo), ("pkg/parse.py", parse)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "shared-construction").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        let message = &hits[0].message;
+        assert!(message.contains("named constructor on `GeoPoint`"), "{message}");
+        assert!(message.contains("from_values"), "{message}");
+        assert!(message.contains("2 places"), "{message}");
+        assert!(
+            message.contains("pkg/geo.py") && message.contains("pkg/parse.py"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn shared_construction_ignores_typed_values_single_sites_one_function_and_foreign_classes() {
+        let direct = include_str!("../../tests/fixtures/code/sample_shared_construction_direct.py");
+        let f = scan_corpus(&[("pkg/geo.py", direct)]);
+        assert!(
+            !f.iter().any(|x| x.kind == "shared-construction"),
+            "typed values: {f:?}"
+        );
+        let single = include_str!("../../tests/fixtures/code/sample_shared_construction_single.py");
+        let f = scan_corpus(&[("pkg/geo.py", single)]);
+        assert!(!f.iter().any(|x| x.kind == "shared-construction"), "one site: {f:?}");
+        let one_fn = include_str!("../../tests/fixtures/code/sample_shared_construction_one_function.py");
+        let f = scan_corpus(&[("pkg/geo.py", one_fn)]);
+        assert!(
+            !f.iter().any(|x| x.kind == "shared-construction"),
+            "one function: {f:?}"
+        );
+        let third = include_str!("../../tests/fixtures/code/sample_shared_construction_third_party.py");
+        let f = scan_corpus(&[("pkg/a.py", third), ("pkg/b.py", third)]);
+        assert!(
+            !f.iter().any(|x| x.kind == "shared-construction"),
+            "foreign class: {f:?}"
+        );
     }
 
     /// A synthetic module with `n` classes; `with_methods` of them carry a
