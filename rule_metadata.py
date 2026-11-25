@@ -441,6 +441,14 @@ CATALOG = RuleCatalog([
          "data, so the function is that class's method in exile; move it "
          "onto the class.",
          display_name="misplaced-method → latent-class", display_group="latent-class"),
+    Rule("derived-method", "warn", "architecture", ("python",),
+         "A module-level function that takes one parameter, a class this "
+         "module defines, returns one expression about it, and only reads "
+         "through it. The formatting may belong to the call site, so this is "
+         "a warning: if the result describes the class itself, make it a "
+         "method on the class; if it is the caller's presentation, keep it "
+         "there.",
+         display_name="derived-method → latent-class", display_group="latent-class"),
     Rule("assembly-class", "fail", "architecture", ("python",),
          "A function assembles >=3 structures by threading the same data "
          "through module-level functions whose outputs feed each other's "

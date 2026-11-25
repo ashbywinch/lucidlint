@@ -256,10 +256,10 @@ impl MisplacedMethod {
                 file: state.file.to_string(),
                 line,
                 function: f.name.to_string(),
-                kind: "misplaced-method".into(),
-                severity: "fail".into(),
+                kind: "derived-method".into(),
+                severity: "warn".into(),
                 message: format!(
-                    "'{}' takes '{}' and only reads through it; move it onto '{}' as the method '{}'",
+                    "'{}' takes '{}' and only reads through it. If the result describes '{}' itself, make it the method '{}'; if the formatting is specific to this call site, keep it here.",
                     f.name.as_str(),
                     class,
                     class,
