@@ -557,5 +557,6 @@ impl ScanState<'_> {
         LoopFamily::findings(self, body, source);
         DuplicateModule::collect(self, body, name);
         Forwarding::collect(self, body);
+        ConstructionOccurrence::collect(self, body, source);
     }
 }

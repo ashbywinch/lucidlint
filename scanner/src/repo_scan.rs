@@ -247,6 +247,13 @@ impl<'a> RepoScan<'a> {
         );
         self.add(
             findings,
+            checks::ConstructionOccurrence::findings(
+                &self.per_file(|scan| &scan.shared_constructions),
+                &self.class_names(),
+            ),
+        );
+        self.add(
+            findings,
             checks::ModuleShape::findings(&self.per_file(|scan| &scan.module_shape)),
         );
         self.add(

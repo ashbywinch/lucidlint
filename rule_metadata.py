@@ -478,6 +478,13 @@ CATALOG = RuleCatalog([
          "once in production Python (any files, any functions). It is one "
          "idea with no name: make one helper, predicate, or type alias.",
          display_name="duplicate-expression"),
+    Rule("shared-construction", "warn", "architecture", ("python",),
+         "The same constructor call — the same class, the same builtin "
+         "conversion of its raw arguments — at more than one site. The type "
+         "has a name; the conversion does not. Add one named constructor to "
+         "the class (for example `from_values`) and call it at every site. "
+         "This is the small-call gap below `duplicate-expression`'s node "
+         "floor; that rule owns the larger shapes."),
     Rule("feature-envy", "fail", "architecture", ("python",),
          "A method reads another object's fields more than its own state — "
          "the logic belongs on that object (feature envy); move the "
