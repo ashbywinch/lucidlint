@@ -5559,8 +5559,9 @@ mod tests {
         let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "shared-construction").collect();
         assert_eq!(hits.len(), 1, "{f:?}");
         let message = &hits[0].message;
-        assert!(message.contains("GeoPoint.from_values"), "{message}");
-        assert!(message.contains("2 sites"), "{message}");
+        assert!(message.contains("named constructor on `GeoPoint`"), "{message}");
+        assert!(message.contains("from_values"), "{message}");
+        assert!(message.contains("2 places"), "{message}");
         assert!(
             message.contains("pkg/geo.py") && message.contains("pkg/parse.py"),
             "{message}"
