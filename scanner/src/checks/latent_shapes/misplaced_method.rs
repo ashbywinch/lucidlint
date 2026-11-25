@@ -259,7 +259,7 @@ impl MisplacedMethod {
                 kind: "derived-method".into(),
                 severity: "warn".into(),
                 message: format!(
-                    "'{}' takes only a '{}' and reads its fields. If a change to '{}' would force a change here, move it onto '{}' as a method. If a change to the caller would force a change here, keep it with the caller.",
+                    "'{}' takes only a '{}' and reads its fields. If a change to '{}' would force this function to change, move it onto '{}' as a method. If a change to the caller would force this function to change, keep it with the caller.",
                     f.name.as_str(),
                     class,
                     class,
