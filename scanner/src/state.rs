@@ -586,7 +586,10 @@ impl ScanState<'_> {
         LoopFamily::findings(self, body, source);
         DuplicateModule::collect(self, body, name);
         Forwarding::collect(self, body);
-        self.private_code_leakage_findings();
+        // the reaches are drained here, in the caller, so the findings pass
+        // cannot silently read an empty cache if it were ever called twice
+        let reaches = std::mem::take(&mut self.private_reaches);
+        self.private_code_leakage_findings(reaches);
     }
 
     /// The receiver chain of a `name.attr.attr` expression: the root name and
@@ -626,13 +629,14 @@ impl ScanState<'_> {
 
     /// `private-code-leakage`, attribute form: a private attribute reached on a
     /// name bound by an import (`houses.school._try_geopoint`). One finding per
-    /// distinct target in the file, at its first reach. Runs after the walk so
-    /// an import below the code still counts.
-    fn private_code_leakage_findings(&mut self) {
+    /// distinct target in the file, at its first reach. The caller passes the
+    /// reaches it drained, so the data flow is visible and a second call cannot
+    /// find an empty cache.
+    fn private_code_leakage_findings(&mut self, reaches: Vec<(String, String, usize, String)>) {
         let package = Self::package_of(self.file);
         let facade = self.file.ends_with("__init__.py");
         let mut seen = std::collections::HashSet::new();
-        for (root, target, line, function) in std::mem::take(&mut self.private_reaches) {
+        for (root, target, line, function) in reaches {
             let Some(source) = self.import_sources.get(&root) else {
                 continue;
             };

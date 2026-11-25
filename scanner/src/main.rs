@@ -1530,6 +1530,13 @@ mod tests {
             facade.iter().any(|x| x.kind == "private-code-leakage"),
             "another package's private name is leakage even in a facade: {facade:?}"
         );
+        // a package whose name only shares a prefix is not the same package
+        let prefixed = include_str!("../../tests/fixtures/rust/private_code_leakage_prefixed_package__01.py");
+        let facade = scan_corpus(&[("pkg/__init__.py", prefixed)]);
+        assert!(
+            facade.iter().any(|x| x.kind == "private-code-leakage"),
+            "pkg_extra is not pkg: {facade:?}"
+        );
     }
 
     // ------------------------------------------------------------- unreachable
