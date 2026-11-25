@@ -15,6 +15,50 @@ use crate::ScanState;
 
 use super::super::{class_attr_names, push_stmt_children, stmt_exprs};
 
+/// What one returned expression does with the parameter: reads through it,
+/// uses it as a bare value, or contains a conditional.
+struct Derivation<'p> {
+    param: &'p str,
+    reads: usize,
+    bare: bool,
+    decision: bool,
+}
+
+impl<'p> Derivation<'p> {
+    fn of(expr: &Expr, param: &'p str) -> Self {
+        struct Probe<'p> {
+            usage: Derivation<'p>,
+        }
+        impl<'a, 'p> SourceOrderVisitor<'a> for Probe<'p> {
+            fn visit_expr(&mut self, expr: &'a Expr) {
+                match expr {
+                    // ruff's conditional expression is `Expr::If`; there is no
+                    // separate `IfExpression` variant.
+                    Expr::If(_) => self.usage.decision = true,
+                    Expr::Attribute(a) if matches!(a.value.as_ref(), Expr::Name(n) if n.id.as_str() == self.usage.param) =>
+                    {
+                        self.usage.reads += 1;
+                        return;
+                    }
+                    Expr::Name(n) if n.id.as_str() == self.usage.param => self.usage.bare = true,
+                    _ => {}
+                }
+                walk_expr(self, expr);
+            }
+        }
+        let mut probe = Probe {
+            usage: Self {
+                param,
+                reads: 0,
+                bare: false,
+                decision: false,
+            },
+        };
+        probe.visit_expr(expr);
+        probe.usage
+    }
+}
+
 /// The misplaced-method rule. Its `findings` walk is the rule's only entry.
 pub struct MisplacedMethod;
 
@@ -29,45 +73,10 @@ impl MisplacedMethod {
         classes.contains(&name).then_some(name)
     }
 
-    /// How a function body uses one name: reads through the name's attributes,
-    /// and whether the name is also used as a value (passed, returned,
-    /// assigned).
-    fn receiver_use(body: &[Stmt], param: &str) -> (usize, bool) {
-        struct Use<'a> {
-            param: &'a str,
-            reads: usize,
-            bare: bool,
-        }
-        impl<'a> SourceOrderVisitor<'a> for Use<'a> {
-            fn visit_expr(&mut self, expr: &'a Expr) {
-                if let Expr::Attribute(a) = expr {
-                    if matches!(a.value.as_ref(), Expr::Name(n) if n.id.as_str() == self.param) {
-                        self.reads += 1;
-                        return;
-                    }
-                }
-                if matches!(expr, Expr::Name(n) if n.id.as_str() == self.param) {
-                    self.bare = true;
-                }
-                walk_expr(self, expr);
-            }
-        }
-        let mut usage = Use {
-            param,
-            reads: 0,
-            bare: false,
-        };
-        let mut stack: Vec<&Stmt> = body.iter().collect();
-        while let Some(st) = stack.pop() {
-            if matches!(st, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
-                continue;
-            }
-            for expr in stmt_exprs(st) {
-                usage.visit_expr(expr);
-            }
-            push_stmt_children(st, &mut stack);
-        }
-        (usage.reads, usage.bare)
+    /// What one returned expression does with the parameter: reads through it,
+    /// uses it as a bare value, or contains a conditional.
+    fn derivation<'p>(expr: &Expr, param: &'p str) -> Derivation<'p> {
+        Derivation::of(expr, param)
     }
 
     /// Every module-level function: its name, line, and parameters.
@@ -174,40 +183,36 @@ impl MisplacedMethod {
         Self::direct_form(state, body, &module_classes, &mut reported);
     }
 
-    /// A derivation is one returned expression (after an optional docstring):
-    /// the function states a value about its parameter, rather than running a
-    /// service that happens to take it.
-    fn is_derivation(body: &[Stmt]) -> bool {
-        let mut statements = body
-            .iter()
-            .filter(|s| !matches!(s, Stmt::Expr(e) if matches!(e.value.as_ref(), Expr::StringLiteral(_))));
-        let (Some(Stmt::Return(ret)), None) = (statements.next(), statements.next()) else {
-            return false;
+    /// The one returned expression (after an optional docstring), when the body
+    /// is exactly that.
+    fn single_return(body: &[Stmt]) -> Option<&Expr> {
+        let mut statements = body.iter().filter(|s| !Self::is_docstring(s));
+        let Stmt::Return(ret) = statements.next()? else {
+            return None;
         };
-        let Some(value) = &ret.value else {
-            return false;
-        };
-        !Self::contains_decision(value)
+        if statements.next().is_some() {
+            return None;
+        }
+        ret.value.as_deref()
     }
 
-    /// A conditional in the returned expression is a decision about the object,
-    /// not a derivation of one of its values; the direct form leaves it to the
-    /// reader's judgment.
-    fn contains_decision(expr: &Expr) -> bool {
-        struct Probe {
-            found: bool,
+    fn is_docstring(stmt: &Stmt) -> bool {
+        matches!(stmt, Stmt::Expr(e) if matches!(e.value.as_ref(), Expr::StringLiteral(_)))
+    }
+
+    /// The only parameter, when the function takes exactly one positional
+    /// parameter and no keyword or varargs: a service with more inputs is not a
+    /// derivation of the object.
+    fn only_parameter(f: &StmtFunctionDef) -> Option<&ruff_python_ast::ParameterWithDefault> {
+        let positional = f.parameters.posonlyargs.len() + f.parameters.args.len();
+        if positional != 1
+            || !f.parameters.kwonlyargs.is_empty()
+            || f.parameters.vararg.is_some()
+            || f.parameters.kwarg.is_some()
+        {
+            return None;
         }
-        impl<'a> SourceOrderVisitor<'a> for Probe {
-            fn visit_expr(&mut self, expr: &'a Expr) {
-                if matches!(expr, Expr::If(_)) {
-                    self.found = true;
-                }
-                walk_expr(self, expr);
-            }
-        }
-        let mut probe = Probe { found: false };
-        probe.visit_expr(expr);
-        probe.found
+        f.parameters.posonlyargs.first().or_else(|| f.parameters.args.first())
     }
 
     /// A module function that takes one of the module's classes as its first
@@ -224,22 +229,20 @@ impl MisplacedMethod {
             if !f.decorator_list.is_empty() {
                 continue;
             }
-            let positional = f.parameters.posonlyargs.len() + f.parameters.args.len();
-            if positional != 1
-                || !f.parameters.kwonlyargs.is_empty()
-                || f.parameters.vararg.is_some()
-                || f.parameters.kwarg.is_some()
-            {
-                continue;
-            }
-            let Some(first) = f.parameters.posonlyargs.first().or_else(|| f.parameters.args.first()) else {
+            let Some(param) = Self::only_parameter(f) else {
                 continue;
             };
-            let Some(class) = Self::annotation_class(first.parameter.annotation.as_deref(), module_classes) else {
+            let Some(annotation) = param.parameter.annotation.as_deref() else {
                 continue;
             };
-            let (reads, bare) = Self::receiver_use(&f.body, first.parameter.name.as_str());
-            if reads < 2 || bare || !Self::is_derivation(&f.body) {
+            let Some(class) = Self::annotation_class(Some(annotation), module_classes) else {
+                continue;
+            };
+            let Some(value) = Self::single_return(&f.body) else {
+                continue;
+            };
+            let usage = Self::derivation(value, param.parameter.name.as_str());
+            if usage.reads < 2 || usage.bare || usage.decision {
                 continue;
             }
             let line = Source::line_of(state.source, f.name.range().start());
