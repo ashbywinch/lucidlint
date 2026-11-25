@@ -163,21 +163,6 @@ pub struct ModuleShape {
     pub generated: bool,
 }
 
-/// The dunder functions the interpreter calls on a *module* (PEP 562): they are
-/// protocol hooks, not concepts the module owns. Other dunders at module scope
-/// (`__str__`, `__init__`) are names nothing calls.
-const MODULE_HOOKS: &[&str] = &["__getattr__", "__dir__"];
-
-fn is_module_hook(name: &str) -> bool {
-    MODULE_HOOKS.contains(&name)
-}
-
-/// A private module function: one leading underscore, but not a dunder (a
-/// dunder that is not a module hook is a name nothing calls, not a helper).
-fn is_private_helper(name: &str) -> bool {
-    name.starts_with('_') && !(name.starts_with("__") && name.ends_with("__"))
-}
-
 impl ModuleShape {
     /// The definitions the module holds. Python: classes and undecorated
     /// public functions (a constant is a value, not a name; a decorated
@@ -463,6 +448,21 @@ impl ModuleShape {
         }
     }
 
+    /// The dunder functions the interpreter calls on a *module* (PEP 562): they
+    /// are protocol hooks, not concepts the module owns. Other dunders at module
+    /// scope (`__str__`, `__init__`) are names nothing calls.
+    const MODULE_HOOKS: &[&str] = &["__getattr__", "__dir__"];
+
+    fn is_module_hook(name: &str) -> bool {
+        Self::MODULE_HOOKS.contains(&name)
+    }
+
+    /// A private module function: one leading underscore, but not a dunder (a
+    /// dunder that is not a module hook is a name nothing calls, not a helper).
+    fn is_private_helper(name: &str) -> bool {
+        name.starts_with('_') && !(name.starts_with("__") && name.ends_with("__"))
+    }
+
     fn finding(kind: &str, severity: &str, rel: &str, message: String) -> Finding {
         Finding {
             logical_start: None,
@@ -512,12 +512,12 @@ impl ModuleShape {
                 Stmt::FunctionDef(function) => {
                     if !function.decorator_list.is_empty() {
                         framework_functions += 1;
-                    } else if is_module_hook(&function.name) {
+                    } else if Self::is_module_hook(&function.name) {
                         // a module hook (`__getattr__`, `__dir__`) is called
                         // by the interpreter — not a concept, and not a
                         // private helper
                         framework_functions += 1;
-                    } else if is_private_helper(&function.name) {
+                    } else if Self::is_private_helper(&function.name) {
                         // a private module function is the module's own helper,
                         // not a second concept; the sibling rule
                         // `private-code-leakage` enforces that no other module
