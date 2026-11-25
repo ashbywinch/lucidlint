@@ -115,6 +115,8 @@ struct ScanState<'a> {
     path_expressions: Vec<checks::PathExpression>,
     /// Substantive expressions — the duplicate-expression family's raw material.
     duplicate_expressions: Vec<checks::ExpressionOccurrence>,
+    /// Free functions that read an imported class — the free feature-envy arm.
+    free_envy: Vec<checks::EnvyCandidate>,
     /// Duplicate-module identities (#26) — modules + top-level classes with
     /// their structural skeletons and constant tokens.
     skeleton_modules: Vec<checks::SkeletonModule>,
@@ -424,6 +426,7 @@ impl Pipeline {
             class_defs: state.class_defs,
             scattered: state.scattered,
             duplicate_expressions: state.duplicate_expressions,
+            free_envy: state.free_envy,
             path_expressions: state.path_expressions,
             module_shape: checks::ModuleShape::python(source, &body),
             setters: state.setters,
@@ -506,6 +509,7 @@ impl Pipeline {
             class_defs: Vec::new(),
             scattered: Vec::new(),
             duplicate_expressions: Vec::new(),
+            free_envy: Vec::new(),
             path_expressions: Vec::new(),
             module_shape: rs.module_shape.clone(),
             setters: Vec::new(),
@@ -2457,6 +2461,20 @@ mod tests {
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/feature_envy_ignores_own_inputs_and_values__01.py"
         ));
+        assert!(!f.iter().any(|x| x.kind == "feature-envy"), "{f:?}");
+    }
+
+    #[test]
+    fn feature_envy_free_function_names_the_imported_class() {
+        let school = include_str!("../../tests/fixtures/code/sample_envy_free_school.py");
+        let format = include_str!("../../tests/fixtures/code/sample_envy_free_format.py");
+        let f = scan_corpus(&[("pkg/school.py", school), ("pkg/format.py", format)]);
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.kind == "feature-envy").collect();
+        assert_eq!(hits.len(), 1, "{f:?}");
+        assert!(hits[0].message.contains("School"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("4 times"), "{}", hits[0].message);
+        let negatives = include_str!("../../tests/fixtures/code/sample_envy_free_negatives.py");
+        let f = scan_corpus(&[("pkg/school.py", school), ("pkg/negatives.py", negatives)]);
         assert!(!f.iter().any(|x| x.kind == "feature-envy"), "{f:?}");
     }
 
