@@ -43,6 +43,10 @@ The rename states the full problem, and the rule gains the attribute arm.
   API that expresses the need, or move the behaviour into the owning module;
   making it public is a deliberate contract change, named for the capability,
   not a renamed implementation detail.
+- Before widening the surface, the message asks the reader to check two things:
+  the class mixes concerns and the function belongs on the class that owns them
+  (where it would be public), or the caller is doing work the callee should
+  own. Public is the answer only when neither holds.
 - A package's `__init__.py` may reassemble names from its own package; that is
   the facade's job, not leakage. A peer module may not, and another package's
   private name is leakage even in a facade. The rule row states the exemption.
