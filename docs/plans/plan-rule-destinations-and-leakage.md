@@ -138,23 +138,22 @@ The message names the class and the method: "`_format_address` takes `School`
 and only reads through it; move it onto `School` as the method
 `_format_address`."
 
-## 5. `feature-envy`'s free-function form waits for the class index
+## 5. `feature-envy` gains the free-function form
 
-The method form is unchanged. The free-function form — a function that reads an
-*imported* project class — needs the repo-wide class index before it can name
-its destination. Without it, a parameter annotated `Path` or `Request` would
-produce "move this onto `pathlib.Path`", which is not a thing the reader can
-do. The rule does not guess a destination; it lands after the class index is
-available, and the plan records the dependency rather than shipping a message
-that names the wrong home.
+The method form is unchanged. The free-function form resolves the annotated
+class against the repo-wide class index: a module-level function that takes
+exactly one parameter, a class the repo defines, reads its fields four or more
+times, and never uses the object as a bare value is that class's method in
+exile. The index is what keeps a `Path` or `Request` from being named as a
+home; the class is the destination, and the function name is the method.
 
-## 6. The drift check moves into `make check`
+## 6. The drift check runs in `make check`
 
 `RULES.md` and `scanner/src/rules_gen.rs` are generated from
 `rule_metadata.CATALOG`; `scripts/gen-rules.py --check` validates both
-directions. It currently runs only in `make test` (via
-`tests/test_lucidlint.py`), so a stale generated file can pass the pre-push
-hook. Add the check to `lint-check` (the target both the hook and CI run).
+directions. It ran only in `make test` (via `tests/test_lucidlint.py`), so a
+stale generated file could pass the pre-push hook. `make check` now depends on
+`rules-check`, which runs the same check; the pytest assertion stays.
 
 ## 7. Audit: the declared language is not verified
 
