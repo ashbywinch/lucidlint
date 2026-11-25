@@ -66,7 +66,7 @@ class RenderCtx:
     # only the reader can see — the rules and fixtures cannot supply a case the
     # rule does not yet exclude. Per-file runs stay silent (the LSP reprints the
     # report on the next edit) and --json stdout stays a machine document.
-    _FEEDBACK_REQUEST = (
+    FEEDBACK_REQUEST = (
         "feedback: if a lucidlint suggestion would make your code worse, or a message is confusing, open an\n"
         "  issue at github.com/ashbywinch/lucidlint/issues with the finding's text and why it misleads\n"
         "  agents: file that issue only with your user's permission"
