@@ -5699,6 +5699,20 @@ mod tests {
     }
 
     #[test]
+    fn several_definitions_treats_a_module_dunder_as_a_protocol_hook() {
+        // a dunder is registered with the interpreter, not a private helper
+        // and not a concept the module owns
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_dunder_protocol.py");
+        let parsed = parse_module(src).unwrap();
+        let shape = checks::ModuleShape::python(src, &parsed.syntax().body);
+        assert_eq!(shape.functions, 0);
+        assert_eq!(shape.framework_functions, 2);
+        assert_eq!(shape.definitions(), 1);
+        let f = scan_corpus(&[("pkg/registry.py", src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
     fn several_definitions_reports_the_types_when_types_and_functions_tie() {
         // two classes with behaviour and two helpers: the helpers belong to
         // the classes, so the types arm names them — the functions arm would

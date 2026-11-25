@@ -31,12 +31,13 @@
 //! the reader names the domain concepts and makes them classes.
 //!
 //! Three exclusions: "all but one class are value records" is one class plus
-//! its records; a decorated function is registered with a caller outside the
-//! module (a framework route, a CLI command) — a module made only of those is
-//! a framework contract, not a module full of concepts; and a private module
-//! function (`_name`) is the module's own helper, not a second concept.
-//! `private-code-leakage` enforces that the helper cannot be reached from
-//! another module, so the exemption rests on a boundary, not a convention.
+//! its records; a decorated function, and a module-level dunder (a protocol
+//! hook), are registered with a caller outside the module — a module made only
+//! of those is a framework contract, not a module full of concepts; and a
+//! private module function (`_name`) is the module's own helper, not a second
+//! concept. The sibling rule `private-code-leakage` (landing separately)
+//! enforces that the helper cannot be reached from another module; this
+//! exemption is conditional on that rule, and the two land together.
 //!
 //! A record is a type that adds no behaviour of its own: its methods build it
 //! (`__init__`, `Marker::parse`) or take no instance (a `@staticmethod`, a
@@ -156,16 +157,24 @@ pub struct ModuleShape {
     /// Functions with no receiver type: undecorated and public in Python (a
     /// `_name` function is the module's helper), ungrouped in Rust.
     pub functions: usize,
-    /// Decorated functions: registered with a caller outside the module.
+    /// Decorated functions and module-level dunder protocol hooks: registered
+    /// with a caller outside the module.
     pub framework_functions: usize,
     pub generated: bool,
+}
+
+/// A module-level dunder is a protocol hook (`__getattr__`, `__dir__`): the
+/// interpreter calls it, and it names no concept the module owns.
+fn is_dunder(name: &str) -> bool {
+    name.starts_with("__") && name.ends_with("__")
 }
 
 impl ModuleShape {
     /// The definitions the module holds. Python: classes and undecorated
     /// public functions (a constant is a value, not a name; a decorated
-    /// function is the framework's entry point; a `_name` function is the
-    /// module's helper). Rust: types, the groups of functions that
+    /// function is the framework's entry point; a dunder is a protocol hook; a
+    /// `_name` function is the module's helper). Rust: types, the groups of
+    /// functions that
     /// take one type (a class equivalent — the type plus its methods in
     /// exile), and the functions left with no receiver.
     pub fn definitions(&self) -> usize {
@@ -494,10 +503,16 @@ impl ModuleShape {
                 Stmt::FunctionDef(function) => {
                     if !function.decorator_list.is_empty() {
                         framework_functions += 1;
+                    } else if is_dunder(&function.name) {
+                        // a module-level dunder is a protocol hook
+                        // (`__getattr__`, `__dir__`), registered with the
+                        // interpreter — not a concept, and not a private helper
+                        framework_functions += 1;
                     } else if !function.name.starts_with('_') {
                         // a private module function is the module's own helper,
-                        // not a second concept; `private-code-leakage` enforces
-                        // that no other module can reach it
+                        // not a second concept; the sibling rule
+                        // `private-code-leakage` enforces that no other module
+                        // can reach it, and this exemption lands with it
                         functions += 1;
                     }
                 }
