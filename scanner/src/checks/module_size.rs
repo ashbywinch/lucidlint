@@ -30,10 +30,13 @@
 //! mostly free functions has no object to own the data they pass around, so
 //! the reader names the domain concepts and makes them classes.
 //!
-//! Two exclusions: "all but one class are value records" is one class plus
-//! its records, and a decorated function is registered with a caller outside
-//! the module (a framework route, a CLI command) — a module made only of
-//! those is a framework contract, not a module full of concepts.
+//! Three exclusions: "all but one class are value records" is one class plus
+//! its records; a decorated function is registered with a caller outside the
+//! module (a framework route, a CLI command) — a module made only of those is
+//! a framework contract, not a module full of concepts; and a private module
+//! function (`_name`) is the module's own helper, not a second concept.
+//! `private-code-leakage` enforces that the helper cannot be reached from
+//! another module, so the exemption rests on a boundary, not a convention.
 //!
 //! A record is a type that adds no behaviour of its own: its methods build it
 //! (`__init__`, `Marker::parse`) or take no instance (a `@staticmethod`, a
@@ -150,7 +153,8 @@ pub struct ModuleShape {
     /// equivalent, so the group counts as one definition. A group over a
     /// foreign type (`&Expr`) is one concept too: the helpers around `Expr`.
     pub receiver_groups: Vec<(String, usize)>,
-    /// Functions with no receiver type: undecorated (Python) and ungrouped.
+    /// Functions with no receiver type: undecorated and public in Python (a
+    /// `_name` function is the module's helper), ungrouped in Rust.
     pub functions: usize,
     /// Decorated functions: registered with a caller outside the module.
     pub framework_functions: usize,
@@ -159,8 +163,9 @@ pub struct ModuleShape {
 
 impl ModuleShape {
     /// The definitions the module holds. Python: classes and undecorated
-    /// functions (a constant is a value, not a name; a decorated function is
-    /// the framework's entry point). Rust: types, the groups of functions that
+    /// public functions (a constant is a value, not a name; a decorated
+    /// function is the framework's entry point; a `_name` function is the
+    /// module's helper). Rust: types, the groups of functions that
     /// take one type (a class equivalent — the type plus its methods in
     /// exile), and the functions left with no receiver.
     pub fn definitions(&self) -> usize {
@@ -487,10 +492,13 @@ impl ModuleShape {
                     methods: Self::acting_methods(&class.body),
                 }),
                 Stmt::FunctionDef(function) => {
-                    if function.decorator_list.is_empty() {
-                        functions += 1;
-                    } else {
+                    if !function.decorator_list.is_empty() {
                         framework_functions += 1;
+                    } else if !function.name.starts_with('_') {
+                        // a private module function is the module's own helper,
+                        // not a second concept; `private-code-leakage` enforces
+                        // that no other module can reach it
+                        functions += 1;
                     }
                 }
                 _ => {}

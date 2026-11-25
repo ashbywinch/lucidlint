@@ -402,12 +402,16 @@ CATALOG = RuleCatalog([
          "definitions are one concern, they become that class's fields and "
          "methods; if they are several, the module is split until each concern "
          "has its module and its class. A decorated function is a framework "
-         "entry point, not a definition the module owns. The upper rung is "
+         "entry point, not a definition the module owns; a private module "
+         "function (`_name`) is the module's own helper, and its privacy is "
+         "enforced by `private-code-leakage`. The upper rung is "
          "`many-definitions`."),
     Rule("many-definitions", "warn", "architecture", ("python", "rust"),
-         "A module holding more than 10 top-level definitions — Python "
-         "functions and classes; Rust types, groups of functions that take one "
-         "type (a class equivalent), and functions left with no receiver. Past "
+         "A module holding more than 10 top-level definitions — Python public "
+         "functions and classes (a private module function is the module's own "
+         "helper, not a counted concept); Rust types, groups of functions that "
+         "take one type (a class equivalent), and functions left with no "
+         "receiver. Past "
          "ten, the module is a grab bag of concerns: split it by concern, one "
          "module per concern, each holding the class it is about. The second "
          "rung of the `several-definitions` ladder, in both languages."),

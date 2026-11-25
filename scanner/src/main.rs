@@ -5682,6 +5682,23 @@ mod tests {
     }
 
     #[test]
+    fn several_definitions_exempts_private_helpers() {
+        // one class and its private parsers are one concept: the helpers are
+        // the module's own, not a second concern
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_private_helpers.py");
+        let f = scan_corpus(&[("pkg/school.py", src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        // the exemption is the private name's: public helpers still count
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_helpers_only.py");
+        let f = scan_corpus(&[("pkg/rows.py", src)]);
+        assert!(f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+        // a module of private helpers is one implementation, not a bag of concepts
+        let src = include_str!("../../tests/fixtures/code/sample_several_definitions_private_helpers_only.py");
+        let f = scan_corpus(&[("pkg/rows.py", src)]);
+        assert!(!f.iter().any(|x| x.kind == "several-definitions"), "{f:?}");
+    }
+
+    #[test]
     fn several_definitions_reports_the_types_when_types_and_functions_tie() {
         // two classes with behaviour and two helpers: the helpers belong to
         // the classes, so the types arm names them — the functions arm would
