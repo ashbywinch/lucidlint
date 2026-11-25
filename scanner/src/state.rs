@@ -220,6 +220,15 @@ impl<'a> SourceOrderVisitor<'a> for ScanState<'a> {
             Expr::Attribute(a) => {
                 // attribute names count as references (obj.set_x(v) uses set_x)
                 self.refs.insert(a.attr.to_string());
+                let attr = a.attr.as_str();
+                if attr.starts_with('_') && !Self::is_dunder(attr) {
+                    if let Some((root, receiver)) = Self::dotted_path(&a.value) {
+                        let line = Source::line_of(self.source, a.range().start());
+                        let fn_name = self.current_fn.as_ref().map(|f| f.0.clone()).unwrap_or_default();
+                        self.private_reaches
+                            .push((root, format!("{receiver}.{attr}"), line, fn_name));
+                    }
+                }
             }
             Expr::StringLiteral(s) if !self.is_test => {
                 self.strings.push(s.value.to_str().to_string());
@@ -430,6 +439,12 @@ impl<'a> ScanState<'a> {
                 if im.module.as_ref().map(|m| m.as_str()) == Some("__future__") {
                     return;
                 }
+                // a relative import is the file's own package by definition
+                let source = if im.level > 0 {
+                    ""
+                } else {
+                    im.module.as_ref().map(|m| m.as_str()).unwrap_or("")
+                };
                 let private_module = im
                     .module
                     .as_ref()
@@ -437,6 +452,10 @@ impl<'a> ScanState<'a> {
                     .unwrap_or(false);
                 for alias in &im.names {
                     let name = alias.name.as_str();
+                    if name != "*" {
+                        let bound = alias.asname.as_ref().map(|a| a.as_str()).unwrap_or(name);
+                        self.import_sources.insert(bound.to_string(), source.to_string());
+                    }
                     if name.starts_with('_') || private_module {
                         let target = if name.starts_with('_') {
                             name.to_string()
@@ -450,9 +469,11 @@ impl<'a> ScanState<'a> {
                             line: Source::stmt_line(self.source, stmt),
                             col: 0,
                             function: fn_name.clone(),
-                            kind: "private-import".into(),
+                            kind: "private-code-leakage".into(),
                             severity: "fail".into(),
-                            message: format!("imports private symbol '{target}' — never import underscore symbols"),
+                            message: format!(
+                                "imports private symbol '{target}' from another module — a private name belongs to its module; import a public name, or move the behaviour to the module that owns it"
+                            ),
                         });
                     }
                 }
@@ -460,6 +481,12 @@ impl<'a> ScanState<'a> {
             Stmt::Import(im) => {
                 for alias in &im.names {
                     let name = alias.name.as_str();
+                    let bound = alias
+                        .asname
+                        .as_ref()
+                        .map(|a| a.as_str())
+                        .unwrap_or_else(|| name.split('.').next().unwrap_or(name));
+                    self.import_sources.insert(bound.to_string(), name.to_string());
                     if name.split('.').any(|seg| seg.starts_with('_')) {
                         self.findings.push(Finding {
                             logical_start: None,
@@ -468,9 +495,11 @@ impl<'a> ScanState<'a> {
                             line: Source::stmt_line(self.source, stmt),
                             col: 0,
                             function: fn_name.clone(),
-                            kind: "private-import".into(),
+                            kind: "private-code-leakage".into(),
                             severity: "fail".into(),
-                            message: format!("imports private path '{name}' — never import underscore symbols"),
+                            message: format!(
+                                "imports private module path '{name}' — a private module belongs to its package; import a public module, or move the behaviour into the package that owns it"
+                            ),
                         });
                     }
                 }
@@ -558,5 +587,81 @@ impl ScanState<'_> {
         DuplicateModule::collect(self, body, name);
         Forwarding::collect(self, body);
         ConstructionOccurrence::collect(self, body, source);
+        // the reaches are drained here, in the caller, so the findings pass
+        // cannot silently read an empty cache if it were ever called twice
+        let reaches = std::mem::take(&mut self.private_reaches);
+        self.private_code_leakage_findings(reaches);
+    }
+
+    /// The receiver chain of a `name.attr.attr` expression: the root name and
+    /// the dotted path as written. `None` when the receiver is not a name chain
+    /// (a call result, a subscript), which the leakage rule leaves alone.
+    fn dotted_path(expr: &Expr) -> Option<(String, String)> {
+        match expr {
+            Expr::Name(n) => Some((n.id.to_string(), n.id.to_string())),
+            Expr::Attribute(a) => {
+                let (root, mut path) = Self::dotted_path(&a.value)?;
+                path.push('.');
+                path.push_str(a.attr.as_str());
+                Some((root, path))
+            }
+            _ => None,
+        }
+    }
+
+    /// Protocol names (`__name__`, `__enter__`) are public by convention; only
+    /// a single-underscore or name-mangled name is private.
+    fn is_dunder(name: &str) -> bool {
+        name.starts_with("__") && name.ends_with("__")
+    }
+
+    /// The dotted package of a file path: `pkg/sub/__init__.py` -> `pkg.sub`.
+    fn package_of(file: &str) -> String {
+        file.rsplit_once('/')
+            .map(|(dir, _)| dir.replace('/', "."))
+            .unwrap_or_default()
+    }
+
+    /// True when `source` is the package itself or a module inside it. A
+    /// relative import (empty source) is the file's own package by definition.
+    fn same_package(package: &str, source: &str) -> bool {
+        !package.is_empty() && (source.is_empty() || source == package || source.starts_with(&format!("{package}.")))
+    }
+
+    /// `private-code-leakage`, attribute form: a private attribute reached on a
+    /// name bound by an import (`houses.school._try_geopoint`). One finding per
+    /// distinct target in the file, at its first reach. The caller passes the
+    /// reaches it drained, so the data flow is visible and a second call cannot
+    /// find an empty cache.
+    fn private_code_leakage_findings(&mut self, reaches: Vec<(String, String, usize, String)>) {
+        let package = Self::package_of(self.file);
+        let facade = self.file.ends_with("__init__.py");
+        let mut seen = std::collections::HashSet::new();
+        for (root, target, line, function) in reaches {
+            let Some(source) = self.import_sources.get(&root) else {
+                continue;
+            };
+            // A package's `__init__.py` reassembles its own package's names:
+            // that is the facade's job, not leakage. A peer module may not.
+            if facade && Self::same_package(&package, source) {
+                continue;
+            }
+            if !seen.insert(target.clone()) {
+                continue;
+            }
+            self.findings.push(Finding {
+                logical_start: None,
+                seam_members: Vec::new(),
+                file: self.file.to_string(),
+                line,
+                col: 0,
+                function,
+                kind: "private-code-leakage".into(),
+                severity: "fail".into(),
+                message: format!(
+                    "reaches private '{target}' from another module — a private name belongs to its module; call a public API, or move the call into that module"
+                ),
+            });
+        }
     }
 }

@@ -1181,7 +1181,7 @@ def test_actions_from_rust_test_only_filter():
         },
         {},
     )
-    acts = RustScan._actions_from_rust(
+    acts = RustScan.actions_from_rust(
         rf, include_tests=False, test_quality=False, file_churn=Counter(), last_modified={}
     )
     assert [a.message for a in acts] == ["test-only rule"]  # only DEFAULT_TEST_SIGNALS survive
