@@ -20,7 +20,7 @@ import sys
 import tarfile
 from collections import Counter
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import fix_engine
@@ -125,12 +125,15 @@ _UNSET = object()
 def make_host(process=None, pygit2=_UNSET, graph_store=_UNSET, graph_registry=_UNSET, engine=_UNSET) -> Host:
     """A host over the real collaborators, with the named ones substituted."""
     real = Host.default()
+    provided: dict[str, Any] = {}
+    if engine is not _UNSET:
+        provided["fix_engine"] = engine
     return Host(
         process=process or real.process,
         pygit2=real.pygit2 if pygit2 is _UNSET else pygit2,
         graph_store=real.graph_store if graph_store is _UNSET else graph_store,
         graph_registry=real.graph_registry if graph_registry is _UNSET else graph_registry,
-        fix_engine=real.fix_engine if engine is _UNSET else engine,
+        **provided,
     )
 
 

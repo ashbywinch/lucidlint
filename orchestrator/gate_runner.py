@@ -136,8 +136,9 @@ class GateRunner:
                 self.ignored_by_signal[a.signal] += 1
                 continue
             removed = False
+            path = Path(a.file)
             for pattern, path_ignored in self.ignored_config.per_path_ignore:
-                if Path(a.file).match(pattern) and a.signal in path_ignored:
+                if a.signal in path_ignored and path.match(pattern):
                     self.ignored_by_signal[a.signal] += 1
                     removed = True
                     break
