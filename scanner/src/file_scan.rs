@@ -87,6 +87,8 @@ pub struct FileScan {
     pub scattered: Vec<checks::ScatteredInstance>,
     /// The file's substantive expressions (#104 duplicate-expression).
     pub duplicate_expressions: Vec<checks::ExpressionOccurrence>,
+    /// The file's free functions that read an imported class (feature-envy).
+    pub free_envy: Vec<checks::EnvyCandidate>,
     /// The file's small constructor calls (shared-construction).
     pub shared_constructions: Vec<checks::ConstructionOccurrence>,
     /// The file's module-level path expressions (#60 shared-path).
