@@ -96,6 +96,12 @@ impl Except {
     /// A handler that ends in a raise propagates the failure (a cleanup guard
     /// or a conversion), so the broad catch is not hiding it. A log-and-return
     /// handler is not a re-raise.
+    /// Only a visible all-path raise is exempt: the last statement is a `raise`,
+    /// or an `if/else` whose every branch raises. A nested `try`/`except`, a
+    /// `match` (which may be non-exhaustive), or a `with` (whose `__exit__` may
+    /// suppress) needs path analysis to know whether every path propagates; the
+    /// rule warns there. That is the safe side: a warning is not a gate failure,
+    /// while exempting a handler that swallows on one path hides a real bug.
     fn ends_in_raise(body: &[Stmt]) -> bool {
         match body.last() {
             Some(Stmt::Raise(_)) => true,
