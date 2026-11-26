@@ -1220,7 +1220,7 @@ class MechanicalFixes:
         total = 0
         for p in SourceFiles(repo).py_files():
             try:
-                text = p.read_text(encoding="utf-8")
+                text = p.read_text(encoding="utf-8")  # the one read; parse this string
             except (OSError, UnicodeDecodeError):
                 continue  # an unreadable sibling is its own finding
             if name not in text:

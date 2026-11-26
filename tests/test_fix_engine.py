@@ -524,6 +524,36 @@ def test_magic_literal_classmethod_positional_receiver_uses_its_name(tmp_path):
     assert namespace["Step"].run(9) == 6, fixed
 
 
+def test_magic_literal_default_argument_keeps_bare_name(tmp_path):
+    # a default is evaluated in class scope, before the function exists; the
+    # bare class constant is the name that resolves there
+    src = code_fixture("sample_magic_literal_default_argument_keeps_bare_name__c81e4a7d.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    out = _fix_finding("magic-number", "houses/app.py", repo, 3, fix_engine.FixOptions(name="LIMIT"))
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "max_turns: int = LIMIT" in fixed, fixed
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["Step"].run() == 6, fixed
+
+
+def test_magic_literal_one_line_body_qualifies_with_cls(tmp_path):
+    # a one-line body is still the body: the literal is after the colon, so it
+    # is inside the function and the classmethod reaches it through cls
+    src = code_fixture("sample_magic_literal_one_line_body_qualifies_with_cls__d92f5b6e.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    out = _fix_finding("magic-number", "houses/app.py", repo, 3, fix_engine.FixOptions(name="LIMIT"))
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "return cls.LIMIT" in fixed, fixed
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["Step"].run() == 6, fixed
+
+
 def test_magic_literal_staticmethod_qualifies_with_class(tmp_path):
     # a staticmethod has no receiver; the class name is the only qualifier
     src = code_fixture("sample_magic_literal_staticmethod_qualifies_with_class__7e2b9d14.py")
