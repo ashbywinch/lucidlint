@@ -29,7 +29,7 @@ pub(super) type PairKey = (ParamKey, ParamKey);
 /// a method read its own state more than its neighbour's, and the margin the
 /// self-read must clear.
 const PAIR_GROUP_MIN: usize = 3;
-const READS_MIN: usize = 4;
+pub(crate) const READS_MIN: usize = 4;
 const SELF_READ_MARGIN: usize = 3;
 
 pub struct LatentState;

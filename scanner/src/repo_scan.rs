@@ -254,6 +254,10 @@ impl<'a> RepoScan<'a> {
         );
         self.add(
             findings,
+            checks::EnvyCandidate::findings(&self.per_file(|scan| &scan.free_envy), &self.class_names()),
+        );
+        self.add(
+            findings,
             checks::ModuleShape::findings(&self.per_file(|scan| &scan.module_shape)),
         );
         self.add(
