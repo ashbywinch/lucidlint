@@ -488,7 +488,38 @@ def test_magic_literal_becomes_class_attribute(tmp_path):
     assert out is not None
     fixed = (repo / "houses" / "app.py").read_text()
     assert fixed.startswith("class Window:"), fixed  # not parked at module top
+    # the instance method reads the class constant THROUGH self: a bare name
+    # inside a method is a NameError, and the fix must not emit one
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["Window"]().g() == 1440, fixed
     _assert_fixed(repo, before)
+
+
+def test_magic_literal_classmethod_qualifies_with_cls(tmp_path):
+    # a classmethod reaches its class constant through cls — `cls.LIMIT`
+    src = code_fixture("sample_magic_literal_classmethod_qualifies_with_cls__4c1a7e02.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    out = _fix_finding("magic-number", "houses/app.py", repo, 4, fix_engine.FixOptions(name="LIMIT"))
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["Step"].run(9) == 6, fixed
+
+
+def test_magic_literal_staticmethod_qualifies_with_class(tmp_path):
+    # a staticmethod has no receiver; the class name is the only qualifier
+    src = code_fixture("sample_magic_literal_staticmethod_qualifies_with_class__7e2b9d14.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    out = _fix_finding("magic-number", "houses/app.py", repo, 4, fix_engine.FixOptions(name="RETRIES"))
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["Limits"].retries() == 3, fixed
 
 
 def test_magic_literal_refuses_without_owning_class(tmp_path):
@@ -1871,6 +1902,32 @@ def test_duplicate_def_unreferenced_shadow_deleted(tmp_path):
     assert out is not None
     assert fixed.count("def guess_pages") == 1
     assert "return 1" in fixed  # the FIRST def survives verbatim
+
+
+def test_duplicate_def_single_reference_is_not_deleted(tmp_path):
+    # the def's own name is a Name node in libcst; one call site used to make
+    # the count look like "two def sites" and the delete broke the caller
+    src = code_fixture("sample_duplicate_def_single_reference_refuses__b3f81c6a.py")
+    out, fixed = _fix(tmp_path, "duplicate-def", "houses/app.py", src, 5)
+    assert out is None
+    assert fixed == src
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["driver"]("abc", 1) == "bb"  # both wrappers are live
+
+
+def test_duplicate_def_target_bound_once_is_refused(tmp_path):
+    # near-identical functions are the `duplicate` rule's finding, not a
+    # shadowing duplicate-def; the fixer must not delete a lone definition
+    src = code_fixture("sample_duplicate_def_target_bound_once_refuses__d94e2f70.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    req = _req("duplicate-def", "houses/app.py", repo, 1)
+    out = req.fix_finding()
+    assert out is None
+    assert req.decline is not None
+    assert "duplicate" in req.decline  # names the near-duplicate family to use
+    assert (repo / "houses" / "app.py").read_text() == src
 
 
 def test_duplicate_def_referenced_shadow_not_deleted(tmp_path):
