@@ -143,7 +143,10 @@ class MagicLiteral:
                 self.chain.append(node)
 
         def qualifier(self, owner_name: str) -> str | None:
-            """The expression prefix for the constant, or None for a bare name."""
+            """The expression prefix for the constant, or None for a bare name.
+            A literal in a method decorator sits before the body start, so the
+            chain stays empty: the decorator runs in class scope, after the
+            constant is bound."""
             if not self.chain:
                 return None
             head = self.chain[0]
