@@ -3619,7 +3619,11 @@ mod tests {
         let f = scan_src_test(include_str!(
             "../../tests/fixtures/rust/fakefs_real_fs_without_pyfakefs_is_found__01.py"
         ));
-        assert!(f.iter().any(|x| x.kind == "fakefs"));
+        let hit = f.iter().find(|x| x.kind == "fakefs").expect("fakefs fires");
+        // the message names a path that clears the finding (the fs fixture)
+        // and never the docstring/comment that does not ("comment why")
+        assert!(hit.message.contains("Use the `fs` fixture"), "{}", hit.message);
+        assert!(!hit.message.contains("comment why"), "{}", hit.message);
     }
 
     #[test]
@@ -4402,8 +4406,13 @@ mod tests {
             "../../tests/fixtures/rust/message_wording_states_the_real_fix_and_the_exemption__03.py"
         ));
         let be = b.iter().find(|x| x.kind == "broad-except").expect("broad-except fires");
-        assert!(be.message.contains("blast radius"), "{}", be.message);
-        assert!(be.message.contains("catch what you actually handle"), "{}", be.message);
+        assert!(
+            be.message.contains("catch the exceptions this handler handles"),
+            "{}",
+            be.message
+        );
+        assert!(be.message.contains("boundary that logs the failure"), "{}", be.message);
+        assert!(!be.message.contains("the why"), "{}", be.message);
 
         let scan_magic = scan_src_test(include_str!(
             "../../tests/fixtures/rust/message_wording_states_the_real_fix_and_the_exemption__04.py"
