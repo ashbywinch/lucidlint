@@ -2135,6 +2135,26 @@ mod tests {
     }
 
     #[test]
+    fn derived_method_direct_form_reads_the_class_it_takes() {
+        // a module function whose first parameter is the module's own class,
+        // read only through its fields — a warning, because the formatting may
+        // belong to the call site
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/misplaced_method_direct_form_reads_the_class_it_takes__01.py"
+        ));
+        let r: Vec<&Finding> = f.iter().filter(|x| x.kind == "derived-method").collect();
+        assert_eq!(r.len(), 1, "{f:?}");
+        assert_eq!(r[0].severity, "warn");
+        assert!(r[0].message.contains("School"), "{}", r[0].message);
+        assert!(r[0].message.contains("likely to change alongside"), "{}", r[0].message);
+        assert!(r[0].message.contains("member of 'School'"), "{}", r[0].message);
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/misplaced_method_direct_form_negatives__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "derived-method"), "{f:?}");
+    }
+
+    #[test]
     fn tuple_record_fires_on_positional_reads() {
         // (props, name) tuples built into dicts, read by constant index and
         // destructure — an anonymous record
