@@ -457,18 +457,6 @@ def test_fix_gate_rerun_is_clean(tmp_path, capsys):
 
 _FIX_ALL_SRC = code_fixture("module__f80558d9.py")
 
-# the gate reports display kinds; the fix command maps them to transforms
-FIXABLE_KINDS = {
-    "stale-suppression": "stale-suppression",
-    "noop-statement": "noop-statement",
-    "unreachable": "unreachable",
-    "positional-literals": "positional-literals",
-    "latent-class": "extract-class",  # strewing's display kind
-    "magic-number": "magic-number",
-    "vague-name": "vague-name",
-    "long-param-list": "long-param-list",
-}
-
 # kinds whose fix needs the agent's semantic bit (supplied on the retry)
 FIX_NAMES = {
     "magic-number": "MAX_RETRIES",
@@ -1627,7 +1615,10 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
     for _ in range(25):  # bounded — the workflow normally converges in ~7
         run_main(repo, "--warn", "--json")
         actions = json.loads(capsys.readouterr().out)["actions"]
-        fixable = [a for a in actions if a["kind"] in FIXABLE_KINDS]
+        # the action's `fix_kind` is the transform it advertises; a display
+        # family like latent-class also has variants (misplaced-method) with
+        # no transform, which are not part of this loop
+        fixable = [a for a in actions if a.get("fix_kind")]
         finding = next(iter(fixable), None)
         if finding is None:
             break
@@ -1642,7 +1633,7 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
                 )
             else:
                 assert len(fixable) <= last_count, f"no-op fix changed the file ({last_count} -> {len(fixable)})"
-        fix_kind = FIXABLE_KINDS[finding["kind"]]
+        fix_kind = finding["fix_kind"]
         key = (finding["kind"], finding["file"], finding["line"])
         extra = []
         if fix_kind == "positional-literals" and attempts.get(key, 0) >= 1:
@@ -1687,7 +1678,7 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
     # every fixable kind is gone and the file still parses
     run_main(repo, "--warn", "--json")
     final_actions = json.loads(capsys.readouterr().out)["actions"]
-    remaining = [a["kind"] for a in final_actions if a["kind"] in FIXABLE_KINDS]
+    remaining = [a["kind"] for a in final_actions if a.get("fix_kind")]
     assert remaining == [], f"fixable findings remain: {remaining}"
     compile((repo / "houses" / "app.py").read_text(), "app.py", "exec")
 
