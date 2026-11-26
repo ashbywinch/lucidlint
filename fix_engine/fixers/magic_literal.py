@@ -151,7 +151,14 @@ class MagicLiteral:
                 params = list(head.params.posonly_params) + list(head.params.params)
                 receiver = params[0].name.value if params else ""
                 if self._decorated(head, "classmethod"):
-                    return receiver or "cls"
+                    if not receiver:
+                        self.decline = (
+                            "sits in a classmethod with no positional receiver — the class has no local "
+                            "name to qualify the constant with; take the class as the first parameter, "
+                            "or name the constant where the computation uses it"
+                        )
+                        return None
+                    return receiver
                 if receiver == "self" and not self._decorated(head, "staticmethod"):
                     return "self"
             if self.owner_depth > 1:

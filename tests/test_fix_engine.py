@@ -522,6 +522,35 @@ def test_magic_literal_staticmethod_qualifies_with_class(tmp_path):
     assert namespace["Limits"].retries() == 3, fixed
 
 
+def test_magic_literal_method_decorator_keeps_bare_name(tmp_path):
+    # a method decorator runs in class scope, where the constant is already
+    # bound — qualifying it with self would NameError at class definition
+    src = code_fixture("sample_magic_literal_method_decorator_keeps_bare_name__e5a0c739.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    out = _fix_finding("magic-number", "houses/app.py", repo, 6, fix_engine.FixOptions(name="LIMIT"))
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "@tag(LIMIT)" in fixed, fixed
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["C"]().m() == 1, fixed
+
+
+def test_magic_literal_classmethod_without_receiver_refuses(tmp_path):
+    # `@classmethod def run(*args)` has no local name for the class; `cls`
+    # would be a NameError, so the fixer declines with the reason
+    src = code_fixture("sample_magic_literal_classmethod_without_receiver_refuses__a6d4b821.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    req = _req("magic-number", "houses/app.py", repo, 4, fix_engine.FixOptions(name="LIMIT"))
+    out = req.fix_finding()
+    assert out is None
+    assert req.decline is not None
+    assert "classmethod with no positional receiver" in req.decline
+    assert (repo / "houses" / "app.py").read_text() == src
+
+
 def test_magic_literal_refuses_without_owning_class(tmp_path):
     # a literal in a module-level function has no class to own its constant —
     # refuse with a why, never park it at module top
