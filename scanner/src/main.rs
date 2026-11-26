@@ -2142,12 +2142,8 @@ mod tests {
         assert_eq!(r.len(), 1, "{f:?}");
         assert_eq!(r[0].severity, "warn");
         assert!(r[0].message.contains("School"), "{}", r[0].message);
-        assert!(
-            r[0].message.contains("would force this function to change"),
-            "{}",
-            r[0].message
-        );
-        assert!(r[0].message.contains("keep it with the caller"), "{}", r[0].message);
+        assert!(r[0].message.contains("likely to change alongside"), "{}", r[0].message);
+        assert!(r[0].message.contains("member of 'School'"), "{}", r[0].message);
         let f = scan_src(include_str!(
             "../../tests/fixtures/rust/misplaced_method_direct_form_negatives__01.py"
         ));
