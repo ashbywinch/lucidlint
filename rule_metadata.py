@@ -444,10 +444,10 @@ CATALOG = RuleCatalog([
     Rule("derived-method", "warn", "architecture", ("python",),
          "A module-level function whose only parameter is a class this module "
          "defines, and whose body reads that parameter's fields and returns "
-         "one value. If the function is likely to change alongside the class, "
-         "and unlikely to change alongside the module it is in, it should be "
-         "a member of the class. A warning, because the tool cannot know "
-         "which.",
+         "one value. If the function is likely to change alongside changes to "
+         "the class, and unlikely to change alongside changes to the module "
+         "that holds it, it should be a member of the class. A warning, because "
+         "the tool cannot know which.",
          display_name="derived-method → latent-class", display_group="latent-class"),
     Rule("assembly-class", "fail", "architecture", ("python",),
          "A function assembles >=3 structures by threading the same data "

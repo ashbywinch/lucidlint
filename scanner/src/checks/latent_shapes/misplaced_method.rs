@@ -200,6 +200,14 @@ impl MisplacedMethod {
         matches!(stmt, Stmt::Expr(e) if matches!(e.value.as_ref(), Expr::StringLiteral(_)))
     }
 
+    /// The dotted module name of a Python file: `houses/school.py` ->
+    /// `houses.school`, `pkg/__init__.py` -> `pkg`.
+    fn module_name(file: &str) -> String {
+        let without_py = file.strip_suffix(".py").unwrap_or(file);
+        let without_init = without_py.strip_suffix("/__init__").unwrap_or(without_py);
+        without_init.replace('/', ".")
+    }
+
     /// The only parameter, when the function takes exactly one positional
     /// parameter and no keyword or varargs: a service with more inputs is not a
     /// derivation of the object.
@@ -259,11 +267,12 @@ impl MisplacedMethod {
                 kind: "derived-method".into(),
                 severity: "warn".into(),
                 message: format!(
-                    "'{}' takes only a '{}' and reads its fields. If it is likely to change alongside '{}', and unlikely to change alongside '{}', it should be a member of '{}'.",
+                    "'{}' takes only a '{}' and reads its fields. If '{}' is likely to change alongside changes to '{}', and unlikely to change alongside changes to '{}', it should be a member of '{}'.",
                     f.name.as_str(),
                     class,
+                    f.name.as_str(),
                     class,
-                    state.file,
+                    Self::module_name(state.file),
                     class
                 ),
             });
