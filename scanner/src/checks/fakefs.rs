@@ -84,7 +84,7 @@ pub fn fakefs_findings(state: &mut ScanState, body: &[Stmt], source: &str) {
                                             kind: "fakefs".into(),
                                             severity: "fail".into(),
                                             message: format!(
-                                                "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — tests fake the filesystem (the `fs` fixture or fake_filesystem_unittest). Reach the real filesystem only when the code under test needs real FS semantics (subprocess interop, symlinks, C-level I/O like sqlite3), or when the test's subject is a checked-in file the repo ships (a workflow, a build script); comment why",
+                                                "test '{}' at line {line} touches the real filesystem (tmp_path/open/Path) without pyfakefs — its result then depends on the machine, and its writes outlive the test. Use the `fs` fixture or fake_filesystem_unittest. Keep the real filesystem only when the test's subject needs it: subprocess interop, symlinks, C-level I/O like sqlite3, or a module loaded from a generated path by importlib.",
                                                 f.name.as_str()
                                             ), });
                 }

@@ -7,8 +7,8 @@
 /// testable without building the maps.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Marker {
-    /// `lucidlint: ignore-file <signal> <why>` — exempts the signal anywhere
-    /// in the file.
+    /// `lucidlint: ignore-file <signal>[,<signal>...] <why>` — exempts each
+    /// signal anywhere in the file.
     File { signal: String, why: String },
     /// `lucidlint: ignore <signal>[,<signal>...] <why>` — exempts each signal
     /// at the comment's line (and the line above, by the marker window).
@@ -23,12 +23,18 @@ impl Marker {
     pub(super) fn parse(line: usize, text: &str) -> Vec<Marker> {
         let trimmed = text.trim_start_matches(['#', '/']).trim_start();
         if let Some(rest) = trimmed.strip_prefix("lucidlint: ignore-file ") {
-            let (signal, why) = Self::signal_and_why(rest);
-            return if signal.is_empty() {
-                Vec::new()
-            } else {
-                vec![Marker::File { signal, why }]
-            };
+            let (signals, why) = Self::signal_and_why(rest);
+            // the file form shares the line form's comma list: one marker
+            // exempts every named signal for the whole file
+            return signals
+                .split(',')
+                .map(str::trim)
+                .filter(|signal| !signal.is_empty())
+                .map(|signal| Marker::File {
+                    signal: signal.to_string(),
+                    why: why.clone(),
+                })
+                .collect();
         }
         let Some(rest) = trimmed.strip_prefix("lucidlint: ignore ") else {
             return Vec::new();
@@ -85,6 +91,29 @@ mod tests {
                     line: 7,
                     signal: "closure-strewing".to_string(),
                     why: "one site".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_marker_parses_the_same_signal_list_as_a_line_marker() {
+        // the file form used to keep the comma list as ONE unknown signal, so
+        // `ignore-file fakefs,monkeypatch` suppressed neither family
+        let file = Marker::parse(
+            1,
+            "# lucidlint: ignore-file fakefs,monkeypatch real fs and an SDK patch are the subject",
+        );
+        assert_eq!(
+            file,
+            vec![
+                Marker::File {
+                    signal: "fakefs".to_string(),
+                    why: "real fs and an SDK patch are the subject".to_string(),
+                },
+                Marker::File {
+                    signal: "monkeypatch".to_string(),
+                    why: "real fs and an SDK patch are the subject".to_string(),
                 },
             ]
         );

@@ -457,18 +457,6 @@ def test_fix_gate_rerun_is_clean(tmp_path, capsys):
 
 _FIX_ALL_SRC = code_fixture("module__f80558d9.py")
 
-# the gate reports display kinds; the fix command maps them to transforms
-FIXABLE_KINDS = {
-    "stale-suppression": "stale-suppression",
-    "noop-statement": "noop-statement",
-    "unreachable": "unreachable",
-    "positional-literals": "positional-literals",
-    "latent-class": "extract-class",  # strewing's display kind
-    "magic-number": "magic-number",
-    "vague-name": "vague-name",
-    "long-param-list": "long-param-list",
-}
-
 # kinds whose fix needs the agent's semantic bit (supplied on the retry)
 FIX_NAMES = {
     "magic-number": "MAX_RETRIES",
@@ -488,7 +476,112 @@ def test_magic_literal_becomes_class_attribute(tmp_path):
     assert out is not None
     fixed = (repo / "houses" / "app.py").read_text()
     assert fixed.startswith("class Window:"), fixed  # not parked at module top
+    # the instance method reads the class constant THROUGH self: a bare name
+    # inside a method is a NameError, and the fix must not emit one
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["Window"]().g() == 1440, fixed
     _assert_fixed(repo, before)
+
+
+def test_magic_literal_classmethod_qualifies_with_cls(tmp_path):
+    # a classmethod reaches its class constant through cls — `cls.LIMIT`
+    src = code_fixture("sample_magic_literal_classmethod_qualifies_with_cls__4c1a7e02.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    out = _fix_finding("magic-number", "houses/app.py", repo, 4, fix_engine.FixOptions(name="LIMIT"))
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["Step"].run(9) == 6, fixed
+
+
+def test_magic_literal_classmethod_positional_receiver_uses_its_name(tmp_path):
+    # the first positional parameter is the class, whatever it is named;
+    # a positional-only `klass` is still the receiver
+    src = code_fixture("sample_magic_literal_classmethod_positional_receiver__b3f7a1c9.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    out = _fix_finding("magic-number", "houses/app.py", repo, 4, fix_engine.FixOptions(name="LIMIT"))
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "klass.LIMIT" in fixed, fixed
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["Step"].run(9) == 6, fixed
+
+
+def test_magic_literal_default_argument_keeps_bare_name(tmp_path):
+    # a default is evaluated in class scope, before the function exists; the
+    # bare class constant is the name that resolves there
+    src = code_fixture("sample_magic_literal_default_argument_keeps_bare_name__c81e4a7d.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    out = _fix_finding("magic-number", "houses/app.py", repo, 3, fix_engine.FixOptions(name="LIMIT"))
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "max_turns: int = LIMIT" in fixed, fixed
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["Step"].run() == 6, fixed
+
+
+def test_magic_literal_one_line_body_qualifies_with_cls(tmp_path):
+    # a one-line body is still the body: the literal is after the colon, so it
+    # is inside the function and the classmethod reaches it through cls
+    src = code_fixture("sample_magic_literal_one_line_body_qualifies_with_cls__d92f5b6e.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    out = _fix_finding("magic-number", "houses/app.py", repo, 3, fix_engine.FixOptions(name="LIMIT"))
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "return cls.LIMIT" in fixed, fixed
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["Step"].run() == 6, fixed
+
+
+def test_magic_literal_staticmethod_qualifies_with_class(tmp_path):
+    # a staticmethod has no receiver; the class name is the only qualifier
+    src = code_fixture("sample_magic_literal_staticmethod_qualifies_with_class__7e2b9d14.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    out = _fix_finding("magic-number", "houses/app.py", repo, 4, fix_engine.FixOptions(name="RETRIES"))
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["Limits"].retries() == 3, fixed
+
+
+def test_magic_literal_method_decorator_keeps_bare_name(tmp_path):
+    # a method decorator runs in class scope, where the constant is already
+    # bound — qualifying it with self would NameError at class definition
+    src = code_fixture("sample_magic_literal_method_decorator_keeps_bare_name__e5a0c739.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    out = _fix_finding("magic-number", "houses/app.py", repo, 6, fix_engine.FixOptions(name="LIMIT"))
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "@tag(LIMIT)" in fixed, fixed
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["C"]().m() == 1, fixed
+
+
+def test_magic_literal_classmethod_without_receiver_refuses(tmp_path):
+    # `@classmethod def run(*args)` has no local name for the class; `cls`
+    # would be a NameError, so the fixer declines with the reason
+    src = code_fixture("sample_magic_literal_classmethod_without_receiver_refuses__a6d4b821.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    req = _req("magic-number", "houses/app.py", repo, 4, fix_engine.FixOptions(name="LIMIT"))
+    out = req.fix_finding()
+    assert out is None
+    assert req.decline is not None
+    assert "classmethod with no positional receiver" in req.decline
+    assert (repo / "houses" / "app.py").read_text() == src
 
 
 def test_magic_literal_refuses_without_owning_class(tmp_path):
@@ -1522,7 +1615,10 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
     for _ in range(25):  # bounded — the workflow normally converges in ~7
         run_main(repo, "--warn", "--json")
         actions = json.loads(capsys.readouterr().out)["actions"]
-        fixable = [a for a in actions if a["kind"] in FIXABLE_KINDS]
+        # the action's `fix_kind` is the transform it advertises; a display
+        # family like latent-class also has variants (misplaced-method) with
+        # no transform, which are not part of this loop
+        fixable = [a for a in actions if a.get("fix_kind")]
         finding = next(iter(fixable), None)
         if finding is None:
             break
@@ -1537,7 +1633,7 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
                 )
             else:
                 assert len(fixable) <= last_count, f"no-op fix changed the file ({last_count} -> {len(fixable)})"
-        fix_kind = FIXABLE_KINDS[finding["kind"]]
+        fix_kind = finding["fix_kind"]
         key = (finding["kind"], finding["file"], finding["line"])
         extra = []
         if fix_kind == "positional-literals" and attempts.get(key, 0) >= 1:
@@ -1582,7 +1678,7 @@ def test_message_to_fix_end_to_end(tmp_path, capsys):
     # every fixable kind is gone and the file still parses
     run_main(repo, "--warn", "--json")
     final_actions = json.loads(capsys.readouterr().out)["actions"]
-    remaining = [a["kind"] for a in final_actions if a["kind"] in FIXABLE_KINDS]
+    remaining = [a["kind"] for a in final_actions if a.get("fix_kind")]
     assert remaining == [], f"fixable findings remain: {remaining}"
     compile((repo / "houses" / "app.py").read_text(), "app.py", "exec")
 
@@ -1871,6 +1967,32 @@ def test_duplicate_def_unreferenced_shadow_deleted(tmp_path):
     assert out is not None
     assert fixed.count("def guess_pages") == 1
     assert "return 1" in fixed  # the FIRST def survives verbatim
+
+
+def test_duplicate_def_single_reference_is_not_deleted(tmp_path):
+    # the def's own name is a Name node in libcst; one call site used to make
+    # the count look like "two def sites" and the delete broke the caller
+    src = code_fixture("sample_duplicate_def_single_reference_refuses__b3f81c6a.py")
+    out, fixed = _fix(tmp_path, "duplicate-def", "houses/app.py", src, 5)
+    assert out is None
+    assert fixed == src
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["driver"]("abc", 1) == "bb"  # both wrappers are live
+
+
+def test_duplicate_def_target_bound_once_is_refused(tmp_path):
+    # near-identical functions are the `duplicate` rule's finding, not a
+    # shadowing duplicate-def; the fixer must not delete a lone definition
+    src = code_fixture("sample_duplicate_def_target_bound_once_refuses__d94e2f70.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    req = _req("duplicate-def", "houses/app.py", repo, 1)
+    out = req.fix_finding()
+    assert out is None
+    assert req.decline is not None
+    assert "duplicate" in req.decline  # names the near-duplicate family to use
+    assert (repo / "houses" / "app.py").read_text() == src
 
 
 def test_duplicate_def_referenced_shadow_not_deleted(tmp_path):
