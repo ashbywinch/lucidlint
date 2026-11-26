@@ -42,7 +42,7 @@ class _FixTarget(NamedTuple):
         """A Rust fix runs in the scan core (syn), not the Python/libcst
         engine: invoke the binary's --fix mode, which edits in place."""
         repo, rel = self.repo, self.rel
-        engine = self.host.fix_engine
+        engine = self.host.load_fix_engine()
         binary = self.services.rust_scan.binary(repo)
         if binary is None:
             print("fix: the Rust scan core is required — build it with `make scanner-check`")
@@ -261,7 +261,7 @@ class FixCommand:
         # A MISSING name still previews — the preview IS the line-number-free
         # contract; only the apply needs the commitment.
         bad = FixCommand.identifier_problem(
-            self.fix_kind, self.args.name, self._params(), f"{self.args.file}:{self.args.line}", self.host.fix_engine
+            self.fix_kind, self.args.name, self._params(), f"{self.args.file}:{self.args.line}", self.host.load_fix_engine()
         )
         if bad:
             print(bad)
@@ -284,7 +284,7 @@ class FixCommand:
                         self.args.name,
                         self._params(),
                         f"{self.args.file}:{self.args.line}",
-                        self.host.fix_engine,
+                        self.host.load_fix_engine(),
                     )
                 )
                 return 0
@@ -292,7 +292,7 @@ class FixCommand:
                 self.fix_kind, self.args.line, self.args.name
             )
         # Python: the libcst fix engine is a mandatory dependency
-        fe = self.host.fix_engine
+        fe = self.host.load_fix_engine()
         if fe is None:
             # the release bundle vendors libcst in deps/ when it can (the
             # static musl bundle cannot); a wheel install always declares it
@@ -430,7 +430,7 @@ class FixCommand:
                 # autofix pending agent-supplied input, at a good anchor
                 print(f"fix: {self.fix_kind} at {self.args.file}:{req.line} needs input — {req.decline}")
                 return 0
-            if self.fix_kind in FixCommand.name_required_kinds(self.host.fix_engine) and self.args.name is None:
+            if self.fix_kind in FixCommand.name_required_kinds(self.host.load_fix_engine()) and self.args.name is None:
                 print(
                     f"fix: {self.fix_kind} at {self.args.file}:{req.line} needs a semantic name "
                     f"the tool cannot invent — pass --name <Name> (name it with a domain noun)"

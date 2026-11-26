@@ -25,6 +25,9 @@ def _optional(name: str) -> Any:
         return None
 
 
+_UNLOADED = object()
+
+
 @dataclass(frozen=True)
 class Host:
     """One run's environment: the process runner, the optional git/graph
@@ -34,7 +37,7 @@ class Host:
     pygit2: Any
     graph_store: Any
     graph_registry: Any
-    fix_engine: Any
+    fix_engine: Any = _UNLOADED
 
     @classmethod
     def default(cls) -> Host:
@@ -49,5 +52,11 @@ class Host:
             pygit2=_optional("pygit2"),
             graph_store=graph.GraphStore if graph_available else None,
             graph_registry=registry.Registry if graph_available else None,
-            fix_engine=_optional("fix_engine"),
         )
+
+    def load_fix_engine(self) -> Any:
+        """The fix engine, imported on first use — a scan never pays for
+        libcst, which only the `fix` command needs."""
+        if self.fix_engine is _UNLOADED:
+            object.__setattr__(self, "fix_engine", _optional("fix_engine"))
+        return self.fix_engine
