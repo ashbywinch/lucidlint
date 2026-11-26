@@ -98,10 +98,11 @@ impl Except {
     /// handler is not a re-raise.
     /// Only a visible all-path raise is exempt: the last statement is a `raise`,
     /// or an `if/else` whose every branch raises. A nested `try`/`except`, a
-    /// `match` (which may be non-exhaustive), or a `with` (whose `__exit__` may
-    /// suppress) needs path analysis to know whether every path propagates; the
-    /// rule warns there. That is the safe side: a warning is not a gate failure,
-    /// while exempting a handler that swallows on one path hides a real bug.
+    /// `match`, or a `with` (whose `__exit__` may suppress) needs path analysis;
+    /// the rule warns there. An exhaustive `match` whose every arm raises is a
+    /// known false positive: detecting exhaustiveness is separate analysis, and
+    /// the warning is the safe side. A warning is not a gate failure, while
+    /// exempting a handler that swallows on one path hides a real bug.
     fn ends_in_raise(body: &[Stmt]) -> bool {
         match body.last() {
             Some(Stmt::Raise(_)) => true,
