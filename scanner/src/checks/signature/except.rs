@@ -97,7 +97,19 @@ impl Except {
     /// or a conversion), so the broad catch is not hiding it. A log-and-return
     /// handler is not a re-raise.
     fn ends_in_raise(body: &[Stmt]) -> bool {
-        matches!(body.last(), Some(Stmt::Raise(_)))
+        match body.last() {
+            Some(Stmt::Raise(_)) => true,
+            // every branch must raise; an `if` without an `else` falls through
+            Some(Stmt::If(i)) => {
+                let has_else = i.elif_else_clauses.iter().any(|clause| clause.test.is_none());
+                has_else
+                    && Self::ends_in_raise(&i.body)
+                    && i.elif_else_clauses
+                        .iter()
+                        .all(|clause| Self::ends_in_raise(&clause.body))
+            }
+            _ => false,
+        }
     }
 
     /// A handler surfaces the error when it exits with control flow, calls

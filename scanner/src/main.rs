@@ -2048,6 +2048,15 @@ mod tests {
     }
 
     #[test]
+    fn broad_except_all_branches_raise_passes() {
+        // an if/else where every branch raises propagates on every path
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/broad_except_all_branches_raise__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "broad-except"), "{f:?}");
+    }
+
+    #[test]
     fn broad_except_logs_and_returns_still_warns() {
         // logging is not a control-flow decision; the failure is swallowed
         let f = scan_src(include_str!(
