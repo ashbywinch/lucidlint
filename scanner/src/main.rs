@@ -3730,6 +3730,16 @@ mod tests {
         assert!(!f.iter().any(|x| x.kind == "fakefs"), "{f:?}");
     }
 
+    #[test]
+    fn fakefs_source_loader_bare_name_passes() {
+        // `from importlib.machinery import SourceFileLoader` is a bare-name
+        // call; the exemption covers the import form as well as the dotted one
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/fakefs_source_loader_bare_name__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "fakefs"), "{f:?}");
+    }
+
     // ------------------------------------------------------------- no-assert-test
     #[test]
     fn test_with_assertion_passes() {
