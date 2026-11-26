@@ -137,10 +137,11 @@ accessor stays: a getter is not always a method. A bare use means the function
 needs the object, not the object's fields.
 
 Negative: `_parse_gender(raw: str)` has no class parameter and stays.
-The message uses the change-coupling test, naming both comparands: "`_format_address`
-takes only a `School` and reads its fields. If it is likely to change alongside
-`School`, and unlikely to change alongside `houses/school.py`, it should be a
-member of `School`."
+The message uses the change-coupling test, naming the function and both
+comparands: "`_format_address` takes only a `School` and reads its fields. If
+`_format_address` is likely to change alongside changes to `School`, and
+unlikely to change alongside changes to `houses.school`, it should be a member
+of `School`."
 
 ## 5. `feature-envy` gains the free-function form
 
