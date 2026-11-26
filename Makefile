@@ -14,7 +14,7 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-.PHONY: help setup deps uv-sync install-hooks check lint lint-check lint-github typecheck typecheck-update-baseline format test scanner-check coverage self-check lucidlint wheel wheel-check bundle-check clean
+.PHONY: help setup deps uv-sync install-hooks check lint lint-check lint-github typecheck typecheck-update-baseline format test scanner-check coverage self-check lucidlint wheel wheel-check bundle-check clean rules rules-check
 
 # Tool paths. uv is the package manager (installs itself if missing).
 PYTHON := .venv/bin/python
@@ -65,7 +65,7 @@ install-hooks:
 # The exact gate a push must pass — run identically by CI and the pre-push
 # hook (single source of truth; no test run — too slow for a hook, and CI's
 # `make test` already includes these).
-check: deps lint-check typecheck
+check: deps lint-check typecheck rules-check
 
 # The Rust scan core must be freshly built before pytest — the orchestrator
 # tests drive the real binary, and a stale binary would test nothing.
@@ -94,6 +94,13 @@ scanner-check:
 
 rules:
 	@$(UV) run python scripts/gen-rules.py
+
+# The generated rule tables (RULES.md, scanner/src/rules_gen.rs) are derived
+# from rule_metadata.CATALOG. The pytest suite checks them, but the pre-push
+# gate does not run tests; this target puts the same check in `make check` so a
+# stale table cannot pass the hook.
+rules-check:
+	@$(PYTHON) scripts/gen-rules.py --check
 
 # The pip distribution must be self-contained: `uv build` compiles the Rust
 # core INTO the wheel (setup.py's build_py), so a clean-venv install scans
