@@ -52,6 +52,18 @@ pub struct PreUsedSuppressions {
     pub files: std::collections::HashSet<String>,
 }
 
+/// The line of the `ignore-file` comment naming `sig`. A comma list names
+/// several signals in one comment, so a substring match on one name misses
+/// the rest — and the why-less and stale checks then skip them silently.
+pub(super) fn ignore_file_comment_line(comments: &[(usize, String)], sig: &str) -> Option<usize> {
+    comments.iter().find_map(|(line, text)| {
+        let trimmed = text.trim_start_matches(['#', '/']).trim_start();
+        let rest = trimmed.strip_prefix("lucidlint: ignore-file ")?;
+        let signals = rest.split_whitespace().next().unwrap_or("");
+        signals.split(',').map(str::trim).any(|s| s == sig).then_some(*line)
+    })
+}
+
 impl Suppressions {
     /// The signal a stale-suppression message names — `ignore <sig>` (line form)
     /// or `ignore-file <sig>` (file form). Used to match a surviving stale
@@ -353,13 +365,10 @@ impl Suppressions {
         }
         for (sig, why) in &supps.file {
             if why.is_empty() {
-                if let Some((ln, _)) = comments
-                    .iter()
-                    .find(|(_, t)| t.contains(&format!("lucidlint: ignore-file {sig}")))
-                {
+                if let Some(ln) = ignore_file_comment_line(comments, sig) {
                     out.push(crate::Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                     file: file.to_string(),
-                                    line: *ln,
+                                    line: ln,
                                     function: String::new(),
                                     kind: "suppression".into(),
                                     severity: "fail".into(),
@@ -667,6 +676,49 @@ mod tests {
             &[],
         );
         assert!(fs.is_empty(), "{:?}", fs.iter().map(|f| &f.kind).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_file_comma_marker_covers_each_named_signal() {
+        // `ignore-file fakefs,monkeypatch` used to keep the list as one
+        // unknown signal, so neither family was exempted
+        let comments = vec![(
+            1,
+            "// lucidlint: ignore-file closures,large-function both are the idiom".to_string(),
+        )];
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let fs = Suppressions::apply(
+            vec![finding("closures", 2), finding("large-function", 9)],
+            &comments,
+            "x.rs",
+            "//",
+            &mut books,
+            &[],
+        );
+        assert!(fs.is_empty(), "{:?}", fs.iter().map(|f| &f.kind).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn an_unused_signal_in_a_file_comma_marker_is_stale() {
+        // the stale check must find the second name in the same comment
+        let comments = vec![(
+            1,
+            "// lucidlint: ignore-file closures,large-function both are the idiom".to_string(),
+        )];
+        let mut books = SuppressionBooks {
+            pre_used: &PreUsedSuppressions::default(),
+            spent: &mut std::collections::HashSet::new(),
+        };
+        let fs = Suppressions::apply(vec![finding("closures", 2)], &comments, "x.rs", "//", &mut books, &[]);
+        assert!(
+            fs.iter()
+                .any(|f| f.kind == "stale-suppression" && f.message.contains("large-function")),
+            "{:?}",
+            fs.iter().map(|f| &f.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]
