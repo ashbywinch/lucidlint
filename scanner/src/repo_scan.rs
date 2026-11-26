@@ -270,6 +270,67 @@ impl<'a> RepoScan<'a> {
             findings,
             checks::SiblingValueClass::sibling_value_class_findings(&self.per_file(|scan| &scan.sibling_classes)),
         );
+        self.add(findings, self.monkeypatch_findings());
+    }
+
+    /// The monkeypatch split: a patch on a module the repo owns is a fail (the
+    /// test can inject a seam); a patch on a third-party module is a warning
+    /// (no object fake exists without changing the dependency). An object
+    /// target — a Name/Attribute, not a string module path — is local and
+    /// stays a fail.
+    fn monkeypatch_findings(&self) -> Vec<Finding> {
+        let mut out = Vec::new();
+        for (scan, rel) in self.scans.iter().zip(&self.rels) {
+            for site in &scan.patch_sites {
+                let third_party = site.target.as_deref().is_some_and(|target| {
+                    let root = target.split('.').next().unwrap_or(target);
+                    !self.rels.iter().any(|candidate| {
+                        candidate == &format!("{root}.py")
+                            || candidate.starts_with(&format!("{root}/"))
+                            || candidate.contains(&format!("/{root}/"))
+                    })
+                });
+                if third_party {
+                    out.push(Finding {
+                        logical_start: None,
+                        seam_members: Vec::new(),
+                        col: 0,
+                        file: rel.clone(),
+                        line: site.line,
+                        function: site.function.clone(),
+                        kind: "third-party-patch".into(),
+                        severity: "warn".into(),
+                        message: format!(
+                            "{} at line {} patches '{}', a global in a module the repo does not own — no object fake can be injected without changing the dependency. Use the dependency's seam if it has one; otherwise keep the patch and record why this third-party boundary is the test's subject.",
+                            site.desc,
+                            site.line,
+                            site.target.as_deref().unwrap_or("")
+                        ),
+                    });
+                } else {
+                    let target = site
+                        .target
+                        .as_ref()
+                        .map(|target| format!(" patches '{target}'"))
+                        .unwrap_or_default();
+                    out.push(Finding {
+                        logical_start: None,
+                        seam_members: Vec::new(),
+                        col: 0,
+                        file: rel.clone(),
+                        line: site.line,
+                        function: site.function.clone(),
+                        kind: "monkeypatch".into(),
+                        severity: "fail".into(),
+                        message: format!(
+                            "{} at line {}{target} — never monkeypatch global state; inject an object fake (a class implementing the real protocol) via parameter injection or a dependency-injection container — fakes are objects, not functions",
+                            site.desc, site.line
+                        ),
+                    });
+                }
+            }
+        }
+        out
     }
 
     /// The final pass: every finding the gate composed itself — the families

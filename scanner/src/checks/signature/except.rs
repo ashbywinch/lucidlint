@@ -51,7 +51,9 @@ impl Except {
                                 ), });
             } else if let Some(ty) = type_opt {
                 let base = annotation_base_name(ty);
-                if matches!(base.as_deref(), Some("Exception") | Some("BaseException")) {
+                if matches!(base.as_deref(), Some("Exception") | Some("BaseException"))
+                    && !Self::ends_in_raise(&eh.body)
+                {
                     state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                         file: state.file.to_string(),
                                         line: Self::header_colon_line(state.source, eh),
@@ -59,7 +61,7 @@ impl Except {
                                         kind: "broad-except".into(),
                                         severity: "warn".into(),
                                         message: format!(
-                                            "broad except Exception at line {line} catches every failure, including the ones the caller must see — catch the exceptions this handler handles. Keep a broad catch only at a boundary that logs the failure or converts it to a domain error.",
+                                            "broad except Exception at line {line} catches every failure, including the ones the caller must see — catch the exceptions this handler handles. A broad catch is justified only when it re-raises or converts the failure to a domain error; logging and continuing still hides the failure.",
                                             line = Self::header_colon_line(state.source, eh)
                                         ), });
                 }
@@ -89,6 +91,32 @@ impl Except {
             i += 1;
         }
         Source::line_of(source, eh.range().start())
+    }
+
+    /// A handler that ends in a raise propagates the failure (a cleanup guard
+    /// or a conversion), so the broad catch is not hiding it. A log-and-return
+    /// handler is not a re-raise.
+    /// Only a visible all-path raise is exempt: the last statement is a `raise`,
+    /// or an `if/else` whose every branch raises. A nested `try`/`except`, a
+    /// `match`, or a `with` (whose `__exit__` may suppress) needs path analysis;
+    /// the rule warns there. An exhaustive `match` whose every arm raises is a
+    /// known false positive: detecting exhaustiveness is separate analysis, and
+    /// the warning is the safe side. A warning is not a gate failure, while
+    /// exempting a handler that swallows on one path hides a real bug.
+    fn ends_in_raise(body: &[Stmt]) -> bool {
+        match body.last() {
+            Some(Stmt::Raise(_)) => true,
+            // every branch must raise; an `if` without an `else` falls through
+            Some(Stmt::If(i)) => {
+                let has_else = i.elif_else_clauses.iter().any(|clause| clause.test.is_none());
+                has_else
+                    && Self::ends_in_raise(&i.body)
+                    && i.elif_else_clauses
+                        .iter()
+                        .all(|clause| Self::ends_in_raise(&clause.body))
+            }
+            _ => false,
+        }
     }
 
     /// A handler surfaces the error when it exits with control flow, calls

@@ -115,6 +115,8 @@ struct ScanState<'a> {
     path_expressions: Vec<checks::PathExpression>,
     /// Substantive expressions — the duplicate-expression family's raw material.
     duplicate_expressions: Vec<checks::ExpressionOccurrence>,
+    /// Patch sites in tests — the monkeypatch split's raw material.
+    patch_sites: Vec<checks::PatchSite>,
     /// Free functions that read an imported class — the free feature-envy arm.
     free_envy: Vec<checks::EnvyCandidate>,
     /// Small constructor calls — the shared-construction family's raw material.
@@ -428,6 +430,7 @@ impl Pipeline {
             class_defs: state.class_defs,
             scattered: state.scattered,
             duplicate_expressions: state.duplicate_expressions,
+            patch_sites: state.patch_sites,
             free_envy: state.free_envy,
             shared_constructions: state.shared_constructions,
             path_expressions: state.path_expressions,
@@ -512,6 +515,7 @@ impl Pipeline {
             class_defs: Vec::new(),
             scattered: Vec::new(),
             duplicate_expressions: Vec::new(),
+            patch_sites: Vec::new(),
             free_envy: Vec::new(),
             shared_constructions: Vec::new(),
             path_expressions: Vec::new(),
@@ -2032,6 +2036,33 @@ mod tests {
         let b: Vec<&Finding> = f.iter().filter(|x| x.kind == "broad-except").collect();
         assert_eq!(b.len(), 1);
         assert_eq!(b[0].severity, "warn");
+    }
+
+    #[test]
+    fn broad_except_cleanup_reraises_passes() {
+        // the handler propagates the failure; the broad catch only cleans up
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/broad_except_cleanup_reraises__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "broad-except"), "{f:?}");
+    }
+
+    #[test]
+    fn broad_except_all_branches_raise_passes() {
+        // an if/else where every branch raises propagates on every path
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/broad_except_all_branches_raise__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "broad-except"), "{f:?}");
+    }
+
+    #[test]
+    fn broad_except_logs_and_returns_still_warns() {
+        // logging is not a control-flow decision; the failure is swallowed
+        let f = scan_src(include_str!(
+            "../../tests/fixtures/rust/broad_except_logs_and_returns__01.py"
+        ));
+        assert!(f.iter().any(|x| x.kind == "broad-except"), "{f:?}");
     }
 
     // ------------------------------------------------------------- closures
@@ -3612,11 +3643,37 @@ mod tests {
 
     #[test]
     fn monkeypatch_setattr_and_patch_decorator_found() {
+        // an object target (Obj) stays a fail; the string module 'y' is not a
+        // repo module, so it is the third-party warning
         let f = scan_src_test(include_str!(
             "../../tests/fixtures/rust/monkeypatch_setattr_and_patch_decorator_found__01.py"
         ));
         let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "monkeypatch").collect();
-        assert_eq!(m.len(), 2);
+        assert_eq!(m.len(), 1, "{f:?}");
+        let t: Vec<&Finding> = f.iter().filter(|x| x.kind == "third-party-patch").collect();
+        assert_eq!(t.len(), 1, "{f:?}");
+        assert_eq!(t[0].severity, "warn");
+    }
+
+    #[test]
+    fn monkeypatch_on_a_project_module_is_a_fail() {
+        // the target root is a module the corpus defines
+        let test = include_str!("../../tests/fixtures/rust/monkeypatch_project_module_is_a_fail__01.py");
+        let f = scan_corpus(&[("pkg/mod.py", "def f():\n    return 1\n"), ("tests/test_mod.py", test)]);
+        let m: Vec<&Finding> = f.iter().filter(|x| x.kind == "monkeypatch").collect();
+        assert_eq!(m.len(), 1, "{f:?}");
+        assert_eq!(m[0].severity, "fail");
+    }
+
+    #[test]
+    fn monkeypatch_on_a_third_party_module_is_a_warn() {
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/monkeypatch_third_party_sdk_is_a_warn__01.py"
+        ));
+        let t: Vec<&Finding> = f.iter().filter(|x| x.kind == "third-party-patch").collect();
+        assert_eq!(t.len(), 1, "{f:?}");
+        assert_eq!(t[0].severity, "warn");
+        assert!(t[0].message.contains("pydantic_ai.Agent.run"), "{}", t[0].message);
     }
 
     #[test]
@@ -3670,6 +3727,26 @@ mod tests {
             "../../tests/fixtures/rust/fakefs_sanctioned_subprocess_need_passes__01.py"
         ));
         assert!(!f.iter().any(|x| x.kind == "fakefs"));
+    }
+
+    #[test]
+    fn fakefs_importlib_loaded_module_passes() {
+        // a module loaded from a generated path is a real file; pyfakefs
+        // cannot load it, so the test needs the real filesystem
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/fakefs_importlib_generated_module__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "fakefs"), "{f:?}");
+    }
+
+    #[test]
+    fn fakefs_source_loader_bare_name_passes() {
+        // `from importlib.machinery import SourceFileLoader` is a bare-name
+        // call; the exemption covers the import form as well as the dotted one
+        let f = scan_src_test(include_str!(
+            "../../tests/fixtures/rust/fakefs_source_loader_bare_name__01.py"
+        ));
+        assert!(!f.iter().any(|x| x.kind == "fakefs"), "{f:?}");
     }
 
     // ------------------------------------------------------------- no-assert-test
@@ -4449,7 +4526,13 @@ mod tests {
             "{}",
             be.message
         );
-        assert!(be.message.contains("boundary that logs the failure"), "{}", be.message);
+        assert!(
+            be.message
+                .contains("re-raises or converts the failure to a domain error"),
+            "{}",
+            be.message
+        );
+        assert!(!be.message.contains("logs the failure"), "{}", be.message);
         assert!(!be.message.contains("the why"), "{}", be.message);
 
         let scan_magic = scan_src_test(include_str!(

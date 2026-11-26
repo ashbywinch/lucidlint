@@ -726,6 +726,14 @@ CATALOG = RuleCatalog([
     Rule("monkeypatch", "fail", "test-discipline", ("python",),
          "`monkeypatch`/`unittest.mock.patch` — prefer dependency injection.",
          display_group="standard"),
+    Rule("third-party-patch", "warn", "test-discipline", ("python",),
+         "A test patches a global in a third-party module "
+         "(`@patch(\"sdk.Client.run\")`, `monkeypatch.setattr(\"sdk...\", ...)`). "
+         "No object fake can be injected without changing the dependency; if "
+         "it has a seam, use it, otherwise keep the patch and record why the "
+         "boundary is the test's subject. Patching a module the repo owns "
+         "stays `monkeypatch` (fail).",
+         display_group="standard"),
     Rule("skipif", "fail", "test-discipline", ("python", "rust"),
          "`@pytest.mark.skipif` on environment presence (`os.environ`, "
          "`sys.platform`, etc.), a bare `@pytest.mark.skip`, or `#[test] "
