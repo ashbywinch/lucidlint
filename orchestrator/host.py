@@ -58,8 +58,10 @@ class Host:
         )
 
     def load_fix_engine(self) -> Any:
-        """The fix engine, imported on first use — a scan never pays for
-        libcst, which only the `fix` command needs."""
+        """The fix engine: an explicitly injected one, or the real module
+        imported once and cached in `_loaded`. A scan never pays for libcst,
+        which only the `fix` command needs."""
+        # an injected engine (tests, a custom composition) is used as given
         if self.fix_engine is not _UNLOADED:
             return self.fix_engine
         if "fix_engine" not in self._loaded:
