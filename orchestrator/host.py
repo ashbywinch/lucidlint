@@ -12,7 +12,7 @@ composition root (`Cli`) builds one, and an absent optional library is `None`
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any
 
@@ -38,6 +38,9 @@ class Host:
     graph_store: Any
     graph_registry: Any
     fix_engine: Any = _UNLOADED
+    # The lazily imported engine lives in a mutable holder: the frozen
+    # Host's fields (and hash) never change after construction.
+    _loaded: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
     def default(cls) -> Host:
@@ -57,6 +60,8 @@ class Host:
     def load_fix_engine(self) -> Any:
         """The fix engine, imported on first use — a scan never pays for
         libcst, which only the `fix` command needs."""
-        if self.fix_engine is _UNLOADED:
-            object.__setattr__(self, "fix_engine", _optional("fix_engine"))
-        return self.fix_engine
+        if self.fix_engine is not _UNLOADED:
+            return self.fix_engine
+        if "fix_engine" not in self._loaded:
+            self._loaded["fix_engine"] = _optional("fix_engine")
+        return self._loaded["fix_engine"]
