@@ -51,7 +51,9 @@ impl Except {
                                 ), });
             } else if let Some(ty) = type_opt {
                 let base = annotation_base_name(ty);
-                if matches!(base.as_deref(), Some("Exception") | Some("BaseException")) {
+                if matches!(base.as_deref(), Some("Exception") | Some("BaseException"))
+                    && !Self::ends_in_raise(&eh.body)
+                {
                     state.findings.push(Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                                         file: state.file.to_string(),
                                         line: Self::header_colon_line(state.source, eh),
@@ -59,7 +61,7 @@ impl Except {
                                         kind: "broad-except".into(),
                                         severity: "warn".into(),
                                         message: format!(
-                                            "broad except Exception at line {line} catches every failure, including the ones the caller must see — catch the exceptions this handler handles. Keep a broad catch only at a boundary that logs the failure or converts it to a domain error.",
+                                            "broad except Exception at line {line} catches every failure, including the ones the caller must see — catch the exceptions this handler handles. A broad catch is justified only when it re-raises or converts the failure to a domain error; logging and continuing still hides the failure.",
                                             line = Self::header_colon_line(state.source, eh)
                                         ), });
                 }
@@ -89,6 +91,13 @@ impl Except {
             i += 1;
         }
         Source::line_of(source, eh.range().start())
+    }
+
+    /// A handler that ends in a raise propagates the failure (a cleanup guard
+    /// or a conversion), so the broad catch is not hiding it. A log-and-return
+    /// handler is not a re-raise.
+    fn ends_in_raise(body: &[Stmt]) -> bool {
+        matches!(body.last(), Some(Stmt::Raise(_)))
     }
 
     /// A handler surfaces the error when it exits with control flow, calls

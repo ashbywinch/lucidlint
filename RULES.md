@@ -167,6 +167,7 @@ with a why).
 | Rule | Severity | Language | What it checks |
 |---|---|---|---|
 | **monkeypatch** | fail | Python | `monkeypatch`/`unittest.mock.patch` — prefer dependency injection. |
+| **third-party-patch** | **warn** | Python | A test patches a global in a third-party module (`@patch("sdk.Client.run")`, `monkeypatch.setattr("sdk...", ...)`). No object fake can be injected without changing the dependency; if it has a seam, use it, otherwise keep the patch and record why the boundary is the test's subject. Patching a module the repo owns stays `monkeypatch` (fail). |
 | **skipif** | fail | Both | `@pytest.mark.skipif` on environment presence (`os.environ`, `sys.platform`, etc.), a bare `@pytest.mark.skip`, or `#[test] #[ignore]` — a skipped test rots; fake the dependency instead. |
 | **fakefs** | fail | Both | Real filesystem I/O (`open`, `pathlib.Path`) in a test without `pyfakefs` — tests fake the filesystem. |
 | **no-assert-test** | fail | Both | A test function with no assertion anywhere in its body — it can never fail. |

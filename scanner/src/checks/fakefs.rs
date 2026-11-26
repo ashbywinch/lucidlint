@@ -143,26 +143,15 @@ fn fs_usage(f: &StmtFunctionDef) -> (bool, bool) {
                 AnyNodeRef::ExprAttribute(a) if matches!(a.attr.as_str(), "symlink" | "symlink_to" | "link") => {
                     needs_real = true
                 }
-                AnyNodeRef::ExprCall(c) => match c.func.as_ref() {
-                    // bare open(...)/tempfile(...) count; a Path(...).open(...)
-                    // attribute call does NOT (Python's _real_fs_usage: only
-                    // Name funcs match open/tempfile; attribute calls must be
-                    // in the path/os/shutil/tempfile method lists)
-                    Expr::Name(n) if matches!(n.id.as_str(), "open" | "tempfile") => {
-                        real_fs = true;
-                    }
-                    Expr::Attribute(a) => {
-                        let attr = a.attr.as_str();
-                        if FS_PATH_METHODS.contains(&attr)
-                            || FS_OS_OPS.contains(&attr)
-                            || FS_SHUTIL_OPS.contains(&attr)
-                            || FS_TEMPFILE.contains(&attr)
-                        {
-                            real_fs = true;
-                        }
-                    }
-                    _ => {}
-                },
+                AnyNodeRef::ExprCall(c) => {
+                    let (fs, real) = match c.func.as_ref() {
+                        Expr::Name(n) => name_usage(n.id.as_str()),
+                        Expr::Attribute(a) => attribute_usage(a.attr.as_str()),
+                        _ => (false, false),
+                    };
+                    real_fs |= fs;
+                    needs_real |= real;
+                }
                 _ => {}
             }
             skel_children(node, &mut fq);
@@ -170,4 +159,28 @@ fn fs_usage(f: &StmtFunctionDef) -> (bool, bool) {
         fi += 1;
     }
     (real_fs, needs_real)
+}
+
+/// A bare name call: `open`/`tempfile` touch the filesystem; a module loaded
+/// from a generated path needs a real file (pyfakefs cannot load it).
+fn name_usage(name: &str) -> (bool, bool) {
+    match name {
+        "open" | "tempfile" => (true, false),
+        "spec_from_file_location" | "SourceFileLoader" | "FileLoader" => (false, true),
+        _ => (false, false),
+    }
+}
+
+/// An attribute call: the path/os/shutil/tempfile methods touch the filesystem;
+/// a symlink or a module loader needs a real file.
+fn attribute_usage(attr: &str) -> (bool, bool) {
+    let real = matches!(
+        attr,
+        "symlink" | "symlink_to" | "link" | "spec_from_file_location" | "SourceFileLoader" | "FileLoader"
+    );
+    let fs = FS_PATH_METHODS.contains(&attr)
+        || FS_OS_OPS.contains(&attr)
+        || FS_SHUTIL_OPS.contains(&attr)
+        || FS_TEMPFILE.contains(&attr);
+    (fs, real)
 }

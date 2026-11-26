@@ -92,6 +92,7 @@ pub use middle_man::{MiddleMan, MiddleManCandidate, MiddleManClass};
 pub use module_names::{class_module_findings, strewing_findings, vague_name_findings};
 pub use module_size::{ModuleShape, TypeShape};
 pub use monkeypatch::Monkeypatch;
+pub(crate) use monkeypatch::PatchSite;
 pub use naming_units::NamingUnits;
 
 pub use no_assert_test::no_assert_test_findings;
