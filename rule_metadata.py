@@ -495,7 +495,11 @@ CATALOG = RuleCatalog([
     Rule("feature-envy", "fail", "architecture", ("python",),
          "A method reads another object's fields more than its own state — "
          "the logic belongs on that object (feature envy); move the "
-         "computation onto the envied class as a method.",
+         "computation onto the envied class as a method. A module-level "
+         "function that takes only one parameter, a class the repo defines, "
+         "and reads its fields four or more times is the same shape; the "
+         "repo-wide pass resolves the class, so a `Path` or `Request` is not "
+         "named as a home.",
          display_name="feature-envy → latent-class", display_group="latent-class",
          fix="feature-envy"),
     Rule("undeclared-attribute", "fail", "architecture", ("python",),

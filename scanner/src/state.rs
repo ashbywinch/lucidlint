@@ -600,6 +600,7 @@ impl ScanState<'_> {
         LoopFamily::findings(self, body, source);
         DuplicateModule::collect(self, body, name);
         Forwarding::collect(self, body);
+        EnvyCandidate::collect(self, body);
         ConstructionOccurrence::collect(self, body, source);
         // the reaches are drained here, in the caller, so the findings pass
         // cannot silently read an empty cache if it were ever called twice
