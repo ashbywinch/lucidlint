@@ -651,7 +651,8 @@ CATALOG = RuleCatalog([
          "`str`, `id`...).",
          display_group="standard"),
     Rule("broad-except", "warn", "style", ("python",),
-         "Bare `except:` — catch specific exceptions.",
+         "`except Exception`/`BaseException` — catch the exceptions the handler "
+         "handles; a boundary catch states its blast radius in the suppression's why.",
          display_group="standard"),
     Rule("boolean-arg", "fail", "style", ("python", "rust"),
          "A boolean literal passed as a call argument (`connect(host, True)`) — "

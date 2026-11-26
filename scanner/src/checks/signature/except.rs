@@ -58,7 +58,10 @@ impl Except {
                                         function: fn_name.clone(),
                                         kind: "broad-except".into(),
                                         severity: "warn".into(),
-                                        message: "broad except Exception - catch what you actually handle; a true boundary catch states its blast radius in the why".into(), });
+                                        message: format!(
+                                            "broad except Exception at line {line} catches every failure, including the ones the caller must see — catch the exceptions this handler handles. Keep a broad catch only at a boundary that logs the failure or converts it to a domain error.",
+                                            line = Self::header_colon_line(state.source, eh)
+                                        ), });
                 }
             }
         }

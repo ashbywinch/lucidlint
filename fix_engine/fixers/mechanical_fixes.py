@@ -147,15 +147,29 @@ class MechanicalFixes:
     def fix_duplicate_def(self) -> str | None:
         source, line = self.request.loaded_source(), self.request.line
         """Delete the shadowing (second) module-scope binding when nothing
-        references it — proven by a repo-wide Name count (only the two def sites
-        hit). Referenced shadows are renamed by the agent, never auto-deleted."""
-        wrapper = cst.MetadataWrapper(cst.parse_module(source))
+        references it — proven by a repo-wide reference count (the binding
+        names are not references). A referenced shadow, or a name bound only
+        once, is renamed by the agent, never auto-deleted."""
+        module = cst.parse_module(source)
+        wrapper = cst.MetadataWrapper(module)
         probe = MechanicalFixes._FindModuleDef(line)
         wrapper.visit(probe)
         if probe.found is None or probe.name is None:
             return None
-        if MechanicalFixes._name_occurrences(self.request.repo, probe.name) > 2:
-            return None  # something references the name — a delete would break it
+        if MechanicalFixes._module_bindings(module, probe.name) < 2:
+            self.request.decline = (
+                f"the name '{probe.name}' is bound once in this module — duplicate-def removes a "
+                "shadowing second binding; near-identical functions are the `duplicate` finding "
+                "(extract the shared logic)"
+            )
+            return None
+        references = MechanicalFixes._reference_count(self.request.repo, probe.name)
+        if references:
+            self.request.decline = (
+                f"'{probe.name}' is referenced {references} time(s) besides its definitions — "
+                "deleting the shadow would break those uses; rename one definition instead"
+            )
+            return None
         return Rewrite(wrapper.module).without([probe.found]).code
 
     def fix_restating_docstring(self) -> str | None:
@@ -857,11 +871,22 @@ class MechanicalFixes:
         def __init__(self, name: str) -> None:
             self.name: str = name
             self.n: int = 0
+            self.bindings: int = 0
 
         @override
         def visit_Name(self, node) -> None:
             if node.value == self.name:
                 self.n += 1
+
+        @override
+        def visit_FunctionDef(self, node) -> None:
+            if node.name.value == self.name:
+                self.bindings += 1
+
+        @override
+        def visit_ClassDef(self, node) -> None:
+            if node.name.value == self.name:
+                self.bindings += 1
 
     class _NameRewriter(cst.CSTTransformer):
         """Rename every occurrence of one name — the hoist re-targets the
@@ -1184,21 +1209,65 @@ class MechanicalFixes:
         return None
 
     @staticmethod
-    def _name_occurrences(repo: Path, name: str) -> int:
-        """Name-node occurrences of `name` across the repo's .py files — the
-        duplicate-def safety check: a delete is only offered when the shadowing
-        def is provably unreferenced (the two def sites are the only hits)."""
+    def _reference_count(repo: Path, name: str) -> int:
+        """Uses of `name` across the repo's .py files, excluding every binding
+        site: libcst presents a def/class name as a Name node, so a raw Name
+        count made one call site look like "the two def sites" and the
+        duplicate-def delete broke the caller. The prefilter reads every
+        file but parses only those whose text contains the name — a name
+        cannot be referenced without its characters, so it only skips
+        negatives."""
         total = 0
         for p in SourceFiles(repo).py_files():
             try:
-                module = cst.parse_module(p.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, cst.ParserSyntaxError):
-                continue  # an unreadable/unparsable sibling is its own finding
+                text = p.read_text(encoding="utf-8")  # the one read; parse this string
+            except (OSError, UnicodeDecodeError):
+                continue  # an unreadable sibling is its own finding
+            if name not in text:
+                continue
+            try:
+                module = cst.parse_module(text)
+            except cst.ParserSyntaxError:
+                continue  # an unparsable sibling is its own finding
 
             probe = MechanicalFixes._NameCount(name)
             module.visit(probe)
-            total += probe.n
+            total += probe.n - probe.bindings
         return total
+
+    @staticmethod
+    def _module_bindings(module: cst.Module, name: str) -> int:
+        """Module-scope bindings of `name`: the def/class/import sites the
+        duplicate-def rule compares. A single binding is not a duplicate."""
+        count = 0
+        for stmt in module.body:
+            if isinstance(stmt, (cst.FunctionDef, cst.ClassDef)) and stmt.name.value == name:
+                count += 1
+            elif isinstance(stmt, cst.SimpleStatementLine):
+                for small in stmt.body:
+                    if isinstance(small, cst.Import):
+                        count += sum(
+                            1
+                            for alias in small.names
+                            if name
+                            in (
+                                Bindings.hoist_target_names(alias.asname.name)
+                                if alias.asname
+                                else {Bindings.import_base_name(alias.name)}
+                            )
+                        )
+                    elif isinstance(small, cst.ImportFrom) and not isinstance(small.names, cst.ImportStar):
+                        count += sum(
+                            1
+                            for alias in small.names
+                            if name
+                            in (
+                                Bindings.hoist_target_names(alias.asname.name)
+                                if alias.asname
+                                else ({alias.name.value} if isinstance(alias.name, cst.Name) else set())
+                            )
+                        )
+        return count
 
     @staticmethod
     def _params_of_any_def(source: str, callee: str) -> list[str] | None:

@@ -148,7 +148,7 @@ with a why).
 | **vague-name** | fail | Both | Type ending in Manager, Handler, Store, Repository, Controller, Utils, or Info with significant size/methods — the domain concept should name it. |
 | **class-module** | fail | Python | A Python module whose public class(es) aren't findable by name: exactly one class whose name doesn't match the filename, or >=2 public classes where any name doesn't match the stem — rename the file to match, or split the module so every public class lives in a file named after it. Exception: a declarations-only Protocol/ABC the module's namesake class satisfies (the DI seam exists because that class does, and it belongs beside it). |
 | **builtin-shadow** | fail | Python | A variable/parameter that shadows a Python builtin (`list`, `dict`, `str`, `id`...). |
-| **broad-except** | **warn** | Python | Bare `except:` — catch specific exceptions. |
+| **broad-except** | **warn** | Python | `except Exception`/`BaseException` — catch the exceptions the handler handles; a boundary catch states its blast radius in the suppression's why. |
 | **boolean-arg** | fail | Both | A boolean literal passed as a call argument (`connect(host, True)`) — name the flag at the call site. |
 | **positional-literals** | **warn** | Both | A call passing ≥2 literals of the same kind positionally (`set_limits(10, 20)`) — a swapped argument is a silent bug; use keyword arguments. |
 | **swallow** | fail | Both | A catch that neither re-raises nor exits with control flow (no return/break/continue); in Rust, a `Result`/`Option` discarded with `let _ =` — the error vanishes, re-raise or handle it. |

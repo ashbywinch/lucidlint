@@ -103,11 +103,7 @@ impl<'a> StaleCtx<'a> {
             if why.is_empty() || self.used_file.contains(sig) {
                 continue;
             }
-            if let Some((ln, _)) = self
-                .comments
-                .iter()
-                .find(|(_, t)| t.contains(&format!("lucidlint: ignore-file {sig}")))
-            {
+            if let Some(ln) = super::ignore_file_comment_line(self.comments, sig) {
                 // same fires-nowhere gate as the line markers: a file
                 // suppression over a family that still fires is either bound
                 // or redundant documentation — never a stale verdict
@@ -115,7 +111,7 @@ impl<'a> StaleCtx<'a> {
                     let delta = self.exemption_delta(sig);
                     out.push(crate::Finding { logical_start: None, seam_members: Vec::new(), col: 0,
                 file: self.file.to_string(),
-                line: *ln,
+                line: ln,
                 function: String::new(),
                 kind: "stale-suppression".into(),
                 severity: "fail".into(),
