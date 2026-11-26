@@ -1213,13 +1213,22 @@ class MechanicalFixes:
         """Uses of `name` across the repo's .py files, excluding every binding
         site: libcst presents a def/class name as a Name node, so a raw Name
         count made one call site look like "the two def sites" and the
-        duplicate-def delete broke the caller."""
+        duplicate-def delete broke the caller. The prefilter reads every
+        file but parses only those whose text contains the name — a name
+        cannot be referenced without its characters, so it only skips
+        negatives."""
         total = 0
         for p in SourceFiles(repo).py_files():
             try:
-                module = cst.parse_module(p.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, cst.ParserSyntaxError):
-                continue  # an unreadable/unparsable sibling is its own finding
+                text = p.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue  # an unreadable sibling is its own finding
+            if name not in text:
+                continue
+            try:
+                module = cst.parse_module(text)
+            except cst.ParserSyntaxError:
+                continue  # an unparsable sibling is its own finding
 
             probe = MechanicalFixes._NameCount(name)
             module.visit(probe)

@@ -134,12 +134,15 @@ class MagicLiteral:
 
         @override
         def visit_FunctionDef(self, node) -> None:
-            if self._in_body(node, node.body):
+            # A decorator and the `def` header sit before the body, in class
+            # scope; a literal there does not enter the chain and keeps the
+            # bare class name.
+            if self._inside_body(node, node.body):
                 self.chain.append(node)
 
         @override
         def visit_Lambda(self, node) -> None:
-            if self._in_body(node, node.body):
+            if self._inside_body(node, node.body):
                 self.chain.append(node)
 
         def qualifier(self, owner_name: str) -> str | None:
@@ -151,10 +154,13 @@ class MagicLiteral:
                 return None
             head = self.chain[0]
             if isinstance(head, cst.FunctionDef):
-                params = list(head.params.posonly_params) + list(head.params.params)
-                receiver = params[0].name.value if params else ""
+                # The first positional parameter is the receiver whatever it
+                # is named: `cls` or `klass` in a classmethod, `self` in an
+                # instance method, positional-only included. Never assume
+                # the conventional name; use the binding at the definition.
+                receiver = self._first_positional(head)
                 if self._decorated(head, "classmethod"):
-                    if not receiver:
+                    if receiver is None:
                         self.decline = (
                             "sits in a classmethod with no positional receiver — the class has no local "
                             "name to qualify the constant with; take the class as the first parameter, "
@@ -177,10 +183,20 @@ class MagicLiteral:
             pos = ModuleOutline.span(self.get_metadata(PositionProvider, node))
             return (pos.start.line, pos.start.column) <= (self.line, self.col) <= (pos.end.line, pos.end.column)
 
-        def _in_body(self, node, body) -> bool:
-            start = ModuleOutline.span(self.get_metadata(PositionProvider, body)).start
-            end = ModuleOutline.span(self.get_metadata(PositionProvider, node)).end
-            return (start.line, start.column) <= (self.line, self.col) <= (end.line, end.column)
+        def _inside_body(self, node, body) -> bool:
+            """True when the literal is in `body`, not the `def` line or its
+            decorators. `body` starts after both, so a decorator literal is
+            outside it and leaves `chain` empty."""
+            body_start = ModuleOutline.span(self.get_metadata(PositionProvider, body)).start
+            node_end = ModuleOutline.span(self.get_metadata(PositionProvider, node)).end
+            return (body_start.line, body_start.column) <= (self.line, self.col) <= (node_end.line, node_end.column)
+
+        @staticmethod
+        def _first_positional(node: cst.FunctionDef) -> str | None:
+            """The first positional parameter, whatever it is named; None
+            when the function has only `*args`/`**kwargs`."""
+            params = list(node.params.posonly_params) + list(node.params.params)
+            return params[0].name.value if params else None
 
         @staticmethod
         def _decorated(node: cst.FunctionDef, name: str) -> bool:

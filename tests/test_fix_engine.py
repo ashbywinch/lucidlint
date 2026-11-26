@@ -509,6 +509,21 @@ def test_magic_literal_classmethod_qualifies_with_cls(tmp_path):
     assert namespace["Step"].run(9) == 6, fixed
 
 
+def test_magic_literal_classmethod_positional_receiver_uses_its_name(tmp_path):
+    # the first positional parameter is the class, whatever it is named;
+    # a positional-only `klass` is still the receiver
+    src = code_fixture("sample_magic_literal_classmethod_positional_receiver__b3f7a1c9.py")
+    repo = make_repo(tmp_path, app_src=code_fixture("build__f9694aad.py"))
+    (repo / "houses" / "app.py").write_text(src)
+    out = _fix_finding("magic-number", "houses/app.py", repo, 4, fix_engine.FixOptions(name="LIMIT"))
+    assert out is not None
+    fixed = (repo / "houses" / "app.py").read_text()
+    assert "klass.LIMIT" in fixed, fixed
+    namespace: dict = {}
+    exec(fixed, namespace)
+    assert namespace["Step"].run(9) == 6, fixed
+
+
 def test_magic_literal_staticmethod_qualifies_with_class(tmp_path):
     # a staticmethod has no receiver; the class name is the only qualifier
     src = code_fixture("sample_magic_literal_staticmethod_qualifies_with_class__7e2b9d14.py")
